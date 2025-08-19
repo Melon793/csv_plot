@@ -199,6 +199,10 @@ class DraggablePlotWidget(pg.PlotWidget):
             angle=-90,
             **{'font-family': 'Arial', 'font-size': '12pt', 'font-weight': 'bold'}
         )
+        # 交互
+        #self.plot_item.setMouseEnabled(x=True, y=False)
+        #self.plot_item.enableAutoRange(x=False, y=True)
+        #self.plot_item.setAutoVisible(x=False, y=True)
 
         # 光标
         self.vline = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen('r', width=4))
@@ -211,6 +215,8 @@ class DraggablePlotWidget(pg.PlotWidget):
         self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
         self.vline.sigPositionChanged.connect(self.update_cursor_label)
         self.setAntialiasing(True)
+
+        
 
         layout = self.plot_item.layout
         if layout is not None:
@@ -237,7 +243,8 @@ class DraggablePlotWidget(pg.PlotWidget):
             if x_data is None or len(x_data) == 0:
                 self.cursor_label.setText("")
                 return
-            idx = min(range(len(x_data)), key=lambda i: abs(x_data[i] - x))
+            #idx = min(range(len(x_data)), key=lambda i: abs(x_data[i] - x))
+            idx = np.argmin(np.abs(x_data - x))
             y_val = y_data[idx]
             (x_min_view, x_max_view), (y_min_view, y_max_view) = self.view_box.viewRange()
             self.cursor_label.setText(f"x={x:.2f}, y={y_val:.2f}")
@@ -294,10 +301,13 @@ class DraggablePlotWidget(pg.PlotWidget):
                 val = float(v)
                 if math.isfinite(val):
                     y_values.append(val)
+                else:
+                    y_values.append(np.nan)
             except (ValueError, TypeError):
+                y_values.append(np.nan)
                 pass
 
-        if not y_values:
+        if not y_values or np.isnan(y_values).all():
             sample_values = [str(v) for v in raw_values if v is not None and str(v).strip() != ''][:5]
             QMessageBox.information(self, "字符串变量", f"变量 {var_name} 包含字符串数据:\n{sample_values}")
             self.plot_item.clear()
@@ -307,11 +317,6 @@ class DraggablePlotWidget(pg.PlotWidget):
             return
         
         self.plot_item.clearPlots() 
-        
-        # for item in self.plot_item.listDataItems() + self.plot_item.items:
-        #     if isinstance(item, pg.PlotDataItem):
-        #         item.clear()
-        #         self.plot_item.removeItem(item)
 
         x_values = list(range(len(y_values)))
         _pen = pg.mkPen(color='blue', width=4)
@@ -328,13 +333,28 @@ class DraggablePlotWidget(pg.PlotWidget):
             **{'font-family': 'Arial', 'font-size': '12pt', 'font-weight': 'bold'}
         )
 
+        padding_xVal = 0.1
+        padding_yVal = 0.2
         if min(y_values) == max(y_values):
             y_center = min(y_values)
             y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
             self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.00)
+            # limit x range
+            self.plot_item.setLimits(xMin=0-padding_xVal*len(y_values), xMax=(padding_xVal+1)*len(y_values), 
+                minXRange=5,
+                yMin=y_center - y_range,
+                yMax=y_center + y_range)        
         else:
             self.view_box.setYRange(min(y_values), max(y_values), padding=0.00)
+            # limit x/y range            
+            self.plot_item.setLimits(xMin=0-padding_xVal*len(y_values), xMax=(padding_xVal+1)*len(y_values), 
+                minXRange=5,
+                yMin=min(y_values)-padding_yVal*(max(y_values)-min(y_values)), 
+                yMax=max(y_values)+padding_yVal*(max(y_values)-min(y_values)))
 
+
+        
+        self.plot_item
         self.plot_item.update()
         if hasattr(self.window(), 'cursor_action'):
             self.vline.setBounds([min(x_values), max(x_values)])
