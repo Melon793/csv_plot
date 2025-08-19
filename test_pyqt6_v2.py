@@ -98,19 +98,19 @@ def detect_encoding(file_path, n_bytes=4096):
     with open(file_path, "rb") as f:
         raw_data = f.read(n_bytes)
     result = chardet.detect(raw_data)
-    return result['encoding'] if result['encoding'] else 'utf-8-sig'
+    return result['encoding'] if result['encoding'] else 'utf-8'
 
 
 def load_csv(file_path):
     #encoding = detect_encoding(file_path)
-    encoding = 'utf-8-sig'
+    encoding = 'utf-8'
     try:
         with open(file_path, newline='', encoding=encoding) as f:
-            reader = csv.reader(f)
+            reader = csv.reader(f,delimiter=',')
             rows = list(reader)
     except UnicodeDecodeError:
-        with open(file_path, newline='', encoding='utf-8-sig',errors='replace') as f:
-            reader = csv.reader(f)
+        with open(file_path, newline='', encoding='CP1252',errors='replace') as f:
+            reader = csv.reader(f,delimiter=',')
             rows = list(reader)
 
     if len(rows) < 3:
@@ -129,6 +129,33 @@ def load_csv(file_path):
                 data[var_names[i]].append(value)
     return var_names, units, data, data_length
 
+def load_mfile(file_path):
+    #encoding = detect_encoding(file_path)
+    encoding = 'utf-8'
+    try:
+        with open(file_path, newline='', encoding=encoding) as f:
+            reader = csv.reader(f,delimiter='\t')
+            rows = list(reader)
+    except UnicodeDecodeError:
+        with open(file_path, newline='', encoding='CP1252',errors='replace') as f:
+            reader = csv.reader(f,delimiter='\t')
+            rows = list(reader)
+
+    if len(rows) < 5:
+        raise ValueError("mfile 数据行数不足，至少包含变量名、单位和数据")
+
+    var_names = rows[2]
+    units_row = rows[3]
+    data = {name: [] for name in var_names}
+    units = {name: unit for name, unit in zip(var_names, units_row)}
+    data_length = len(rows)-4
+    for row in rows[4:]:
+        for i, value in enumerate(row):
+            try:
+                data[var_names[i]].append(float(value))
+            except Exception:
+                data[var_names[i]].append(value)
+    return var_names, units, data, data_length
 
 # ---------------- 自定义 QListWidget ----------------
 class MyListWidget(QListWidget):
@@ -241,12 +268,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.setBackground('w')
         self.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
-    # def update_header(self, left_text=None, right_text=None):
-    #     """更新顶部文本内容"""
-    #     if left_text is not None:
-    #         self.label_left.setText(left_text)
-    #     if right_text is not None:
-    #         self.label_right.setText(right_text)
 
     def update_left_header(self, left_text=None):
         """更新顶部文本内容"""
@@ -258,12 +279,27 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if right_text is not None:
             self.label_right.setText(right_text)
             self.label_right.setAlignment(Qt.AlignmentFlag.AlignRight)
-    def clear_plot(self):
-        pass
-
-    def update_x_range(self,xMin,xMax):
+    def reset_plot(self,xMin,xMax):
+        self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
+        self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
         if not (np.isnan(xMax) or np.isinf(xMax)):
-            self.view_box.setXRange(xMin, xMax, padding=0.00)
+            self.view_box.setXRange(xMin, xMax, padding=0.02)
+            padding_xVal=0.1
+            self.plot_item.setLimits(xMin=0-padding_xVal*(xMax-xMin), xMax=(padding_xVal+1)*(xMax-xMin))
+
+        self.view_box.setYRange(0,1,padding=0) 
+        
+        
+        #self.plot_item.update()
+        self.plot_item.clearPlots() 
+        self.axis_y.setLabel(text="")
+        self.update_left_header("channel name")
+        self.update_right_header("")
+
+    # def update_x_range(self,xMin,xMax):
+    #     if not (np.isnan(xMax) or np.isinf(xMax)):
+    #         self.view_box.setXRange(xMin, xMax, padding=0.02)
+    #         self.plot_item.update()
             #self.axis_x.setRange(xMin, xMax)
         #self.plot_item.setLimits(xMin=xMin,xMax=xMax)
 
@@ -317,13 +353,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.vline.sigPositionChanged.connect(self.update_cursor_label)
         self.setAntialiasing(True)
     
-    def wheelEvent(self, ev, axis=None):
-        """滚轮事件处理"""
-        if ev.buttons() == Qt.MouseButton.MiddleButton:
-            super().wheelEvent(ev, axis=0)
+    def wheelEvent(self, ev):
+        vb = self.plot_item.getViewBox()
+        delta = ev.angleDelta().y()  # 获取垂直滚动增量
+        if delta > 0:
+            #print("向上滚动,放大")  # 正值表示向上
+            vb.scaleBy((0.9, 1))  # 仅缩放x轴
+        elif delta < 0:
+            #print("向下滚动,缩小")  # 负值表示向下
+            vb.scaleBy((1.1, 1))  # 仅缩放x轴
         else:
-            super().wheelEvent(ev, axis=axis)
-        return super().wheelEvent(ev)
+            super().wheelEvent(ev)
     
     def mouse_moved(self, evt):
         """鼠标移动事件处理"""
@@ -356,16 +396,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             #(x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
             
             self.update_right_header(f"x={x:.2f}, y={y_val:.2f}")
-            # self.cursor_label.setText(f"x={x:.2f}, y={y_val:.2f}")
-            # fm = QFontMetrics(self.cursor_label.textItem.font())
-            # text_height = fm.height()
-            # dy = self.view_box.mapToView(QPointF(0, text_height)).y() - \
-            #      self.view_box.mapToView(QPointF(0, 0)).y()
-            
-            # self.cursor_label.setPos(
-            #     x_max - (x_max - x_min) * 0.02,
-            #     y_max - abs(dy * 1.2)
-            # )
+
         except Exception as e:
             print(f"Cursor update error: {e}")
             # self.cursor_label.setText("")
@@ -376,6 +407,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.cursor_label.setVisible(show)
         if show:
             self.update_cursor_label()
+
 # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
@@ -398,10 +430,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         raw_values = self.data[var_name]
         if not raw_values or all(v is None or str(v).strip() == '' for v in raw_values):
             QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
-            for item in self.plot_item.listDataItems():
-                self.plot_item.removeItem(item)
-            self.axis_y.setLabel(text="")
-            self.plot_item.update()
+            # for item in self.plot_item.listDataItems():
+            #     self.plot_item.removeItem(item)
+            # self.axis_y.setLabel(text="")
+            # self.plot_item.update()
             event.acceptProposedAction()
             return
 
@@ -420,9 +452,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not y_values or np.isnan(y_values).all():
             sample_values = [str(v) for v in raw_values if v is not None and str(v).strip() != ''][:5]
             QMessageBox.information(self, "字符串变量", f"变量 {var_name} 包含字符串数据:\n{sample_values}")
-            self.plot_item.clear()
-            self.axis_y.setLabel(text="")
-            self.plot_item.update()
+            # self.plot_item.clear()
+            # self.axis_y.setLabel(text="")
+            # self.plot_item.update()
             event.acceptProposedAction()
             return
         
@@ -433,9 +465,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.plot(x_values, y_values, pen=_pen, name=var_name)
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
-        # if len(full_title) > 30:
-        #     full_title = full_title[:27] + "..."
-
         # self.axis_y.setLabel(
         #     text=full_title,
         #     color='black',
@@ -804,9 +833,12 @@ class MainWindow(QMainWindow):
         self.plot_widgets = []
         self.create_subplots(4)
 
-    def update_x_range_after_loading(self,xMin,xMax):
+    # def update_x_range_after_loading(self,xMin,xMax):
+    #     for plot_widget in self.plot_widgets:
+    #         plot_widget.update_x_range(xMin,xMax)
+    def reset_plots_after_loading(self,xMin,xMax):
         for plot_widget in self.plot_widgets:
-            plot_widget.update_x_range(xMin,xMax)
+            plot_widget.reset_plot(xMin,xMax)
 
     # ---------------- 公用函数 ----------------
     def toggle_cursor_all(self, checked):
@@ -846,11 +878,18 @@ class MainWindow(QMainWindow):
             self.plot_layout.addWidget(container)
 
     def load_csv_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择 CSV 文件", "", "CSV Files (*.csv)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
         if not path:
             return
         try:
-            self.var_names, self.units, self.data,data_length = load_csv(path)
+            file_ext = os.path.splitext(path)[1]
+            if file_ext == ['.csv','.txt']:
+                self.var_names, self.units, self.data,data_length = load_csv(path)
+            elif file_ext in ['.mfile','.t00','.t01']:
+                self.var_names, self.units, self.data,data_length = load_mfile(path)
+            else:
+                QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
+                return
         except Exception as e:
             QMessageBox.critical(self, "读取失败", str(e))
             return
@@ -860,8 +899,10 @@ class MainWindow(QMainWindow):
         for widget in self.plot_widgets:
             widget.data = self.data
             widget.units = self.units
-
-        self.update_x_range_after_loading(0,data_length)
+        
+        
+        self.reset_plots_after_loading(0,data_length)
+        #self.update_x_range_after_loading(0,data_length)
     def filter_variables(self, text):
         keywords = text.lower().split()
         self.list_widget.clear()
