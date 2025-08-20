@@ -883,7 +883,7 @@ class MainWindow(QMainWindow):
             return
         try:
             file_ext = os.path.splitext(path)[1]
-            if file_ext == ['.csv','.txt']:
+            if file_ext in ['.csv','.txt']:
                 self.var_names, self.units, self.data,data_length = load_csv(path)
             elif file_ext in ['.mfile','.t00','.t01']:
                 self.var_names, self.units, self.data,data_length = load_mfile(path)
