@@ -653,7 +653,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def setup_interaction(self):
         """配置交互元素"""
         # 光标线
-        self.vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('r', width=4))
+        self.vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((255, 0, 0, 100), width=4) )
+        self.vline.setZValue(100) 
         self.cursor_label = pg.TextItem("", anchor=(1, 1), color="red")
         self.plot_item.addItem(self.vline, ignoreBounds=True)
         self.plot_item.addItem(self.cursor_label, ignoreBounds=True)
@@ -755,7 +756,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     #time
                     datetime64_value = pd.to_datetime(raw_values,errors='coerce')
                     y_values = (
-                        datetime64_value.dt.hour * 3600_000 +
+                        datetime64_value.dt.hour * 3_600_000 +
                         datetime64_value.dt.minute * 60_000 +
                         datetime64_value.dt.second * 1_000 +
                         datetime64_value.dt.microsecond // 1_000      
@@ -1038,6 +1039,7 @@ class MainWindow(QMainWindow):
         self.drop_overlay.setGeometry(self.centralWidget().rect())
         self.drop_overlay.raise_()
         self.drop_overlay.show()
+        self.drop_overlay.activateWindow()
 
     def hide_drop_overlay(self):
         self.drop_overlay.hide()
@@ -1114,7 +1116,7 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
         self.plot_widgets.clear()
 
-        first_col_viewbox = None   # 用于 XLink
+        first_viewbox = None   # 用于 XLink
 
         for r in range(m):
             for c in range(n):
@@ -1122,10 +1124,10 @@ class MainWindow(QMainWindow):
                 plot_widget.toggle_cursor(self.cursor_btn.isChecked())
 
                 # XLink：让同一行的所有列都 link 到第一列
-                if c == 0:
-                    first_col_viewbox = plot_widget.view_box
+                if c == 0 and r == 0:
+                    first_viewbox = plot_widget.view_box
                 else:
-                    plot_widget.view_box.setXLink(first_col_viewbox)
+                    plot_widget.view_box.setXLink(first_viewbox)
 
                 # 用一个 QWidget 包一层，方便隐藏
                 wrapper = QVBoxLayout()
@@ -1147,14 +1149,7 @@ class MainWindow(QMainWindow):
             self.plot_layout.setColumnStretch(c, 1)
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
-        """
-        仅显示前 k 行、前 v 列的子图，其余隐藏
-        要求当前布局是 m×n 的网格（create_subplots(rows, cols) 生成）
-        """
-        """
-        只显示前 row_set 行、col_set 列，其余隐藏
-        要求 create_subplots_matrix 已经调用过
-        """
+
         m, n = self._plot_row_default, self._plot_col_default
 
         for idx, container in enumerate(self.plot_widgets):
@@ -1263,20 +1258,24 @@ class MainWindow(QMainWindow):
         # < 20 MB 直接读
         file_size =os.path.getsize(file_path)
         if file_size < _Threshold_Size_Mb * 1024 * 1024:               
-            return self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+            status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+        else:
+            # 20 MB 以上走线程
+            self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
+            self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            self._progress.setAutoClose(True)
+            self._progress.setCancelButton(None)            # 不可取消
+            self._progress.show()
 
-        # 20 MB 以上走线程
-        self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
-        self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self._progress.setAutoClose(True)
-        self._progress.setCancelButton(None)            # 不可取消
-        self._progress.show()
+            self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+            self._thread.progress.connect(self._progress.setValue)
+            self._thread.finished.connect(self._on_load_done)
+            self._thread.error.connect(self._on_load_error)
+            self._thread.start()
 
-        self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
-        self._thread.progress.connect(self._progress.setValue)
-        self._thread.finished.connect(self._on_load_done)
-        self._thread.error.connect(self._on_load_error)
-        self._thread.start()
+            status = True
+
+        return status
         # except Exception as e:
         #     QMessageBox.critical(self, "读取失败", str(e))
         #     return
