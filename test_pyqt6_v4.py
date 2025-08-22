@@ -6,7 +6,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QMimeData, QRectF, QMargins, QTimer, QPointF,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex
 from PyQt6.QtGui import QFont, QFontMetrics, QDrag, QPen, QColor, QAction,QScreen
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,
     QListWidget, QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView
 )
@@ -167,7 +167,44 @@ class DataTableDialog(QDialog):
         max_right = screen.right() - MARGIN
         new_width = max(self.width(), min(needed_width, max_right - left_x))
         self.resize(new_width, self.height())
+class LayoutInputDialog(QDialog):
+    def __init__(self, 
+                 max_rows:int=4, 
+                 max_cols:int=2, 
+                 cur_rows:int=1, 
+                 cur_cols:int=1,
+                parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置图表的行、列数")
+        self.max_rows = max_rows
+        self.max_cols = max_cols
 
+        form = QFormLayout(self)
+
+        self.row_spin = QSpinBox()
+        self.row_spin.setRange(1, max_rows)
+        self.row_spin.setValue(cur_rows)
+
+        self.col_spin = QSpinBox()
+        self.col_spin.setRange(1, max_cols)
+        self.col_spin.setValue(cur_cols)
+
+        form.addRow("行数：", self.row_spin)
+        form.addRow("列数：", self.col_spin)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("确定")
+        cancel_btn = QPushButton("取消")
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        form.addRow(btns)
+
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        QTimer.singleShot(0, self.row_spin.selectAll)
+    def values(self):
+        return self.row_spin.value(), self.col_spin.value()
+    
 class AxisDialog(QDialog):
     def __init__(self, axis, view_box, axis_type: str, plot_widget, parent=None):
         super().__init__(parent)
@@ -626,12 +663,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             #(x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
             if self.y_format == 'ms':
                 time_str=self.msInt_to_fmtStr(y_val)
-                self.update_right_header(f"x={x:.2f}, y={time_str}")
+                self.update_right_header(f"x={x:.0f}, y={time_str}")
             elif self.y_format == 'date':
                 date_str=self.dateInt_to_fmtStr(y_val)
-                self.update_right_header(f"x={x:.2f}, y={date_str}")
+                self.update_right_header(f"x={x:.0f}, y={date_str}")
             else:
-                self.update_right_header(f"x={x:.2f}, y={y_val:.2f}")
+                self.update_right_header(f"x={x:.0f}, y={y_val:.2f}")
 
         except Exception as e:
             print(f"Cursor update error: {e}")
@@ -849,17 +886,22 @@ class MainWindow(QMainWindow):
         self.cursor_btn.setCheckable(True)
         self.cursor_btn.clicked.connect(self.toggle_cursor_all)
         
+        self.grid_layout_btn = QPushButton("修改布局")
+        self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
+
         #self.cursor_btn.setFixedSize(100, 28)
         
-        
+        top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.auto_y_btn)
         top_bar.addWidget(self.auto_range_btn)
+        
 
         root_layout.addLayout(top_bar)
 
         # 真正容纳子图的布局
-        self.plot_layout = QVBoxLayout()
+        #self.plot_layout = QVBoxLayout()
+        self.plot_layout=QGridLayout()
         self.plot_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         self.plot_layout.setSpacing(0)  # No spacing
         root_layout.addLayout(self.plot_layout, 1)    # 1 表示可伸缩
@@ -867,8 +909,17 @@ class MainWindow(QMainWindow):
 
         # ---------------- 子图 ----------------
         self.plot_widgets = []
-        self.create_subplots(4)
-        
+
+        # put default plots into the window
+        self._plot_row_default = 4
+        self._plot_col_default = 3
+        self.create_subplots_matrix(self._plot_row_default,self._plot_col_default)
+
+        # turn on/off the plots
+        self._plot_row_current = 4
+        self._plot_col_current = 1
+        self.set_plots_visible(row_set=self._plot_row_current,col_set=self._plot_col_current)
+
         self.drop_overlay = DropOverlay(self.centralWidget())
         self.drop_overlay.lower()          # 初始在最下层
         self.drop_overlay.hide()
@@ -884,49 +935,6 @@ class MainWindow(QMainWindow):
         if len(sys.argv) > 1:
             file_path = sys.argv[1]
             self.load_csv_file(file_path)
-
-    # def dragEnterEvent(self, event):
-    #     if event.mimeData().hasUrls():
-    #         urls = event.mimeData().urls()
-    #         # 只要有一个 .csv/.txt/.mfile/.t00 就接受
-    #         if any(url.toLocalFile().lower().endswith(('.csv', '.txt', '.mfile', '.t00','.t01')) for url in urls):
-    #             event.acceptProposedAction()
-    #         else:
-    #             event.ignore()
-    #     else:
-    #         event.ignore()
-
-    # def dropEvent(self, event):
-    #     urls = event.mimeData().urls()
-    #     for url in urls:
-    #         path = url.toLocalFile()
-    #         if path.lower().endswith(('.csv', '.txt', '.mfile', '.t00','.t01')):
-    #             self.load_csv_file(path)   # 直接复用现有函数
-    #             break                      # 只加载第一个文件
-
-    # def eventFilter(self, obj, event):
-    #     etype = event.type()
-    #     if etype == QEvent.Type.DragEnter:
-    #         if event.mimeData().hasUrls():
-    #             urls = event.mimeData().urls()
-    #             if any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00'))
-    #                    for u in urls):
-    #                 self.show_drop_overlay()
-    #                 event.acceptProposedAction()
-    #                 return True
-    #     elif etype == QEvent.Type.DragLeave:
-    #         self.hide_drop_overlay()
-    #     elif etype == QEvent.Type.Drop:
-    #         if event.mimeData().hasUrls():
-    #             urls = event.mimeData().urls()
-    #             for u in urls:
-    #                 path = u.toLocalFile()
-    #                 if path.lower().endswith(('.csv','.txt','.mfile','.t00')):
-    #                     self.hide_drop_overlay()
-    #                     self.load_csv_file(path)
-    #                     event.accept()
-    #                     return True
-    #     return super().eventFilter(obj, event)
 
     def eventFilter(self, obj, event):
         etype = event.type()
@@ -956,6 +964,15 @@ class MainWindow(QMainWindow):
                         return True
         return super().eventFilter(obj, event)
 
+    def open_layout_dialog(self):
+        dlg = LayoutInputDialog(max_rows=self._plot_row_default, 
+                                max_cols=self._plot_col_default, 
+                                cur_rows=self._plot_row_current,
+                                cur_cols=self._plot_col_current,
+                                parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            r, c = dlg.values()
+            self.set_plots_visible (r, c)
 
     def show_drop_overlay(self):
         self.drop_overlay.setGeometry(self.centralWidget().rect())
@@ -991,6 +1008,54 @@ class MainWindow(QMainWindow):
     def auto_y_in_x_range(self):
         for plot_widget in self.plot_widgets:
             plot_widget.auto_y_in_x_range()
+
+    def create_subplots_matrix(self, rows: int = 1, cols: int = 1):
+        """生成 m×n 的绘图区"""
+        # 1. 清理旧图
+        for widget in self.plot_widgets:
+            self.plot_layout.removeWidget(widget)
+            widget.deleteLater()
+        self.plot_widgets.clear()
+
+        # # 2. 用网格布局
+        # grid = QGridLayout()
+        # grid.setSpacing(2)          # 间隙
+        # self.plot_layout.addLayout(grid)
+
+        # 3. 创建 m×n 个 DraggableGraphicsLayoutWidget
+        first_viewbox = None
+        for r in range(rows):
+            for c in range(cols):
+                plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data)
+                plot_widget.toggle_cursor(self.cursor_btn.isChecked())
+
+                if first_viewbox is None:
+                    first_viewbox = plot_widget.view_box
+                else:
+                    plot_widget.view_box.setXLink(first_viewbox)
+                
+                # 直接加到网格
+                self.plot_layout.addWidget(plot_widget, r, c)
+
+                self.plot_widgets.append(plot_widget)
+
+    def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
+        """
+        仅显示前 k 行、前 v 列的子图，其余隐藏
+        要求当前布局是 m×n 的网格（create_subplots(rows, cols) 生成）
+        """
+
+
+        # 逐个可见性控制
+        for idx, plot_widget in enumerate(self.plot_widgets):
+            r, c = divmod(idx, self._plot_col_default)
+            visible = r < row_set and c < col_set
+            plot_widget.setVisible(visible)
+            
+
+            
+        self._plot_row_current = row_set
+        self._plot_col_current = col_set
 
     def create_subplots(self, n):
         for widget in self.plot_widgets:
@@ -1029,6 +1094,11 @@ class MainWindow(QMainWindow):
 
     def load_csv_file(self,file_path):
         #file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
+        
+        # raise window
+        self.raise_()  # Bring window to front
+        self.activateWindow()  # Set focus
+
         status = False
         if not file_path:
             return status
