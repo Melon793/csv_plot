@@ -3,23 +3,170 @@ import sys
 import os
 import csv
 import numpy as np
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QMimeData, QRectF, QMargins, QTimer, QPointF,QSettings, QRect, QMargins,QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, pyqtSignal, QMimeData, QRectF, QMargins, QTimer, QPointF,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex
 from PyQt6.QtGui import QFont, QFontMetrics, QDrag, QPen, QColor, QAction,QScreen
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,
-    QListWidget, QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,
+    QListWidget, QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView
 )
 import pyqtgraph as pg
 from itertools import islice
 import pandas as pd
+
 from myDataLoader2 import FastDataLoader,DataLoadThread
 # 屏蔽 macOS ICC 警告
 os.environ["QT_LOGGING_RULES"] = "qt5ct.debug=false"
 
+class DropOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setWindowFlags(Qt.WindowType.Widget)
+        self.setStyleSheet("""
+            background:rgba(255,255,255,200);   
+            border:none;
+        """)
+        self.label = QLabel("请丢入数据", self)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setStyleSheet("""
+            background-color: rgba(68, 68, 68, 200)
+            color:#333;
+            font-size:36px;
+            border-radius:1p2x;
+            padding:20px 40px;
+            color: rgba(128, 128, 128, 200);
+        """)
+        self.hide()
+
+    def adjust_text(self,file_type_supported=True):
+        if file_type_supported == True:
+            self.label.setText("请丢入数据")
+        else:
+            self.label.setText("数据格式不支持")
+                               
+        
+    def adjust_font(self):
+        # 根据 label 当前尺寸动态字号
+        side = min(self.label.width(), self.label.height())
+        font_size = max(12, min(int(side * 0.3), 128))
+        font = QFont()
+        font.setPixelSize(font_size)
+        font.setBold(True)
+        self.label.setFont(font)
+
+    def resizeEvent(self, event):
+        #self.label.adjustSize()
+        w_half = self.width() 
+        h_half = self.height() 
+        self.label.setFixedSize(w_half, h_half)
+        self.adjust_font()
+
+        self.label.move(
+            (self.width() - self.label.width()) // 2,
+            (self.height() - self.label.height()) // 2
+        )
 
 
+class PandasTableModel(QAbstractTableModel):
+    """只读官方虚拟模型，支持千万行秒开"""
+    def __init__(self, df: pd.DataFrame, parent=None):
+        super().__init__(parent)
+        self._df = df
 
+    # 三个必须实现的纯虚函数
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else self._df.shape[0]
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else self._df.shape[1]
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+            return None
+        value = self._df.iloc[index.row(), index.column()]
+        return str(value) if pd.notnull(value) else ""
+
+    def headerData(self, section, orientation, role):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            return str(self._df.columns[section])
+        return str(section + 1)           # 行号 1-based
+
+class DataTableDialog(QDialog):
+    _instance = None
+    _settings = QSettings("MyCompany", "DataTableDialog")
+
+    @classmethod
+    def popup(cls, var_name: str, data: pd.Series, parent=None):
+        if cls._instance is None:
+            cls._instance = cls(parent)
+
+        dlg = cls._instance
+        if dlg.has_column(var_name):
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            return dlg
+
+        dlg.add_series(var_name, data)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        return dlg
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("变量数值表")
+
+        # 1. 用官方 QTableView 代替 QTableWidget
+        self.view = QTableView(self)
+        self.view.setSortingEnabled(True)           # 需要排序可加 QSortFilterProxyModel
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.view)
+
+        # 内部 DataFrame，所有列都存在这里
+        self._df = pd.DataFrame()
+
+        # 恢复上一次的位置/大小
+        geom = self._settings.value("geometry")
+        if geom:
+            self.restoreGeometry(geom)
+        else:
+            self.resize(400, 600)
+
+    def closeEvent(self, event):
+        self._df = pd.DataFrame()          # 释放内存
+        self.view.setModel(None)
+        self.hide()
+        event.accept()
+        self._settings.setValue("geometry", self.saveGeometry())
+
+    def has_column(self, var_name: str) -> bool:
+        return var_name in self._df.columns
+
+    def add_series(self, var_name: str, data: pd.Series):
+        # ---- 追加列 ----
+        self._df[var_name] = data
+
+        # 用官方模型挂载（零拷贝，只保存 DataFrame 指针）
+        model = PandasTableModel(self._df)
+        self.view.setModel(model)
+
+        # ---- 自动向右伸展宽度（仅当前列） ----
+        self._auto_resize_right()
+
+    def _auto_resize_right(self):
+        """与原来逻辑一致，仅计算列宽"""
+        COL_WIDTH = 120
+        MARGIN = 40
+        left_x = self.x()
+        needed_width = self._df.shape[1] * COL_WIDTH + MARGIN
+        screen = QApplication.primaryScreen().availableGeometry()
+        max_right = screen.right() - MARGIN
+        new_width = max(self.width(), min(needed_width, max_right - left_x))
+        self.resize(new_width, self.height())
 
 class AxisDialog(QDialog):
     def __init__(self, axis, view_box, axis_type: str, plot_widget, parent=None):
@@ -97,102 +244,102 @@ class AxisDialog(QDialog):
             QMessageBox.warning(self, "错误", "请输入有效的数值（最小值、最大值、刻度数量）")
 
 
-class DataTableDialog(QDialog):
-    _instance = None
-    _settings = QSettings("MyCompany", "DataTableDialog")
+# class DataTableDialog(QDialog):
+#     _instance = None
+#     _settings = QSettings("MyCompany", "DataTableDialog")
 
-    @classmethod
-    def popup(cls, var_name: str, data: pd.Series, parent=None):
-        if cls._instance is None:
-            cls._instance = cls(parent)
+#     @classmethod
+#     def popup(cls, var_name: str, data: pd.Series, parent=None):
+#         if cls._instance is None:
+#             cls._instance = cls(parent)
 
-        dlg = cls._instance
-        if dlg.has_column(var_name):
-            dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
-            return dlg
+#         dlg = cls._instance
+#         if dlg.has_column(var_name):
+#             dlg.show()
+#             dlg.raise_()
+#             dlg.activateWindow()
+#             return dlg
 
-        dlg.add_series(var_name, data)
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
-        return dlg
+#         dlg.add_series(var_name, data)
+#         dlg.show()
+#         dlg.raise_()
+#         dlg.activateWindow()
+#         return dlg
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("变量数值表")
-        #self.resize(400, 600)
+#     def __init__(self, parent=None):
+#         super().__init__(parent)
+#         self.setWindowTitle("变量数值表")
+#         #self.resize(400, 600)
 
-        self.table = QTableWidget()
-        self.table.setSortingEnabled(True)
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.table)
+#         self.table = QTableWidget()
+#         self.table.setSortingEnabled(True)
+#         layout = QVBoxLayout(self)
+#         layout.addWidget(self.table)
 
-        # 恢复上一次的位置/大小
-        geom = self._settings.value("geometry")
-        if geom:
-            self.restoreGeometry(geom)
-        else:
-            self.resize(400, 600) 
+#         # 恢复上一次的位置/大小
+#         geom = self._settings.value("geometry")
+#         if geom:
+#             self.restoreGeometry(geom)
+#         else:
+#             self.resize(400, 600) 
 
-    def closeEvent(self, event):
-        """仅清空内容，不销毁窗口"""
-        self.table.clear()
-        self.table.setRowCount(0)
-        self.table.setColumnCount(0)
-        self.hide()          # 隐藏而不是销毁
-        event.accept()
-        self._settings.setValue("geometry", self.saveGeometry())
-        super().closeEvent(event)
+#     def closeEvent(self, event):
+#         """仅清空内容，不销毁窗口"""
+#         self.table.clear()
+#         self.table.setRowCount(0)
+#         self.table.setColumnCount(0)
+#         self.hide()          # 隐藏而不是销毁
+#         event.accept()
+#         self._settings.setValue("geometry", self.saveGeometry())
+#         super().closeEvent(event)
 
-    def has_column(self, var_name: str) -> bool:
-        return any(
-            self.table.horizontalHeaderItem(i).text() == var_name
-            for i in range(self.table.columnCount())
-        )
+#     def has_column(self, var_name: str) -> bool:
+#         return any(
+#             self.table.horizontalHeaderItem(i).text() == var_name
+#             for i in range(self.table.columnCount())
+#         )
 
-    def add_series(self, var_name: str, data: pd.Series):
-        # ---- 原有追加列逻辑 ----
-        if self.table.columnCount() == 0:
-            self.table.setRowCount(len(data))
-        else:
-            self.table.setRowCount(max(self.table.rowCount(), len(data)))
+#     def add_series(self, var_name: str, data: pd.Series):
+#         # ---- 原有追加列逻辑 ----
+#         if self.table.columnCount() == 0:
+#             self.table.setRowCount(len(data))
+#         else:
+#             self.table.setRowCount(max(self.table.rowCount(), len(data)))
 
-        col = self.table.columnCount()
-        self.table.insertColumn(col)
-        self.table.setHorizontalHeaderItem(col, QTableWidgetItem(var_name))
-        for i, v in enumerate(data):
-            self.table.setItem(i, col, QTableWidgetItem(str(v)))
-        #self.table.resizeColumnsToContents()
-        # sample = data[:1000].astype(str).to_numpy()
-        # max_len = max(len(s) for s in sample) if sample.size else 10
-        # self.table.setColumnWidth(col, max_len * 8 + 20)
-        # ---- 自动向右伸展 ----
-        self._auto_resize_right()
+#         col = self.table.columnCount()
+#         self.table.insertColumn(col)
+#         self.table.setHorizontalHeaderItem(col, QTableWidgetItem(var_name))
+#         for i, v in enumerate(data):
+#             self.table.setItem(i, col, QTableWidgetItem(str(v)))
+#         #self.table.resizeColumnsToContents()
+#         # sample = data[:1000].astype(str).to_numpy()
+#         # max_len = max(len(s) for s in sample) if sample.size else 10
+#         # self.table.setColumnWidth(col, max_len * 8 + 20)
+#         # ---- 自动向右伸展 ----
+#         self._auto_resize_right()
 
-    def _auto_resize_right(self):
-        """
-        左边固定，向右扩展：
-        1) 如果计算宽度 < 当前宽度 → 保持不变
-        2) 否则向右扩展，直到屏幕右边缘
-        """
-        COL_WIDTH = 120
-        MARGIN = 40
+#     def _auto_resize_right(self):
+#         """
+#         左边固定，向右扩展：
+#         1) 如果计算宽度 < 当前宽度 → 保持不变
+#         2) 否则向右扩展，直到屏幕右边缘
+#         """
+#         COL_WIDTH = 120
+#         MARGIN = 40
 
-        # 当前窗口左上角的 x 坐标（用户手动调整后也有效）
-        left_x = self.x()
+#         # 当前窗口左上角的 x 坐标（用户手动调整后也有效）
+#         left_x = self.x()
 
-        # 计算需要的宽度
-        needed_width = self.table.columnCount() * COL_WIDTH + MARGIN
+#         # 计算需要的宽度
+#         needed_width = self.table.columnCount() * COL_WIDTH + MARGIN
 
-        # 屏幕可用右边界
-        screen = QApplication.primaryScreen().availableGeometry()
-        max_right = screen.right() - MARGIN
-        new_width = max(self.width(), min(needed_width, max_right - left_x))
+#         # 屏幕可用右边界
+#         screen = QApplication.primaryScreen().availableGeometry()
+#         max_right = screen.right() - MARGIN
+#         new_width = max(self.width(), min(needed_width, max_right - left_x))
 
-        # 只改宽和高，不动 x
-        self.resize(new_width, self.height())
+#         # 只改宽和高，不动 x
+#         self.resize(new_width, self.height())
 
 # ---------------- 自定义 QListWidget ----------------
 class MyListWidget(QListWidget):
@@ -239,8 +386,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.time_channels_info = time_channels_info
         self.synchronizer = synchronizer
 
-        self.ci.layout.setContentsMargins(0, 0, 0, 0)
-        self.ci.layout.setSpacing(0)
+        #self.ci.layout.setContentsMargins(0, 0, 0, 5)
+        
 
         self.y_format = ''
         # 添加顶部文本区域
@@ -254,12 +401,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         # 布局比例设置 (绘图区占90%)
         self.ci.layout.setContentsMargins(0, 0, 10, 5)  # 消除所有边距
+        self.ci.layout.setSpacing(0)
         self.ci.layout.setRowStretchFactor(1, 1)  # 主区域完全拉伸
-        #plot.getViewBox().setAutoVisible(True)  # 自动适应可视区域
-        # self.ci.layout.setRowStretchFactor(0, 0.5)  # 顶部区域
-        # self.ci.layout.setRowStretchFactor(1, 0.5)  # 主绘图区
- 
-        #self.ci.layout.setContentsMargins(10, 10, 10, 10)
 
     def setup_header(self):
         """完全修正的顶部文本区域设置方法"""
@@ -324,19 +467,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.setTitle(None)
         self.plot_item.hideButtons()
         self.setBackground('w')
-        self.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
+        pen = pg.mkPen('#f00',width=1)
+        self.plot_item.getAxis('left').setGrid(255) 
+        #self.plot_item.getAxis('left').gridPen=(pen) 
+        self.plot_item.getAxis('bottom').setGrid(255) 
+        #self.plot_item.getAxis('bottom').gridPen=(pen) 
+        self.plot_item.showGrid(x=True, y=True, alpha=0.1)
+        
 
     def update_left_header(self, left_text=None):
         """更新顶部文本内容"""
         if left_text is not None:
             self.label_left.setText(left_text)
+    def auto_range(self):
+        self.view_box.autoRange()
+
+    def auto_y_in_x_range(self):
+        vb=self.view_box
+        vb.enableAutoRange(axis=vb.YAxis, enable=True)
 
     def update_right_header(self, right_text=None):
         """更新顶部文本内容"""
         if right_text is not None:
             self.label_right.setText(right_text)
             self.label_right.setAlignment(Qt.AlignmentFlag.AlignRight)
+
     def reset_plot(self,xMin,xMax):
         self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
         self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
@@ -346,7 +502,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.plot_item.setLimits(xMin=0-padding_xVal*(xMax-xMin), xMax=(padding_xVal+1)*(xMax-xMin))
 
         self.view_box.setYRange(0,1,padding=0) 
-        
+        self.vline.setBounds([None, None]) 
         
         #self.plot_item.update()
         self.plot_item.clearPlots() 
@@ -400,7 +556,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def setup_interaction(self):
         """配置交互元素"""
         # 光标线
-        self.vline = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen('r', width=4))
+        self.vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('r', width=4))
         self.cursor_label = pg.TextItem("", anchor=(1, 1), color="red")
         self.plot_item.addItem(self.vline, ignoreBounds=True)
         self.plot_item.addItem(self.cursor_label, ignoreBounds=True)
@@ -432,6 +588,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         mousePoint = self.plot_item.vb.mapSceneToView(pos)
         if hasattr(self.window(), 'sync_crosshair'):
             self.window().sync_crosshair(mousePoint.x(), self)
+            #print(f"mouse in pos {mousePoint.x()}")
 
     def msInt_to_fmtStr(self,value:int):
         td = pd.to_timedelta(pd.Series(value, dtype='int64'), unit='ms')
@@ -480,6 +637,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             print(f"Cursor update error: {e}")
             # self.cursor_label.setText("")
             self.update_right_header("")
+
     def toggle_cursor(self, show: bool):
         """切换光标显示状态"""
         self.vline.setVisible(show)
@@ -487,41 +645,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if show:
             self.update_cursor_label()
 
-# ---------------- 拖拽相关 ----------------
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasText():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasText():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        var_name = event.mimeData().text()
-        if var_name not in self.data.columns:
-            QMessageBox.warning(self, "错误", f"变量 {var_name} 不存在")
-            return
-
+    def get_value_from_name(self,var_name):
         raw_values = self.data[var_name]
-
         if pd.api.types.is_numeric_dtype(raw_values):
             y_values=raw_values
             self.y_format = 'number'
-        # elif pd.api.types.is_string_dtype(raw_values):
-        #     try:
-        #         y_values=pd.to_datetime(raw_values).astype('int64') / 1e9    
-        #     except:
-        #         QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
-        #         event.acceptProposedAction()
-        #         return
-        # elif pd.api.types.is_categorical_dtype(raw_values):
-        #         QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
-        #         event.acceptProposedAction()
-        #        return
+
         elif var_name in self.time_channels_info:
             fmt = self.time_channels_info[var_name]
             try:
@@ -542,14 +671,41 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     y_values = date_delta.dt.days.astype('int64')
                     self.y_format = 'date'
             except:
-                QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
-                event.acceptProposedAction()
-                return
+                # cannot parse the format
+                return None
+
         else:
+            # cannot get right info
+            return None
+        
+        # finally
+        return y_values
+    
+# ---------------- 拖拽相关 ----------------
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        var_name = event.mimeData().text()
+        if var_name not in self.data.columns:
+            QMessageBox.warning(self, "错误", f"变量 {var_name} 不存在")
+            return
+        
+        y_values=self.get_value_from_name(var_name=var_name)
+
+        if y_values is None:
             QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
             event.acceptProposedAction()
             return
-
         
         self.plot_item.clearPlots() 
 
@@ -561,24 +717,26 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         self.update_left_header(full_title)
         padding_xVal = 0.1
-        padding_yVal = 0.2
+        padding_yVal = 0.5
         if np.nanmin(y_values) == np.nanmax(y_values):
             y_center = np.nanmin(y_values)
             y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
-            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.00)
+            
             # limit x range
             self.plot_item.setLimits(xMin=0-padding_xVal*len(x_values), xMax=(padding_xVal+1)*len(x_values), 
                 minXRange=5,
                 yMin=y_center - y_range,
-                yMax=y_center + y_range)        
+                yMax=y_center + y_range) 
+            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)       
         else:
-            self.view_box.setYRange(np.nanmin(y_values), np.nanmax(y_values), padding=0.05)
+            
             # limit x/y range            
             self.plot_item.setLimits(xMin=0-padding_xVal*len(y_values), xMax=(padding_xVal+1)*len(y_values), 
                 minXRange=5,
                 yMin=np.nanmin(y_values)-padding_yVal*(np.nanmax(y_values)-np.nanmin(y_values)), 
                 yMax=np.nanmax(y_values)+padding_yVal*(max(y_values)-np.nanmin(y_values)))
-
+            
+            self.view_box.setYRange(np.nanmin(y_values), np.nanmax(y_values), padding=0.05)
 
         
 
@@ -666,9 +824,8 @@ class MainWindow(QMainWindow):
         # ---------------- 右侧绘图区 ----------------
         self.plot_widget = QWidget()
         root_layout = QVBoxLayout(self.plot_widget)
-        #root_layout.setContentsMargins(5, 5, 5, 5)
+
         root_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
-        #root_layout.setSpacing(5)
         root_layout.setSpacing(0)  # Remove spacing
 
         # 顶部按钮栏：弹簧 + 光标按钮（右对齐）
@@ -676,15 +833,29 @@ class MainWindow(QMainWindow):
         top_bar.setContentsMargins(0, 0, 5, 0)
         top_bar.addStretch(1)
 
+
+
+
+        
+        self.auto_range_btn = QPushButton("自动缩放")
+        self.auto_range_btn.clicked.connect(self.auto_range_all_plots)
+        
+
+        self.auto_y_btn = QPushButton("仅调节y轴")
+        self.auto_y_btn.clicked.connect(self.auto_y_in_x_range)
+        
+        
         self.cursor_btn = QPushButton("显示光标")
-        self.auto_y_btn = QPushButton("调节y轴")
         self.cursor_btn.setCheckable(True)
-
-        #self.cursor_btn.setFixedSize(100, 28)
         self.cursor_btn.clicked.connect(self.toggle_cursor_all)
-
-        top_bar.addWidget(self.auto_y_btn)
+        
+        #self.cursor_btn.setFixedSize(100, 28)
+        
+        
         top_bar.addWidget(self.cursor_btn)
+        top_bar.addWidget(self.auto_y_btn)
+        top_bar.addWidget(self.auto_range_btn)
+
         root_layout.addLayout(top_bar)
 
         # 真正容纳子图的布局
@@ -697,23 +868,103 @@ class MainWindow(QMainWindow):
         # ---------------- 子图 ----------------
         self.plot_widgets = []
         self.create_subplots(4)
+        
+        self.drop_overlay = DropOverlay(self.centralWidget())
+        self.drop_overlay.lower()          # 初始在最下层
+        self.drop_overlay.hide()
+
+        # 全局拖拽过滤器
+        QApplication.instance().installEventFilter(self)
+
+
+        # 主窗口接受拖拽
+        # self.setAcceptDrops(True)      
 
         # ---------------- 命令行直接加载文件 ----------------
         if len(sys.argv) > 1:
             file_path = sys.argv[1]
             self.load_csv_file(file_path)
-    # def update_x_range_after_loading(self,xMin,xMax):
-    #     for plot_widget in self.plot_widgets:
-    #         plot_widget.update_x_range(xMin,xMax)
-    # def _position_cursor_btn(self):
-    #     """把按钮放到绘图区右上角"""
-    #     margin = 40
-    #     # central 的右边缘再向左偏移
-    #     self.cursor_btn.move(
-    #         self.centralWidget().width() - self.cursor_btn.width() - margin,
-    #         margin
-    #     )
-    #     self.cursor_btn.setVisible(True)
+
+    # def dragEnterEvent(self, event):
+    #     if event.mimeData().hasUrls():
+    #         urls = event.mimeData().urls()
+    #         # 只要有一个 .csv/.txt/.mfile/.t00 就接受
+    #         if any(url.toLocalFile().lower().endswith(('.csv', '.txt', '.mfile', '.t00','.t01')) for url in urls):
+    #             event.acceptProposedAction()
+    #         else:
+    #             event.ignore()
+    #     else:
+    #         event.ignore()
+
+    # def dropEvent(self, event):
+    #     urls = event.mimeData().urls()
+    #     for url in urls:
+    #         path = url.toLocalFile()
+    #         if path.lower().endswith(('.csv', '.txt', '.mfile', '.t00','.t01')):
+    #             self.load_csv_file(path)   # 直接复用现有函数
+    #             break                      # 只加载第一个文件
+
+    # def eventFilter(self, obj, event):
+    #     etype = event.type()
+    #     if etype == QEvent.Type.DragEnter:
+    #         if event.mimeData().hasUrls():
+    #             urls = event.mimeData().urls()
+    #             if any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00'))
+    #                    for u in urls):
+    #                 self.show_drop_overlay()
+    #                 event.acceptProposedAction()
+    #                 return True
+    #     elif etype == QEvent.Type.DragLeave:
+    #         self.hide_drop_overlay()
+    #     elif etype == QEvent.Type.Drop:
+    #         if event.mimeData().hasUrls():
+    #             urls = event.mimeData().urls()
+    #             for u in urls:
+    #                 path = u.toLocalFile()
+    #                 if path.lower().endswith(('.csv','.txt','.mfile','.t00')):
+    #                     self.hide_drop_overlay()
+    #                     self.load_csv_file(path)
+    #                     event.accept()
+    #                     return True
+    #     return super().eventFilter(obj, event)
+
+    def eventFilter(self, obj, event):
+        etype = event.type()
+        if etype == QEvent.Type.DragEnter:
+            if event.mimeData().hasUrls():
+                urls = event.mimeData().urls()
+                self.show_drop_overlay()
+                if any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','t01'))
+                       for u in urls):                    
+                    self.drop_overlay.adjust_text(file_type_supported=True)
+                    event.acceptProposedAction()
+                else:
+                    self.drop_overlay.adjust_text(file_type_supported=False)
+                    event.acceptProposedAction()
+                    return True
+        elif etype == QEvent.Type.DragLeave:
+            self.hide_drop_overlay()
+        elif etype == QEvent.Type.Drop:
+            if event.mimeData().hasUrls():
+                urls = event.mimeData().urls()
+                for u in urls:
+                    path = u.toLocalFile()
+                    if path.lower().endswith(('.csv','.txt','.mfile','.t00','t01')):
+                        self.hide_drop_overlay()
+                        self.load_csv_file(path)
+                        event.accept()
+                        return True
+        return super().eventFilter(obj, event)
+
+
+    def show_drop_overlay(self):
+        self.drop_overlay.setGeometry(self.centralWidget().rect())
+        self.drop_overlay.raise_()
+        self.drop_overlay.show()
+
+    def hide_drop_overlay(self):
+        self.drop_overlay.hide()
+
 
     def reset_plots_after_loading(self,xMin,xMax):
         for plot_widget in self.plot_widgets:
@@ -733,6 +984,14 @@ class MainWindow(QMainWindow):
             w.vline.setPos(x)
             w.update_cursor_label()
 
+    def auto_range_all_plots(self):
+        for plot_widget in self.plot_widgets:
+            plot_widget.auto_range()
+            
+    def auto_y_in_x_range(self):
+        for plot_widget in self.plot_widgets:
+            plot_widget.auto_y_in_x_range()
+
     def create_subplots(self, n):
         for widget in self.plot_widgets:
             self.plot_layout.removeWidget(widget)
@@ -740,22 +999,25 @@ class MainWindow(QMainWindow):
         self.plot_widgets.clear()
 
         last_viewbox = None
+
         for _ in range(n):
             #plot_widget = DraggablePlotWidget(self.units, self.data)
             plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data)
             plot_widget.toggle_cursor(self.cursor_btn.isChecked())
             if last_viewbox is not None:
                 plot_widget.view_box.setXLink(last_viewbox)
+            
             last_viewbox = plot_widget.view_box
 
             wrapper = QVBoxLayout()
-            wrapper.setContentsMargins(QMargins(0, 0, 5, 0))
+            wrapper.setContentsMargins(QMargins(0, 0, 5, 5))
             wrapper.addWidget(plot_widget)
 
             container = QWidget()
             container.setLayout(wrapper)
             self.plot_widgets.append(plot_widget)
             self.plot_layout.addWidget(container)
+        
     def load_btn_click(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
         status = self.load_csv_file(file_path)
