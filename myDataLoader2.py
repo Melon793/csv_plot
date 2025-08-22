@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple, Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+# some change 
 class DataLoadThread(QThread):
     # 信号：发送进度 0-100，或直接发 DataFrame
     progress = pyqtSignal(int)        # 百分比
