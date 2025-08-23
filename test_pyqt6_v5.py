@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 import pandas as pd
 
-from myDataLoader2 import FastDataLoader,DataLoadThread
+from myDataLoader2 import FastDataLoader, DataLoadThread
 from config_dict import load_dict
 # 屏蔽 macOS ICC 警告
 os.environ["QT_LOGGING_RULES"] = "qt5ct.debug=false"
@@ -33,14 +33,14 @@ class DropOverlay(QWidget):
             background-color: rgba(68, 68, 68, 200);
             color:#333;
             font-size:36px;
-            border-radius:1p2x;
+            border-radius:12px;
             padding:20px 40px;
             color: rgba(128, 128, 128, 200);
         """)
         self.hide()
 
-    def adjust_text(self,file_type_supported=True):
-        if file_type_supported == True:
+    def adjust_text(self, file_type_supported=True):
+        if file_type_supported:
             self.label.setText("请丢入数据")
         else:
             self.label.setText("数据格式不支持")
@@ -312,104 +312,6 @@ class AxisDialog(QDialog):
         except ValueError:
             QMessageBox.warning(self, "错误", "请输入有效的数值（最小值、最大值、刻度数量）")
 
-
-# class DataTableDialog(QDialog):
-#     _instance = None
-#     _settings = QSettings("MyCompany", "DataTableDialog")
-
-#     @classmethod
-#     def popup(cls, var_name: str, data: pd.Series, parent=None):
-#         if cls._instance is None:
-#             cls._instance = cls(parent)
-
-#         dlg = cls._instance
-#         if dlg.has_column(var_name):
-#             dlg.show()
-#             dlg.raise_()
-#             dlg.activateWindow()
-#             return dlg
-
-#         dlg.add_series(var_name, data)
-#         dlg.show()
-#         dlg.raise_()
-#         dlg.activateWindow()
-#         return dlg
-
-#     def __init__(self, parent=None):
-#         super().__init__(parent)
-#         self.setWindowTitle("变量数值表")
-#         #self.resize(400, 600)
-
-#         self.table = QTableWidget()
-#         self.table.setSortingEnabled(True)
-#         layout = QVBoxLayout(self)
-#         layout.addWidget(self.table)
-
-#         # 恢复上一次的位置/大小
-#         geom = self._settings.value("geometry")
-#         if geom:
-#             self.restoreGeometry(geom)
-#         else:
-#             self.resize(400, 600) 
-
-#     def closeEvent(self, event):
-#         """仅清空内容，不销毁窗口"""
-#         self.table.clear()
-#         self.table.setRowCount(0)
-#         self.table.setColumnCount(0)
-#         self.hide()          # 隐藏而不是销毁
-#         event.accept()
-#         self._settings.setValue("geometry", self.saveGeometry())
-#         super().closeEvent(event)
-
-#     def has_column(self, var_name: str) -> bool:
-#         return any(
-#             self.table.horizontalHeaderItem(i).text() == var_name
-#             for i in range(self.table.columnCount())
-#         )
-
-#     def add_series(self, var_name: str, data: pd.Series):
-#         # ---- 原有追加列逻辑 ----
-#         if self.table.columnCount() == 0:
-#             self.table.setRowCount(len(data))
-#         else:
-#             self.table.setRowCount(max(self.table.rowCount(), len(data)))
-
-#         col = self.table.columnCount()
-#         self.table.insertColumn(col)
-#         self.table.setHorizontalHeaderItem(col, QTableWidgetItem(var_name))
-#         for i, v in enumerate(data):
-#             self.table.setItem(i, col, QTableWidgetItem(str(v)))
-#         #self.table.resizeColumnsToContents()
-#         # sample = data[:1000].astype(str).to_numpy()
-#         # max_len = max(len(s) for s in sample) if sample.size else 10
-#         # self.table.setColumnWidth(col, max_len * 8 + 20)
-#         # ---- 自动向右伸展 ----
-#         self._auto_resize_right()
-
-#     def _auto_resize_right(self):
-#         """
-#         左边固定，向右扩展：
-#         1) 如果计算宽度 < 当前宽度 → 保持不变
-#         2) 否则向右扩展，直到屏幕右边缘
-#         """
-#         COL_WIDTH = 120
-#         MARGIN = 40
-
-#         # 当前窗口左上角的 x 坐标（用户手动调整后也有效）
-#         left_x = self.x()
-
-#         # 计算需要的宽度
-#         needed_width = self.table.columnCount() * COL_WIDTH + MARGIN
-
-#         # 屏幕可用右边界
-#         screen = QApplication.primaryScreen().availableGeometry()
-#         max_right = screen.right() - MARGIN
-#         new_width = max(self.width(), min(needed_width, max_right - left_x))
-
-#         # 只改宽和高，不动 x
-#         self.resize(new_width, self.height())
-
 # ---------------- 自定义 QListWidget ----------------
 class MyListWidget(QListWidget):
     def startDrag(self, supportedActions):
@@ -473,30 +375,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.ci.layout.setSpacing(0)
         self.ci.layout.setRowStretchFactor(1, 1)  # 主区域完全拉伸
 
-    # def setup_header(self):
-    #     """完全修正的顶部文本区域设置方法"""
-    #     header = pg.GraphicsWidget()
 
-    #     self.label_left = QGraphicsSimpleTextItem("channel name")
-    #     self.label_left.setBrush(QBrush(QColor("#000")))
-    #     font = QApplication.font()       # 取系统/应用默认字体
-    #     font.setBold(True)               # 粗体留给左边
-    #     self.label_left.setFont(font)
-    #     self.label_left.setParentItem(header)
-
-    #     self.label_right = QGraphicsSimpleTextItem("")
-    #     self.label_right.setBrush(QBrush(QColor("#000")))
-    #     self.label_right.setFont(font)
-    #     self.label_right.setParentItem(header)
-
-    #     def resize_header(self):
-    #         w = header.width()
-    #         h = header.height()
-    #         self.label_left.setPos(0, h - self.label_left.boundingRect().height())
-    #         self.label_right.setPos(
-    #             w - self.txt_right.boundingRect().width(),
-    #             h - self.txt_right.boundingRect().height()
-    #         )
 
     def setup_header(self):
         """完全修正的顶部文本区域设置方法"""
@@ -608,12 +487,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.update_left_header("channel name")
         self.update_right_header("")
 
-    # def update_x_range(self,xMin,xMax):
-    #     if not (np.isnan(xMax) or np.isinf(xMax)):
-    #         self.view_box.setXRange(xMin, xMax, padding=0.02)
-    #         self.plot_item.update()
-            #self.axis_x.setRange(xMin, xMax)
-        #self.plot_item.setLimits(xMin=xMin,xMax=xMax)
+
 
     def setup_axes(self):
         """配置坐标轴样式和范围"""
@@ -745,7 +619,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def get_value_from_name(self,var_name):
         raw_values = self.data[var_name]
         if pd.api.types.is_numeric_dtype(raw_values):
-            y_values=raw_values
+            y_values = raw_values
             self.y_format = 'number'
 
         elif var_name in self.time_channels_info:
@@ -797,7 +671,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             QMessageBox.warning(self, "错误", f"变量 {var_name} 不存在")
             return
         
-        y_values=self.get_value_from_name(var_name=var_name)
+        y_values = self.get_value_from_name(var_name=var_name)
 
         if y_values is None:
             QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
