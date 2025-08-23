@@ -30,7 +30,7 @@ class DropOverlay(QWidget):
         self.label = QLabel("请丢入数据", self)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setStyleSheet("""
-            background-color: rgba(68, 68, 68, 200)
+            background-color: rgba(68, 68, 68, 200);
             color:#333;
             font-size:36px;
             border-radius:1p2x;
