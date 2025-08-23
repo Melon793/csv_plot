@@ -1,7 +1,6 @@
 from __future__ import annotations 
 import sys
 import os
-import csv
 import numpy as np
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QMimeData, QRectF, QMargins, QTimer, QPointF,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex
 from PyQt6.QtGui import QFont, QFontMetrics, QDrag, QPen, QColor, QAction,QScreen,QBrush
@@ -11,7 +10,6 @@ from PyQt6.QtWidgets import (
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView
 )
 import pyqtgraph as pg
-from itertools import islice
 import pandas as pd
 
 from myDataLoader2 import FastDataLoader,DataLoadThread
@@ -456,7 +454,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.data = dataframe
         self.time_channels_info = time_channels_info
         self.synchronizer = synchronizer
-
+        self.curve = None
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
         
 
@@ -563,6 +561,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.view_box.setAutoVisible(True)  # 自动适应可视区域
         self.plot_item.setTitle(None)
         self.plot_item.hideButtons()
+        self.plot_item.setClipToView(True)
+        self.plot_item.setDownsampling(True)
         self.setBackground('w')
 
         pen = pg.mkPen('#f00',width=1)
@@ -577,6 +577,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """更新顶部文本内容"""
         if left_text is not None:
             self.label_left.setText(left_text)
+
     def auto_range(self):
         self.view_box.autoRange()
 
@@ -709,9 +710,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         
         try:
-            x = self.vline.value()
-            
-
+            x = self.vline.value()           
             curve = self.plot_item.listDataItems()[0]
             x_data, y_data = curve.getData()
             if x_data is None or len(x_data) == 0:
@@ -804,15 +803,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
             event.acceptProposedAction()
             return
-        
-        self.plot_item.clearPlots() 
+        x_values = list(range(1,1+len(y_values)))
 
-        x_values = list(range(len(y_values)))
-        _pen = pg.mkPen(color='blue', width=4)
-        self.plot_item.plot(x_values, y_values, pen=_pen, name=var_name)
+        if any(isinstance(item, pg.PlotDataItem) for item in self.plot_item.items):
+            self.curve.setData(x_values,y_values)
+        else:
+            #self.plot_item.clearPlots()             
+            _pen = pg.mkPen(color='blue', width=4)
+            self.curve=self.plot_item.plot(x_values, y_values, pen=_pen, name=var_name)
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
-
         self.update_left_header(full_title)
         padding_xVal = 0.1
         padding_yVal = 0.5
@@ -820,14 +820,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             y_center = np.nanmin(y_values)
             y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
             
-            # limit x range
+            # limit x/y range
             self.plot_item.setLimits(xMin=0-padding_xVal*len(x_values), xMax=(padding_xVal+1)*len(x_values), 
                 minXRange=5,
                 yMin=y_center - y_range,
                 yMax=y_center + y_range) 
             self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)       
-        else:
-            
+        else:            
             # limit x/y range            
             self.plot_item.setLimits(xMin=0-padding_xVal*len(y_values), xMax=(padding_xVal+1)*len(y_values), 
                 minXRange=5,
