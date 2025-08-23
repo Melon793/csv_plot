@@ -1275,32 +1275,6 @@ class MainWindow(QMainWindow):
             status = True
 
         return status
-        # except Exception as e:
-        #     QMessageBox.critical(self, "读取失败", str(e))
-        #     return
-
-        # try:
-        #     self.loader = FastDataLoader(file_path, descRows=descRows,sep=delimiter_typ)
-        # except:
-        #     QMessageBox.critical(self, "读取失败", f"文件读取错误: {str(e)}")
-        #     return status
-
-        # self.var_names=self.loader.var_names
-        # self.units=self.loader.units
-        # self.time_channels_infos=self.loader.time_channels_info
-        # self.list_widget.clear()
-        # self.list_widget.addItems(self.var_names)
-
-        # for widget in self.plot_widgets:
-        #     widget.data = self.loader.df
-        #     widget.units = self.loader.units
-        #     widget.time_channels_info = self.time_channels_infos
-        
-        
-        # self.reset_plots_after_loading(0,self.loader.datalength)
-        # status = True
-        # return status
-        #self.update_x_range_after_loading(0,data_length)
 
     def _load_sync(self, 
                    file_path:str,

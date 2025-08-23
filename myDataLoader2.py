@@ -31,7 +31,7 @@ class DataLoadThread(QThread):
                 if total_bytes > 0:
                     self.progress.emit(int(bytes_read / total_bytes * 100))
 
-            print("Calling FastDataLoader with _progress:", _progress_cb) 
+            # print("Calling FastDataLoader with _progress:", _progress_cb) 
 
             # 给 FastDataLoader 打补丁：加一个回调
             loader = FastDataLoader(
@@ -40,8 +40,7 @@ class DataLoadThread(QThread):
                 descRows=self.descRows,
                 sep=self.sep,
                 hasunit=self.hasunit,
-                # 下面 3 行是关键：逐 chunk 回调
-                chunksize=10_000,          # 足够大的 chunk
+                chunksize=10_000,          
                 _progress= _progress_cb,
             )
             self.finished.emit(loader)
@@ -70,7 +69,7 @@ class FastDataLoader:
         do_parse_date: bool =False,
         hasunit:bool = True
     ):
-        print("Calling inside FastDataLoader with _progress:", _progress) 
+        #print("Calling inside FastDataLoader with _progress:", _progress) 
         self._path = Path(csv_path)
         self.file_size = Path(csv_path).stat().st_size 
         self.max_rows_infer = max_rows_infer
@@ -104,12 +103,12 @@ class FastDataLoader:
         dtype_map, parse_dates, date_formats,downcast_ratio = self._infer_schema(sample)
         self.date_formats = date_formats
         self.sample_mem_size = sample.memory_usage(deep=True).sum()
-        print(f"the estimated downcast ratio is {downcast_ratio*100:2f} %, the compression ratio estimated {(0.5*downcast_ratio+1*(1-downcast_ratio))}")
-        print(f"sample of {sample.shape[0]} lines has costed memory {self.sample_mem_size/(1024**2):2f}Mb")
+        # print(f"the estimated downcast ratio is {downcast_ratio*100:2f} %, the compression ratio estimated {(0.5*downcast_ratio+1*(1-downcast_ratio))}")
+        # print(f"sample of {sample.shape[0]} lines has costed memory {self.sample_mem_size/(1024**2):2f}Mb")
         self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
 
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
-        print(f"this file might have lines of {self.estimated_lines}")
+        # print(f"this file might have lines of {self.estimated_lines}")
         # 计算 chunk 大小
         if chunksize is None:
             chunksize = 10_000
