@@ -1178,7 +1178,7 @@ class MainWindow(QMainWindow):
             widget.units = loader.units
             widget.time_channels_info = loader.time_channels_info
 
-        self.reset_plots_after_loading(0, loader.datalength)
+        self.reset_plots_after_loading(xMin=0, xMax=loader.datalength)
         self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{loader.path}]")
 
 
