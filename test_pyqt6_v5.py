@@ -447,6 +447,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
 
         self.y_format = ''
+        self.xMin:int =0 
+        self.xMax:int =1 
         # 添加顶部文本区域
         self.setup_header()
         # 主绘图区域设置
@@ -544,6 +546,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.label_left.setText(left_text)
 
     def auto_range(self):
+        self.view_box.setXRange(self.xMin, self.xMax, padding=0.02)
         self.view_box.autoRange()
 
     def auto_y_in_x_range(self):
@@ -566,7 +569,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         self.view_box.setYRange(0,1,padding=0) 
         self.vline.setBounds([None, None]) 
-        
+
+        self.xMin = xMin
+        self.xMax = xMax
+
         #self.plot_item.update()
         self.plot_item.clearPlots() 
         self.axis_y.setLabel(text="")
