@@ -2,6 +2,17 @@ from __future__ import annotations
 import sys
 import os
 import numpy as np
+import pandas as pd
+from myDataLoader2 import FastDataLoader, DataLoadThread
+from config_dict import load_dict
+
+
+# 屏蔽 macOS ICC 警告
+os.environ["QT_LOGGING_RULES"] = (
+    "qt6ct.debug=false; "      # 原来想关的 qt6ct 日志
+    "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
+)
+
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QMimeData, QRectF, QMargins, QTimer, QPointF,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex
 from PyQt6.QtGui import QFont, QFontMetrics, QDrag, QPen, QColor, QAction,QScreen,QBrush
 from PyQt6.QtWidgets import (
@@ -10,12 +21,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView
 )
 import pyqtgraph as pg
-import pandas as pd
 
-from myDataLoader2 import FastDataLoader, DataLoadThread
-from config_dict import load_dict
-# 屏蔽 macOS ICC 警告
-os.environ["QT_LOGGING_RULES"] = "qt5ct.debug=false"
 
 class DropOverlay(QWidget):
     def __init__(self, parent=None):
@@ -357,6 +363,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.time_channels_info = time_channels_info
         self.synchronizer = synchronizer
         self.curve = None
+        self._value_cache: dict[str, tuple[pd.Series, str]] = {}
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
         
 
@@ -580,7 +587,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
         if len(self.plot_item.listDataItems()) == 0:
-            self.cursor_label.setText("")
+            #self.cursor_label.setText("")
+            self.update_right_header("")
             return
         
         try:
@@ -615,12 +623,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.cursor_label.setVisible(show)
         if show:
             self.update_cursor_label()
+        else:
+            self.update_right_header("")
+            
+    def clear_value_cache(self):
+        self._value_cache: dict[str, tuple[pd.Series, str]] = {}
 
-    def get_value_from_name(self,var_name):
+    def get_value_from_name(self,var_name)-> tuple[pd.Series, str] | None:
+        if var_name in self._value_cache:
+            #y_values, self.y_format = self._value_cache[var_name]
+            return self._value_cache[var_name]
+
         raw_values = self.data[var_name]
-        if pd.api.types.is_numeric_dtype(raw_values):
+        dtype_kind = raw_values.dtype.kind
+        if dtype_kind in "iuf":
             y_values = raw_values
-            self.y_format = 'number'
+            y_format = 'number'
 
         elif var_name in self.time_channels_info:
             fmt = self.time_channels_info[var_name]
@@ -634,13 +652,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         datetime64_value.dt.second * 1_000 +
                         datetime64_value.dt.microsecond // 1_000      
                     ).astype('int64')
-                    self.y_format = 'ms'
+                    y_format = 'ms'
                 else:
                     #date
                     datetime64_value = pd.to_datetime(raw_values, errors='coerce')
                     date_delta = datetime64_value.dt.normalize() - pd.Timestamp('1970-01-01')
                     y_values = date_delta.dt.days.astype('int64')
-                    self.y_format = 'date'
+                    y_format = 'date'
             except:
                 # cannot parse the format
                 return None
@@ -650,7 +668,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return None
         
         # finally
-        return y_values
+        self._value_cache[var_name] = (y_values, y_format)
+        return y_values, y_format
     
 # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
@@ -671,20 +690,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             QMessageBox.warning(self, "错误", f"变量 {var_name} 不存在")
             return
         
-        y_values = self.get_value_from_name(var_name=var_name)
+        y_values,y_format = self.get_value_from_name(var_name=var_name)
 
         if y_values is None:
             QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
             event.acceptProposedAction()
             return
+        
+        # 如果正常
+        self.y_format=y_format
         x_values = list(range(1,1+len(y_values)))
 
-        if any(isinstance(item, pg.PlotDataItem) for item in self.plot_item.items):
-            self.curve.setData(x_values,y_values)
-        else:
-            #self.plot_item.clearPlots()             
-            _pen = pg.mkPen(color='blue', width=4)
-            self.curve=self.plot_item.plot(x_values, y_values, pen=_pen, name=var_name)
+        # if any(isinstance(item, pg.PlotDataItem) for item in self.plot_item.items):
+        #     self.curve.setData(x_values,y_values)
+        # else:
+        self.plot_item.clearPlots()             
+        _pen = pg.mkPen(color='blue', width=4)
+        self.curve=self.plot_item.plot(x_values, y_values, pen=_pen, name=var_name)
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
         self.update_left_header(full_title)
@@ -921,6 +943,7 @@ class MainWindow(QMainWindow):
     def reset_plots_after_loading(self,xMin,xMax):
         for container in self.plot_widgets:
              container.plot_widget.reset_plot(xMin,xMax)
+             container.plot_widget.clear_value_cache()
         # for plot_widget in self.plot_widgets:
         #     plot_widget.reset_plot(xMin,xMax)
 
