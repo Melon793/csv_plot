@@ -146,7 +146,13 @@ class DataTableDialog(QDialog):
         # 允许用户拖拽列标题，改变列顺序
         self.view.horizontalHeader().setSectionsMovable(True)
         self.view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.view.horizontalHeader().customContextMenuRequested.connect(self._on_header_right_click)
+        
+        # 设置字体
+        font = self.view.horizontalHeader().font()
+        font.setBold(True)
+        self.view.horizontalHeader().setFont(font)
 
         # 恢复上一次的位置/大小
         geom = self._settings.value("geometry")
