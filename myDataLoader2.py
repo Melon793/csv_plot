@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 import gc
 from typing import Dict, List, Tuple, Callable
-
+import time
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # some change 
@@ -130,6 +130,7 @@ class FastDataLoader:
             self._df = self._df.dropna(axis=1, how="all")
         if downcast_float:
             self._downcast_numeric()
+        self._df_validity=self._check_df_validity()
         gc.collect()
 
     # ------------------------------------------------------------------
@@ -258,6 +259,25 @@ class FastDataLoader:
     # ------------------------------------------------------------------
     # 对外 API
     # ------------------------------------------------------------------
+
+    def _check_df_validity(self) -> pd.DataFrame:
+        time_start = time.perf_counter()
+        validity : Dict = {}
+        for col in self._df.columns:
+            validity[col] = self._classify_column(self._df[col])
+
+        validity_result = (pd.concat(
+                    [#pd.Series(self._var_names, name='name'),
+                    pd.Series(self._units, name='unit'),
+                    pd.Series(validity, name='validity')],
+                    axis=1
+                )
+        .rename_axis('name')
+        .reset_index()
+        )
+        print(f"used time: {(time.perf_counter()-time_start):3f}")
+        return validity_result
+
     @staticmethod
     def _make_unique(names: list[str]) -> list[str]:
         seen = {}
@@ -271,6 +291,29 @@ class FastDataLoader:
                 new_name = name
             unique_names.append(new_name)
         return unique_names
+    
+    @staticmethod
+    def _classify_column(series: pd.Series) -> int:
+        """
+        1: 全部可转数字，且 ≥2 个不同有效值
+        0: 全部可转数字，且唯一有效值
+        -1: 存在非数字 或 全部 NaN
+        """
+        # 1) 先尝试整列转 float，失败直接 C
+        try:
+            numeric = pd.to_numeric(series, errors="raise")
+        except (ValueError, TypeError):
+            return (-1)
+
+        # 2) 去掉 NaN 后看有效值
+        valid = numeric.dropna()
+        if valid.empty:          # 全 NaN
+            return (-1)
+
+        unique_vals = valid.unique()
+        if len(unique_vals) == 1:
+            return (0)
+        return (1)
     
     @property
     def df(self) -> pd.DataFrame:
@@ -303,3 +346,7 @@ class FastDataLoader:
     @property
     def time_channels_info(self) -> dict[str, str]:
         return self.date_formats
+    
+    @property
+    def df_validity(self) -> pd.DataFrame:
+        return self._df_validity

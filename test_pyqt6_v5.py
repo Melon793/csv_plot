@@ -867,9 +867,9 @@ class MainWindow(QMainWindow):
         self.plot_widgets = []
 
         # put default plots into the window
-        self._plot_row_default = 4
-        self._plot_col_default = 3
-        self.create_subplots_matrix(self._plot_row_default,self._plot_col_default)
+        self._plot_row_max_default = 4
+        self._plot_col_max_default = 3
+        self.create_subplots_matrix(self._plot_row_max_default,self._plot_col_max_default)
 
         # turn on/off the plots
         self._plot_row_current = 4
@@ -882,10 +882,7 @@ class MainWindow(QMainWindow):
 
         # 全局拖拽过滤器
         QApplication.instance().installEventFilter(self)
-
-
-        # 主窗口接受拖拽
-        # self.setAcceptDrops(True)      
+   
 
         # ---------------- 命令行直接加载文件 ----------------
         if len(sys.argv) > 1:
@@ -921,8 +918,8 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def open_layout_dialog(self):
-        dlg = LayoutInputDialog(max_rows=self._plot_row_default, 
-                                max_cols=self._plot_col_default, 
+        dlg = LayoutInputDialog(max_rows=self._plot_row_max_default, 
+                                max_cols=self._plot_col_max_default, 
                                 cur_rows=self._plot_row_current,
                                 cur_cols=self._plot_col_current,
                                 parent=self)
@@ -973,36 +970,6 @@ class MainWindow(QMainWindow):
             widget=container.plot_widget
             widget.auto_y_in_x_range()
 
-    # def create_subplots_matrix(self, rows: int = 1, cols: int = 1):
-    #     """生成 m×n 的绘图区"""
-    #     # 1. 清理旧图
-    #     for widget in self.plot_widgets:
-    #         self.plot_layout.removeWidget(widget)
-    #         widget.deleteLater()
-    #     self.plot_widgets.clear()
-
-    #     # # 2. 用网格布局
-    #     # grid = QGridLayout()
-    #     # grid.setSpacing(2)          # 间隙
-    #     # self.plot_layout.addLayout(grid)
-
-    #     # 3. 创建 m×n 个 DraggableGraphicsLayoutWidget
-    #     first_viewbox = None
-    #     for r in range(rows):
-    #         for c in range(cols):
-    #             plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data)
-    #             plot_widget.toggle_cursor(self.cursor_btn.isChecked())
-
-    #             if first_viewbox is None:
-    #                 first_viewbox = plot_widget.view_box
-    #             else:
-    #                 plot_widget.view_box.setXLink(first_viewbox)
-                
-    #             # 直接加到网格
-    #             self.plot_layout.addWidget(plot_widget, r, c)
-
-    #             self.plot_widgets.append(plot_widget)
-
     def create_subplots_matrix(self, m: int, n: int):
         # 先全部清掉
         for i in reversed(range(self.plot_layout.count())):
@@ -1046,7 +1013,7 @@ class MainWindow(QMainWindow):
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
 
-        m, n = self._plot_row_default, self._plot_col_default
+        m, n = self._plot_row_max_default, self._plot_col_max_default
 
         for idx, container in enumerate(self.plot_widgets):
             r, c = divmod(idx, n)
@@ -1067,31 +1034,31 @@ class MainWindow(QMainWindow):
         self._plot_col_current = col_set
             
 
-    def create_subplots(self, n):
-        for widget in self.plot_widgets:
-            self.plot_layout.removeWidget(widget)
-            widget.deleteLater()
-        self.plot_widgets.clear()
+    # def create_subplots(self, n):
+    #     for widget in self.plot_widgets:
+    #         self.plot_layout.removeWidget(widget)
+    #         widget.deleteLater()
+    #     self.plot_widgets.clear()
 
-        last_viewbox = None
+    #     last_viewbox = None
 
-        for _ in range(n):
-            #plot_widget = DraggablePlotWidget(self.units, self.data)
-            plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data)
-            plot_widget.toggle_cursor(self.cursor_btn.isChecked())
-            if last_viewbox is not None:
-                plot_widget.view_box.setXLink(last_viewbox)
+    #     for _ in range(n):
+    #         #plot_widget = DraggablePlotWidget(self.units, self.data)
+    #         plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data)
+    #         plot_widget.toggle_cursor(self.cursor_btn.isChecked())
+    #         if last_viewbox is not None:
+    #             plot_widget.view_box.setXLink(last_viewbox)
             
-            last_viewbox = plot_widget.view_box
+    #         last_viewbox = plot_widget.view_box
 
-            wrapper = QVBoxLayout()
-            wrapper.setContentsMargins(QMargins(0, 0, 5, 5))
-            wrapper.addWidget(plot_widget)
+    #         wrapper = QVBoxLayout()
+    #         wrapper.setContentsMargins(QMargins(0, 0, 5, 5))
+    #         wrapper.addWidget(plot_widget)
 
-            container = QWidget()
-            container.setLayout(wrapper)
-            self.plot_widgets.append(plot_widget)
-            self.plot_layout.addWidget(container)
+    #         container = QWidget()
+    #         container.setLayout(wrapper)
+    #         self.plot_widgets.append(plot_widget)
+    #         self.plot_layout.addWidget(container)
         
     def load_btn_click(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
@@ -1110,7 +1077,7 @@ class MainWindow(QMainWindow):
         self.activateWindow()  # Set focus
 
         status = False
-        data = pd.DataFrame()
+        #data = pd.DataFrame()
         if not file_path:
             return status
         
@@ -1201,6 +1168,7 @@ class MainWindow(QMainWindow):
         self.var_names = loader.var_names
         self.units = loader.units
         self.time_channels_infos = loader.time_channels_info
+        self.data_validity = loader.df_validity
         self.list_widget.clear()
         self.list_widget.addItems(self.var_names)
 
