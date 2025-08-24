@@ -318,10 +318,53 @@ class AxisDialog(QDialog):
         except ValueError:
             QMessageBox.warning(self, "错误", "请输入有效的数值（最小值、最大值、刻度数量）")
 
-# ---------------- 自定义 QListWidget ----------------
-class MyListWidget(QListWidget):
+# ---------------- 自定义 QTableWidget ----------------
+class MyTableWidget(QTableWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setColumnCount(2)
+        self.setHorizontalHeaderLabels(["变量名", "单位"])
+
+        # ---------------- 关键修改 1：字体 ----------------
+        hdr = self.horizontalHeader()
+        # ---------------- 默认 3:1 的初始宽度 ----------------
+        total = 255          # 首次拿不到 width 时给一个兜底
+        self.setColumnWidth(0, int(total * 0.75))
+        self.setColumnWidth(1, int(total * 0.25))
+
+        font = QFont()
+        font.setPointSize(12)   # 想要多大就改多大
+        font.setBold(True)
+        hdr.setFont(font)
+
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.horizontalHeader().setStretchLastSection(False)  # 关闭自动拉伸最后一列
+        self.verticalHeader().setVisible(False)  # 隐藏行号
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.setSortingEnabled(False)  # 我们手动排序
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # 设置字体大小
+        font = QFont()
+        font.setPointSize(12)  # 调小字体大小
+        self.setFont(font) 
+
+    # def resizeEvent(self, event):
+    #         super().resizeEvent(event)
+    #         total_width = self.viewport().width()
+    #         self.setColumnWidth(0, int(total_width * 0.75))  # 变量名 3/4
+    #         self.setColumnWidth(1, int(total_width * 0.25))  # 单位 1/4
+
+       
     def startDrag(self, supportedActions):
-        item = self.currentItem()
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+        row = indexes[0].row()
+        item = self.item(row, 0)
         if item is None:
             return
         drag = QDrag(self)
@@ -330,25 +373,55 @@ class MyListWidget(QListWidget):
         drag.setMimeData(mime_data)
         drag.exec(Qt.DropAction.MoveAction)
 
-    # 双击事件：追加到新/已存在的 DataTableDialog
     def mouseDoubleClickEvent(self, event):
-        """双击变量 → 弹出数值表格（单例，不重复创建）"""
-        item = self.itemAt(event.pos())
-        if item is None:
+        index = self.indexAt(event.pos())
+        if not index.isValid():
             super().mouseDoubleClickEvent(event)
             return
 
-        var_name = item.text()
+        row = index.row()
+        var_name = self.item(row, 0).text()
         main_window = self.window()
         if not hasattr(main_window, 'loader') or main_window.loader is None:
             return
 
         series = main_window.loader.df[var_name]
 
-        # 用类方法保证只弹一次
         DataTableDialog.popup(var_name, series, parent=main_window)
 
         super().mouseDoubleClickEvent(event)
+
+    def populate(self, var_names, units, validity):
+        self.clearContents()
+        self.setRowCount(len(var_names))
+
+        # 创建列表并排序: 先按validity降序, 然后按原顺序 (使用stable sort)
+        items = list(zip(var_names, [units.get(v, '') for v in var_names], [validity.get(v, -1) for v in var_names]))
+        # 为了保持相同validity的原顺序, 我们用enumerate添加index
+        indexed_items = [(valid, idx, name, unit) for idx, (name, unit, valid) in enumerate(items)]  # idx asc for original order
+        indexed_items.sort(key=lambda x: (-x[0], x[1]))  # valid desc (-valid), then original idx asc
+        sorted_names = [name for valid, idx, name, unit in indexed_items]
+        sorted_units = [unit for valid, idx, name, unit in indexed_items]
+        sorted_valids = [valid for valid, idx, name, unit in indexed_items]
+
+        for row, (name, unit, valid) in enumerate(zip(sorted_names, sorted_units, sorted_valids)):
+            name_item = QTableWidgetItem(name)
+            unit_item = QTableWidgetItem(unit)
+
+            if valid == 1:
+                brush = QBrush(QColor(0, 255, 0, 50))  # 半透明绿色
+            elif valid == 0:
+                brush = QBrush(QColor(255, 255, 0, 50))  # 半透明黄色
+            elif valid == -1:
+                brush = QBrush(QColor(255, 192, 203, 50))  # 半透明粉色
+            else:
+                brush = QBrush(Qt.GlobalColor.transparent)
+            #print(f"channel: {name} validity is {valid}")
+            name_item.setBackground(brush)
+            unit_item.setBackground(brush)
+
+            self.setItem(row, 0, name_item)
+            self.setItem(row, 1, unit_item)
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def __init__(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -803,13 +876,16 @@ class MainWindow(QMainWindow):
         self.filter_input.textChanged.connect(self.filter_variables)
         left_layout.addWidget(self.filter_input)
 
+        self.unit_filter_input = QLineEdit()
+        self.unit_filter_input.setPlaceholderText("输入单位关键词筛选（空格分隔）")
+        self.unit_filter_input.textChanged.connect(self.filter_variables)
+        left_layout.addWidget(self.unit_filter_input)
+
         self.load_btn = QPushButton("导入 CSV")
         self.load_btn.clicked.connect(self.load_btn_click)
         left_layout.addWidget(self.load_btn)
 
-        self.list_widget = MyListWidget()
-        self.list_widget.setDragEnabled(True)
-        self.list_widget.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.list_widget = MyTableWidget()
         left_layout.addWidget(self.list_widget)
 
         main_layout.addWidget(left_widget, 0)
@@ -1169,8 +1245,7 @@ class MainWindow(QMainWindow):
         self.units = loader.units
         self.time_channels_infos = loader.time_channels_info
         self.data_validity = loader.df_validity
-        self.list_widget.clear()
-        self.list_widget.addItems(self.var_names)
+        self.list_widget.populate(self.var_names, self.units, self.data_validity)
 
         for container in self.plot_widgets:
             widget=container.plot_widget
@@ -1182,14 +1257,24 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{loader.path}]")
 
 
-    def filter_variables(self, text):
-        keywords = text.lower().split()
-        self.list_widget.clear()
-        if not keywords:
-            self.list_widget.addItems(self.var_names)
-            return
-        filtered = [var for var in self.var_names if any(kw in var.lower() for kw in keywords)]
-        self.list_widget.addItems(filtered)
+    def filter_variables(self):
+        name_text = self.filter_input.text().lower()
+        unit_text = self.unit_filter_input.text().lower()
+        name_keywords = name_text.split() if name_text else []
+        unit_keywords = unit_text.split() if unit_text else []
+
+        filtered_names = []
+        for var in self.var_names:
+            var_lower = var.lower()
+            unit = self.units.get(var, '').lower()
+
+            name_match = not name_keywords or any(kw in var_lower for kw in name_keywords)
+            unit_match = not unit_keywords or any(kw in unit for kw in unit_keywords)
+
+            if name_match and unit_match:
+                filtered_names.append(var)
+
+        self.list_widget.populate(filtered_names, self.units, self.data_validity)
 
 
 # ---------------- 主程序 ----------------

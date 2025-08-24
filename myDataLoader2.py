@@ -260,23 +260,15 @@ class FastDataLoader:
     # 对外 API
     # ------------------------------------------------------------------
 
-    def _check_df_validity(self) -> pd.DataFrame:
+    def _check_df_validity(self) -> Dict:
         time_start = time.perf_counter()
         validity : Dict = {}
         for col in self._df.columns:
             validity[col] = self._classify_column(self._df[col])
 
-        validity_result = (pd.concat(
-                    [#pd.Series(self._var_names, name='name'),
-                    pd.Series(self._units, name='unit'),
-                    pd.Series(validity, name='validity')],
-                    axis=1
-                )
-        .rename_axis('name')
-        .reset_index()
-        )
+        
         print(f"used time: {(time.perf_counter()-time_start):3f}")
-        return validity_result
+        return validity
 
     @staticmethod
     def _make_unique(names: list[str]) -> list[str]:
@@ -348,5 +340,5 @@ class FastDataLoader:
         return self.date_formats
     
     @property
-    def df_validity(self) -> pd.DataFrame:
+    def df_validity(self) -> Dict:
         return self._df_validity
