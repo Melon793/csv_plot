@@ -3,9 +3,6 @@ import sys
 import os
 import numpy as np
 import pandas as pd
-from myDataLoader2 import FastDataLoader, DataLoadThread
-from config_dict import load_dict
-
 
 # 屏蔽 macOS ICC 警告
 os.environ["QT_LOGGING_RULES"] = (

@@ -1,9 +1,10 @@
 from __future__ import annotations
 import pandas as pd
 import numpy as np
-import os
-from typing import Dict, Callable
-
+from pathlib import Path
+import gc
+from typing import Dict, List, Tuple, Callable
+import time
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # some change 
@@ -23,7 +24,8 @@ class DataLoadThread(QThread):
         try:
             # 将 FastDataLoader 的读取过程按块拆进度
             # 这里用文件大小估算百分比，够简单
-            total_bytes = os.path.getsize(self.file_path)#Path(self.file_path).stat().st_size
+            from pathlib import Path
+            total_bytes = Path(self.file_path).stat().st_size
 
             def _progress_cb(bytes_read: int):
                 if total_bytes > 0:
@@ -54,7 +56,7 @@ class FastDataLoader:
 
     def __init__(
         self,
-        csv_path: str ,
+        csv_path: str | Path,
         *,
         max_rows_infer: int = 1000,
         chunksize: int | None = None,
@@ -63,13 +65,13 @@ class FastDataLoader:
         downcast_float: bool = True,
         descRows: int = 0,
         sep: str = ",",
-        _progress: Callable | None = None,
+        _progress: callable | None = None,
         do_parse_date: bool =False,
         hasunit:bool = True
     ):
         #print("Calling inside FastDataLoader with _progress:", _progress) 
-        self._path = csv_path
-        self.file_size = os.path.getsize(csv_path) 
+        self._path = Path(csv_path)
+        self.file_size = Path(csv_path).stat().st_size 
         self.max_rows_infer = max_rows_infer
         self.usecols = usecols
         self.drop_empty = drop_empty
@@ -129,7 +131,6 @@ class FastDataLoader:
         if downcast_float:
             self._downcast_numeric()
         self._df_validity=self._check_df_validity()
-        import gc
         gc.collect()
 
     # ------------------------------------------------------------------
@@ -137,7 +138,7 @@ class FastDataLoader:
     # ------------------------------------------------------------------
     @staticmethod
     def _load_header_units(
-        path: str,
+        path: Path,
         desc_rows: int = 0,
         usecols: list[str] | None = None,
         sep: str = ",",
@@ -211,7 +212,7 @@ class FastDataLoader:
 
     def _read_chunks(
         self,
-        path: str,
+        path: str | Path,
         dtype_map,
         parse_dates: list[str],
         chunksize: int,
@@ -260,10 +261,13 @@ class FastDataLoader:
     # ------------------------------------------------------------------
 
     def _check_df_validity(self) -> Dict:
+        time_start = time.perf_counter()
         validity : Dict = {}
         for col in self._df.columns:
             validity[col] = self._classify_column(self._df[col])
+
         
+        print(f"used time: {(time.perf_counter()-time_start):3f}")
         return validity
 
     @staticmethod

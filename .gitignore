@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+_archived/
+data/
+test_pyqt6_v1.py
+test_pyqt6_v2.py
+test_pyqt6_v4_bak.py
+test_pyqt6_v4.py
+test_pyside_v3.py
