@@ -10,17 +10,16 @@ os.environ["QT_LOGGING_RULES"] = (
     "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
 )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRectF, QMargins, QTimer,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
 from PyQt6.QtGui import QFont, QFontMetrics, QDrag, QPen, QColor,QBrush
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand
 )
 import pyqtgraph as pg
 
 
-from typing import Dict, Callable
 
 
 # some change 
@@ -66,9 +65,9 @@ class FastDataLoader:
     # 脏数据清单
     _NA_VALUES = [
         "", "nan", "NaN", "NAN", "NULL", "null", "None",
-        "Inf", "inf", "-inf", "-Inf", "1.#INF", "-1.#INF", "data err"
+        "Inf", "inf", "-inf", "-Inf", "1.#INF", "-1.#INF", "data err", '* *', '----',
     ]
-
+    from typing import Callable
     def __init__(
         self,
         csv_path: str ,
@@ -124,6 +123,9 @@ class FastDataLoader:
 
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
         # print(f"this file might have lines of {self.estimated_lines}")
+        import gc
+        del sample 
+        gc.collect()
         # 计算 chunk 大小
         if chunksize is None:
             chunksize = 10_000
@@ -201,8 +203,8 @@ class FastDataLoader:
         date_formats: dict[str, str] = {}
 
         date_candidates = [
-            "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d",
-            "%H:%M:%S", "%H:%M:%S.%f",
+            "%Y/%m/%d","%H:%M:%S", "%H:%M:%S.%f",
+            "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d","%d-%m-%Y", "%m-%d-%Y"
         ]
         float_cols = sample.select_dtypes(include=['float', 'float64','category'])
         downcast_ratio_est = float_cols.shape[1] / sample.shape[1] if sample.shape[1] > 0 else 0.000001
@@ -276,8 +278,8 @@ class FastDataLoader:
     # 对外 API
     # ------------------------------------------------------------------
 
-    def _check_df_validity(self) -> Dict:
-        validity : Dict = {}
+    def _check_df_validity(self) -> dict:
+        validity : dict = {}
         for col in self._df.columns:
             validity[col] = self._classify_column(self._df[col])
         
@@ -353,7 +355,7 @@ class FastDataLoader:
         return self.date_formats
     
     @property
-    def df_validity(self) -> Dict:
+    def df_validity(self) -> dict:
         return self._df_validity
     
 class DropOverlay(QWidget):
@@ -389,7 +391,7 @@ class DropOverlay(QWidget):
         # 根据 label 当前尺寸动态字号
         side = min(self.label.width(), self.label.height())
         font_size = max(12, min(int(side * 0.3), 128))
-        font = QFont()
+        font = self.label.font() #QFont()
         font.setPixelSize(font_size)
         font.setBold(True)
         self.label.setFont(font)
@@ -446,7 +448,7 @@ class DataTableDialog(QDialog):
     _settings = QSettings("MyCompany", "DataTableDialog")
 
     @classmethod
-    def popup(cls, var_name: str, data: pd.Series, parent=None):
+    def popup(cls, var_name: str, data, parent=None):
         if cls._instance is None:
             cls._instance = cls(parent)
 
@@ -474,6 +476,7 @@ class DataTableDialog(QDialog):
         layout.addWidget(self.view)
 
         # 内部 DataFrame，所有列都存在这里
+
         self._df = pd.DataFrame()
 
         # 允许用户拖拽列标题，改变列顺序
@@ -513,14 +516,15 @@ class DataTableDialog(QDialog):
         self.view.setModel(model)
 
         # ---- 自动向右伸展宽度（仅当前列） ----
-        self._auto_resize_right()
+        #self._auto_resize_right()
 
     def _auto_resize_right(self):
         COL_WIDTH = 120
         MARGIN = 40
         left_x = self.x()
         needed_width = self._df.shape[1] * COL_WIDTH + MARGIN
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen = self.screen().availableGeometry()
+        #screen = QApplication.primaryScreen().availableGeometry()
         max_right = screen.right() - MARGIN
         new_width = max(300, min(needed_width, max_right - left_x))  # 最小宽 300
         self.resize(new_width, self.height())
@@ -541,7 +545,7 @@ class DataTableDialog(QDialog):
     def _remove_column(self, col):
         model = self.view.model()
         model.removeColumns(col, 1)          # 从模型/DF 中删除
-        self._auto_resize_right()            # 窗口自动缩回
+        #self._auto_resize_right()            # 窗口自动缩回
 
         
 class LayoutInputDialog(QDialog):
@@ -671,10 +675,10 @@ class MyTableWidget(QTableWidget):
         self.setColumnWidth(0, int(total * 0.75))
         self.setColumnWidth(1, int(total * 0.25))
 
-        font = QFont()
-        font.setPointSize(12)   # 想要多大就改多大
-        font.setBold(True)
-        hdr.setFont(font)
+        # font = QFont()
+        # font.setPointSize(12)   # 想要多大就改多大
+        # font.setBold(True)
+        # hdr.setFont(font)
 
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.horizontalHeader().setStretchLastSection(False)  # 关闭自动拉伸最后一列
@@ -687,9 +691,9 @@ class MyTableWidget(QTableWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # 设置字体大小
-        font = QFont()
-        font.setPointSize(12)  # 调小字体大小
-        self.setFont(font) 
+        # font = QFont()
+        # font.setPointSize(12)  # 调小字体大小
+        # self.setFont(font) 
 
     # def resizeEvent(self, event):
     #         super().resizeEvent(event)
@@ -775,7 +779,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.time_channels_info = time_channels_info
         self.synchronizer = synchronizer
         self.curve = None
-        self._value_cache: dict[str, tuple[pd.Series, str]] = {}
+        self._value_cache: dict[str, tuple] = {}
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
         
 
@@ -796,6 +800,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.ci.layout.setSpacing(0)
         self.ci.layout.setRowStretchFactor(1, 1)  # 主区域完全拉伸
 
+        # 初始化框选功能
+        self.rubberBand = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.origin = QPoint()
 
 
     def setup_header(self):
@@ -892,7 +899,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.label_right.setText(right_text)
             self.label_right.setAlignment(Qt.AlignmentFlag.AlignRight)
 
+
     def reset_plot(self,xMin,xMax):
+
         self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
         self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
         if not (np.isnan(xMax) or np.isinf(xMax)):
@@ -971,10 +980,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         delta = ev.angleDelta().y()  # 获取垂直滚动增量
         if delta > 0:
             #print("向上滚动,放大")  # 正值表示向上
-            vb.scaleBy((0.9, 1))  # 仅缩放x轴
+            vb.scaleBy((0.8, 1))  # 仅缩放x轴
         elif delta < 0:
             #print("向下滚动,缩小")  # 负值表示向下
-            vb.scaleBy((1.1, 1))  # 仅缩放x轴
+            vb.scaleBy((1.2, 1))  # 仅缩放x轴
         else:
             super().wheelEvent(ev)
     
@@ -1045,9 +1054,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.update_right_header("")
             
     def clear_value_cache(self):
-        self._value_cache: dict[str, tuple[pd.Series, str]] = {}
+        self._value_cache: dict[str, tuple] = {}
 
-    def get_value_from_name(self,var_name)-> tuple[pd.Series, str] | None:
+    def get_value_from_name(self,var_name)-> tuple | None:
         if var_name in self._value_cache:
             #y_values, self.y_format = self._value_cache[var_name]
             return self._value_cache[var_name]
@@ -1145,7 +1154,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.plot_item.setLimits(xMin=0-padding_xVal*len(y_values), xMax=(padding_xVal+1)*len(y_values), 
                 minXRange=5,
                 yMin=np.nanmin(y_values)-padding_yVal*(np.nanmax(y_values)-np.nanmin(y_values)), 
-                yMax=np.nanmax(y_values)+padding_yVal*(max(y_values)-np.nanmin(y_values)))
+                yMax=np.nanmax(y_values)+padding_yVal*(np.nanmax(y_values)-np.nanmin(y_values)))
             
             self.view_box.setYRange(np.nanmin(y_values), np.nanmax(y_values), padding=0.05)
 
@@ -1160,30 +1169,96 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         event.acceptProposedAction()
 
+    def clear_plot_item(self):
+        self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
+        self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
+
+        self.view_box.setYRange(0,1,padding=0) 
+        self.vline.setBounds([None, None]) 
+
+        #self.plot_item.update()
+        self.plot_item.clearPlots() 
+        self.axis_y.setLabel(text="")
+        self.update_left_header("channel name")
+        self.update_right_header("")
+
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton:
+        if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             super().mouseDoubleClickEvent(event)
             return
+        
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self.clear_plot_item()
 
-        scene_pos = self.mapToScene(event.pos())
-        y_axis_rect_scene = self.axis_y.mapToScene(self.axis_y.boundingRect()).boundingRect()
-        x_axis_rect_scene = self.axis_x.mapToScene(self.axis_x.boundingRect()).boundingRect()
+            return
 
-        if y_axis_rect_scene.contains(scene_pos):
-            dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
-            if dialog.exec():
-                self.plot_item.update()
-        elif x_axis_rect_scene.contains(scene_pos):
-            dialog = AxisDialog(self.axis_x, self.view_box, "X", self)
-            if dialog.exec():
-                min_val, max_val = self.view_box.viewRange()[0]
-                for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
-                    view.view_box.setXRange(min_val, max_val, padding=0.00)
-                    view.plot_item.update()
+        if event.button() == Qt.MouseButton.LeftButton:
+            scene_pos = self.mapToScene(event.pos())
+            y_axis_rect_scene = self.axis_y.mapToScene(self.axis_y.boundingRect()).boundingRect()
+            x_axis_rect_scene = self.axis_x.mapToScene(self.axis_x.boundingRect()).boundingRect()
+
+            if y_axis_rect_scene.contains(scene_pos):
+                dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
+                if dialog.exec():
+                    self.plot_item.update()
+                return 
+            elif x_axis_rect_scene.contains(scene_pos):
+                dialog = AxisDialog(self.axis_x, self.view_box, "X", self)
+                if dialog.exec():
+                    min_val, max_val = self.view_box.viewRange()[0]
+                    for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
+                        view.view_box.setXRange(min_val, max_val, padding=0.00)
+                        view.plot_item.update()
+                return
+        return super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.origin = event.pos()
+            self.rubberBand.setGeometry(QRect(self.origin, QSize()))
+            self.rubberBand.show()
+            event.accept()
         else:
-            super().mouseDoubleClickEvent(event)
+            super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if self.rubberBand.isVisible():
+            self.rubberBand.setGeometry(QRect(self.origin, event.pos()).normalized())
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.rubberBand.isVisible() and event.button() == Qt.MouseButton.LeftButton:
+            self.rubberBand.hide()
+            rect = self.rubberBand.geometry()
+            if rect.width() > 10 and rect.height() > 10:  # 避免误触
+                topLeft = self.mapToScene(rect.topLeft())
+                bottomRight = self.mapToScene(rect.bottomRight())
+
+                p1 = self.view_box.mapSceneToView(topLeft)
+                p2 = self.view_box.mapSceneToView(bottomRight)
+
+                x_min = min(p1.x(), p2.x())
+                x_max = max(p1.x(), p2.x())
+                y_min = min(p1.y(), p2.y())
+                y_max = max(p1.y(), p2.y())
+
+                # 添加10% margin
+                dx = x_max - x_min
+                dy = y_max - y_min
+                margin = 0.1
+                x_min -= margin * dx
+                x_max += margin * dx
+                y_min -= margin * dy
+                y_max += margin * dy
+
+                self.view_box.setXRange(x_min, x_max, padding=0)
+                self.view_box.setYRange(y_min, y_max, padding=0)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
 
 # ---------------- 主窗口 ----------------
@@ -1194,10 +1269,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self.defaultTitle)
         self.resize(1600, 900)
 
-        self.var_names = []
-        self.units = {}
-        self.time_channels_infos = {}
-        self.data = pd.DataFrame()
+        self.var_names = None
+        self.units = None
+        self.time_channels_infos = None
+        self.data = None
+        self.data_validity = None
 
         # ---------------- 中央控件 ----------------
         central = QWidget()
@@ -1268,8 +1344,11 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn = QPushButton("修改布局")
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
+        self.clear_all_plots_btn = QPushButton("清除绘图")
+        self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         #self.cursor_btn.setFixedSize(100, 28)
-        
+
+        top_bar.addWidget(self.clear_all_plots_btn)
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.auto_y_btn)
@@ -1292,12 +1371,17 @@ class MainWindow(QMainWindow):
         # put default plots into the window
         self._plot_row_max_default = 4
         self._plot_col_max_default = 3
-        self.create_subplots_matrix(self._plot_row_max_default,self._plot_col_max_default)
+        # 延迟创建：self.create_subplots_matrix(self._plot_row_max_default,self._plot_col_max_default)
 
         # turn on/off the plots
         self._plot_row_current = 4
         self._plot_col_current = 1
-        self.set_plots_visible(row_set=self._plot_row_current,col_set=self._plot_col_current)
+        # 延迟设置：self.set_plots_visible(row_set=self._plot_row_current,col_set=self._plot_col_current)
+
+        self.placeholder_label = QLabel("请导入 CSV 文件以查看数据", self.plot_widget)
+        self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder_label.setStyleSheet("font-size: 24px; color: gray;")
+        self.plot_layout.addWidget(self.placeholder_label, 0, 0)
 
         self.drop_overlay = DropOverlay(self.centralWidget())
         self.drop_overlay.lower()          # 初始在最下层
@@ -1383,6 +1467,11 @@ class MainWindow(QMainWindow):
             w.vline.setPos(x)
             w.update_cursor_label()
 
+    def clear_all_plots(self):
+        for container in self.plot_widgets:
+            widget=container.plot_widget
+            widget.clear_plot_item()
+
     def auto_range_all_plots(self):
         for container in self.plot_widgets:
             widget=container.plot_widget
@@ -1406,7 +1495,7 @@ class MainWindow(QMainWindow):
 
         for r in range(m):
             for c in range(n):
-                plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data)
+                plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data, self.time_channels_infos)
                 plot_widget.toggle_cursor(self.cursor_btn.isChecked())
 
                 # XLink：让同一行的所有列都 link 到第一列
@@ -1578,9 +1667,16 @@ class MainWindow(QMainWindow):
         self.time_channels_infos = loader.time_channels_info
         self.data_validity = loader.df_validity
         self.list_widget.populate(self.var_names, self.units, self.data_validity)
+        # 移除占位符
+        self.placeholder_label.setParent(None)
 
+        # 现在创建子图矩阵
+        self.create_subplots_matrix(self._plot_row_max_default, self._plot_col_max_default)
+        self.set_plots_visible(self._plot_row_current, self._plot_col_current)
+
+        # 更新所有 plot_widgets 的数据
         for container in self.plot_widgets:
-            widget=container.plot_widget
+            widget = container.plot_widget
             widget.data = loader.df
             widget.units = loader.units
             widget.time_channels_info = loader.time_channels_info
