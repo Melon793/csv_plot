@@ -8,12 +8,12 @@ os.environ["QT_LOGGING_RULES"] = (
     "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
 )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRectF, QMargins, QTimer,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QRectF, QMargins, QTimer,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
 from PyQt6.QtGui import QFont, QFontMetrics, QDrag, QPen, QColor,QBrush
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand
 )
 import pyqtgraph as pg
 #import numpy as np
@@ -879,6 +879,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.ci.layout.setSpacing(0)
         self.ci.layout.setRowStretchFactor(1, 1)  # 主区域完全拉伸
 
+        # 初始化框选功能
+        self.rubberBand = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.origin = QPoint()
 
 
     def setup_header(self):
@@ -1308,6 +1311,52 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
         return super().mouseDoubleClickEvent(event)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.origin = event.pos()
+            self.rubberBand.setGeometry(QRect(self.origin, QSize()))
+            self.rubberBand.show()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.rubberBand.isVisible():
+            self.rubberBand.setGeometry(QRect(self.origin, event.pos()).normalized())
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.rubberBand.isVisible() and event.button() == Qt.MouseButton.LeftButton:
+            self.rubberBand.hide()
+            rect = self.rubberBand.geometry()
+            if rect.width() > 10 and rect.height() > 10:  # 避免误触
+                topLeft = self.mapToScene(rect.topLeft())
+                bottomRight = self.mapToScene(rect.bottomRight())
+
+                p1 = self.view_box.mapSceneToView(topLeft)
+                p2 = self.view_box.mapSceneToView(bottomRight)
+
+                x_min = min(p1.x(), p2.x())
+                x_max = max(p1.x(), p2.x())
+                y_min = min(p1.y(), p2.y())
+                y_max = max(p1.y(), p2.y())
+
+                # 添加10% margin
+                dx = x_max - x_min
+                dy = y_max - y_min
+                margin = 0.1
+                x_min -= margin * dx
+                x_max += margin * dx
+                y_min -= margin * dy
+                y_max += margin * dy
+
+                self.view_box.setXRange(x_min, x_max, padding=0)
+                self.view_box.setYRange(y_min, y_max, padding=0)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
 
 # ---------------- 主窗口 ----------------
