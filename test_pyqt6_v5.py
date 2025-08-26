@@ -11,7 +11,7 @@ os.environ["QT_LOGGING_RULES"] = (
 )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
-from PyQt6.QtGui import QFont, QFontMetrics, QDrag, QPen, QColor,QBrush
+from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
@@ -20,9 +20,6 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 
 
-
-
-# some change 
 class DataLoadThread(QThread):
     # 信号：发送进度 0-100，或直接发 DataFrame
     progress = pyqtSignal(int)        # 百分比
@@ -997,18 +994,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.window().sync_crosshair(mousePoint.x(), self)
             #print(f"mouse in pos {mousePoint.x()}")
 
-    def msInt_to_fmtStr(self,value:int):
-        td = pd.to_timedelta(pd.Series(value, dtype='int64'), unit='ms')
-        total = td.dt.total_seconds()            # Series of float (秒)
+    def sInt_to_fmtStr(self,value:int):
+        td = pd.to_timedelta(pd.Series(value, dtype='int64'), unit='s')
+        total = td.dt.total_seconds() % (24*3600)           # Series of float (秒)
         hh = (total // 3600).astype(int)
         mm = (total % 3600 // 60).astype(int)
         ss = total % 60
         return (hh.apply(lambda x: f"{x:02d}") + ':' +
                 mm.apply(lambda x: f"{x:02d}") + ':' +
-                ss.apply(lambda x: f"{x:06.3f}")).tolist()
+                ss.apply(lambda x: f"{x:06.2f}")).tolist()
     
     def dateInt_to_fmtStr(self,value:int):
-        correct_dates = pd.to_datetime(pd.Series(value), unit='D').dt.strftime('%Y-%m-%d')
+        correct_dates = pd.to_datetime(pd.Series(value), unit='s').dt.strftime('%Y/%m/%d')
         return correct_dates.tolist()
     
     def update_cursor_label(self):
@@ -1030,8 +1027,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             idx = np.argmin(np.abs(x_data - x))
             y_val = y_data[idx]
             #(x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
-            if self.y_format == 'ms':
-                time_str=self.msInt_to_fmtStr(y_val)
+            if self.y_format == 's':
+                time_str=self.sInt_to_fmtStr(y_val)
                 self.update_right_header(f"x={x:.0f}, y={time_str}")
             elif self.y_format == 'date':
                 date_str=self.dateInt_to_fmtStr(y_val)
@@ -1073,26 +1070,29 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 if "%H:%M:%S" in fmt:
                     #time
                     datetime64_value = pd.to_datetime(raw_values,errors='coerce')
-                    y_values = (
-                        datetime64_value.dt.hour * 3_600_000 +
-                        datetime64_value.dt.minute * 60_000 +
-                        datetime64_value.dt.second * 1_000 +
-                        datetime64_value.dt.microsecond // 1_000      
-                    ).astype('int64')
-                    y_format = 'ms'
+                    # y_values = (
+                    #     # datetime64[ns] -> s
+                    #     datetime64_value.dt.hour * 3_600 +
+                    #     datetime64_value.dt.minute * 60 +
+                    #     datetime64_value.dt.second * 1 +
+                    #     datetime64_value.dt.microsecond // 1_000      
+                    # ).astype('int64')
+                    y_values = datetime64_value.view('int64') // 10**9
+                    y_format = 's'
                 else:
                     #date
                     datetime64_value = pd.to_datetime(raw_values, errors='coerce')
-                    date_delta = datetime64_value.dt.normalize() - pd.Timestamp('1970-01-01')
-                    y_values = date_delta.dt.days.astype('int64')
+                    # date_delta = datetime64_value.dt.normalize() - pd.Timestamp('1970-01-01')
+                    # y_values = date_delta.dt.days.astype('int64')
+                    y_values = datetime64_value.view('int64') // 10**9
                     y_format = 'date'
             except:
                 # cannot parse the format
-                return None
+                return None,None
 
         else:
             # cannot get right info
-            return None
+            return None,None
         
         # finally
         self._value_cache[var_name] = (y_values, y_format)
