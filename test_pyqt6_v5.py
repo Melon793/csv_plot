@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations 
 import sys
 import os
@@ -17,7 +15,7 @@ from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox
 )
 import pyqtgraph as pg
 
@@ -768,6 +766,10 @@ class MyTableWidget(QTableWidget):
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def __init__(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
         super().__init__()
+        self.factor = 1.0
+        self.offset = 0.0
+        self.original_index_x = None
+        self.original_y = None
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -885,7 +887,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.label_left.setText(left_text)
 
     def auto_range(self):
-        self.view_box.setXRange(self.xMin, self.xMax, padding=0.02)
+        datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 1
+        index_x = np.arange(1, datalength + 1)
+        min_x = self.offset + self.factor * index_x.min()
+        max_x = self.offset + self.factor * index_x.max()
+        self.view_box.setXRange(min_x, max_x, padding=0.02)
         self.view_box.autoRange()
 
     def auto_y_in_x_range(self):
@@ -899,14 +905,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.label_right.setAlignment(Qt.AlignmentFlag.AlignRight)
 
 
-    def reset_plot(self,xMin,xMax):
+    def reset_plot(self,index_xMin,index_xMax):
 
         self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
         self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
+        
+        xMin = self.offset + self.factor * index_xMin
+        xMax = self.offset + self.factor * index_xMax
+        
         if not (np.isnan(xMax) or np.isinf(xMax)):
             self.view_box.setXRange(xMin, xMax, padding=0.02)
             padding_xVal=0.1
-            self.plot_item.setLimits(xMin=0-padding_xVal*(xMax-xMin), xMax=(padding_xVal+1)*(xMax-xMin))
+            limits_xMin = xMin - padding_xVal * (xMax - xMin)
+            limits_xMax = xMax + padding_xVal * (xMax - xMin)
+            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax)
 
         self.view_box.setYRange(0,1,padding=0) 
         self.vline.setBounds([None, None]) 
@@ -1017,7 +1029,28 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def dateInt_to_fmtStr(self,value:int):
         correct_dates = pd.to_datetime(pd.Series(value), unit='s').dt.strftime('%Y/%m/%d')
         return correct_dates.tolist()
-    
+    def _significant_decimal_format_str(self,value: float, ref: float, max_dp:int | None = None) -> str:
+        """
+        根据 ref 的“显示精度”自动决定 value 的字符串格式。
+        """
+        # check length
+        s = format(ref, 'f').rstrip('0').rstrip('.')
+        if '.' not in s:
+            dp = 0
+        else:
+            dp = len(s.split('.')[1])
+
+        if max_dp is None or max_dp < 0:
+            pass
+        else:
+            dp = min(max_dp,dp)
+
+        if dp == 0:                       # ref 本身按整数显示
+            return str(int(round(value)))
+        
+        fmt = f'{{:.{dp}f}}'              # 例如保留 2 位 -> "{:.2f}"
+        return fmt.format(value).rstrip('0').rstrip('.')  # 去掉无意义的 0
+
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
         if len(self.plot_item.listDataItems()) == 0:
@@ -1037,14 +1070,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             idx = np.argmin(np.abs(x_data - x))
             y_val = y_data[idx]
             #(x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
+            x_str = self._significant_decimal_format_str(value=float(x),ref=self.factor)
             if self.y_format == 's':
                 time_str=self.sInt_to_fmtStr(y_val)
-                self.update_right_header(f"x={x:.0f}, y={time_str}")
+                #self.update_right_header(f"x={x:.0f}, y={time_str}")
+                self.update_right_header(f"x={x_str}, y={time_str}")
             elif self.y_format == 'date':
                 date_str=self.dateInt_to_fmtStr(y_val)
-                self.update_right_header(f"x={x:.0f}, y={date_str}")
+                #self.update_right_header(f"x={x:.0f}, y={date_str}")
+                self.update_right_header(f"x={x_str}, y={date_str}")
             else:
-                self.update_right_header(f"x={x:.0f}, y={y_val:.2f}")
+                #self.update_right_header(f"x={x:.0f}, y={y_val:.2f}")
+
+                self.update_right_header(f"x={x_str}, y={y_val:.5g}")
 
         except Exception as e:
             print(f"Cursor update error: {e}")
@@ -1118,6 +1156,26 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._value_cache[var_name] = (y_values, y_format)
         return y_values, y_format
     
+    def update_time_correction(self, new_factor, new_offset):
+        self.factor = new_factor
+        self.offset = new_offset
+
+        if self.original_index_x is not None:
+            new_x = self.offset + self.factor * self.original_index_x
+            self.curve.setData(new_x, self.original_y)
+
+        datalength = len(self.original_index_x) if self.original_index_x is not None else (self.window().loader.datalength if hasattr(self.window(), 'loader') else 0)
+        padding_xVal = 0.1
+        index_min = 1 - padding_xVal * datalength
+        index_max = datalength + padding_xVal * datalength
+        limits_xMin = self.offset + self.factor * index_min
+        limits_xMax = self.offset + self.factor * index_max
+        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=self.factor * 5)
+
+        data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
+        data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
+        self.vline.setBounds([data_min_x, data_max_x])
+
 # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
@@ -1146,34 +1204,41 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 如果正常
         self.y_format=y_format
-        x_values = list(range(1,1+len(y_values)))
+        self.original_index_x = np.arange(1, len(y_values) + 1)
+        self.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
+        x_values = self.offset + self.factor * self.original_index_x
 
         self.plot_item.clearPlots()             
         _pen = pg.mkPen(color='blue', width=3)
-        self.curve=self.plot_item.plot(x_values, y_values, pen=_pen, name=var_name)
+        self.curve=self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
         self.update_left_header(full_title)
         padding_xVal = 0.1
         padding_yVal = 0.5
-        if np.nanmin(y_values) == np.nanmax(y_values):
-            y_center = np.nanmin(y_values)
+        
+        min_x = np.min(x_values)
+        max_x = np.max(x_values)
+        limits_xMin = min_x - padding_xVal * (max_x - min_x)
+        limits_xMax = max_x + padding_xVal * (max_x - min_x)
+        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=self.factor * 5)
+
+        if np.nanmin(self.original_y) == np.nanmax(self.original_y):
+            y_center = np.nanmin(self.original_y)
             y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
             
             # limit x/y range
-            self.plot_item.setLimits(xMin=0-padding_xVal*len(x_values), xMax=(padding_xVal+1)*len(x_values), 
-                minXRange=5,
+            self.plot_item.setLimits(
                 yMin=y_center - y_range,
                 yMax=y_center + y_range) 
             self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)       
         else:            
             # limit x/y range            
-            self.plot_item.setLimits(xMin=0-padding_xVal*len(y_values), xMax=(padding_xVal+1)*len(y_values), 
-                minXRange=5,
-                yMin=np.nanmin(y_values)-padding_yVal*(np.nanmax(y_values)-np.nanmin(y_values)), 
-                yMax=np.nanmax(y_values)+padding_yVal*(np.nanmax(y_values)-np.nanmin(y_values)))
+            self.plot_item.setLimits(
+                yMin=np.nanmin(self.original_y)-padding_yVal*(np.nanmax(self.original_y)-np.nanmin(self.original_y)), 
+                yMax=np.nanmax(self.original_y)+padding_yVal*(np.nanmax(self.original_y)-np.nanmin(self.original_y)))
             
-            self.view_box.setYRange(np.nanmin(y_values), np.nanmax(y_values), padding=0.05)
+            self.view_box.setYRange(np.nanmin(self.original_y), np.nanmax(self.original_y), padding=0.05)
 
         
 
@@ -1198,6 +1263,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.axis_y.setLabel(text="")
         self.update_left_header("channel name")
         self.update_right_header("")
+        self.curve = None
+        self.original_index_x = None
+        self.original_y = None
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
@@ -1279,12 +1347,48 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
 
 # ---------------- 主窗口 ----------------
+class TimeCorrectionDialog(QDialog):
+    def __init__(self, cur_factor=1.0, cur_offset=0.0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("时间修正")
+
+        form = QFormLayout(self)
+
+        self.factor_spin = QDoubleSpinBox()
+        self.factor_spin.setRange(0.0001, 1e6)
+        self.factor_spin.setValue(cur_factor)
+        self.factor_spin.setDecimals(6)
+
+        self.offset_spin = QDoubleSpinBox()
+        self.offset_spin.setRange(-1e9, 1e9)
+        self.offset_spin.setValue(cur_offset)
+        self.offset_spin.setDecimals(6)
+
+        form.addRow("比例因子:", self.factor_spin)
+        form.addRow("偏移量:", self.offset_spin)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("确定")
+        cancel_btn = QPushButton("取消")
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        form.addRow(btns)
+
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        QTimer.singleShot(0, lambda: self.factor_spin.selectAll())
+
+    def values(self):
+        return self.factor_spin.value(), self.offset_spin.value()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
         self.setWindowTitle(self.defaultTitle)
         self.resize(1600, 900)
+        self.factor = 1.0
+        self.offset = 0.0
 
         self.var_names = None
         self.units = None
@@ -1340,6 +1444,11 @@ class MainWindow(QMainWindow):
         # 顶部按钮栏：弹簧 + 光标按钮（右对齐）
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 5, 0)
+        
+        self.time_correction_btn = QPushButton("时间修正")
+        self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
+        top_bar.addWidget(self.time_correction_btn)
+        
         top_bar.addStretch(1)
 
 
@@ -1413,6 +1522,54 @@ class MainWindow(QMainWindow):
             file_path = sys.argv[1]
             self.load_csv_file(file_path)
 
+    def open_layout_dialog(self):
+        dlg = LayoutInputDialog(max_rows=self._plot_row_max_default, 
+                                max_cols=self._plot_col_max_default, 
+                                cur_rows=self._plot_row_current,
+                                cur_cols=self._plot_col_current,
+                                parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            r, c = dlg.values()
+            self.set_plots_visible (r, c)
+
+    def open_time_correction_dialog(self):
+        dlg = TimeCorrectionDialog(cur_factor=self.factor, cur_offset=self.offset, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_factor, new_offset = dlg.values()
+            if new_factor <= 0:
+                QMessageBox.warning(self, "错误", "Factor 必须是正数")
+                return
+            old_factor = self.factor
+            old_offset = self.offset
+            self.factor = new_factor
+            self.offset = new_offset
+
+            # 获取当前视图范围（假设所有视图联动，使用第一个）
+            if self.plot_widgets:
+                curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+            else:
+                curr_min, curr_max = 0, 1
+
+            # 更新所有图表的数据和限制，但不设置范围
+            for container in self.plot_widgets:
+                container.plot_widget.update_time_correction(new_factor, new_offset)
+
+            # 计算新范围
+            if old_factor != 0:
+                index_min = (curr_min - old_offset) / old_factor
+                index_max = (curr_max - old_offset) / old_factor
+                new_min = new_offset + new_factor * index_min
+                new_max = new_offset + new_factor * index_max
+            else:
+                # fallback
+                datalength = self.loader.datalength if hasattr(self, 'loader') else 1
+                new_min = new_offset + new_factor * 1
+                new_max = new_offset + new_factor * datalength
+
+            # 统一设置范围
+            for container in self.plot_widgets:
+                container.plot_widget.view_box.setXRange(new_min, new_max, padding=0)
+
     def eventFilter(self, obj, event):
         etype = event.type()
         if etype == QEvent.Type.DragEnter:
@@ -1441,16 +1598,6 @@ class MainWindow(QMainWindow):
                         return True
         return super().eventFilter(obj, event)
 
-    def open_layout_dialog(self):
-        dlg = LayoutInputDialog(max_rows=self._plot_row_max_default, 
-                                max_cols=self._plot_col_max_default, 
-                                cur_rows=self._plot_row_current,
-                                cur_cols=self._plot_col_current,
-                                parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            r, c = dlg.values()
-            self.set_plots_visible (r, c)
-
     def show_drop_overlay(self):
         self.drop_overlay.setGeometry(self.centralWidget().rect())
         self.drop_overlay.raise_()
@@ -1461,9 +1608,9 @@ class MainWindow(QMainWindow):
         self.drop_overlay.hide()
 
 
-    def reset_plots_after_loading(self,xMin,xMax):
+    def reset_plots_after_loading(self,index_xMin,index_xMax):
         for container in self.plot_widgets:
-             container.plot_widget.reset_plot(xMin,xMax)
+             container.plot_widget.reset_plot(index_xMin,index_xMax)
              container.plot_widget.clear_value_cache()
         # for plot_widget in self.plot_widgets:
         #     plot_widget.reset_plot(xMin,xMax)
@@ -1705,7 +1852,14 @@ class MainWindow(QMainWindow):
             widget.units = self.loader.units
             widget.time_channels_info = self.loader.time_channels_info
 
-        self.reset_plots_after_loading(xMin=0, xMax=self.loader.datalength)
+        self.factor = 1.0
+        self.offset = 0.0
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            widget.factor = 1.0
+            widget.offset = 0.0
+
+        self.reset_plots_after_loading(index_xMin=1, index_xMax=self.loader.datalength)
         self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{self.loader.path}]")
 
 
