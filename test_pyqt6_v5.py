@@ -1,3 +1,5 @@
+
+
 from __future__ import annotations 
 import sys
 import os
@@ -368,7 +370,7 @@ class DropOverlay(QWidget):
         self.label = QLabel("请丢入数据", self)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setStyleSheet("""
-            background-color: rgba(68, 68, 68, 200);
+            background-color: rgba(168, 168, 168, 255);
             color:#333;
             font-size:36px;
             border-radius:12px;
@@ -974,15 +976,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
-        delta = ev.angleDelta().y()  # 获取垂直滚动增量
-        if delta > 0:
-            #print("向上滚动,放大")  # 正值表示向上
-            vb.scaleBy((0.8, 1))  # 仅缩放x轴
-        elif delta < 0:
-            #print("向下滚动,缩小")  # 负值表示向下
-            vb.scaleBy((1.2, 1))  # 仅缩放x轴
-        else:
-            super().wheelEvent(ev)
+        delta = ev.angleDelta().y()
+
+        
+        if ev.modifiers() and Qt.KeyboardModifier.ShiftModifier:  # 检测Shift键按下状态 
+            if delta > 0:
+                vb.scaleBy((1, 0.8))  # 仅缩放Y轴
+            elif delta < 0:
+                vb.scaleBy((1, 1.2))  # 仅缩放Y轴
+        else:  # 默认情况缩放X轴
+            if delta > 0:
+                vb.scaleBy((0.8, 1))
+            elif delta < 0:
+                vb.scaleBy((1.2, 1))
+            else:
+                super().wheelEvent(ev)
+        
+        ev.accept()  # 确保事件被处理
     
     def mouse_moved(self, evt):
         """鼠标移动事件处理"""
@@ -995,14 +1005,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             #print(f"mouse in pos {mousePoint.x()}")
 
     def sInt_to_fmtStr(self,value:int):
-        td = pd.to_timedelta(pd.Series(value, dtype='int64'), unit='s')
+        td = pd.to_timedelta(pd.Series(value, dtype='float64'), unit='s')
         total = td.dt.total_seconds() % (24*3600)           # Series of float (秒)
         hh = (total // 3600).astype(int)
         mm = (total % 3600 // 60).astype(int)
         ss = total % 60
         return (hh.apply(lambda x: f"{x:02d}") + ':' +
                 mm.apply(lambda x: f"{x:02d}") + ':' +
-                ss.apply(lambda x: f"{x:06.2f}")).tolist()
+                ss.apply(lambda x: f"{x:05.2f}")).tolist()
     
     def dateInt_to_fmtStr(self,value:int):
         correct_dates = pd.to_datetime(pd.Series(value), unit='s').dt.strftime('%Y/%m/%d')
@@ -1053,6 +1063,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def clear_value_cache(self):
         self._value_cache: dict[str, tuple] = {}
 
+    def datetime_to_unix_seconds(self,series: pd.Series) -> pd.Series:
+        if "ns" in str(series.dtype):
+            return series.astype("int64") / 10**9
+        elif "us" in str(series.dtype):
+            return series.astype("int64") / 10**6
+        elif "ms" in str(series.dtype):
+            return series.astype("int64") / 10**3
+        else:
+            raise ValueError(f"Unsupported datetime dtype: {series.dtype}")
+        
     def get_value_from_name(self,var_name)-> tuple | None:
         if var_name in self._value_cache:
             #y_values, self.y_format = self._value_cache[var_name]
@@ -1069,22 +1089,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             try:
                 if "%H:%M:%S" in fmt:
                     #time
-                    datetime64_value = pd.to_datetime(raw_values,errors='coerce')
-                    # y_values = (
-                    #     # datetime64[ns] -> s
-                    #     datetime64_value.dt.hour * 3_600 +
-                    #     datetime64_value.dt.minute * 60 +
-                    #     datetime64_value.dt.second * 1 +
-                    #     datetime64_value.dt.microsecond // 1_000      
-                    # ).astype('int64')
-                    y_values = datetime64_value.view('int64') // 10**9
+                    times = pd.to_datetime(raw_values, format="%H:%M:%S", errors="coerce")
+                    today = pd.Timestamp.today().normalize()
+                    dt_values = today + (times.dt.hour.astype("timedelta64[h]") +
+                        times.dt.minute.astype("timedelta64[m]") +
+                        times.dt.second.astype("timedelta64[s]"))
+                    
+                    y_values = self.datetime_to_unix_seconds(dt_values)
                     y_format = 's'
+
+                    # reverse method：
+                    # y_sec = dt_values.astype("int64") // 10**6  
+                    # kk = pd.to_datetime(y_sec, unit="s")
                 else:
                     #date
-                    datetime64_value = pd.to_datetime(raw_values, errors='coerce')
-                    # date_delta = datetime64_value.dt.normalize() - pd.Timestamp('1970-01-01')
-                    # y_values = date_delta.dt.days.astype('int64')
-                    y_values = datetime64_value.view('int64') // 10**9
+                    dt_values = pd.to_datetime(raw_values,format=fmt, errors='coerce')
+                    y_values = self.datetime_to_unix_seconds(dt_values)
                     y_format = 'date'
             except:
                 # cannot parse the format
@@ -1128,11 +1148,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.y_format=y_format
         x_values = list(range(1,1+len(y_values)))
 
-        # if any(isinstance(item, pg.PlotDataItem) for item in self.plot_item.items):
-        #     self.curve.setData(x_values,y_values)
-        # else:
         self.plot_item.clearPlots()             
-        _pen = pg.mkPen(color='blue', width=4)
+        _pen = pg.mkPen(color='blue', width=3)
         self.curve=self.plot_item.plot(x_values, y_values, pen=_pen, name=var_name)
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
@@ -1170,7 +1187,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         event.acceptProposedAction()
 
     def clear_plot_item(self):
-        self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
+        #self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
         self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
 
         self.view_box.setYRange(0,1,padding=0) 
@@ -1512,7 +1529,7 @@ class MainWindow(QMainWindow):
                 container = QWidget()
                 container.setLayout(wrapper)
                 container.plot_widget = plot_widget   # 保留引用，方便后面找
-                container.setVisible(True)            # 默认全部显示
+                #container.setVisible(True)            # 默认全部显示
 
                 self.plot_layout.addWidget(container, r, c)
                 self.plot_widgets.append(container)   # 保存容器
@@ -1643,29 +1660,36 @@ class MainWindow(QMainWindow):
                    sep:str = ',',
                    hasunit:bool=True):
         """小文件直接读"""
+        loader = None
+        status = False
         try:
             loader = FastDataLoader(file_path, descRows=descRows,sep=sep,hasunit=hasunit)
-            self._apply_loader(loader)
-            return True
+            self.loader = loader
+            self._apply_loader()
+            status = True
         except Exception as e:
             QMessageBox.critical(self, "读取失败", str(e))
-            return False
+            status = False
+        finally:
+            if loader is not None:
+                loader = None
+            return status
 
-    def _on_load_done(self, loader):
+    def _on_load_done(self,loader):
         self._progress.close()
-        self._apply_loader(loader)
+        self.loader=loader
+        self._apply_loader()
 
     def _on_load_error(self, msg):
         self._progress.close()
         QMessageBox.critical(self, "读取失败", msg)
 
-    def _apply_loader(self, loader):
+    def _apply_loader(self):
         """把 loader 的内容同步到 UI"""
-        self.loader = loader
-        self.var_names = loader.var_names
-        self.units = loader.units
-        self.time_channels_infos = loader.time_channels_info
-        self.data_validity = loader.df_validity
+        self.var_names = self.loader.var_names
+        self.units = self.loader.units
+        self.time_channels_infos = self.loader.time_channels_info
+        self.data_validity = self.loader.df_validity
         self.list_widget.populate(self.var_names, self.units, self.data_validity)
         # 移除占位符
         self.placeholder_label.setParent(None)
@@ -1677,12 +1701,12 @@ class MainWindow(QMainWindow):
         # 更新所有 plot_widgets 的数据
         for container in self.plot_widgets:
             widget = container.plot_widget
-            widget.data = loader.df
-            widget.units = loader.units
-            widget.time_channels_info = loader.time_channels_info
+            widget.data = self.loader.df
+            widget.units = self.loader.units
+            widget.time_channels_info = self.loader.time_channels_info
 
-        self.reset_plots_after_loading(xMin=0, xMax=loader.datalength)
-        self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{loader.path}]")
+        self.reset_plots_after_loading(xMin=0, xMax=self.loader.datalength)
+        self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{self.loader.path}]")
 
 
     def filter_variables(self):
