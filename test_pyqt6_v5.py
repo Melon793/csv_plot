@@ -484,26 +484,54 @@ class DataTableDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("变量数值表")
 
-        # 1. 用官方 QTableView 代替 QTableWidget
-        self.view = QTableView(self)
-        self.view.setSortingEnabled(True)           # 需要排序可加 QSortFilterProxyModel
+        self.frozen_columns = []  # 冻结列列表 (变量名)
+
+        # 布局：使用 HBox 放置冻结视图和主视图
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        # 冻结视图 (左侧)
+        self.frozen_view = QTableView(self)
+        self.frozen_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.frozen_view.verticalHeader().setVisible(False)
+        self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.frozen_view.horizontalHeader().customContextMenuRequested.connect(self._on_frozen_header_right_click)
+
+        # 主视图 (右侧)
+        self.main_view = QTableView(self)
+        self.main_view.setSortingEnabled(True)
+        self.main_view.verticalHeader().setVisible(False)
+        self.main_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.main_view.horizontalHeader().setSectionsMovable(True)
+        self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
+
+        content_layout.addWidget(self.frozen_view)
+        content_layout.addWidget(self.main_view)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(self.view)
+        layout.addLayout(content_layout)
 
-        # 内部 DataFrame，所有列都存在这里
-
+        # 内部 DataFrame
         self._df = pd.DataFrame()
+        self.model = None
 
-        # 允许用户拖拽列标题，改变列顺序
-        self.view.horizontalHeader().setSectionsMovable(True)
-        self.view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.view.horizontalHeader().customContextMenuRequested.connect(self._on_header_right_click)
-        
         # 设置字体
-        font = self.view.horizontalHeader().font()
+        font = self.main_view.horizontalHeader().font()
         font.setBold(True)
-        self.view.horizontalHeader().setFont(font)
+        self.main_view.horizontalHeader().setFont(font)
+        self.frozen_view.horizontalHeader().setFont(font)
+
+        # 同步滚动和选择
+        self.main_view.verticalScrollBar().valueChanged.connect(self.frozen_view.verticalScrollBar().setValue)
+        self.frozen_view.verticalScrollBar().valueChanged.connect(self.main_view.verticalScrollBar().setValue)
+
+        # 同步行高变化
+        self.main_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
+        self.frozen_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
 
         # 恢复上一次的位置/大小
         geom = self._settings.value("geometry")
@@ -514,7 +542,8 @@ class DataTableDialog(QDialog):
 
     def closeEvent(self, event):
         self._df = pd.DataFrame()          # 释放内存
-        self.view.setModel(None)
+        self.main_view.setModel(None)
+        self.frozen_view.setModel(None)
         self.hide()
         event.accept()
         self._settings.setValue("geometry", self.saveGeometry())
@@ -523,46 +552,111 @@ class DataTableDialog(QDialog):
         return var_name in self._df.columns
 
     def add_series(self, var_name: str, data: pd.Series):
-        # ---- 追加列 ----
+        # 追加列
         self._df[var_name] = data
 
-        # 用官方模型挂载（零拷贝，只保存 DataFrame 指针）
-        model = PandasTableModel(self._df)
-        self.view.setModel(model)
+        # 更新模型
+        self.model = PandasTableModel(self._df)
+        self.main_view.setModel(self.model)
+        self.frozen_view.setModel(self.model)
 
-        # ---- 自动向右伸展宽度（仅当前列） ----
-        #self._auto_resize_right()
+        # 更新视图显示的列
+        self._update_views()
 
-    def _auto_resize_right(self):
-        COL_WIDTH = 120
-        MARGIN = 40
-        left_x = self.x()
-        needed_width = self._df.shape[1] * COL_WIDTH + MARGIN
-        screen = self.screen().availableGeometry()
-        #screen = QApplication.primaryScreen().availableGeometry()
-        max_right = screen.right() - MARGIN
-        new_width = max(300, min(needed_width, max_right - left_x))  # 最小宽 300
-        self.resize(new_width, self.height())
+        # 滚动到新列（如果不是冻结列）
+        if var_name not in self.frozen_columns:
+            col_index = self._df.columns.get_loc(var_name)
+            index = self.model.index(0, col_index)
+            self.main_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
-
-    def _on_header_right_click(self, pos):
-        header = self.view.horizontalHeader()
-        col = header.logicalIndexAt(pos)
-        if col < 0:      # 点在空白区
+    def _update_views(self):
+        if self.model is None:
             return
 
+        # 隐藏列以实现冻结效果
+        frozen_count = 0
+        for col in range(self.model.columnCount()):
+            var_name = self._df.columns[col]
+            if var_name in self.frozen_columns:
+                self.main_view.setColumnHidden(col, True)
+                self.frozen_view.setColumnHidden(col, False)
+                frozen_count += 1
+            else:
+                self.main_view.setColumnHidden(col, False)
+                self.frozen_view.setColumnHidden(col, True)
+
+        # 调整冻结视图宽度
+        frozen_width = 0
+        for i in range(self.model.columnCount()):
+            if not self.frozen_view.isColumnHidden(i):
+                frozen_width += self.frozen_view.columnWidth(i)
+        self.frozen_view.setFixedWidth(frozen_width + 2)  # +2 for borders
+
+        # 如果没有冻结列，隐藏冻结视图
+        if frozen_count == 0:
+            self.frozen_view.hide()
+        else:
+            self.frozen_view.show()
+
+    def freeze_column(self, logical_col):
+        var_name = self._df.columns[logical_col]
+        if var_name not in self.frozen_columns:
+            self.frozen_columns.append(var_name)
+            self._update_views()
+
+    def unfreeze_column(self, logical_col):
+        var_name = self._df.columns[logical_col]
+        if var_name in self.frozen_columns:
+            self.frozen_columns.remove(var_name)
+            self._update_views()
+
+    def _sync_row_heights(self, logicalIndex, oldSize, newSize):
+        sender = self.sender()
+        if sender == self.main_view.verticalHeader():
+            self.frozen_view.setRowHeight(logicalIndex, newSize)
+        elif sender == self.frozen_view.verticalHeader():
+            self.main_view.setRowHeight(logicalIndex, newSize)
+
+    def _on_frozen_header_right_click(self, pos):
+        self._on_header_right_click(pos, self.frozen_view)
+
+    def _on_main_header_right_click(self, pos):
+        self._on_header_right_click(pos, self.main_view)
+
+    def _on_header_right_click(self, pos, view):
+        header = view.horizontalHeader()
+        col = header.logicalIndexAt(pos)
+        if col < 0:
+            return
+
+        logical_col = header.visualIndex(col)  # 因为可移动，获取逻辑索引
+        var_name = self._df.columns[logical_col]
+
         menu = QMenu(self)
-        act = menu.addAction(f"删除列 “{self._df.columns[col]}”")
-        if menu.exec(header.mapToGlobal(pos)) == act:
-            self._remove_column(col)
+        act_delete = menu.addAction(f"删除列 “{var_name}”")
 
-    # 3. 真正执行删除
-    def _remove_column(self, col):
-        model = self.view.model()
-        model.removeColumns(col, 1)          # 从模型/DF 中删除
-        #self._auto_resize_right()            # 窗口自动缩回
+        if var_name in self.frozen_columns:
+            act_freeze = menu.addAction("解除冻结列")
+        else:
+            act_freeze = menu.addAction("冻结列")
 
-        
+        selected = menu.exec(header.mapToGlobal(pos))
+        if selected == act_delete:
+            self._remove_column(logical_col)
+        elif selected == act_freeze:
+            if var_name in self.frozen_columns:
+                self.unfreeze_column(logical_col)
+            else:
+                self.freeze_column(logical_col)
+
+    def _remove_column(self, logical_col):
+        var_name = self._df.columns[logical_col]
+        if var_name in self.frozen_columns:
+            self.frozen_columns.remove(var_name)
+        self.model.removeColumns(logical_col, 1)
+        self._update_views()
+
+
 class LayoutInputDialog(QDialog):
     def __init__(self, 
                  max_rows:int=4, 
@@ -1879,7 +1973,7 @@ class MainWindow(QMainWindow):
 
         self.reset_plots_after_loading(index_xMin=1, index_xMax=self.loader.datalength)
         self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{self.loader.path}]")
-
+        self.filter_variables() 
 
     def filter_variables(self):
         name_text = self.filter_input.text().lower()
