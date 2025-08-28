@@ -92,9 +92,10 @@ class FastDataLoader:
         self._progress_cb = _progress
         self.do_parse_date=do_parse_date
         self.hasunit=hasunit
+
         # 一次性读取 header + 单位行，并回退编码
         self._var_names, self._units, self.encoding_used = self._load_header_units(
-            self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,hasunit=self.hasunit,
+            self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,hasunit=self.hasunit
         )
 
         # 推断 dtype
@@ -163,8 +164,24 @@ class FastDataLoader:
         返回 (变量名列表, {变量名: 单位}, 最终编码)
         """
         nrows = 2 if hasunit else 1
-        encodings = ["utf-8", "cp1252"]
-        for enc in encodings:
+        encodings_default = ["utf-8", "cp1252"]
+
+        # chardet
+        import chardet
+        from pathlib import Path
+        sample_sime = 2000 #bytes
+        with Path(path).open('rb') as f:
+            raw_sample = f.read(sample_sime)
+        r = chardet.detect(raw_sample)
+        language_infer = r['language']
+        confidence_infer = r['confidence']
+
+        if language_infer is not None and language_infer.lower() =='chinese' and confidence_infer > 0.7:
+            encoding_infer = ['gb18030']
+        else:
+            encoding_infer = ['utf-8']
+
+        for enc in list(dict.fromkeys(encoding_infer+encodings_default)):
             try:
                 df = pd.read_csv(
                     path,
@@ -253,6 +270,7 @@ class FastDataLoader:
             sep=sep,
             na_values=self._NA_VALUES,
             keep_default_na=True,
+            on_bad_lines='skip'
         )):
             #print(f"chunksize is {chunksize}, full size {self.file_size/(1024**2):2f}Mb")
             if self._progress_cb:
