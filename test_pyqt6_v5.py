@@ -15,7 +15,7 @@ from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem
 )
 import pyqtgraph as pg
 
@@ -498,6 +498,8 @@ class DataTableDialog(QDialog):
         self.frozen_view.verticalHeader().setVisible(False)
         self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.frozen_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.frozen_view.setStyleSheet("QTableView { background-color: rgba(245,245,245,128); }")
         self.frozen_view.horizontalHeader().customContextMenuRequested.connect(self._on_frozen_header_right_click)
 
         # 主视图 (右侧)
@@ -508,7 +510,7 @@ class DataTableDialog(QDialog):
         self.main_view.horizontalHeader().setSectionsMovable(True)
         self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
-
+        self.main_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         content_layout.addWidget(self.frozen_view)
         content_layout.addWidget(self.main_view)
 
@@ -882,6 +884,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.offset = 0.0
         self.original_index_x = None
         self.original_y = None
+        self.mark_region = None
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -1269,6 +1272,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return y_values, y_format
     
     def update_time_correction(self, new_factor, new_offset):
+        old_factor = self.factor
+        old_offset = self.offset
         self.factor = new_factor
         self.offset = new_offset
 
@@ -1276,7 +1281,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             new_x = self.offset + self.factor * self.original_index_x
             self.curve.setData(new_x, self.original_y)
 
-        datalength = len(self.original_index_x) if self.original_index_x is not None else (self.window().loader.datalength if hasattr(self.window(), 'loader') else 0)
+        datalength = len(self.original_index_x) if self.original_index_x is not None else (
+            self.window().loader.datalength if hasattr(self.window(), 'loader') else 0)
         padding_xVal = 0.1
         index_min = 1 - padding_xVal * datalength
         index_max = datalength + padding_xVal * datalength
@@ -1287,6 +1293,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
         data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
         self.vline.setBounds([data_min_x, data_max_x])
+
+        # 更新标记区域（仅在第一个plot上更新，避免重复）
+        if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
+            old_min, old_max = self.mark_region.getRegion()
+            if old_factor != 0:
+                index_min = (old_min - old_offset) / old_factor
+                index_max = (old_max - old_offset) / old_factor
+                new_min = new_offset + new_factor * index_min
+                new_max = new_offset + new_factor * index_max
+                self.mark_region.setRegion([new_min, new_max])
+                self.window().sync_mark_regions(self.mark_region)  # 同步到其他plot
+
+
 
 # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
@@ -1362,6 +1381,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.toggle_cursor(False)
 
         event.acceptProposedAction()
+        self.window().update_mark_stats()
 
     def clear_plot_item(self):
         #self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
@@ -1456,9 +1476,96 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+    
+    def add_mark_region(self, min_x, max_x):
+        self.mark_region = pg.LinearRegionItem([min_x, max_x], movable=True)
+        #self.mark_region.setBrush(pg.mkBrush(181,196,177, 80))
+        for line in self.mark_region.lines:
+            line.setPen(pg.mkPen(color='r', width=1)) 
+        self.plot_item.addItem(self.mark_region)
+        self.mark_region.sigRegionChanged.connect(self.window().sync_mark_regions)
+
+    def remove_mark_region(self):
+        if self.mark_region:
+            self.plot_item.removeItem(self.mark_region)
+            self.mark_region = None
+
+    def update_mark_region(self):
+        if self.mark_region:
+            old_min, old_max = self.mark_region.getRegion()
+            # 更新基于新factor/offset，但由于x是scaled的，不需要额外缩放
+            self.mark_region.setRegion([old_min, old_max])  # 实际不需要变，因为x已scale
+
+    def get_mark_stats(self):
+        if not self.curve or not self.mark_region:
+            return None
+        min_x, max_x = self.mark_region.getRegion()
+        x_data, y_data = self.curve.getData()
+        if x_data is None or len(x_data) == 0:
+            return None
+        idx_left = np.argmin(np.abs(x_data - min_x))
+        idx_right = np.argmin(np.abs(x_data - max_x))
+        x1 = x_data[idx_left]
+        y1 = y_data[idx_left]
+        x2 = x_data[idx_right]
+        y2 = y_data[idx_right]
+        dx = x2 - x1
+        dy = y2 - y1
+        slope = float('inf') if dx == 0 else dy / dx  # Handle zero division
+        return (x1, x2, y1, y2, dx, dy, slope, self.label_left.text())
 
 
 # ---------------- 主窗口 ----------------
+class MarkStatsWindow(QDialog):
+    _instance = None  # Singleton instance
+
+    @classmethod
+    def get_instance(cls, parent=None):
+        if cls._instance is None:
+            cls._instance = cls(parent)
+        return cls._instance
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._settings = QSettings("MyCompany", "MarkStatsWindow")
+        self.setWindowTitle("标记区域统计")
+        self.tree = QTreeWidget(self)
+        self.tree.setHeaderLabels(["Plot", "x1", "x2", "y1", "y2", "dx", "dy", "slope"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.tree)
+        self.no_curve_item = QTreeWidgetItem(self.tree, ["No Curve"])
+        self.no_curve_item.setExpanded(False)
+        geom = self._settings.value("mark_stats_geometry")
+        if geom:
+            self.restoreGeometry(geom)
+        else:
+            self.resize(900, 300)
+
+    def update_stats(self, stats_list):
+        self.tree.clear()
+        self.no_curve_item = QTreeWidgetItem(self.tree, ["No Curve"])
+        self.no_curve_item.setExpanded(False)
+        has_no_curve = False
+        for idx, stats in enumerate(stats_list):
+            if stats:
+                    item = QTreeWidgetItem(self.tree, [
+                    f"Plot {idx+1} -> {stats[7]}",
+                    f"{stats[0]:.2f}", f"{stats[1]:.2f}",
+                    f"{stats[2]:.2f}", f"{stats[3]:.2f}",
+                    f"{stats[4]:.2f}", f"{stats[5]:.2f}",
+                    f"{stats[6]:.2f}" if not np.isinf(stats[6]) else "inf"
+                ])            
+            else:
+                has_no_curve = True
+                sub_item = QTreeWidgetItem(self.no_curve_item, [f"Plot {idx+1}", "", "", "", "", "", "", ""])
+        if not has_no_curve:
+            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))
+    
+    def closeEvent(self, event):
+        self._settings.setValue("mark_stats_geometry", self.saveGeometry())
+        super().closeEvent(event)
+
 class TimeCorrectionDialog(QDialog):
     def __init__(self, cur_factor=1.0, cur_offset=0.0, parent=None):
         super().__init__(parent)
@@ -1555,18 +1662,23 @@ class MainWindow(QMainWindow):
 
         # 顶部按钮栏：弹簧 + 光标按钮（右对齐）
         top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(0, 0, 5, 0)
+        top_bar.setContentsMargins(0, 0, 5, 5)
         
+        # 左侧按钮
         self.time_correction_btn = QPushButton("时间修正")
         self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
         top_bar.addWidget(self.time_correction_btn)
         
+        self.clear_all_plots_btn = QPushButton("清除绘图")
+        self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
+        top_bar.addWidget(self.clear_all_plots_btn)
+
+
+        # 中键占位
         top_bar.addStretch(1)
 
 
-
-
-        
+        # 右侧按钮        
         self.auto_range_btn = QPushButton("自动缩放")
         self.auto_range_btn.clicked.connect(self.auto_range_all_plots)
         
@@ -1578,25 +1690,24 @@ class MainWindow(QMainWindow):
         self.cursor_btn = QPushButton("显示光标")
         self.cursor_btn.setCheckable(True)
         self.cursor_btn.clicked.connect(self.toggle_cursor_all)
+
+        self.mark_region_btn = QPushButton("标记区域")
+        self.mark_region_btn.setCheckable(True)
+        self.mark_region_btn.clicked.connect(self.toggle_mark_region)
         
         self.grid_layout_btn = QPushButton("修改布局")
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
-
-        self.clear_all_plots_btn = QPushButton("清除绘图")
-        self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
-        #self.cursor_btn.setFixedSize(100, 28)
-
-        top_bar.addWidget(self.clear_all_plots_btn)
+        
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
+        top_bar.addWidget(self.mark_region_btn)
         top_bar.addWidget(self.auto_y_btn)
         top_bar.addWidget(self.auto_range_btn)
         
-
+        # 添加布局
         root_layout.addLayout(top_bar)
 
         # 真正容纳子图的布局
-        #self.plot_layout = QVBoxLayout()
         self.plot_layout=QGridLayout()
         self.plot_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         self.plot_layout.setSpacing(0)  # No spacing
@@ -1634,6 +1745,75 @@ class MainWindow(QMainWindow):
             file_path = sys.argv[1]
             self.load_csv_file(file_path)
 
+        # 标记区域相关
+        self.saved_mark_range = None
+        self.mark_stats_window = None
+        self._settings = QSettings("MyCompany", "MarkStatsWindow")
+        #self.resize(900, 300)
+
+    def toggle_mark_region(self, checked):
+        if checked:
+            self.mark_region_btn.setText("关闭标记")
+            # 添加标记区域
+            if len(self.plot_widgets) == 0:
+                self.mark_region_btn.setChecked(False)
+                return
+            if self.saved_mark_range:
+                min_x, max_x = self.saved_mark_range
+                view_min, view_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                if min_x >= view_min and max_x <= view_max:
+                    pass  # 沿用
+                else:
+                    # 新位置：中间1/3
+                    width = view_max - view_min
+                    min_x = view_min + width / 3
+                    max_x = view_min + 2 * width / 3
+            else:
+                # 默认中间1/3
+                view_min, view_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                width = view_max - view_min
+                min_x = view_min + width / 3
+                max_x = view_min + 2 * width / 3
+
+            for container in self.plot_widgets:
+                if container.isVisible():
+                    container.plot_widget.add_mark_region(min_x, max_x)
+
+            # 打开统计窗口
+            self.mark_stats_window = MarkStatsWindow.get_instance(self)
+            geom = self._settings.value("mark_stats_geometry")
+            if geom:
+                self.mark_stats_window.restoreGeometry(geom)
+            #self.mark_stats_window.resize(900,300)
+            self.mark_stats_window.show()
+            self.update_mark_stats()
+        else:
+            self.mark_region_btn.setText("标记区域")
+            # 保存当前范围
+            if self.plot_widgets and self.plot_widgets[0].plot_widget.mark_region:
+                self.saved_mark_range = self.plot_widgets[0].plot_widget.mark_region.getRegion()
+            for container in self.plot_widgets:
+                container.plot_widget.remove_mark_region()
+            if self.mark_stats_window:
+                self.mark_stats_window.hide()  # Hide instead of close to preserve state
+                # Do not set to None to maintain singleton
+
+    def sync_mark_regions(self, region_item):
+        min_x, max_x = region_item.getRegion()
+        for container in self.plot_widgets:
+            if container.isVisible() and container.plot_widget.mark_region and container.plot_widget.mark_region != region_item:
+                container.plot_widget.mark_region.setRegion([min_x, max_x])
+        self.update_mark_stats()
+
+    def update_mark_stats(self):
+        if self.mark_stats_window:
+            stats_list = []
+            for container in self.plot_widgets:
+                if container.isVisible():
+                    stats = container.plot_widget.get_mark_stats()
+                    stats_list.append(stats)
+            self.mark_stats_window.update_stats(stats_list)
+
     def open_layout_dialog(self):
         dlg = LayoutInputDialog(max_rows=self._plot_row_max_default, 
                                 max_cols=self._plot_col_max_default, 
@@ -1643,11 +1823,12 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             r, c = dlg.values()
             self.set_plots_visible (r, c)
+            self.update_mark_regions_on_layout_change()
 
     def open_time_correction_dialog(self):
-        dlg = TimeCorrectionDialog(cur_factor=self.factor, cur_offset=self.offset, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_factor, new_offset = dlg.values()
+        dialog = TimeCorrectionDialog(self.factor, self.offset, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_factor, new_offset = dialog.values()
             if new_factor <= 0:
                 QMessageBox.warning(self, "错误", "Factor 必须是正数")
                 return
@@ -1665,6 +1846,8 @@ class MainWindow(QMainWindow):
             # 更新所有图表的数据和限制，但不设置范围
             for container in self.plot_widgets:
                 container.plot_widget.update_time_correction(new_factor, new_offset)
+            self.update_mark_stats()
+            
 
             # 计算新范围
             if old_factor != 0:
@@ -1681,6 +1864,21 @@ class MainWindow(QMainWindow):
             # 统一设置范围
             for container in self.plot_widgets:
                 container.plot_widget.view_box.setXRange(new_min, new_max, padding=0)
+    def update_mark_regions_on_layout_change(self):
+        if self.mark_region_btn.isChecked():
+            # 移除旧的
+            if self.plot_widgets[0] and self.plot_widgets[0].plot_widget.mark_region:
+                self.saved_mark_range = self.plot_widgets[0].plot_widget.mark_region.getRegion()
+
+            for container in self.plot_widgets:
+                container.plot_widget.remove_mark_region()
+            # 添加新的到可见plot
+            view_min, view_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+            min_x, max_x = self.saved_mark_range if self.saved_mark_range else (view_min + (view_max - view_min) / 3, view_min + 2 * (view_max - view_min) / 3)
+            for container in self.plot_widgets:
+                if container.isVisible():
+                    container.plot_widget.add_mark_region(min_x, max_x)
+            self.update_mark_stats()
 
     def eventFilter(self, obj, event):
         etype = event.type()
@@ -1722,10 +1920,17 @@ class MainWindow(QMainWindow):
 
     def reset_plots_after_loading(self,index_xMin,index_xMax):
         for container in self.plot_widgets:
-             container.plot_widget.reset_plot(index_xMin,index_xMax)
+             container.plot_widget.reset_plot(index_xMin, index_xMax)
              container.plot_widget.clear_value_cache()
         # for plot_widget in self.plot_widgets:
         #     plot_widget.reset_plot(xMin,xMax)
+        self.saved_mark_range = None
+        if self.mark_stats_window:
+            self.mark_stats_window.hide()  # Hide instead of close
+            self.mark_stats_window.tree.clear()  # Clear stats to prevent duplication
+        if self.mark_region_btn.isChecked():
+            self.mark_region_btn.setChecked(False)
+            self.toggle_mark_region(False)
 
     # ---------------- 公用函数 ----------------
     def toggle_cursor_all(self, checked):
@@ -1747,6 +1952,8 @@ class MainWindow(QMainWindow):
         for container in self.plot_widgets:
             widget=container.plot_widget
             widget.clear_plot_item()
+        self.saved_mark_range = None
+        self.update_mark_stats()
 
     def auto_range_all_plots(self):
         for container in self.plot_widgets:
@@ -1798,6 +2005,8 @@ class MainWindow(QMainWindow):
             self.plot_layout.setRowStretch(r, 1)
         for c in range(n):
             self.plot_layout.setColumnStretch(c, 1)
+        if self.mark_region_btn.isChecked():
+            self.toggle_mark_region(True)
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
 
@@ -1820,6 +2029,7 @@ class MainWindow(QMainWindow):
 
         self._plot_row_current = row_set
         self._plot_col_current = col_set
+        self.update_mark_regions_on_layout_change()
             
         
     def load_btn_click(self):
@@ -1974,6 +2184,9 @@ class MainWindow(QMainWindow):
         self.reset_plots_after_loading(index_xMin=1, index_xMax=self.loader.datalength)
         self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{self.loader.path}]")
         self.filter_variables() 
+        if self.mark_region_btn.isChecked():
+            self.mark_region_btn.setChecked(False)
+            self.toggle_mark_region(False)
 
     def filter_variables(self):
         name_text = self.filter_input.text().lower()
