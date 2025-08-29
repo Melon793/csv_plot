@@ -10,7 +10,7 @@ os.environ["QT_LOGGING_RULES"] = (
     "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
 )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer,QSettings, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
 from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
@@ -51,7 +51,7 @@ class DataLoadThread(QThread):
                 descRows=self.descRows,
                 sep=self.sep,
                 hasunit=self.hasunit,
-                chunksize=10_000,          
+                chunksize=1000,          
                 _progress= _progress_cb,
             )
             self.finished.emit(loader)
@@ -69,7 +69,7 @@ class FastDataLoader:
         self,
         csv_path: str ,
         *,
-        max_rows_infer: int = 500,
+        max_rows_infer: int = 200,
         chunksize: int | None = None,
         usecols: list[str] | None = None,
         drop_empty: bool = False,
@@ -460,7 +460,7 @@ class PandasTableModel(QAbstractTableModel):
     
 class DataTableDialog(QDialog):
     _instance = None
-    _settings = QSettings("MyCompany", "DataTableDialog")
+    _saved_scroll_pos = None  # 类级变量存储滚动位置
 
     @classmethod
     def popup(cls, var_name: str, data, parent=None):
@@ -468,12 +468,16 @@ class DataTableDialog(QDialog):
             cls._instance = cls(parent)
 
         dlg = cls._instance
+        dlg.save_geom()
         if dlg.has_column(var_name):
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
             return dlg
-
+        
+        # 保存当前滚动位置
+        cls._saved_scroll_pos = dlg.main_view.verticalScrollBar().value() if dlg.main_view else None
+        dlg.load_geom()
         dlg.add_series(var_name, data)
         dlg.show()
         dlg.raise_()
@@ -482,7 +486,9 @@ class DataTableDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        #self._settings = QSettings("MyCompany", "DataTableDialog")
         self.setWindowTitle("变量数值表")
+        self.window_geometry = None 
 
         self.frozen_columns = []  # 冻结列列表 (变量名)
 
@@ -536,19 +542,27 @@ class DataTableDialog(QDialog):
         self.frozen_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
 
         # 恢复上一次的位置/大小
-        geom = self._settings.value("geometry")
-        if geom:
-            self.restoreGeometry(geom)
+        if self.parent().data_table_geometry:
+            self.restoreGeometry(self.parent().data_table_geometry)
         else:
             self.resize(400, 600)
+    def save_geom(self):
+        self.parent().data_table_geometry = self.saveGeometry()
+
+    def load_geom(self):
+        if self.parent().data_table_geometry is not None:
+            geom = self.parent().data_table_geometry
+            self.restoreGeometry(geom)
 
     def closeEvent(self, event):
+        self.parent().data_table_geometry = self.saveGeometry()
         self._df = pd.DataFrame()          # 释放内存
         self.main_view.setModel(None)
         self.frozen_view.setModel(None)
+        self._instance = None  # 重置实例
+        self._saved_scroll_pos = None  # 清空滚动位置记忆
         self.hide()
         event.accept()
-        self._settings.setValue("geometry", self.saveGeometry())
 
     def has_column(self, var_name: str) -> bool:
         return var_name in self._df.columns
@@ -565,6 +579,9 @@ class DataTableDialog(QDialog):
         # 更新视图显示的列
         self._update_views()
 
+        # 恢复滚动位置
+        if self._saved_scroll_pos is not None:
+            QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(self._saved_scroll_pos))
         # 滚动到新列（如果不是冻结列）
         if var_name not in self.frozen_columns:
             col_index = self._df.columns.get_loc(var_name)
@@ -895,7 +912,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.time_channels_info = time_channels_info
         self.synchronizer = synchronizer
         self.curve = None
-        self._value_cache: dict[str, tuple] = {}
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
         
 
@@ -1213,8 +1229,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.update_right_header("")
             
     def clear_value_cache(self):
-        self._value_cache: dict[str, tuple] = {}
-
+        #self._value_cache: dict[str, tuple] = {}
+        pass
     def datetime_to_unix_seconds(self,series: pd.Series) -> pd.Series:
         if "ns" in str(series.dtype):
             return series.astype("int64") / 10**9
@@ -1226,16 +1242,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             raise ValueError(f"Unsupported datetime dtype: {series.dtype}")
         
     def get_value_from_name(self,var_name)-> tuple | None:
-        if var_name in self._value_cache:
-            #y_values, self.y_format = self._value_cache[var_name]
-            return self._value_cache[var_name]
+        main_window = self.window()
+        if var_name in main_window.value_cache:
+            return main_window.value_cache[var_name]
 
         raw_values = self.data[var_name]
         dtype_kind = raw_values.dtype.kind
         if dtype_kind in "iuf":
             y_values = raw_values
             y_format = 'number'
-
+            return y_values, y_format
         elif var_name in self.time_channels_info:
             fmt = self.time_channels_info[var_name]
             try:
@@ -1267,7 +1283,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return None,None
         
         # finally
-        self._value_cache[var_name] = (y_values, y_format)
+        main_window.value_cache[var_name] = (y_values, y_format)
         return y_values, y_format
     
     def update_time_correction(self, new_factor, new_offset):
@@ -1526,8 +1542,15 @@ class MarkStatsWindow(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._settings = QSettings("MyCompany", "MarkStatsWindow")
+        self.window_geometry = None  # 存储几何信息
         self.setWindowTitle("标记区域统计")
+
+        # 取消关闭按钮
+        flags = self.windowFlags()
+        flags |= Qt.WindowType.CustomizeWindowHint
+        flags &= ~Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
+
         self.tree = QTreeWidget(self)
         self.tree.setHeaderLabels(["Plot", "x1", "x2", "y1", "y2", "dx", "dy", "slope"])
         self.tree.setColumnWidth(0,200)
@@ -1536,9 +1559,8 @@ class MarkStatsWindow(QDialog):
         layout.addWidget(self.tree)
         self.no_curve_item = QTreeWidgetItem(self.tree, ["No Curve"])
         self.no_curve_item.setExpanded(False)
-        geom = self._settings.value("mark_stats_geometry")
-        if geom:
-            self.restoreGeometry(geom)
+        if self.parent().mark_stats_geometry:
+            self.restoreGeometry(self.parent().mark_stats_geometry)
         else:
             self.resize(900, 300)
 
@@ -1562,15 +1584,21 @@ class MarkStatsWindow(QDialog):
         if not has_no_curve:
             self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))    
     def save_geom(self):
-        self._settings.setValue("mark_stats_geometry", self.saveGeometry())
+        self.parent().mark_stats_geometry = self.saveGeometry()
+
+    def load_geom(self):
+        if self.parent().mark_stats_geometry is not None:
+            geom = self.parent().mark_stats_geometry
+            self.restoreGeometry(geom)
 
     def closeEvent(self, event):
-        self.save_geom
+        self.save_geom()
         super().closeEvent(event)
 
 class TimeCorrectionDialog(QDialog):
     def __init__(self, cur_factor=1.0, cur_offset=0.0, parent=None):
         super().__init__(parent)
+        self.window_geometry = None  # 存储几何信息
         self.setWindowTitle("时间修正")
 
         form = QFormLayout(self)
@@ -1599,8 +1627,15 @@ class TimeCorrectionDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         QTimer.singleShot(0, lambda: self.factor_spin.selectAll())
 
+        if self.parent().time_correction_geometry:
+            self.restoreGeometry(self.parent().time_correction_geometry)
+
     def values(self):
         return self.factor_spin.value(), self.offset_spin.value()
+
+    def closeEvent(self, event):
+        self.parent().time_correction_geometry = self.saveGeometry()
+        super().closeEvent(event)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1616,6 +1651,14 @@ class MainWindow(QMainWindow):
         self.time_channels_infos = None
         self.data = None
         self.data_validity = None
+
+        # 窗口几何信息
+        self.data_table_geometry = None
+        self.mark_stats_geometry = None
+        self.time_correction_geometry = None
+
+        # value cache
+        self.value_cache = {}
 
         # ---------------- 中央控件 ----------------
         central = QWidget()
@@ -1670,7 +1713,10 @@ class MainWindow(QMainWindow):
         self.time_correction_btn = QPushButton("时间修正")
         self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
         top_bar.addWidget(self.time_correction_btn)
-        
+        self.reload_btn = QPushButton("重新加载数据")
+        self.reload_btn.clicked.connect(self.reload_data)
+        top_bar.addWidget(self.reload_btn)
+
         self.clear_all_plots_btn = QPushButton("清除绘图")
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
@@ -1750,8 +1796,109 @@ class MainWindow(QMainWindow):
         # 标记区域相关
         self.saved_mark_range = None
         self.mark_stats_window = None
-        self._settings = QSettings("MyCompany", "MarkStatsWindow")
+        # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
+
+    def reload_data(self):
+        if not hasattr(self, 'loader') or not self.loader or not self.loader.path or not os.path.isfile(self.loader.path):
+            QMessageBox.critical(self, "错误", "文件路径无效，无法重新加载")
+            return
+
+        file_path = self.loader.path
+        file_ext = os.path.splitext(file_path)[1].lower()
+
+        # load default
+        delimiter_typ = ','
+        descRows = 0
+        hasunit = True
+
+        # try to load config json files
+        if os.path.isfile("config_dict.json"):
+            try:
+                config_dict=self.load_dict("config_dict.json")
+                ext_dict=config_dict.get(file_ext[1:],{})
+                delimiter_typ=ext_dict.get('sep')
+                descRows = int(ext_dict.get('skiprows'))
+                hasunit = bool(ext_dict.get('hasunit'))
+
+            except Exception as e:     
+                print(f"配置文件读取失败: {e}")
+        else:
+            if file_ext in ['.csv','.txt']:
+                delimiter_typ = ','
+                descRows = 0
+                hasunit = True
+            elif file_ext in ['.mfile','.t00','.t01']:
+                delimiter_typ = '\t'
+                descRows = 2
+                hasunit=True                    
+            else:
+                QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
+                return
+
+        # 保存当前xRange
+        if self.plot_widgets:
+            curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+        else:
+            curr_min, curr_max = 1, self.loader.datalength if hasattr(self, 'loader') else 1
+
+        # 重新加载loader
+        loader = FastDataLoader(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+        self.loader = loader
+
+        # 更新数据但不重置plot
+        self.var_names = self.loader.var_names
+        self.units = self.loader.units
+        self.time_channels_infos = self.loader.time_channels_info
+        self.data_validity = self.loader.df_validity
+        self.list_widget.populate(self.var_names, self.units, self.data_validity)  # 应用过滤器
+        self.filter_variables()
+
+        # 更新所有 plot_widgets 的数据
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            widget.data = self.loader.df
+            widget.units = self.loader.units
+            widget.time_channels_info = self.loader.time_channels_info
+
+            # 更新曲线如果存在
+            if widget.curve:
+                var_name = widget.curve.name()
+                y_values, y_format = widget.get_value_from_name(var_name)
+                if y_values is not None:
+                    widget.y_format = y_format
+                    widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
+                    x_values = widget.offset + widget.factor * widget.original_index_x
+                    widget.curve.setData(x_values, widget.original_y)
+
+                    full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
+                    widget.update_left_header(full_title)
+
+                    min_x = np.min(x_values)
+                    max_x = np.max(x_values)
+                    limits_xMin = min_x - 0.1 * (max_x - min_x)
+                    limits_xMax = max_x + 0.1 * (max_x - min_x)
+                    widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
+
+                    widget.vline.setBounds([min(x_values), max(x_values)])
+
+        # 恢复xRange
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            widget.view_box.setXRange(curr_min, curr_max, padding=0)
+
+        # 更新DataTableDialog如果打开
+        if DataTableDialog._instance:
+            DataTableDialog._instance._df = self.loader.df
+            DataTableDialog._instance.model = PandasTableModel(self.loader.df)
+            DataTableDialog._instance.main_view.setModel(DataTableDialog._instance.model)
+            DataTableDialog._instance.frozen_view.setModel(DataTableDialog._instance.model)
+            DataTableDialog._instance._update_views()
+            # 恢复滚动位置
+            if DataTableDialog._saved_scroll_pos is not None:
+                DataTableDialog._instance.main_view.verticalScrollBar().setValue(DataTableDialog._saved_scroll_pos)
+
+        self.update_mark_stats()
 
     def toggle_mark_region(self, checked):
         if checked:
@@ -1783,9 +1930,12 @@ class MainWindow(QMainWindow):
 
             # 打开统计窗口
             self.mark_stats_window = MarkStatsWindow.get_instance(self)
-            geom = self._settings.value("mark_stats_geometry")
+            geom = self.mark_stats_window.load_geom()
             if geom:
                 self.mark_stats_window.restoreGeometry(geom)
+            # geom = self.mark_stats_window._settings.value("geometry")
+            # if geom:
+            #     self.mark_stats_window.restoreGeometry(geom)
             #self.mark_stats_window.resize(900,300)
             self.mark_stats_window.show()
             self.update_mark_stats()
@@ -1830,6 +1980,8 @@ class MainWindow(QMainWindow):
 
     def open_time_correction_dialog(self):
         dialog = TimeCorrectionDialog(self.factor, self.offset, self)
+        if dialog.window_geometry:
+            dialog.restoreGeometry(dialog.window_geometry)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_factor, new_offset = dialog.values()
             if new_factor <= 0:
@@ -2102,14 +2254,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
                 return status
         
-        _Threshold_Size_Mb=20 
+        _Threshold_Size_Mb=5 
 
-        # < 20 MB 直接读
+        # < 5 MB 直接读
         file_size =os.path.getsize(file_path)
         if file_size < _Threshold_Size_Mb * 1024 * 1024:               
             status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
         else:
-            # 20 MB 以上走线程
+            # 5 MB 以上走线程
             self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
             self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
             self._progress.setAutoClose(True)
