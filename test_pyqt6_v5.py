@@ -62,14 +62,14 @@ class FastDataLoader:
     # 脏数据清单
     _NA_VALUES = [
         "", "nan", "NaN", "NAN", "NULL", "null", "None",
-        "Inf", "inf", "-inf", "-Inf", "1.#INF", "-1.#INF", "data err", '* *', '----',
+        "Inf", "inf", "-inf", "-Inf", "1.#INF", "-1.#INF", "data err", '* *', '----', 'Infinity', 'no value'
     ]
     from typing import Callable
     def __init__(
         self,
         csv_path: str ,
         *,
-        max_rows_infer: int = 1000,
+        max_rows_infer: int = 500,
         chunksize: int | None = None,
         usecols: list[str] | None = None,
         drop_empty: bool = False,
@@ -126,7 +126,7 @@ class FastDataLoader:
         gc.collect()
         # 计算 chunk 大小
         if chunksize is None:
-            chunksize = 10_000
+            chunksize = 500
         
         #print(f"chunk size is {chunksize}")
         # 正式读取
@@ -1104,22 +1104,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
         delta = ev.angleDelta().y()
-
-        
-        if ev.modifiers() and Qt.KeyboardModifier.ShiftModifier:  # 检测Shift键按下状态 
-            if delta > 0:
-                vb.scaleBy((1, 0.8))  # 仅缩放Y轴
-            elif delta < 0:
-                vb.scaleBy((1, 1.2))  # 仅缩放Y轴
-        else:  # 默认情况缩放X轴
+        # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
+        if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
             if delta > 0:
                 vb.scaleBy((0.8, 1))
+                ev.accept()  # 确保事件被处理
             elif delta < 0:
                 vb.scaleBy((1.2, 1))
+                ev.accept()  # 确保事件被处理
             else:
                 super().wheelEvent(ev)
+        else:
+            # 有按键按下，交给父类默认处理（或自己写别的逻辑）
+            super().wheelEvent(ev)
         
-        ev.accept()  # 确保事件被处理
+        #ev.accept()  # 确保事件被处理
     
     def mouse_moved(self, evt):
         """鼠标移动事件处理"""
@@ -1242,7 +1241,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             try:
                 if "%H:%M:%S" in fmt:
                     #time
-                    times = pd.to_datetime(raw_values, format="%H:%M:%S", errors="coerce")
+                    times = pd.to_datetime(raw_values, format=fmt, errors="coerce")
                     today = pd.Timestamp.today().normalize()
                     dt_values = today + (times.dt.hour.astype("timedelta64[h]") +
                         times.dt.minute.astype("timedelta64[m]") +
@@ -1531,7 +1530,8 @@ class MarkStatsWindow(QDialog):
         self.setWindowTitle("标记区域统计")
         self.tree = QTreeWidget(self)
         self.tree.setHeaderLabels(["Plot", "x1", "x2", "y1", "y2", "dx", "dy", "slope"])
-        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.setColumnWidth(0,200)
+        #self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         layout = QVBoxLayout(self)
         layout.addWidget(self.tree)
         self.no_curve_item = QTreeWidgetItem(self.tree, ["No Curve"])
@@ -1560,10 +1560,12 @@ class MarkStatsWindow(QDialog):
                 has_no_curve = True
                 sub_item = QTreeWidgetItem(self.no_curve_item, [f"Plot {idx+1}", "", "", "", "", "", "", ""])
         if not has_no_curve:
-            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))
-    
-    def closeEvent(self, event):
+            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))    
+    def save_geom(self):
         self._settings.setValue("mark_stats_geometry", self.saveGeometry())
+
+    def closeEvent(self, event):
+        self.save_geom
         super().closeEvent(event)
 
 class TimeCorrectionDialog(QDialog):
@@ -1795,6 +1797,7 @@ class MainWindow(QMainWindow):
             for container in self.plot_widgets:
                 container.plot_widget.remove_mark_region()
             if self.mark_stats_window:
+                self.mark_stats_window.save_geom()
                 self.mark_stats_window.hide()  # Hide instead of close to preserve state
                 # Do not set to None to maintain singleton
 
