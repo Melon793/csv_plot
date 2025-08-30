@@ -450,7 +450,7 @@ class PandasTableModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal:
             col_name = str(self._df.columns[section])
             unit = self._units.get(col_name, '')
-            return f"{col_name} \n({unit})" if unit else col_name
+            return f"{col_name}\n({unit})" if unit else col_name
         return str(section + 1)           # 行号 1-based
 
     def removeColumns(self, column, count, parent=QModelIndex()):
@@ -2446,7 +2446,7 @@ class MainWindow(QMainWindow):
 
         # 激活按钮
         self.set_button_status(True)
-
+        self.loaded_path=self.loader.path
         # 如果尚未创建子图矩阵，则创建
         if not self.plot_widgets:
             self.create_subplots_matrix(self._plot_row_max_default, self._plot_col_max_default)
