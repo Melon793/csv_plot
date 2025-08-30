@@ -51,7 +51,7 @@ class DataLoadThread(QThread):
                 descRows=self.descRows,
                 sep=self.sep,
                 hasunit=self.hasunit,
-                chunksize=1000,          
+                chunksize=3600,          
                 _progress= _progress_cb,
             )
             self.finished.emit(loader)
@@ -126,7 +126,7 @@ class FastDataLoader:
         gc.collect()
         # 计算 chunk 大小
         if chunksize is None:
-            chunksize = 500
+            chunksize = 3600
         
         #print(f"chunk size is {chunksize}")
         # 正式读取
@@ -426,9 +426,10 @@ class DropOverlay(QWidget):
 
 class PandasTableModel(QAbstractTableModel):
     """只读官方虚拟模型，支持千万行秒开"""
-    def __init__(self, df: pd.DataFrame, parent=None):
+    def __init__(self, df: pd.DataFrame, units: dict[str, str], parent=None):
         super().__init__(parent)
         self._df = df
+        self._units = units
 
     # 三个必须实现的纯虚函数
     def rowCount(self, parent=QModelIndex()):
@@ -447,7 +448,9 @@ class PandasTableModel(QAbstractTableModel):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
-            return str(self._df.columns[section])
+            col_name = str(self._df.columns[section])
+            unit = self._units.get(col_name, '')
+            return f"{col_name} \n({unit})" if unit else col_name
         return str(section + 1)           # 行号 1-based
 
     def removeColumns(self, column, count, parent=QModelIndex()):
@@ -501,7 +504,8 @@ class DataTableDialog(QDialog):
         self.frozen_view = QTableView(self)
         self.frozen_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.frozen_view.verticalHeader().setVisible(False)
+        self.frozen_view.verticalHeader().setVisible(True)  # 默认启用
+        self.frozen_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
         self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.frozen_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -511,14 +515,15 @@ class DataTableDialog(QDialog):
         # 主视图 (右侧)
         self.main_view = QTableView(self)
         self.main_view.setSortingEnabled(True)
-        self.main_view.verticalHeader().setVisible(False)
+        self.main_view.verticalHeader().setVisible(False)  # 默认隐藏
+        self.main_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
         self.main_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.main_view.horizontalHeader().setSectionsMovable(True)
         self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
         self.main_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         content_layout.addWidget(self.frozen_view)
-        content_layout.addWidget(self.main_view)
+        content_layout.addWidget(self.main_view)       
 
         layout = QVBoxLayout(self)
         layout.addLayout(content_layout)
@@ -526,6 +531,7 @@ class DataTableDialog(QDialog):
         # 内部 DataFrame
         self._df = pd.DataFrame()
         self.model = None
+        self.units = {}
 
         # 设置字体
         font = self.main_view.horizontalHeader().font()
@@ -545,7 +551,7 @@ class DataTableDialog(QDialog):
         if self.parent().data_table_geometry:
             self.restoreGeometry(self.parent().data_table_geometry)
         else:
-            self.resize(400, 600)
+            self.resize(600, 400)
     def save_geom(self):
         self.parent().data_table_geometry = self.saveGeometry()
 
@@ -570,9 +576,11 @@ class DataTableDialog(QDialog):
     def add_series(self, var_name: str, data: pd.Series):
         # 追加列
         self._df[var_name] = data
-
+        # 获取 units（从 parent 的 loader 获取）
+        if hasattr(self.parent(), 'loader') and self.parent().loader:
+            self.units = self.parent().loader.units
         # 更新模型
-        self.model = PandasTableModel(self._df)
+        self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
 
@@ -616,6 +624,14 @@ class DataTableDialog(QDialog):
             self.frozen_view.hide()
         else:
             self.frozen_view.show()
+
+        # 更新行号显示
+        if frozen_count > 0:
+            self.frozen_view.verticalHeader().setVisible(True)
+            self.main_view.verticalHeader().setVisible(False)
+        else:
+            self.frozen_view.verticalHeader().setVisible(False)
+            self.main_view.verticalHeader().setVisible(True)
 
     def freeze_column(self, logical_col):
         var_name = self._df.columns[logical_col]
@@ -914,8 +930,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.curve = None
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
         
-
+        self.y_name = ''
         self.y_format = ''
+        self.x_name = ''
+        self.x_format = ''
+
         self.xMin:int =0 
         self.xMax:int =1 
         # 添加顶部文本区域
@@ -975,7 +994,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """)
         self.label_right.setSizePolicy(QSizePolicy.Policy.Minimum,
                                        QSizePolicy.Policy.Preferred)
-        #self.label_right.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        #self.label_right.setAlignment(Qt.AlignmentFlag.AlignBottom| Qt.AlignmentFlag.AlignRight)
         proxy_right = QGraphicsProxyWidget()
         proxy_right.setWidget(self.label_right)
         
@@ -1056,7 +1075,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         self.xMin = xMin
         self.xMax = xMax
-
+        # self.x_name = ''
+        # self.x_format = ''
+        self.y_name = ''
+        self.y_format = ''
         #self.plot_item.update()
         self.plot_item.clearPlots() 
         self.axis_y.setLabel(text="")
@@ -1122,11 +1144,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         delta = ev.angleDelta().y()
         # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
         if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
-            if delta > 0:
-                vb.scaleBy((0.8, 1))
-                ev.accept()  # 确保事件被处理
-            elif delta < 0:
-                vb.scaleBy((1.2, 1))
+            if delta != 0:
+                # 获取鼠标位置
+                mouse_pos = ev.position().toPoint()
+                scene_pos = self.mapToScene(mouse_pos)
+                view_pos = vb.mapSceneToView(scene_pos)
+                mouse_x = view_pos.x()
+                mouse_y = view_pos.y()
+
+                factor = 0.8 if delta > 0 else 1.2
+                vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
                 ev.accept()  # 确保事件被处理
             else:
                 super().wheelEvent(ev)
@@ -1342,7 +1369,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         
         y_values,y_format = self.get_value_from_name(var_name=var_name)
-
+        
         if y_values is None:
             QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
             event.acceptProposedAction()
@@ -1350,6 +1377,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 如果正常
         self.y_format=y_format
+        self.y_name = var_name
         self.original_index_x = np.arange(1, len(y_values) + 1)
         self.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
         x_values = self.offset + self.factor * self.original_index_x
@@ -1408,6 +1436,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         #self.plot_item.update()
         self.plot_item.clearPlots() 
         self.axis_y.setLabel(text="")
+        self.y_name = ''
+        self.y_format=''
         self.update_left_header("channel name")
         self.update_right_header("")
         self.curve = None
@@ -1646,6 +1676,7 @@ class MainWindow(QMainWindow):
         self.factor = 1.0
         self.offset = 0.0
 
+        self.loaded_path = ''
         self.var_names = None
         self.units = None
         self.time_channels_infos = None
@@ -1666,7 +1697,6 @@ class MainWindow(QMainWindow):
 
         # 总水平布局：左侧变量列表 + 右侧绘图区
         main_layout = QHBoxLayout(central)
-        #main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for precise alignment
 
         # ---------------- 左侧变量列表 ----------------
@@ -1675,7 +1705,13 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(5, 5, 5, 5)
 
-        left_layout.addWidget(QLabel("变量列表"))
+        # 左侧大标题
+        left_layout_title=QLabel("变量列表")
+        font = left_layout_title.font()
+        font.setBold(True)
+        left_layout_title.setFont(font)
+        #left_layout_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_layout.addWidget(left_layout_title)
 
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("输入变量名关键词（空格分隔）")
@@ -1689,7 +1725,7 @@ class MainWindow(QMainWindow):
         self.unit_filter_input.textChanged.connect(self.filter_variables)
         left_layout.addWidget(self.unit_filter_input)
 
-        self.load_btn = QPushButton("导入 CSV")
+        self.load_btn = QPushButton("导入数据文件")
         self.load_btn.clicked.connect(self.load_btn_click)
         left_layout.addWidget(self.load_btn)
 
@@ -1711,8 +1747,10 @@ class MainWindow(QMainWindow):
         
         # 左侧按钮
         self.time_correction_btn = QPushButton("时间修正")
+        
         self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
         top_bar.addWidget(self.time_correction_btn)
+
         self.reload_btn = QPushButton("重新加载数据")
         self.reload_btn.clicked.connect(self.reload_data)
         top_bar.addWidget(self.reload_btn)
@@ -1745,7 +1783,8 @@ class MainWindow(QMainWindow):
         
         self.grid_layout_btn = QPushButton("修改布局")
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
-        
+
+        self.set_button_status(False)
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
@@ -1798,13 +1837,23 @@ class MainWindow(QMainWindow):
         self.mark_stats_window = None
         # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
+    def set_button_status(self,status:bool):
+        if status is not None:
+            self.time_correction_btn.setEnabled(status)
+            self.reload_btn.setEnabled(status)
+            self.clear_all_plots_btn.setEnabled(status)
+            self.auto_range_btn.setEnabled(status)
+            self.auto_y_btn.setEnabled(status)
+            self.cursor_btn.setEnabled(status)
+            self.mark_region_btn.setEnabled(status)
+            self.grid_layout_btn.setEnabled(status)
 
     def reload_data(self):
         if not hasattr(self, 'loader') or not self.loader or not self.loader.path or not os.path.isfile(self.loader.path):
             QMessageBox.critical(self, "错误", "文件路径无效，无法重新加载")
             return
 
-        file_path = self.loader.path
+        file_path = self.loaded_path
         file_ext = os.path.splitext(file_path)[1].lower()
 
         # load default
@@ -1860,32 +1909,33 @@ class MainWindow(QMainWindow):
             widget.data = self.loader.df
             widget.units = self.loader.units
             widget.time_channels_info = self.loader.time_channels_info
+        self.replots_after_loading()
 
-            # 更新曲线如果存在
-            if widget.curve:
-                var_name = widget.curve.name()
-                y_values, y_format = widget.get_value_from_name(var_name)
-                if y_values is not None:
-                    widget.y_format = y_format
-                    widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
-                    x_values = widget.offset + widget.factor * widget.original_index_x
-                    widget.curve.setData(x_values, widget.original_y)
+        #     # 更新曲线如果存在
+        #     if widget.curve:
+        #         var_name = widget.curve.name()
+        #         y_values, y_format = widget.get_value_from_name(var_name)
+        #         if y_values is not None:
+        #             widget.y_format = y_format
+        #             widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
+        #             x_values = widget.offset + widget.factor * widget.original_index_x
+        #             widget.curve.setData(x_values, widget.original_y)
 
-                    full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
-                    widget.update_left_header(full_title)
+        #             full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
+        #             widget.update_left_header(full_title)
 
-                    min_x = np.min(x_values)
-                    max_x = np.max(x_values)
-                    limits_xMin = min_x - 0.1 * (max_x - min_x)
-                    limits_xMax = max_x + 0.1 * (max_x - min_x)
-                    widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
+        #             min_x = np.min(x_values)
+        #             max_x = np.max(x_values)
+        #             limits_xMin = min_x - 0.1 * (max_x - min_x)
+        #             limits_xMax = max_x + 0.1 * (max_x - min_x)
+        #             widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
 
-                    widget.vline.setBounds([min(x_values), max(x_values)])
+        #             widget.vline.setBounds([min(x_values), max(x_values)])
 
-        # 恢复xRange
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-            widget.view_box.setXRange(curr_min, curr_max, padding=0)
+        # # 恢复xRange
+        # for container in self.plot_widgets:
+        #     widget = container.plot_widget
+        #     widget.view_box.setXRange(curr_min, curr_max, padding=0)
 
         # 更新DataTableDialog如果打开
         if DataTableDialog._instance:
@@ -1899,6 +1949,77 @@ class MainWindow(QMainWindow):
                 DataTableDialog._instance.main_view.verticalScrollBar().setValue(DataTableDialog._saved_scroll_pos)
 
         self.update_mark_stats()
+
+    def replots_after_loading(self):
+        # 收集所有 y_name (包括未显示的)
+        all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
+        unique_y_names = set(all_y_names)
+        if not unique_y_names:
+            self.reset_plots_after_loading(1, self.loader.datalength)
+            return
+
+        # 找到在新数据中存在的有效 y_name
+        found = [y for y in unique_y_names if y in self.loader.var_names and self.loader.df_validity.get(y, -1) == 1]
+        ratio = len(found) / len(unique_y_names)
+
+        if ratio <= 0.3 or len(found) < 1:
+            self.reset_plots_after_loading(1, self.loader.datalength)
+        else:
+            self.value_cache = {}
+            cleared = []
+            for idx, container in enumerate(self.plot_widgets):
+                widget = container.plot_widget
+                y_name = widget.y_name
+                if not y_name:
+                    continue
+                if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) == 1:
+                    y_values, y_format = widget.get_value_from_name(y_name)
+                    if y_values is not None:
+                        widget.y_format = y_format
+                        widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
+                        x_values = widget.offset + widget.factor * widget.original_index_x
+                        widget.curve.setData(x_values, widget.original_y)
+
+                        full_title = f"{y_name} ({self.loader.units.get(y_name, '')})".strip()
+                        widget.update_left_header(full_title)
+
+                        # 更新 limits
+                        min_x = np.min(x_values)
+                        max_x = np.max(x_values)
+                        limits_xMin = min_x - 0.1 * (max_x - min_x)
+                        limits_xMax = max_x + 0.1 * (max_x - min_x)
+                        widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
+
+                        min_y = np.nanmin(widget.original_y)
+                        max_y = np.nanmax(widget.original_y)
+                        if min_y == max_y:
+                            y_center = min_y
+                            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
+                            widget.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
+                        else:
+                            widget.plot_item.setLimits(yMin=min_y - 0.5*(max_y - min_y), yMax=max_y + 0.5*(max_y - min_y))
+
+                        widget.vline.setBounds([min(x_values), max(x_values)])
+                    else:
+                        widget.clear_plot_item()
+                        cleared.append((idx + 1, "无效数据"))
+                else:
+                    widget.clear_plot_item()
+                    reason = "未找到变量" if y_name not in self.loader.df.columns else "无效数据"
+                    cleared.append((idx + 1, reason))
+
+            # 恢复 xRange
+            if self.plot_widgets:
+                curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                for container in self.plot_widgets:
+                    container.plot_widget.view_box.setXRange(curr_min, curr_max, padding=0)
+
+            # 如果有清除，弹窗
+            if cleared:
+                msg = "以下图表被清除：\n"
+                for plot_idx, reason in cleared:
+                    msg += f"Plot {plot_idx}: {reason}\n"
+                QMessageBox.information(self, "更新通知", msg)
 
     def toggle_mark_region(self, checked):
         if checked:
@@ -2258,8 +2379,11 @@ class MainWindow(QMainWindow):
 
         # < 5 MB 直接读
         file_size =os.path.getsize(file_path)
-        if file_size < _Threshold_Size_Mb * 1024 * 1024:               
+        if file_size < _Threshold_Size_Mb * 1024 * 1024:
             status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+            if status == True:
+                self.set_button_status(True)
+                #self.loaded_path = file_path
         else:
             # 5 MB 以上走线程
             self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
@@ -2315,12 +2439,18 @@ class MainWindow(QMainWindow):
         self.time_channels_infos = self.loader.time_channels_info
         self.data_validity = self.loader.df_validity
         self.list_widget.populate(self.var_names, self.units, self.data_validity)
-        # 移除占位符
-        self.placeholder_label.setParent(None)
 
-        # 现在创建子图矩阵
-        self.create_subplots_matrix(self._plot_row_max_default, self._plot_col_max_default)
-        self.set_plots_visible(self._plot_row_current, self._plot_col_current)
+        # 移除占位符
+        if self.placeholder_label.parent():
+            self.placeholder_label.setParent(None)
+
+        # 激活按钮
+        self.set_button_status(True)
+
+        # 如果尚未创建子图矩阵，则创建
+        if not self.plot_widgets:
+            self.create_subplots_matrix(self._plot_row_max_default, self._plot_col_max_default)
+            self.set_plots_visible(self._plot_row_current, self._plot_col_current)
 
         # 更新所有 plot_widgets 的数据
         for container in self.plot_widgets:
@@ -2328,6 +2458,9 @@ class MainWindow(QMainWindow):
             widget.data = self.loader.df
             widget.units = self.loader.units
             widget.time_channels_info = self.loader.time_channels_info
+
+        # 清除cache
+        self.value_cache = {}
 
         self.factor = 1.0
         self.offset = 0.0
