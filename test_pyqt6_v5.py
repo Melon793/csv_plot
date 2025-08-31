@@ -19,9 +19,9 @@ from PyQt6.QtWidgets import (
 )
 import pyqtgraph as pg
 
-global DEFAULT_PADDING_VAL
+global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING
 DEFAULT_PADDING_VAL= 0.02
-
+FILE_SIZE_LIMIT_BACKGROUND_LOADING = 5
 class DataLoadThread(QThread):
     # 信号：发送进度 0-100，或直接发 DataFrame
     progress = pyqtSignal(int)        # 百分比
@@ -1710,15 +1710,17 @@ class TimeCorrectionDialog(QDialog):
     def closeEvent(self, event):
         self.parent().time_correction_geometry = self.saveGeometry()
         super().closeEvent(event)
-
+        
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
         self.setWindowTitle(self.defaultTitle)
         self.resize(1600, 900)
-        self.factor = 1.0
-        self.offset = 0.0
+        self._factor_default  = 1
+        self._offset_default = 0
+        self.factor = self._factor_default
+        self.offset = self._offset_default
 
         self.loaded_path = ''
         self.var_names = None
@@ -1881,6 +1883,7 @@ class MainWindow(QMainWindow):
         self.mark_stats_window = None
         # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
+
     def set_button_status(self,status:bool):
         if status is not None:
             self.time_correction_btn.setEnabled(status)
@@ -1897,7 +1900,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "错误", "文件路径无效，无法重新加载")
             return
 
-        file_path = self.loaded_path
+        self._load_file(self.loader.path, is_reload=True)
+
+    def _load_file(self, file_path: str, is_reload: bool = False):
         file_ext = os.path.splitext(file_path)[1].lower()
 
         # load default
@@ -1929,23 +1934,105 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
                 return
 
-        # 保存当前xRange
-        if self.plot_widgets:
-            curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+        _Threshold_Size_Mb=5 
+
+        # < 5 MB 直接读
+        file_size =os.path.getsize(file_path)
+        if file_size < _Threshold_Size_Mb * 1024 * 1024:
+            status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+            if status:
+                self.set_button_status(True)
+                self._post_load_actions(file_path)
         else:
-            curr_min, curr_max = 1, self.loader.datalength if hasattr(self, 'loader') else 1
+            # 5 MB 以上走线程
+            self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
+            self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            self._progress.setAutoClose(True)
+            self._progress.setCancelButton(None)            # 不可取消
+            self._progress.show()
 
-        # 重新加载loader
-        loader = FastDataLoader(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
-        self.loader = loader
+            self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+            self._thread.progress.connect(self._progress.setValue)
+            self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
+            self._thread.error.connect(self._on_load_error)
+            self._thread.start()
 
-        # 更新数据但不重置plot
+    def _post_load_actions(self, file_path: str):
+        self.loaded_path = file_path
+        self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{file_path}]")
+        if DataTableDialog._instance is not None:
+            DataTableDialog._instance.close()   # 触发 closeEvent → 清空
+            DataTableDialog._instance = None
+
+    def load_btn_click(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
+        self.load_csv_file(file_path)
+
+    def load_csv_file(self, file_path: str):
+        if not file_path or not os.path.isfile(file_path):
+            return
+        self.raise_()  # Bring window to front
+        self.activateWindow()  # Set focus
+        self._load_file(file_path)
+
+    @staticmethod
+    def load_dict(path: str, *, default=None) -> dict:
+        import ujson as json
+        if not os.path.exists(path):
+            return {} if default is None else default
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {} if default is None else default
+        
+    def _load_sync(self, 
+                   file_path:str,
+                   descRows:int =0,
+                   sep:str = ',',
+                   hasunit:bool=True):
+        """小文件直接读"""
+        loader = None
+        status = False
+        try:
+            loader = FastDataLoader(file_path, descRows=descRows,sep=sep,hasunit=hasunit)
+            self.loader = loader
+            self._apply_loader()
+            status = True
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", str(e))
+            status = False
+        finally:
+            if loader is not None:
+                loader = None
+            return status
+
+    def _on_load_done(self,loader, file_path: str):
+        self._progress.close()
+        self.loader=loader
+        self._apply_loader()
+        self._post_load_actions(file_path)
+
+    def _on_load_error(self, msg):
+        self._progress.close()
+        QMessageBox.critical(self, "读取失败", msg)
+
+    def _apply_loader(self):
+        """把 loader 的内容同步到 UI"""
         self.var_names = self.loader.var_names
         self.units = self.loader.units
         self.time_channels_infos = self.loader.time_channels_info
         self.data_validity = self.loader.df_validity
-        self.list_widget.populate(self.var_names, self.units, self.data_validity)  # 应用过滤器
-        self.filter_variables()
+        self.list_widget.populate(self.var_names, self.units, self.data_validity)
+
+        # 移除占位符
+        if self.placeholder_label.parent():
+            self.placeholder_label.setParent(None)
+
+        # 如果尚未创建子图矩阵，则创建
+        if not self.plot_widgets:
+            self.create_subplots_matrix(self._plot_row_max_default, self._plot_col_max_default)
+            self.set_plots_visible(self._plot_row_current, self._plot_col_current)
 
         # 更新所有 plot_widgets 的数据
         for container in self.plot_widgets:
@@ -1953,117 +2040,41 @@ class MainWindow(QMainWindow):
             widget.data = self.loader.df
             widget.units = self.loader.units
             widget.time_channels_info = self.loader.time_channels_info
-        self.replots_after_loading()
 
-        #     # 更新曲线如果存在
-        #     if widget.curve:
-        #         var_name = widget.curve.name()
-        #         y_values, y_format = widget.get_value_from_name(var_name)
-        #         if y_values is not None:
-        #             widget.y_format = y_format
-        #             widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
-        #             x_values = widget.offset + widget.factor * widget.original_index_x
-        #             widget.curve.setData(x_values, widget.original_y)
+        # 清除cache
+        # self.value_cache = {}
 
-        #             full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
-        #             widget.update_left_header(full_title)
-
-        #             min_x = np.min(x_values)
-        #             max_x = np.max(x_values)
-        #             limits_xMin = min_x - 0.1 * (max_x - min_x)
-        #             limits_xMax = max_x + 0.1 * (max_x - min_x)
-        #             widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
-
-        #             widget.vline.setBounds([min(x_values), max(x_values)])
-
-        # # 恢复xRange
+        # self.factor = 1.0
+        # self.offset = 0.0
         # for container in self.plot_widgets:
         #     widget = container.plot_widget
-        #     widget.view_box.setXRange(curr_min, curr_max, padding=0)
+        #     widget.factor = 1.0
+        #     widget.offset = 0.0
 
-        # 更新DataTableDialog如果打开
-        if DataTableDialog._instance:
-            DataTableDialog._instance._df = self.loader.df
-            DataTableDialog._instance.model = PandasTableModel(self.loader.df,self.loader.units)
-            DataTableDialog._instance.main_view.setModel(DataTableDialog._instance.model)
-            DataTableDialog._instance.frozen_view.setModel(DataTableDialog._instance.model)
-            DataTableDialog._instance._update_views()
-            # 恢复滚动位置
-            if DataTableDialog._saved_scroll_pos is not None:
-                DataTableDialog._instance.main_view.verticalScrollBar().setValue(DataTableDialog._saved_scroll_pos)
+        self.replots_after_loading()
+        self.filter_variables() 
+        if self.mark_region_btn.isChecked():
+            self.mark_region_btn.setChecked(False)
+            self.toggle_mark_region(False)
 
-        self.update_mark_stats()
+    def filter_variables(self):
+        name_text = self.filter_input.text().lower()
+        unit_text = self.unit_filter_input.text().lower()
+        name_keywords = name_text.split() if name_text else []
+        unit_keywords = unit_text.split() if unit_text else []
 
-    def replots_after_loading(self):
-        # 收集所有 y_name (包括未显示的)
-        all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
-        unique_y_names = set(all_y_names)
-        if not unique_y_names:
-            self.reset_plots_after_loading(1, self.loader.datalength)
-            return
+        filtered_names = []
+        for var in self.var_names:
+            var_lower = var.lower()
+            unit = self.units.get(var, '').lower()
 
-        # 找到在新数据中存在的有效 y_name
-        found = [y for y in unique_y_names if y in self.loader.var_names and self.loader.df_validity.get(y, -1) == 1]
-        ratio = len(found) / len(unique_y_names)
+            name_match = not name_keywords or any(kw in var_lower for kw in name_keywords)
+            unit_match = not unit_keywords or any(kw in unit for kw in unit_keywords)
 
-        if ratio <= 0.3 or len(found) < 1:
-            self.reset_plots_after_loading(1, self.loader.datalength)
-        else:
-            self.value_cache = {}
-            cleared = []
-            for idx, container in enumerate(self.plot_widgets):
-                widget = container.plot_widget
-                y_name = widget.y_name
-                if not y_name:
-                    continue
-                if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) == 1:
-                    y_values, y_format = widget.get_value_from_name(y_name)
-                    if y_values is not None:
-                        widget.y_format = y_format
-                        widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
-                        x_values = widget.offset + widget.factor * widget.original_index_x
-                        widget.curve.setData(x_values, widget.original_y)
+            if name_match and unit_match:
+                filtered_names.append(var)
 
-                        full_title = f"{y_name} ({self.loader.units.get(y_name, '')})".strip()
-                        widget.update_left_header(full_title)
-
-                        # 更新 limits
-                        min_x = np.min(x_values)
-                        max_x = np.max(x_values)
-                        limits_xMin = min_x - 0.1 * (max_x - min_x)
-                        limits_xMax = max_x + 0.1 * (max_x - min_x)
-                        widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
-
-                        min_y = np.nanmin(widget.original_y)
-                        max_y = np.nanmax(widget.original_y)
-                        if min_y == max_y:
-                            y_center = min_y
-                            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
-                            widget.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
-                        else:
-                            widget.plot_item.setLimits(yMin=min_y - 0.5*(max_y - min_y), yMax=max_y + 0.5*(max_y - min_y))
-
-                        widget.vline.setBounds([min(x_values), max(x_values)])
-                    else:
-                        widget.clear_plot_item()
-                        cleared.append((idx + 1, "无效数据"))
-                else:
-                    widget.clear_plot_item()
-                    reason = "未找到变量" if y_name not in self.loader.df.columns else "无效数据"
-                    cleared.append((idx + 1, reason))
-
-            # 恢复 xRange
-            if self.plot_widgets:
-                curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-                for container in self.plot_widgets:
-                    container.plot_widget.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL)
-
-            # 如果有清除，弹窗
-            if cleared:
-                msg = "以下图表被清除：\n"
-                for plot_idx, reason in cleared:
-                    msg += f"Plot {plot_idx}: {reason}\n"
-                QMessageBox.information(self, "更新通知", msg)
+        self.list_widget.populate(filtered_names, self.units, self.data_validity)
 
     def toggle_mark_region(self, checked):
         if checked:
@@ -2350,195 +2361,80 @@ class MainWindow(QMainWindow):
         self._plot_row_current = row_set
         self._plot_col_current = col_set
         self.update_mark_regions_on_layout_change()
-            
-        
-    def load_btn_click(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
-        status = self.load_csv_file(file_path)
-        if status:
-            if DataTableDialog._instance is not None:
-                DataTableDialog._instance.close()   # 触发 closeEvent → 清空
-                DataTableDialog._instance = None
-            self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{file_path}]")
 
-    @staticmethod
-    def load_dict(path: str, *, default=None) -> dict:
-        import ujson as json
-        if not os.path.exists(path):
-            return {} if default is None else default
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return {} if default is None else default
-        
-    def load_csv_file(self,file_path):
-        #file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
-        
-        # raise window
-        self.raise_()  # Bring window to front
-        self.activateWindow()  # Set focus
+    def replots_after_loading(self):
+        # 收集所有 y_name (包括未显示的)
+        all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
+        unique_y_names = set(all_y_names)
+        if not unique_y_names:
+            self.reset_plots_after_loading(1, self.loader.datalength)
+            return
 
-        status = False
-        #data = pd.DataFrame()
-        if not file_path:
-            return status
-        
-        if not os.path.isfile(file_path):
-            QMessageBox.critical(self, "读取失败",f"文件不存在: {file_path}")
-            return status
-        
-        file_ext = os.path.splitext(file_path)[1].lower()
+        # 找到在新数据中存在的有效 y_name
+        found = [y for y in unique_y_names if y in self.loader.var_names and self.loader.df_validity.get(y, -1) == 1]
+        ratio = len(found) / len(unique_y_names)
 
-        # load default
-        delimiter_typ = ','
-        descRows = 0
-        hasunit = True
-
-        # try to load config json files
-        if os.path.isfile("config_dict.json"):
-            try:
-                config_dict=self.load_dict("config_dict.json")
-                ext_dict=config_dict.get(file_ext[1:],{})
-                delimiter_typ=ext_dict.get('sep')
-                descRows = int(ext_dict.get('skiprows'))
-                hasunit = bool(ext_dict.get('hasunit'))
-
-            except Exception as e:     
-                print(f"配置文件读取失败: {e}")
+        if ratio <= 0.3 or len(found) < 1:
+            self.reset_plots_after_loading(1, self.loader.datalength)
         else:
-            if file_ext in ['.csv','.txt']:
-                delimiter_typ = ','
-                descRows = 0
-                hasunit = True
-            elif file_ext in ['.mfile','.t00','.t01']:
-                delimiter_typ = '\t'
-                descRows = 2
-                hasunit=True                    
-            else:
-                QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
-                return status
-        
-        _Threshold_Size_Mb=5 
+            self.value_cache = {}
+            cleared = []
+            for idx, container in enumerate(self.plot_widgets):
+                widget = container.plot_widget
+                y_name = widget.y_name
+                # 更新 limits
+                original_index_x = np.arange(1, self.loader.datalength + 1)
+                min_x = widget.offset + widget.factor * np.min(original_index_x)
+                max_x = widget.offset + widget.factor * np.max(original_index_x)
+                limits_xMin = min_x - 0.1 * (max_x - min_x)
+                limits_xMax = max_x + 0.1 * (max_x - min_x)
+                widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
+                widget.vline.setBounds([min_x, max_x])
+                if not y_name:
+                    continue
+                if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) == 1:
+                    y_values, y_format = widget.get_value_from_name(y_name)
+                    if y_values is not None:
+                        widget.y_format = y_format
+                        widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
+                        widget.original_index_x = original_index_x
+                        x_values = widget.offset + widget.factor * widget.original_index_x
+                        widget.curve.setData(x_values, widget.original_y)
 
-        # < 5 MB 直接读
-        file_size =os.path.getsize(file_path)
-        if file_size < _Threshold_Size_Mb * 1024 * 1024:
-            status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
-            if status == True:
-                self.set_button_status(True)
-                #self.loaded_path = file_path
-        else:
-            # 5 MB 以上走线程
-            self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
-            self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-            self._progress.setAutoClose(True)
-            self._progress.setCancelButton(None)            # 不可取消
-            self._progress.show()
+                        full_title = f"{y_name} ({self.loader.units.get(y_name, '')})".strip()
+                        widget.update_left_header(full_title)
 
-            self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
-            self._thread.progress.connect(self._progress.setValue)
-            self._thread.finished.connect(self._on_load_done)
-            self._thread.error.connect(self._on_load_error)
-            self._thread.start()
+                        min_y = np.nanmin(widget.original_y)
+                        max_y = np.nanmax(widget.original_y)
+                        if min_y == max_y:
+                            y_center = min_y
+                            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
+                            widget.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
+                        else:
+                            widget.plot_item.setLimits(yMin=min_y - 0.5*(max_y - min_y), yMax=max_y + 0.5*(max_y - min_y))
 
-            status = True
+                        
+                    else:
+                        widget.clear_plot_item()
+                        cleared.append((idx + 1, "无效数据"))
+                else:
+                    widget.clear_plot_item()
+                    reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
+                    cleared.append((idx + 1, reason))
 
-        return status
+            # 恢复 xRange
+            if self.plot_widgets:
+                curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                for container in self.plot_widgets:
+                    widget = container.plot_widget
+                    widget.view_box.setXRange(curr_min, curr_max, padding=0)
 
-    def _load_sync(self, 
-                   file_path:str,
-                   descRows:int =0,
-                   sep:str = ',',
-                   hasunit:bool=True):
-        """小文件直接读"""
-        loader = None
-        status = False
-        try:
-            loader = FastDataLoader(file_path, descRows=descRows,sep=sep,hasunit=hasunit)
-            self.loader = loader
-            self._apply_loader()
-            status = True
-        except Exception as e:
-            QMessageBox.critical(self, "读取失败", str(e))
-            status = False
-        finally:
-            if loader is not None:
-                loader = None
-            return status
-
-    def _on_load_done(self,loader):
-        self._progress.close()
-        self.loader=loader
-        self._apply_loader()
-
-    def _on_load_error(self, msg):
-        self._progress.close()
-        QMessageBox.critical(self, "读取失败", msg)
-
-    def _apply_loader(self):
-        """把 loader 的内容同步到 UI"""
-        self.var_names = self.loader.var_names
-        self.units = self.loader.units
-        self.time_channels_infos = self.loader.time_channels_info
-        self.data_validity = self.loader.df_validity
-        self.list_widget.populate(self.var_names, self.units, self.data_validity)
-
-        # 移除占位符
-        if self.placeholder_label.parent():
-            self.placeholder_label.setParent(None)
-
-        # 激活按钮
-        self.set_button_status(True)
-        self.loaded_path=self.loader.path
-        # 如果尚未创建子图矩阵，则创建
-        if not self.plot_widgets:
-            self.create_subplots_matrix(self._plot_row_max_default, self._plot_col_max_default)
-            self.set_plots_visible(self._plot_row_current, self._plot_col_current)
-
-        # 更新所有 plot_widgets 的数据
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-            widget.data = self.loader.df
-            widget.units = self.loader.units
-            widget.time_channels_info = self.loader.time_channels_info
-
-        # 清除cache
-        self.value_cache = {}
-
-        self.factor = 1.0
-        self.offset = 0.0
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-            widget.factor = 1.0
-            widget.offset = 0.0
-
-        self.reset_plots_after_loading(index_xMin=1, index_xMax=self.loader.datalength)
-        self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{self.loader.path}]")
-        self.filter_variables() 
-        if self.mark_region_btn.isChecked():
-            self.mark_region_btn.setChecked(False)
-            self.toggle_mark_region(False)
-
-    def filter_variables(self):
-        name_text = self.filter_input.text().lower()
-        unit_text = self.unit_filter_input.text().lower()
-        name_keywords = name_text.split() if name_text else []
-        unit_keywords = unit_text.split() if unit_text else []
-
-        filtered_names = []
-        for var in self.var_names:
-            var_lower = var.lower()
-            unit = self.units.get(var, '').lower()
-
-            name_match = not name_keywords or any(kw in var_lower for kw in name_keywords)
-            unit_match = not unit_keywords or any(kw in unit for kw in unit_keywords)
-
-            if name_match and unit_match:
-                filtered_names.append(var)
-
-        self.list_widget.populate(filtered_names, self.units, self.data_validity)
-
+            # 如果有清除，弹窗
+            if cleared:
+                msg = "以下图表被清除：\n"
+                for plot_idx, reason in cleared:
+                    msg += f"Plot {plot_idx}: {reason}\n"
+                QMessageBox.information(self, "更新通知", msg)
 
 # ---------------- 主程序 ----------------
 if __name__ == "__main__":
