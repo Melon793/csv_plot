@@ -15,10 +15,12 @@ from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter,
 )
 import pyqtgraph as pg
 
+global DEFAULT_PADDING_VAL
+DEFAULT_PADDING_VAL= 0.02
 
 class DataLoadThread(QThread):
     # 信号：发送进度 0-100，或直接发 DataFrame
@@ -495,10 +497,10 @@ class DataTableDialog(QDialog):
 
         self.frozen_columns = []  # 冻结列列表 (变量名)
 
-        # 布局：使用 HBox 放置冻结视图和主视图
-        content_layout = QHBoxLayout()
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(0)
+        # 布局：使用 Splitter 放置冻结视图和主视图
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(5)
+        splitter.setChildrenCollapsible(False)
 
         # 冻结视图 (左侧)
         self.frozen_view = QTableView(self)
@@ -511,6 +513,7 @@ class DataTableDialog(QDialog):
         self.frozen_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.frozen_view.setStyleSheet("QTableView { background-color: rgba(245,245,245,128); }")
         self.frozen_view.horizontalHeader().customContextMenuRequested.connect(self._on_frozen_header_right_click)
+        self.frozen_view.horizontalHeader().setSectionsMovable(True)  # 启用拖动
 
         # 主视图 (右侧)
         self.main_view = QTableView(self)
@@ -522,11 +525,13 @@ class DataTableDialog(QDialog):
         self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
         self.main_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        content_layout.addWidget(self.frozen_view)
-        content_layout.addWidget(self.main_view)       
+        
+        splitter.addWidget(self.frozen_view)
+        splitter.addWidget(self.main_view)
+        splitter.setSizes([200, 400])  # 初始宽度：冻结200，主400
 
         layout = QVBoxLayout(self)
-        layout.addLayout(content_layout)
+        layout.addWidget(splitter)
 
         # 内部 DataFrame
         self._df = pd.DataFrame()
@@ -546,6 +551,10 @@ class DataTableDialog(QDialog):
         # 同步行高变化
         self.main_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
         self.frozen_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
+        
+        # 同步列顺序变化
+        self.main_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
+        self.frozen_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
 
         # 恢复上一次的位置/大小
         if self.parent().data_table_geometry:
@@ -612,12 +621,12 @@ class DataTableDialog(QDialog):
                 self.main_view.setColumnHidden(col, False)
                 self.frozen_view.setColumnHidden(col, True)
 
-        # 调整冻结视图宽度
-        frozen_width = 0
-        for i in range(self.model.columnCount()):
-            if not self.frozen_view.isColumnHidden(i):
-                frozen_width += self.frozen_view.columnWidth(i)
-        self.frozen_view.setFixedWidth(frozen_width + 2)  # +2 for borders
+        # # 调整冻结视图宽度
+        # frozen_width = 0
+        # for i in range(self.model.columnCount()):
+        #     if not self.frozen_view.isColumnHidden(i):
+        #         frozen_width += self.frozen_view.columnWidth(i)
+        # self.frozen_view.setFixedWidth(frozen_width + 2)  # +2 for borders
 
         # 如果没有冻结列，隐藏冻结视图
         if frozen_count == 0:
@@ -649,8 +658,24 @@ class DataTableDialog(QDialog):
         sender = self.sender()
         if sender == self.main_view.verticalHeader():
             self.frozen_view.setRowHeight(logicalIndex, newSize)
-        elif sender == self.frozen_view.verticalHeader():
+        elif sender == self.sender() == self.frozen_view.verticalHeader():
             self.main_view.setRowHeight(logicalIndex, newSize)
+
+    def _sync_column_order(self, logicalIndex, oldVisualIndex, newVisualIndex):
+        # 获取发送者
+        sender = self.sender()
+        if sender == self.main_view.horizontalHeader():
+            other_header = self.frozen_view.horizontalHeader()
+        else:
+            other_header = self.main_view.horizontalHeader()
+
+        # 同步其他视图的视觉顺序
+        other_header.moveSection(oldVisualIndex, newVisualIndex)
+
+        # 更新 _df.columns 以匹配新顺序
+        new_order = [self._df.columns[other_header.logicalIndex(i)] for i in range(other_header.count())]
+        self._df = self._df[new_order]
+        self._update_views()
 
     def _on_frozen_header_right_click(self, pos):
         self._on_header_right_click(pos, self.frozen_view)
@@ -788,9 +813,9 @@ class AxisDialog(QDialog):
 
             # 设置范围
             if self.axis_type == "X":
-                self.view_box.setXRange(min_val, max_val, padding=0.00)
+                self.view_box.setXRange(min_val, max_val, padding=DEFAULT_PADDING_VAL)
             else:
-                self.view_box.setYRange(min_val, max_val, padding=0.00)
+                self.view_box.setYRange(min_val, max_val, padding=DEFAULT_PADDING_VAL)
 
             # 设置固定刻度
             if tick_count:
@@ -1016,7 +1041,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """配置绘图区域基本属性"""
         self.plot_item = self.addPlot(row=1, col=0, colspan=2)
         self.view_box = self.plot_item.vb
-        self.view_box.setAutoVisible(True)  # 自动适应可视区域
+        self.view_box.setAutoVisible(x=False, y=True)  # 自动适应可视区域
         self.plot_item.setTitle(None)
         self.plot_item.hideButtons()
         self.plot_item.setClipToView(True)
@@ -1041,7 +1066,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         index_x = np.arange(1, datalength + 1)
         min_x = self.offset + self.factor * index_x.min()
         max_x = self.offset + self.factor * index_x.max()
-        self.view_box.setXRange(min_x, max_x, padding=0.02)
+        self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL)
         self.view_box.autoRange()
 
     def auto_y_in_x_range(self):
@@ -1064,7 +1089,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         xMax = self.offset + self.factor * index_xMax
         
         if not (np.isnan(xMax) or np.isinf(xMax)):
-            self.view_box.setXRange(xMin, xMax, padding=0.02)
+            self.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL)
             padding_xVal=0.1
             limits_xMin = xMin - padding_xVal * (xMax - xMin)
             limits_xMax = xMax + padding_xVal * (xMax - xMin)
@@ -1207,6 +1232,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         fmt = f'{{:.{dp}f}}'              # 例如保留 2 位 -> "{:.2f}"
         return fmt.format(value).rstrip('0').rstrip('.')  # 去掉无意义的 0
+    
+    def set_xrange_with_link_handling(self, xmin, xmax,padding:float = 0):
+        plot=self.plot_item
+        # 1. 记录当前联动对象
+        linked = plot.getViewBox().linkedView(0)
+        
+        # 2. 临时断开联动
+        if linked is not None:
+            plot.setXLink(None)
+        
+        # 3. 安全设置范围
+        plot.getViewBox().enableAutoRange(x=False)
+        plot.setXRange(xmin, xmax, padding=max(0,padding))
+        
+        # 4. 恢复联动
+        if linked is not None:
+            plot.setXLink(linked)
 
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
@@ -1430,7 +1472,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         #self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
         self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
 
-        self.view_box.setYRange(0,1,padding=0) 
+        self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL) 
         self.vline.setBounds([None, None]) 
 
         #self.plot_item.update()
@@ -1470,7 +1512,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 if dialog.exec():
                     min_val, max_val = self.view_box.viewRange()[0]
                     for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
-                        view.view_box.setXRange(min_val, max_val, padding=0.00)
+                        #view.view_box.setXRange(min_val, max_val, padding=0.00)
+                        #view.plot_item.setXRange(min_val, max_val, padding=0.00)
+                        self.set_xrange_with_link_handling(xmin=min_val,xmax=max_val,padding=DEFAULT_PADDING_VAL)
                         view.plot_item.update()
                 return
         return super().mouseDoubleClickEvent(event)
@@ -1940,7 +1984,7 @@ class MainWindow(QMainWindow):
         # 更新DataTableDialog如果打开
         if DataTableDialog._instance:
             DataTableDialog._instance._df = self.loader.df
-            DataTableDialog._instance.model = PandasTableModel(self.loader.df)
+            DataTableDialog._instance.model = PandasTableModel(self.loader.df,self.loader.units)
             DataTableDialog._instance.main_view.setModel(DataTableDialog._instance.model)
             DataTableDialog._instance.frozen_view.setModel(DataTableDialog._instance.model)
             DataTableDialog._instance._update_views()
@@ -2012,7 +2056,7 @@ class MainWindow(QMainWindow):
             if self.plot_widgets:
                 curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
                 for container in self.plot_widgets:
-                    container.plot_widget.view_box.setXRange(curr_min, curr_max, padding=0)
+                    container.plot_widget.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL)
 
             # 如果有清除，弹窗
             if cleared:
