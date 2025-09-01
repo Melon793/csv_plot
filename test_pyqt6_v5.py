@@ -19,9 +19,11 @@ from PyQt6.QtWidgets import (
 )
 import pyqtgraph as pg
 
-global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING
+global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS
 DEFAULT_PADDING_VAL= 0.02
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 5
+RATIO_RESET_PLOTS = 0.3
+
 class DataLoadThread(QThread):
     # 信号：发送进度 0-100，或直接发 DataFrame
     progress = pyqtSignal(int)        # 百分比
@@ -716,6 +718,51 @@ class DataTableDialog(QDialog):
         self.model.removeColumns(logical_col, 1)
         self._update_views()
 
+    def update_data(self, loader):
+        """更新数据表中的数据，保持位置，删除消失的变量"""
+        if self.model is None or self._df.empty:
+            return
+
+        # 保存当前滚动位置和冻结列
+        scroll_pos = self.main_view.verticalScrollBar().value()
+        frozen_cols = self.frozen_columns.copy()
+
+        # 收集当前列
+        current_cols = list(self._df.columns)
+
+        # 更新每个列的数据
+        removed = []
+        for col in current_cols:
+            if col in loader.df.columns:
+                self._df[col] = loader.df[col]
+            else:
+                # 变量消失，删除列
+                col_idx = self._df.columns.get_loc(col)
+                self.model.removeColumns(col_idx, 1)
+                if col in self.frozen_columns:
+                    self.frozen_columns.remove(col)
+                removed.append(col)
+
+        # 更新 units 和 validity
+        self.units = loader.units
+
+        # 更新模型
+        self.model = PandasTableModel(self._df, self.units)
+        self.main_view.setModel(self.model)
+        self.frozen_view.setModel(self.model)
+
+        # 恢复冻结列
+        self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
+        self._update_views()
+
+        # 恢复滚动位置
+        QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(scroll_pos))
+
+        # 提示移除的列
+        if removed:
+            msg = f"以下变量已从数据中移除：{', '.join(removed)}"
+            QMessageBox.information(self, "更新通知", msg)
+
 
 class LayoutInputDialog(QDialog):
     def __init__(self, 
@@ -1388,7 +1435,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 new_max = new_offset + new_factor * index_max
                 self.mark_region.setRegion([new_min, new_max])
                 self.window().sync_mark_regions(self.mark_region)  # 同步到其他plot
-
+        
+        # 确保曲线数据更新后立即更新标记统计
+        QTimer.singleShot(0, self.window().update_mark_stats)
 
 
 # ---------------- 拖拽相关 ----------------
@@ -1406,19 +1455,24 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def dropEvent(self, event):
         var_name = event.mimeData().text()
+        self.plot_variable(var_name)
+        event.acceptProposedAction()
+        self.window().update_mark_stats()
+
+    def plot_variable(self, var_name: str) -> bool:
+        """绘制变量到图表，返回是否成功"""
         if var_name not in self.data.columns:
             QMessageBox.warning(self, "错误", f"变量 {var_name} 不存在")
-            return
+            return False
         
-        y_values,y_format = self.get_value_from_name(var_name=var_name)
+        y_values, y_format = self.get_value_from_name(var_name=var_name)
         
         if y_values is None:
             QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
-            event.acceptProposedAction()
-            return
+            return False
         
         # 如果正常
-        self.y_format=y_format
+        self.y_format = y_format
         self.y_name = var_name
         self.original_index_x = np.arange(1, len(y_values) + 1)
         self.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
@@ -1426,7 +1480,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         self.plot_item.clearPlots()             
         _pen = pg.mkPen(color='blue', width=3)
-        self.curve=self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
+        self.curve = self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
         self.update_left_header(full_title)
@@ -1465,8 +1519,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         else:
             self.toggle_cursor(False)
 
-        event.acceptProposedAction()
-        self.window().update_mark_stats()
+        return True
 
     def clear_plot_item(self):
         #self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
@@ -1494,7 +1547,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         if event.button() == Qt.MouseButton.MiddleButton:
             self.clear_plot_item()
-
+            self.window().update_mark_stats()
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1601,7 +1654,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         dx = x2 - x1
         dy = y2 - y1
         slope = float('inf') if dx == 0 else dy / dx  # Handle zero division
-        return (x1, x2, y1, y2, dx, dy, slope, self.label_left.text())
+        
+        # 计算区域内 y 的统计
+        mask = (x_data >= min_x) & (x_data <= max_x)
+        y_region = y_data[mask]
+        if len(y_region) == 0:
+            y_avg = y_max = y_min = np.nan
+        else:
+            y_avg = np.nanmean(y_region)
+            y_max = np.nanmax(y_region)
+            y_min = np.nanmin(y_region)
+        
+        return (x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)
 
 
 # ---------------- 主窗口 ----------------
@@ -1626,7 +1690,7 @@ class MarkStatsWindow(QDialog):
         self.setWindowFlags(flags)
 
         self.tree = QTreeWidget(self)
-        self.tree.setHeaderLabels(["Plot", "x1", "x2", "y1", "y2", "dx", "dy", "slope"])
+        self.tree.setHeaderLabels(["Plot", "x1", "x2", "y1", "y2", "dx", "dy", "slope", "y_avg", "y_max", "y_min"])
         self.tree.setColumnWidth(0,200)
         #self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         layout = QVBoxLayout(self)
@@ -1636,7 +1700,7 @@ class MarkStatsWindow(QDialog):
         if self.parent().mark_stats_geometry:
             self.restoreGeometry(self.parent().mark_stats_geometry)
         else:
-            self.resize(900, 300)
+            self.resize(1200, 300)
 
     def update_stats(self, stats_list):
         self.tree.clear()
@@ -1650,13 +1714,15 @@ class MarkStatsWindow(QDialog):
                     f"{stats[0]:.2f}", f"{stats[1]:.2f}",
                     f"{stats[2]:.2f}", f"{stats[3]:.2f}",
                     f"{stats[4]:.2f}", f"{stats[5]:.2f}",
-                    f"{stats[6]:.2f}" if not np.isinf(stats[6]) else "inf"
+                    f"{stats[6]:.2f}" if not np.isinf(stats[6]) else "inf",
+                    f"{stats[8]:.2f}", f"{stats[9]:.2f}", f"{stats[10]:.2f}"
                 ])            
             else:
                 has_no_curve = True
-                sub_item = QTreeWidgetItem(self.no_curve_item, [f"Plot {idx+1}", "", "", "", "", "", "", ""])
+                sub_item = QTreeWidgetItem(self.no_curve_item, [f"Plot {idx+1}", "", "", "", "", "", "", "", "", "", ""])
         if not has_no_curve:
-            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))    
+            self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))
+    
     def save_geom(self):
         self.parent().mark_stats_geometry = self.saveGeometry()
 
@@ -1710,7 +1776,7 @@ class TimeCorrectionDialog(QDialog):
     def closeEvent(self, event):
         self.parent().time_correction_geometry = self.saveGeometry()
         super().closeEvent(event)
-        
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1922,19 +1988,23 @@ class MainWindow(QMainWindow):
             except Exception as e:     
                 print(f"配置文件读取失败: {e}")
         else:
-            if file_ext in ['.csv','.txt']:
+            if file_ext in ['.csv',]:
                 delimiter_typ = ','
                 descRows = 0
                 hasunit = True
             elif file_ext in ['.mfile','.t00','.t01']:
                 delimiter_typ = '\t'
                 descRows = 2
-                hasunit=True                    
+                hasunit=True       
+            elif file_ext in ['.txt',]:
+                delimiter_typ = '\t'
+                descRows = 0
+                hasunit=True      
             else:
                 QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
                 return
 
-        _Threshold_Size_Mb=5 
+        _Threshold_Size_Mb=FILE_SIZE_LIMIT_BACKGROUND_LOADING 
 
         # < 5 MB 直接读
         file_size =os.path.getsize(file_path)
@@ -1960,9 +2030,10 @@ class MainWindow(QMainWindow):
     def _post_load_actions(self, file_path: str):
         self.loaded_path = file_path
         self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{file_path}]")
-        if DataTableDialog._instance is not None:
-            DataTableDialog._instance.close()   # 触发 closeEvent → 清空
-            DataTableDialog._instance = None
+        self.set_button_status(True)
+        # if DataTableDialog._instance is not None:
+        #     DataTableDialog._instance.close()   # 触发 closeEvent → 清空
+        #     DataTableDialog._instance = None
 
     def load_btn_click(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
@@ -2052,10 +2123,17 @@ class MainWindow(QMainWindow):
         #     widget.offset = 0.0
 
         self.replots_after_loading()
+        # 更新数值变量表（如果存在）
+        if DataTableDialog._instance is not None:
+            DataTableDialog._instance.update_data(self.loader)
+            DataTableDialog._instance.show()  # 确保窗口显示
+            DataTableDialog._instance.raise_()
+            DataTableDialog._instance.activateWindow()
+
+
         self.filter_variables() 
         if self.mark_region_btn.isChecked():
-            self.mark_region_btn.setChecked(False)
-            self.toggle_mark_region(False)
+            self.update_mark_stats()
 
     def filter_variables(self):
         name_text = self.filter_input.text().lower()
@@ -2109,10 +2187,7 @@ class MainWindow(QMainWindow):
             geom = self.mark_stats_window.load_geom()
             if geom:
                 self.mark_stats_window.restoreGeometry(geom)
-            # geom = self.mark_stats_window._settings.value("geometry")
-            # if geom:
-            #     self.mark_stats_window.restoreGeometry(geom)
-            #self.mark_stats_window.resize(900,300)
+
             self.mark_stats_window.show()
             self.update_mark_stats()
         else:
@@ -2148,7 +2223,7 @@ class MainWindow(QMainWindow):
                                 max_cols=self._plot_col_max_default, 
                                 cur_rows=self._plot_row_current,
                                 cur_cols=self._plot_col_current,
-                                parent=self)
+                                   parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             r, c = dlg.values()
             self.set_plots_visible (r, c)
@@ -2177,8 +2252,6 @@ class MainWindow(QMainWindow):
             # 更新所有图表的数据和限制，但不设置范围
             for container in self.plot_widgets:
                 container.plot_widget.update_time_correction(new_factor, new_offset)
-            self.update_mark_stats()
-            
 
             # 计算新范围
             if old_factor != 0:
@@ -2192,9 +2265,15 @@ class MainWindow(QMainWindow):
                 new_min = new_offset + new_factor * 1
                 new_max = new_offset + new_factor * datalength
 
-            # 统一设置范围
-            for container in self.plot_widgets:
-                container.plot_widget.view_box.setXRange(new_min, new_max, padding=0)
+            # 只设置第一个图表的 X 轴范围，其他图表通过 XLink 同步
+            if self.plot_widgets:
+                first_plot = self.plot_widgets[0].plot_widget
+                first_plot.view_box.enableAutoRange(x=False)  # 禁用自动范围调整
+                first_plot.view_box.setXRange(new_min, new_max, padding=0)  # 明确设置 padding=0
+
+            # 更新标记统计
+            self.update_mark_stats()
+
     def update_mark_regions_on_layout_change(self):
         if self.mark_region_btn.isChecked():
             # 移除旧的
@@ -2365,6 +2444,9 @@ class MainWindow(QMainWindow):
     def replots_after_loading(self):
         # 收集所有 y_name (包括未显示的)
         all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
+        if DataTableDialog._instance is not None:
+            all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
+
         unique_y_names = set(all_y_names)
         if not unique_y_names:
             self.reset_plots_after_loading(1, self.loader.datalength)
@@ -2374,7 +2456,7 @@ class MainWindow(QMainWindow):
         found = [y for y in unique_y_names if y in self.loader.var_names and self.loader.df_validity.get(y, -1) == 1]
         ratio = len(found) / len(unique_y_names)
 
-        if ratio <= 0.3 or len(found) < 1:
+        if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
             self.reset_plots_after_loading(1, self.loader.datalength)
         else:
             self.value_cache = {}
@@ -2392,29 +2474,9 @@ class MainWindow(QMainWindow):
                 widget.vline.setBounds([min_x, max_x])
                 if not y_name:
                     continue
-                if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) == 1:
-                    y_values, y_format = widget.get_value_from_name(y_name)
-                    if y_values is not None:
-                        widget.y_format = y_format
-                        widget.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
-                        widget.original_index_x = original_index_x
-                        x_values = widget.offset + widget.factor * widget.original_index_x
-                        widget.curve.setData(x_values, widget.original_y)
-
-                        full_title = f"{y_name} ({self.loader.units.get(y_name, '')})".strip()
-                        widget.update_left_header(full_title)
-
-                        min_y = np.nanmin(widget.original_y)
-                        max_y = np.nanmax(widget.original_y)
-                        if min_y == max_y:
-                            y_center = min_y
-                            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
-                            widget.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
-                        else:
-                            widget.plot_item.setLimits(yMin=min_y - 0.5*(max_y - min_y), yMax=max_y + 0.5*(max_y - min_y))
-
-                        
-                    else:
+                if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) >=0 :
+                    success = widget.plot_variable(y_name)
+                    if not success:
                         widget.clear_plot_item()
                         cleared.append((idx + 1, "无效数据"))
                 else:
@@ -2424,10 +2486,12 @@ class MainWindow(QMainWindow):
 
             # 恢复 xRange
             if self.plot_widgets:
-                curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-                for container in self.plot_widgets:
-                    widget = container.plot_widget
-                    widget.view_box.setXRange(curr_min, curr_max, padding=0)
+                first_plot = self.plot_widgets[0].plot_widget
+                curr_min, curr_max = first_plot.view_box.viewRange()[0]
+                first_plot.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL) # 明确设置 padding=0
+                # for container in self.plot_widgets:
+                #     widget = container.plot_widget
+                #     widget.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL)
 
             # 如果有清除，弹窗
             if cleared:
