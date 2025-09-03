@@ -548,7 +548,7 @@ class DataTableDialog(QDialog):
         # 关闭自动换行，避免高度被内容撑开
         self.main_view.setWordWrap(False)
         self.frozen_view.setWordWrap(False)
-        
+
         splitter.addWidget(self.frozen_view)
         splitter.addWidget(self.main_view)
         splitter.setSizes([200, 400])  # 初始宽度：冻结200，主400
@@ -2126,7 +2126,7 @@ class MainWindow(QMainWindow):
                 delimiter_typ = ','
                 descRows = 0
                 hasunit = True
-            elif file_ext in ['.mfile','.t00','.t01']:
+            elif file_ext in ['.mfile','.t00','.t01','t10','t11']:
                 delimiter_typ = '\t'
                 descRows = 2
                 hasunit=True       

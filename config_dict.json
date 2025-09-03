@@ -14,7 +14,22 @@
     "hasunit": true,
     "sep": "\t"
   },
+  "t00": {
+    "skiprows": 2,
+    "hasunit": true,
+    "sep": "\t"
+  },
   "t01": {
+    "skiprows": 2,
+    "hasunit": true,
+    "sep": "\t"
+  },
+  "t10": {
+    "skiprows": 2,
+    "hasunit": true,
+    "sep": "\t"
+  },
+  "t11": {
     "skiprows": 2,
     "hasunit": true,
     "sep": "\t"
