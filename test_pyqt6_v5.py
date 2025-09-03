@@ -13,7 +13,7 @@ os.environ["QT_LOGGING_RULES"] = (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
 from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter,
 )
@@ -23,6 +23,43 @@ global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS
 DEFAULT_PADDING_VAL= 0.02
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 5
 RATIO_RESET_PLOTS = 0.3
+
+from pathlib import Path
+def resource_path(relative_path: str) -> Path:
+    """获取打包后的资源文件路径"""
+    if hasattr(sys, "_MEIPASS"):  # PyInstaller 解包目录
+        return Path(os.path.join(sys._MEIPASS, relative_path))
+    return Path(relative_path)
+
+class HelpDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("帮助文档")
+        self.resize(800, 600)
+
+        layout = QVBoxLayout(self)
+        
+        # 文本区域
+        text_edit = QTextEdit(self)
+        text_edit.setReadOnly(True)
+
+        
+        # 加载 README.md
+        readme_path = resource_path("README.md")
+        if readme_path.exists():
+            with open(readme_path, "r", encoding="utf-8") as f:
+                text_edit.setMarkdown(f.read())
+        else:
+            text_edit.setPlainText("README.md 文件未找到。")
+
+        layout.addWidget(text_edit)
+
+        # 关闭按钮
+        close_btn = QPushButton("关闭", self)
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+
 
 class DataLoadThread(QThread):
     # 信号：发送进度 0-100，或直接发 DataFrame
@@ -1993,12 +2030,16 @@ class MainWindow(QMainWindow):
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
 
+        self.help_btn = QPushButton("帮助")
+        self.help_btn.clicked.connect(self.show_help)
+        top_bar.addWidget(self.help_btn)
 
         # 中键占位
         top_bar.addStretch(1)
 
 
         # 右侧按钮        
+        
         self.auto_range_btn = QPushButton("自动缩放")
         self.auto_range_btn.clicked.connect(self.auto_range_all_plots)
         
@@ -2019,6 +2060,7 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
         self.set_button_status(False)
+        
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
@@ -2071,7 +2113,9 @@ class MainWindow(QMainWindow):
         self.mark_stats_window = None
         # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
-
+    def show_help(self):
+        dlg = HelpDialog(self)
+        dlg.exec()
     def load_btn_click(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
         if file_path:
