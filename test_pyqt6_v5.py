@@ -2677,6 +2677,10 @@ if __name__ == "__main__":
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    # app.setStyle("Fusion")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+    # compile
+    # mac: pyinstaller --noconsole --onefile --add-data "README.md:." test_pyqt6_v5.py
+    # win: pyinstaller --noconsole --onefile --add-data "README.md;." test_pyqt6_v5.py
