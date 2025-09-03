@@ -11,7 +11,7 @@ os.environ["QT_LOGGING_RULES"] = (
 )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
-from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush
+from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
@@ -40,11 +40,10 @@ class DataLoadThread(QThread):
         try:
             # 将 FastDataLoader 的读取过程按块拆进度
             # 这里用文件大小估算百分比，够简单
-            total_bytes = os.path.getsize(self.file_path)#Path(self.file_path).stat().st_size
+            #total_bytes = os.path.getsize(self.file_path)#Path(self.file_path).stat().st_size
 
-            def _progress_cb(bytes_read: int):
-                if total_bytes > 0:
-                    self.progress.emit(int(bytes_read / total_bytes * 100))
+            def _progress_cb(progress: int):
+                self.progress.emit(progress)
 
             # print("Calling FastDataLoader with _progress:", _progress_cb) 
 
@@ -101,6 +100,8 @@ class FastDataLoader:
         self._var_names, self._units, self.encoding_used = self._load_header_units(
             self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,hasunit=self.hasunit
         )
+        if self._progress_cb:
+            self._progress_cb(5)
 
         # 推断 dtype
         
@@ -121,13 +122,16 @@ class FastDataLoader:
         self.sample_mem_size = sample.memory_usage(deep=True).sum()
         # print(f"the estimated downcast ratio is {downcast_ratio*100:2f} %, the compression ratio estimated {(0.5*downcast_ratio+1*(1-downcast_ratio))}")
         # print(f"sample of {sample.shape[0]} lines has costed memory {self.sample_mem_size/(1024**2):2f}Mb")
-        self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
-
+        #self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
+        self.byte_per_line = (0.8*self.sample_mem_size)/sample.shape[0]
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
         # print(f"this file might have lines of {self.estimated_lines}")
         import gc
         del sample 
         gc.collect()
+        if self._progress_cb:
+            self._progress_cb(15)
+            
         # 计算 chunk 大小
         if chunksize is None:
             chunksize = 3600
@@ -152,6 +156,8 @@ class FastDataLoader:
         self._df_validity=self._check_df_validity()
         import gc
         gc.collect()
+        if self._progress_cb:
+            self._progress_cb(100)
 
     # ------------------------------------------------------------------
     # 内部工具
@@ -260,6 +266,9 @@ class FastDataLoader:
         # do not parse date
         if not self.do_parse_date:
             parse_dates=[]
+        total_chunks_est = max(1, self.estimated_lines // chunksize + (1 if self.estimated_lines % chunksize else 0))
+        increment = 80 / total_chunks_est
+        
         for idx,chunk in enumerate(pd.read_csv(
             path,
             skiprows=(2 + descRows) if hasunit else (1+descRows),
@@ -278,8 +287,8 @@ class FastDataLoader:
         )):
             #print(f"chunksize is {chunksize}, full size {self.file_size/(1024**2):2f}Mb")
             if self._progress_cb:
-                bytes_read = (idx + 1) * chunksize * self.byte_per_line   # 粗略估算
-                self._progress_cb(min(bytes_read, self.file_size))
+                chunk_progress = min(80, (idx + 1) * increment)
+                self._progress_cb(15 + int(chunk_progress))
                 #print (f"progress {idx} is {bytes_read}")
             chunks.append(chunk)
         return pd.concat(chunks, ignore_index=True)
@@ -509,7 +518,7 @@ class DataTableDialog(QDialog):
         self.frozen_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.frozen_view.verticalHeader().setVisible(True)  # 默认启用
-        self.frozen_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
+        #self.frozen_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
         self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.frozen_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -521,12 +530,24 @@ class DataTableDialog(QDialog):
         self.main_view = QTableView(self)
         self.main_view.setSortingEnabled(True)
         self.main_view.verticalHeader().setVisible(False)  # 默认隐藏
-        self.main_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
+        #self.main_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
         self.main_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.main_view.horizontalHeader().setSectionsMovable(True)
         self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
         self.main_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        
+        # 计算一个安全的行高（字体高度 + padding）
+        fm = QFontMetrics(self.main_view.font())
+        safe_height = int(fm.height()*1.6)   # 你可以改成 +10 或 +12 看效果
+
+        print(f"the safe height set to {safe_height}")
+        self.main_view.verticalHeader().setDefaultSectionSize(safe_height)  # 可调整行高
+        self.frozen_view.verticalHeader().setDefaultSectionSize(safe_height)  # 可调整行高
+
+        # 关闭自动换行，避免高度被内容撑开
+        self.main_view.setWordWrap(False)
+        self.frozen_view.setWordWrap(False)
         
         splitter.addWidget(self.frozen_view)
         splitter.addWidget(self.main_view)
@@ -601,11 +622,11 @@ class DataTableDialog(QDialog):
         # 恢复滚动位置
         if self._saved_scroll_pos is not None:
             QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(self._saved_scroll_pos))
-        # 滚动到新列（如果不是冻结列）
-        if var_name not in self.frozen_columns:
-            col_index = self._df.columns.get_loc(var_name)
-            index = self.model.index(0, col_index)
-            self.main_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+        # 不再滚动到新列的第0行
+        # if var_name not in self.frozen_columns:
+        #     col_index = self._df.columns.get_loc(var_name)
+        #     index = self.model.index(0, col_index)
+        #     self.main_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def _update_views(self):
         if self.model is None:
@@ -762,6 +783,10 @@ class DataTableDialog(QDialog):
         if removed:
             msg = f"以下变量已从数据中移除：{', '.join(removed)}"
             QMessageBox.information(self, "更新通知", msg)
+
+        # 如果更新后为空，关闭窗口
+        if self._df.empty:
+            self.close()
 
 
 class LayoutInputDialog(QDialog):
@@ -982,6 +1007,53 @@ class MyTableWidget(QTableWidget):
             self.setItem(row, 0, name_item)
             self.setItem(row, 1, unit_item)
 
+
+# 新增自定义 ViewBox 类
+class CustomViewBox(pg.ViewBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.context_x = None  # 记录右键点击时的 x 坐标
+        self.plot_widget = None  # 将在 DraggableGraphicsLayoutWidget 中设置
+
+    def getMenu(self, ev):
+        # 记录鼠标位置的 x 值
+        scene_pos = ev.scenePos()
+        view_pos = self.mapSceneToView(scene_pos)
+        self.context_x = view_pos.x()
+
+        # 获取默认菜单
+        menu = super().getMenu(ev)
+        if menu is None:
+            return None
+
+        # 屏蔽 "Mouse Mode"
+        for act in menu.actions():
+            if act.text() == 'Mouse Mode':
+                act.setVisible(False)
+            elif act.text() == 'Plot Options':
+                # 子菜单下屏蔽 "Transforms"（注意：实际文本为 "Transforms"）
+                submenu = act.menu()
+                if submenu:
+                    for subact in submenu.actions():
+                        if subact.text() == 'Transforms':
+                            subact.setVisible(False)
+
+        # 添加新 action: "Jump to Data" (检查是否已存在以避免重复)
+        existing_texts = [act.text() for act in menu.actions()]
+        if "Jump to Data" not in existing_texts:
+            jump_act = QAction("Jump to Data", menu)
+            jump_act.triggered.connect(self.trigger_jump_to_data)
+            if menu.actions():
+                menu.insertAction(menu.actions()[0], jump_act)
+            else:
+                menu.addAction(jump_act)
+
+        return menu
+
+    def trigger_jump_to_data(self):
+        if self.plot_widget:
+            self.plot_widget.jump_to_data_impl(self.context_x)
+
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def __init__(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
         super().__init__()
@@ -1086,8 +1158,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def setup_plot_area(self):
         """配置绘图区域基本属性"""
-        self.plot_item = self.addPlot(row=1, col=0, colspan=2)
+        self.plot_item = self.addPlot(row=1, col=0, colspan=2, viewBox=CustomViewBox())
         self.view_box = self.plot_item.vb
+        self.view_box.plot_widget = self  # 设置 plot_widget 以确保 trigger_jump_to_data 能调用 jump_to_data_impl
+        
+        # 移除 self._customize_plot_menu()，因为现在用 CustomViewBox 实现菜单定制
+        
         self.view_box.setAutoVisible(x=False, y=True)  # 自动适应可视区域
         self.plot_item.setTitle(None)
         self.plot_item.hideButtons()
@@ -1097,11 +1173,55 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         pen = pg.mkPen('#f00',width=1)
         self.plot_item.getAxis('left').setGrid(255) 
-        #self.plot_item.getAxis('left').gridPen=(pen) 
         self.plot_item.getAxis('bottom').setGrid(255) 
-        #self.plot_item.getAxis('bottom').gridPen=(pen) 
         self.plot_item.showGrid(x=True, y=True, alpha=0.1)
         
+    def jump_to_data_impl(self, x):
+        if not self.curve or not self.y_name:
+            # 没有曲线，直接返回
+            return
+
+        main_window = self.window()
+        if not hasattr(main_window, 'loader') or main_window.loader is None:
+            return
+
+        y_name = self.y_name
+
+        # a. 打开/激活数值变量表，并添加系列（如果不存在）
+        dlg = DataTableDialog.popup(y_name, main_window.loader.df[y_name], parent=main_window)
+
+        # b. popup 已处理：如果已在（冻结或非冻结），不添加；否则添加到非冻结区域
+
+        # c. 计算行索引（0-based）
+        if self.factor == 0:
+            return  # 避免除零
+
+        index = (x - self.offset) / self.factor
+        index = int(round(index)) - 1  # 转换为 0-based 行索引
+        index = max(0, min(index, len(main_window.loader.df) - 1))  # 夹到有效范围
+
+        # 获取模型和列索引
+        model = dlg.model
+        col_idx = dlg._df.columns.get_loc(y_name)  # 逻辑列索引
+
+        # 确定使用哪个视图（冻结或主视图）
+        if y_name in dlg.frozen_columns:
+            view = dlg.frozen_view
+        else:
+            view = dlg.main_view
+
+        # 获取视觉列索引（因为列可拖动）
+        header = view.horizontalHeader()
+        visual_col = header.visualIndex(col_idx)
+
+        # 创建 QModelIndex
+        qindex = model.index(index, col_idx)
+
+        # 跳转并居中，使用 QTimer 确保在窗口显示后执行
+        QTimer.singleShot(0, lambda: view.scrollTo(qindex, QAbstractItemView.ScrollHint.PositionAtCenter))
+
+        # 选中该单元格
+        QTimer.singleShot(0, lambda: view.setCurrentIndex(qindex))
 
     def update_left_header(self, left_text=None):
         """更新顶部文本内容"""
@@ -1280,6 +1400,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         fmt = f'{{:.{dp}f}}'              # 例如保留 2 位 -> "{:.2f}"
         return fmt.format(value).rstrip('0').rstrip('.')  # 去掉无意义的 0
     
+
+
     def set_xrange_with_link_handling(self, xmin, xmax,padding:float = 0):
         plot=self.plot_item
         # 1. 记录当前联动对象
@@ -1950,6 +2072,18 @@ class MainWindow(QMainWindow):
         # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
 
+    def load_btn_click(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
+        if file_path:
+            self.load_csv_file(file_path)
+
+    def load_csv_file(self, file_path: str):
+        if not file_path or not os.path.isfile(file_path):
+            return
+        self.raise_()  # Bring window to front
+        self.activateWindow()  # Set focus
+        self._load_file(file_path)
+
     def set_button_status(self,status:bool):
         if status is not None:
             self.time_correction_btn.setEnabled(status)
@@ -2035,17 +2169,6 @@ class MainWindow(QMainWindow):
         #     DataTableDialog._instance.close()   # 触发 closeEvent → 清空
         #     DataTableDialog._instance = None
 
-    def load_btn_click(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
-        self.load_csv_file(file_path)
-
-    def load_csv_file(self, file_path: str):
-        if not file_path or not os.path.isfile(file_path):
-            return
-        self.raise_()  # Bring window to front
-        self.activateWindow()  # Set focus
-        self._load_file(file_path)
-
     @staticmethod
     def load_dict(path: str, *, default=None) -> dict:
         import ujson as json
@@ -2126,9 +2249,13 @@ class MainWindow(QMainWindow):
         # 更新数值变量表（如果存在）
         if DataTableDialog._instance is not None:
             DataTableDialog._instance.update_data(self.loader)
-            DataTableDialog._instance.show()  # 确保窗口显示
-            DataTableDialog._instance.raise_()
-            DataTableDialog._instance.activateWindow()
+            # 只show如果有列
+            if not DataTableDialog._instance._df.empty:
+                DataTableDialog._instance.show()  # 确保窗口显示
+                DataTableDialog._instance.raise_()
+                DataTableDialog._instance.activateWindow()
+            else:
+                DataTableDialog._instance.close()
 
 
         self.filter_variables() 
