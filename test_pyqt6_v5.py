@@ -1815,7 +1815,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.mark_region = pg.LinearRegionItem([min_x, max_x], movable=True)
         #self.mark_region.setBrush(pg.mkBrush(181,196,177, 80))
         for line in self.mark_region.lines:
-            line.setPen(pg.mkPen(color='r', width=1)) 
+            line.setHoverPen(pg.mkPen(color='r', width=10)) 
+            
         self.plot_item.addItem(self.mark_region)
         self.mark_region.sigRegionChanged.connect(self.window().sync_mark_regions)
 
