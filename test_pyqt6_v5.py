@@ -10,11 +10,11 @@ os.environ["QT_LOGGING_RULES"] = (
     "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
 )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect
-from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
+from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
-    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,
+    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter,
 )
 import pyqtgraph as pg
@@ -511,6 +511,19 @@ class PandasTableModel(QAbstractTableModel):
         self.endRemoveColumns()
         return True
     
+class CustomDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.selected_rows = set()
+        self.selected_cols = set()
+
+    def paint(self, painter, option, index):
+        painter.save()
+        if index.row() in self.selected_rows or index.column() in self.selected_cols:
+            painter.fillRect(option.rect, QColor(200, 200, 255, 128))  # 浅蓝高亮，半透明
+        super().paint(painter, option, index)
+        painter.restore()
+    
 class DataTableDialog(QDialog):
     _instance = None
     _saved_scroll_pos = None  # 类级变量存储滚动位置
@@ -556,7 +569,7 @@ class DataTableDialog(QDialog):
         self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.frozen_view.verticalHeader().setVisible(True)  # 默认启用
         #self.frozen_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
-        self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.frozen_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.frozen_view.setStyleSheet("QTableView { background-color: rgba(245,245,245,128); }")
@@ -568,7 +581,7 @@ class DataTableDialog(QDialog):
         self.main_view.setSortingEnabled(True)
         self.main_view.verticalHeader().setVisible(False)  # 默认隐藏
         #self.main_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
-        self.main_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.main_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.main_view.horizontalHeader().setSectionsMovable(True)
         self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
@@ -616,11 +629,29 @@ class DataTableDialog(QDialog):
         self.main_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
         self.frozen_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
 
+        # 设置自定义代理
+        self.delegate = CustomDelegate(self)
+        self.main_view.setItemDelegate(self.delegate)
+        self.frozen_view.setItemDelegate(self.delegate)
+
         # 恢复上一次的位置/大小
         if self.parent().data_table_geometry:
             self.restoreGeometry(self.parent().data_table_geometry)
         else:
             self.resize(600, 400)
+
+    def _connect_signals(self):
+        if self.model:
+            self.main_view.selectionModel().selectionChanged.connect(self._update_highlights)
+            self.frozen_view.selectionModel().selectionChanged.connect(self._update_highlights)
+
+    def _update_highlights(self, selected, deselected):
+        selected_indexes = self.main_view.selectionModel().selectedIndexes() + self.frozen_view.selectionModel().selectedIndexes()
+        self.delegate.selected_rows = set(idx.row() for idx in selected_indexes)
+        self.delegate.selected_cols = set(idx.column() for idx in selected_indexes)
+        self.main_view.viewport().update()
+        self.frozen_view.viewport().update()
+
     def save_geom(self):
         self.parent().data_table_geometry = self.saveGeometry()
 
@@ -652,6 +683,7 @@ class DataTableDialog(QDialog):
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
+        self._connect_signals()
 
         # 更新视图显示的列
         self._update_views()
@@ -808,6 +840,7 @@ class DataTableDialog(QDialog):
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
+        self._connect_signals()
 
         # 恢复冻结列
         self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
@@ -1258,12 +1291,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         QTimer.singleShot(0, lambda: view.scrollTo(qindex, QAbstractItemView.ScrollHint.PositionAtCenter))
 
         # 选中该单元格
-        QTimer.singleShot(0, lambda: view.setCurrentIndex(qindex))
-
-    def update_left_header(self, left_text=None):
-        """更新顶部文本内容"""
-        if left_text is not None:
-            self.label_left.setText(left_text)
+        QTimer.singleShot(0, lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect))
 
     def auto_range(self):
         datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 1
@@ -1276,6 +1304,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def auto_y_in_x_range(self):
         vb=self.view_box
         vb.enableAutoRange(axis=vb.YAxis, enable=True)
+
+    def update_left_header(self, left_text=None):
+        """更新顶部文本内容"""
+        if left_text is not None:
+            self.label_left.setText(left_text)
 
     def update_right_header(self, right_text=None):
         """更新顶部文本内容"""
@@ -1365,7 +1398,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 信号连接
         self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
-        self.vline.sigPositionChanged.connect(self.update_cursor_label)
+        #self.vline.sigPositionChanged.connect(self.update_cursor_label)
         self.setAntialiasing(True)
     
     def wheelEvent(self, ev):
@@ -1940,6 +1973,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
+        #self.setWindowIcon(QIcon("icon.png")) 
         self.setWindowTitle(self.defaultTitle)
         self.resize(1600, 900)
         self._factor_default  = 1
