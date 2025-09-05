@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter,
 )
 import pyqtgraph as pg
+from threading import Lock
 
 global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS
 DEFAULT_PADDING_VAL= 0.02
@@ -30,6 +31,13 @@ def resource_path(relative_path: str) -> Path:
     if hasattr(sys, "_MEIPASS"):  # PyInstaller 解包目录
         return Path(os.path.join(sys._MEIPASS, relative_path))
     return Path(relative_path)
+
+
+
+if sys.platform == 'win32':
+    import ctypes
+    myappid = 'mycompany.csv_plot.0.1'  # 自定义应用ID
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
@@ -500,7 +508,7 @@ class PandasTableModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal:
             col_name = str(self._df.columns[section])
             unit = self._units.get(col_name, '')
-            return f"{col_name}\n({unit})" if unit else col_name
+            return f"{col_name}\n({unit})" if unit else f"{col_name}\n()"
         return str(section + 1)           # 行号 1-based
 
     def removeColumns(self, column, count, parent=QModelIndex()):
@@ -591,7 +599,7 @@ class DataTableDialog(QDialog):
         fm = QFontMetrics(self.main_view.font())
         safe_height = int(fm.height()*1.6)   # 你可以改成 +10 或 +12 看效果
 
-        print(f"the safe height set to {safe_height}")
+        # print(f"the safe height set to {safe_height}")
         self.main_view.verticalHeader().setDefaultSectionSize(safe_height)  # 可调整行高
         self.frozen_view.verticalHeader().setDefaultSectionSize(safe_height)  # 可调整行高
 
@@ -608,6 +616,7 @@ class DataTableDialog(QDialog):
 
         # 内部 DataFrame
         self._df = pd.DataFrame()
+        self._df_lock = Lock()
         self.model = None
         self.units = {}
 
@@ -761,13 +770,18 @@ class DataTableDialog(QDialog):
         else:
             other_header = self.main_view.horizontalHeader()
 
-        # 同步其他视图的视觉顺序
-        other_header.moveSection(oldVisualIndex, newVisualIndex)
+         # 临时阻断信号
+        other_header.blockSignals(True)  # 禁止触发信号
+        try:
+            other_header.moveSection(oldVisualIndex, newVisualIndex)
+        finally:
+            other_header.blockSignals(False)  # 恢复信号
 
-        # 更新 _df.columns 以匹配新顺序
-        new_order = [self._df.columns[other_header.logicalIndex(i)] for i in range(other_header.count())]
-        self._df = self._df[new_order]
-        self._update_views()
+        # 更新 _df.columns 以匹配新顺序        
+        new_order = [self._df.columns[other_header.logicalIndex(i)] for i in range(other_header.count())]   
+        with self._df_lock:
+            self._df = self._df[new_order]
+            self._update_views()
 
     def _on_frozen_header_right_click(self, pos):
         self._on_header_right_click(pos, self.frozen_view)
@@ -1245,6 +1259,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.getAxis('left').setGrid(255) 
         self.plot_item.getAxis('bottom').setGrid(255) 
         self.plot_item.showGrid(x=True, y=True, alpha=0.1)
+
+        # 基于点数修改曲线风格
+        self.view_box.sigRangeChanged.connect(self.update_plot_style)
         
     def jump_to_data_impl(self, x):
         if not self.curve or not self.y_name:
@@ -1296,8 +1313,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def auto_range(self):
         datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 1
         index_x = np.arange(1, datalength + 1)
-        min_x = self.offset + self.factor * index_x.min()
-        max_x = self.offset + self.factor * index_x.max()
+
+        special_limits = self.handle_single_point_limits(index_x * self.factor + self.offset, np.array([0] * datalength))  # 虚拟y
+        if special_limits:
+            min_x, max_x, _, _ = special_limits
+        else:
+            min_x = self.offset + self.factor * index_x.min()
+            max_x = self.offset + self.factor * index_x.max()
+        
         self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL)
         self.view_box.autoRange()
 
@@ -1326,6 +1349,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         xMax = self.offset + self.factor * index_xMax
         
         if not (np.isnan(xMax) or np.isinf(xMax)):
+            if xMax ==xMin:
+                xMax = xMax + 0.5 * self.factor  # 基于factor扩展，避免零范围
+                xMin = xMin - 0.5 * self.factor
+
             self.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL)
             padding_xVal=0.1
             limits_xMin = xMin - padding_xVal * (xMax - xMin)
@@ -1399,8 +1426,24 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 信号连接
         self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
         #self.vline.sigPositionChanged.connect(self.update_cursor_label)
-        self.setAntialiasing(True)
-    
+        self.setAntialiasing(False)
+
+    def handle_single_point_limits(self, x_values, y_values):
+        if len(x_values) == 1:
+            x = x_values[0]
+            min_x = x - 0.5 * self.factor  # 基于factor扩展，避免零范围
+            max_x = x + 0.5 * self.factor
+            if len(y_values) == 1:
+                y = y_values[0]
+                min_y = y - 0.5 if y != 0 else -0.5
+                max_y = y + 0.5 if y != 0 else 0.5
+            else:
+                min_y = np.nanmin(y_values)
+                max_y = np.nanmax(y_values)
+            return min_x, max_x, min_y, max_y
+        else:
+            return None  # 返回None表示不特殊处理
+        
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
         delta = ev.angleDelta().y()
@@ -1671,42 +1714,52 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         x_values = self.offset + self.factor * self.original_index_x
 
         self.plot_item.clearPlots()             
-        _pen = pg.mkPen(color='blue', width=3)
+        _pen = pg.mkPen(color='blue', width=3)  # 初始粗线
         self.curve = self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
+        # 无初始symbol，等待update_plot_style
+        QTimer.singleShot(0, lambda: self.update_plot_style(self.view_box, self.view_box.viewRange(), None))  # 修正: 传整个viewRange() 和 None for rect
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
         self.update_left_header(full_title)
         padding_xVal = 0.1
         padding_yVal = 0.5
-        
-        min_x = np.min(x_values)
-        max_x = np.max(x_values)
+
+        special_limits = self.handle_single_point_limits(x_values, self.original_y)
+        if special_limits:
+            min_x, max_x, min_y, max_y = special_limits
+            # extra margin for x-axis limit : 50% * factor
+            # limits_xMin = min_x - 0.5 * self.factor
+            # limits_xMax = max_x + 0.5 * self.factor
+
+        else:
+            min_x = np.min(x_values)
+            max_x = np.max(x_values)
+            min_y = np.nanmin(self.original_y)
+            max_y = np.nanmax(self.original_y)
         limits_xMin = min_x - padding_xVal * (max_x - min_x)
         limits_xMax = max_x + padding_xVal * (max_x - min_x)
-        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=self.factor * 5)
-
-        if np.nanmin(self.original_y) == np.nanmax(self.original_y):
-            y_center = np.nanmin(self.original_y)
-            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
-            
-            # limit x/y range
-            self.plot_item.setLimits(
-                yMin=y_center - y_range,
-                yMax=y_center + y_range) 
-            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)       
-        else:            
-            # limit x/y range            
-            self.plot_item.setLimits(
-                yMin=np.nanmin(self.original_y)-padding_yVal*(np.nanmax(self.original_y)-np.nanmin(self.original_y)), 
-                yMax=np.nanmax(self.original_y)+padding_yVal*(np.nanmax(self.original_y)-np.nanmin(self.original_y)))
-            
-            self.view_box.setYRange(np.nanmin(self.original_y), np.nanmax(self.original_y), padding=0.05)
 
         
 
+
+        
+        if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
+            y_center = min_y if not np.isnan(min_y) else 0
+            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
+            self.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
+            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)
+        else:
+            self.plot_item.setLimits(
+                yMin=min_y - padding_yVal * (max_y - min_y),
+                yMax=max_y + padding_yVal * (max_y - min_y))
+            self.view_box.setYRange(min_y, max_y, padding=0.05)
+        
+        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
+        self.vline.setBounds([min_x, max_x])
+        
         self.plot_item.update()
         if hasattr(self.window(), 'cursor_btn'):
-            self.vline.setBounds([min(x_values), max(x_values)])
+            self.vline.setBounds([min_x, max_x])
             self.toggle_cursor(self.window().cursor_btn.isChecked())
         else:
             self.toggle_cursor(False)
@@ -1859,7 +1912,36 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             y_min = np.nanmin(y_region)
         
         return (x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)
+    def update_plot_style(self, view_box, range, rect=None):
+        if not self.curve:
+            return
+        x_data, _ = self.curve.getData()
+        if x_data is None:
+            return
+        
+        x_min, x_max = range[0]
+        # 计算可见点数（近似：二分查找或mask计数）
+        visible_mask = (x_data >= x_min) & (x_data <= x_max)
+        visible_points = np.sum(visible_mask)
+        
+        threshold = 100  # 可调阈值
+        tolerance = 0.5
+        if visible_points > threshold * (1 + tolerance):
+            # 粗线，无symbol
+            pen = pg.mkPen(color='blue', width=3)
+            self.curve.setPen(pen)
+            self.curve.setSymbol(None)  # 移除symbol
 
+        elif visible_points < threshold * (1 - tolerance):
+            # 细线 + symbol
+            pen = pg.mkPen(color='blue', width=1)
+            self.curve.setPen(pen)
+            self.curve.setSymbol('s')  # 或's'如原有
+            self.curve.setSymbolSize(3)
+            self.curve.setSymbolPen('blue')
+            self.curve.setSymbolBrush('blue')
+        else:
+            pass
 
 # ---------------- 主窗口 ----------------
 class MarkStatsWindow(QDialog):
@@ -1974,7 +2056,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
-        #self.setWindowIcon(QIcon("icon.png")) 
+        #ico_path =resource_path("icon.ico")
+        #self.setWindowIcon(QIcon(str(ico_path))) 
         self.setWindowTitle(self.defaultTitle)
         self.resize(1600, 900)
         self._factor_default  = 1
@@ -2148,6 +2231,7 @@ class MainWindow(QMainWindow):
         self.mark_stats_window = None
         # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
+
     def show_help(self):
         dlg = HelpDialog(self)
         dlg.exec()
@@ -2161,7 +2245,13 @@ class MainWindow(QMainWindow):
             return
         self.raise_()  # Bring window to front
         self.activateWindow()  # Set focus
-        self._load_file(file_path)
+        try:
+            self._load_file(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "加载错误", str(e))
+        finally:
+            if hasattr(self, 'loader') and self.loader:  # 如果加载成功
+                self._post_load_actions(file_path)
 
     def set_button_status(self,status:bool):
         if status is not None:
@@ -2416,7 +2506,7 @@ class MainWindow(QMainWindow):
         self.update_mark_stats()
 
     def update_mark_stats(self):
-        if self.mark_stats_window:
+        if hasattr(self, 'mark_stats_window') and self.mark_stats_window:
             stats_list = []
             for container in self.plot_widgets:
                 if container.isVisible():
