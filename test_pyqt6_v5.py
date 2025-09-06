@@ -11,7 +11,7 @@ os.environ["QT_LOGGING_RULES"] = (
 )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
-from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon
+from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
@@ -33,18 +33,21 @@ def resource_path(relative_path: str) -> Path:
     return Path(relative_path)
 
 
-
-if sys.platform == 'win32':
-    import ctypes
-    myappid = 'mycompany.csv_plot.0.1'  # 自定义应用ID
+# 设置应用程序和窗口图标
+if sys.platform == "win32": # Windows
+    myappid = 'mycompany.csv_plot.0.1'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    ico_path = resource_path("icon.ico")  
+
+elif sys.platform == "darwin":  # macOS
+    ico_path = resource_path("icon.icns")  
+
 
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("帮助文档")
         self.resize(800, 600)
-
         layout = QVBoxLayout(self)
         
         # 文本区域
@@ -531,7 +534,61 @@ class CustomDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, QColor(200, 200, 255, 128))  # 浅蓝高亮，半透明
         super().paint(painter, option, index)
         painter.restore()
-    
+
+# ===================================================================
+# 新增功能：X/Y 散点图绘制窗口
+# ===================================================================
+class XYScatterPlotDialog(QDialog):
+    def __init__(self, x_data, y_data, x_name, y_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("X/Y 散点图")
+        self.resize(400, 300)
+
+        # 设置窗口在关闭时释放内存
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        layout = QVBoxLayout(self)
+        
+        # 创建 pyqtgraph 绘图组件
+        self.plot_widget = pg.PlotWidget()
+        layout.addWidget(self.plot_widget)
+
+        # 绘制散点图
+        scatter = pg.ScatterPlotItem(x=x_data, y=y_data, pen='r', brush='r', size=5)
+        self.plot_widget.addItem(scatter)
+        self.plot_widget.setBackground('w')
+        black_pen = pg.mkPen(color='k', width=2)
+        self.plot_widget.getViewBox().setBorder(black_pen)   # 外框黑色
+
+        # 文字加粗，但字体家族用系统默认
+        bold_font = QFont()
+        bold_font.setBold(True)
+
+        # 设置坐标轴标签和标题
+        self.plot_widget.setLabel('bottom', text=x_name, color='k', font=bold_font)
+        self.plot_widget.setLabel('left',   text=y_name, color='k', font=bold_font)
+
+        # 直接设置标签字体
+        axis_bottom = self.plot_widget.getAxis('bottom')
+        axis_left = self.plot_widget.getAxis('left')
+        axis_bottom.label.setFont(bold_font)
+        axis_left.label.setFont(bold_font)
+
+        self.plot_widget.setTitle(f"{y_name} vs. {x_name}")
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+
+        # 拿到 AxisItem 句柄
+        axis_bottom = self.plot_widget.getAxis('bottom')
+        axis_left = self.plot_widget.getAxis('left')
+
+        for ax in (axis_bottom, axis_left):
+            # 设置轴线和刻度线的颜色为黑色
+            ax.setPen('k')
+            # 设置刻度文字颜色为黑色
+            ax.setTextPen('k')
+            # 设置刻度文字的字体
+            ax.setTickFont(QFont())
+
 class DataTableDialog(QDialog):
     _instance = None
     _saved_scroll_pos = None  # 类级变量存储滚动位置
@@ -549,7 +606,6 @@ class DataTableDialog(QDialog):
             dlg.activateWindow()
             return dlg
         
-        # 保存当前滚动位置
         cls._saved_scroll_pos = dlg.main_view.verticalScrollBar().value() if dlg.main_view else None
         dlg.load_geom()
         dlg.add_series(var_name, data)
@@ -560,122 +616,250 @@ class DataTableDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        #self._settings = QSettings("MyCompany", "DataTableDialog")
         self.setWindowTitle("变量数值表")
         self.window_geometry = None 
+        self.scatter_plot_windows = []
 
-        self.frozen_columns = []  # 冻结列列表 (变量名)
+        self.frozen_columns = []
 
-        # 布局：使用 Splitter 放置冻结视图和主视图
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(5)
         splitter.setChildrenCollapsible(False)
 
-        # 冻结视图 (左侧)
         self.frozen_view = QTableView(self)
         self.frozen_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.frozen_view.verticalHeader().setVisible(True)  # 默认启用
-        #self.frozen_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
+        self.frozen_view.verticalHeader().setVisible(True)
         self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.frozen_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.frozen_view.setStyleSheet("QTableView { background-color: rgba(245,245,245,128); }")
         self.frozen_view.horizontalHeader().customContextMenuRequested.connect(self._on_frozen_header_right_click)
-        self.frozen_view.horizontalHeader().setSectionsMovable(True)  # 启用拖动
+        self.frozen_view.horizontalHeader().setSectionsMovable(True)
+        self.frozen_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.frozen_view.customContextMenuRequested.connect(self._show_table_context_menu)
 
-        # 主视图 (右侧)
         self.main_view = QTableView(self)
-        self.main_view.setSortingEnabled(True)
-        self.main_view.verticalHeader().setVisible(False)  # 默认隐藏
-        #self.main_view.verticalHeader().setDefaultSectionSize(20)  # 可调整行高
+        self.main_view.setSortingEnabled(False)
+        self.main_view.verticalHeader().setVisible(False)
         self.main_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.main_view.horizontalHeader().setSectionsMovable(True)
         self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
         self.main_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.main_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.main_view.customContextMenuRequested.connect(self._show_table_context_menu)
         
-        # 计算一个安全的行高（字体高度 + padding）
         fm = QFontMetrics(self.main_view.font())
-        safe_height = int(fm.height()*1.6)   # 你可以改成 +10 或 +12 看效果
+        safe_height = int(fm.height() * 1.6)
+        self.main_view.verticalHeader().setDefaultSectionSize(safe_height)
+        self.frozen_view.verticalHeader().setDefaultSectionSize(safe_height)
 
-        # print(f"the safe height set to {safe_height}")
-        self.main_view.verticalHeader().setDefaultSectionSize(safe_height)  # 可调整行高
-        self.frozen_view.verticalHeader().setDefaultSectionSize(safe_height)  # 可调整行高
-
-        # 关闭自动换行，避免高度被内容撑开
         self.main_view.setWordWrap(False)
         self.frozen_view.setWordWrap(False)
 
         splitter.addWidget(self.frozen_view)
         splitter.addWidget(self.main_view)
-        splitter.setSizes([200, 400])  # 初始宽度：冻结200，主400
+        splitter.setSizes([200, 400])
 
         layout = QVBoxLayout(self)
         layout.addWidget(splitter)
 
-        # 内部 DataFrame
         self._df = pd.DataFrame()
         self._df_lock = Lock()
         self.model = None
         self.units = {}
 
-        # 设置字体
         font = self.main_view.horizontalHeader().font()
         font.setBold(True)
         self.main_view.horizontalHeader().setFont(font)
         self.frozen_view.horizontalHeader().setFont(font)
 
-        # 同步滚动和选择
         self.main_view.verticalScrollBar().valueChanged.connect(self.frozen_view.verticalScrollBar().setValue)
         self.frozen_view.verticalScrollBar().valueChanged.connect(self.main_view.verticalScrollBar().setValue)
-
-        # 同步行高变化
         self.main_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
         self.frozen_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
-        
-        # 同步列顺序变化
         self.main_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
         self.frozen_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
 
-        # 设置自定义代理
-        self.delegate = CustomDelegate(self)
-        self.main_view.setItemDelegate(self.delegate)
-        self.frozen_view.setItemDelegate(self.delegate)
+        self.delegate_frozen = CustomDelegate(self)
+        self.delegate_main = CustomDelegate(self)
+        self.frozen_view.setItemDelegate(self.delegate_frozen)
+        self.main_view.setItemDelegate(self.delegate_main)
 
-        # 恢复上一次的位置/大小
-        if self.parent().data_table_geometry:
+        if self.parent() and self.parent().data_table_geometry:
             self.restoreGeometry(self.parent().data_table_geometry)
         else:
             self.resize(600, 400)
 
+    # ===================================================================
+    #               >>>>>>>>> 修正后的核心逻辑 <<<<<<<<<
+    # ===================================================================
+    def _show_table_context_menu(self, pos):
+        """
+        根据视觉顺序判断是否显示绘图菜单，并传递正确的列索引。
+        """
+        view = self.sender()
+        if not isinstance(view, QTableView):
+            return
+
+        selected_indexes = view.selectionModel().selectedIndexes()
+        if not selected_indexes:
+            return
+
+        this_cols = set(idx.column() for idx in selected_indexes)
+        other_view = self.frozen_view if view == self.main_view else self.main_view
+        other_selected = other_view.selectionModel().selectedIndexes()
+        other_cols = set(idx.column() for idx in other_selected)
+        all_selected = selected_indexes + other_selected
+        total_cols = this_cols | other_cols
+
+        # 先检查该view是否有正好2 cols
+        if len(this_cols) == 2:
+            cols_list = sorted(list(this_cols))
+            rows_per_col = {}
+            for col in cols_list:
+                rows = set(idx.row() for idx in selected_indexes if idx.column() == col)
+                rows_per_col[col] = rows
+            if len(rows_per_col[cols_list[0]]) >= 2 and rows_per_col[cols_list[0]] == rows_per_col[cols_list[1]]:
+                # 确定顺序：根据视觉索引
+                header = view.horizontalHeader()
+                vis1 = header.visualIndex(cols_list[0])
+                vis2 = header.visualIndex(cols_list[1])
+                if vis1 < vis2:
+                    x_col, y_col = cols_list[0], cols_list[1]
+                else:
+                    x_col, y_col = cols_list[1], cols_list[0]
+                min_row = min(rows_per_col[cols_list[0]])
+                num_rows = len(rows_per_col[cols_list[0]])
+                self._show_plot_menu(pos, view, x_col, y_col, min_row, num_rows, enabled=True)
+                return
+
+        # 然后检查跨区 1+1
+        elif len(this_cols) == 1 and len(other_cols) == 1:
+            this_col = list(this_cols)[0]
+            other_col = list(other_cols)[0]
+            this_rows = set(idx.row() for idx in selected_indexes)
+            other_rows = set(idx.row() for idx in other_selected)
+            if len(this_rows) >= 2 and this_rows == other_rows:
+                if view == self.frozen_view:
+                    x_col, y_col = this_col, other_col
+                else:
+                    x_col, y_col = other_col, this_col
+                min_row = min(this_rows)
+                num_rows = len(this_rows)
+                self._show_plot_menu(pos, view, x_col, y_col, min_row, num_rows, enabled=True)
+                return
+
+        # else: if total 2 cols, show disabled
+        if len(total_cols) == 2:
+            cols_list = sorted(list(total_cols))
+            x_col, y_col = cols_list[0], cols_list[1]
+            all_rows = set(idx.row() for idx in all_selected)
+            if all_rows:
+                min_row = min(all_rows)
+                num_rows = max(all_rows) - min_row + 1
+            else:
+                min_row = 0
+                num_rows = 0
+            self._show_plot_menu(pos, view, x_col, y_col, min_row, num_rows, enabled=False)
+        else:
+            return
+
+    def _show_plot_menu(self, pos, view, x_col, y_col, min_row, num_rows, enabled=True):
+        x_name = self.model.headerData(x_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
+        y_name = self.model.headerData(y_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
+        menu = QMenu(self)
+        act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
+        act1.triggered.connect(lambda: self._plot_xy_scatter(x_col, y_col, min_row, num_rows))
+        act1.setEnabled(enabled)
+        act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
+        act2.triggered.connect(lambda: self._plot_xy_scatter(y_col, x_col, min_row, num_rows))
+        act2.setEnabled(enabled)
+        menu.addAction(act1)
+        menu.addAction(act2)
+        menu.exec(view.mapToGlobal(pos))
+
+    def _plot_xy_scatter(self, x_col_idx, y_col_idx, start_row, num_rows):
+        """
+        接收已按视觉顺序确定的逻辑列索引进行绘图。
+        """
+        try:
+            # 直接使用正确的逻辑索引提取数据
+            x_data_series = pd.to_numeric(self._df.iloc[start_row : start_row + num_rows, x_col_idx], errors='coerce')
+            y_data_series = pd.to_numeric(self._df.iloc[start_row : start_row + num_rows, y_col_idx], errors='coerce')
+
+            # 验证1：检查是否有非数值数据
+            if x_data_series.isnull().any() or y_data_series.isnull().any():
+                QMessageBox.warning(self, "绘图错误", "选中区域包含无法转换为数字的单元格。")
+                return
+
+            # # 验证2：检查X轴数据是否唯一
+            # if x_data_series.nunique() < 2:
+            #     QMessageBox.warning(self, "绘图错误", "X轴数据（左侧列）需要至少两个不同的数值才能绘图。")
+            #     return
+            
+            # 获取清理后的列标题
+            x_header = self.model.headerData(x_col_idx, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
+            y_header = self.model.headerData(y_col_idx, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
+
+            # 创建并显示绘图窗口
+            plot_dialog = XYScatterPlotDialog(x_data_series.to_numpy(), y_data_series.to_numpy(), x_header, y_header, self)
+            self.scatter_plot_windows.append(plot_dialog)
+            plot_dialog.show()
+
+        except Exception as e:
+            QMessageBox.critical(self, "未知错误", f"绘图时发生错误: {e}")
+
+    # ===================================================================
+    #               ... (DataTableDialog 的其余代码保持不变) ...
+    # ===================================================================
+
     def _connect_signals(self):
         if self.model:
-            self.main_view.selectionModel().selectionChanged.connect(self._update_highlights)
-            self.frozen_view.selectionModel().selectionChanged.connect(self._update_highlights)
+            self.main_view.selectionModel().selectionChanged.connect(self._update_highlights_main)
+            self.frozen_view.selectionModel().selectionChanged.connect(self._update_highlights_frozen)
 
-    def _update_highlights(self, selected, deselected):
-        selected_indexes = self.main_view.selectionModel().selectedIndexes() + self.frozen_view.selectionModel().selectedIndexes()
-        self.delegate.selected_rows = set(idx.row() for idx in selected_indexes)
-        self.delegate.selected_cols = set(idx.column() for idx in selected_indexes)
-        self.main_view.viewport().update()
+    def _update_highlights_frozen(self, selected, deselected):
+        selected_indexes = self.frozen_view.selectionModel().selectedIndexes()
+        self.delegate_frozen.selected_rows = set(idx.row() for idx in selected_indexes)
+        self.delegate_frozen.selected_cols = set(idx.column() for idx in selected_indexes)
         self.frozen_view.viewport().update()
 
+    def _update_highlights_main(self, selected, deselected):
+        selected_indexes = self.main_view.selectionModel().selectedIndexes()
+        self.delegate_main.selected_rows = set(idx.row() for idx in selected_indexes)
+        self.delegate_main.selected_cols = set(idx.column() for idx in selected_indexes)
+        self.main_view.viewport().update()
+
     def save_geom(self):
-        self.parent().data_table_geometry = self.saveGeometry()
+        if self.parent():
+            self.parent().data_table_geometry = self.saveGeometry()
 
     def load_geom(self):
-        if self.parent().data_table_geometry is not None:
+        if self.parent() and self.parent().data_table_geometry is not None:
             geom = self.parent().data_table_geometry
             self.restoreGeometry(geom)
 
     def closeEvent(self, event):
-        self.parent().data_table_geometry = self.saveGeometry()
-        self._df = pd.DataFrame()          # 释放内存
+        for win in self.scatter_plot_windows[:]:
+            try:
+                # 尝试访问窗口属性来检查是否有效
+                if hasattr(win, 'isVisible'):
+                    win.close()
+            except RuntimeError:
+                # 窗口已经被删除，跳过
+                pass
+        
+        self.scatter_plot_windows.clear()
+        
+        # 其他清理代码保持不变...
+        self.save_geom()
+        self._df = pd.DataFrame()
         self.main_view.setModel(None)
         self.frozen_view.setModel(None)
-        self._instance = None  # 重置实例
-        self._saved_scroll_pos = None  # 清空滚动位置记忆
+        self._instance = None
+        self._saved_scroll_pos = None
         self.hide()
         event.accept()
 
@@ -683,34 +867,20 @@ class DataTableDialog(QDialog):
         return var_name in self._df.columns
 
     def add_series(self, var_name: str, data: pd.Series):
-        # 追加列
         self._df[var_name] = data
-        # 获取 units（从 parent 的 loader 获取）
         if hasattr(self.parent(), 'loader') and self.parent().loader:
             self.units = self.parent().loader.units
-        # 更新模型
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
-
-        # 更新视图显示的列
         self._update_views()
-
-        # 恢复滚动位置
         if self._saved_scroll_pos is not None:
             QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(self._saved_scroll_pos))
-        # 不再滚动到新列的第0行
-        # if var_name not in self.frozen_columns:
-        #     col_index = self._df.columns.get_loc(var_name)
-        #     index = self.model.index(0, col_index)
-        #     self.main_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def _update_views(self):
         if self.model is None:
             return
-
-        # 隐藏列以实现冻结效果
         frozen_count = 0
         for col in range(self.model.columnCount()):
             var_name = self._df.columns[col]
@@ -721,21 +891,10 @@ class DataTableDialog(QDialog):
             else:
                 self.main_view.setColumnHidden(col, False)
                 self.frozen_view.setColumnHidden(col, True)
-
-        # # 调整冻结视图宽度
-        # frozen_width = 0
-        # for i in range(self.model.columnCount()):
-        #     if not self.frozen_view.isColumnHidden(i):
-        #         frozen_width += self.frozen_view.columnWidth(i)
-        # self.frozen_view.setFixedWidth(frozen_width + 2)  # +2 for borders
-
-        # 如果没有冻结列，隐藏冻结视图
         if frozen_count == 0:
             self.frozen_view.hide()
         else:
             self.frozen_view.show()
-
-        # 更新行号显示
         if frozen_count > 0:
             self.frozen_view.verticalHeader().setVisible(True)
             self.main_view.verticalHeader().setVisible(False)
@@ -747,12 +906,24 @@ class DataTableDialog(QDialog):
         var_name = self._df.columns[logical_col]
         if var_name not in self.frozen_columns:
             self.frozen_columns.append(var_name)
+            non_frozen = [c for c in self._df.columns if c not in self.frozen_columns]
+            self._df = self._df[self.frozen_columns + non_frozen]
+            self.model = PandasTableModel(self._df, self.units)
+            self.main_view.setModel(self.model)
+            self.frozen_view.setModel(self.model)
+            self._connect_signals()
             self._update_views()
 
     def unfreeze_column(self, logical_col):
         var_name = self._df.columns[logical_col]
         if var_name in self.frozen_columns:
             self.frozen_columns.remove(var_name)
+            non_frozen = [c for c in self._df.columns if c not in self.frozen_columns]
+            self._df = self._df[self.frozen_columns + non_frozen]
+            self.model = PandasTableModel(self._df, self.units)
+            self.main_view.setModel(self.model)
+            self.frozen_view.setModel(self.model)
+            self._connect_signals()
             self._update_views()
 
     def _sync_row_heights(self, logicalIndex, oldSize, newSize):
@@ -763,25 +934,31 @@ class DataTableDialog(QDialog):
             self.main_view.setRowHeight(logicalIndex, newSize)
 
     def _sync_column_order(self, logicalIndex, oldVisualIndex, newVisualIndex):
-        # 获取发送者
         sender = self.sender()
-        if sender == self.main_view.horizontalHeader():
-            other_header = self.frozen_view.horizontalHeader()
-        else:
-            other_header = self.main_view.horizontalHeader()
-
-         # 临时阻断信号
-        other_header.blockSignals(True)  # 禁止触发信号
+        other_header = self.frozen_view.horizontalHeader() if sender == self.main_view.horizontalHeader() else self.main_view.horizontalHeader()
+        other_header.blockSignals(True)
         try:
-            other_header.moveSection(oldVisualIndex, newVisualIndex)
-        finally:
-            other_header.blockSignals(False)  # 恢复信号
+            # The following line might not be strictly necessary if both headers move together, but for robustness:
+            # Find the logical index being moved
+            moved_logical_index = self.main_view.horizontalHeader().logicalIndex(newVisualIndex) if sender == self.main_view.horizontalHeader() else self.frozen_view.horizontalHeader().logicalIndex(newVisualIndex)
 
-        # 更新 _df.columns 以匹配新顺序        
-        new_order = [self._df.columns[other_header.logicalIndex(i)] for i in range(other_header.count())]   
-        with self._df_lock:
-            self._df = self._df[new_order]
+            # Reorder internal DataFrame to match the new visual order of the sender
+            current_order = [sender.logicalIndex(i) for i in range(sender.count())]
+            new_column_order = self._df.columns[current_order].tolist()
+            
+            with self._df_lock:
+                self._df = self._df[new_column_order]
+            
+            # Now that the model's underlying data is reordered, we need to reset the model
+            # to make all views aware of the structural change.
+            self.model = PandasTableModel(self._df, self.units)
+            self.main_view.setModel(self.model)
+            self.frozen_view.setModel(self.model)
+            self._connect_signals()
             self._update_views()
+
+        finally:
+            other_header.blockSignals(False)
 
     def _on_frozen_header_right_click(self, pos):
         self._on_header_right_click(pos, self.frozen_view)
@@ -791,16 +968,14 @@ class DataTableDialog(QDialog):
 
     def _on_header_right_click(self, pos, view):
         header = view.horizontalHeader()
-        col = header.logicalIndexAt(pos)
-        if col < 0:
+        logical_col = header.logicalIndexAt(pos)
+        if logical_col < 0:
             return
 
-        logical_col = header.visualIndex(col)  # 因为可移动，获取逻辑索引
         var_name = self._df.columns[logical_col]
 
         menu = QMenu(self)
         act_delete = menu.addAction(f"删除列 “{var_name}”")
-
         if var_name in self.frozen_columns:
             act_freeze = menu.addAction("解除冻结列")
         else:
@@ -819,56 +994,42 @@ class DataTableDialog(QDialog):
         var_name = self._df.columns[logical_col]
         if var_name in self.frozen_columns:
             self.frozen_columns.remove(var_name)
-        self.model.removeColumns(logical_col, 1)
+        
+        # We need to drop by name as logical_col index can change
+        self._df.drop(columns=[var_name], inplace=True)
+
+        self.model = PandasTableModel(self._df, self.units)
+        self.main_view.setModel(self.model)
+        self.frozen_view.setModel(self.model)
+        self._connect_signals()
         self._update_views()
 
     def update_data(self, loader):
-        """更新数据表中的数据，保持位置，删除消失的变量"""
         if self.model is None or self._df.empty:
             return
-
-        # 保存当前滚动位置和冻结列
         scroll_pos = self.main_view.verticalScrollBar().value()
         frozen_cols = self.frozen_columns.copy()
-
-        # 收集当前列
         current_cols = list(self._df.columns)
-
-        # 更新每个列的数据
         removed = []
         for col in current_cols:
             if col in loader.df.columns:
                 self._df[col] = loader.df[col]
             else:
-                # 变量消失，删除列
-                col_idx = self._df.columns.get_loc(col)
-                self.model.removeColumns(col_idx, 1)
+                self._df.drop(columns=[col], inplace=True)
                 if col in self.frozen_columns:
                     self.frozen_columns.remove(col)
                 removed.append(col)
-
-        # 更新 units 和 validity
         self.units = loader.units
-
-        # 更新模型
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
-
-        # 恢复冻结列
         self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
         self._update_views()
-
-        # 恢复滚动位置
         QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(scroll_pos))
-
-        # 提示移除的列
         if removed:
             msg = f"以下变量已从数据中移除：{', '.join(removed)}"
             QMessageBox.information(self, "更新通知", msg)
-
-        # 如果更新后为空，关闭窗口
         if self._df.empty:
             self.close()
 
@@ -1260,7 +1421,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.getAxis('bottom').setGrid(255) 
         self.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
-        # 基于点数修改曲线风格
+# 基于点数修改曲线风格
         self.view_box.sigRangeChanged.connect(self.update_plot_style)
         
     def jump_to_data_impl(self, x):
@@ -2056,8 +2217,20 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
-        #ico_path =resource_path("icon.ico")
-        #self.setWindowIcon(QIcon(str(ico_path))) 
+
+        # 设置应用程序图标（影响Dock图标）
+        global ico_path        
+        if sys.platform == "darwin":  # macOS
+            if os.path.exists(ico_path):
+                app_icon = QIcon(str(ico_path))
+                app = QApplication.instance()
+                app.setWindowIcon(app_icon)
+                self.setWindowIcon(app_icon)
+
+        elif sys.platform == "win32":  # Windows
+            if os.path.exists(ico_path):
+                self.setWindowIcon(QIcon(str(ico_path))) 
+       
         self.setWindowTitle(self.defaultTitle)
         self.resize(1600, 900)
         self._factor_default  = 1
@@ -2302,7 +2475,7 @@ class MainWindow(QMainWindow):
             elif file_ext in ['.txt',]:
                 delimiter_typ = '\t'
                 descRows = 0
-                hasunit=True      
+                hasunit=True         
             else:
                 QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
                 return
