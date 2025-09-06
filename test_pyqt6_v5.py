@@ -25,13 +25,14 @@ DEFAULT_PADDING_VAL= 0.02
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 5
 RATIO_RESET_PLOTS = 0.3
 
+
+# PyInstaller 解包目录
 from pathlib import Path
 def resource_path(relative_path: str) -> Path:
     """获取打包后的资源文件路径"""
-    if hasattr(sys, "_MEIPASS"):  # PyInstaller 解包目录
+    if hasattr(sys, "_MEIPASS"):  
         return Path(os.path.join(sys._MEIPASS, relative_path))
     return Path(relative_path)
-
 
 # 设置应用程序和窗口图标
 if sys.platform == "win32": # Windows
@@ -53,7 +54,6 @@ class HelpDialog(QDialog):
         # 文本区域
         text_edit = QTextEdit(self)
         text_edit.setReadOnly(True)
-
         
         # 加载 README.md
         readme_path = resource_path("README.md")
@@ -207,9 +207,6 @@ class FastDataLoader:
         if self._progress_cb:
             self._progress_cb(100)
 
-    # ------------------------------------------------------------------
-    # 内部工具
-    # ------------------------------------------------------------------
     @staticmethod
     def _load_header_units(
         path: str,
@@ -350,9 +347,6 @@ class FastDataLoader:
                 .astype("float32")
             )
 
-    # ------------------------------------------------------------------
-    # 对外 API
-    # ------------------------------------------------------------------
 
     def _check_df_validity(self) -> dict:
         validity : dict = {}
@@ -527,17 +521,21 @@ class CustomDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.selected_rows = set()
         self.selected_cols = set()
+        self.highlighted_rows = set()  # 新增：用于存储需要高亮的行（来自另一个视图）
 
     def paint(self, painter, option, index):
         painter.save()
+        # 高亮选中的单元格所在的行和列
         if index.row() in self.selected_rows or index.column() in self.selected_cols:
             painter.fillRect(option.rect, QColor(200, 200, 255, 128))  # 浅蓝高亮，半透明
+        
+        # 新增：高亮来自另一个视图的行
+        if index.row() in self.highlighted_rows:
+            painter.fillRect(option.rect, QColor(255, 200, 200, 64))  # 淡红色高亮，更透明
+        
         super().paint(painter, option, index)
         painter.restore()
 
-# ===================================================================
-# 新增功能：X/Y 散点图绘制窗口
-# ===================================================================
 class XYScatterPlotDialog(QDialog):
     def __init__(self, x_data, y_data, x_name, y_name, parent=None):
         super().__init__(parent)
@@ -636,6 +634,10 @@ class DataTableDialog(QDialog):
         self.frozen_view.setStyleSheet("QTableView { background-color: rgba(245,245,245,128); }")
         self.frozen_view.horizontalHeader().customContextMenuRequested.connect(self._on_frozen_header_right_click)
         self.frozen_view.horizontalHeader().setSectionsMovable(True)
+        self.frozen_view.horizontalHeader().setDragEnabled(True)
+        self.frozen_view.horizontalHeader().setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.frozen_view.horizontalHeader().setDragDropOverwriteMode(False)
+
         self.frozen_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.frozen_view.customContextMenuRequested.connect(self._show_table_context_menu)
 
@@ -644,6 +646,10 @@ class DataTableDialog(QDialog):
         self.main_view.verticalHeader().setVisible(False)
         self.main_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.main_view.horizontalHeader().setSectionsMovable(True)
+        self.main_view.horizontalHeader().setDragEnabled(True)
+        self.main_view.horizontalHeader().setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.main_view.horizontalHeader().setDragDropOverwriteMode(False)
+
         self.main_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.main_view.horizontalHeader().customContextMenuRequested.connect(self._on_main_header_right_click)
         self.main_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -684,17 +690,103 @@ class DataTableDialog(QDialog):
 
         self.delegate_frozen = CustomDelegate(self)
         self.delegate_main = CustomDelegate(self)
+        self.delegate_frozen.highlighted_rows = set()
+        self.delegate_main.highlighted_rows = set()
         self.frozen_view.setItemDelegate(self.delegate_frozen)
         self.main_view.setItemDelegate(self.delegate_main)
+
+        # 添加当前焦点视图跟踪
+        self.current_focused_view = None  
+
+        # 为两个视图安装焦点事件过滤器
+        self.frozen_view.installEventFilter(self)
+        self.main_view.installEventFilter(self)
+
 
         if self.parent() and self.parent().data_table_geometry:
             self.restoreGeometry(self.parent().data_table_geometry)
         else:
             self.resize(600, 400)
 
-    # ===================================================================
-    #               >>>>>>>>> 修正后的核心逻辑 <<<<<<<<<
-    # ===================================================================
+    def eventFilter(self, obj, event):
+        # 处理焦点变化事件
+        if event.type() == QEvent.Type.FocusIn:
+            if obj in [self.frozen_view, self.main_view]:
+                self.current_focused_view = obj
+                self._update_highlights_on_focus_change()
+        
+        return super().eventFilter(obj, event)
+    
+    def _update_highlights_on_focus_change(self):
+        # 根据当前焦点视图更新高亮
+        if self.current_focused_view == self.frozen_view:
+            # 清除主视图的同步高亮
+            self.delegate_main.highlighted_rows = set()
+            self.delegate_frozen.highlighted_rows = set()
+
+            # 获取冻结区选中的单元格
+            selected_indexes = self.frozen_view.selectionModel().selectedIndexes()
+            self.delegate_frozen.selected_rows = set(idx.row() for idx in selected_indexes)
+            self.delegate_frozen.selected_cols = set(idx.column() for idx in selected_indexes)
+            
+            # 设置主视图的高亮行
+            self.delegate_main.highlighted_rows = self.delegate_frozen.selected_rows
+            
+            # 清除主视图的选中状态（只保留高亮行）
+            self.delegate_main.selected_rows = set()
+            self.delegate_main.selected_cols = set()
+            
+        elif self.current_focused_view == self.main_view:
+            # 清除冻结视图的同步高亮
+            self.delegate_frozen.highlighted_rows = set()
+            self.delegate_main.highlighted_rows = set()
+            # 获取主视图选中的单元格
+            selected_indexes = self.main_view.selectionModel().selectedIndexes()
+            self.delegate_main.selected_rows = set(idx.row() for idx in selected_indexes)
+            self.delegate_main.selected_cols = set(idx.column() for idx in selected_indexes)
+            
+            # 设置冻结视图的高亮行
+            self.delegate_frozen.highlighted_rows = self.delegate_main.selected_rows
+            
+            # 清除冻结视图的选中状态（只保留高亮行）
+            self.delegate_frozen.selected_rows = set()
+            self.delegate_frozen.selected_cols = set()
+            
+        else:
+            # 没有焦点，清空所有高亮
+            self.delegate_frozen.selected_rows = set()
+            self.delegate_frozen.selected_cols = set()
+            self.delegate_frozen.highlighted_rows = set()
+            
+            self.delegate_main.selected_rows = set()
+            self.delegate_main.selected_cols = set()
+            self.delegate_main.highlighted_rows = set()
+
+        # 更新视图
+        self.frozen_view.viewport().update()
+        self.main_view.viewport().update()
+    
+    def _update_highlights_frozen(self, selected, deselected):
+        # 设置当前焦点视图为冻结视图
+        self.current_focused_view = self.frozen_view
+        self._update_highlights_on_focus_change()
+    
+    def _update_highlights_main(self, selected, deselected):
+        # 设置当前焦点视图为主视图
+        self.current_focused_view = self.main_view
+        self._update_highlights_on_focus_change()
+    
+    def focusInEvent(self, event):
+        # 当对话框获得焦点时，更新高亮
+        super().focusInEvent(event)
+        self._update_highlights_on_focus_change()
+    
+    def focusOutEvent(self, event):
+        # 当对话框失去焦点时，清除所有高亮
+        super().focusOutEvent(event)
+        self.current_focused_view = None
+        self._update_highlights_on_focus_change()
+    
     def _show_table_context_menu(self, pos):
         """
         根据视觉顺序判断是否显示绘图菜单，并传递正确的列索引。
@@ -706,11 +798,20 @@ class DataTableDialog(QDialog):
         selected_indexes = view.selectionModel().selectedIndexes()
         if not selected_indexes:
             return
+        frozen_cols = set(self._df.columns.get_loc(col) for col in self.frozen_columns)
+        if view == self.main_view:
+            # non-frozen selected
+            this_cols = set(idx.column() for idx in selected_indexes)- frozen_cols
+            other_view = self.frozen_view
+            other_selected = other_view.selectionModel().selectedIndexes()
+            other_cols = set(idx.column() for idx in other_selected) & frozen_cols
+        else:
+            # frozen
+            other_view = self.main_view
+            this_cols = set(idx.column() for idx in selected_indexes) & frozen_cols
+            other_selected = other_view.selectionModel().selectedIndexes()
+            other_cols = set(idx.column() for idx in other_selected) - frozen_cols
 
-        this_cols = set(idx.column() for idx in selected_indexes)
-        other_view = self.frozen_view if view == self.main_view else self.main_view
-        other_selected = other_view.selectionModel().selectedIndexes()
-        other_cols = set(idx.column() for idx in other_selected)
         all_selected = selected_indexes + other_selected
         total_cols = this_cols | other_cols
 
@@ -811,26 +912,12 @@ class DataTableDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "未知错误", f"绘图时发生错误: {e}")
 
-    # ===================================================================
-    #               ... (DataTableDialog 的其余代码保持不变) ...
-    # ===================================================================
 
     def _connect_signals(self):
         if self.model:
             self.main_view.selectionModel().selectionChanged.connect(self._update_highlights_main)
             self.frozen_view.selectionModel().selectionChanged.connect(self._update_highlights_frozen)
 
-    def _update_highlights_frozen(self, selected, deselected):
-        selected_indexes = self.frozen_view.selectionModel().selectedIndexes()
-        self.delegate_frozen.selected_rows = set(idx.row() for idx in selected_indexes)
-        self.delegate_frozen.selected_cols = set(idx.column() for idx in selected_indexes)
-        self.frozen_view.viewport().update()
-
-    def _update_highlights_main(self, selected, deselected):
-        selected_indexes = self.main_view.selectionModel().selectedIndexes()
-        self.delegate_main.selected_rows = set(idx.row() for idx in selected_indexes)
-        self.delegate_main.selected_cols = set(idx.column() for idx in selected_indexes)
-        self.main_view.viewport().update()
 
     def save_geom(self):
         if self.parent():
@@ -932,33 +1019,29 @@ class DataTableDialog(QDialog):
             self.frozen_view.setRowHeight(logicalIndex, newSize)
         elif sender == self.sender() == self.frozen_view.verticalHeader():
             self.main_view.setRowHeight(logicalIndex, newSize)
-
+    
     def _sync_column_order(self, logicalIndex, oldVisualIndex, newVisualIndex):
-        sender = self.sender()
-        other_header = self.frozen_view.horizontalHeader() if sender == self.main_view.horizontalHeader() else self.main_view.horizontalHeader()
-        other_header.blockSignals(True)
-        try:
-            # The following line might not be strictly necessary if both headers move together, but for robustness:
-            # Find the logical index being moved
-            moved_logical_index = self.main_view.horizontalHeader().logicalIndex(newVisualIndex) if sender == self.main_view.horizontalHeader() else self.frozen_view.horizontalHeader().logicalIndex(newVisualIndex)
+        """
+        保持冻结区和非冻结区的列顺序一致。
+        注意：moveSection 的参数是 visualIndex，不是 logicalIndex。
+        """
+        frozen_header = self.frozen_view.horizontalHeader()
+        main_header = self.main_view.horizontalHeader() 
+        # 如果拖动发生在主表头，就同步冻结表头
+        sender_header = self.sender()
+        if sender_header is main_header:
+            frozen_header.blockSignals(True)
+            try:
+                frozen_header.moveSection(oldVisualIndex, newVisualIndex)
+            finally:
+                frozen_header.blockSignals(False)
 
-            # Reorder internal DataFrame to match the new visual order of the sender
-            current_order = [sender.logicalIndex(i) for i in range(sender.count())]
-            new_column_order = self._df.columns[current_order].tolist()
-            
-            with self._df_lock:
-                self._df = self._df[new_column_order]
-            
-            # Now that the model's underlying data is reordered, we need to reset the model
-            # to make all views aware of the structural change.
-            self.model = PandasTableModel(self._df, self.units)
-            self.main_view.setModel(self.model)
-            self.frozen_view.setModel(self.model)
-            self._connect_signals()
-            self._update_views()
-
-        finally:
-            other_header.blockSignals(False)
+        elif sender_header is frozen_header:
+            main_header.blockSignals(True)
+            try:
+                main_header.moveSection(oldVisualIndex, newVisualIndex)
+            finally:
+                main_header.blockSignals(False)
 
     def _on_frozen_header_right_click(self, pos):
         self._on_header_right_click(pos, self.frozen_view)
@@ -1154,17 +1237,13 @@ class MyTableWidget(QTableWidget):
         self.setColumnCount(2)
         self.setHorizontalHeaderLabels(["变量名", "单位"])
 
-        # ---------------- 关键修改 1：字体 ----------------
+        # 字体 
         hdr = self.horizontalHeader()
-        # ---------------- 默认 3:1 的初始宽度 ----------------
+        # 默认 3:1 的初始宽度 
         total = 255          # 首次拿不到 width 时给一个兜底
         self.setColumnWidth(0, int(total * 0.75))
         self.setColumnWidth(1, int(total * 0.25))
 
-        # font = QFont()
-        # font.setPointSize(12)   # 想要多大就改多大
-        # font.setBold(True)
-        # hdr.setFont(font)
 
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.horizontalHeader().setStretchLastSection(False)  # 关闭自动拉伸最后一列
