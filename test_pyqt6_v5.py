@@ -947,6 +947,7 @@ class DataTableDialog(QDialog):
         self.frozen_view.setModel(None)
         self._instance = None
         self._saved_scroll_pos = None
+        self.frozen_columns = []  
         self.hide()
         event.accept()
 
@@ -1072,6 +1073,51 @@ class DataTableDialog(QDialog):
                 self.unfreeze_column(logical_col)
             else:
                 self.freeze_column(logical_col)
+
+
+    def scroll_to_column(self, var_name: str):
+        """滚动到指定变量名的列（可能在冻结区或普通区），不影响垂直滚动位置"""
+        if var_name not in self._df.columns:
+            return False
+        
+        # 获取列的索引
+        col_idx = self._df.columns.get_loc(var_name)
+        
+        # 确定列在哪个视图（冻结区或普通区）
+        if var_name in self.frozen_columns:
+            view = self.frozen_view
+        else:
+            view = self.main_view
+        
+        # 获取水平头部
+        header = view.horizontalHeader()
+        
+        # 获取列的视觉位置
+        visual_idx = header.visualIndex(col_idx)
+        
+        # 计算列的位置和大小
+        col_pos = 0
+        for i in range(visual_idx):
+            col_pos += header.sectionSize(header.logicalIndex(i))
+        
+        col_width = header.sectionSize(col_idx)
+        
+        # 获取当前水平滚动位置
+        scroll_pos = view.horizontalScrollBar().value()
+        
+        # 计算需要的滚动位置，使列在视图中可见
+        viewport_width = view.viewport().width()
+        
+        # 如果列在视图左侧之外
+        if col_pos < scroll_pos:
+            view.horizontalScrollBar().setValue(col_pos)
+        # 如果列在视图右侧之外
+        elif col_pos + col_width > scroll_pos + viewport_width:
+            view.horizontalScrollBar().setValue(col_pos + col_width - viewport_width)
+        
+        return True
+    
+
 
     def _remove_column(self, logical_col):
         var_name = self._df.columns[logical_col]
@@ -1295,7 +1341,11 @@ class MyTableWidget(QTableWidget):
 
         series = main_window.loader.df[var_name]
 
-        DataTableDialog.popup(var_name, series, parent=main_window)
+        # 弹出数值变量表
+        dlg = DataTableDialog.popup(var_name, series, parent=main_window)
+        
+        # 滚动到新添加的列
+        QTimer.singleShot(100, lambda: dlg.scroll_to_column(var_name))
 
         super().mouseDoubleClickEvent(event)
 
