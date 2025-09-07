@@ -531,6 +531,7 @@ class CustomDelegate(QStyledItemDelegate):
         self.selected_rows = set()
         self.selected_cols = set()
         self.highlighted_rows = set()  # 新增：用于存储需要高亮的行（来自另一个视图）
+        self.highlighted_cols = set()  # 新增：用于存储需要高亮的列（用于闪烁效果）
 
     def paint(self, painter, option, index):
         painter.save()
@@ -541,7 +542,11 @@ class CustomDelegate(QStyledItemDelegate):
         # 新增：高亮来自另一个视图的行
         if index.row() in self.highlighted_rows:
             painter.fillRect(option.rect, QColor(255, 200, 200, 64))  # 淡红色高亮，更透明
-        
+
+        # 新增：高亮指定的列（用于闪烁）
+        if index.column() in self.highlighted_cols:
+            painter.fillRect(option.rect, QColor(200, 200, 255, 128))  # 淡蓝色高亮，半透明
+
         super().paint(painter, option, index)
         painter.restore()
 
@@ -611,6 +616,19 @@ class DataTableDialog(QMainWindow):
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
+            col_idx = dlg._df.columns.get_loc(var_name)  # 获取逻辑列索引
+            if var_name in dlg.frozen_columns:
+                delegate = dlg.delegate_frozen
+                view = dlg.frozen_view
+            else:
+                delegate = dlg.delegate_main
+                view = dlg.main_view
+            # 闪烁
+            # delegate.highlighted_cols.add(col_idx)
+            # view.viewport().update()
+            dlg._blink_step_on(delegate, col_idx, view)
+            QTimer.singleShot(800, lambda: dlg._blink_step_off(delegate, col_idx, view))  
+
             return dlg
         
         cls._saved_scroll_pos = dlg.main_view.verticalScrollBar().value() if dlg.main_view else None
@@ -797,13 +815,38 @@ class DataTableDialog(QMainWindow):
         self._handle_dropped_variable(var_name)
         event.acceptProposedAction()
 
+    def _blink_step_on(self, delegate, col_idx, view):
+        # 步骤1: 高亮 (持续0.5s)
+        delegate.highlighted_cols.add(col_idx)
+        view.viewport().update()
+
+    def _blink_step_off(self, delegate, col_idx, view):
+        # 步骤2: 取消高亮 (持续0.5s)
+        delegate.highlighted_cols.remove(col_idx)
+        view.viewport().update()
+
     # 内部函数：处理拖放的变量
     def _handle_dropped_variable(self, var_name: str):
         """处理拖放的变量，添加到非冻结区"""
         # 检查变量是否已存在
         if self.has_column(var_name):
             self.scroll_to_column(var_name)
-            QMessageBox.information(self, "提示", f"变量 '{var_name}' 已存在")
+
+            # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
+            col_idx = self._df.columns.get_loc(var_name)  # 获取逻辑列索引
+            if var_name in self.frozen_columns:
+                delegate = self.delegate_frozen
+                view = self.frozen_view
+            else:
+                delegate = self.delegate_main
+                view = self.main_view
+
+            # 步骤1: 高亮 (持续0.5s)
+            # delegate.highlighted_cols.add(col_idx)
+            # view.viewport().update()
+            self._blink_step_on(delegate, col_idx, view)
+            QTimer.singleShot(800, lambda: self._blink_step_off(delegate, col_idx, view))  
+            #QMessageBox.information(self, "提示", f"变量 '{var_name}' 已存在")
             return
             
         # 获取主窗口
