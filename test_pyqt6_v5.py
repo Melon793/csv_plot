@@ -616,27 +616,17 @@ class DataTableDialog(QMainWindow):
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
-            col_idx = dlg._df.columns.get_loc(var_name)  # 获取逻辑列索引
-            if var_name in dlg.frozen_columns:
-                delegate = dlg.delegate_frozen
-                view = dlg.frozen_view
-            else:
-                delegate = dlg.delegate_main
-                view = dlg.main_view
-            # 闪烁
-            # delegate.highlighted_cols.add(col_idx)
-            # view.viewport().update()
-            dlg._blink_step_on(delegate, col_idx, view)
-            QTimer.singleShot(800, lambda: dlg._blink_step_off(delegate, col_idx, view))  
+            # return dlg
+        else:
+            cls._saved_scroll_pos = dlg.main_view.verticalScrollBar().value() if dlg.main_view else None
+            dlg.load_geom()
+            dlg._add_variable_to_table(var_name, data)  # 使用内部函数
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
 
-            return dlg
-        
-        cls._saved_scroll_pos = dlg.main_view.verticalScrollBar().value() if dlg.main_view else None
-        dlg.load_geom()
-        dlg._add_variable_to_table(var_name, data)  # 使用内部函数
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        # 闪烁
+        QTimer.singleShot(100, lambda: dlg._blink_column(var_name,pulse=800))
         return dlg
 
     def __init__(self, parent=None):
@@ -824,14 +814,8 @@ class DataTableDialog(QMainWindow):
         # 步骤2: 取消高亮 (持续0.5s)
         delegate.highlighted_cols.remove(col_idx)
         view.viewport().update()
-
-    # 内部函数：处理拖放的变量
-    def _handle_dropped_variable(self, var_name: str):
-        """处理拖放的变量，添加到非冻结区"""
-        # 检查变量是否已存在
+    def _blink_column(self,var_name,pulse:int=800):
         if self.has_column(var_name):
-            self.scroll_to_column(var_name)
-
             # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
             col_idx = self._df.columns.get_loc(var_name)  # 获取逻辑列索引
             if var_name in self.frozen_columns:
@@ -845,7 +829,29 @@ class DataTableDialog(QMainWindow):
             # delegate.highlighted_cols.add(col_idx)
             # view.viewport().update()
             self._blink_step_on(delegate, col_idx, view)
-            QTimer.singleShot(800, lambda: self._blink_step_off(delegate, col_idx, view))  
+            QTimer.singleShot(pulse, lambda: self._blink_step_off(delegate, col_idx, view))  
+        return
+    # 内部函数：处理拖放的变量
+    def _handle_dropped_variable(self, var_name: str):
+        """处理拖放的变量，添加到非冻结区"""
+        # 检查变量是否已存在
+        if self.has_column(var_name):
+            self.scroll_to_column(var_name)
+            self._blink_column(var_name,pulse=800)
+            # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
+            # col_idx = self._df.columns.get_loc(var_name)  # 获取逻辑列索引
+            # if var_name in self.frozen_columns:
+            #     delegate = self.delegate_frozen
+            #     view = self.frozen_view
+            # else:
+            #     delegate = self.delegate_main
+            #     view = self.main_view
+
+            # # 步骤1: 高亮 (持续0.5s)
+            # # delegate.highlighted_cols.add(col_idx)
+            # # view.viewport().update()
+            # self._blink_step_on(delegate, col_idx, view)
+            # QTimer.singleShot(800, lambda: self._blink_step_off(delegate, col_idx, view))  
             #QMessageBox.information(self, "提示", f"变量 '{var_name}' 已存在")
             return
             
@@ -870,7 +876,7 @@ class DataTableDialog(QMainWindow):
         
         # 滚动到新添加的列
         QTimer.singleShot(100, lambda: self.scroll_to_column(var_name))
-
+        QTimer.singleShot(100, lambda: self._blink_column(var_name,pulse=800))
     # 内部函数：添加变量到表格
     def _add_variable_to_table(self, var_name: str, data: pd.Series):
         """内部函数：将变量添加到表格的非冻结区"""
