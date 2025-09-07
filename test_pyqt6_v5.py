@@ -20,11 +20,11 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 from threading import Lock
 
-global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS
+global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT
 DEFAULT_PADDING_VAL= 0.02
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 5
 RATIO_RESET_PLOTS = 0.3
-
+FROZEN_VIEW_WIDTH_DEFAULT = 180
 
 # PyInstaller 解包目录
 from pathlib import Path
@@ -50,7 +50,14 @@ class HelpDialog(QDialog):
         self.setWindowTitle("帮助文档")
         self.resize(800, 600)
         layout = QVBoxLayout(self)
-        
+
+        # 把窗口移动到屏幕中心
+        screen = QApplication.primaryScreen().availableGeometry()
+        size = self.geometry()
+        x = (screen.width() - size.width()) // 2
+        y = (screen.height() - size.height()) // 4
+        self.move(x, y)
+
         # 文本区域
         text_edit = QTextEdit(self)
         text_edit.setReadOnly(True)
@@ -502,6 +509,8 @@ class PandasTableModel(QAbstractTableModel):
     def headerData(self, section, orientation, role):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
+        if self._df.columns.empty:
+            return None
         if orientation == Qt.Orientation.Horizontal:
             col_name = str(self._df.columns[section])
             unit = self._units.get(col_name, '')
@@ -540,7 +549,7 @@ class XYScatterPlotDialog(QDialog):
     def __init__(self, x_data, y_data, x_name, y_name, parent=None):
         super().__init__(parent)
         self.setWindowTitle("X/Y 散点图")
-        self.resize(400, 300)
+        self.resize(500, 500)
 
         # 设置窗口在关闭时释放内存
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -587,7 +596,7 @@ class XYScatterPlotDialog(QDialog):
             # 设置刻度文字的字体
             ax.setTickFont(QFont())
 
-class DataTableDialog(QDialog):
+class DataTableDialog(QMainWindow):
     _instance = None
     _saved_scroll_pos = None  # 类级变量存储滚动位置
 
@@ -614,21 +623,35 @@ class DataTableDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-
-
         self.setWindowTitle("变量数值表")
         self.window_geometry = None 
         self.scatter_plot_windows = []
 
         self.frozen_columns = []
 
+        # 创建中央部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # 创建主布局
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(5)
         splitter.setChildrenCollapsible(False)
+        self.splitter = splitter
+        # Initialize user-preferred left width
+        self.user_left_width = FROZEN_VIEW_WIDTH_DEFAULT  # Initial fixed width for frozen_view
+
+        # Connect splitterMoved to update user preference when handle is dragged
+        self.splitter.splitterMoved.connect(self._update_user_left_width)
+
 
         self.frozen_view = QTableView(self)
         self.frozen_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        #self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.frozen_view.verticalHeader().setVisible(True)
         self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -668,10 +691,9 @@ class DataTableDialog(QDialog):
 
         splitter.addWidget(self.frozen_view)
         splitter.addWidget(self.main_view)
-        splitter.setSizes([200, 400])
+        splitter.setSizes([self.user_left_width, 400])
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(splitter)
+        main_layout.addWidget(splitter)
 
         self._df = pd.DataFrame()
         self._df_lock = Lock()
@@ -714,10 +736,15 @@ class DataTableDialog(QDialog):
         self.main_view.viewport().installEventFilter(self.drop_filter)
         self.frozen_view.viewport().installEventFilter(self.drop_filter)
 
-        if self.parent() and self.parent().data_table_geometry:
+        if self.parent() and hasattr(self.parent(), 'data_table_geometry') and self.parent().data_table_geometry:
             self.restoreGeometry(self.parent().data_table_geometry)
         else:
             self.resize(600, 400)
+            screen = QApplication.primaryScreen().availableGeometry()
+            size = self.geometry()
+            x = (screen.width() - size.width()) // 2
+            y = (screen.height() - size.height()) // 2
+            self.move(x, y)
 
     # 事件过滤器类处理拖放事件
     class DropFilter(QObject):
@@ -741,6 +768,16 @@ class DataTableDialog(QDialog):
                     event.acceptProposedAction()
                     return True
             return super().eventFilter(obj, event)
+        
+    def _update_user_left_width(self, pos, index):
+        if index == 1:  # Handle for the first splitter section
+            self.user_left_width = self.splitter.sizes()[0]
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # On window resize, fix left width to user preference, stretch right
+        total_width = sum(self.splitter.sizes())
+        self.splitter.setSizes([self.user_left_width, total_width - self.user_left_width])
 
     # 拖放相关方法
     def dragEnterEvent(self, event):
@@ -765,23 +802,18 @@ class DataTableDialog(QDialog):
         """处理拖放的变量，添加到非冻结区"""
         # 检查变量是否已存在
         if self.has_column(var_name):
-            #QMessageBox.information(self, "提示", f"变量 '{var_name}' 已存在")
             self.scroll_to_column(var_name)
+            QMessageBox.information(self, "提示", f"变量 '{var_name}' 已存在")
             return
             
-        # 获取数据
-        main_window = self.parent()
-        if not isinstance(main_window, MainWindow):
-            # 尝试通过其他方式获取主窗口，例如通过应用程序的activeWindow
-            for widget in QApplication.topLevelWidgets():
-                if isinstance(widget, MainWindow):
-                    main_window = widget
-                    break
-            else:
-                QMessageBox.warning(self, "错误", "无法找到主窗口")
-                return
+        # 获取主窗口
+        main_window = None
+        for widget in QApplication.topLevelWidgets():
+            if hasattr(widget, 'loader') and hasattr(widget, 'value_cache'):
+                main_window = widget
+                break
         
-        if not hasattr(main_window, 'loader') or main_window.loader is None:
+        if main_window is None or not hasattr(main_window, 'loader') or main_window.loader is None:
             QMessageBox.warning(self, "错误", "没有可用的数据")
             return
             
@@ -800,8 +832,15 @@ class DataTableDialog(QDialog):
     def _add_variable_to_table(self, var_name: str, data: pd.Series):
         """内部函数：将变量添加到表格的非冻结区"""
         self._df[var_name] = data
-        if hasattr(self.parent(), 'loader') and self.parent().loader:
-            self.units = self.parent().loader.units
+        # 获取主窗口
+        main_window = None
+        for widget in QApplication.topLevelWidgets():
+            if hasattr(widget, 'loader') and hasattr(widget, 'value_cache'):
+                main_window = widget
+                break
+        
+        if main_window and hasattr(main_window, 'loader') and main_window.loader:
+            self.units = main_window.loader.units
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
@@ -997,11 +1036,6 @@ class DataTableDialog(QDialog):
                 QMessageBox.warning(self, "绘图错误", "选中区域包含无法转换为数字的单元格。")
                 return
 
-            # # 验证2：检查X轴数据是否唯一
-            # if x_data_series.nunique() < 2:
-            #     QMessageBox.warning(self, "绘图错误", "X轴数据（左侧列）需要至少两个不同的数值才能绘图。")
-            #     return
-            
             # 获取清理后的列标题
             x_header = self.model.headerData(x_col_idx, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
             y_header = self.model.headerData(y_col_idx, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
@@ -1022,11 +1056,11 @@ class DataTableDialog(QDialog):
 
 
     def save_geom(self):
-        if self.parent():
+        if self.parent() and hasattr(self.parent(), 'data_table_geometry'):
             self.parent().data_table_geometry = self.saveGeometry()
 
     def load_geom(self):
-        if self.parent() and self.parent().data_table_geometry is not None:
+        if self.parent() and hasattr(self.parent(), 'data_table_geometry') and self.parent().data_table_geometry is not None:
             geom = self.parent().data_table_geometry
             self.restoreGeometry(geom)
 
@@ -1086,6 +1120,27 @@ class DataTableDialog(QDialog):
     def freeze_column(self, logical_col):
         var_name = self._df.columns[logical_col]
         if var_name not in self.frozen_columns:
+            # --- 开始修改 ---
+            col_width = self.main_view.columnWidth(logical_col)
+            current_sizes = self.splitter.sizes()
+            frozen_width, main_width = current_sizes[0], current_sizes[1]
+
+            # 新增逻辑：检查这是否是第一个被冻结的列
+            if not self.frozen_columns:
+                # 如果是第一个，设置固定宽度为 self.user_left_width
+                global FROZEN_VIEW_WIDTH_DEFAULT
+                new_frozen_width = FROZEN_VIEW_WIDTH_DEFAULT
+                total_width = frozen_width + main_width
+                new_main_width = total_width - new_frozen_width
+            else:
+                # 如果不是第一个，则累加列宽
+                new_frozen_width = frozen_width + col_width
+                new_main_width = main_width - col_width
+            
+            self.splitter.setSizes([new_frozen_width, new_main_width])
+            self.user_left_width = new_frozen_width
+            # --- 结束修改 ---
+
             self.frozen_columns.append(var_name)
             non_frozen = [c for c in self._df.columns if c not in self.frozen_columns]
             self._df = self._df[self.frozen_columns + non_frozen]
@@ -1095,9 +1150,32 @@ class DataTableDialog(QDialog):
             self._connect_signals()
             self._update_views()
 
+
     def unfreeze_column(self, logical_col):
         var_name = self._df.columns[logical_col]
         if var_name in self.frozen_columns:
+            # --- 开始修改 ---
+            col_width = self.frozen_view.columnWidth(logical_col)
+            current_sizes = self.splitter.sizes()
+            frozen_width, main_width = current_sizes[0], current_sizes[1]
+
+            # 新增逻辑：检查解冻后是否只剩一列
+            # 注意：此时 self.frozen_columns 尚未移除元素，所以判断长度是否为 2
+            if len(self.frozen_columns) == 2:
+                # 如果解冻后只剩一列，将宽度重置为 self.user_left_width
+                global FROZEN_VIEW_WIDTH_DEFAULT
+                new_frozen_width = FROZEN_VIEW_WIDTH_DEFAULT
+                total_width = frozen_width + main_width
+                new_main_width = total_width - new_frozen_width
+            else:
+                # 其他情况（解冻后剩 0 列或多于 1 列），则减去列宽
+                new_frozen_width = max(0, frozen_width - col_width)
+                new_main_width = main_width + col_width
+
+            self.splitter.setSizes([new_frozen_width, new_main_width])
+            self.user_left_width = new_frozen_width
+            # --- 结束修改 ---
+
             self.frozen_columns.remove(var_name)
             non_frozen = [c for c in self._df.columns if c not in self.frozen_columns]
             self._df = self._df[self.frozen_columns + non_frozen]
@@ -1210,20 +1288,45 @@ class DataTableDialog(QDialog):
         
         return True
     
-
     def _remove_column(self, logical_col):
         var_name = self._df.columns[logical_col]
+
+        # 如果要删除的列在冻结区，则执行与解冻相同的宽度调整策略
+        if var_name in self.frozen_columns:
+            # 1. 从 frozen_view 获取列宽
+            col_width = self.frozen_view.columnWidth(logical_col)
+            current_sizes = self.splitter.sizes()
+            frozen_width, main_width = current_sizes[0], current_sizes[1]
+
+            # 2. 应用特殊宽度逻辑：
+            #    如果删除后只剩一列（即删除前有两列），则将剩余的冻结区宽度设为 150
+            if len(self.frozen_columns) == 2:
+                new_frozen_width = 150
+                total_width = frozen_width + main_width
+                new_main_width = total_width - new_frozen_width
+            else:
+                #    否则，直接减去被删除列的宽度
+                new_frozen_width = max(0, frozen_width - col_width)
+                new_main_width = main_width + col_width
+
+            # 3. 应用新尺寸并更新用户偏好宽度
+            self.splitter.setSizes([new_frozen_width, new_main_width])
+            self.user_left_width = new_frozen_width
+
+        # 从冻结列表中移除
         if var_name in self.frozen_columns:
             self.frozen_columns.remove(var_name)
         
-        # We need to drop by name as logical_col index can change
+        # 从DataFrame中删除列
         self._df.drop(columns=[var_name], inplace=True)
 
+        # 刷新模型和视图
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
         self._update_views()
+
 
     def update_data(self, loader):
         if self.model is None or self._df.empty:
@@ -1253,7 +1356,6 @@ class DataTableDialog(QDialog):
             QMessageBox.information(self, "更新通知", msg)
         if self._df.empty:
             self.close()
-
 
 class LayoutInputDialog(QDialog):
     def __init__(self, 
@@ -2453,11 +2555,48 @@ class MainWindow(QMainWindow):
                 self.setWindowIcon(QIcon(str(ico_path))) 
        
         self.setWindowTitle(self.defaultTitle)
-        self.resize(1600, 900)
         self._factor_default  = 1
         self._offset_default = 0
         self.factor = self._factor_default
         self.offset = self._offset_default
+
+        # try to load config json files
+        _read_status = False
+        if os.path.isfile("config_dict.json"):            
+            try:
+                config_dict=self.load_dict("config_dict.json")
+                layout_config_dict=config_dict.get("layout_config",{})
+                _width = int(layout_config_dict.get('window_width',0))
+                _height = int(layout_config_dict.get('window_height',0))
+                _max_row = int(layout_config_dict.get('max_row',0))
+                _max_col = int(layout_config_dict.get('max_col',0))
+                _default_row = int(layout_config_dict.get('default_row',0))
+                _default_col = int(layout_config_dict.get('default_col',0))
+                _hide_plot_area = bool(layout_config_dict.get('hide_plot_area',None))
+                _read_status = all(x > 0 for x in (_width, _height, _max_row, _max_col,_default_row,_default_col)) and _hide_plot_area is not None
+            except Exception as e:     
+                print(f"配置文件读取失败: {e}")
+
+        if _read_status == True:
+            self._window_width_default = max(600,_width)
+            self._window_height_default = max(400,_height)
+            self.resize(self._window_width_default, self._window_height_default)
+            self._plot_row_max_default = max(1,_max_row)
+            self._plot_col_max_default = max(1,_max_col)
+            self._plot_row_current = max(1,min(_default_row,_max_row))
+            self._plot_col_current = max(1,min(_default_col,_max_col))
+        else:        
+            self._window_width_default = 1600
+            self._window_height_default = 900
+            self.resize(self._window_width_default, self._window_height_default)
+            # put default plots into the window
+            self._plot_row_max_default = 4
+            self._plot_col_max_default = 3
+            self._plot_row_current = 4
+            self._plot_col_current = 1
+            _hide_plot_area = False
+
+
 
         self.loaded_path = ''
         self.var_names = None
@@ -2486,15 +2625,32 @@ class MainWindow(QMainWindow):
         left_widget = QWidget()
         left_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(5, 5, 5, 5)
+        left_layout.setContentsMargins(5, 0, 5, 0)
 
         # 左侧大标题
-        left_layout_title=QLabel("变量列表")
+        # 创建一个水平布局来放置标题和帮助按钮
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 左侧大标题
+        left_layout_title = QLabel("变量列表")
         font = left_layout_title.font()
         font.setBold(True)
         left_layout_title.setFont(font)
-        #left_layout_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left_layout.addWidget(left_layout_title)
+        title_layout.addWidget(left_layout_title)
+
+        # 添加弹簧，将按钮推到右侧
+        title_layout.addStretch(1)
+
+        # 帮助按钮（使用小图标按钮样式）
+        self.help_btn_small = QPushButton("?")
+        #self.help_btn_small.setFixedSize(25, 25)  # 设置固定大小
+        self.help_btn_small.setToolTip("帮助文档")  # 添加提示
+        self.help_btn_small.clicked.connect(self.show_help)
+        title_layout.addWidget(self.help_btn_small)
+
+        # 将标题布局添加到左侧布局
+        left_layout.addLayout(title_layout)
 
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("输入变量名关键词（空格分隔）")
@@ -2535,6 +2691,7 @@ class MainWindow(QMainWindow):
         self.toggle_plot_btn.setCheckable(True)
         self.toggle_plot_btn.toggled.connect(self.toggle_plot_area)
         left_layout.addWidget(self.toggle_plot_btn)
+        left_layout.setSpacing(2)
         self.left_widget=left_widget
         main_layout.addWidget(left_widget, 0)
 
@@ -2542,6 +2699,8 @@ class MainWindow(QMainWindow):
         self._plot_area_visible = True
         self._saved_geometry = None
 
+
+            
         # ---------------- 右侧绘图区 ----------------
         self.plot_widget = QWidget()
         root_layout = QVBoxLayout(self.plot_widget)
@@ -2567,9 +2726,9 @@ class MainWindow(QMainWindow):
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
 
-        self.help_btn = QPushButton("帮助")
-        self.help_btn.clicked.connect(self.show_help)
-        top_bar.addWidget(self.help_btn)
+        # self.help_btn = QPushButton("帮助")
+        # self.help_btn.clicked.connect(self.show_help)
+        # top_bar.addWidget(self.help_btn)
 
         # 中键占位
         top_bar.addStretch(1)
@@ -2617,16 +2776,6 @@ class MainWindow(QMainWindow):
         # ---------------- 子图 ----------------
         self.plot_widgets = []
 
-        # put default plots into the window
-        self._plot_row_max_default = 4
-        self._plot_col_max_default = 3
-        # 延迟创建：self.create_subplots_matrix(self._plot_row_max_default,self._plot_col_max_default)
-
-        # turn on/off the plots
-        self._plot_row_current = 4
-        self._plot_col_current = 1
-        # 延迟设置：self.set_plots_visible(row_set=self._plot_row_current,col_set=self._plot_col_current)
-
         self.placeholder_label = QLabel("请导入 CSV 文件以查看数据", self.plot_widget)
         self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder_label.setStyleSheet("font-size: 24px; color: gray;")
@@ -2639,6 +2788,22 @@ class MainWindow(QMainWindow):
         # 全局拖拽过滤器
         QApplication.instance().installEventFilter(self)
    
+        if _hide_plot_area:
+            QTimer.singleShot(500, lambda: self.toggle_plot_btn.toggle())
+            # self.plot_widget.hide()
+            # self.toggle_plot_btn.setText("显示绘图区")         
+            # # 保存当前的最大宽度策略，然后设置固定宽度
+            # self._old_max_width = self._window_width_default
+            # # 计算固定宽度
+            # left_width = self.left_widget.width()
+            # # 加上主布局的左右边距
+            # main_margin = self.centralWidget().layout().contentsMargins()
+            # left_width += main_margin.left() + main_margin.right()
+            # # 加上窗口框架的宽度
+            # frame_width = self._window_width_default- self.width()
+            # new_width = left_width + frame_width
+            # self.setFixedWidth(new_width)
+            # self._plot_area_visible = False
 
         # ---------------- 命令行直接加载文件 ----------------
         if len(sys.argv) > 1:
@@ -2650,6 +2815,7 @@ class MainWindow(QMainWindow):
         self.mark_stats_window = None
         # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
+        
     def toggle_plot_area(self, checked):
         if checked:
             self._saved_geometry = self.saveGeometry()

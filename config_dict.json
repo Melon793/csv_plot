@@ -5,16 +5,16 @@
     "sep": ","
   },
   "txt": {
-    "skiprows": 2,
-    "hasunit": false,
-    "sep": "\t"
-  },
-  "mfile": {
-    "skiprows": 2,
+    "skiprows": 0,
     "hasunit": true,
     "sep": "\t"
   },
   "t00": {
+    "skiprows": 2,
+    "hasunit": true,
+    "sep": "\t"
+  },
+  "mfile": {
     "skiprows": 2,
     "hasunit": true,
     "sep": "\t"
@@ -33,5 +33,14 @@
     "skiprows": 2,
     "hasunit": true,
     "sep": "\t"
+  },
+  "layout_config": {
+    "window_width": 1600,
+    "window_height": 900,
+    "max_row": 4,
+    "max_col": 3,
+    "default_row": 4,
+    "default_col": 1,
+    "hide_plot_area": false
   }
 }
