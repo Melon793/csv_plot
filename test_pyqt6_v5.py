@@ -10,7 +10,7 @@ os.environ["QT_LOGGING_RULES"] = (
     "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
 )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
 from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
@@ -606,7 +606,7 @@ class DataTableDialog(QDialog):
         
         cls._saved_scroll_pos = dlg.main_view.verticalScrollBar().value() if dlg.main_view else None
         dlg.load_geom()
-        dlg.add_series(var_name, data)
+        dlg._add_variable_to_table(var_name, data)  # 使用内部函数
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
@@ -614,6 +614,8 @@ class DataTableDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+
         self.setWindowTitle("变量数值表")
         self.window_geometry = None 
         self.scatter_plot_windows = []
@@ -702,11 +704,111 @@ class DataTableDialog(QDialog):
         self.frozen_view.installEventFilter(self)
         self.main_view.installEventFilter(self)
 
+        # 启用拖放功能
+        self.setAcceptDrops(True)
+        self.main_view.setAcceptDrops(True)
+        self.frozen_view.setAcceptDrops(True)
+        
+        # 安装事件过滤器处理视图的拖放事件
+        self.drop_filter = self.DropFilter(self)
+        self.main_view.viewport().installEventFilter(self.drop_filter)
+        self.frozen_view.viewport().installEventFilter(self.drop_filter)
 
         if self.parent() and self.parent().data_table_geometry:
             self.restoreGeometry(self.parent().data_table_geometry)
         else:
             self.resize(600, 400)
+
+    # 事件过滤器类处理拖放事件
+    class DropFilter(QObject):
+        def __init__(self, parent_dialog):
+            super().__init__(parent_dialog)
+            self.parent_dialog = parent_dialog
+            
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.DragEnter:
+                if event.mimeData().hasText():
+                    event.acceptProposedAction()
+                    return True
+            elif event.type() == QEvent.Type.DragMove:
+                if event.mimeData().hasText():
+                    event.acceptProposedAction()
+                    return True
+            elif event.type() == QEvent.Type.Drop:
+                if event.mimeData().hasText():
+                    var_name = event.mimeData().text()
+                    self.parent_dialog._handle_dropped_variable(var_name)
+                    event.acceptProposedAction()
+                    return True
+            return super().eventFilter(obj, event)
+
+    # 拖放相关方法
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        var_name = event.mimeData().text()
+        self._handle_dropped_variable(var_name)
+        event.acceptProposedAction()
+
+    # 内部函数：处理拖放的变量
+    def _handle_dropped_variable(self, var_name: str):
+        """处理拖放的变量，添加到非冻结区"""
+        # 检查变量是否已存在
+        if self.has_column(var_name):
+            #QMessageBox.information(self, "提示", f"变量 '{var_name}' 已存在")
+            self.scroll_to_column(var_name)
+            return
+            
+        # 获取数据
+        main_window = self.parent()
+        if not isinstance(main_window, MainWindow):
+            # 尝试通过其他方式获取主窗口，例如通过应用程序的activeWindow
+            for widget in QApplication.topLevelWidgets():
+                if isinstance(widget, MainWindow):
+                    main_window = widget
+                    break
+            else:
+                QMessageBox.warning(self, "错误", "无法找到主窗口")
+                return
+        
+        if not hasattr(main_window, 'loader') or main_window.loader is None:
+            QMessageBox.warning(self, "错误", "没有可用的数据")
+            return
+            
+        if var_name not in main_window.loader.df.columns:
+            QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
+            return
+            
+        # 添加到表格
+        series = main_window.loader.df[var_name]
+        self._add_variable_to_table(var_name, series)
+        
+        # 滚动到新添加的列
+        QTimer.singleShot(100, lambda: self.scroll_to_column(var_name))
+
+    # 内部函数：添加变量到表格
+    def _add_variable_to_table(self, var_name: str, data: pd.Series):
+        """内部函数：将变量添加到表格的非冻结区"""
+        self._df[var_name] = data
+        if hasattr(self.parent(), 'loader') and self.parent().loader:
+            self.units = self.parent().loader.units
+        self.model = PandasTableModel(self._df, self.units)
+        self.main_view.setModel(self.model)
+        self.frozen_view.setModel(self.model)
+        self._connect_signals()
+        self._update_views()
+        if self._saved_scroll_pos is not None:
+            QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(self._saved_scroll_pos))
 
     def eventFilter(self, obj, event):
         # 处理焦点变化事件
@@ -955,16 +1057,7 @@ class DataTableDialog(QDialog):
         return var_name in self._df.columns
 
     def add_series(self, var_name: str, data: pd.Series):
-        self._df[var_name] = data
-        if hasattr(self.parent(), 'loader') and self.parent().loader:
-            self.units = self.parent().loader.units
-        self.model = PandasTableModel(self._df, self.units)
-        self.main_view.setModel(self.model)
-        self.frozen_view.setModel(self.model)
-        self._connect_signals()
-        self._update_views()
-        if self._saved_scroll_pos is not None:
-            QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(self._saved_scroll_pos))
+        self._add_variable_to_table(var_name, data)
 
     def _update_views(self):
         if self.model is None:
@@ -1059,7 +1152,7 @@ class DataTableDialog(QDialog):
         var_name = self._df.columns[logical_col]
 
         menu = QMenu(self)
-        act_delete = menu.addAction(f"删除列 “{var_name}”")
+        act_delete = menu.addAction(f"删除列 \"{var_name}\"")
         if var_name in self.frozen_columns:
             act_freeze = menu.addAction("解除冻结列")
         else:
@@ -1117,7 +1210,6 @@ class DataTableDialog(QDialog):
         
         return True
     
-
 
     def _remove_column(self, logical_col):
         var_name = self._df.columns[logical_col]
