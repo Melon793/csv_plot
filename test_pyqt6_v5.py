@@ -2416,14 +2416,39 @@ class MainWindow(QMainWindow):
         self.unit_filter_input.textChanged.connect(self.filter_variables)
         left_layout.addWidget(self.unit_filter_input)
 
+        # self.load_btn = QPushButton("导入数据文件")
+        # self.load_btn.clicked.connect(self.load_btn_click)
+        # left_layout.addWidget(self.load_btn)
+        # 创建一个水平布局来放置这两个按钮
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
+
+        # 创建按钮
         self.load_btn = QPushButton("导入数据文件")
         self.load_btn.clicked.connect(self.load_btn_click)
-        left_layout.addWidget(self.load_btn)
 
+        self.reload_btn = QPushButton("重载")
+        self.reload_btn.clicked.connect(self.reload_data)
+
+        # 设置按钮的拉伸比例（4:1）
+        button_layout.addWidget(self.load_btn, 4)  # 导入按钮占4份
+        button_layout.addWidget(self.reload_btn, 1)  # 重新加载按钮占1份
+
+        # 将按钮布局添加到左侧布局
+        left_layout.addLayout(button_layout)
         self.list_widget = MyTableWidget()
         left_layout.addWidget(self.list_widget)
 
+        self.toggle_plot_btn = QPushButton("隐藏绘图区")
+        self.toggle_plot_btn.setCheckable(True)
+        self.toggle_plot_btn.toggled.connect(self.toggle_plot_area)
+        left_layout.addWidget(self.toggle_plot_btn)
+        self.left_widget=left_widget
         main_layout.addWidget(left_widget, 0)
+
+        # 添加成员变量来保存窗口状态
+        self._plot_area_visible = True
+        self._saved_geometry = None
 
         # ---------------- 右侧绘图区 ----------------
         self.plot_widget = QWidget()
@@ -2442,9 +2467,9 @@ class MainWindow(QMainWindow):
         self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
         top_bar.addWidget(self.time_correction_btn)
 
-        self.reload_btn = QPushButton("重新加载数据")
-        self.reload_btn.clicked.connect(self.reload_data)
-        top_bar.addWidget(self.reload_btn)
+        # self.reload_btn = QPushButton("重新加载数据")
+        # self.reload_btn.clicked.connect(self.reload_data)
+        # top_bar.addWidget(self.reload_btn)
 
         self.clear_all_plots_btn = QPushButton("清除绘图")
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
@@ -2533,7 +2558,36 @@ class MainWindow(QMainWindow):
         self.mark_stats_window = None
         # self._settings = QSettings("MyCompany", "MarkStatsWindow")
         #self.resize(900, 300)
+    def toggle_plot_area(self, checked):
+        if checked:
+            self._saved_geometry = self.saveGeometry()
+            self.plot_widget.hide()
+            self.toggle_plot_btn.setText("显示绘图区")
+            
+            # 保存当前的最大宽度策略，然后设置固定宽度
+            self._old_max_width = self.maximumWidth()
+            # 计算固定宽度
+            left_width = self.left_widget.width()
+            # 加上主布局的左右边距
+            main_margin = self.centralWidget().layout().contentsMargins()
+            left_width += main_margin.left() + main_margin.right()
+            # 加上窗口框架的宽度
+            frame_width = self.frameGeometry().width() - self.width()
+            new_width = left_width + frame_width
+            self.setFixedWidth(new_width)
+            self._plot_area_visible = False
+        else:
+            # 恢复窗口大小策略
+            self.setMaximumWidth(self._old_max_width)
+            self.setMinimumWidth(0)
+            self.plot_widget.show()
+            self.toggle_plot_btn.setText("隐藏绘图区")
+            if self._saved_geometry:
+                self.restoreGeometry(self._saved_geometry)
+            self._plot_area_visible = True
 
+        #print(f"actual window width = {self.width()}")
+            
     def show_help(self):
         dlg = HelpDialog(self)
         dlg.exec()
@@ -2558,7 +2612,7 @@ class MainWindow(QMainWindow):
     def set_button_status(self,status:bool):
         if status is not None:
             self.time_correction_btn.setEnabled(status)
-            self.reload_btn.setEnabled(status)
+            #self.reload_btn.setEnabled(status)
             self.clear_all_plots_btn.setEnabled(status)
             self.auto_range_btn.setEnabled(status)
             self.auto_y_btn.setEnabled(status)
