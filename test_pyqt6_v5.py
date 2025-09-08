@@ -20,11 +20,15 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 from threading import Lock
 
-global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT
+global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
 DEFAULT_PADDING_VAL= 0.02
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 5
 RATIO_RESET_PLOTS = 0.3
 FROZEN_VIEW_WIDTH_DEFAULT = 180
+THRESHOLD_LINE_TO_SYMBOL = 100
+TOLERANCE_LINE_TO_SYMBOL = 0.2
+BLINK_PULSE = 500
+FACTOR_SCROLL_ZOOM = 0.3
 
 # PyInstaller 解包目录
 from pathlib import Path
@@ -36,6 +40,7 @@ def resource_path(relative_path: str) -> Path:
 
 # 设置应用程序和窗口图标
 if sys.platform == "win32": # Windows
+    import ctypes
     myappid = 'mycompany.csv_plot.0.1'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     ico_path = resource_path("icon.ico")  
@@ -537,7 +542,7 @@ class CustomDelegate(QStyledItemDelegate):
         painter.save()
         # 高亮选中的单元格所在的行和列
         if index.row() in self.selected_rows or index.column() in self.selected_cols:
-            painter.fillRect(option.rect, QColor(200, 200, 255, 128))  # 浅蓝高亮，半透明
+            painter.fillRect(option.rect, QColor(200, 200, 255, 64))  # 浅蓝高亮，半透明
         
         # 新增：高亮来自另一个视图的行
         if index.row() in self.highlighted_rows:
@@ -626,7 +631,7 @@ class DataTableDialog(QMainWindow):
             dlg.activateWindow()
 
         # 闪烁
-        QTimer.singleShot(100, lambda: dlg._blink_column(var_name,pulse=800))
+        QTimer.singleShot(100, lambda: dlg._blink_column(var_name,pulse=BLINK_PULSE))
         return dlg
 
     def __init__(self, parent=None):
@@ -634,7 +639,7 @@ class DataTableDialog(QMainWindow):
         self.setWindowTitle("变量数值表")
         self.window_geometry = None 
         self.scatter_plot_windows = []
-
+        self._skip_close_confirmation = False
         self.frozen_columns = []
 
         # 创建中央部件
@@ -664,7 +669,7 @@ class DataTableDialog(QMainWindow):
         self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.frozen_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.frozen_view.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.frozen_view.setStyleSheet("QTableView { background-color: rgba(245,245,245,128); }")
+        #self.frozen_view.setStyleSheet("QTableView { background-color: rgba(245,245,245,128); }")
         self.frozen_view.horizontalHeader().customContextMenuRequested.connect(self._on_frozen_header_right_click)
         self.frozen_view.horizontalHeader().setSectionsMovable(True)
         self.frozen_view.horizontalHeader().setDragEnabled(True)
@@ -814,6 +819,7 @@ class DataTableDialog(QMainWindow):
         # 步骤2: 取消高亮 (持续0.5s)
         delegate.highlighted_cols.remove(col_idx)
         view.viewport().update()
+
     def _blink_column(self,var_name,pulse:int=800):
         if self.has_column(var_name):
             # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
@@ -837,7 +843,7 @@ class DataTableDialog(QMainWindow):
         # 检查变量是否已存在
         if self.has_column(var_name):
             self.scroll_to_column(var_name)
-            self._blink_column(var_name,pulse=800)
+            self._blink_column(var_name,pulse=BLINK_PULSE)
             # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
             # col_idx = self._df.columns.get_loc(var_name)  # 获取逻辑列索引
             # if var_name in self.frozen_columns:
@@ -876,7 +882,8 @@ class DataTableDialog(QMainWindow):
         
         # 滚动到新添加的列
         QTimer.singleShot(100, lambda: self.scroll_to_column(var_name))
-        QTimer.singleShot(100, lambda: self._blink_column(var_name,pulse=800))
+        QTimer.singleShot(100, lambda: self._blink_column(var_name,pulse=BLINK_PULSE))
+
     # 内部函数：添加变量到表格
     def _add_variable_to_table(self, var_name: str, data: pd.Series):
         """内部函数：将变量添加到表格的非冻结区"""
@@ -1122,7 +1129,16 @@ class DataTableDialog(QMainWindow):
             except RuntimeError:
                 # 窗口已经被删除，跳过
                 pass
-        
+        if not (self._skip_close_confirmation) and (self._df.columns.tolist()):
+            reply = QMessageBox.question(self,"确认关闭","是否清除所有列表，并关闭数值变量表窗口？",
+                                         QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+            # if user did not confirm to close the window
+            if reply !=QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
+        self.set_skip_close_confirmation(True)
+
         self.scatter_plot_windows.clear()
         
         # 其他清理代码保持不变...
@@ -1135,6 +1151,9 @@ class DataTableDialog(QMainWindow):
         self.frozen_columns = []  
         self.hide()
         event.accept()
+
+    def set_skip_close_confirmation(self,status:bool):
+        self._skip_close_confirmation=status
 
     def has_column(self, var_name: str) -> bool:
         return var_name in self._df.columns
@@ -1285,6 +1304,14 @@ class DataTableDialog(QMainWindow):
         else:
             act_freeze = menu.addAction("冻结列")
 
+        # 新增: 复制变量名
+        act_copy = menu.addAction("复制变量名")
+        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(var_name))
+
+        # 新增: 清空列表（全局操作，不依赖具体列）
+        act_clear = menu.addAction("清空列表")
+        act_clear.triggered.connect(self._clear_all_columns)
+
         selected = menu.exec(header.mapToGlobal(pos))
         if selected == act_delete:
             self._remove_column(logical_col)
@@ -1293,6 +1320,19 @@ class DataTableDialog(QMainWindow):
                 self.unfreeze_column(logical_col)
             else:
                 self.freeze_column(logical_col)
+
+    def _clear_all_columns(self):
+        reply = QMessageBox.question(self, "确认", "是否清空所有列？",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        # 清空所有列
+        while self.model.columnCount() > 0:
+            self.model.removeColumns(0, 1)
+        self._df = pd.DataFrame()
+        self.frozen_columns = []
+        self._update_views()
 
 
     def scroll_to_column(self, var_name: str):
@@ -1543,7 +1583,8 @@ class MyTableWidget(QTableWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.setSortingEnabled(False)  # 我们手动排序
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         # 设置字体大小
         # font = QFont()
         # font.setPointSize(12)  # 调小字体大小
@@ -1555,7 +1596,108 @@ class MyTableWidget(QTableWidget):
     #         self.setColumnWidth(0, int(total_width * 0.75))  # 变量名 3/4
     #         self.setColumnWidth(1, int(total_width * 0.25))  # 单位 1/4
 
-       
+    def _show_context_menu(self, pos):
+        index = self.indexAt(pos)
+        if not index.isValid():
+            return
+
+        var_name = self.item(index.row(), 0).text()
+
+        menu = QMenu(self)
+        
+        # a. 添加至数值变量表
+        act_add_table = QAction("添加至数值变量表", menu)
+        act_add_table.triggered.connect(lambda: self._add_to_data_table(var_name))
+        menu.addAction(act_add_table)
+        
+        # b. 添加至空白绘图区
+        act_add_blank_plot = QAction("添加至空白绘图区", menu)
+        act_add_blank_plot.triggered.connect(lambda: self._add_to_blank_plot(var_name))
+        menu.addAction(act_add_blank_plot)
+        
+        # c. 复制变量名
+        act_copy = QAction("复制变量名", menu)
+        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(var_name))
+        menu.addAction(act_copy)
+        
+        menu.exec(self.mapToGlobal(pos))
+
+    def _add_to_data_table(self, var_name: str):
+        # 获取 MainWindow 实例（假设 self.window() 是 MainWindow）
+        main_window = None
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, MainWindow):
+                main_window = widget
+                break
+        if main_window is None or not hasattr(main_window, 'loader') or main_window.loader is None:
+            QMessageBox.warning(self, "错误", "没有加载数据")
+            return
+        if var_name not in main_window.loader.df.columns:
+            QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
+            return
+        data = main_window.loader.df[var_name]
+        DataTableDialog.popup(var_name, data, self)
+
+    def _add_to_blank_plot(self, var_name: str):
+        # 获取 MainWindow 实例
+        main_window = None
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, MainWindow):
+                main_window = widget
+                break
+        if main_window is None or not hasattr(main_window, 'loader') or main_window.loader is None:
+            QMessageBox.warning(self, "错误", "没有加载数据")
+            return
+        if var_name not in main_window.loader.df.columns:
+            QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
+            return
+
+        # 1. 首先判断该变量是否含有有效值
+        if main_window.loader.df_validity.get(var_name, -1) <0:
+            QMessageBox.warning(self, "错误", f"变量 '{var_name}' 没有足够有效数值")
+            return
+
+        # 2. 在用户设置的当前布局(mxn)中查找空白绘图区，无论绘图区整体是否可见
+        blank_plot = None
+        rows, cols = main_window._plot_row_current, main_window._plot_col_current
+        max_cols = main_window._plot_col_max_default # 这是完整网格的列数，用于计算索引
+
+        for idx, container in enumerate(main_window.plot_widgets):
+            # 根据一维索引计算其在完整网格(pxq)中的二维坐标(r, c)
+            r = idx // max_cols
+            c = idx % max_cols
+
+            # 判断这个坐标是否在用户当前的(mxn)布局内
+            if r < rows and c < cols:
+                # 如果在布局内，再判断是否为空白
+                if container.plot_widget.y_name == '' and container.plot_widget.curve is None:
+                    blank_plot = container.plot_widget
+                    break  # 找到第一个可用的就退出
+
+        if blank_plot is None:
+            QMessageBox.warning(self, "提示", "当前布局中已无空白绘图区")
+            return
+
+        # 3. 判断绘图区域整体是否被隐藏，并提示用户        
+        _delay = 0
+        if not main_window._plot_area_visible:
+            reply = QMessageBox.question(self, "确认", "绘图区域当前已隐藏，是否要显示它？",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                         QMessageBox.StandardButton.Yes)
+            if reply == QMessageBox.StandardButton.Yes:
+                # 激活绘图区，同步按钮状态
+                main_window.toggle_plot_btn.setChecked(False)
+                _delay = 300
+            else:
+                return  # 用户选择不激活，则不执行后续操作
+        def _job():
+            # 4. 将变量添加至空白图中
+            success = blank_plot.plot_variable(var_name)
+            if success:
+                main_window.update_mark_stats()
+
+        QTimer.singleShot(_delay, _job) 
+
     def startDrag(self, supportedActions):
         indexes = self.selectedIndexes()
         if not indexes:
@@ -1907,6 +2049,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.update_left_header("channel name")
         self.update_right_header("")
 
+        self.curve = None
+        self.original_index_x = None
+        self.original_y = None
+
 
 
     def setup_axes(self):
@@ -1990,7 +2136,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 mouse_x = view_pos.x()
                 mouse_y = view_pos.y()
 
-                factor = 0.8 if delta > 0 else 1.2
+                global FACTOR_SCROLL_ZOOM
+                factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
                 vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
                 ev.accept()  # 确保事件被处理
             else:
@@ -2456,9 +2603,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 计算可见点数（近似：二分查找或mask计数）
         visible_mask = (x_data >= x_min) & (x_data <= x_max)
         visible_points = np.sum(visible_mask)
-        
-        threshold = 100  # 可调阈值
-        tolerance = 0.5
+
+        global THRESHOLD_LINE_TO_SYMBOL,TOLERANCE_LINE_TO_SYMBOL
+
+        threshold = THRESHOLD_LINE_TO_SYMBOL  
+        tolerance = TOLERANCE_LINE_TO_SYMBOL
         if visible_points > threshold * (1 + tolerance):
             # 粗线，无symbol
             pen = pg.mkPen(color='blue', width=3)
@@ -2634,9 +2783,23 @@ class MainWindow(QMainWindow):
             self._plot_col_max_default = max(1,_max_col)
             self._plot_row_current = max(1,min(_default_row,_max_row))
             self._plot_col_current = max(1,min(_default_col,_max_col))
-        else:        
-            self._window_width_default = 1600
-            self._window_height_default = 900
+        else:
+            CANDIDATES = [
+                (1920,1080),
+                (1600, 900),
+                (1366, 768),
+                (1280, 720),
+                ( 640, 480),
+                ]
+
+            def best_resolution() -> tuple[int, int]:
+                desk = QApplication.primaryScreen().size()
+                for w, h in sorted(CANDIDATES, key=lambda t: t[0]*t[1], reverse=True):
+                    if w < desk.width() and h < desk.height():
+                        return w, h
+                return desk.width(), desk.height()
+
+            self._window_width_default, self._window_height_default = best_resolution()
             self.resize(self._window_width_default, self._window_height_default)
             # put default plots into the window
             self._plot_row_max_default = 4
@@ -2644,8 +2807,6 @@ class MainWindow(QMainWindow):
             self._plot_row_current = 4
             self._plot_col_current = 1
             _hide_plot_area = False
-
-
 
         self.loaded_path = ''
         self.var_names = None
@@ -2713,9 +2874,6 @@ class MainWindow(QMainWindow):
         self.unit_filter_input.textChanged.connect(self.filter_variables)
         left_layout.addWidget(self.unit_filter_input)
 
-        # self.load_btn = QPushButton("导入数据文件")
-        # self.load_btn.clicked.connect(self.load_btn_click)
-        # left_layout.addWidget(self.load_btn)
         # 创建一个水平布局来放置这两个按钮
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
@@ -2838,21 +2996,34 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
    
         if _hide_plot_area:
-            QTimer.singleShot(500, lambda: self.toggle_plot_btn.toggle())
-            # self.plot_widget.hide()
-            # self.toggle_plot_btn.setText("显示绘图区")         
-            # # 保存当前的最大宽度策略，然后设置固定宽度
-            # self._old_max_width = self._window_width_default
-            # # 计算固定宽度
-            # left_width = self.left_widget.width()
-            # # 加上主布局的左右边距
-            # main_margin = self.centralWidget().layout().contentsMargins()
-            # left_width += main_margin.left() + main_margin.right()
-            # # 加上窗口框架的宽度
-            # frame_width = self._window_width_default- self.width()
-            # new_width = left_width + frame_width
-            # self.setFixedWidth(new_width)
-            # self._plot_area_visible = False
+            # 临时设置离屏属性，模拟显示以计算布局尺寸（无闪烁）
+            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            self.show()  # 此处仅计算布局，不实际显示在屏幕上
+            _geometry=self.geometry()
+
+            # 更新按钮文本、checked状态和可见性标志
+            self.toggle_plot_btn.setChecked(True)
+            self.toggle_plot_btn.setText("显示绘图区")
+            self._plot_area_visible = False
+
+            # 隐藏右侧绘图区域
+            self.plot_widget.hide()
+
+            # 计算左侧部件的实际宽度（包括边距和框架）
+            left_width = self.left_widget.width()
+            main_margin = self.centralWidget().layout().contentsMargins()
+            left_width += main_margin.left() + main_margin.right()
+            frame_width = self.frameGeometry().width() - self.width()
+            new_width = left_width + frame_width
+
+            # 设置固定宽度，并关闭离屏模拟
+            self.setFixedWidth(new_width)
+            self.move(_geometry.topLeft())
+            self.close()  # 关闭模拟窗口
+            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+
+            # 保存原最大宽度（用于后续显示时恢复）
+            self._old_max_width = self._window_width_default  # 或实际原宽
 
         # ---------------- 命令行直接加载文件 ----------------
         if len(sys.argv) > 1:
@@ -2862,8 +3033,6 @@ class MainWindow(QMainWindow):
         # 标记区域相关
         self.saved_mark_range = None
         self.mark_stats_window = None
-        # self._settings = QSettings("MyCompany", "MarkStatsWindow")
-        #self.resize(900, 300)
         
     def toggle_plot_area(self, checked):
         if checked:
@@ -2898,6 +3067,7 @@ class MainWindow(QMainWindow):
     def show_help(self):
         dlg = HelpDialog(self)
         dlg.exec()
+
     def load_btn_click(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
         if file_path:
@@ -3068,15 +3238,7 @@ class MainWindow(QMainWindow):
             widget.time_channels_info = self.loader.time_channels_info
 
         # 清除cache
-        # self.value_cache = {}
-
-        # self.factor = 1.0
-        # self.offset = 0.0
-        # for container in self.plot_widgets:
-        #     widget = container.plot_widget
-        #     widget.factor = 1.0
-        #     widget.offset = 0.0
-
+  
         self.replots_after_loading()
         # 更新数值变量表（如果存在）
         if DataTableDialog._instance is not None:
@@ -3087,6 +3249,7 @@ class MainWindow(QMainWindow):
                 DataTableDialog._instance.raise_()
                 DataTableDialog._instance.activateWindow()
             else:
+                DataTableDialog._instance.set_skip_close_confirmation(True)
                 DataTableDialog._instance.close()
 
 
@@ -3297,6 +3460,7 @@ class MainWindow(QMainWindow):
         if self.mark_stats_window:
             self.mark_stats_window.hide()  # Hide instead of close
             self.mark_stats_window.tree.clear()  # Clear stats to prevent duplication
+
         if self.mark_region_btn.isChecked():
             self.mark_region_btn.setChecked(False)
             self.toggle_mark_region(False)
