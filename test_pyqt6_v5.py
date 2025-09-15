@@ -30,6 +30,11 @@ TOLERANCE_LINE_TO_SYMBOL = 0.2
 BLINK_PULSE = 500
 FACTOR_SCROLL_ZOOM = 0.3
 
+# 主界面
+global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
+SCREEN_WITDH_MARGIN = 0.3
+SCREEN_HEIGHT_MARGIN = 0.3
+
 # PyInstaller 解包目录
 from pathlib import Path
 def resource_path(relative_path: str) -> Path:
@@ -724,6 +729,8 @@ class DataTableDialog(QMainWindow):
         self.frozen_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
         self.main_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
         self.frozen_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
+        self.main_view.horizontalHeader().setResizeContentsPrecision(1)  # 0: BalanceSpeedAndAccuracy, 試1 (Speed)
+        self.frozen_view.horizontalHeader().setResizeContentsPrecision(1)
 
         self.delegate_frozen = CustomDelegate(self)
         self.delegate_main = CustomDelegate(self)
@@ -1681,9 +1688,10 @@ class MyTableWidget(QTableWidget):
         # 3. 判断绘图区域整体是否被隐藏，并提示用户        
         _delay = 0
         if not main_window._plot_area_visible:
-            reply = QMessageBox.question(self, "确认", "绘图区域当前已隐藏，是否要显示它？",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                         QMessageBox.StandardButton.Yes)
+            # reply = QMessageBox.question(self, "确认", "绘图区域当前已隐藏，是否要显示它？",
+            #                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            #                              QMessageBox.StandardButton.Yes)
+            reply = QMessageBox.StandardButton.Yes
             if reply == QMessageBox.StandardButton.Yes:
                 # 激活绘图区，同步按钮状态
                 main_window.toggle_plot_btn.setChecked(False)
@@ -2789,13 +2797,15 @@ class MainWindow(QMainWindow):
                 (1600, 900),
                 (1366, 768),
                 (1280, 720),
+                (1024, 600),
+                ( 800, 600),
                 ( 640, 480),
                 ]
 
             def best_resolution() -> tuple[int, int]:
                 desk = QApplication.primaryScreen().size()
                 for w, h in sorted(CANDIDATES, key=lambda t: t[0]*t[1], reverse=True):
-                    if w < desk.width() and h < desk.height():
+                    if w < desk.width()*(1-SCREEN_WITDH_MARGIN) and h < desk.height()*(1-SCREEN_HEIGHT_MARGIN):
                         return w, h
                 return desk.width(), desk.height()
 
