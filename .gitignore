@@ -15,3 +15,14 @@ test_pyqt6_v2.py
 test_pyqt6_v4_bak.py
 test_pyqt6_v4.py
 test_pyside_v3.py
+worklog.md
+test.py
+.DS_Store
+config_dict.py
+log.txt
+tutorial.py
+worklog.md
+test.py
+test.spec
+config_dict1.json
+uv.lock
