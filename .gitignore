@@ -26,3 +26,5 @@ test.py
 test.spec
 config_dict1.json
 uv.lock
+myCacheDataManager.py
+myDataLoader2.py
