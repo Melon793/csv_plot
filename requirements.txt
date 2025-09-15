@@ -2,3 +2,5 @@ numpy
 pandas
 pyqt6
 pyqtgraph
+chardet
+usjon
