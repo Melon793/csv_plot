@@ -44,7 +44,7 @@
 ### 1. 安装依赖
 请确保已安装 Python 3.10+，然后安装依赖：
 ```bash
-pip install pyqt6 pyqtgraph pandas numpy
+pip install pyqt6 pyqtgraph pandas numpy chardet ujson
 ```
 
 ### 2. 启动程序
