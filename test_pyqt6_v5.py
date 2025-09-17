@@ -3617,7 +3617,7 @@ class MainWindow(QMainWindow):
                     reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
                     cleared.append((idx + 1, reason))
 
-            # 恢复 xRange
+            # 恢复 xRange            
             if self.plot_widgets:
                 first_plot = self.plot_widgets[0].plot_widget
                 curr_min, curr_max = first_plot.view_box.viewRange()[0]

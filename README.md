@@ -2,7 +2,6 @@
 
 一个基于 **PyQt6 + pyqtgraph** 的交互式数据可视化工具，适合快速加载 CSV 数据、浏览曲线、分析对比、做标记统计等操作。
 
-## 🚀 快速上手指南
 
 - **数据加载与显示**
   - 打开 CSV 或兼容格式文件
@@ -54,6 +53,12 @@ python test_pyqt6_v5.py
 ```
 
 程序会弹出主界面。
+
+---
+##  开源地址
+
+- [github](https://github.com/Melon793/csv_plot/) - https://github.com/Melon793/csv_plot/
+
 
 ---
 
