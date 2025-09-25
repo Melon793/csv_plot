@@ -1806,7 +1806,15 @@ class CustomViewBox(pg.ViewBox):
                             subact.setVisible(False)
 
         existing_texts = [act.text() for act in menu.actions()]
-
+        
+        # 添加新 action: "Jump to Data" (检查是否已存在以避免重复)
+        if "Jump to Data" not in existing_texts:
+            jump_act = QAction("Jump to Data", menu)
+            jump_act.triggered.connect(self.trigger_jump_to_data)
+            if menu.actions():
+                menu.insertAction(menu.actions()[0], jump_act)
+            else:
+                menu.addAction(jump_act)
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
             menu.addSeparator()  # 在末尾添加一个分隔符
