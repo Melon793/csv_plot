@@ -1574,7 +1574,19 @@ class MyTableWidget(QTableWidget):
         self.setHorizontalHeaderLabels(["变量名", "单位"])
 
         # 字体 
-        hdr = self.horizontalHeader()
+        # hdr = self.horizontalHeader()
+        header_font = self.horizontalHeader().font()
+        header_font.setBold(False)  
+        self.horizontalHeader().setFont(header_font)
+        
+        # 设置表格选择行为的样式，避免选中时影响表头
+        self.setStyleSheet("""
+            QTableWidget::item:selected {
+                font-weight: normal;         /* 确保选中项字体也不加粗 */
+            }
+        """)
+
+
         # 默认 3:1 的初始宽度 
         total = 255          # 首次拿不到 width 时给一个兜底
         self.setColumnWidth(0, int(total * 0.75))
