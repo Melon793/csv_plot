@@ -1580,7 +1580,6 @@ class MyTableWidget(QTableWidget):
         self.setColumnWidth(0, int(total * 0.75))
         self.setColumnWidth(1, int(total * 0.25))
 
-
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.horizontalHeader().setStretchLastSection(False)  # 关闭自动拉伸最后一列
         self.verticalHeader().setVisible(False)  # 隐藏行号
@@ -1588,7 +1587,7 @@ class MyTableWidget(QTableWidget):
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.setSortingEnabled(False)  # 我们手动排序
+        self.setSortingEnabled(False)  
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -1806,7 +1805,7 @@ class CustomViewBox(pg.ViewBox):
                             subact.setVisible(False)
 
         existing_texts = [act.text() for act in menu.actions()]
-        
+
         # 添加新 action: "Jump to Data" (检查是否已存在以避免重复)
         if "Jump to Data" not in existing_texts:
             jump_act = QAction("Jump to Data", menu)
@@ -1815,6 +1814,7 @@ class CustomViewBox(pg.ViewBox):
                 menu.insertAction(menu.actions()[0], jump_act)
             else:
                 menu.addAction(jump_act)
+                
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
             menu.addSeparator()  # 在末尾添加一个分隔符
@@ -2192,6 +2192,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def dateInt_to_fmtStr(self,value:int):
         correct_dates = pd.to_datetime(pd.Series(value), unit='s').dt.strftime('%Y/%m/%d')
         return correct_dates.tolist()
+    
     def _significant_decimal_format_str(self,value: float, ref: float, max_dp:int | None = None) -> str:
         """
         根据 ref 的“显示精度”自动决定 value 的字符串格式。
@@ -3056,6 +3057,12 @@ class MainWindow(QMainWindow):
         # 标记区域相关
         self.saved_mark_range = None
         self.mark_stats_window = None
+
+    def closeEvent(self, event):
+        # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
+        if DataTableDialog._instance is not None:
+            DataTableDialog._instance.set_skip_close_confirmation(True)
+        super().closeEvent(event)
         
     def toggle_plot_area(self, checked):
         if checked:
@@ -3688,6 +3695,7 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
     # compile
     # mac: pyinstaller --noconsole --onefile --add-data "README.md:." test_pyqt6_v5.py
     # win: pyinstaller --noconsole --onefile --add-data "README.md;." test_pyqt6_v5.py
