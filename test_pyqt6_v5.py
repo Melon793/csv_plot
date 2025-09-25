@@ -11,7 +11,7 @@ os.environ["QT_LOGGING_RULES"] = (
 )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
-from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont
+from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
@@ -1805,21 +1805,26 @@ class CustomViewBox(pg.ViewBox):
                         if subact.text() == 'Transforms':
                             subact.setVisible(False)
 
-        # 添加新 action: "Jump to Data" (检查是否已存在以避免重复)
         existing_texts = [act.text() for act in menu.actions()]
-        if "Jump to Data" not in existing_texts:
-            jump_act = QAction("Jump to Data", menu)
-            jump_act.triggered.connect(self.trigger_jump_to_data)
-            if menu.actions():
-                menu.insertAction(menu.actions()[0], jump_act)
-            else:
-                menu.addAction(jump_act)
+
+        # 将 "Clear Plot" action 添加到菜单末尾
+        if "Clear Plot" not in existing_texts:
+            menu.addSeparator()  # 在末尾添加一个分隔符
+            clear_act = QAction("Clear Plot", menu)
+            clear_act.triggered.connect(self.trigger_clear_plot)
+            menu.addAction(clear_act)  # addAction 会将按钮添加到末尾
 
         return menu
 
     def trigger_jump_to_data(self):
         if self.plot_widget:
             self.plot_widget.jump_to_data_impl(self.context_x)
+            
+    def trigger_clear_plot(self):
+        if self.plot_widget:
+            self.plot_widget.clear_plot_item()
+            if self.plot_widget.window():
+                self.plot_widget.window().update_mark_stats()
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def __init__(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -2814,7 +2819,7 @@ class MainWindow(QMainWindow):
             # put default plots into the window
             self._plot_row_max_default = 4
             self._plot_col_max_default = 3
-            self._plot_row_current = 4
+            self._plot_row_current = 3
             self._plot_col_current = 1
             _hide_plot_area = False
 
@@ -3086,8 +3091,6 @@ class MainWindow(QMainWindow):
     def load_csv_file(self, file_path: str):
         if not file_path or not os.path.isfile(file_path):
             return
-        self.raise_()  # Bring window to front
-        self.activateWindow()  # Set focus
         try:
             self._load_file(file_path)
         except Exception as e:
@@ -3095,6 +3098,8 @@ class MainWindow(QMainWindow):
         finally:
             if hasattr(self, 'loader') and self.loader:  # 如果加载成功
                 self._post_load_actions(file_path)
+                self.raise_()  # 加载完成后前置
+                self.activateWindow()
 
     def set_button_status(self,status:bool):
         if status is not None:
@@ -3102,7 +3107,7 @@ class MainWindow(QMainWindow):
             #self.reload_btn.setEnabled(status)
             self.clear_all_plots_btn.setEnabled(status)
             self.auto_range_btn.setEnabled(status)
-            self.auto_y_btn.setEnabled(status)
+            self.auto_y_btn.setEnabled(status) 
             self.cursor_btn.setEnabled(status)
             self.mark_region_btn.setEnabled(status)
             self.grid_layout_btn.setEnabled(status)
@@ -3165,6 +3170,7 @@ class MainWindow(QMainWindow):
             self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
             self._progress.setAutoClose(True)
             self._progress.setCancelButton(None)            # 不可取消
+            self._progress.setMinimumDuration(0)  # 立即显示，避免延迟
             self._progress.show()
 
             self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
@@ -3268,6 +3274,8 @@ class MainWindow(QMainWindow):
             self.update_mark_stats()
 
     def filter_variables(self):
+        if self.var_names is None:
+            return
         name_text = self.filter_input.text().lower()
         unit_text = self.unit_filter_input.text().lower()
         name_keywords = name_text.split() if name_text else []
@@ -3427,6 +3435,10 @@ class MainWindow(QMainWindow):
         if etype == QEvent.Type.DragEnter:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
+                if len(urls)<1:
+                    event.ignore()
+                    return True
+                
                 self.show_drop_overlay()
                 if any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','t01'))
                        for u in urls):                    
@@ -3441,6 +3453,10 @@ class MainWindow(QMainWindow):
         elif etype == QEvent.Type.Drop:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
+                if len(urls)<1:
+                    event.ignore()
+                    return True
+                
                 for u in urls:
                     path = u.toLocalFile()
                     if path.lower().endswith(('.csv','.txt','.mfile','.t00','t01')):
@@ -3639,7 +3655,28 @@ if __name__ == "__main__":
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    # app.setStyle("Fusion")
+    if sys.platform == "win32":
+        def get_windows_chinese_font():
+            # 常见Modern UI中文字体优先级列表
+            font_priority = [
+                'Microsoft YaHei UI',  # Win10/11默认
+                'Microsoft YaHei',     # Win7/8默认
+                'SimHei',              # 传统Windows
+                'Arial Unicode MS'     # 备用
+            ]
+            
+            available_fonts = QFontDatabase.families()            
+            for font in font_priority:
+                if font in available_fonts:
+                    return QFont(font)            
+            
+            # 回退到系统默认字体
+            return QApplication.font()
+        
+        font = get_windows_chinese_font()        
+        font.setPointSize(9)
+        app.setFont(font)
+        # app.setStyle("Fusion")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

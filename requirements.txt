@@ -3,4 +3,4 @@ pandas
 pyqt6
 pyqtgraph
 chardet
-usjon
+ujson
