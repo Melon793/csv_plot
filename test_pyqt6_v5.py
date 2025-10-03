@@ -2648,7 +2648,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.curve.setPen(pen)
             self.curve.setSymbol(None)  # 移除symbol
 
-        elif visible_points < threshold * (1 - tolerance):
+        elif visible_points < threshold * (1 - tolerance) and (visible_points > 0):
             # 细线 + symbol
             pen = pg.mkPen(color='blue', width=1)
             self.curve.setPen(pen)
