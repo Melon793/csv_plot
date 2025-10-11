@@ -2057,13 +2057,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
         self.vline.setBounds([min_x, max_x])
-        
+
+        # 在设置完新范围后，立即直接调用样式更新函数。
+        self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
         self.plot_item.update()
+
         if hasattr(self.window(), 'cursor_btn'):
             self.vline.setBounds([min_x, max_x])
             self.toggle_cursor(self.window().cursor_btn.isChecked())
         else:
             self.toggle_cursor(False)
+
 
         return True
 
