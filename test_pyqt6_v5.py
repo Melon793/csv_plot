@@ -4,11 +4,12 @@ import os
 import numpy as np
 import pandas as pd
 
-# 屏蔽 macOS ICC 警告
-os.environ["QT_LOGGING_RULES"] = (
-    "qt6ct.debug=false; "      # 原来想关的 qt6ct 日志
-    "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
-)
+if sys.platform == "darwin":  # macOS
+    # 屏蔽 macOS ICC 警告
+    os.environ["QT_LOGGING_RULES"] = (
+        "qt6ct.debug=false; "      # 原来想关的 qt6ct 日志
+        "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
+    )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
 from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase
@@ -2019,18 +2020,52 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         QTimer.singleShot(0, lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect))
 
     def auto_range(self):
-        datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 1
-        index_x = np.arange(1, datalength + 1)
-
-        special_limits = self.handle_single_point_limits(index_x * self.factor + self.offset, np.array([0] * datalength))  # 虚拟y
-        if special_limits:
-            min_x, max_x, _, _ = special_limits
-        else:
-            min_x = self.offset + self.factor * index_x.min()
-            max_x = self.offset + self.factor * index_x.max()
+        if not self.curve:
+            return False
         
-        self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL)
-        self.view_box.autoRange()
+        x_values = self.offset + self.factor * self.original_index_x
+        global DEFAULT_PADDING_VAL, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
+        
+        padding_xVal = 0.1  # 或使用 DEFAULT_PADDING_VAL = 0.02 以一致
+        padding_yVal = 0.5
+
+        special_limits = self.handle_single_point_limits(x_values, self.original_y)
+        if special_limits:
+            min_x, max_x, min_y, max_y = special_limits
+        else:
+            min_x = np.min(x_values)
+            max_x = np.max(x_values)
+            min_y = np.nanmin(self.original_y)
+            max_y = np.nanmax(self.original_y)
+        
+        limits_xMin = min_x - padding_xVal * (max_x - min_x)
+        limits_xMax = max_x + padding_xVal * (max_x - min_x)
+        
+        # 新增：显式设置 XRange（与 YRange 一致，使用 padding=0.05）
+        self.view_box.setXRange(min_x, max_x, padding=0.05)  # 重置到全范围
+
+        if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
+            y_center = min_y if not np.isnan(min_y) else 0
+            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
+            self.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
+            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)
+        else:
+            self.plot_item.setLimits(
+                yMin=min_y - padding_yVal * (max_y - min_y),
+                yMax=max_y + padding_yVal * (max_y - min_y))
+            self.view_box.setYRange(min_y, max_y, padding=0.05)
+        
+        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
+        self.vline.setBounds([min_x, max_x])
+        
+        self.plot_item.update()
+        if hasattr(self.window(), 'cursor_btn'):
+            self.vline.setBounds([min_x, max_x])
+            self.toggle_cursor(self.window().cursor_btn.isChecked())
+        else:
+            self.toggle_cursor(False)
+
+        return True
 
     def auto_y_in_x_range(self):
         vb=self.view_box
@@ -2675,10 +2710,17 @@ class MarkStatsWindow(QDialog):
         self.setWindowTitle("标记区域统计")
 
         # 取消关闭按钮
-        flags = self.windowFlags()
-        flags |= Qt.WindowType.CustomizeWindowHint
-        flags &= ~Qt.WindowType.WindowCloseButtonHint
-        self.setWindowFlags(flags)
+        self.setWindowFlags(
+            Qt.WindowType.Window |  # 基本窗口类型
+            Qt.WindowType.CustomizeWindowHint |  # 允许自定义标题栏
+            Qt.WindowType.WindowMinimizeButtonHint |  # 启用最小化按钮
+            Qt.WindowType.WindowMaximizeButtonHint    # 启用最大化按钮
+            # 注意：不包括 WindowCloseButtonHint，即禁用关闭按钮
+        )
+        # flags = self.windowFlags()
+        # flags |= Qt.WindowType.CustomizeWindowHint
+        # flags &= ~Qt.WindowType.WindowCloseButtonHint
+        # self.setWindowFlags(flags)
 
         self.tree = QTreeWidget(self)
         self.tree.setHeaderLabels(["Plot", "x1", "x2", "y1", "y2", "dx", "dy", "slope", "y_avg", "y_max", "y_min"])
@@ -2715,12 +2757,26 @@ class MarkStatsWindow(QDialog):
             self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))
     
     def save_geom(self):
-        self.parent().mark_stats_geometry = self.saveGeometry()
+        if self.isMinimized() or self.isMaximized():
+            self.parent().mark_stats_geometry = None  # 不保存，强制下次使用默认
+        else:
+            self.parent().mark_stats_geometry = self.saveGeometry()
 
     def load_geom(self):
         if self.parent().mark_stats_geometry is not None:
             geom = self.parent().mark_stats_geometry
             self.restoreGeometry(geom)
+        else:
+            # 默认大小和位置：resize并居中
+            self.resize(1200, 300)
+            screen = QApplication.primaryScreen().availableGeometry()
+            x = (screen.width() - self.width()) // 2
+            y = (screen.height() - self.height()) // 2
+            self.move(x, y)
+        
+        # 新增：防御性重置状态，确保不是 min/max
+        if self.isMinimized() or self.isMaximized():
+            self.setWindowState(Qt.WindowState.WindowNoState)  # 强制正常状态
 
     def closeEvent(self, event):
         self.save_geom()
@@ -3355,7 +3411,7 @@ class MainWindow(QMainWindow):
             if geom:
                 self.mark_stats_window.restoreGeometry(geom)
 
-            self.mark_stats_window.show()
+            self.mark_stats_window.showNormal()
             self.update_mark_stats()
         else:
             self.mark_region_btn.setText("标记区域")
@@ -3542,9 +3598,12 @@ class MainWindow(QMainWindow):
         self.update_mark_stats()
 
     def auto_range_all_plots(self):
+        if not self.loader or self.loader.datalength == 0:
+            return
         for container in self.plot_widgets:
-            widget=container.plot_widget
-            widget.auto_range()
+            if container.isVisible():
+                widget = container.plot_widget
+                widget.auto_range()
             
     def auto_y_in_x_range(self):
         for container in self.plot_widgets:
@@ -3595,7 +3654,6 @@ class MainWindow(QMainWindow):
             self.toggle_mark_region(True)
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
-
         m, n = self._plot_row_max_default, self._plot_col_max_default
 
         for idx, container in enumerate(self.plot_widgets):
@@ -3616,6 +3674,16 @@ class MainWindow(QMainWindow):
         self._plot_row_current = row_set
         self._plot_col_current = col_set
         self.update_mark_regions_on_layout_change()
+
+        # 新增：布局改变后，显式同步所有可见plot的XRange到第一个
+        if self.plot_widgets:
+            first_plot = self.plot_widgets[0].plot_widget
+            curr_min, curr_max = first_plot.view_box.viewRange()[0]
+            for container in self.plot_widgets:
+                if container.isVisible():
+                    widget = container.plot_widget
+                    widget.view_box.setXRange(curr_min, curr_max, padding=0)  # padding=0 以精确同步
+                    widget.plot_item.update()  # 强制更新渲染
 
     def replots_after_loading(self):
         # 收集所有 y_name (包括未显示的)
