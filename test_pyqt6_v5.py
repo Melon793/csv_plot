@@ -1986,6 +1986,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # a. 打开/激活数值变量表，并添加系列（如果不存在）
         dlg = DataTableDialog.popup(y_name, main_window.loader.df[y_name], parent=main_window)
 
+        # 判断“数值变量表”窗口是否被最小化了，如果是，则恢复正常状态
+        if dlg.isMinimized():
+            dlg.showNormal()
+            
         # b. popup 已处理：如果已在（冻结或非冻结），不添加；否则添加到非冻结区域
 
         # c. 计算行索引（0-based）
