@@ -104,10 +104,6 @@ class DataLoadThread(QThread):
         self.hasunit=hasunit
     def run(self):
         try:
-            # 将 FastDataLoader 的读取过程按块拆进度
-            # 这里用文件大小估算百分比，够简单
-            #total_bytes = os.path.getsize(self.file_path)#Path(self.file_path).stat().st_size
-
             def _progress_cb(progress: int):
                 self.progress.emit(progress)
 
@@ -116,7 +112,6 @@ class DataLoadThread(QThread):
             # 给 FastDataLoader 打补丁：加一个回调
             loader = FastDataLoader(
                 self.file_path,
-                # 其他参数照抄
                 descRows=self.descRows,
                 sep=self.sep,
                 hasunit=self.hasunit,
@@ -169,8 +164,7 @@ class FastDataLoader:
         if self._progress_cb:
             self._progress_cb(5)
 
-        # 推断 dtype
-        
+        # 推断 dtype        
         sample = pd.read_csv(
             self._path,
             skiprows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
@@ -188,7 +182,7 @@ class FastDataLoader:
         self.sample_mem_size = sample.memory_usage(deep=True).sum()
         # print(f"the estimated downcast ratio is {downcast_ratio*100:2f} %, the compression ratio estimated {(0.5*downcast_ratio+1*(1-downcast_ratio))}")
         # print(f"sample of {sample.shape[0]} lines has costed memory {self.sample_mem_size/(1024**2):2f}Mb")
-        #self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
+        # self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
         self.byte_per_line = (0.8*self.sample_mem_size)/sample.shape[0]
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
         # print(f"this file might have lines of {self.estimated_lines}")
@@ -202,7 +196,7 @@ class FastDataLoader:
         if chunksize is None:
             chunksize = 3600
         
-        #print(f"chunk size is {chunksize}")
+        # print(f"chunk size is {chunksize}")
         # 正式读取
         self._df = self._read_chunks(
             self._path,
@@ -840,11 +834,10 @@ class DataTableDialog(QMainWindow):
                 view = self.main_view
 
             # 步骤1: 高亮 (持续0.5s)
-            # delegate.highlighted_cols.add(col_idx)
-            # view.viewport().update()
             self._blink_step_on(delegate, col_idx, view)
             QTimer.singleShot(pulse, lambda: self._blink_step_off(delegate, col_idx, view))  
         return
+    
     # 内部函数：处理拖放的变量
     def _handle_dropped_variable(self, var_name: str):
         """处理拖放的变量，添加到非冻结区"""
@@ -852,21 +845,6 @@ class DataTableDialog(QMainWindow):
         if self.has_column(var_name):
             self.scroll_to_column(var_name)
             self._blink_column(var_name,pulse=BLINK_PULSE)
-            # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
-            # col_idx = self._df.columns.get_loc(var_name)  # 获取逻辑列索引
-            # if var_name in self.frozen_columns:
-            #     delegate = self.delegate_frozen
-            #     view = self.frozen_view
-            # else:
-            #     delegate = self.delegate_main
-            #     view = self.main_view
-
-            # # 步骤1: 高亮 (持续0.5s)
-            # # delegate.highlighted_cols.add(col_idx)
-            # # view.viewport().update()
-            # self._blink_step_on(delegate, col_idx, view)
-            # QTimer.singleShot(800, lambda: self._blink_step_off(delegate, col_idx, view))  
-            #QMessageBox.information(self, "提示", f"变量 '{var_name}' 已存在")
             return
             
         # 获取主窗口
@@ -1609,12 +1587,6 @@ class MyTableWidget(QTableWidget):
         # font.setPointSize(12)  # 调小字体大小
         # self.setFont(font) 
 
-    # def resizeEvent(self, event):
-    #         super().resizeEvent(event)
-    #         total_width = self.viewport().width()
-    #         self.setColumnWidth(0, int(total_width * 0.75))  # 变量名 3/4
-    #         self.setColumnWidth(1, int(total_width * 0.25))  # 单位 1/4
-
     def _show_context_menu(self, pos):
         index = self.indexAt(pos)
         if not index.isValid():
@@ -2161,7 +2133,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # Y轴标签
         self.axis_y.setLabel(
-            #text="YYYYYYYYYYY",
             color='black',
             angle=-90,
             **{'font-family': 'Arial', 'font-size': '12pt', 'font-weight': 'bold'}
@@ -2374,9 +2345,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     y_values = self.datetime_to_unix_seconds(dt_values)
                     y_format = 's'
 
-                    # reverse method：
-                    # y_sec = dt_values.astype("int64") // 10**6  
-                    # kk = pd.to_datetime(y_sec, unit="s")
                 else:
                     #date
                     dt_values = pd.to_datetime(raw_values,format=fmt, errors='coerce')
@@ -2432,7 +2400,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         QTimer.singleShot(0, self.window().update_mark_stats)
 
 
-# ---------------- 拖拽相关 ----------------
+    # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
             event.acceptProposedAction()
@@ -2672,9 +2640,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def update_plot_style(self, view_box, range, rect=None):
         if not self.curve:
             return
-        x_data, _ = self.curve.getData()
-        if x_data is None:
-            return
+        
+        # 使用原始数据而不是裁剪后的数据
+        if self.original_index_x is not None:
+            x_data = self.offset + self.factor * self.original_index_x
+        else:
+            x_data, _ = self.curve.getData()
+            if x_data is None:
+                return
         
         x_min, x_max = range[0]
         # 计算可见点数（近似：二分查找或mask计数）
@@ -2725,10 +2698,6 @@ class MarkStatsWindow(QDialog):
             Qt.WindowType.WindowMaximizeButtonHint    # 启用最大化按钮
             # 注意：不包括 WindowCloseButtonHint，即禁用关闭按钮
         )
-        # flags = self.windowFlags()
-        # flags |= Qt.WindowType.CustomizeWindowHint
-        # flags &= ~Qt.WindowType.WindowCloseButtonHint
-        # self.setWindowFlags(flags)
 
         self.tree = QTreeWidget(self)
         self.tree.setHeaderLabels(["Plot", "x1", "x2", "y1", "y2", "dx", "dy", "slope", "y_avg", "y_max", "y_min"])
@@ -3025,21 +2994,13 @@ class MainWindow(QMainWindow):
         self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
         top_bar.addWidget(self.time_correction_btn)
 
-        # self.reload_btn = QPushButton("重新加载数据")
-        # self.reload_btn.clicked.connect(self.reload_data)
-        # top_bar.addWidget(self.reload_btn)
 
         self.clear_all_plots_btn = QPushButton("清除绘图")
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
 
-        # self.help_btn = QPushButton("帮助")
-        # self.help_btn.clicked.connect(self.show_help)
-        # top_bar.addWidget(self.help_btn)
-
         # 中键占位
         top_bar.addStretch(1)
-
 
         # 右侧按钮        
         
