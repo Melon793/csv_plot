@@ -722,8 +722,6 @@ class DataTableDialog(QMainWindow):
         self.frozen_view.verticalScrollBar().valueChanged.connect(self.main_view.verticalScrollBar().setValue)
         self.main_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
         self.frozen_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
-        self.main_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
-        self.frozen_view.horizontalHeader().sectionMoved.connect(self._sync_column_order)
         self.main_view.horizontalHeader().setResizeContentsPrecision(1)  # 0: BalanceSpeedAndAccuracy, 試1 (Speed)
         self.frozen_view.horizontalHeader().setResizeContentsPrecision(1)
 
@@ -1171,103 +1169,168 @@ class DataTableDialog(QMainWindow):
             self.frozen_view.verticalHeader().setVisible(False)
             self.main_view.verticalHeader().setVisible(True)
 
+    def _get_full_visual_order(self):
+        """获取所有列的完整视觉顺序（从左到右）"""
+        full_order = []
+        
+        # 获取冻结区的视觉顺序
+        frozen_header = self.frozen_view.horizontalHeader()
+        for visual_idx in range(frozen_header.count()):
+            logical_idx = frozen_header.logicalIndex(visual_idx)
+            if not self.frozen_view.isColumnHidden(logical_idx):
+                col_name = self._df.columns[logical_idx]
+                full_order.append(col_name)
+        
+        # 获取非冻结区的视觉顺序
+        main_header = self.main_view.horizontalHeader()
+        for visual_idx in range(main_header.count()):
+            logical_idx = main_header.logicalIndex(visual_idx)
+            if not self.main_view.isColumnHidden(logical_idx):
+                col_name = self._df.columns[logical_idx]
+                full_order.append(col_name)
+        
+        return full_order
+
+    def _restore_visual_order_after_model_change(self, old_visual_order, new_logical_order):
+        """在模型改变后恢复视觉顺序"""
+        # 创建从列名到新逻辑索引的映射
+        name_to_new_logical = {name: idx for idx, name in enumerate(new_logical_order)}
+        
+        # 获取冻结区和非冻结区的表头
+        frozen_header = self.frozen_view.horizontalHeader()
+        main_header = self.main_view.horizontalHeader()
+        
+        # 按照旧的视觉顺序重新排列列
+        current_visual_index = 0
+        
+        # 处理冻结区的列
+        for col_name in old_visual_order:
+            if col_name in self.frozen_columns:
+                logical_idx = name_to_new_logical[col_name]
+                current_visual_idx = frozen_header.visualIndex(logical_idx)
+                if current_visual_idx != current_visual_index:
+                    frozen_header.moveSection(current_visual_idx, current_visual_index)
+                current_visual_index += 1
+        
+        # 重置视觉索引计数器，开始处理非冻结区
+        current_visual_index = 0
+        
+        # 处理非冻结区的列
+        for col_name in old_visual_order:
+            if col_name not in self.frozen_columns:
+                logical_idx = name_to_new_logical[col_name]
+                current_visual_idx = main_header.visualIndex(logical_idx)
+                if current_visual_idx != current_visual_index:
+                    main_header.moveSection(current_visual_idx, current_visual_index)
+                current_visual_index += 1
+
     def freeze_column(self, logical_col):
         var_name = self._df.columns[logical_col]
+        
         if var_name not in self.frozen_columns:
-            # --- 开始修改 ---
+            # 调整splitter大小的代码保持不变
             col_width = self.main_view.columnWidth(logical_col)
             current_sizes = self.splitter.sizes()
             frozen_width, main_width = current_sizes[0], current_sizes[1]
 
-            # 新增逻辑：检查这是否是第一个被冻结的列
             if not self.frozen_columns:
-                # 如果是第一个，设置固定宽度为 self.user_left_width
                 global FROZEN_VIEW_WIDTH_DEFAULT
                 new_frozen_width = FROZEN_VIEW_WIDTH_DEFAULT
                 total_width = frozen_width + main_width
                 new_main_width = total_width - new_frozen_width
             else:
-                # 如果不是第一个，则累加列宽
                 new_frozen_width = frozen_width + col_width
                 new_main_width = main_width - col_width
             
             self.splitter.setSizes([new_frozen_width, new_main_width])
             self.user_left_width = new_frozen_width
-            # --- 结束修改 ---
 
+            # 获取当前所有列的完整视觉顺序
+            full_visual_order = self._get_full_visual_order()
+            
+            # 将要冻结的列添加到冻结列列表
             self.frozen_columns.append(var_name)
-            non_frozen = [c for c in self._df.columns if c not in self.frozen_columns]
-            self._df = self._df[self.frozen_columns + non_frozen]
+            
+            # 重新构建列顺序
+            new_column_order = []
+            
+            # 按照完整视觉顺序添加列，但冻结列在前，非冻结列在后
+            for col in full_visual_order:
+                if col in self.frozen_columns and col not in new_column_order:
+                    new_column_order.append(col)
+            
+            for col in full_visual_order:
+                if col not in self.frozen_columns and col not in new_column_order:
+                    new_column_order.append(col)
+            
+            # 重新排列DataFrame
+            self._df = self._df[new_column_order]
             self.model = PandasTableModel(self._df, self.units)
             self.main_view.setModel(self.model)
             self.frozen_view.setModel(self.model)
             self._connect_signals()
             self._update_views()
-
+            
+            # 重新设置模型后，恢复用户调整的视觉顺序
+            self._restore_visual_order_after_model_change(full_visual_order, new_column_order)
 
     def unfreeze_column(self, logical_col):
         var_name = self._df.columns[logical_col]
+        
         if var_name in self.frozen_columns:
-            # --- 开始修改 ---
+            # 调整splitter大小的代码保持不变
             col_width = self.frozen_view.columnWidth(logical_col)
             current_sizes = self.splitter.sizes()
             frozen_width, main_width = current_sizes[0], current_sizes[1]
 
-            # 新增逻辑：检查解冻后是否只剩一列
-            # 注意：此时 self.frozen_columns 尚未移除元素，所以判断长度是否为 2
             if len(self.frozen_columns) == 2:
-                # 如果解冻后只剩一列，将宽度重置为 self.user_left_width
                 global FROZEN_VIEW_WIDTH_DEFAULT
                 new_frozen_width = FROZEN_VIEW_WIDTH_DEFAULT
                 total_width = frozen_width + main_width
                 new_main_width = total_width - new_frozen_width
             else:
-                # 其他情况（解冻后剩 0 列或多于 1 列），则减去列宽
                 new_frozen_width = max(0, frozen_width - col_width)
                 new_main_width = main_width + col_width
 
             self.splitter.setSizes([new_frozen_width, new_main_width])
             self.user_left_width = new_frozen_width
-            # --- 结束修改 ---
 
+            # 获取当前所有列的完整视觉顺序
+            full_visual_order = self._get_full_visual_order()
+            
+            # 将要解冻的列从冻结列列表中移除
             self.frozen_columns.remove(var_name)
-            non_frozen = [c for c in self._df.columns if c not in self.frozen_columns]
-            self._df = self._df[self.frozen_columns + non_frozen]
+            
+            # 重新构建列顺序
+            new_column_order = []
+            
+            # 按照完整视觉顺序添加列，但冻结列在前，非冻结列在后
+            for col in full_visual_order:
+                if col in self.frozen_columns and col not in new_column_order:
+                    new_column_order.append(col)
+            
+            for col in full_visual_order:
+                if col not in self.frozen_columns and col not in new_column_order:
+                    new_column_order.append(col)
+            
+            # 重新排列DataFrame
+            self._df = self._df[new_column_order]
             self.model = PandasTableModel(self._df, self.units)
             self.main_view.setModel(self.model)
             self.frozen_view.setModel(self.model)
             self._connect_signals()
             self._update_views()
+            
+            # 重新设置模型后，恢复用户调整的视觉顺序
+            self._restore_visual_order_after_model_change(full_visual_order, new_column_order)
+
 
     def _sync_row_heights(self, logicalIndex, oldSize, newSize):
         sender = self.sender()
         if sender == self.main_view.verticalHeader():
             self.frozen_view.setRowHeight(logicalIndex, newSize)
         elif sender == self.sender() == self.frozen_view.verticalHeader():
-            self.main_view.setRowHeight(logicalIndex, newSize)
-    
-    def _sync_column_order(self, logicalIndex, oldVisualIndex, newVisualIndex):
-        """
-        保持冻结区和非冻结区的列顺序一致。
-        注意：moveSection 的参数是 visualIndex，不是 logicalIndex。
-        """
-        frozen_header = self.frozen_view.horizontalHeader()
-        main_header = self.main_view.horizontalHeader() 
-        # 如果拖动发生在主表头，就同步冻结表头
-        sender_header = self.sender()
-        if sender_header is main_header:
-            frozen_header.blockSignals(True)
-            try:
-                frozen_header.moveSection(oldVisualIndex, newVisualIndex)
-            finally:
-                frozen_header.blockSignals(False)
-
-        elif sender_header is frozen_header:
-            main_header.blockSignals(True)
-            try:
-                main_header.moveSection(oldVisualIndex, newVisualIndex)
-            finally:
-                main_header.blockSignals(False)
+            self.main_view.setRowHeight(logicalIndex, newSize)     
 
     def _on_frozen_header_right_click(self, pos):
         self._on_header_right_click(pos, self.frozen_view)
