@@ -1402,34 +1402,55 @@ class DataTableDialog(QMainWindow):
         self._connect_signals()
         self._update_views()
 
-
     def update_data(self, loader):
+        """当主窗口重载数据时，更新此对话框中的数据"""
         if self.model is None or self._df.empty:
             return
+        
         scroll_pos = self.main_view.verticalScrollBar().value()
         frozen_cols = self.frozen_columns.copy()
         current_cols = list(self._df.columns)
+        
+        # --- BUG修复 START ---
+        
+        # 创建一个新的DataFrame来保存更新后的数据
+        new_df = pd.DataFrame()
         removed = []
+
+        # 遍历当前表中的列
         for col in current_cols:
             if col in loader.df.columns:
-                self._df[col] = loader.df[col]
+                # 从新的加载器数据中复制完整的列
+                # 这是关键修复：确保新DataFrame获得完整行数
+                new_df[col] = loader.df[col]
             else:
-                self._df.drop(columns=[col], inplace=True)
-                if col in self.frozen_columns:
-                    self.frozen_columns.remove(col)
+                # 该列已从源文件中移除
                 removed.append(col)
+
+        # 用新的、行数正确的DataFrame替换旧的
+        self._df = new_df
+        
+        # --- BUG修复 END ---
+
         self.units = loader.units
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
+        
+        # 重新应用冻结列，确保它们仍然存在
         self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
+        
         self._update_views()
         QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(scroll_pos))
+        
         if removed:
             msg = f"以下变量已从数据中移除：{', '.join(removed)}"
             QMessageBox.information(self, "更新通知", msg)
+        
         if self._df.empty:
+            # 增加这行，避免在表格变空并关闭时弹出烦人的确认框
+            self.set_skip_close_confirmation(True)
             self.close()
 
 class LayoutInputDialog(QDialog):
