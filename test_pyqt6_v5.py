@@ -363,7 +363,8 @@ class FastDataLoader:
     def _check_df_validity(self) -> dict:
         validity : dict = {}
         for col in self._df.columns:
-            validity[col] = self._classify_column(self._df[col])
+            # 传入列名和date_formats参数
+            validity[col] = self._classify_column(self._df[col], col, self.date_formats)
         
         return validity
 
@@ -382,12 +383,16 @@ class FastDataLoader:
         return unique_names
     
     @staticmethod
-    def _classify_column(series: pd.Series) -> int:
+    def _classify_column(series: pd.Series, col_name: str, date_formats: dict) -> int:
         """
-        1: 全部可转数字，且 ≥2 个不同有效值
+        1: 全部可转数字，且 ≥2 个不同有效值 或 该列是日期格式
         0: 全部可转数字，且唯一有效值
         -1: 存在非数字 或 全部 NaN
         """
+        # 如果该列是日期格式，则直接返回1（有效）
+        if col_name in date_formats:
+            return 1
+
         # 1) 先尝试整列转 float，失败直接 C
         try:
             numeric = pd.to_numeric(series, errors="raise")
