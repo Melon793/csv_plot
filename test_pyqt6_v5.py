@@ -21,9 +21,10 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 from threading import Lock
 
-global DEFAULT_PADDING_VAL,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
-DEFAULT_PADDING_VAL= 0.02
-FILE_SIZE_LIMIT_BACKGROUND_LOADING = 5
+global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
+DEFAULT_PADDING_VAL_X = 0.05
+DEFAULT_PADDING_VAL_Y = 0.1
+FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
 RATIO_RESET_PLOTS = 0.3
 FROZEN_VIEW_WIDTH_DEFAULT = 180
 THRESHOLD_LINE_TO_SYMBOL = 100
@@ -1615,11 +1616,12 @@ class AxisDialog(QDialog):
             else:
                 tick_count = None  # 自动
 
+            global DEFAULT_PADDING_VAL_X
             # 设置范围
             if self.axis_type == "X":
-                self.view_box.setXRange(min_val, max_val, padding=DEFAULT_PADDING_VAL)
+                self.view_box.setXRange(min_val, max_val, padding=DEFAULT_PADDING_VAL_X)
             else:
-                self.view_box.setYRange(min_val, max_val, padding=DEFAULT_PADDING_VAL)
+                self.view_box.setYRange(min_val, max_val, padding=DEFAULT_PADDING_VAL_X)
 
             # 设置固定刻度
             if tick_count:
@@ -2030,7 +2032,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.getAxis('bottom').setGrid(255) 
         self.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
-# 基于点数修改曲线风格
+        # 基于点数修改曲线风格
         self.view_box.sigRangeChanged.connect(self.update_plot_style)
         
     def jump_to_data_impl(self, x):
@@ -2089,9 +2091,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return False
         
         x_values = self.offset + self.factor * self.original_index_x
-        global DEFAULT_PADDING_VAL, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
+        global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
         
-        padding_xVal = 0.1  # 或使用 DEFAULT_PADDING_VAL = 0.02 以一致
+        padding_xVal = DEFAULT_PADDING_VAL_X  # 或使用 DEFAULT_PADDING_VAL = 0.02 以一致
         padding_yVal = 0.5
 
         special_limits = self.handle_single_point_limits(x_values, self.original_y)
@@ -2105,20 +2107,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         limits_xMin = min_x - padding_xVal * (max_x - min_x)
         limits_xMax = max_x + padding_xVal * (max_x - min_x)
-        
+
         # 新增：显式设置 XRange（与 YRange 一致，使用 padding=0.05）
-        self.view_box.setXRange(min_x, max_x, padding=0.05)  # 重置到全范围
+        self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)  # 重置到全范围
 
         if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
             y_center = min_y if not np.isnan(min_y) else 0
             y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
             self.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
-            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)
+            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=DEFAULT_PADDING_VAL_Y)
         else:
             self.plot_item.setLimits(
                 yMin=min_y - padding_yVal * (max_y - min_y),
                 yMax=max_y + padding_yVal * (max_y - min_y))
-            self.view_box.setYRange(min_y, max_y, padding=0.05)
+            self.view_box.setYRange(min_y, max_y, padding=DEFAULT_PADDING_VAL_Y)
         
         self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
         self.vline.setBounds([min_x, max_x])
@@ -2160,18 +2162,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         xMin = self.offset + self.factor * index_xMin
         xMax = self.offset + self.factor * index_xMax
         
+        global DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y
+
         if not (np.isnan(xMax) or np.isinf(xMax)):
             if xMax ==xMin:
                 xMax = xMax + 0.5 * self.factor  # 基于factor扩展，避免零范围
                 xMin = xMin - 0.5 * self.factor
 
-            self.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL)
-            padding_xVal=0.1
+            self.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
+            padding_xVal=DEFAULT_PADDING_VAL_X
             limits_xMin = xMin - padding_xVal * (xMax - xMin)
             limits_xMax = xMax + padding_xVal * (xMax - xMin)
             self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax)
 
-        self.view_box.setYRange(0,1,padding=0) 
+        self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
         self.vline.setBounds([None, None]) 
 
         self.xMin = xMin
@@ -2456,14 +2460,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         old_offset = self.offset
         self.factor = new_factor
         self.offset = new_offset
-
+        
         if self.original_index_x is not None:
             new_x = self.offset + self.factor * self.original_index_x
             self.curve.setData(new_x, self.original_y)
 
         datalength = len(self.original_index_x) if self.original_index_x is not None else (
             self.window().loader.datalength if hasattr(self.window(), 'loader') else 0)
-        padding_xVal = 0.1
+        
+        global DEFAULT_PADDING_VAL_X
+        padding_xVal = DEFAULT_PADDING_VAL_X
+
         index_min = 1 - padding_xVal * datalength
         index_max = datalength + padding_xVal * datalength
         limits_xMin = self.offset + self.factor * index_min
@@ -2535,7 +2542,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
         self.update_left_header(full_title)
-        padding_xVal = 0.1
+        global DEFAULT_PADDING_VAL_X
+        padding_xVal = DEFAULT_PADDING_VAL_X
         padding_yVal = 0.5
 
         special_limits = self.handle_single_point_limits(x_values, self.original_y)
@@ -2555,18 +2563,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         
 
-
+        global DEFAULT_PADDING_VAL_Y
         
         if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
             y_center = min_y if not np.isnan(min_y) else 0
             y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
             self.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
-            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=0.05)
+            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=DEFAULT_PADDING_VAL_Y)
         else:
             self.plot_item.setLimits(
                 yMin=min_y - padding_yVal * (max_y - min_y),
                 yMax=max_y + padding_yVal * (max_y - min_y))
-            self.view_box.setYRange(min_y, max_y, padding=0.05)
+            self.view_box.setYRange(min_y, max_y, padding=DEFAULT_PADDING_VAL_Y)
         
         self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
         self.vline.setBounds([min_x, max_x])
@@ -2584,7 +2592,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         #self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
         self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
 
-        self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL) 
+        global DEFAULT_PADDING_VAL_Y
+        self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
         self.vline.setBounds([None, None]) 
 
         #self.plot_item.update()
@@ -2614,6 +2623,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             y_axis_rect_scene = self.axis_y.mapToScene(self.axis_y.boundingRect()).boundingRect()
             x_axis_rect_scene = self.axis_x.mapToScene(self.axis_x.boundingRect()).boundingRect()
 
+            global DEFAULT_PADDING_VAL_X
             if y_axis_rect_scene.contains(scene_pos):
                 dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
                 if dialog.exec():
@@ -2626,7 +2636,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
                         #view.view_box.setXRange(min_val, max_val, padding=0.00)
                         #view.plot_item.setXRange(min_val, max_val, padding=0.00)
-                        self.set_xrange_with_link_handling(xmin=min_val,xmax=max_val,padding=DEFAULT_PADDING_VAL)
+                        self.set_xrange_with_link_handling(xmin=min_val,xmax=max_val,padding=DEFAULT_PADDING_VAL_X)
                         view.plot_item.update()
                 return
         return super().mouseDoubleClickEvent(event)
@@ -3763,6 +3773,7 @@ class MainWindow(QMainWindow):
         else:
             self.value_cache = {}
             cleared = []
+            global DEFAULT_PADDING_VAL_X
             for idx, container in enumerate(self.plot_widgets):
                 widget = container.plot_widget
                 y_name = widget.y_name
@@ -3770,8 +3781,8 @@ class MainWindow(QMainWindow):
                 original_index_x = np.arange(1, self.loader.datalength + 1)
                 min_x = widget.offset + widget.factor * np.min(original_index_x)
                 max_x = widget.offset + widget.factor * np.max(original_index_x)
-                limits_xMin = min_x - 0.1 * (max_x - min_x)
-                limits_xMax = max_x + 0.1 * (max_x - min_x)
+                limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
+                limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
                 widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
                 widget.vline.setBounds([min_x, max_x])
                 if not y_name:
@@ -3786,14 +3797,11 @@ class MainWindow(QMainWindow):
                     reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
                     cleared.append((idx + 1, reason))
 
-            # 恢复 xRange            
+            # 恢复 xRange     
             if self.plot_widgets:
                 first_plot = self.plot_widgets[0].plot_widget
                 curr_min, curr_max = first_plot.view_box.viewRange()[0]
-                first_plot.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL) # 明确设置 padding=0
-                # for container in self.plot_widgets:
-                #     widget = container.plot_widget
-                #     widget.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL)
+                first_plot.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL_X) 
 
             # 如果有清除，弹窗
             if cleared:
