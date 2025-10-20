@@ -1621,7 +1621,7 @@ class AxisDialog(QDialog):
             if self.axis_type == "X":
                 self.view_box.setXRange(min_val, max_val, padding=DEFAULT_PADDING_VAL_X)
             else:
-                self.view_box.setYRange(min_val, max_val, padding=DEFAULT_PADDING_VAL_X)
+                self.view_box.setYRange(min_val, max_val, padding=DEFAULT_PADDING_VAL_Y)
 
             # 设置固定刻度
             if tick_count:
