@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 from threading import Lock
 
-global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
+global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH
 DEFAULT_PADDING_VAL_X = 0.05
 DEFAULT_PADDING_VAL_Y = 0.1
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
@@ -31,6 +31,7 @@ THRESHOLD_LINE_TO_SYMBOL = 100
 TOLERANCE_LINE_TO_SYMBOL = 0.2
 BLINK_PULSE = 500
 FACTOR_SCROLL_ZOOM = 0.3
+MIN_INDEX_LENGTH =3
 
 # 主界面
 global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
@@ -2123,6 +2124,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.view_box.setYRange(min_y, max_y, padding=DEFAULT_PADDING_VAL_Y)
         
         self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
+        self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
         self.vline.setBounds([min_x, max_x])
 
         # 在设置完新范围后，立即直接调用样式更新函数。
@@ -2575,8 +2577,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 yMin=min_y - padding_yVal * (max_y - min_y),
                 yMax=max_y + padding_yVal * (max_y - min_y))
             self.view_box.setYRange(min_y, max_y, padding=DEFAULT_PADDING_VAL_Y)
-        
-        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
+
+        global MIN_INDEX_LENGTH 
+
+        if len(x_values)<=MIN_INDEX_LENGTH:
+            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax)
+            
+            curr_x_min,curr_x_max = self.plot_item.vb.state['viewRange'][0]
+            if curr_x_min<limits_xMin or curr_x_max> limits_xMax:
+                self.view_box.setXRange(max(curr_x_min,limits_xMin),min(curr_x_max,limits_xMax),padding=DEFAULT_PADDING_VAL_X)
+            self.window().sync_all_x_limits(limits_xMin, limits_xMax)
+        else:
+            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=len(x_values)*self.factor)
+            self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
+
         self.vline.setBounds([min_x, max_x])
         
         self.plot_item.update()
@@ -3193,6 +3207,25 @@ class MainWindow(QMainWindow):
         # 标记区域相关
         self.saved_mark_range = None
         self.mark_stats_window = None
+
+    def sync_all_x_limits(self, xMin, xMax, minXRange:int|None = None):
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            if minXRange:
+                widget.plot_item.setLimits(xMin=xMin, xMax=xMax, minXRange=minXRange)
+                self.sync_all_x_ranges(padding=DEFAULT_PADDING_VAL_X)
+            else:
+                widget.plot_item.setLimits(xMin=xMin, xMax=xMax)
+                self.sync_all_x_ranges(padding=0)
+
+    def sync_all_x_ranges(self,padding=0):
+        if self.plot_widgets:
+            first_plot = self.plot_widgets[0].plot_widget
+            curr_min, curr_max = first_plot.view_box.viewRange()[0]
+            for container in self.plot_widgets:
+                widget = container.plot_widget
+                widget.view_box.setXRange(curr_min, curr_max, padding=padding)
+                widget.plot_item.update()
 
     def closeEvent(self, event):
         # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
