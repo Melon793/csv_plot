@@ -34,8 +34,8 @@ FACTOR_SCROLL_ZOOM = 0.3
 
 # 主界面
 global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
-SCREEN_WITDH_MARGIN = 0.3
-SCREEN_HEIGHT_MARGIN = 0.3
+SCREEN_WITDH_MARGIN = 0.2
+SCREEN_HEIGHT_MARGIN = 0.2
 
 # PyInstaller 解包目录
 from pathlib import Path
@@ -3332,11 +3332,15 @@ class MainWindow(QMainWindow):
 
     def _post_load_actions(self, file_path: str):
         self.loaded_path = file_path
-        self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{file_path}]")
+
+        def truncate_string(file_path, max_length=79):
+            # directory = os.path.dirname(file_path)
+            filename_length = len(os.path.basename(file_path))
+            if len(file_path) <= max_length:
+                return file_path
+            return "..." + file_path[min(-filename_length-1,-(max_length-3)):]
+        self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{truncate_string(file_path)}]")
         self.set_button_status(True)
-        # if DataTableDialog._instance is not None:
-        #     DataTableDialog._instance.close()   # 触发 closeEvent → 清空
-        #     DataTableDialog._instance = None
 
     @staticmethod
     def load_dict(path: str, *, default=None) -> dict:
