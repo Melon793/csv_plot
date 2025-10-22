@@ -621,7 +621,7 @@ class XYScatterPlotDialog(QDialog):
         axis_bottom.label.setFont(bold_font)
         axis_left.label.setFont(bold_font)
 
-        self.plot_widget.setTitle(f"{y_name} vs. {x_name}")
+        #self.plot_widget.setTitle(f"{y_name} vs. {x_name}")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
 
         # 拿到 AxisItem 句柄
