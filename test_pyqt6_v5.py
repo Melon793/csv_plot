@@ -56,6 +56,24 @@ if sys.platform == "win32": # Windows
 elif sys.platform == "darwin":  # macOS
     ico_path = resource_path("icon.icns")  
 
+# 窗口实例相关函数
+def get_main_window() -> MainWindow | None:
+    """
+    安全地查找并返回 MainWindow 实例。
+    """
+    for widget in QApplication.topLevelWidgets():
+        if isinstance(widget, MainWindow):
+            return widget
+    return None
+
+def get_main_loader() -> FastDataLoader | None:
+    """
+    安全地查找并返回 MainWindow 的 loader 实例。
+    """
+    main_window = get_main_window()
+    if main_window and hasattr(main_window, 'loader') and main_window.loader:
+        return main_window.loader
+    return None
 
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
@@ -387,29 +405,34 @@ class FastDataLoader:
     @staticmethod
     def _classify_column(series: pd.Series, col_name: str, date_formats: dict) -> int:
         """
-        1: 全部可转数字，且 ≥2 个不同有效值 或 该列是日期格式
-        0: 全部可转数字，且唯一有效值
-        -1: 存在非数字 或 全部 NaN
+        1: （全部可转数字，且 ≥2 个不同有效值） 或 （该列是日期格式） 或 （数据长度为1，且可转换为数字）
+        0: 数据长度>=2, 且全部可转数字，且唯一有效值
+        -1: 存在非数字（不含日期格式） 或 全部 NaN
         """
-        # 如果该列是日期格式，则直接返回1（有效）
+        # 如果该列是日期格式，则直接返回1（有效）   
         if col_name in date_formats:
             return 1
 
-        # 1) 先尝试整列转 float，失败直接 C
+        # 1) 先尝试整列转 float，失败直接 -1
         try:
             numeric = pd.to_numeric(series, errors="raise")
         except (ValueError, TypeError):
-            return (-1)
+            return -1
 
         # 2) 去掉 NaN 后看有效值
         valid = numeric.dropna()
         if valid.empty:          # 全 NaN
-            return (-1)
+            return -1
+
+        # 数据长度为1且可转数字 → 返回1
+        if len(series) == 1:
+            return 1
 
         unique_vals = valid.unique()
         if len(unique_vals) == 1:
-            return (0)
-        return (1)
+            return 0
+        else:
+            return 1
     
     @property
     def df(self) -> pd.DataFrame:
@@ -853,14 +876,11 @@ class DataTableDialog(QMainWindow):
             return
             
         # 获取主窗口
-        main_window = None
-        for widget in QApplication.topLevelWidgets():
-            if hasattr(widget, 'loader') and hasattr(widget, 'value_cache'):
-                main_window = widget
-                break
-        
-        if main_window is None or not hasattr(main_window, 'loader') or main_window.loader is None:
-            QMessageBox.warning(self, "错误", "没有可用的数据")
+        main_window = get_main_window() # 如果你需要 main_window 本身
+        loader = get_main_loader()       # 如果你只需要 loader
+
+        if loader is None:
+            QMessageBox.warning(self, "错误", "没有加载数据")
             return
             
         if var_name not in main_window.loader.df.columns:
@@ -879,15 +899,12 @@ class DataTableDialog(QMainWindow):
     def _add_variable_to_table(self, var_name: str, data: pd.Series):
         """内部函数：将变量添加到表格的非冻结区"""
         self._df[var_name] = data
-        # 获取主窗口
-        main_window = None
-        for widget in QApplication.topLevelWidgets():
-            if hasattr(widget, 'loader') and hasattr(widget, 'value_cache'):
-                main_window = widget
-                break
+        # 使用新函数替换循环
+        loader = get_main_loader() 
         
-        if main_window and hasattr(main_window, 'loader') and main_window.loader:
-            self.units = main_window.loader.units
+        if loader:
+            self.units = loader.units
+            
         self.model = PandasTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
@@ -1707,12 +1724,10 @@ class MyTableWidget(QTableWidget):
 
     def _add_to_data_table(self, var_name: str):
         # 获取 MainWindow 实例（假设 self.window() 是 MainWindow）
-        main_window = None
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, MainWindow):
-                main_window = widget
-                break
-        if main_window is None or not hasattr(main_window, 'loader') or main_window.loader is None:
+        main_window = get_main_window() # 如果你需要 main_window 本身
+        loader = get_main_loader()       # 如果你只需要 loader
+
+        if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
         if var_name not in main_window.loader.df.columns:
@@ -1723,12 +1738,10 @@ class MyTableWidget(QTableWidget):
 
     def _add_to_blank_plot(self, var_name: str):
         # 获取 MainWindow 实例
-        main_window = None
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, MainWindow):
-                main_window = widget
-                break
-        if main_window is None or not hasattr(main_window, 'loader') or main_window.loader is None:
+        main_window = get_main_window() # 如果你需要 main_window 本身
+        loader = get_main_loader()       # 如果你只需要 loader
+
+        if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
         if var_name not in main_window.loader.df.columns:
@@ -2094,7 +2107,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         x_values = self.offset + self.factor * self.original_index_x
         global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
         
-        padding_xVal = DEFAULT_PADDING_VAL_X  # 或使用 DEFAULT_PADDING_VAL = 0.02 以一致
+        padding_xVal = DEFAULT_PADDING_VAL_X  
         padding_yVal = 0.5
 
         special_limits = self.handle_single_point_limits(x_values, self.original_y)
@@ -2111,32 +2124,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         # 新增：显式设置 XRange（与 YRange 一致，使用 padding=0.05）
         self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)  # 重置到全范围
+        self._set_safe_y_range(min_y, max_y)
 
-        if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
-            y_center = min_y if not np.isnan(min_y) else 0
-            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
-            self.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
-            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=DEFAULT_PADDING_VAL_Y)
-        else:
-            self.plot_item.setLimits(
-                yMin=min_y - padding_yVal * (max_y - min_y),
-                yMax=max_y + padding_yVal * (max_y - min_y))
-            self.view_box.setYRange(min_y, max_y, padding=DEFAULT_PADDING_VAL_Y)
-        
-        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=min(3,len(x_values))*self.factor)
-        self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
+        global MIN_INDEX_LENGTH 
+        minXRange_val = min(MIN_INDEX_LENGTH,len(x_values)-1 if len(x_values)>1 else 1)*self.factor
+        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
+
+        # self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
         self.vline.setBounds([min_x, max_x])
 
         # 在设置完新范围后，立即直接调用样式更新函数。
         self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
         self.plot_item.update()
-
-        if hasattr(self.window(), 'cursor_btn'):
-            self.vline.setBounds([min_x, max_x])
-            self.toggle_cursor(self.window().cursor_btn.isChecked())
-        else:
-            self.toggle_cursor(False)
-
+        self._update_cursor_after_plot(min_x, max_x)
 
         return True
 
@@ -2155,6 +2155,74 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.label_right.setText(right_text)
             self.label_right.setAlignment(Qt.AlignmentFlag.AlignRight)
 
+    def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
+        """
+        确保X轴范围非零，如果 min_x == max_x，则基于 factor 扩展。
+        """
+        if min_x == max_x:
+            # 在中心点两侧各扩展 0.5 * factor
+            min_x_safe = min_x - 0.5 * self.factor
+            max_x_safe = max_x + 0.5 * self.factor
+            return min_x_safe, max_x_safe
+        return min_x, max_x
+    
+    def _get_min_x_range_value(self) -> float:
+        """
+        根据数据长度计算最小的可缩放 X 范围 (minXRange)。
+        """
+        global MIN_INDEX_LENGTH
+        if self.data is None or self.data.empty:
+            data_len = 0
+        else:
+            data_len = self.data.shape[0]
+            
+        # 计算有效的数据点最小间隔
+        effective_min_len = min(MIN_INDEX_LENGTH, data_len - 1 if data_len > 1 else 1)
+        
+        # 最小范围 = 最小间隔 * 比例因子
+        return effective_min_len * self.factor
+
+    def _set_x_limits_with_min_range(self, limits_xMin: float | None, limits_xMax: float | None):
+        """
+        统一设置 X 轴的 limits 和 minXRange。
+        """
+        minXRange_val = self._get_min_x_range_value()
+        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
+
+    def _set_safe_y_range(self, min_y: float, max_y: float):
+        """
+        设置 Y 轴的 viewRange 和 limits，自动处理 NaN 或恒定值。
+        """
+        global DEFAULT_PADDING_VAL_Y
+        
+        # Y 轴 limit 的内外边距 (0.5 表示上下各扩展 50%)
+        padding_yVal_limit = 0.5 
+
+        if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
+            # 如果是 NaN 或恒定值
+            y_center = min_y if not np.isnan(min_y) else 0
+            # 保证最小范围为 1.0，或者为中心值的 20%
+            y_range_half = (1.0 if y_center == 0 else abs(y_center) * 0.2)
+            
+            y_min_view = y_center - y_range_half
+            y_max_view = y_center + y_range_half
+            
+            # Limits 也使用这个扩展后的范围
+            y_min_limit = y_min_view
+            y_max_limit = y_max_view
+        else:
+            # 如果是正常范围
+            y_min_view = min_y
+            y_max_view = max_y
+            
+            # Limits 应用 50% 的外边距
+            y_range = max_y - min_y
+            y_min_limit = min_y - padding_yVal_limit * y_range
+            y_max_limit = max_y + padding_yVal_limit * y_range
+
+        self.plot_item.setLimits(yMin=y_min_limit, yMax=y_max_limit)
+        # ViewRange 使用 PADDING_Y (默认0.1) 的内边距
+        self.view_box.setYRange(y_min_view, y_max_view, padding=DEFAULT_PADDING_VAL_Y)
 
     def reset_plot(self,index_xMin,index_xMax):
 
@@ -2167,15 +2235,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         global DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y
 
         if not (np.isnan(xMax) or np.isinf(xMax)):
-            if xMax ==xMin:
-                xMax = xMax + 0.5 * self.factor  # 基于factor扩展，避免零范围
-                xMin = xMin - 0.5 * self.factor
+            xMin, xMax = self._get_safe_x_range(xMin, xMax)
 
             self.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
             padding_xVal=DEFAULT_PADDING_VAL_X
             limits_xMin = xMin - padding_xVal * (xMax - xMin)
             limits_xMax = xMax + padding_xVal * (xMax - xMin)
-            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax)
+            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            # global MIN_INDEX_LENGTH
+            # x_len = self.data.shape[0]
+            # minXRange_val = min(MIN_INDEX_LENGTH,x_len-1 if x_len>1 else 1)*self.factor
+            # self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax,minXRange=minXRange_val)
 
         self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
         self.vline.setBounds([None, None]) 
@@ -2252,8 +2322,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def handle_single_point_limits(self, x_values, y_values):
         if len(x_values) == 1:
             x = x_values[0]
-            min_x = x - 0.5 * self.factor  # 基于factor扩展，避免零范围
-            max_x = x + 0.5 * self.factor
+            min_x, max_x = self._get_safe_x_range(x, x)
             if len(y_values) == 1:
                 y = y_values[0]
                 min_y = y - 0.5 if y != 0 else -0.5
@@ -2401,7 +2470,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.update_cursor_label()
         else:
             self.update_right_header("")
-            
+
+    def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
+        """
+        在绘图或自动缩放后，更新光标线的边界和可见性。
+        """
+        main_window = self.window()
+        if main_window and hasattr(main_window, 'cursor_btn'):
+            self.vline.setBounds([min_x_bound, max_x_bound])
+            self.toggle_cursor(main_window.cursor_btn.isChecked())
+        else:
+            self.vline.setBounds([None, None]) # 确保清除边界
+            self.toggle_cursor(False)
+
     def clear_value_cache(self):
         #self._value_cache: dict[str, tuple] = {}
         pass
@@ -2477,7 +2558,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         index_max = datalength + padding_xVal * datalength
         limits_xMin = self.offset + self.factor * index_min
         limits_xMax = self.offset + self.factor * index_max
-        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=self.factor * 5)
+        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
         data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
         data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
@@ -2551,10 +2632,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         special_limits = self.handle_single_point_limits(x_values, self.original_y)
         if special_limits:
             min_x, max_x, min_y, max_y = special_limits
-            # extra margin for x-axis limit : 50% * factor
-            # limits_xMin = min_x - 0.5 * self.factor
-            # limits_xMax = max_x + 0.5 * self.factor
-
         else:
             min_x = np.min(x_values)
             max_x = np.max(x_values)
@@ -2564,41 +2641,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         limits_xMax = max_x + padding_xVal * (max_x - min_x)
 
         
-
-        global DEFAULT_PADDING_VAL_Y
-        
-        if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
-            y_center = min_y if not np.isnan(min_y) else 0
-            y_range = 1.0 if y_center == 0 else abs(y_center) * 0.2
-            self.plot_item.setLimits(yMin=y_center - y_range, yMax=y_center + y_range)
-            self.view_box.setYRange(y_center - y_range, y_center + y_range, padding=DEFAULT_PADDING_VAL_Y)
-        else:
-            self.plot_item.setLimits(
-                yMin=min_y - padding_yVal * (max_y - min_y),
-                yMax=max_y + padding_yVal * (max_y - min_y))
-            self.view_box.setYRange(min_y, max_y, padding=DEFAULT_PADDING_VAL_Y)
-
-        global MIN_INDEX_LENGTH 
-
-        if len(x_values)<=MIN_INDEX_LENGTH:
-            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax)
-            
-            curr_x_min,curr_x_max = self.plot_item.vb.state['viewRange'][0]
-            if curr_x_min<limits_xMin or curr_x_max> limits_xMax:
-                self.view_box.setXRange(max(curr_x_min,limits_xMin),min(curr_x_max,limits_xMax),padding=DEFAULT_PADDING_VAL_X)
-            self.window().sync_all_x_limits(limits_xMin, limits_xMax)
-        else:
-            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=len(x_values)*self.factor)
-            self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
-
+        self._set_safe_y_range(min_y, max_y)
+        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+        # global MIN_INDEX_LENGTH 
+        # minXRange_val = min(MIN_INDEX_LENGTH,len(x_values)-1 if len(x_values)>1 else 1)*self.factor
+        # self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
         self.vline.setBounds([min_x, max_x])
         
         self.plot_item.update()
-        if hasattr(self.window(), 'cursor_btn'):
-            self.vline.setBounds([min_x, max_x])
-            self.toggle_cursor(self.window().cursor_btn.isChecked())
-        else:
-            self.toggle_cursor(False)
+        self._update_cursor_after_plot(min_x, max_x)
 
         return True
 
@@ -3208,25 +3259,6 @@ class MainWindow(QMainWindow):
         self.saved_mark_range = None
         self.mark_stats_window = None
 
-    def sync_all_x_limits(self, xMin, xMax, minXRange:int|None = None):
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-            if minXRange:
-                widget.plot_item.setLimits(xMin=xMin, xMax=xMax, minXRange=minXRange)
-                self.sync_all_x_ranges(padding=DEFAULT_PADDING_VAL_X)
-            else:
-                widget.plot_item.setLimits(xMin=xMin, xMax=xMax)
-                self.sync_all_x_ranges(padding=0)
-
-    def sync_all_x_ranges(self,padding=0):
-        if self.plot_widgets:
-            first_plot = self.plot_widgets[0].plot_widget
-            curr_min, curr_max = first_plot.view_box.viewRange()[0]
-            for container in self.plot_widgets:
-                widget = container.plot_widget
-                widget.view_box.setXRange(curr_min, curr_max, padding=padding)
-                widget.plot_item.update()
-
     def closeEvent(self, event):
         # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
         if DataTableDialog._instance is not None:
@@ -3815,12 +3847,14 @@ class MainWindow(QMainWindow):
                 widget = container.plot_widget
                 y_name = widget.y_name
                 # 更新 limits
+
                 original_index_x = np.arange(1, self.loader.datalength + 1)
                 min_x = widget.offset + widget.factor * np.min(original_index_x)
                 max_x = widget.offset + widget.factor * np.max(original_index_x)
+                min_x, max_x = widget._get_safe_x_range(min_x, max_x)
                 limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
                 limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                widget.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=widget.factor * 5)
+                widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
                 widget.vline.setBounds([min_x, max_x])
                 if not y_name:
                     continue
@@ -3838,8 +3872,9 @@ class MainWindow(QMainWindow):
             if self.plot_widgets:
                 first_plot = self.plot_widgets[0].plot_widget
                 curr_min, curr_max = first_plot.view_box.viewRange()[0]
-                first_plot.view_box.setXRange(curr_min, curr_max, padding=DEFAULT_PADDING_VAL_X) 
-
+                first_plot.view_box.setXRange(curr_min, curr_max, padding=0) 
+                # first_plot.set_xrange_with_link_handling(curr_min, curr_max, padding=DEFAULT_PADDING_VAL_X) 
+            
             # 如果有清除，弹窗
             if cleared:
                 msg = "以下图表被清除：\n"
