@@ -876,19 +876,17 @@ class DataTableDialog(QMainWindow):
             return
             
         # 获取主窗口
-        main_window = get_main_window() # 如果你需要 main_window 本身
         loader = get_main_loader()       # 如果你只需要 loader
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
             
-        if var_name not in main_window.loader.df.columns:
+        if var_name not in loader.df.columns:  # 改为 loader
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
             
-        # 添加到表格
-        series = main_window.loader.df[var_name]
+        series = loader.df[var_name]  # 改为 loader
         self._add_variable_to_table(var_name, series)
         
         # 滚动到新添加的列
@@ -1724,16 +1722,15 @@ class MyTableWidget(QTableWidget):
 
     def _add_to_data_table(self, var_name: str):
         # 获取 MainWindow 实例（假设 self.window() 是 MainWindow）
-        main_window = get_main_window() # 如果你需要 main_window 本身
         loader = get_main_loader()       # 如果你只需要 loader
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
-        if var_name not in main_window.loader.df.columns:
+        if var_name not in loader.df.columns:
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
-        data = main_window.loader.df[var_name]
+        data = loader.df[var_name]
         DataTableDialog.popup(var_name, data, self)
 
     def _add_to_blank_plot(self, var_name: str):
@@ -2242,18 +2239,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             limits_xMin = xMin - padding_xVal * (xMax - xMin)
             limits_xMax = xMax + padding_xVal * (xMax - xMin)
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-            # global MIN_INDEX_LENGTH
-            # x_len = self.data.shape[0]
-            # minXRange_val = min(MIN_INDEX_LENGTH,x_len-1 if x_len>1 else 1)*self.factor
-            # self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax,minXRange=minXRange_val)
 
         self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
         self.vline.setBounds([None, None]) 
 
         self.xMin = xMin
         self.xMax = xMax
-        # self.x_name = ''
-        # self.x_format = ''
         self.y_name = ''
         self.y_format = ''
         #self.plot_item.update()
@@ -2643,9 +2634,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         self._set_safe_y_range(min_y, max_y)
         self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-        # global MIN_INDEX_LENGTH 
-        # minXRange_val = min(MIN_INDEX_LENGTH,len(x_values)-1 if len(x_values)>1 else 1)*self.factor
-        # self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
         self.vline.setBounds([min_x, max_x])
         
         self.plot_item.update()
@@ -3700,8 +3688,7 @@ class MainWindow(QMainWindow):
         for container in self.plot_widgets:
              container.plot_widget.reset_plot(index_xMin, index_xMax)
              container.plot_widget.clear_value_cache()
-        # for plot_widget in self.plot_widgets:
-        #     plot_widget.reset_plot(xMin,xMax)
+
         self.saved_mark_range = None
         if self.mark_stats_window:
             self.mark_stats_window.hide()  # Hide instead of close
@@ -3823,6 +3810,10 @@ class MainWindow(QMainWindow):
                     widget.plot_item.update()  # 强制更新渲染
 
     def replots_after_loading(self):
+        # 如果加载文件为空
+        if self.loader.datalength == 0: 
+                return
+        
         # 收集所有 y_name (包括未显示的)
         all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
         if DataTableDialog._instance is not None:
