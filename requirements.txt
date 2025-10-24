@@ -4,3 +4,4 @@ pyqt6
 pyqtgraph
 chardet
 ujson
+psutil

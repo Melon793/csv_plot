@@ -1,6 +1,7 @@
 from __future__ import annotations 
 import sys
 import os
+import time
 import numpy as np
 import pandas as pd
 
@@ -20,6 +21,13 @@ from PyQt6.QtWidgets import (
 )
 import pyqtgraph as pg
 from threading import Lock
+
+# 可选依赖
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH
 DEFAULT_PADDING_VAL_X = 0.05
@@ -127,6 +135,11 @@ class DataLoadThread(QThread):
             def _progress_cb(progress: int):
                 self.progress.emit(progress)
 
+            # 检查文件是否仍然存在
+            if not os.path.exists(self.file_path):
+                self.error.emit("文件不存在或已被删除")
+                return
+
             # print("Calling FastDataLoader with _progress:", _progress_cb) 
 
             # 给 FastDataLoader 打补丁：加一个回调
@@ -139,8 +152,12 @@ class DataLoadThread(QThread):
                 _progress= _progress_cb,
             )
             self.finished.emit(loader)
+        except MemoryError:
+            self.error.emit("内存不足，无法加载此文件。请尝试加载较小的文件。")
+        except OSError as e:
+            self.error.emit(f"文件访问错误: {e}")
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(f"加载文件时发生未知错误: {str(e)}")
 
 class FastDataLoader:
     # 脏数据清单
@@ -234,8 +251,11 @@ class FastDataLoader:
         if downcast_float:
             self._downcast_numeric()
         self._df_validity=self._check_df_validity()
+        
+        # 强制垃圾回收
         import gc
         gc.collect()
+        
         if self._progress_cb:
             self._progress_cb(100)
 
@@ -346,6 +366,9 @@ class FastDataLoader:
         total_chunks_est = max(1, self.estimated_lines // chunksize + (1 if self.estimated_lines % chunksize else 0))
         increment = 80 / total_chunks_est
         
+        # 使用更小的chunk size来减少内存峰值
+        optimized_chunksize = min(chunksize, 1000)  # 限制最大chunk size
+        
         for idx,chunk in enumerate(pd.read_csv(
             path,
             skiprows=(2 + descRows) if hasunit else (1+descRows),
@@ -353,9 +376,9 @@ class FastDataLoader:
             dtype=dtype_map,
             parse_dates=parse_dates,
             encoding=self.encoding_used,
-            chunksize=chunksize,
+            chunksize=optimized_chunksize,
             usecols=self.usecols,
-            low_memory=False,
+            low_memory=True,  # 改为True以节省内存
             memory_map=True,
             sep=sep,
             na_values=self._NA_VALUES,
@@ -368,6 +391,12 @@ class FastDataLoader:
                 self._progress_cb(15 + int(chunk_progress))
                 #print (f"progress {idx} is {bytes_read}")
             chunks.append(chunk)
+            
+            # 每处理几个chunk就进行一次垃圾回收
+            if idx % 5 == 0:
+                import gc
+                gc.collect()
+                
         return pd.concat(chunks, ignore_index=True)
 
     def _downcast_numeric(self) -> None:
@@ -2029,6 +2058,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.view_box = self.plot_item.vb
         self.view_box.plot_widget = self  # 设置 plot_widget 以确保 trigger_jump_to_data 能调用 jump_to_data_impl
         
+        # 添加防抖定时器来优化缩放性能
+        self._update_timer = QTimer()
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self._delayed_update_plot_style)
+        
         # 移除 self._customize_plot_menu()，因为现在用 CustomViewBox 实现菜单定制
         
         self.view_box.setAutoVisible(x=False, y=True)  # 自动适应可视区域
@@ -2044,7 +2078,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
         # 基于点数修改曲线风格
-        self.view_box.sigRangeChanged.connect(self.update_plot_style)
+        # 使用防抖机制来优化缩放性能
+        self.view_box.sigRangeChanged.connect(self._on_range_changed)
         
     def jump_to_data_impl(self, x):
         if not self.curve or not self.y_name:
@@ -2810,6 +2845,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         threshold = THRESHOLD_LINE_TO_SYMBOL  
         tolerance = TOLERANCE_LINE_TO_SYMBOL
+        
+        # 性能优化：如果数据量很大，进行采样
+        if visible_points > threshold * 10:  # 如果可见点太多
+            self._apply_data_sampling(x_data, visible_mask, x_min, x_max)
+            return
+            
         if visible_points > threshold * (1 + tolerance):
             # 粗线，无symbol
             pen = pg.mkPen(color='blue', width=3)
@@ -2826,6 +2867,56 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.curve.setSymbolBrush('blue')
         else:
             pass
+
+    def _apply_data_sampling(self, x_data, visible_mask, x_min, x_max):
+        """对大数据量进行采样以提高性能"""
+        try:
+            # 获取可见数据的索引
+            visible_indices = np.where(visible_mask)[0]
+            
+            if len(visible_indices) == 0:
+                return
+                
+            # 计算采样率（最多显示10000个点）
+            max_points = 10000
+            if len(visible_indices) > max_points:
+                step = len(visible_indices) // max_points
+                sampled_indices = visible_indices[::step]
+            else:
+                sampled_indices = visible_indices
+            
+            # 获取采样后的数据
+            if self.original_y is not None:
+                sampled_x = x_data[sampled_indices]
+                sampled_y = self.original_y[sampled_indices]
+                
+                # 更新曲线数据
+                self.curve.setData(sampled_x, sampled_y)
+                
+                # 设置样式
+                pen = pg.mkPen(color='blue', width=2)
+                self.curve.setPen(pen)
+                self.curve.setSymbol(None)
+                
+        except Exception as e:
+            print(f"数据采样时出错: {e}")
+            # 如果采样失败，使用原始样式
+            pen = pg.mkPen(color='blue', width=3)
+            self.curve.setPen(pen)
+            self.curve.setSymbol(None)
+
+    def _on_range_changed(self, view_box, range):
+        """范围变化时的防抖处理"""
+        # 停止之前的定时器
+        if hasattr(self, '_update_timer'):
+            self._update_timer.stop()
+            # 延迟50ms执行更新，避免频繁更新
+            self._update_timer.start(50)
+
+    def _delayed_update_plot_style(self):
+        """延迟更新绘图样式"""
+        if hasattr(self, 'view_box'):
+            self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
 
 # ---------------- 主窗口 ----------------
 class MarkStatsWindow(QDialog):
@@ -3294,11 +3385,33 @@ class MainWindow(QMainWindow):
 
     def load_csv_file(self, file_path: str):
         if not file_path or not os.path.isfile(file_path):
+            QMessageBox.warning(self, "文件错误", "请选择一个有效的文件")
             return
+        
+        # 检查文件大小
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                QMessageBox.warning(self, "文件错误", "文件为空")
+                return
+            if file_size > 500 * 1024 * 1024:  # 500MB限制
+                reply = QMessageBox.question(self, "文件过大", 
+                    f"文件大小 {file_size/(1024*1024):.1f}MB 较大，加载可能需要较长时间，是否继续？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+        except OSError as e:
+            QMessageBox.critical(self, "文件访问错误", f"无法访问文件: {e}")
+            return
+        
         try:
             self._load_file(file_path)
+        except MemoryError:
+            QMessageBox.critical(self, "内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
+            self._cleanup_old_data()
         except Exception as e:
-            QMessageBox.critical(self, "加载错误", str(e))
+            QMessageBox.critical(self, "加载错误", f"加载文件时发生错误: {str(e)}")
+            self._cleanup_old_data()
         finally:
             if hasattr(self, 'loader') and self.loader:  # 如果加载成功
                 self._post_load_actions(file_path)
@@ -3324,6 +3437,12 @@ class MainWindow(QMainWindow):
         self._load_file(self.loader.path, is_reload=True)
 
     def _load_file(self, file_path: str, is_reload: bool = False):
+        start_time = self._log_performance_info("数据加载")
+        
+        # 在加载新数据前，先释放旧数据以节省内存
+        if hasattr(self, 'loader') and self.loader is not None:
+            self._cleanup_old_data()
+        
         file_ext = os.path.splitext(file_path)[1].lower()
 
         # load default
@@ -3368,6 +3487,7 @@ class MainWindow(QMainWindow):
             if status:
                 self.set_button_status(True)
                 self._post_load_actions(file_path)
+                self._log_performance_info("数据加载", start_time)
         else:
             # 5 MB 以上走线程
             self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
@@ -3379,9 +3499,52 @@ class MainWindow(QMainWindow):
 
             self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
             self._thread.progress.connect(self._progress.setValue)
-            self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
+            self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path, start_time))
             self._thread.error.connect(self._on_load_error)
             self._thread.start()
+
+    def _cleanup_old_data(self):
+        """清理旧数据以释放内存"""
+        try:
+            # 清理旧的loader数据
+            if hasattr(self, 'loader') and self.loader is not None:
+                if hasattr(self.loader, '_df'):
+                    del self.loader._df
+                del self.loader
+                self.loader = None
+            
+            # 清理所有绘图数据
+            self.clear_all_plots()
+            
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            
+        except Exception as e:
+            print(f"清理旧数据时出错: {e}")
+
+    def _check_memory_usage(self):
+        """检查内存使用情况"""
+        if not PSUTIL_AVAILABLE:
+            return 0
+        try:
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / (1024 * 1024)
+            return memory_mb
+        except Exception:
+            return 0
+
+    def _log_performance_info(self, operation: str, start_time: float = None):
+        """记录性能信息"""
+        if start_time:
+            duration = time.time() - start_time
+            memory_mb = self._check_memory_usage()
+            print(f"[性能] {operation} 完成 - 耗时: {duration:.2f}s, 内存: {memory_mb:.1f}MB")
+        else:
+            memory_mb = self._check_memory_usage()
+            print(f"[性能] {operation} 开始 - 内存: {memory_mb:.1f}MB")
+            return time.time()
 
     def _post_load_actions(self, file_path: str):
         self.loaded_path = file_path
@@ -3427,11 +3590,13 @@ class MainWindow(QMainWindow):
                 loader = None
             return status
 
-    def _on_load_done(self,loader, file_path: str):
+    def _on_load_done(self,loader, file_path: str, start_time: float = None):
         self._progress.close()
         self.loader=loader
         self._apply_loader()
         self._post_load_actions(file_path)
+        if start_time:
+            self._log_performance_info("数据加载", start_time)
 
     def _on_load_error(self, msg):
         self._progress.close()
