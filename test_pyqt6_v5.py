@@ -21,7 +21,8 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 from threading import Lock
 
-global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH
+
+global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 DEFAULT_PADDING_VAL_X = 0.05
 DEFAULT_PADDING_VAL_Y = 0.1
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
@@ -31,7 +32,10 @@ THRESHOLD_LINE_TO_SYMBOL = 100
 TOLERANCE_LINE_TO_SYMBOL = 0.2
 BLINK_PULSE = 500
 FACTOR_SCROLL_ZOOM = 0.3
-MIN_INDEX_LENGTH =3
+MIN_INDEX_LENGTH = 3
+DEFAULT_LINE_WIDTH = 3
+THICK_LINE_WIDTH = 3
+THIN_LINE_WIDTH = 1
 
 # 主界面
 global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
@@ -127,6 +131,11 @@ class DataLoadThread(QThread):
             def _progress_cb(progress: int):
                 self.progress.emit(progress)
 
+            # 检查文件是否仍然存在
+            if not os.path.exists(self.file_path):
+                self.error.emit("文件不存在或已被删除")
+                return
+
             # print("Calling FastDataLoader with _progress:", _progress_cb) 
 
             # 给 FastDataLoader 打补丁：加一个回调
@@ -139,8 +148,12 @@ class DataLoadThread(QThread):
                 _progress= _progress_cb,
             )
             self.finished.emit(loader)
+        except MemoryError:
+            self.error.emit("内存不足，无法加载此文件。请尝试加载较小的文件。")
+        except OSError as e:
+            self.error.emit(f"文件访问错误: {e}")
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(f"加载文件时发生未知错误: {str(e)}")
 
 class FastDataLoader:
     # 脏数据清单
@@ -203,7 +216,7 @@ class FastDataLoader:
         # print(f"the estimated downcast ratio is {downcast_ratio*100:2f} %, the compression ratio estimated {(0.5*downcast_ratio+1*(1-downcast_ratio))}")
         # print(f"sample of {sample.shape[0]} lines has costed memory {self.sample_mem_size/(1024**2):2f}Mb")
         # self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
-        self.byte_per_line = (0.8*self.sample_mem_size)/sample.shape[0]
+        self.byte_per_line = (0.6*self.sample_mem_size)/sample.shape[0]
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
         # print(f"this file might have lines of {self.estimated_lines}")
         import gc
@@ -234,8 +247,11 @@ class FastDataLoader:
         if downcast_float:
             self._downcast_numeric()
         self._df_validity=self._check_df_validity()
+        
+        # 强制垃圾回收
         import gc
         gc.collect()
+        
         if self._progress_cb:
             self._progress_cb(100)
 
@@ -346,6 +362,9 @@ class FastDataLoader:
         total_chunks_est = max(1, self.estimated_lines // chunksize + (1 if self.estimated_lines % chunksize else 0))
         increment = 80 / total_chunks_est
         
+        # 使用更小的chunk size来减少内存峰值
+        optimized_chunksize = min(chunksize, 2000)  # 限制最大chunk size
+        
         for idx,chunk in enumerate(pd.read_csv(
             path,
             skiprows=(2 + descRows) if hasunit else (1+descRows),
@@ -353,7 +372,7 @@ class FastDataLoader:
             dtype=dtype_map,
             parse_dates=parse_dates,
             encoding=self.encoding_used,
-            chunksize=chunksize,
+            chunksize=optimized_chunksize,
             usecols=self.usecols,
             low_memory=False,
             memory_map=True,
@@ -368,6 +387,12 @@ class FastDataLoader:
                 self._progress_cb(15 + int(chunk_progress))
                 #print (f"progress {idx} is {bytes_read}")
             chunks.append(chunk)
+            
+            # 每处理几个chunk就进行一次垃圾回收
+            if idx % 5 == 0:
+                import gc
+                gc.collect()
+                
         return pd.concat(chunks, ignore_index=True)
 
     def _downcast_numeric(self) -> None:
@@ -1135,7 +1160,7 @@ class DataTableDialog(QMainWindow):
             except RuntimeError:
                 # 窗口已经被删除，跳过
                 pass
-        if not (self._skip_close_confirmation) and (self._df.columns.tolist()):
+        if not (self._skip_close_confirmation) and bool(self._df.columns.tolist()):
             reply = QMessageBox.question(self,"确认关闭","是否清除所有列表，并关闭数值变量表窗口？",
                                          QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
             # if user did not confirm to close the window
@@ -2029,13 +2054,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.view_box = self.plot_item.vb
         self.view_box.plot_widget = self  # 设置 plot_widget 以确保 trigger_jump_to_data 能调用 jump_to_data_impl
         
+        # 添加防抖定时器来优化缩放性能
+        self._update_timer = QTimer()
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self._delayed_update_plot_style)
+        
         # 移除 self._customize_plot_menu()，因为现在用 CustomViewBox 实现菜单定制
         
         self.view_box.setAutoVisible(x=False, y=True)  # 自动适应可视区域
         self.plot_item.setTitle(None)
         self.plot_item.hideButtons()
         self.plot_item.setClipToView(True)
-        self.plot_item.setDownsampling(True)
+        # 配置pyqtgraph的downsample设置，使用peak模式保留细节
+        self.plot_item.setDownsampling(mode='peak', auto=True)
         self.setBackground('w')
 
         pen = pg.mkPen('#f00',width=1)
@@ -2044,7 +2075,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
         # 基于点数修改曲线风格
-        self.view_box.sigRangeChanged.connect(self.update_plot_style)
+        # 使用防抖机制来优化缩放性能
+        self.view_box.sigRangeChanged.connect(self._on_range_changed)
         
     def jump_to_data_impl(self, x):
         if not self.curve or not self.y_name:
@@ -2589,76 +2621,149 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         event.acceptProposedAction()
         self.window().update_mark_stats()
 
+    def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
+        """验证绘图数据的有效性"""
+        if not isinstance(var_name, str) or not var_name.strip():
+            return False, "变量名无效"
+            
+        if not hasattr(self, 'data') or self.data is None:
+            return False, "没有可用的数据"
+            
+        if not hasattr(self.data, 'columns'):
+            return False, "数据格式无效"
+            
+        if var_name not in self.data.columns:
+            return False, f"变量 {var_name} 不存在"
+            
+        return True, ""
+
+    def _prepare_plot_data(self, var_name: str) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
+        """准备绘图数据"""
+        try:
+            y_values, y_format = self.get_value_from_name(var_name=var_name)
+            
+            if y_values is None or len(y_values) == 0:
+                return False, f"变量 {var_name} 没有有效数据", None, None, ""
+            
+            # 转换为numpy数组
+            if isinstance(y_values, pd.Series):
+                y_array = y_values.to_numpy()
+            else:
+                y_array = np.array(y_values)
+                
+            # 检查数据是否全为NaN
+            if np.all(np.isnan(y_array)):
+                return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
+                
+            x_array = np.arange(1, len(y_array) + 1)
+            
+            return True, "", x_array, y_array, y_format
+            
+        except Exception as e:
+            return False, f"处理数据时出错: {str(e)}", None, None, ""
+
     def plot_variable(self, var_name: str) -> bool:
         """绘制变量到图表，返回是否成功"""
-        if var_name not in self.data.columns:
-            QMessageBox.warning(self, "错误", f"变量 {var_name} 不存在")
+        # 验证输入
+        is_valid, error_msg = self._validate_plot_data(var_name)
+        if not is_valid:
+            QMessageBox.warning(self, "错误", error_msg)
             return False
         
-        y_values, y_format = self.get_value_from_name(var_name=var_name)
-        
-        if y_values is None:
-            QMessageBox.warning(self, "错误", f"变量 {var_name} 没有有效数据")
+        # 准备数据
+        success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(var_name)
+        if not success:
+            QMessageBox.warning(self, "错误", error_msg)
             return False
         
-        # 如果正常
-        self.y_format = y_format
-        self.y_name = var_name
-        self.original_index_x = np.arange(1, len(y_values) + 1)
-        self.original_y = y_values.to_numpy() if isinstance(y_values, pd.Series) else np.array(y_values)
-        x_values = self.offset + self.factor * self.original_index_x
+        try:
+            # 设置绘图数据
+            self.y_format = y_format
+            self.y_name = var_name
+            self.original_index_x = x_array
+            self.original_y = y_array
+            x_values = self.offset + self.factor * self.original_index_x
 
-        self.plot_item.clearPlots()             
-        _pen = pg.mkPen(color='blue', width=3)  # 初始粗线
-        self.curve = self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
-        # 无初始symbol，等待update_plot_style
-        QTimer.singleShot(0, lambda: self.update_plot_style(self.view_box, self.view_box.viewRange(), None))  # 修正: 传整个viewRange() 和 None for rect
+            # 清除旧图并绘制新图
+            self.plot_item.clearPlots()             
+            _pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)
+            self.curve = self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
+            
+            # 延迟更新样式
+            QTimer.singleShot(0, lambda: self.update_plot_style(self.view_box, self.view_box.viewRange(), None))
 
-        full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
-        self.update_left_header(full_title)
-        global DEFAULT_PADDING_VAL_X
-        padding_xVal = DEFAULT_PADDING_VAL_X
-        padding_yVal = 0.5
+            # 更新标题
+            full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
+            self.update_left_header(full_title)
+            
+            # 设置坐标轴范围
+            self._setup_plot_axes(x_values, self.original_y)
+            
+            # 更新光标
+            min_x, max_x = np.min(x_values), np.max(x_values)
+            self.vline.setBounds([min_x, max_x])
+            self.plot_item.update()
+            self._update_cursor_after_plot(min_x, max_x)
 
-        special_limits = self.handle_single_point_limits(x_values, self.original_y)
-        if special_limits:
-            min_x, max_x, min_y, max_y = special_limits
-        else:
-            min_x = np.min(x_values)
-            max_x = np.max(x_values)
-            min_y = np.nanmin(self.original_y)
-            max_y = np.nanmax(self.original_y)
-        limits_xMin = min_x - padding_xVal * (max_x - min_x)
-        limits_xMax = max_x + padding_xVal * (max_x - min_x)
+            return True
+            
+        except Exception as e:
+            QMessageBox.critical(self, "绘图错误", f"绘制变量时发生错误: {str(e)}")
+            return False
 
-        
-        self._set_safe_y_range(min_y, max_y)
-        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-        self.vline.setBounds([min_x, max_x])
-        
-        self.plot_item.update()
-        self._update_cursor_after_plot(min_x, max_x)
+    def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray):
+        """设置绘图坐标轴"""
+        try:
+            special_limits = self.handle_single_point_limits(x_values, y_values)
+            if special_limits:
+                min_x, max_x, min_y, max_y = special_limits
+            else:
+                min_x = np.min(x_values)
+                max_x = np.max(x_values)
+                min_y = np.nanmin(y_values)
+                max_y = np.nanmax(y_values)
+                
+            padding_x = DEFAULT_PADDING_VAL_X
+            limits_xMin = min_x - padding_x * (max_x - min_x)
+            limits_xMax = max_x + padding_x * (max_x - min_x)
 
-        return True
+            self._set_safe_y_range(min_y, max_y)
+            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            
+        except Exception as e:
+            print(f"设置坐标轴时出错: {e}")
+            # 使用默认范围
+            self._set_safe_y_range(0, 1)
+            self._set_x_limits_with_min_range(0, 1)
+
+    def _reset_plot_limits(self):
+        """重置绘图限制"""
+        try:
+            self.plot_item.setLimits(yMin=None, yMax=None)
+            self.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
+            self.vline.setBounds([None, None])
+        except Exception as e:
+            print(f"重置绘图限制时出错: {e}")
+
+    def _clear_plot_data(self):
+        """清除绘图数据"""
+        try:
+            self.plot_item.clearPlots()
+            self.axis_y.setLabel(text="")
+            self.y_name = ''
+            self.y_format = ''
+            self.update_left_header("channel name")
+            self.update_right_header("")
+            self.curve = None
+            self.original_index_x = None
+            self.original_y = None
+        except Exception as e:
+            print(f"清除绘图数据时出错: {e}")
 
     def clear_plot_item(self):
-        #self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
-        self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
-
-        global DEFAULT_PADDING_VAL_Y
-        self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
-        self.vline.setBounds([None, None]) 
-
-        #self.plot_item.update()
-        self.plot_item.clearPlots() 
-        self.axis_y.setLabel(text="")
-        self.y_name = ''
-        self.y_format=''
-        self.update_left_header("channel name")
-        self.update_right_header("")
-        self.curve = None
-        self.original_index_x = None
-        self.original_y = None
+        """清除绘图项"""
+        self._reset_plot_limits()
+        self._clear_plot_data()
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
@@ -2789,43 +2894,100 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             y_min = np.nanmin(y_region)
         
         return (x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)
+    def _get_visible_points_count(self, x_data: np.ndarray, x_min: float, x_max: float) -> int:
+        """计算可见点数量"""
+        try:
+            visible_mask = (x_data >= x_min) & (x_data <= x_max)
+            return int(np.sum(visible_mask))
+        except Exception:
+            return 0
+
+    def _should_show_symbols(self, visible_points: int) -> bool:
+        """判断是否应该显示符号"""
+        if visible_points <= 0:
+            return False
+            
+        threshold = THRESHOLD_LINE_TO_SYMBOL
+        tolerance = TOLERANCE_LINE_TO_SYMBOL
+        
+        return visible_points < threshold * (1 - tolerance)
+
+    def _should_use_thick_line(self, visible_points: int) -> bool:
+        """判断是否应该使用粗线"""
+        if visible_points <= 0:
+            return False
+            
+        threshold = THRESHOLD_LINE_TO_SYMBOL
+        tolerance = TOLERANCE_LINE_TO_SYMBOL
+        
+        return visible_points > threshold * (1 + tolerance)
+
+    def _apply_plot_style(self, use_thick_line: bool, show_symbols: bool):
+        """应用绘图样式"""
+        try:
+            if use_thick_line:
+                pen = pg.mkPen(color='blue', width=THICK_LINE_WIDTH)
+                self.curve.setPen(pen)
+                self.curve.setSymbol(None)
+            elif show_symbols:
+                pen = pg.mkPen(color='blue', width=THIN_LINE_WIDTH)
+                self.curve.setPen(pen)
+                self.curve.setSymbol('s')
+                self.curve.setSymbolSize(3)
+                self.curve.setSymbolPen('blue')
+                self.curve.setSymbolBrush('blue')
+            # 如果都不满足，保持当前样式
+        except Exception as e:
+            print(f"应用绘图样式时出错: {e}")
+
     def update_plot_style(self, view_box, range, rect=None):
+        """更新绘图样式"""
         if not self.curve:
             return
         
-        # 使用原始数据而不是裁剪后的数据
-        if self.original_index_x is not None:
-            x_data = self.offset + self.factor * self.original_index_x
-        else:
-            x_data, _ = self.curve.getData()
-            if x_data is None:
-                return
-        
-        x_min, x_max = range[0]
-        # 计算可见点数（近似：二分查找或mask计数）
-        visible_mask = (x_data >= x_min) & (x_data <= x_max)
-        visible_points = np.sum(visible_mask)
+        try:
+            # 使用原始数据而不是裁剪后的数据
+            if self.original_index_x is not None:
+                x_data = self.offset + self.factor * self.original_index_x
+            else:
+                x_data, _ = self.curve.getData()
+                if x_data is None:
+                    return
+            
+            x_min, x_max = range[0]
+            visible_points = self._get_visible_points_count(x_data, x_min, x_max)
+            
+            # 让pyqtgraph自行处理downsample，不再进行额外采样
+            
+            # 判断样式
+            use_thick_line = self._should_use_thick_line(visible_points)
+            show_symbols = self._should_show_symbols(visible_points)
+            
+            # 应用样式
+            self._apply_plot_style(use_thick_line, show_symbols)
+            
+        except Exception as e:
+            print(f"更新绘图样式时出错: {e}")
 
-        global THRESHOLD_LINE_TO_SYMBOL,TOLERANCE_LINE_TO_SYMBOL
 
-        threshold = THRESHOLD_LINE_TO_SYMBOL  
-        tolerance = TOLERANCE_LINE_TO_SYMBOL
-        if visible_points > threshold * (1 + tolerance):
-            # 粗线，无symbol
-            pen = pg.mkPen(color='blue', width=3)
-            self.curve.setPen(pen)
-            self.curve.setSymbol(None)  # 移除symbol
+    def _on_range_changed(self, view_box, range):
+        """范围变化时的防抖处理"""
+        try:
+            # 停止之前的定时器
+            if hasattr(self, '_update_timer'):
+                self._update_timer.stop()
+                # 延迟50ms执行更新，避免频繁更新
+                self._update_timer.start(50)
+        except Exception as e:
+            print(f"处理范围变化时出错: {e}")
 
-        elif visible_points < threshold * (1 - tolerance) and (visible_points > 0):
-            # 细线 + symbol
-            pen = pg.mkPen(color='blue', width=1)
-            self.curve.setPen(pen)
-            self.curve.setSymbol('s')  # 或's'如原有
-            self.curve.setSymbolSize(3)
-            self.curve.setSymbolPen('blue')
-            self.curve.setSymbolBrush('blue')
-        else:
-            pass
+    def _delayed_update_plot_style(self):
+        """延迟更新绘图样式"""
+        try:
+            if hasattr(self, 'view_box'):
+                self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
+        except Exception as e:
+            print(f"延迟更新绘图样式时出错: {e}")
 
 # ---------------- 主窗口 ----------------
 class MarkStatsWindow(QDialog):
@@ -3292,15 +3454,56 @@ class MainWindow(QMainWindow):
         if file_path:
             self.load_csv_file(file_path)
 
+    def _validate_file_path(self, file_path: str) -> bool:
+        """验证文件路径是否有效"""
+        if not file_path or not isinstance(file_path, str):
+            QMessageBox.warning(self, "文件错误", "请选择一个有效的文件")
+            return False
+        
+        if not os.path.isfile(file_path):
+            QMessageBox.warning(self, "文件错误", "文件不存在")
+            return False
+            
+        return True
+    
+    def _check_file_size(self, file_path: str) -> bool:
+        """检查文件大小并提示用户"""
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size == 0:
+                QMessageBox.warning(self, "文件错误", "文件为空")
+                return False
+                
+            if file_size > 1024 * 1024 * 1024:  # 1GB限制
+                reply = QMessageBox.question(self, "文件过大", 
+                    f"文件大小 {file_size/(1024*1024*1024):.1f}GB 较大，加载可能需要较长时间，是否继续？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                return reply == QMessageBox.StandardButton.Yes
+                
+            return True
+            
+        except OSError as e:
+            QMessageBox.critical(self, "文件访问错误", f"无法访问文件: {e}")
+            return False
+
     def load_csv_file(self, file_path: str):
-        if not file_path or not os.path.isfile(file_path):
+        """加载CSV文件"""
+        if not self._validate_file_path(file_path):
             return
+            
+        if not self._check_file_size(file_path):
+            return
+        
         try:
             self._load_file(file_path)
+        except MemoryError:
+            QMessageBox.critical(self, "内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
+            self._cleanup_old_data()
         except Exception as e:
-            QMessageBox.critical(self, "加载错误", str(e))
+            QMessageBox.critical(self, "加载错误", f"加载文件时发生错误: {str(e)}")
+            self._cleanup_old_data()
         finally:
-            if hasattr(self, 'loader') and self.loader:  # 如果加载成功
+            if self._has_valid_loader:  # 如果加载成功
                 self._post_load_actions(file_path)
                 self.raise_()  # 加载完成后前置
                 self.activateWindow()
@@ -3317,13 +3520,26 @@ class MainWindow(QMainWindow):
             self.grid_layout_btn.setEnabled(status)
 
     def reload_data(self):
-        if not hasattr(self, 'loader') or not self.loader or not self.loader.path or not os.path.isfile(self.loader.path):
-            QMessageBox.critical(self, "错误", "文件路径无效，无法重新加载")
+        """重新加载当前数据"""
+        if not self._has_valid_loader:
+            QMessageBox.critical(self, "错误", "没有可重新加载的数据")
+            return
+            
+        if not hasattr(self.loader, 'path') or not self.loader.path:
+            QMessageBox.critical(self, "错误", "数据路径无效")
+            return
+            
+        if not os.path.isfile(self.loader.path):
+            QMessageBox.critical(self, "错误", "文件不存在，无法重新加载")
             return
 
         self._load_file(self.loader.path, is_reload=True)
 
     def _load_file(self, file_path: str, is_reload: bool = False):
+        # 在加载新数据前，先释放旧数据以节省内存
+        if hasattr(self, 'loader') and self.loader is not None:
+            self._cleanup_old_data()
+        
         file_ext = os.path.splitext(file_path)[1].lower()
 
         # load default
@@ -3383,6 +3599,46 @@ class MainWindow(QMainWindow):
             self._thread.error.connect(self._on_load_error)
             self._thread.start()
 
+    @property
+    def _has_valid_loader(self) -> bool:
+        """检查是否有有效的loader"""
+        return hasattr(self, 'loader') and self.loader is not None
+    
+    @property
+    def _has_valid_data(self) -> bool:
+        """检查是否有有效的数据"""
+        return (self._has_valid_loader and 
+                hasattr(self.loader, 'datalength') and 
+                self.loader.datalength > 0)
+    
+    @property
+    def _current_data_length(self) -> int:
+        """获取当前数据长度"""
+        return self.loader.datalength if self._has_valid_loader else 0
+
+    def _cleanup_old_data(self):
+        """清理旧数据以释放内存"""
+        try:
+            # 清理旧的loader数据
+            if self._has_valid_loader:
+                if hasattr(self.loader, '_df'):
+                    del self.loader._df
+                del self.loader
+                self.loader = None
+            
+            # 清理所有绘图数据
+            self.clear_all_plots()
+            
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            
+        except (AttributeError, TypeError) as e:
+            print(f"清理旧数据时出错: {e}")
+        except Exception as e:
+            print(f"清理旧数据时发生未知错误: {e}")
+
+
     def _post_load_actions(self, file_path: str):
         self.loaded_path = file_path
 
@@ -3406,21 +3662,53 @@ class MainWindow(QMainWindow):
         except json.JSONDecodeError:
             return {} if default is None else default
         
+    def _validate_load_parameters(self, file_path: str, descRows: int, sep: str, hasunit: bool) -> tuple[bool, str]:
+        """验证加载参数"""
+        if not isinstance(file_path, str) or not file_path.strip():
+            return False, "文件路径无效"
+            
+        if not isinstance(descRows, int) or descRows < 0:
+            return False, "描述行数必须是非负整数"
+            
+        if not isinstance(sep, str) or not sep:
+            return False, "分隔符无效"
+            
+        if not isinstance(hasunit, bool):
+            return False, "hasunit参数必须是布尔值"
+            
+        return True, ""
+
     def _load_sync(self, 
-                   file_path:str,
-                   descRows:int =0,
-                   sep:str = ',',
-                   hasunit:bool=True):
+                   file_path: str,
+                   descRows: int = 0,
+                   sep: str = ',',
+                   hasunit: bool = True):
         """小文件直接读"""
+        # 验证参数
+        is_valid, error_msg = self._validate_load_parameters(file_path, descRows, sep, hasunit)
+        if not is_valid:
+            QMessageBox.critical(self, "参数错误", error_msg)
+            return False
+            
         loader = None
         status = False
+        
         try:
-            loader = FastDataLoader(file_path, descRows=descRows,sep=sep,hasunit=hasunit)
+            loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit)
             self.loader = loader
             self._apply_loader()
             status = True
+        except MemoryError as e:
+            QMessageBox.critical(self, "内存不足", f"加载文件时内存不足: {str(e)}")
+            status = False
+        except FileNotFoundError as e:
+            QMessageBox.critical(self, "文件未找到", f"无法找到文件: {str(e)}")
+            status = False
+        except PermissionError as e:
+            QMessageBox.critical(self, "权限错误", f"没有文件访问权限: {str(e)}")
+            status = False
         except Exception as e:
-            QMessageBox.critical(self, "读取失败", str(e))
+            QMessageBox.critical(self, "读取失败", f"加载文件时发生错误: {str(e)}")
             status = False
         finally:
             if loader is not None:
