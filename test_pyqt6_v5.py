@@ -29,7 +29,7 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
-global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH
+global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 DEFAULT_PADDING_VAL_X = 0.05
 DEFAULT_PADDING_VAL_Y = 0.1
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
@@ -39,7 +39,10 @@ THRESHOLD_LINE_TO_SYMBOL = 100
 TOLERANCE_LINE_TO_SYMBOL = 0.2
 BLINK_PULSE = 500
 FACTOR_SCROLL_ZOOM = 0.3
-MIN_INDEX_LENGTH =3
+MIN_INDEX_LENGTH = 3
+DEFAULT_LINE_WIDTH = 3
+THICK_LINE_WIDTH = 3
+THIN_LINE_WIDTH = 1
 
 # 主界面
 global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
@@ -2069,7 +2072,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.setTitle(None)
         self.plot_item.hideButtons()
         self.plot_item.setClipToView(True)
-        self.plot_item.setDownsampling(True)
+        # 配置pyqtgraph的downsample设置，使用peak模式保留细节
+        self.plot_item.setDownsampling(mode='peak', auto=True)
         self.setBackground('w')
 
         pen = pg.mkPen('#f00',width=1)
@@ -2644,7 +2648,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         x_values = self.offset + self.factor * self.original_index_x
 
         self.plot_item.clearPlots()             
-        _pen = pg.mkPen(color='blue', width=3)  # 初始粗线
+        _pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)  # 初始粗线
         self.curve = self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
         # 无初始symbol，等待update_plot_style
         QTimer.singleShot(0, lambda: self.update_plot_style(self.view_box, self.view_box.viewRange(), None))  # 修正: 传整个viewRange() 和 None for rect
@@ -2846,20 +2850,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         threshold = THRESHOLD_LINE_TO_SYMBOL  
         tolerance = TOLERANCE_LINE_TO_SYMBOL
         
-        # 性能优化：如果数据量很大，进行采样
-        if visible_points > threshold * 10:  # 如果可见点太多
+        # 性能优化：如果数据量很大且pyqtgraph的downsample不够，进行额外采样
+        # pyqtgraph的downsample通常能处理到50000-100000个点，我们设置更高的阈值
+        if visible_points > threshold * 50:  # 如果可见点非常多（50万个点以上）
             self._apply_data_sampling(x_data, visible_mask, x_min, x_max)
             return
             
         if visible_points > threshold * (1 + tolerance):
             # 粗线，无symbol
-            pen = pg.mkPen(color='blue', width=3)
+            pen = pg.mkPen(color='blue', width=THICK_LINE_WIDTH)
             self.curve.setPen(pen)
             self.curve.setSymbol(None)  # 移除symbol
 
         elif visible_points < threshold * (1 - tolerance) and (visible_points > 0):
             # 细线 + symbol
-            pen = pg.mkPen(color='blue', width=1)
+            pen = pg.mkPen(color='blue', width=THIN_LINE_WIDTH)
             self.curve.setPen(pen)
             self.curve.setSymbol('s')  # 或's'如原有
             self.curve.setSymbolSize(3)
@@ -2869,7 +2874,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             pass
 
     def _apply_data_sampling(self, x_data, visible_mask, x_min, x_max):
-        """对大数据量进行采样以提高性能"""
+        """对大数据量进行智能采样以提高性能，保留突变细节"""
         try:
             # 获取可见数据的索引
             visible_indices = np.where(visible_mask)[0]
@@ -2877,13 +2882,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if len(visible_indices) == 0:
                 return
                 
-            # 计算采样率（最多显示10000个点）
+            # 如果可见点不多，不需要采样
             max_points = 10000
-            if len(visible_indices) > max_points:
-                step = len(visible_indices) // max_points
-                sampled_indices = visible_indices[::step]
-            else:
-                sampled_indices = visible_indices
+            if len(visible_indices) <= max_points:
+                return
+                
+            # 智能采样：结合均匀采样和峰值检测
+            sampled_indices = self._intelligent_sampling(
+                visible_indices, x_data, self.original_y, max_points
+            )
             
             # 获取采样后的数据
             if self.original_y is not None:
@@ -2893,17 +2900,54 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 更新曲线数据
                 self.curve.setData(sampled_x, sampled_y)
                 
-                # 设置样式
-                pen = pg.mkPen(color='blue', width=2)
+                # 设置样式（保持与其他地方一致的宽度）
+                pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)
                 self.curve.setPen(pen)
                 self.curve.setSymbol(None)
                 
         except Exception as e:
             print(f"数据采样时出错: {e}")
             # 如果采样失败，使用原始样式
-            pen = pg.mkPen(color='blue', width=3)
+            pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)
             self.curve.setPen(pen)
             self.curve.setSymbol(None)
+
+    def _intelligent_sampling(self, visible_indices, x_data, y_data, max_points):
+        """智能采样算法，保留突变细节"""
+        if len(visible_indices) <= max_points:
+            return visible_indices
+            
+        # 1. 均匀采样基础点
+        step = len(visible_indices) // max_points
+        uniform_indices = visible_indices[::step]
+        
+        # 2. 检测突变点（一阶导数变化大的点）
+        if len(visible_indices) > 2:
+            # 计算一阶导数
+            y_values = y_data[visible_indices]
+            dy = np.diff(y_values)
+            
+            # 计算二阶导数来检测突变
+            d2y = np.diff(dy)
+            
+            # 找到突变点（二阶导数绝对值大的点）
+            threshold = np.std(d2y) * 2  # 使用2倍标准差作为阈值
+            peak_indices = np.where(np.abs(d2y) > threshold)[0] + 1  # +1因为diff减少了1个元素
+            
+            # 将突变点添加到采样中
+            peak_indices = visible_indices[peak_indices]
+            
+            # 合并均匀采样点和突变点
+            all_indices = np.unique(np.concatenate([uniform_indices, peak_indices]))
+            
+            # 如果合并后还是太多，进一步均匀采样
+            if len(all_indices) > max_points:
+                step = len(all_indices) // max_points
+                all_indices = all_indices[::step]
+                
+            return all_indices
+        else:
+            return uniform_indices
 
     def _on_range_changed(self, view_box, range):
         """范围变化时的防抖处理"""
