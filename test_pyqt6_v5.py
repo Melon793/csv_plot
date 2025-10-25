@@ -12,11 +12,11 @@ if sys.platform == "darwin":  # macOS
     )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
-from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase
+from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase, QPixmap, QImage, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter,
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter, QSystemTrayIcon, QFrame,
 )
 import pyqtgraph as pg
 from threading import Lock
@@ -3907,8 +3907,13 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn = QPushButton("修改布局")
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
+        # 新增：绘图区截图按钮（位于“修改布局”的左侧）
+        self.screenshot_plots_btn = QPushButton("绘图区截图")
+        self.screenshot_plots_btn.clicked.connect(self.copy_plots_screenshot_to_clipboard)
+
         self.set_button_status(False)
         
+        top_bar.addWidget(self.screenshot_plots_btn)
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
@@ -4096,6 +4101,8 @@ class MainWindow(QMainWindow):
             self.cursor_btn.setEnabled(status)
             self.mark_region_btn.setEnabled(status)
             self.grid_layout_btn.setEnabled(status)
+            if hasattr(self, 'screenshot_plots_btn'):
+                self.screenshot_plots_btn.setEnabled(status)
 
     def reload_data(self):
         """重新加载当前数据"""
@@ -4646,6 +4653,142 @@ class MainWindow(QMainWindow):
         for container in self.plot_widgets:
             widget=container.plot_widget
             widget.auto_y_in_x_range()
+
+    def copy_plots_screenshot_to_clipboard(self):
+        """将当前可见布局中的每个plot连同左右上角文本拼接为大图并复制到剪贴板。
+
+        截图时临时隐藏坐标轴，避免把轴和刻度也复制进去。
+        """
+        if not self.plot_widgets:
+            return
+        rows, cols = int(self._plot_row_current), int(self._plot_col_current)
+        max_cols = int(self._plot_col_max_default)
+
+        # 抓取每个可见cell的图像（直接抓 plot_widget，本身包含顶部左右文本）
+        cell_pix: list[list[QPixmap | None]] = [[None for _ in range(cols)] for _ in range(rows)]
+
+        # 记录每列宽度和每行高度（使用该行/列中cell的最大值以对齐）
+        col_widths = [0] * cols
+        row_heights = [0] * rows
+
+        for idx, container in enumerate(self.plot_widgets):
+            r, c = divmod(idx, max_cols)
+            r_i = int(r)
+            c_i = int(c)
+            if r_i >= rows or c_i >= cols:
+                continue
+            if not container.isVisible():
+                continue
+
+            pw = container.plot_widget
+            if pw is None:
+                continue
+
+            # 临时隐藏轴以去除坐标轴（不影响顶部左右文本）
+            ax_vis = pw.axis_x.isVisible()
+            ay_vis = pw.axis_y.isVisible()
+            pw.axis_x.setVisible(False)
+            pw.axis_y.setVisible(False)
+
+            # 记录并临时去除内部内容边距，避免右侧/底部灰边
+            try:
+                l, t, r, b = pw.ci.layout.getContentsMargins()
+            except Exception:
+                l = t = r = b = 0
+            pw.ci.layout.setContentsMargins(0, 0, 0, 0)
+
+            # 临时去掉外框并设置白色背景，减少缝隙差异
+            old_frame_shape = pw.frameShape() if hasattr(pw, 'frameShape') else None
+            old_frame_shadow = pw.frameShadow() if hasattr(pw, 'frameShadow') else None
+            try:
+                pw.setFrameShape(QFrame.Shape.NoFrame)
+                pw.setFrameShadow(QFrame.Shadow.Plain)
+            except Exception:
+                pass
+
+            try:
+                old_bg = pw.backgroundBrush()
+                pw.setBackground('w')
+            except Exception:
+                old_bg = None
+
+            pw.update()
+            QApplication.processEvents()
+
+            # 抓图
+            pix = pw.grab()
+
+            # 恢复轴可见性
+            pw.axis_x.setVisible(ax_vis)
+            pw.axis_y.setVisible(ay_vis)
+
+            # 恢复内容边距
+            try:
+                pw.ci.layout.setContentsMargins(l, t, r, b)
+            except Exception:
+                pass
+
+            # 恢复外框与背景
+            try:
+                if old_frame_shape is not None:
+                    pw.setFrameShape(old_frame_shape)
+                if old_frame_shadow is not None:
+                    pw.setFrameShadow(old_frame_shadow)
+            except Exception:
+                pass
+            try:
+                if old_bg is not None:
+                    pw.setBackground(old_bg)
+            except Exception:
+                pass
+
+            pw.update()
+
+            cell_pix[r_i][c_i] = pix
+            col_widths[c_i] = max(col_widths[c_i], pix.width())
+            row_heights[r_i] = max(row_heights[r_i], pix.height())
+
+        if not any(col_widths) or not any(row_heights):
+            return
+
+        total_w = sum(col_widths)
+        total_h = sum(row_heights)
+        # 透明背景并手动绘白底，避免边界混色导致灰缝
+        final_image = QImage(total_w, total_h, QImage.Format.Format_ARGB32)
+        final_image.fill(Qt.GlobalColor.white)
+
+        painter = QPainter(final_image)
+        y = 0
+        for r in range(rows):
+            x = 0
+            for c in range(cols):
+                pix = cell_pix[r][c]
+                if pix is not None:
+                    painter.drawPixmap(x, y, pix)
+                x += col_widths[c]
+            y += row_heights[r]
+        painter.end()
+
+        QApplication.clipboard().setImage(final_image)
+        self._notify_copy_done()
+
+    def _notify_copy_done(self):
+        """跨平台提醒复制完成。"""
+        title = "已复制"
+        message = "绘图区截图已复制到剪贴板"
+        try:
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                tray = getattr(self, '_tray_icon', None)
+                if tray is None:
+                    icon = QIcon(str(resource_path('icon.png')))
+                    tray = QSystemTrayIcon(icon, self)
+                    tray.setVisible(True)
+                    self._tray_icon = tray
+                self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+            else:
+                QMessageBox.information(self, title, message)
+        except Exception:
+            QMessageBox.information(self, title, message)
 
     def create_subplots_matrix(self, m: int, n: int):
         # 先全部清掉
