@@ -2539,7 +2539,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 信号连接
         self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
-        #self.vline.sigPositionChanged.connect(self.update_cursor_label)
+        self.vline.sigPositionChanged.connect(self.on_vline_position_changed)
         self.setAntialiasing(False)
 
     def handle_single_point_limits(self, x_values, y_values):
@@ -2589,22 +2589,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         mousePoint = self.plot_item.vb.mapSceneToView(pos)
         
-        # 如果cursor被固定，允许拖动
+        # 如果cursor被固定，不跟随鼠标移动
         if self.is_cursor_pinned:
-            # 在pin状态下，允许拖动cursor到新的位置
-            if hasattr(self.window(), 'sync_crosshair'):
-                self.window().sync_crosshair(mousePoint.x(), self)
-                # 更新所有plot的固定x值
-                if self.window() and hasattr(self.window(), 'plot_widgets'):
-                    for container in self.window().plot_widgets:
-                        widget = container.plot_widget
-                        if widget.is_cursor_pinned:
-                            widget.pinned_x_value = mousePoint.x()
+            # 在pin状态下，cursor保持固定位置，不跟随鼠标
+            pass
         else:
             # 正常跟随鼠标模式
             if hasattr(self.window(), 'sync_crosshair'):
                 self.window().sync_crosshair(mousePoint.x(), self)
             #print(f"mouse in pos {mousePoint.x()}")
+
+    def on_vline_position_changed(self):
+        """vline位置变化时的处理"""
+        if self.is_cursor_pinned:
+            # 在pin状态下，同步所有plot的cursor位置
+            x_pos = self.vline.value()
+            if hasattr(self.window(), 'sync_crosshair'):
+                self.window().sync_crosshair(x_pos, self)
+                # 更新所有plot的固定x值
+                if self.window() and hasattr(self.window(), 'plot_widgets'):
+                    for container in self.window().plot_widgets:
+                        widget = container.plot_widget
+                        if widget.is_cursor_pinned:
+                            widget.pinned_x_value = x_pos
+        else:
+            # 正常模式下更新cursor标签
+            self.update_cursor_label()
 
     def sInt_to_fmtStr(self,value:int):
         td = pd.to_timedelta(pd.Series(value, dtype='float64'), unit='s')
