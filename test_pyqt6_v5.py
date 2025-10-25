@@ -3536,9 +3536,8 @@ class MainWindow(QMainWindow):
         self._load_file(self.loader.path, is_reload=True)
 
     def _load_file(self, file_path: str, is_reload: bool = False):
-        # 重载时不立即清理plot，等新数据加载完成后再处理
-        if not is_reload and hasattr(self, 'loader') and self.loader is not None:
-            self._cleanup_old_data()
+        # 无论是重载还是加载新数据，都不立即清理plot，等新数据加载完成后再处理
+        # 这样可以避免UI立即清空，提供更好的用户体验
         
         file_ext = os.path.splitext(file_path)[1].lower()
 
@@ -3718,7 +3717,7 @@ class MainWindow(QMainWindow):
     def _on_load_done(self,loader, file_path: str):
         self._progress.close()
         
-        # 如果是重载，先清理旧的loader数据
+        # 清理旧的loader数据（无论是重载还是加载新数据）
         if hasattr(self, 'loader') and self.loader is not None:
             if hasattr(self.loader, '_df'):
                 del self.loader._df
@@ -3982,6 +3981,8 @@ class MainWindow(QMainWindow):
 
     def reset_plots_after_loading(self,index_xMin,index_xMax):
         for container in self.plot_widgets:
+             # 先清空plot内容，然后重置坐标轴
+             container.plot_widget.clear_plot_item()
              container.plot_widget.reset_plot(index_xMin, index_xMax)
              container.plot_widget.clear_value_cache()
 
