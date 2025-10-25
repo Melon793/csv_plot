@@ -4753,6 +4753,10 @@ class MainWindow(QMainWindow):
                 
                 # 显示通知
                 center = NSUserNotificationCenter.defaultUserNotificationCenter()
+                if center is None:
+                    print("NSUserNotificationCenter不可用，可能是bundle identifier问题")
+                    raise Exception("NSUserNotificationCenter不可用")
+                
                 center.deliverNotification_(notification)
                 print(f"macOS通知已发送: {title} - {message}")
                 return
