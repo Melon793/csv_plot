@@ -16,7 +16,7 @@ from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter, QSystemTrayIcon,
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter, QSystemTrayIcon, QFrame,
 )
 import pyqtgraph as pg
 from threading import Lock
@@ -4687,6 +4687,29 @@ class MainWindow(QMainWindow):
             ay_vis = pw.axis_y.isVisible()
             pw.axis_x.setVisible(False)
             pw.axis_y.setVisible(False)
+
+            # 记录并临时去除内部内容边距，避免右侧/底部灰边
+            try:
+                l, t, r, b = pw.ci.layout.getContentsMargins()
+            except Exception:
+                l = t = r = b = 0
+            pw.ci.layout.setContentsMargins(0, 0, 0, 0)
+
+            # 临时去掉外框并设置白色背景，减少缝隙差异
+            old_frame_shape = pw.frameShape() if hasattr(pw, 'frameShape') else None
+            old_frame_shadow = pw.frameShadow() if hasattr(pw, 'frameShadow') else None
+            try:
+                pw.setFrameShape(QFrame.Shape.NoFrame)
+                pw.setFrameShadow(QFrame.Shadow.Plain)
+            except Exception:
+                pass
+
+            try:
+                old_bg = pw.backgroundBrush()
+                pw.setBackground('w')
+            except Exception:
+                old_bg = None
+
             pw.update()
             QApplication.processEvents()
 
@@ -4696,6 +4719,27 @@ class MainWindow(QMainWindow):
             # 恢复轴可见性
             pw.axis_x.setVisible(ax_vis)
             pw.axis_y.setVisible(ay_vis)
+
+            # 恢复内容边距
+            try:
+                pw.ci.layout.setContentsMargins(l, t, r, b)
+            except Exception:
+                pass
+
+            # 恢复外框与背景
+            try:
+                if old_frame_shape is not None:
+                    pw.setFrameShape(old_frame_shape)
+                if old_frame_shadow is not None:
+                    pw.setFrameShadow(old_frame_shadow)
+            except Exception:
+                pass
+            try:
+                if old_bg is not None:
+                    pw.setBackground(old_bg)
+            except Exception:
+                pass
+
             pw.update()
 
             cell_pix[r][c] = pix
@@ -4707,6 +4751,7 @@ class MainWindow(QMainWindow):
 
         total_w = sum(col_widths)
         total_h = sum(row_heights)
+        # 透明背景并手动绘白底，避免边界混色导致灰缝
         final_image = QImage(total_w, total_h, QImage.Format.Format_ARGB32)
         final_image.fill(Qt.GlobalColor.white)
 
