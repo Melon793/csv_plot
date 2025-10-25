@@ -3070,6 +3070,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.vline.setBounds([min_x, max_x])
             self.plot_item.update()
             self._update_cursor_after_plot(min_x, max_x)
+            
+            # 同步所有plot的vline bounds到相同的数据范围
+            if self.window() and hasattr(self.window(), 'plot_widgets'):
+                for container in self.window().plot_widgets:
+                    widget = container.plot_widget
+                    if widget != self:  # 跳过当前plot，已经设置过了
+                        widget.vline.setBounds([min_x, max_x])
 
             return True
             
