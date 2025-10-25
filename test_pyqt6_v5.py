@@ -4768,7 +4768,7 @@ class MainWindow(QMainWindow):
                 print(f"PyObjC通知失败: {e}")
                 pass
             
-            # 尝试使用terminal-notifier工具（如果可用）
+            # 优先使用terminal-notifier工具（最可靠的方法）
             try:
                 import subprocess
                 result = subprocess.run(['terminal-notifier', '-title', title, '-message', message, '-sound', 'Glass'], 
