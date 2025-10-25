@@ -22,12 +22,13 @@ import pyqtgraph as pg
 from threading import Lock
 
 
-global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
+global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, NOTIFICATION_ENABLE
 DEFAULT_PADDING_VAL_X = 0.05
 DEFAULT_PADDING_VAL_Y = 0.1
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
 RATIO_RESET_PLOTS = 0.3
 FROZEN_VIEW_WIDTH_DEFAULT = 180
+NOTIFICATION_ENABLE = False  # 通知功能开关，默认关闭
 THRESHOLD_LINE_TO_SYMBOL = 100
 TOLERANCE_LINE_TO_SYMBOL = 0.2
 BLINK_PULSE = 200
@@ -4712,10 +4713,24 @@ class MainWindow(QMainWindow):
 
     def _notify_copy_done(self):
         """跨平台提醒复制完成。"""
+        # 检查通知开关
+        if not NOTIFICATION_ENABLE:
+            # print("通知功能已关闭")
+            return
+        
         title = "已复制"
         message = "绘图区截图已复制到剪贴板"
+        
+        # 检测操作系统
+        import platform
+        system = platform.system()
+        
         try:
-            if QSystemTrayIcon.isSystemTrayAvailable():
+            if system == "Darwin":  # macOS
+                self._show_macos_notification(title, message)
+            elif system == "Windows":  # Windows
+                self._show_windows_notification(title, message)
+            elif QSystemTrayIcon.isSystemTrayAvailable():
                 tray = getattr(self, '_tray_icon', None)
                 if tray is None:
                     icon = QIcon(str(resource_path('icon.png')))
@@ -4727,7 +4742,253 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, title, message)
         except Exception:
             QMessageBox.information(self, title, message)
-
+    
+    def _show_macos_notification(self, title, message):
+        """在macOS上显示原生通知。"""
+        try:
+            # 首先尝试使用PyObjC调用macOS原生通知API
+            try:
+                import objc
+                from Foundation import NSUserNotification, NSUserNotificationCenter
+                
+                # 创建通知
+                notification = NSUserNotification.alloc().init()
+                notification.setTitle_(title)
+                notification.setInformativeText_(message)
+                notification.setSoundName_("Glass")
+                
+                # 显示通知
+                center = NSUserNotificationCenter.defaultUserNotificationCenter()
+                if center is None:
+                    print("NSUserNotificationCenter不可用，可能是bundle identifier问题")
+                    raise Exception("NSUserNotificationCenter不可用")
+                
+                center.deliverNotification_(notification)
+                print(f"macOS通知已发送: {title} - {message}")
+                return
+                
+            except ImportError:
+                print("PyObjC未安装，尝试其他方法")
+                pass
+            except Exception as e:
+                print(f"PyObjC通知失败: {e}")
+                pass
+            
+            # 优先使用terminal-notifier工具（最可靠的方法）
+            try:
+                import subprocess
+                result = subprocess.run(['terminal-notifier', '-title', title, '-message', message, '-sound', 'Glass'], 
+                                     capture_output=True, text=True, check=True)
+                print(f"terminal-notifier通知已发送: {title} - {message}")
+                return
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"terminal-notifier失败: {e}")
+                print("提示：可以通过 'brew install terminal-notifier' 安装terminal-notifier")
+                pass
+            
+            # 尝试使用macOS的通知中心API（最可靠的方法）
+            try:
+                import subprocess
+                # 使用osascript调用macOS的通知中心
+                script = f'''
+                display notification "{message}" with title "{title}" sound name "Glass"
+                '''
+                result = subprocess.run(['osascript', '-e', script], 
+                                     capture_output=True, text=True, check=True)
+                print(f"macOS通知已发送: {title} - {message}")
+                return
+            except subprocess.CalledProcessError as e:
+                print(f"macOS通知失败: {e}")
+                if e.stderr:
+                    print(f"错误信息: {e.stderr}")
+                pass
+            
+            # 尝试使用macOS的通知中心API（简化版本，避免权限问题）
+            try:
+                import subprocess
+                # 使用简化的AppleScript，避免System Events权限问题
+                script = f'''
+                display notification "{message}" with title "{title}" sound name "Glass"
+                '''
+                result = subprocess.run(['osascript', '-e', script], 
+                                     capture_output=True, text=True, check=True)
+                print(f"AppleScript通知已发送: {title} - {message}")
+                return
+            except subprocess.CalledProcessError as e:
+                print(f"AppleScript失败: {e}")
+                if e.stderr:
+                    print(f"错误信息: {e.stderr}")
+                pass
+            
+            # 使用osascript调用macOS的通知系统（最终备用方案）
+            import subprocess
+            
+            # 转义特殊字符
+            title_escaped = title.replace('"', '\\"')
+            message_escaped = message.replace('"', '\\"')
+            
+            script = f'''
+            display notification "{message_escaped}" with title "{title_escaped}" sound name "Glass"
+            '''
+            
+            # 执行AppleScript
+            try:
+                result = subprocess.run(['osascript', '-e', script], 
+                                     capture_output=True, text=True, check=True)
+                print(f"最终AppleScript通知已发送: {title} - {message}")
+            except subprocess.CalledProcessError as e:
+                print(f"最终AppleScript失败: {e}")
+                if e.stderr:
+                    print(f"错误信息: {e.stderr}")
+                # 如果AppleScript失败，尝试使用系统声音
+                try:
+                    subprocess.run(['afplay', '/System/Library/Sounds/Glass.aiff'], check=True)
+                    print("播放系统声音作为备用提醒")
+                except:
+                    pass
+            
+        except Exception as e:
+            print(f"macOS通知异常: {e}")
+            # 如果原生通知失败，尝试使用系统托盘
+            try:
+                if QSystemTrayIcon.isSystemTrayAvailable():
+                    tray = getattr(self, '_tray_icon', None)
+                    if tray is None:
+                        icon = QIcon(str(resource_path('icon.png')))
+                        tray = QSystemTrayIcon(icon, self)
+                        tray.setVisible(True)
+                        self._tray_icon = tray
+                    self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+                    print(f"系统托盘通知已发送: {title} - {message}")
+                else:
+                    QMessageBox.information(self, title, message)
+                    print(f"消息框通知已显示: {title} - {message}")
+            except Exception as e2:
+                print(f"备用通知失败: {e2}")
+                QMessageBox.information(self, title, message)
+    
+    def _show_windows_notification(self, title, message):
+        """在Windows上显示现代Toast通知。"""
+        try:
+            # 首先尝试使用win10toast库
+            try:
+                from win10toast import ToastNotifier
+                toaster = ToastNotifier()
+                toaster.show_toast(
+                    title=title,
+                    msg=message,
+                    duration=3,
+                    icon_path=str(resource_path('icon.ico')),
+                    threaded=True
+                )
+                return
+            except ImportError:
+                pass
+            
+            # 尝试使用plyer库（跨平台通知）
+            try:
+                from plyer import notification
+                notification.notify(
+                    title=title,
+                    message=message,
+                    timeout=3,
+                    app_icon=str(resource_path('icon.ico'))
+                )
+                return
+            except ImportError:
+                pass
+            
+            # 尝试使用winrt库（Windows Runtime）
+            try:
+                import winrt.windows.ui.notifications as notifications
+                import winrt.windows.data.xml.dom as dom
+                import winrt.windows.applicationmodel as app_model
+                
+                # 创建Toast通知
+                app = app_model.Package.current
+                if app:
+                    # 创建Toast XML模板
+                    toast_xml = f'''
+                    <toast>
+                        <visual>
+                            <binding template="ToastGeneric">
+                                <text>{title}</text>
+                                <text>{message}</text>
+                                <image placement="appLogoOverride" src="file:///{resource_path('icon.ico')}"/>
+                            </binding>
+                        </visual>
+                        <audio src="ms-winsoundevent:Notification.Default"/>
+                    </toast>
+                    '''
+                    
+                    # 解析XML
+                    xml_doc = dom.XmlDocument()
+                    xml_doc.load_xml(toast_xml)
+                    
+                    # 创建通知
+                    toast = notifications.ToastNotification(xml_doc)
+                    notifier = notifications.ToastNotificationManager.create_toast_notifier()
+                    notifier.show(toast)
+                    return
+            except ImportError:
+                pass
+            
+            # 尝试使用Windows原生API（更现代的方式）
+            try:
+                import ctypes
+                from ctypes import wintypes
+                
+                # 定义Windows API函数
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+                
+                # 创建通知
+                MessageBox = user32.MessageBoxW
+                MessageBox.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
+                MessageBox.restype = ctypes.c_int
+                
+                # 显示通知（使用系统托盘样式）
+                MessageBox(None, message, title, 0x40)  # MB_ICONINFORMATION
+                return
+            except Exception:
+                pass
+            
+            # 尝试使用Windows原生API（更现代的方式）
+            try:
+                import ctypes
+                from ctypes import wintypes
+                
+                # 定义Windows API函数
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+                
+                # 创建通知
+                MessageBox = user32.MessageBoxW
+                MessageBox.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
+                MessageBox.restype = ctypes.c_int
+                
+                # 显示通知（使用系统托盘样式）
+                MessageBox(None, message, title, 0x40)  # MB_ICONINFORMATION
+                return
+            except Exception:
+                pass
+            
+            # 备用方案：使用系统托盘
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                tray = getattr(self, '_tray_icon', None)
+                if tray is None:
+                    icon = QIcon(str(resource_path('icon.ico')))
+                    tray = QSystemTrayIcon(icon, self)
+                    tray.setVisible(True)
+                    self._tray_icon = tray
+                self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+            else:
+                QMessageBox.information(self, title, message)
+                
+        except Exception as e:
+            # 最终备用方案
+            QMessageBox.information(self, title, message)
+    
     def create_subplots_matrix(self, m: int, n: int):
         # 先全部清掉
         for i in reversed(range(self.plot_layout.count())):
