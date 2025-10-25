@@ -4754,9 +4754,11 @@ class MainWindow(QMainWindow):
                 # 显示通知
                 center = NSUserNotificationCenter.defaultUserNotificationCenter()
                 center.deliverNotification_(notification)
+                print(f"macOS通知已发送: {title} - {message}")
                 return
                 
             except ImportError:
+                print("PyObjC未安装，尝试其他方法")
                 # 如果没有PyObjC，尝试使用现代通知API
                 try:
                     import objc
@@ -4777,30 +4779,38 @@ class MainWindow(QMainWindow):
                         
                         center = UNUserNotificationCenter.currentNotificationCenter()
                         center.addNotificationRequest_withCompletionHandler_(request, None)
+                        print(f"macOS现代通知已发送: {title} - {message}")
                         return
                 except ImportError:
+                    print("现代通知API不可用")
                     pass
             
             # 尝试使用terminal-notifier工具（如果可用）
             try:
                 import subprocess
-                subprocess.run(['terminal-notifier', '-title', title, '-message', message, '-sound', 'Glass'], check=True)
+                result = subprocess.run(['terminal-notifier', '-title', title, '-message', message, '-sound', 'Glass'], 
+                                     capture_output=True, text=True, check=True)
+                print(f"terminal-notifier通知已发送: {title} - {message}")
                 return
-            except (subprocess.CalledProcessError, FileNotFoundError):
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"terminal-notifier失败: {e}")
                 pass
             
-            # 尝试使用macOS的通知中心API
+            # 尝试使用macOS的通知中心API（简化版本，避免权限问题）
             try:
                 import subprocess
-                # 使用osascript调用macOS的通知中心
+                # 使用简化的AppleScript，避免System Events权限问题
                 script = f'''
-                tell application "System Events"
-                    display notification "{message}" with title "{title}" sound name "Glass"
-                end tell
+                display notification "{message}" with title "{title}" sound name "Glass"
                 '''
-                subprocess.run(['osascript', '-e', script], check=True)
+                result = subprocess.run(['osascript', '-e', script], 
+                                     capture_output=True, text=True, check=True)
+                print(f"AppleScript通知已发送: {title} - {message}")
                 return
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as e:
+                print(f"AppleScript失败: {e}")
+                if e.stderr:
+                    print(f"错误信息: {e.stderr}")
                 pass
             
             # 尝试使用macOS的通知中心API（更现代的方式）
@@ -4810,12 +4820,17 @@ class MainWindow(QMainWindow):
                 script = f'''
                 display notification "{message}" with title "{title}" sound name "Glass"
                 '''
-                subprocess.run(['osascript', '-e', script], check=True)
+                result = subprocess.run(['osascript', '-e', script], 
+                                     capture_output=True, text=True, check=True)
+                print(f"现代AppleScript通知已发送: {title} - {message}")
                 return
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as e:
+                print(f"现代AppleScript失败: {e}")
+                if e.stderr:
+                    print(f"错误信息: {e.stderr}")
                 pass
             
-            # 使用osascript调用macOS的通知系统
+            # 使用osascript调用macOS的通知系统（最终备用方案）
             import subprocess
             
             # 转义特殊字符
@@ -4827,9 +4842,23 @@ class MainWindow(QMainWindow):
             '''
             
             # 执行AppleScript
-            subprocess.run(['osascript', '-e', script], check=True)
+            try:
+                result = subprocess.run(['osascript', '-e', script], 
+                                     capture_output=True, text=True, check=True)
+                print(f"最终AppleScript通知已发送: {title} - {message}")
+            except subprocess.CalledProcessError as e:
+                print(f"最终AppleScript失败: {e}")
+                if e.stderr:
+                    print(f"错误信息: {e.stderr}")
+                # 如果AppleScript失败，尝试使用系统声音
+                try:
+                    subprocess.run(['afplay', '/System/Library/Sounds/Glass.aiff'], check=True)
+                    print("播放系统声音作为备用提醒")
+                except:
+                    pass
             
         except Exception as e:
+            print(f"macOS通知异常: {e}")
             # 如果原生通知失败，尝试使用系统托盘
             try:
                 if QSystemTrayIcon.isSystemTrayAvailable():
@@ -4840,9 +4869,12 @@ class MainWindow(QMainWindow):
                         tray.setVisible(True)
                         self._tray_icon = tray
                     self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+                    print(f"系统托盘通知已发送: {title} - {message}")
                 else:
-                QMessageBox.information(self, title, message)
-            except Exception:
+                    QMessageBox.information(self, title, message)
+                    print(f"消息框通知已显示: {title} - {message}")
+            except Exception as e2:
+                print(f"备用通知失败: {e2}")
                 QMessageBox.information(self, title, message)
     
     def _show_windows_notification(self, title, message):
