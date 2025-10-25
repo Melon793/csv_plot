@@ -45,7 +45,18 @@ SCREEN_HEIGHT_MARGIN = 0.2
 # PyInstaller 解包目录
 from pathlib import Path
 def resource_path(relative_path: str) -> Path:
-    """获取打包后的资源文件路径"""
+    """
+    获取打包后的资源文件路径
+    
+    用于处理PyInstaller打包后的资源文件路径问题
+    在开发环境中返回相对路径，在打包环境中返回临时解包路径
+    
+    Args:
+        relative_path: 资源文件的相对路径
+        
+    Returns:
+        Path: 正确的资源文件路径
+    """
     if hasattr(sys, "_MEIPASS"):  
         return Path(os.path.join(sys._MEIPASS, relative_path))
     return Path(relative_path)
@@ -63,7 +74,13 @@ elif sys.platform == "darwin":  # macOS
 # 窗口实例相关函数
 def get_main_window() -> MainWindow | None:
     """
-    安全地查找并返回 MainWindow 实例。
+    安全地查找并返回 MainWindow 实例
+    
+    遍历所有顶级窗口控件，查找MainWindow类型的实例
+    用于在全局范围内获取主窗口引用
+    
+    Returns:
+        MainWindow | None: 找到的主窗口实例，如果未找到则返回None
     """
     for widget in QApplication.topLevelWidgets():
         if isinstance(widget, MainWindow):
@@ -72,7 +89,13 @@ def get_main_window() -> MainWindow | None:
 
 def get_main_loader() -> FastDataLoader | None:
     """
-    安全地查找并返回 MainWindow 的 loader 实例。
+    安全地查找并返回 MainWindow 的 loader 实例
+    
+    通过主窗口获取数据加载器实例，用于全局数据访问
+    提供安全的数据加载器引用获取方式
+    
+    Returns:
+        FastDataLoader | None: 找到的数据加载器实例，如果未找到则返回None
     """
     main_window = get_main_window()
     if main_window and hasattr(main_window, 'loader') and main_window.loader:
@@ -80,6 +103,10 @@ def get_main_loader() -> FastDataLoader | None:
     return None
 
 class HelpDialog(QDialog):
+    """
+    帮助对话框类
+    用于显示应用程序的帮助文档，包括README.md文件内容
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("帮助文档")
@@ -115,6 +142,11 @@ class HelpDialog(QDialog):
 
 
 class DataLoadThread(QThread):
+    """
+    数据加载线程类
+    在后台线程中异步加载CSV数据文件，避免阻塞主界面
+    通过信号机制向主线程发送加载进度和结果
+    """
     # 信号：发送进度 0-100，或直接发 DataFrame
     progress = pyqtSignal(int)        # 百分比
     finished = pyqtSignal(object)     # FastDataLoader 实例
@@ -127,6 +159,11 @@ class DataLoadThread(QThread):
         self.sep=sep
         self.hasunit=hasunit
     def run(self):
+        """
+        线程执行方法
+        在后台线程中执行数据加载操作，避免阻塞主界面
+        通过信号机制向主线程发送进度更新和结果
+        """
         try:
             def _progress_cb(progress: int):
                 self.progress.emit(progress)
@@ -156,6 +193,11 @@ class DataLoadThread(QThread):
             self.error.emit(f"加载文件时发生未知错误: {str(e)}")
 
 class FastDataLoader:
+    """
+    快速数据加载器类
+    高效加载和处理大型CSV文件，支持分块读取、数据类型推断、编码检测等功能
+    专门为大数据文件优化，提供进度回调和内存管理
+    """
     # 脏数据清单
     _NA_VALUES = [
         "", "nan", "NaN", "NAN", "NULL", "null", "None",
@@ -177,6 +219,25 @@ class FastDataLoader:
         do_parse_date: bool =False,
         hasunit:bool = True
     ):
+        """
+        初始化快速数据加载器
+        
+        配置数据加载参数，包括文件路径、数据类型推断、分块大小等
+        自动检测文件编码和数据结构
+        
+        Args:
+            csv_path: CSV文件路径
+            max_rows_infer: 用于推断数据类型的最大行数
+            chunksize: 分块读取大小
+            usecols: 要读取的列名列表
+            drop_empty: 是否删除空行
+            downcast_float: 是否下转换浮点数类型
+            descRows: 描述行数量
+            sep: 分隔符
+            _progress: 进度回调函数
+            do_parse_date: 是否解析日期
+            hasunit: 是否包含单位行
+        """
         #print("Calling inside FastDataLoader with _progress:", _progress) 
         self._path = csv_path
         self.file_size = os.path.getsize(csv_path) 
@@ -264,7 +325,20 @@ class FastDataLoader:
         hasunit:bool=True
     ) -> tuple[list[str], dict[str, str], str]:
         """
-        返回 (变量名列表, {变量名: 单位}, 最终编码)
+        加载CSV文件的表头和单位信息
+        
+        自动检测文件编码，读取变量名和单位信息
+        支持多行描述和单位行的处理
+        
+        Args:
+            path: CSV文件路径
+            desc_rows: 描述行数量
+            usecols: 要读取的列名列表
+            sep: 分隔符
+            hasunit: 是否包含单位行
+            
+        Returns:
+            tuple: (变量名列表, {变量名: 单位}, 最终编码)
         """
         nrows = 2 if hasunit else 1
         encodings_default = ["utf-8", "cp1252"]
@@ -496,6 +570,10 @@ class FastDataLoader:
         return self._df_validity
     
 class DropOverlay(QWidget):
+    """
+    拖拽覆盖层类
+    在文件拖拽到应用程序时显示半透明的覆盖层，提供视觉反馈
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
@@ -547,7 +625,11 @@ class DropOverlay(QWidget):
 
 
 class PandasTableModel(QAbstractTableModel):
-    """只读官方虚拟模型，支持千万行秒开"""
+    """
+    Pandas数据表格模型类
+    只读官方虚拟模型，支持千万行秒开
+    将pandas DataFrame数据适配到Qt的表格视图中，提供高效的数据访问功能
+    """
     def __init__(self, df: pd.DataFrame, units: dict[str, str], parent=None):
         super().__init__(parent)
         self._df = df
@@ -586,6 +668,11 @@ class PandasTableModel(QAbstractTableModel):
         return True
     
 class CustomDelegate(QStyledItemDelegate):
+    """
+    自定义表格项委托类
+    为表格单元格提供自定义的显示和编辑功能
+    支持数据格式化和特殊显示效果
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selected_rows = set()
@@ -611,6 +698,11 @@ class CustomDelegate(QStyledItemDelegate):
         painter.restore()
 
 class XYScatterPlotDialog(QDialog):
+    """
+    XY散点图对话框类
+    用于创建和配置XY散点图，允许用户选择X轴和Y轴变量
+    提供图形参数设置和预览功能
+    """
     def __init__(self, x_data, y_data, x_name, y_name, parent=None):
         super().__init__(parent)
         self.setWindowTitle("X/Y 散点图")
@@ -662,6 +754,12 @@ class XYScatterPlotDialog(QDialog):
             ax.setTickFont(QFont())
 
 class DataTableDialog(QMainWindow):
+    """
+    数据表格对话框类
+    以独立窗口形式显示完整的数据表格
+    支持数据查看、搜索、排序和导出功能
+    使用单例模式确保只有一个表格窗口实例
+    """
     _instance = None
     _saved_scroll_pos = None  # 类级变量存储滚动位置
 
@@ -893,7 +991,15 @@ class DataTableDialog(QMainWindow):
     
     # 内部函数：处理拖放的变量
     def _handle_dropped_variable(self, var_name: str):
-        """处理拖放的变量，添加到非冻结区"""
+        """
+        处理拖放的变量，添加到非冻结区
+        
+        处理从变量列表拖拽到表格的变量
+        检查变量是否已存在，如果存在则高亮显示，否则添加到表格
+        
+        Args:
+            var_name: 要添加的变量名称
+        """
         # 检查变量是否已存在
         if self.has_column(var_name):
             self.scroll_to_column(var_name)
@@ -920,7 +1026,16 @@ class DataTableDialog(QMainWindow):
 
     # 内部函数：添加变量到表格
     def _add_variable_to_table(self, var_name: str, data: pd.Series):
-        """内部函数：将变量添加到表格的非冻结区"""
+        """
+        内部函数：将变量添加到表格的非冻结区
+        
+        将新变量添加到数据表格中，更新模型和视图
+        保持滚动位置和焦点状态
+        
+        Args:
+            var_name: 变量名称
+            data: 变量数据序列
+        """
         self._df[var_name] = data
         # 使用新函数替换循环
         loader = get_main_loader() 
@@ -1143,10 +1258,22 @@ class DataTableDialog(QMainWindow):
 
 
     def save_geom(self):
+        """
+        保存窗口几何信息
+        
+        将当前窗口的位置和大小保存到父窗口的几何信息中
+        用于下次打开时恢复窗口状态
+        """
         if self.parent() and hasattr(self.parent(), 'data_table_geometry'):
             self.parent().data_table_geometry = self.saveGeometry()
 
     def load_geom(self):
+        """
+        加载窗口几何信息
+        
+        从父窗口的几何信息中恢复窗口的位置和大小
+        提供用户界面状态的持久化
+        """
         if self.parent() and hasattr(self.parent(), 'data_table_geometry') and self.parent().data_table_geometry is not None:
             geom = self.parent().data_table_geometry
             self.restoreGeometry(geom)
@@ -1513,7 +1640,15 @@ class DataTableDialog(QMainWindow):
         self._update_views()
 
     def update_data(self, loader):
-        """当主窗口重载数据时，更新此对话框中的数据"""
+        """
+        当主窗口重载数据时，更新此对话框中的数据
+        
+        同步数据表格与主窗口的数据状态
+        保持用户界面的一致性和数据完整性
+        
+        Args:
+            loader: 数据加载器实例
+        """
         if self.model is None or self._df.empty:
             return
         
@@ -1564,6 +1699,11 @@ class DataTableDialog(QMainWindow):
             self.close()
 
 class LayoutInputDialog(QDialog):
+    """
+    布局输入对话框类
+    用于设置绘图区域的网格布局参数
+    允许用户配置行数和列数，并验证输入的有效性
+    """
     def __init__(self, 
                  max_rows:int=4, 
                  max_cols:int=2, 
@@ -1602,6 +1742,11 @@ class LayoutInputDialog(QDialog):
         return self.row_spin.value(), self.col_spin.value()
     
 class AxisDialog(QDialog):
+    """
+    坐标轴设置对话框类
+    用于配置图表的坐标轴参数，包括范围、标签、刻度等
+    提供直观的图形界面来调整轴属性
+    """
     def __init__(self, axis, view_box, axis_type: str, plot_widget, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"调整 {axis_type} 轴")
@@ -1679,6 +1824,11 @@ class AxisDialog(QDialog):
 
 # ---------------- 自定义 QTableWidget ----------------
 class MyTableWidget(QTableWidget):
+    """
+    自定义表格控件类
+    扩展QTableWidget功能，支持拖拽、右键菜单等自定义交互
+    提供数据表格的增强显示和操作功能
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setColumnCount(2)
@@ -1888,6 +2038,11 @@ class MyTableWidget(QTableWidget):
 
 # 新增自定义 ViewBox 类
 class CustomViewBox(pg.ViewBox):
+    """
+    自定义视图框类
+    扩展pyqtgraph的ViewBox功能，添加自定义右键菜单
+    支持跳转到数据表格、清除图表等操作
+    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.context_x = None  # 记录右键点击时的 x 坐标
@@ -1947,6 +2102,11 @@ class CustomViewBox(pg.ViewBox):
                 self.plot_widget.window().update_mark_stats()
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
+    """
+    可拖拽的图形布局控件类
+    支持图表区域的拖拽重排和动态布局调整
+    提供灵活的图表排列和交互功能
+    """
     def __init__(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
         super().__init__()
         self.factor = 1.0
@@ -1957,7 +2117,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
-        """初始化UI组件和布局"""
+        """
+        初始化UI组件和布局
+        
+        设置图形布局控件的基本配置和数据结构
+        初始化绘图相关的属性和同步器
+        
+        Args:
+            units_dict: 单位字典
+            dataframe: 数据框
+            time_channels_info: 时间通道信息
+            synchronizer: 同步器实例
+        """
         self.setAcceptDrops(True)
         self.units = units_dict
         self.data = dataframe
@@ -2049,7 +2220,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.addItem(header, row=0, col=0, colspan=2)
 
     def setup_plot_area(self):
-        """配置绘图区域基本属性"""
+        """
+        配置绘图区域基本属性
+        
+        创建和配置主要的绘图区域
+        设置视图框、坐标轴和基本绘图属性
+        """
         self.plot_item = self.addPlot(row=1, col=0, colspan=2, viewBox=CustomViewBox())
         self.view_box = self.plot_item.vb
         self.view_box.plot_widget = self  # 设置 plot_widget 以确保 trigger_jump_to_data 能调用 jump_to_data_impl
@@ -2622,7 +2798,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.window().update_mark_stats()
 
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
-        """验证绘图数据的有效性"""
+        """
+        验证绘图数据的有效性
+        
+        检查变量名和数据源的有效性
+        确保数据可以安全地用于绘图
+        
+        Args:
+            var_name: 要验证的变量名称
+            
+        Returns:
+            tuple: (是否有效, 错误信息)
+        """
         if not isinstance(var_name, str) or not var_name.strip():
             return False, "变量名无效"
             
@@ -2638,7 +2825,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return True, ""
 
     def _prepare_plot_data(self, var_name: str) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
-        """准备绘图数据"""
+        """
+        准备绘图数据
+        
+        从数据源中提取指定变量的数据，进行格式化和预处理
+        生成用于绘图的x和y数组
+        
+        Args:
+            var_name: 变量名称
+            
+        Returns:
+            tuple: (是否成功, 错误信息, x数组, y数组, y格式)
+        """
         try:
             y_values, y_format = self.get_value_from_name(var_name=var_name)
             
@@ -2663,7 +2861,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return False, f"处理数据时出错: {str(e)}", None, None, ""
 
     def plot_variable(self, var_name: str) -> bool:
-        """绘制变量到图表，返回是否成功"""
+        """
+        绘制变量到图表
+        
+        将指定的数据变量绘制到当前图表中
+        包括数据验证、格式化和图形渲染
+        
+        Args:
+            var_name: 要绘制的变量名称
+            
+        Returns:
+            bool: 绘制是否成功
+        """
         # 验证输入
         is_valid, error_msg = self._validate_plot_data(var_name)
         if not is_valid:
@@ -2991,6 +3200,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
 # ---------------- 主窗口 ----------------
 class MarkStatsWindow(QDialog):
+    """
+    标记统计窗口类
+    显示数据标记的统计信息和分析结果
+    提供数据质量评估和异常检测功能
+    使用单例模式确保只有一个统计窗口实例
+    """
     _instance = None  # Singleton instance
 
     @classmethod
@@ -3074,6 +3289,11 @@ class MarkStatsWindow(QDialog):
         super().closeEvent(event)
 
 class TimeCorrectionDialog(QDialog):
+    """
+    时间校正对话框类
+    用于校正时间序列数据的时间偏移和漂移
+    提供时间同步和数据对齐功能
+    """
     def __init__(self, cur_factor=1.0, cur_offset=0.0, parent=None):
         super().__init__(parent)
         self.window_geometry = None  # 存储几何信息
@@ -3116,6 +3336,11 @@ class TimeCorrectionDialog(QDialog):
         super().closeEvent(event)
 
 class MainWindow(QMainWindow):
+    """
+    主窗口类
+    应用程序的主界面，集成数据加载、图表显示、表格查看等功能
+    提供完整的用户交互界面和数据处理流程
+    """
     def __init__(self):
         super().__init__()
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
@@ -3487,7 +3712,15 @@ class MainWindow(QMainWindow):
             return False
 
     def load_csv_file(self, file_path: str):
-        """加载CSV文件"""
+        """
+        加载CSV文件
+        
+        主文件加载入口，处理文件验证、大小检查和错误处理
+        协调整个数据加载流程
+        
+        Args:
+            file_path: CSV文件路径
+        """
         if not self._validate_file_path(file_path):
             return
             
@@ -3536,8 +3769,17 @@ class MainWindow(QMainWindow):
         self._load_file(self.loader.path, is_reload=True)
 
     def _load_file(self, file_path: str, is_reload: bool = False):
-        # 无论是重载还是加载新数据，都不立即清理plot，等新数据加载完成后再处理
-        # 这样可以避免UI立即清空，提供更好的用户体验
+        """
+        内部文件加载方法
+        
+        执行实际的文件加载操作，包括参数配置和线程启动
+        无论是重载还是加载新数据，都不立即清理plot，等新数据加载完成后再处理
+        这样可以避免UI立即清空，提供更好的用户体验
+        
+        Args:
+            file_path: 文件路径
+            is_reload: 是否为重新加载
+        """
         
         file_ext = os.path.splitext(file_path)[1].lower()
 
