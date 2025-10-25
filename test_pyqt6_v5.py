@@ -2113,6 +2113,18 @@ class CustomViewBox(pg.ViewBox):
             menu.insertAction(menu.actions()[1], pin_act)
         else:
             menu.addAction(pin_act)
+
+        # 添加 "Copy Name" 按钮：复制当前绘图的变量名
+        if "Copy Name" not in existing_texts:
+            copy_act = QAction("Copy Name", menu)
+            copy_act.triggered.connect(self.trigger_copy_name)
+            has_data = bool(
+                self.plot_widget
+                and getattr(self.plot_widget, 'curve', None) is not None
+                and bool(getattr(self.plot_widget, 'y_name', ''))
+            )
+            copy_act.setEnabled(has_data)
+            menu.addAction(copy_act)
                 
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
@@ -2142,6 +2154,15 @@ class CustomViewBox(pg.ViewBox):
         """解除cursor固定，恢复跟随鼠标"""
         if self.plot_widget:
             self.plot_widget.free_cursor()
+
+    def trigger_copy_name(self):
+        """复制当前绘图变量名到剪贴板（无数据则不执行）"""
+        if not self.plot_widget:
+            return
+        var_name = getattr(self.plot_widget, 'y_name', '')
+        if not var_name:
+            return
+        QApplication.clipboard().setText(var_name)
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     """
