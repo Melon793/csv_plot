@@ -4425,7 +4425,7 @@ class MainWindow(QMainWindow):
                 w = container.plot_widget
                 w.vline.setVisible(True)
                 # 检查vline的bounds，确保x值在bounds范围内
-                bounds = w.vline.bounds
+                bounds = w.vline.bounds()
                 if bounds[0] is not None and bounds[1] is not None:
                     # 有bounds限制，将x值限制在bounds范围内
                     x_clipped = max(bounds[0], min(bounds[1], x))
