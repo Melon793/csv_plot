@@ -4661,7 +4661,8 @@ class MainWindow(QMainWindow):
         """
         if not self.plot_widgets:
             return
-        rows, cols = self._plot_row_current, self._plot_col_current
+        rows, cols = int(self._plot_row_current), int(self._plot_col_current)
+        max_cols = int(self._plot_col_max_default)
 
         # 抓取每个可见cell的图像（直接抓 plot_widget，本身包含顶部左右文本）
         cell_pix: list[list[QPixmap | None]] = [[None for _ in range(cols)] for _ in range(rows)]
@@ -4671,8 +4672,7 @@ class MainWindow(QMainWindow):
         row_heights = [0] * rows
 
         for idx, container in enumerate(self.plot_widgets):
-            r = idx // self._plot_col_max_default
-            c = idx % self._plot_col_max_default
+            r, c = divmod(idx, max_cols)
             if r >= rows or c >= cols:
                 continue
             if not container.isVisible():
