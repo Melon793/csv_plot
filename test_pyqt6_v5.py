@@ -3536,8 +3536,8 @@ class MainWindow(QMainWindow):
         self._load_file(self.loader.path, is_reload=True)
 
     def _load_file(self, file_path: str, is_reload: bool = False):
-        # 在加载新数据前，先释放旧数据以节省内存
-        if hasattr(self, 'loader') and self.loader is not None:
+        # 重载时不立即清理plot，等新数据加载完成后再处理
+        if not is_reload and hasattr(self, 'loader') and self.loader is not None:
             self._cleanup_old_data()
         
         file_ext = os.path.splitext(file_path)[1].lower()
@@ -3717,6 +3717,13 @@ class MainWindow(QMainWindow):
 
     def _on_load_done(self,loader, file_path: str):
         self._progress.close()
+        
+        # 如果是重载，先清理旧的loader数据
+        if hasattr(self, 'loader') and self.loader is not None:
+            if hasattr(self.loader, '_df'):
+                del self.loader._df
+            del self.loader
+        
         self.loader=loader
         self._apply_loader()
         self._post_load_actions(file_path)
