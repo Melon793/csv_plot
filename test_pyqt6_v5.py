@@ -2083,18 +2083,26 @@ class CustomViewBox(pg.ViewBox):
             else:
                 menu.addAction(jump_act)
         
-        # 添加 Pin Cursor/Free Cursor 功能
+        # 添加 Pin Cursor/Free Cursor 功能 (放在Jump to Data之后)
         if "Pin Cursor" not in existing_texts and "Free Cursor" not in existing_texts:
-            menu.addSeparator()
-            # 检查plot_widget的pin状态
-            is_pinned = self.plot_widget.is_cursor_pinned if self.plot_widget else False
+            # 检查是否有任何plot处于pin状态
+            is_pinned = False
+            if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
+                for container in self.plot_widget.window().plot_widgets:
+                    if container.plot_widget.is_cursor_pinned:
+                        is_pinned = True
+                        break
             if is_pinned:
                 pin_act = QAction("Free Cursor", menu)
                 pin_act.triggered.connect(self.trigger_free_cursor)
             else:
                 pin_act = QAction("Pin Cursor", menu)
                 pin_act.triggered.connect(self.trigger_pin_cursor)
-            menu.addAction(pin_act)
+            # 在Jump to Data之后插入
+            if menu.actions():
+                menu.insertAction(menu.actions()[1], pin_act)
+            else:
+                menu.addAction(pin_act)
                 
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
@@ -4485,6 +4493,14 @@ class MainWindow(QMainWindow):
         # 如果加载文件为空
         if self.loader.datalength == 0: 
                 return
+        
+        # 重置所有plot的pin状态
+        for container in self.plot_widgets:
+            container.plot_widget.is_cursor_pinned = False
+            container.plot_widget.pinned_x_value = None
+            container.plot_widget.vline.setMovable(False)
+            if hasattr(container.plot_widget.view_box, 'is_cursor_pinned'):
+                container.plot_widget.view_box.is_cursor_pinned = False
         
         # 收集所有 y_name (包括未显示的)
         all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
