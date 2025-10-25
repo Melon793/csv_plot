@@ -12,11 +12,11 @@ if sys.platform == "darwin":  # macOS
     )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
-from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase
+from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase, QPixmap, QImage, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter,
+    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter, QSystemTrayIcon,
 )
 import pyqtgraph as pg
 from threading import Lock
@@ -3907,8 +3907,13 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn = QPushButton("修改布局")
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
+        # 新增：绘图区截图按钮（位于“修改布局”的左侧）
+        self.screenshot_plots_btn = QPushButton("绘图区截图")
+        self.screenshot_plots_btn.clicked.connect(self.copy_plots_screenshot_to_clipboard)
+
         self.set_button_status(False)
         
+        top_bar.addWidget(self.screenshot_plots_btn)
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
@@ -4096,6 +4101,8 @@ class MainWindow(QMainWindow):
             self.cursor_btn.setEnabled(status)
             self.mark_region_btn.setEnabled(status)
             self.grid_layout_btn.setEnabled(status)
+            if hasattr(self, 'screenshot_plots_btn'):
+                self.screenshot_plots_btn.setEnabled(status)
 
     def reload_data(self):
         """重新加载当前数据"""
@@ -4646,6 +4653,80 @@ class MainWindow(QMainWindow):
         for container in self.plot_widgets:
             widget=container.plot_widget
             widget.auto_y_in_x_range()
+
+    def copy_plots_screenshot_to_clipboard(self):
+        """将当前可见布局中的每个plot连同左右上角文本拼接为大图并复制到剪贴板。"""
+        if not self.plot_widgets:
+            return
+        # 计算当前可见的 MxN
+        rows, cols = self._plot_row_current, self._plot_col_current
+        # 先渲染每个可见格子的图像
+        cell_images: list[list[QImage | None]] = [[None for _ in range(cols)] for _ in range(rows)]
+        cell_w = 0
+        cell_h = 0
+        for idx, container in enumerate(self.plot_widgets):
+            r = idx // self._plot_col_max_default
+            c = idx % self._plot_col_max_default
+            if r >= rows or c >= cols:
+                continue
+            if not container.isVisible():
+                continue
+            # 取实际widget尺寸
+            w = max(1, container.width())
+            h = max(1, container.height())
+            cell_w = max(cell_w, w)
+            cell_h = max(cell_h, h)
+
+            image = QImage(w, h, QImage.Format.Format_ARGB32)
+            image.fill(Qt.GlobalColor.white)
+            painter = QPainter(image)
+            container.render(painter)
+            painter.end()
+            cell_images[r][c] = image
+
+        if cell_w == 0 or cell_h == 0:
+            return
+
+        total_w = cell_w * cols
+        total_h = cell_h * rows
+        final_image = QImage(total_w, total_h, QImage.Format.Format_ARGB32)
+        final_image.fill(Qt.GlobalColor.white)
+        painter = QPainter(final_image)
+
+        for r in range(rows):
+            for c in range(cols):
+                img = cell_images[r][c]
+                if img is None:
+                    continue
+                target_x = c * cell_w
+                target_y = r * cell_h
+                painter.drawImage(target_x, target_y, img)
+
+        painter.end()
+
+        # 放入剪贴板
+        QApplication.clipboard().setImage(final_image)
+
+        # 平台通知
+        self._notify_copy_done()
+
+    def _notify_copy_done(self):
+        """跨平台提醒复制完成。"""
+        title = "已复制"
+        message = "绘图区截图已复制到剪贴板"
+        try:
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                tray = getattr(self, '_tray_icon', None)
+                if tray is None:
+                    icon = QIcon(str(resource_path('icon.png')))
+                    tray = QSystemTrayIcon(icon, self)
+                    tray.setVisible(True)
+                    self._tray_icon = tray
+                self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+            else:
+                QMessageBox.information(self, title, message)
+        except Exception:
+            QMessageBox.information(self, title, message)
 
     def create_subplots_matrix(self, m: int, n: int):
         # 先全部清掉
