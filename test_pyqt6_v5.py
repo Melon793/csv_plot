@@ -2602,16 +2602,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def on_vline_position_changed(self):
         """vline位置变化时的处理"""
         if self.is_cursor_pinned:
-            # 在pin状态下，同步所有plot的cursor位置
+            # 在pin状态下，同步所有被pin的plot的cursor位置
             x_pos = self.vline.value()
-            if hasattr(self.window(), 'sync_crosshair'):
-                self.window().sync_crosshair(x_pos, self)
-                # 更新所有plot的固定x值
-                if self.window() and hasattr(self.window(), 'plot_widgets'):
-                    for container in self.window().plot_widgets:
-                        widget = container.plot_widget
-                        if widget.is_cursor_pinned:
-                            widget.pinned_x_value = x_pos
+            if self.window() and hasattr(self.window(), 'plot_widgets'):
+                for container in self.window().plot_widgets:
+                    widget = container.plot_widget
+                    if widget.is_cursor_pinned and widget != self:
+                        # 同步其他被pin的plot
+                        widget.vline.setPos(x_pos)
+                        widget.update_cursor_label()
+                        widget.pinned_x_value = x_pos
         else:
             # 正常模式下更新cursor标签
             self.update_cursor_label()
@@ -4359,11 +4359,31 @@ class MainWindow(QMainWindow):
     def sync_crosshair(self, x, sender_widget):
         if not self.cursor_btn.isChecked():
             return
+        
+        # 检查是否有任何plot处于pin状态
+        has_pinned_plot = False
         for container in self.plot_widgets:
             w = container.plot_widget
-            w.vline.setVisible(True)
-            w.vline.setPos(x)
-            w.update_cursor_label()
+            if w.is_cursor_pinned:
+                has_pinned_plot = True
+                break
+        
+        # 如果有plot被pin，只更新被pin的plot，不跟随鼠标
+        if has_pinned_plot:
+            for container in self.plot_widgets:
+                w = container.plot_widget
+                if w.is_cursor_pinned:
+                    # 只更新被pin的plot的cursor位置
+                    w.vline.setVisible(True)
+                    w.vline.setPos(x)
+                    w.update_cursor_label()
+        else:
+            # 没有plot被pin，正常同步所有plot
+            for container in self.plot_widgets:
+                w = container.plot_widget
+                w.vline.setVisible(True)
+                w.vline.setPos(x)
+                w.update_cursor_label()
 
     def clear_all_plots(self):
         for container in self.plot_widgets:
