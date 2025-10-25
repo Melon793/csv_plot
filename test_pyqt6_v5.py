@@ -2839,6 +2839,35 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.vline.setBounds([None, None]) # 确保清除边界
             self.toggle_cursor(False)
 
+    def _sync_all_plot_bounds(self):
+        """
+        同步所有plot的vline bounds到相同的数据范围
+        
+        找到所有有数据的plot，获取它们的数据范围，然后将所有plot的bounds设置为相同的范围
+        """
+        if not self.window() or not hasattr(self.window(), 'plot_widgets'):
+            return
+            
+        # 找到所有有数据的plot，获取它们的数据范围
+        data_ranges = []
+        for container in self.window().plot_widgets:
+            widget = container.plot_widget
+            if hasattr(widget, 'original_index_x') and widget.original_index_x is not None:
+                if len(widget.original_index_x) > 0:
+                    x_values = widget.offset + widget.factor * widget.original_index_x
+                    min_x, max_x = np.min(x_values), np.max(x_values)
+                    data_ranges.append((min_x, max_x))
+        
+        # 如果有数据范围，使用所有数据范围的最小值和最大值
+        if data_ranges:
+            all_min_x = min(range[0] for range in data_ranges)
+            all_max_x = max(range[1] for range in data_ranges)
+            
+            # 设置所有plot的bounds
+            for container in self.window().plot_widgets:
+                widget = container.plot_widget
+                widget.vline.setBounds([all_min_x, all_max_x])
+
     def clear_value_cache(self):
         #self._value_cache: dict[str, tuple] = {}
         pass
@@ -2950,7 +2979,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def dropEvent(self, event):
         var_name = event.mimeData().text()
-        self.plot_variable(var_name)
+        success = self.plot_variable(var_name)
+        if success:
+            # 数据加载成功后，同步所有plot的bounds
+            self._sync_all_plot_bounds()
         event.acceptProposedAction()
         self.window().update_mark_stats()
 
@@ -3491,6 +3523,35 @@ class TimeCorrectionDialog(QDialog):
     def closeEvent(self, event):
         self.parent().time_correction_geometry = self.saveGeometry()
         super().closeEvent(event)
+
+    def _sync_all_plot_bounds(self):
+        """
+        同步所有plot的vline bounds到相同的数据范围
+        
+        找到所有有数据的plot，获取它们的数据范围，然后将所有plot的bounds设置为相同的范围
+        """
+        if not self.window() or not hasattr(self.window(), 'plot_widgets'):
+            return
+            
+        # 找到所有有数据的plot，获取它们的数据范围
+        data_ranges = []
+        for container in self.window().plot_widgets:
+            widget = container.plot_widget
+            if hasattr(widget, 'original_index_x') and widget.original_index_x is not None:
+                if len(widget.original_index_x) > 0:
+                    x_values = widget.offset + widget.factor * widget.original_index_x
+                    min_x, max_x = np.min(x_values), np.max(x_values)
+                    data_ranges.append((min_x, max_x))
+        
+        # 如果有数据范围，使用所有数据范围的最小值和最大值
+        if data_ranges:
+            all_min_x = min(range[0] for range in data_ranges)
+            all_max_x = max(range[1] for range in data_ranges)
+            
+            # 设置所有plot的bounds
+            for container in self.window().plot_widgets:
+                widget = container.plot_widget
+                widget.vline.setBounds([all_min_x, all_max_x])
 
 class MainWindow(QMainWindow):
     """
