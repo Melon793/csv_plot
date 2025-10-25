@@ -2086,7 +2086,9 @@ class CustomViewBox(pg.ViewBox):
         # 添加 Pin Cursor/Free Cursor 功能
         if "Pin Cursor" not in existing_texts and "Free Cursor" not in existing_texts:
             menu.addSeparator()
-            if self.is_cursor_pinned:
+            # 检查plot_widget的pin状态
+            is_pinned = self.plot_widget.is_cursor_pinned if self.plot_widget else False
+            if is_pinned:
                 pin_act = QAction("Free Cursor", menu)
                 pin_act.triggered.connect(self.trigger_free_cursor)
             else:
@@ -2740,19 +2742,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 转换回显示坐标
                 display_x = pinned_x * self.factor + self.offset
                 
-                self.is_cursor_pinned = True
-                self.pinned_x_value = display_x
-                
-                # 让vline可移动
-                self.vline.setMovable(True)
-                
-                # 同步所有plot的cursor位置
-                if hasattr(self.window(), 'sync_crosshair'):
-                    self.window().sync_crosshair(display_x, self)
-                
-                # 更新ViewBox的pin状态
-                if hasattr(self.view_box, 'is_cursor_pinned'):
-                    self.view_box.is_cursor_pinned = True
+                # 设置所有plot为pin状态并同步位置
+                if self.window() and hasattr(self.window(), 'plot_widgets'):
+                    for container in self.window().plot_widgets:
+                        widget = container.plot_widget
+                        widget.is_cursor_pinned = True
+                        widget.pinned_x_value = display_x
+                        widget.vline.setMovable(True)
+                        widget.vline.setPos(display_x)
+                        widget.update_cursor_label()
+                        if hasattr(widget.view_box, 'is_cursor_pinned'):
+                            widget.view_box.is_cursor_pinned = True
 
     def free_cursor(self):
         """解除cursor固定，恢复跟随鼠标"""
@@ -4368,15 +4368,10 @@ class MainWindow(QMainWindow):
                 has_pinned_plot = True
                 break
         
-        # 如果有plot被pin，只更新被pin的plot，不跟随鼠标
+        # 如果有plot被pin，完全忽略鼠标移动的同步
         if has_pinned_plot:
-            for container in self.plot_widgets:
-                w = container.plot_widget
-                if w.is_cursor_pinned:
-                    # 只更新被pin的plot的cursor位置
-                    w.vline.setVisible(True)
-                    w.vline.setPos(x)
-                    w.update_cursor_label()
+            # 不更新任何plot的cursor位置，保持pin状态
+            pass
         else:
             # 没有plot被pin，正常同步所有plot
             for container in self.plot_widgets:
