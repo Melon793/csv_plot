@@ -216,7 +216,7 @@ class FastDataLoader:
         # print(f"the estimated downcast ratio is {downcast_ratio*100:2f} %, the compression ratio estimated {(0.5*downcast_ratio+1*(1-downcast_ratio))}")
         # print(f"sample of {sample.shape[0]} lines has costed memory {self.sample_mem_size/(1024**2):2f}Mb")
         # self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
-        self.byte_per_line = (0.8*self.sample_mem_size)/sample.shape[0]
+        self.byte_per_line = (0.6*self.sample_mem_size)/sample.shape[0]
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
         # print(f"this file might have lines of {self.estimated_lines}")
         import gc
@@ -363,7 +363,7 @@ class FastDataLoader:
         increment = 80 / total_chunks_est
         
         # 使用更小的chunk size来减少内存峰值
-        optimized_chunksize = min(chunksize, 1000)  # 限制最大chunk size
+        optimized_chunksize = min(chunksize, 2000)  # 限制最大chunk size
         
         for idx,chunk in enumerate(pd.read_csv(
             path,
@@ -374,7 +374,7 @@ class FastDataLoader:
             encoding=self.encoding_used,
             chunksize=optimized_chunksize,
             usecols=self.usecols,
-            low_memory=True,  # 改为True以节省内存
+            low_memory=False,
             memory_map=True,
             sep=sep,
             na_values=self._NA_VALUES,
@@ -3731,6 +3731,7 @@ class MainWindow(QMainWindow):
         self.units = self.loader.units
         self.time_channels_infos = self.loader.time_channels_info
         self.data_validity = self.loader.df_validity
+        self.data = self.loader.df  # 设置主数据
         self.list_widget.populate(self.var_names, self.units, self.data_validity)
 
         # 移除占位符
