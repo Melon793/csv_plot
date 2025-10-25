@@ -1160,7 +1160,7 @@ class DataTableDialog(QMainWindow):
             except RuntimeError:
                 # 窗口已经被删除，跳过
                 pass
-        if not (self._skip_close_confirmation) and (self._df.columns.tolist()):
+        if not (self._skip_close_confirmation) and (len(self._df.columns) >= 4):
             reply = QMessageBox.question(self,"确认关闭","是否清除所有列表，并关闭数值变量表窗口？",
                                          QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
             # if user did not confirm to close the window
