@@ -30,7 +30,7 @@ RATIO_RESET_PLOTS = 0.3
 FROZEN_VIEW_WIDTH_DEFAULT = 180
 THRESHOLD_LINE_TO_SYMBOL = 100
 TOLERANCE_LINE_TO_SYMBOL = 0.2
-BLINK_PULSE = 500
+BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
 MIN_INDEX_LENGTH = 3
 DEFAULT_LINE_WIDTH = 3
@@ -1160,7 +1160,7 @@ class DataTableDialog(QMainWindow):
             except RuntimeError:
                 # 窗口已经被删除，跳过
                 pass
-        if not (self._skip_close_confirmation) and bool(self._df.columns.tolist()):
+        if not (self._skip_close_confirmation) and (len(self._df.columns) >= 4):
             reply = QMessageBox.question(self,"确认关闭","是否清除所有列表，并关闭数值变量表窗口？",
                                          QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
             # if user did not confirm to close the window
@@ -1168,7 +1168,7 @@ class DataTableDialog(QMainWindow):
                 event.ignore()
                 return
 
-        self.set_skip_close_confirmation(True)
+        self.set_skip_close_confirmation(False)
 
         self.scatter_plot_windows.clear()
         
@@ -3536,9 +3536,8 @@ class MainWindow(QMainWindow):
         self._load_file(self.loader.path, is_reload=True)
 
     def _load_file(self, file_path: str, is_reload: bool = False):
-        # 在加载新数据前，先释放旧数据以节省内存
-        if hasattr(self, 'loader') and self.loader is not None:
-            self._cleanup_old_data()
+        # 无论是重载还是加载新数据，都不立即清理plot，等新数据加载完成后再处理
+        # 这样可以避免UI立即清空，提供更好的用户体验
         
         file_ext = os.path.splitext(file_path)[1].lower()
 
@@ -3717,6 +3716,13 @@ class MainWindow(QMainWindow):
 
     def _on_load_done(self,loader, file_path: str):
         self._progress.close()
+        
+        # 清理旧的loader数据（无论是重载还是加载新数据）
+        if hasattr(self, 'loader') and self.loader is not None:
+            if hasattr(self.loader, '_df'):
+                del self.loader._df
+            del self.loader
+        
         self.loader=loader
         self._apply_loader()
         self._post_load_actions(file_path)
@@ -3731,6 +3737,7 @@ class MainWindow(QMainWindow):
         self.units = self.loader.units
         self.time_channels_infos = self.loader.time_channels_info
         self.data_validity = self.loader.df_validity
+        self.data = self.loader.df  # 设置主数据
         self.list_widget.populate(self.var_names, self.units, self.data_validity)
 
         # 移除占位符
@@ -3974,6 +3981,8 @@ class MainWindow(QMainWindow):
 
     def reset_plots_after_loading(self,index_xMin,index_xMax):
         for container in self.plot_widgets:
+             # 先清空plot内容，然后重置坐标轴
+             container.plot_widget.clear_plot_item()
              container.plot_widget.reset_plot(index_xMin, index_xMax)
              container.plot_widget.clear_value_cache()
 
