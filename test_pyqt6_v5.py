@@ -4655,15 +4655,21 @@ class MainWindow(QMainWindow):
             widget.auto_y_in_x_range()
 
     def copy_plots_screenshot_to_clipboard(self):
-        """将当前可见布局中的每个plot连同左右上角文本拼接为大图并复制到剪贴板。"""
+        """将当前可见布局中的每个plot连同左右上角文本拼接为大图并复制到剪贴板。
+
+        截图时临时隐藏坐标轴，避免把轴和刻度也复制进去。
+        """
         if not self.plot_widgets:
             return
-        # 计算当前可见的 MxN
         rows, cols = self._plot_row_current, self._plot_col_current
-        # 先渲染每个可见格子的图像
-        cell_images: list[list[QImage | None]] = [[None for _ in range(cols)] for _ in range(rows)]
-        cell_w = 0
-        cell_h = 0
+
+        # 抓取每个可见cell的图像（直接抓 plot_widget，本身包含顶部左右文本）
+        cell_pix: list[list[QPixmap | None]] = [[None for _ in range(cols)] for _ in range(rows)]
+
+        # 记录每列宽度和每行高度（使用该行/列中cell的最大值以对齐）
+        col_widths = [0] * cols
+        row_heights = [0] * rows
+
         for idx, container in enumerate(self.plot_widgets):
             r = idx // self._plot_col_max_default
             c = idx % self._plot_col_max_default
@@ -4671,43 +4677,52 @@ class MainWindow(QMainWindow):
                 continue
             if not container.isVisible():
                 continue
-            # 取实际widget尺寸
-            w = max(1, container.width())
-            h = max(1, container.height())
-            cell_w = max(cell_w, w)
-            cell_h = max(cell_h, h)
 
-            image = QImage(w, h, QImage.Format.Format_ARGB32)
-            image.fill(Qt.GlobalColor.white)
-            painter = QPainter(image)
-            container.render(painter)
-            painter.end()
-            cell_images[r][c] = image
+            pw = container.plot_widget
+            if pw is None:
+                continue
 
-        if cell_w == 0 or cell_h == 0:
+            # 临时隐藏轴以去除坐标轴（不影响顶部左右文本）
+            ax_vis = pw.axis_x.isVisible()
+            ay_vis = pw.axis_y.isVisible()
+            pw.axis_x.setVisible(False)
+            pw.axis_y.setVisible(False)
+            pw.update()
+            QApplication.processEvents()
+
+            # 抓图
+            pix = pw.grab()
+
+            # 恢复轴可见性
+            pw.axis_x.setVisible(ax_vis)
+            pw.axis_y.setVisible(ay_vis)
+            pw.update()
+
+            cell_pix[r][c] = pix
+            col_widths[c] = max(col_widths[c], pix.width())
+            row_heights[r] = max(row_heights[r], pix.height())
+
+        if not any(col_widths) or not any(row_heights):
             return
 
-        total_w = cell_w * cols
-        total_h = cell_h * rows
+        total_w = sum(col_widths)
+        total_h = sum(row_heights)
         final_image = QImage(total_w, total_h, QImage.Format.Format_ARGB32)
         final_image.fill(Qt.GlobalColor.white)
+
         painter = QPainter(final_image)
-
+        y = 0
         for r in range(rows):
+            x = 0
             for c in range(cols):
-                img = cell_images[r][c]
-                if img is None:
-                    continue
-                target_x = c * cell_w
-                target_y = r * cell_h
-                painter.drawImage(target_x, target_y, img)
-
+                pix = cell_pix[r][c]
+                if pix is not None:
+                    painter.drawPixmap(x, y, pix)
+                x += col_widths[c]
+            y += row_heights[r]
         painter.end()
 
-        # 放入剪贴板
         QApplication.clipboard().setImage(final_image)
-
-        # 平台通知
         self._notify_copy_done()
 
     def _notify_copy_done(self):
