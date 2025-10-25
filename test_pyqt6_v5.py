@@ -2092,25 +2092,32 @@ class CustomViewBox(pg.ViewBox):
                     is_pinned = True
                     break
         
-        # 根据全局pin状态添加相应的按钮
+        print(f"DEBUG: existing_texts = {existing_texts}")
+        print(f"DEBUG: is_pinned = {is_pinned}")
+        
+        # 先移除可能存在的旧按钮
+        actions_to_remove = []
+        for action in menu.actions():
+            if action.text() in ["Pin Cursor", "Free Cursor"]:
+                actions_to_remove.append(action)
+        for action in actions_to_remove:
+            menu.removeAction(action)
+        
+        # 根据全局pin状态添加相应的按钮（严格互斥）
         if is_pinned:
-            if "Free Cursor" not in existing_texts:
-                pin_act = QAction("Free Cursor", menu)
-                pin_act.triggered.connect(self.trigger_free_cursor)
-                # 在Jump to Data之后插入
-                if menu.actions():
-                    menu.insertAction(menu.actions()[1], pin_act)
-                else:
-                    menu.addAction(pin_act)
+            pin_act = QAction("Free Cursor", menu)
+            pin_act.triggered.connect(self.trigger_free_cursor)
+            print("DEBUG: Adding Free Cursor button")
         else:
-            if "Pin Cursor" not in existing_texts:
-                pin_act = QAction("Pin Cursor", menu)
-                pin_act.triggered.connect(self.trigger_pin_cursor)
-                # 在Jump to Data之后插入
-                if menu.actions():
-                    menu.insertAction(menu.actions()[1], pin_act)
-                else:
-                    menu.addAction(pin_act)
+            pin_act = QAction("Pin Cursor", menu)
+            pin_act.triggered.connect(self.trigger_pin_cursor)
+            print("DEBUG: Adding Pin Cursor button")
+        
+        # 在Jump to Data之后插入
+        if menu.actions():
+            menu.insertAction(menu.actions()[1], pin_act)
+        else:
+            menu.addAction(pin_act)
                 
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
