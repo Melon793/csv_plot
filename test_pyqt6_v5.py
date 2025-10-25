@@ -1253,14 +1253,8 @@ class DataTableDialog(QMainWindow):
         # 构建统一菜单
         menu = QMenu(self)
 
-        # 复制到剪贴板
-        act_copy = QAction("复制数据到剪贴板", menu)
-        act_copy.setEnabled(can_copy)
-        if can_copy:
-            act_copy.triggered.connect(lambda: self._copy_selected_to_clipboard(ordered_cols, rows_order))
-        menu.addAction(act_copy)
-
         # 绘图菜单（仅在正好两列被选中时展示；保持原行为）
+        scatter_actions_added = False
         if len(total_cols) == 2:
             # 获取列名用于展示
             cols_list = sorted(list(total_cols))
@@ -1268,7 +1262,6 @@ class DataTableDialog(QMainWindow):
             x_name = self.model.headerData(x_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
             y_name = self.model.headerData(y_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
 
-            menu.addSeparator()
             act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
             act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
             if plot_enabled and x_col is not None and y_col is not None:
@@ -1276,11 +1269,44 @@ class DataTableDialog(QMainWindow):
                 act2.triggered.connect(lambda: self._plot_xy_scatter(y_col, x_col, min_row, num_rows))
                 act1.setEnabled(True)
                 act2.setEnabled(True)
+                # 若可激活绘图，则先放绘图菜单
+                menu.addAction(act1)
+                menu.addAction(act2)
+                scatter_actions_added = True
             else:
                 act1.setEnabled(False)
                 act2.setEnabled(False)
-            menu.addAction(act1)
-            menu.addAction(act2)
+                # 若无法激活绘图，则稍后把它们放在复制项之后
+
+        # 复制到剪贴板（两个按钮）
+        act_copy_selected = QAction("复制所选数据到剪贴板", menu)
+        act_copy_selected.setEnabled(can_copy)
+        if can_copy:
+            act_copy_selected.triggered.connect(lambda: self._copy_selected_to_clipboard(ordered_cols, rows_order))
+
+        act_copy_all = QAction("复制表内所有数据到剪贴板", menu)
+        enable_all = (self._df is not None and self._df.shape[0] > 0 and self._df.shape[1] > 0)
+        act_copy_all.setEnabled(enable_all)
+        if enable_all:
+            act_copy_all.triggered.connect(self._copy_all_to_clipboard)
+
+        if scatter_actions_added:
+            menu.addSeparator()
+            menu.addAction(act_copy_selected)
+            menu.addAction(act_copy_all)
+        else:
+            # 若无法激活x/y散点图，则优先展示复制功能
+            menu.addAction(act_copy_selected)
+            menu.addAction(act_copy_all)
+            # 若存在两列但不可激活，也追加禁用的绘图项在其后
+            if len(total_cols) == 2:
+                menu.addSeparator()
+                act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
+                act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
+                act1.setEnabled(False)
+                act2.setEnabled(False)
+                menu.addAction(act1)
+                menu.addAction(act2)
 
         menu.exec(view.mapToGlobal(pos))
 
@@ -1342,6 +1368,44 @@ class DataTableDialog(QMainWindow):
         lines.append('\t'.join(units))
 
         for r in rows_order:
+            row_vals = []
+            for c in ordered_cols:
+                val = self._df.iloc[r, c]
+                if pd.isna(val):
+                    row_vals.append("")
+                else:
+                    row_vals.append(str(val))
+            lines.append('\t'.join(row_vals))
+
+        text = '\n'.join(lines)
+        QApplication.clipboard().setText(text)
+
+    def _copy_all_to_clipboard(self):
+        """复制表内所有数据到剪贴板，列顺序按可视顺序（先冻结区再主区）。"""
+        if self._df is None or self._df.shape[0] == 0 or self._df.shape[1] == 0:
+            return
+
+        # 计算可视列顺序：先冻结区，再主区
+        frozen_cols = set(self._df.columns.get_loc(col) for col in self.frozen_columns)
+        frozen_header = self.frozen_view.horizontalHeader()
+        main_header = self.main_view.horizontalHeader()
+
+        all_cols = list(range(self._df.shape[1]))
+        frozen_list = [c for c in all_cols if c in frozen_cols]
+        main_list = [c for c in all_cols if c not in frozen_cols]
+        frozen_list.sort(key=lambda c: frozen_header.visualIndex(c))
+        main_list.sort(key=lambda c: main_header.visualIndex(c))
+        ordered_cols = frozen_list + main_list
+
+        # 变量名与单位
+        var_names = [str(self._df.columns[c]) for c in ordered_cols]
+        units = [self.units.get(name, '') for name in var_names]
+
+        lines = []
+        lines.append('\t'.join(var_names))
+        lines.append('\t'.join(units))
+
+        for r in range(self._df.shape[0]):
             row_vals = []
             for c in ordered_cols:
                 val = self._df.iloc[r, c]
