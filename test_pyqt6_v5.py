@@ -3731,6 +3731,7 @@ class MainWindow(QMainWindow):
         self.units = self.loader.units
         self.time_channels_infos = self.loader.time_channels_info
         self.data_validity = self.loader.df_validity
+        self.data = self.loader.df  # 设置主数据
         self.list_widget.populate(self.var_names, self.units, self.data_validity)
 
         # 移除占位符
