@@ -4424,7 +4424,15 @@ class MainWindow(QMainWindow):
             for container in self.plot_widgets:
                 w = container.plot_widget
                 w.vline.setVisible(True)
-                w.vline.setPos(x)
+                # 检查vline的bounds，确保x值在bounds范围内
+                bounds = w.vline.bounds
+                if bounds[0] is not None and bounds[1] is not None:
+                    # 有bounds限制，将x值限制在bounds范围内
+                    x_clipped = max(bounds[0], min(bounds[1], x))
+                    w.vline.setPos(x_clipped)
+                else:
+                    # 没有bounds限制，直接设置
+                    w.vline.setPos(x)
                 w.update_cursor_label()
 
     def reset_all_pin_states(self):
