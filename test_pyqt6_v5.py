@@ -4427,20 +4427,34 @@ class MainWindow(QMainWindow):
             # 不更新任何plot的cursor位置，保持pin状态
             pass
         else:
-            # 没有plot被pin，正常同步所有plot
+            # 检查是否所有有数据的plot都只有一个数据点
+            single_point_mode = True
             for container in self.plot_widgets:
                 w = container.plot_widget
-                w.vline.setVisible(True)
-                # 检查vline的bounds，确保x值在bounds范围内
-                bounds = w.vline.bounds()
-                if bounds[0] is not None and bounds[1] is not None:
-                    # 有bounds限制，将x值限制在bounds范围内
-                    x_clipped = max(bounds[0], min(bounds[1], x))
-                    w.vline.setPos(x_clipped)
-                else:
-                    # 没有bounds限制，直接设置
-                    w.vline.setPos(x)
-                w.update_cursor_label()
+                if hasattr(w, 'original_index_x') and w.original_index_x is not None:
+                    if len(w.original_index_x) > 1:
+                        single_point_mode = False
+                        break
+            
+            # 如果所有有数据的plot都只有一个数据点，不进行cursor同步
+            if single_point_mode:
+                # 保持所有plot的cursor在固定位置，不跟随鼠标
+                pass
+            else:
+                # 正常同步所有plot
+                for container in self.plot_widgets:
+                    w = container.plot_widget
+                    w.vline.setVisible(True)
+                    # 检查vline的bounds，确保x值在bounds范围内
+                    bounds = w.vline.bounds()
+                    if bounds[0] is not None and bounds[1] is not None:
+                        # 有bounds限制，将x值限制在bounds范围内
+                        x_clipped = max(bounds[0], min(bounds[1], x))
+                        w.vline.setPos(x_clipped)
+                    else:
+                        # 没有bounds限制，直接设置
+                        w.vline.setPos(x)
+                    w.update_cursor_label()
 
     def reset_all_pin_states(self):
         """
