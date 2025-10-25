@@ -3077,6 +3077,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     widget = container.plot_widget
                     if widget != self:  # 跳过当前plot，已经设置过了
                         widget.vline.setBounds([min_x, max_x])
+                        print(f"设置plot {id(widget)} 的bounds为 [{min_x}, {max_x}]")
 
             return True
             
@@ -4433,12 +4434,15 @@ class MainWindow(QMainWindow):
                 w.vline.setVisible(True)
                 # 检查vline的bounds，确保x值在bounds范围内
                 bounds = w.vline.bounds()
+                print(f"Plot {id(w)} bounds: {bounds}, 鼠标x: {x}")
                 if bounds[0] is not None and bounds[1] is not None:
                     # 有bounds限制，将x值限制在bounds范围内
                     x_clipped = max(bounds[0], min(bounds[1], x))
+                    print(f"  -> 限制后x: {x_clipped}")
                     w.vline.setPos(x_clipped)
                 else:
                     # 没有bounds限制，直接设置
+                    print(f"  -> 无bounds限制，直接设置x: {x}")
                     w.vline.setPos(x)
                 w.update_cursor_label()
 
