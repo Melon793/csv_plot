@@ -1141,32 +1141,73 @@ class DataTableDialog(QMainWindow):
         selected_indexes = view.selectionModel().selectedIndexes()
         if not selected_indexes:
             return
+
+        # 计算两侧选择与列集合
         frozen_cols = set(self._df.columns.get_loc(col) for col in self.frozen_columns)
         if view == self.main_view:
-            # non-frozen selected
-            this_cols = set(idx.column() for idx in selected_indexes)- frozen_cols
             other_view = self.frozen_view
-            other_selected = other_view.selectionModel().selectedIndexes()
-            other_cols = set(idx.column() for idx in other_selected) & frozen_cols
         else:
-            # frozen
             other_view = self.main_view
-            this_cols = set(idx.column() for idx in selected_indexes) & frozen_cols
-            other_selected = other_view.selectionModel().selectedIndexes()
-            other_cols = set(idx.column() for idx in other_selected) - frozen_cols
 
+        other_selected = other_view.selectionModel().selectedIndexes()
         all_selected = selected_indexes + other_selected
-        total_cols = this_cols | other_cols
 
-        # 先检查该view是否有正好2 cols
+        # 构建每列的选中行集合（基于两侧合并选择）
+        rows_per_col_all: dict[int, set[int]] = {}
+        for idx in all_selected:
+            rows_per_col_all.setdefault(idx.column(), set()).add(idx.row())
+
+        total_cols = set(rows_per_col_all.keys())
+
+        # 计算复制可行性与顺序
+        can_copy = False
+        ordered_cols: list[int] = []
+        rows_order: list[int] = []
+
+        if len(total_cols) == 1:
+            # 单列：允许复制（支持多段选择）
+            only_col = next(iter(total_cols))
+            ordered_cols = [only_col]
+            rows_order = sorted(rows_per_col_all[only_col])
+            can_copy = len(rows_order) > 0
+        elif len(total_cols) >= 2:
+            # 多列：几列的行号集合需完全相同
+            cols_list = list(total_cols)
+            base_rows = rows_per_col_all[cols_list[0]] if cols_list else set()
+            if base_rows and all(rows_per_col_all[c] == base_rows for c in cols_list[1:]):
+                # 左到右的可视列顺序：先冻结区，再主区
+                frozen_header = self.frozen_view.horizontalHeader()
+                main_header = self.main_view.horizontalHeader()
+                frozen_selected_cols = [c for c in total_cols if c in frozen_cols]
+                main_selected_cols = [c for c in total_cols if c not in frozen_cols]
+                frozen_selected_cols.sort(key=lambda c: frozen_header.visualIndex(c))
+                main_selected_cols.sort(key=lambda c: main_header.visualIndex(c))
+                ordered_cols = frozen_selected_cols + main_selected_cols
+                rows_order = sorted(base_rows)
+                can_copy = True
+
+        # 计算绘图相关（尽量保持原有逻辑）
+        plot_enabled = False
+        x_col = y_col = None
+        min_row = num_rows = 0
+
+        # 使用当前视图与对侧分别计算两种情形
+        # 1) 当前视图内正好2列，且行集合一致且>=2
+        this_cols = set()
+        rows_per_col_this: dict[int, set[int]] = {}
+        for idx in selected_indexes:
+            this_cols.add(idx.column())
+            rows_per_col_this.setdefault(idx.column(), set()).add(idx.row())
+        if view == self.main_view:
+            this_cols = this_cols - frozen_cols
+        else:
+            this_cols = this_cols & frozen_cols
+
         if len(this_cols) == 2:
             cols_list = sorted(list(this_cols))
-            rows_per_col = {}
-            for col in cols_list:
-                rows = set(idx.row() for idx in selected_indexes if idx.column() == col)
-                rows_per_col[col] = rows
-            if len(rows_per_col[cols_list[0]]) >= 2 and rows_per_col[cols_list[0]] == rows_per_col[cols_list[1]]:
-                # 确定顺序：根据视觉索引
+            r0 = rows_per_col_this.get(cols_list[0], set())
+            r1 = rows_per_col_this.get(cols_list[1], set())
+            if len(r0) >= 2 and r0 == r1:
                 header = view.horizontalHeader()
                 vis1 = header.visualIndex(cols_list[0])
                 vis2 = header.visualIndex(cols_list[1])
@@ -1174,41 +1215,74 @@ class DataTableDialog(QMainWindow):
                     x_col, y_col = cols_list[0], cols_list[1]
                 else:
                     x_col, y_col = cols_list[1], cols_list[0]
-                min_row = min(rows_per_col[cols_list[0]])
-                num_rows = len(rows_per_col[cols_list[0]])
-                self._show_plot_menu(pos, view, x_col, y_col, min_row, num_rows, enabled=True)
-                return
+                min_row = min(r0)
+                num_rows = len(r0)
+                plot_enabled = True
 
-        # 然后检查跨区 1+1
-        elif len(this_cols) == 1 and len(other_cols) == 1:
-            this_col = list(this_cols)[0]
-            other_col = list(other_cols)[0]
-            this_rows = set(idx.row() for idx in selected_indexes)
-            other_rows = set(idx.row() for idx in other_selected)
-            if len(this_rows) >= 2 and this_rows == other_rows:
-                if view == self.frozen_view:
-                    x_col, y_col = this_col, other_col
-                else:
-                    x_col, y_col = other_col, this_col
-                min_row = min(this_rows)
-                num_rows = len(this_rows)
-                self._show_plot_menu(pos, view, x_col, y_col, min_row, num_rows, enabled=True)
-                return
+        # 2) 跨两视图各1列，且行集合一致且>=2
+        if not plot_enabled:
+            # 统计对侧列与行
+            other_cols = set()
+            rows_per_col_other: dict[int, set[int]] = {}
+            for idx in other_selected:
+                other_cols.add(idx.column())
+                rows_per_col_other.setdefault(idx.column(), set()).add(idx.row())
 
-        # else: if total 2 cols, show disabled
-        if len(total_cols) == 2:
-            cols_list = sorted(list(total_cols))
-            x_col, y_col = cols_list[0], cols_list[1]
-            all_rows = set(idx.row() for idx in all_selected)
-            if all_rows:
-                min_row = min(all_rows)
-                num_rows = max(all_rows) - min_row + 1
+            # 归一化集合
+            if view == self.main_view:
+                this_cols = this_cols  # 已经去除了冻结列
+                other_cols = other_cols & frozen_cols
             else:
-                min_row = 0
-                num_rows = 0
-            self._show_plot_menu(pos, view, x_col, y_col, min_row, num_rows, enabled=False)
-        else:
-            return
+                this_cols = this_cols  # 已经只保留冻结列
+                other_cols = other_cols - frozen_cols
+
+            if len(this_cols) == 1 and len(other_cols) == 1:
+                this_col = next(iter(this_cols))
+                other_col = next(iter(other_cols))
+                this_rows = rows_per_col_this.get(this_col, set())
+                other_rows = rows_per_col_other.get(other_col, set())
+                if len(this_rows) >= 2 and this_rows == other_rows:
+                    if view == self.frozen_view:
+                        x_col, y_col = this_col, other_col
+                    else:
+                        x_col, y_col = other_col, this_col
+                    min_row = min(this_rows)
+                    num_rows = len(this_rows)
+                    plot_enabled = True
+
+        # 构建统一菜单
+        menu = QMenu(self)
+
+        # 复制到剪贴板
+        act_copy = QAction("复制数据到剪贴板", menu)
+        act_copy.setEnabled(can_copy)
+        if can_copy:
+            act_copy.triggered.connect(lambda: self._copy_selected_to_clipboard(ordered_cols, rows_order))
+        menu.addAction(act_copy)
+
+        # 绘图菜单（仅在正好两列被选中时展示；保持原行为）
+        if len(total_cols) == 2:
+            # 获取列名用于展示
+            cols_list = sorted(list(total_cols))
+            x_show, y_show = cols_list[0], cols_list[1]
+            x_name = self.model.headerData(x_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
+            y_name = self.model.headerData(y_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
+
+            menu.addSeparator()
+            act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
+            act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
+            if plot_enabled and x_col is not None and y_col is not None:
+                act1.triggered.connect(lambda: self._plot_xy_scatter(x_col, y_col, min_row, num_rows))
+                act2.triggered.connect(lambda: self._plot_xy_scatter(y_col, x_col, min_row, num_rows))
+                act1.setEnabled(True)
+                act2.setEnabled(True)
+            else:
+                act1.setEnabled(False)
+                act2.setEnabled(False)
+            menu.addAction(act1)
+            menu.addAction(act2)
+
+        menu.exec(view.mapToGlobal(pos))
 
     def _show_plot_menu(self, pos, view, x_col, y_col, min_row, num_rows, enabled=True):
         x_name = self.model.headerData(x_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
@@ -1250,6 +1324,35 @@ class DataTableDialog(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "未知错误", f"绘图时发生错误: {e}")
 
+
+    def _copy_selected_to_clipboard(self, ordered_cols: list[int], rows_order: list[int]):
+        """将选中区域的数据复制到剪贴板。
+
+        第一行：变量名；第二行：单位；第三行开始为数据。
+        """
+        if not ordered_cols or not rows_order:
+            return
+        # 变量名与单位
+        var_names = [str(self._df.columns[c]) for c in ordered_cols]
+        units = [self.units.get(name, '') for name in var_names]
+
+        # 组装数据（按行）
+        lines = []
+        lines.append('\t'.join(var_names))
+        lines.append('\t'.join(units))
+
+        for r in rows_order:
+            row_vals = []
+            for c in ordered_cols:
+                val = self._df.iloc[r, c]
+                if pd.isna(val):
+                    row_vals.append("")
+                else:
+                    row_vals.append(str(val))
+            lines.append('\t'.join(row_vals))
+
+        text = '\n'.join(lines)
+        QApplication.clipboard().setText(text)
 
     def _connect_signals(self):
         if self.model:
