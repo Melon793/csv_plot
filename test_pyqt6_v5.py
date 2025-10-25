@@ -2047,6 +2047,7 @@ class CustomViewBox(pg.ViewBox):
         super().__init__(*args, **kwargs)
         self.context_x = None  # 记录右键点击时的 x 坐标
         self.plot_widget = None  # 将在 DraggableGraphicsLayoutWidget 中设置
+        self.is_cursor_pinned = False  # 记录cursor是否被固定
 
     def getMenu(self, ev):
         # 记录鼠标位置的 x 值
@@ -2081,6 +2082,37 @@ class CustomViewBox(pg.ViewBox):
                 menu.insertAction(menu.actions()[0], jump_act)
             else:
                 menu.addAction(jump_act)
+        
+        # 添加 Pin Cursor/Free Cursor 功能 (放在Jump to Data之后)
+        # 检查是否有任何plot处于pin状态
+        is_pinned = False
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
+            for container in self.plot_widget.window().plot_widgets:
+                if container.plot_widget.is_cursor_pinned:
+                    is_pinned = True
+                    break
+        
+        # 先移除可能存在的旧按钮
+        actions_to_remove = []
+        for action in menu.actions():
+            if action.text() in ["Pin Cursor", "Free Cursor"]:
+                actions_to_remove.append(action)
+        for action in actions_to_remove:
+            menu.removeAction(action)
+        
+        # 根据全局pin状态添加相应的按钮（严格互斥）
+        if is_pinned:
+            pin_act = QAction("Free Cursor", menu)
+            pin_act.triggered.connect(self.trigger_free_cursor)
+        else:
+            pin_act = QAction("Pin Cursor", menu)
+            pin_act.triggered.connect(self.trigger_pin_cursor)
+        
+        # 在Jump to Data之后插入
+        if menu.actions():
+            menu.insertAction(menu.actions()[1], pin_act)
+        else:
+            menu.addAction(pin_act)
                 
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
@@ -2100,6 +2132,16 @@ class CustomViewBox(pg.ViewBox):
             self.plot_widget.clear_plot_item()
             if self.plot_widget.window():
                 self.plot_widget.window().update_mark_stats()
+    
+    def trigger_pin_cursor(self):
+        """固定cursor到最近的数据点"""
+        if self.plot_widget:
+            self.plot_widget.pin_cursor(self.context_x)
+    
+    def trigger_free_cursor(self):
+        """解除cursor固定，恢复跟随鼠标"""
+        if self.plot_widget:
+            self.plot_widget.free_cursor()
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     """
@@ -2114,6 +2156,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.original_index_x = None
         self.original_y = None
         self.mark_region = None
+        self.is_cursor_pinned = False  # 记录cursor是否被固定
+        self.pinned_x_value = None  # 记录固定的x值
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -2515,7 +2559,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 信号连接
         self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
-        #self.vline.sigPositionChanged.connect(self.update_cursor_label)
+        self.vline.sigPositionChanged.connect(self.on_vline_position_changed)
         self.setAntialiasing(False)
 
     def handle_single_point_limits(self, x_values, y_values):
@@ -2564,9 +2608,38 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not self.plot_item.sceneBoundingRect().contains(pos):
             return
         mousePoint = self.plot_item.vb.mapSceneToView(pos)
-        if hasattr(self.window(), 'sync_crosshair'):
-            self.window().sync_crosshair(mousePoint.x(), self)
+        
+        # 如果cursor被固定，不跟随鼠标移动
+        if self.is_cursor_pinned:
+            # 在pin状态下，cursor保持固定位置，不跟随鼠标
+            pass
+        else:
+            # 正常跟随鼠标模式
+            if hasattr(self.window(), 'sync_crosshair'):
+                self.window().sync_crosshair(mousePoint.x(), self)
             #print(f"mouse in pos {mousePoint.x()}")
+
+    def on_vline_position_changed(self):
+        """
+        vline位置变化时的处理
+        
+        当vline被拖动时触发，在pin状态下会同步所有被pin的plot的cursor位置。
+        在正常状态下会更新cursor标签显示。
+        """
+        if self.is_cursor_pinned:
+            # 在pin状态下，同步所有被pin的plot的cursor位置
+            x_pos = self.vline.value()
+            if self.window() and hasattr(self.window(), 'plot_widgets'):
+                for container in self.window().plot_widgets:
+                    widget = container.plot_widget
+                    if widget.is_cursor_pinned and widget != self:
+                        # 同步其他被pin的plot
+                        widget.vline.setPos(x_pos)
+                        widget.update_cursor_label()
+                        widget.pinned_x_value = x_pos
+        else:
+            # 正常模式下更新cursor标签
+            self.update_cursor_label()
 
     def sInt_to_fmtStr(self,value:int):
         td = pd.to_timedelta(pd.Series(value, dtype='float64'), unit='s')
@@ -2669,6 +2742,90 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.update_cursor_label()
         else:
             self.update_right_header("")
+            # 隐藏光标时重置pin状态
+            self.is_cursor_pinned = False
+            self.pinned_x_value = None
+
+    def pin_cursor(self, x_value):
+        """
+        固定cursor到指定x值并同步所有plot
+        
+        将当前plot的cursor固定到离指定x值最近的数据点，并同步所有plot的cursor位置。
+        固定后cursor不会跟随鼠标移动，但可以通过拖动vline来改变位置。
+        
+        Args:
+            x_value (float): 要固定到的x坐标值
+        """
+        if not self.window() or not hasattr(self.window(), 'cursor_btn') or not self.window().cursor_btn.isChecked():
+            # 如果cursor未显示，先显示cursor
+            self.window().cursor_btn.setChecked(True)
+            self.window().toggle_cursor_all(True)
+        
+        # 找到最近的数据点
+        if len(self.plot_item.listDataItems()) > 0:
+            curve = self.plot_item.listDataItems()[0]
+            x_data, y_data = curve.getData()
+            if x_data is not None and len(x_data) > 0:
+                # 考虑factor和offset
+                adjusted_x = (x_value - self.offset) / self.factor if self.factor != 0 else x_value
+                idx = np.argmin(np.abs(x_data - adjusted_x))
+                pinned_x = x_data[idx]
+                # 转换回显示坐标
+                display_x = pinned_x * self.factor + self.offset
+                
+                # 设置所有plot为pin状态并同步位置
+                if self.window() and hasattr(self.window(), 'plot_widgets'):
+                    for container in self.window().plot_widgets:
+                        widget = container.plot_widget
+                        widget.is_cursor_pinned = True
+                        widget.pinned_x_value = display_x
+                        widget.vline.setMovable(True)
+                        widget.vline.setPos(display_x)
+                        widget.update_cursor_label()
+                        if hasattr(widget.view_box, 'is_cursor_pinned'):
+                            widget.view_box.is_cursor_pinned = True
+
+    def free_cursor(self):
+        """
+        解除cursor固定，恢复跟随鼠标
+        
+        解除所有plot的cursor固定状态，恢复cursor跟随鼠标移动的默认行为。
+        同时将vline设置为不可移动状态。
+        """
+        self.is_cursor_pinned = False
+        self.pinned_x_value = None
+        
+        # 让vline不可移动
+        self.vline.setMovable(False)
+        
+        # 更新ViewBox的pin状态
+        if hasattr(self.view_box, 'is_cursor_pinned'):
+            self.view_box.is_cursor_pinned = False
+        
+        # 同步所有plot解除固定
+        if self.window() and hasattr(self.window(), 'plot_widgets'):
+            for container in self.window().plot_widgets:
+                widget = container.plot_widget
+                widget.is_cursor_pinned = False
+                widget.pinned_x_value = None
+                widget.vline.setMovable(False)
+                if hasattr(widget.view_box, 'is_cursor_pinned'):
+                    widget.view_box.is_cursor_pinned = False
+
+    def reset_pin_state(self):
+        """
+        重置当前plot的pin状态
+        
+        将当前plot的cursor从固定状态重置为默认状态，包括：
+        - 清除pin标志和固定位置
+        - 设置vline为不可移动
+        - 更新ViewBox的pin状态
+        """
+        self.is_cursor_pinned = False
+        self.pinned_x_value = None
+        self.vline.setMovable(False)
+        if hasattr(self.view_box, 'is_cursor_pinned'):
+            self.view_box.is_cursor_pinned = False
 
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
         """
@@ -4227,6 +4384,8 @@ class MainWindow(QMainWindow):
              container.plot_widget.clear_plot_item()
              container.plot_widget.reset_plot(index_xMin, index_xMax)
              container.plot_widget.clear_value_cache()
+             # 重置pin状态
+             container.plot_widget.reset_pin_state()
 
         self.saved_mark_range = None
         if self.mark_stats_window:
@@ -4247,16 +4406,43 @@ class MainWindow(QMainWindow):
     def sync_crosshair(self, x, sender_widget):
         if not self.cursor_btn.isChecked():
             return
+        
+        # 检查是否有任何plot处于pin状态
+        has_pinned_plot = False
         for container in self.plot_widgets:
             w = container.plot_widget
-            w.vline.setVisible(True)
-            w.vline.setPos(x)
-            w.update_cursor_label()
+            if w.is_cursor_pinned:
+                has_pinned_plot = True
+                break
+        
+        # 如果有plot被pin，完全忽略鼠标移动的同步
+        if has_pinned_plot:
+            # 不更新任何plot的cursor位置，保持pin状态
+            pass
+        else:
+            # 没有plot被pin，正常同步所有plot
+            for container in self.plot_widgets:
+                w = container.plot_widget
+                w.vline.setVisible(True)
+                w.vline.setPos(x)
+                w.update_cursor_label()
+
+    def reset_all_pin_states(self):
+        """
+        重置所有plot的pin状态
+        
+        遍历所有plot widget，将它们的cursor从固定状态重置为默认状态。
+        用于数据重载、清除图表等操作时统一重置pin状态。
+        """
+        for container in self.plot_widgets:
+            container.plot_widget.reset_pin_state()
 
     def clear_all_plots(self):
         for container in self.plot_widgets:
             widget=container.plot_widget
             widget.clear_plot_item()
+            # 重置pin状态
+            widget.reset_pin_state()
         self.saved_mark_range = None
         self.update_mark_stats()
 
@@ -4352,6 +4538,9 @@ class MainWindow(QMainWindow):
         # 如果加载文件为空
         if self.loader.datalength == 0: 
                 return
+        
+        # 重置所有plot的pin状态
+        self.reset_all_pin_states()
         
         # 收集所有 y_name (包括未显示的)
         all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
