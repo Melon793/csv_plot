@@ -4722,6 +4722,8 @@ class MainWindow(QMainWindow):
         try:
             if system == "Darwin":  # macOS
                 self._show_macos_notification(title, message)
+            elif system == "Windows":  # Windows
+                self._show_windows_notification(title, message)
             elif QSystemTrayIcon.isSystemTrayAvailable():
                 tray = getattr(self, '_tray_icon', None)
                 if tray is None:
@@ -4839,10 +4841,132 @@ class MainWindow(QMainWindow):
                         self._tray_icon = tray
                     self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
                 else:
-                    QMessageBox.information(self, title, message)
+                QMessageBox.information(self, title, message)
             except Exception:
                 QMessageBox.information(self, title, message)
-
+    
+    def _show_windows_notification(self, title, message):
+        """在Windows上显示现代Toast通知。"""
+        try:
+            # 首先尝试使用win10toast库
+            try:
+                from win10toast import ToastNotifier
+                toaster = ToastNotifier()
+                toaster.show_toast(
+                    title=title,
+                    msg=message,
+                    duration=3,
+                    icon_path=str(resource_path('icon.ico')),
+                    threaded=True
+                )
+                return
+            except ImportError:
+                pass
+            
+            # 尝试使用plyer库（跨平台通知）
+            try:
+                from plyer import notification
+                notification.notify(
+                    title=title,
+                    message=message,
+                    timeout=3,
+                    app_icon=str(resource_path('icon.ico'))
+                )
+                return
+            except ImportError:
+                pass
+            
+            # 尝试使用winrt库（Windows Runtime）
+            try:
+                import winrt.windows.ui.notifications as notifications
+                import winrt.windows.data.xml.dom as dom
+                import winrt.windows.applicationmodel as app_model
+                
+                # 创建Toast通知
+                app = app_model.Package.current
+                if app:
+                    # 创建Toast XML模板
+                    toast_xml = f'''
+                    <toast>
+                        <visual>
+                            <binding template="ToastGeneric">
+                                <text>{title}</text>
+                                <text>{message}</text>
+                                <image placement="appLogoOverride" src="file:///{resource_path('icon.ico')}"/>
+                            </binding>
+                        </visual>
+                        <audio src="ms-winsoundevent:Notification.Default"/>
+                    </toast>
+                    '''
+                    
+                    # 解析XML
+                    xml_doc = dom.XmlDocument()
+                    xml_doc.load_xml(toast_xml)
+                    
+                    # 创建通知
+                    toast = notifications.ToastNotification(xml_doc)
+                    notifier = notifications.ToastNotificationManager.create_toast_notifier()
+                    notifier.show(toast)
+                    return
+            except ImportError:
+                pass
+            
+            # 尝试使用Windows原生API（更现代的方式）
+            try:
+                import ctypes
+                from ctypes import wintypes
+                
+                # 定义Windows API函数
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+                
+                # 创建通知
+                MessageBox = user32.MessageBoxW
+                MessageBox.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
+                MessageBox.restype = ctypes.c_int
+                
+                # 显示通知（使用系统托盘样式）
+                MessageBox(None, message, title, 0x40)  # MB_ICONINFORMATION
+                return
+            except Exception:
+                pass
+            
+            # 尝试使用Windows原生API（更现代的方式）
+            try:
+                import ctypes
+                from ctypes import wintypes
+                
+                # 定义Windows API函数
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+                
+                # 创建通知
+                MessageBox = user32.MessageBoxW
+                MessageBox.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
+                MessageBox.restype = ctypes.c_int
+                
+                # 显示通知（使用系统托盘样式）
+                MessageBox(None, message, title, 0x40)  # MB_ICONINFORMATION
+                return
+            except Exception:
+                pass
+            
+            # 备用方案：使用系统托盘
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                tray = getattr(self, '_tray_icon', None)
+                if tray is None:
+                    icon = QIcon(str(resource_path('icon.ico')))
+                    tray = QSystemTrayIcon(icon, self)
+                    tray.setVisible(True)
+                    self._tray_icon = tray
+                self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+            else:
+                QMessageBox.information(self, title, message)
+                
+        except Exception as e:
+            # 最终备用方案
+            QMessageBox.information(self, title, message)
+    
     def create_subplots_matrix(self, m: int, n: int):
         # 先全部清掉
         for i in reversed(range(self.plot_layout.count())):
