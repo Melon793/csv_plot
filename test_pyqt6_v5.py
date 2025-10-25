@@ -4714,8 +4714,15 @@ class MainWindow(QMainWindow):
         """跨平台提醒复制完成。"""
         title = "已复制"
         message = "绘图区截图已复制到剪贴板"
+        
+        # 检测操作系统
+        import platform
+        system = platform.system()
+        
         try:
-            if QSystemTrayIcon.isSystemTrayAvailable():
+            if system == "Darwin":  # macOS
+                self._show_macos_notification(title, message)
+            elif QSystemTrayIcon.isSystemTrayAvailable():
                 tray = getattr(self, '_tray_icon', None)
                 if tray is None:
                     icon = QIcon(str(resource_path('icon.png')))
@@ -4727,6 +4734,114 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, title, message)
         except Exception:
             QMessageBox.information(self, title, message)
+    
+    def _show_macos_notification(self, title, message):
+        """在macOS上显示原生通知。"""
+        try:
+            # 首先尝试使用PyObjC调用macOS原生通知API
+            try:
+                import objc
+                from Foundation import NSUserNotification, NSUserNotificationCenter
+                
+                # 创建通知
+                notification = NSUserNotification.alloc().init()
+                notification.setTitle_(title)
+                notification.setInformativeText_(message)
+                notification.setSoundName_("Glass")
+                
+                # 显示通知
+                center = NSUserNotificationCenter.defaultUserNotificationCenter()
+                center.deliverNotification_(notification)
+                return
+                
+            except ImportError:
+                # 如果没有PyObjC，尝试使用现代通知API
+                try:
+                    import objc
+                    from Foundation import NSBundle
+                    from UserNotifications import UNUserNotificationCenter, UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound
+                    
+                    # 检查是否支持现代通知API
+                    if hasattr(UNUserNotificationCenter, 'currentNotificationCenter'):
+                        # 使用现代通知API
+                        content = UNMutableNotificationContent.alloc().init()
+                        content.setTitle_(title)
+                        content.setBody_(message)
+                        content.setSound_(UNNotificationSound.defaultSound())
+                        
+                        request = UNNotificationRequest.requestWithIdentifier_trigger_content_(
+                            "screenshot_notification", None, content
+                        )
+                        
+                        center = UNUserNotificationCenter.currentNotificationCenter()
+                        center.addNotificationRequest_withCompletionHandler_(request, None)
+                        return
+                except ImportError:
+                    pass
+            
+            # 尝试使用terminal-notifier工具（如果可用）
+            try:
+                import subprocess
+                subprocess.run(['terminal-notifier', '-title', title, '-message', message, '-sound', 'Glass'], check=True)
+                return
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
+            
+            # 尝试使用macOS的通知中心API
+            try:
+                import subprocess
+                # 使用osascript调用macOS的通知中心
+                script = f'''
+                tell application "System Events"
+                    display notification "{message}" with title "{title}" sound name "Glass"
+                end tell
+                '''
+                subprocess.run(['osascript', '-e', script], check=True)
+                return
+            except subprocess.CalledProcessError:
+                pass
+            
+            # 尝试使用macOS的通知中心API（更现代的方式）
+            try:
+                import subprocess
+                # 使用osascript调用macOS的通知中心
+                script = f'''
+                display notification "{message}" with title "{title}" sound name "Glass"
+                '''
+                subprocess.run(['osascript', '-e', script], check=True)
+                return
+            except subprocess.CalledProcessError:
+                pass
+            
+            # 使用osascript调用macOS的通知系统
+            import subprocess
+            
+            # 转义特殊字符
+            title_escaped = title.replace('"', '\\"')
+            message_escaped = message.replace('"', '\\"')
+            
+            script = f'''
+            display notification "{message_escaped}" with title "{title_escaped}" sound name "Glass"
+            '''
+            
+            # 执行AppleScript
+            subprocess.run(['osascript', '-e', script], check=True)
+            
+        except Exception as e:
+            # 如果原生通知失败，尝试使用系统托盘
+            try:
+                if QSystemTrayIcon.isSystemTrayAvailable():
+                    tray = getattr(self, '_tray_icon', None)
+                    if tray is None:
+                        icon = QIcon(str(resource_path('icon.png')))
+                        tray = QSystemTrayIcon(icon, self)
+                        tray.setVisible(True)
+                        self._tray_icon = tray
+                    self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
+                else:
+                    QMessageBox.information(self, title, message)
+            except Exception:
+                QMessageBox.information(self, title, message)
 
     def create_subplots_matrix(self, m: int, n: int):
         # 先全部清掉
