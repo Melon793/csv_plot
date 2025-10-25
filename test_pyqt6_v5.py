@@ -2084,25 +2084,33 @@ class CustomViewBox(pg.ViewBox):
                 menu.addAction(jump_act)
         
         # 添加 Pin Cursor/Free Cursor 功能 (放在Jump to Data之后)
-        if "Pin Cursor" not in existing_texts and "Free Cursor" not in existing_texts:
-            # 检查是否有任何plot处于pin状态
-            is_pinned = False
-            if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
-                for container in self.plot_widget.window().plot_widgets:
-                    if container.plot_widget.is_cursor_pinned:
-                        is_pinned = True
-                        break
-            if is_pinned:
+        # 检查是否有任何plot处于pin状态
+        is_pinned = False
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
+            for container in self.plot_widget.window().plot_widgets:
+                if container.plot_widget.is_cursor_pinned:
+                    is_pinned = True
+                    break
+        
+        # 根据全局pin状态添加相应的按钮
+        if is_pinned:
+            if "Free Cursor" not in existing_texts:
                 pin_act = QAction("Free Cursor", menu)
                 pin_act.triggered.connect(self.trigger_free_cursor)
-            else:
+                # 在Jump to Data之后插入
+                if menu.actions():
+                    menu.insertAction(menu.actions()[1], pin_act)
+                else:
+                    menu.addAction(pin_act)
+        else:
+            if "Pin Cursor" not in existing_texts:
                 pin_act = QAction("Pin Cursor", menu)
                 pin_act.triggered.connect(self.trigger_pin_cursor)
-            # 在Jump to Data之后插入
-            if menu.actions():
-                menu.insertAction(menu.actions()[1], pin_act)
-            else:
-                menu.addAction(pin_act)
+                # 在Jump to Data之后插入
+                if menu.actions():
+                    menu.insertAction(menu.actions()[1], pin_act)
+                else:
+                    menu.addAction(pin_act)
                 
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
