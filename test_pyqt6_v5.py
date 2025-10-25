@@ -4673,7 +4673,9 @@ class MainWindow(QMainWindow):
 
         for idx, container in enumerate(self.plot_widgets):
             r, c = divmod(idx, max_cols)
-            if r >= rows or c >= cols:
+            r_i = int(r)
+            c_i = int(c)
+            if r_i >= rows or c_i >= cols:
                 continue
             if not container.isVisible():
                 continue
@@ -4742,9 +4744,9 @@ class MainWindow(QMainWindow):
 
             pw.update()
 
-            cell_pix[r][c] = pix
-            col_widths[c] = max(col_widths[c], pix.width())
-            row_heights[r] = max(row_heights[r], pix.height())
+            cell_pix[r_i][c_i] = pix
+            col_widths[c_i] = max(col_widths[c_i], pix.width())
+            row_heights[r_i] = max(row_heights[r_i], pix.height())
 
         if not any(col_widths) or not any(row_heights):
             return
