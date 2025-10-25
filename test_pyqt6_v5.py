@@ -4773,6 +4773,7 @@ class MainWindow(QMainWindow):
                 return
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 print(f"terminal-notifier失败: {e}")
+                print("提示：可以通过 'brew install terminal-notifier' 安装terminal-notifier")
                 pass
             
             # 尝试使用macOS的通知中心API（最可靠的方法）
