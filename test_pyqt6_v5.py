@@ -4188,9 +4188,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         widget.pinned_x_value = display_x
                         widget.vline.setMovable(True)
                         widget.vline.setPos(display_x)
-                        widget.update_cursor_label()
+                        
+                        # 重置节流时间戳，确保update_cursor_label能立即执行
+                        # 这样可以绕过自适应节流控制，立即更新cursor标签到正确位置
+                        if hasattr(widget, '_last_cursor_update_time'):
+                            widget._last_cursor_update_time = 0
+                        
                         if hasattr(widget.view_box, 'is_cursor_pinned'):
                             widget.view_box.is_cursor_pinned = True
+                    
+                    # 强制处理Qt事件队列，确保所有vline位置都已更新
+                    QApplication.processEvents()
+                    
+                    # 然后再更新所有plot的cursor标签
+                    for container in self.window().plot_widgets:
+                        widget = container.plot_widget
+                        widget.update_cursor_label()
 
     def free_cursor(self):
         """
@@ -5798,7 +5811,7 @@ class MainWindow(QMainWindow):
         self.cursor_btn.clicked.connect(self.toggle_cursor_all)
         
         # 全局cursor值显示状态：False表示显示所有值，True表示只显示x值
-        self.cursor_values_hidden = True  # 默认只显示x轴数值框，不显示圆圈和y值
+        self.cursor_values_hidden = False  # 默认显示完整cursor（包括圆圈和y值）
 
         self.mark_region_btn = QPushButton("标记区域")
         self.mark_region_btn.setCheckable(True)
