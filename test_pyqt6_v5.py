@@ -11,26 +11,28 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect,QItemSelectionModel
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect, QRectF,QItemSelectionModel
 from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase, QPixmap, QImage, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
     QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter, QSystemTrayIcon,
+    QListWidget, QListWidgetItem, QColorDialog, QCheckBox
 )
 import pyqtgraph as pg
 from threading import Lock
 
 
-global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, NOTIFICATION_ENABLE
+global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, NOTIFICATION_ENABLE, XRANGE_THRESHOLD_FOR_SYMBOLS
 DEFAULT_PADDING_VAL_X = 0.05
 DEFAULT_PADDING_VAL_Y = 0.1
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
 RATIO_RESET_PLOTS = 0.3
 FROZEN_VIEW_WIDTH_DEFAULT = 180
 NOTIFICATION_ENABLE = False  # 通知功能开关，默认关闭
-THRESHOLD_LINE_TO_SYMBOL = 100
-TOLERANCE_LINE_TO_SYMBOL = 0.2
+THRESHOLD_LINE_TO_SYMBOL = 100  # 已废弃，使用XRANGE_THRESHOLD_FOR_SYMBOLS
+TOLERANCE_LINE_TO_SYMBOL = 0.2  # 已废弃
+XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols
 BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
 MIN_INDEX_LENGTH = 3
@@ -1991,6 +1993,158 @@ class AxisDialog(QDialog):
             QMessageBox.warning(self, "错误", "请输入有效的数值（最小值、最大值、刻度数量）")
 
 # ---------------- 自定义 QTableWidget ----------------
+class NoHoverDelegate(QStyledItemDelegate):
+    """
+    变量表自定义委托类
+    
+    功能：
+    1. 禁用鼠标悬停和焦点的视觉反馈，避免干扰用户操作
+    2. 在变量名列左侧绘制彩色方块标识符（绿色=有效，橙色=常数，红色=无效）
+    3. 方块不占用文本显示空间，最大化变量名显示长度
+    4. 确保选中行文本高对比度显示（白色文字）
+    """
+    
+    def paint(self, painter, option, index):
+        """
+        自定义单元格绘制逻辑
+        
+        Args:
+            painter: QPainter绘图对象
+            option: QStyleOptionViewItem样式选项
+            index: QModelIndex单元格索引
+        """
+        from PyQt6.QtWidgets import QStyle
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QColor, QPen
+        
+        # 移除悬停和焦点状态，避免出现白色块和焦点框
+        option.state &= ~QStyle.StateFlag.State_MouseOver
+        option.state &= ~QStyle.StateFlag.State_HasFocus
+        
+        # 绘制背景（选中状态用高亮色，未选中用基础色）
+        self._draw_background(painter, option)
+        
+        # 变量名列（第0列）：绘制彩色方块 + 文本
+        if index.column() == 0:
+            self._draw_variable_name_column(painter, option, index)
+        # 其他列（单位、序号）：仅绘制文本
+        else:
+            self._draw_text_column(painter, option, index)
+    
+    def _draw_background(self, painter, option):
+        """绘制单元格背景"""
+        from PyQt6.QtWidgets import QStyle
+        
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        else:
+            painter.fillRect(option.rect, option.palette.base())
+        painter.restore()
+    
+    def _get_validity_color(self, valid):
+        """
+        根据有效性返回对应的颜色
+        
+        Args:
+            valid: 有效性值（1=有效，0=常数，-1=无效）
+            
+        Returns:
+            QColor或None
+        """
+        from PyQt6.QtGui import QColor
+        
+        if valid == 1:
+            return QColor(0, 200, 0)      # 鲜艳绿色（有效）
+        elif valid == 0:
+            return QColor(255, 140, 0)    # 橙色（常数）
+        elif valid == -1:
+            return QColor(255, 0, 0)      # 红色（无效）
+        return None
+    
+    def _draw_variable_name_column(self, painter, option, index):
+        """绘制变量名列（包含彩色方块标识符）"""
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QPen, QColor
+        from PyQt6.QtWidgets import QStyle
+        
+        # 获取有效性和颜色
+        valid = index.data(Qt.ItemDataRole.UserRole)
+        color = self._get_validity_color(valid) if valid is not None else None
+        
+        # 获取原始变量名（存储在UserRole+1中）
+        original_name = index.data(Qt.ItemDataRole.UserRole + 1)
+        if not original_name:
+            return
+        
+        # 如果有效性标识，绘制彩色方块
+        text_rect = option.rect
+        if color:
+            # 计算方块位置和大小
+            square_size = min(option.rect.height() - 4, 12)
+            square_x = option.rect.left() + 3
+            square_y = option.rect.top() + (option.rect.height() - square_size) // 2
+            
+            # 绘制方块
+            painter.save()
+            painter.setPen(QPen(color, 1))
+            painter.setBrush(color)
+            painter.drawRect(square_x, square_y, square_size, square_size)
+            painter.restore()
+            
+            # 调整文本区域，为方块留出空间
+            text_rect = QRect(option.rect)
+            text_rect.setLeft(option.rect.left() + square_size + 8)
+        else:
+            # 无方块时，左侧留出小边距
+            text_rect = option.rect.adjusted(6, 0, -6, 0)
+        
+        # 绘制文本
+        self._draw_text(painter, option, original_name, text_rect)
+    
+    def _draw_text_column(self, painter, option, index):
+        """绘制普通文本列（单位、序号）"""
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        if text is not None:
+            text_rect = option.rect.adjusted(3, 0, -3, 0)
+            self._draw_text(painter, option, str(text), text_rect)
+    
+    def _draw_text(self, painter, option, text, text_rect):
+        """
+        绘制文本，自动处理选中状态的颜色和文本省略
+        
+        Args:
+            painter: QPainter对象
+            option: 样式选项
+            text: 要绘制的文本
+            text_rect: 文本绘制区域
+        """
+        from PyQt6.QtGui import QColor
+        from PyQt6.QtWidgets import QStyle
+        
+        painter.save()
+        
+        # 选中时使用白色文字（高对比度），否则使用默认颜色
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.setPen(QColor(255, 255, 255))
+        else:
+            painter.setPen(option.palette.text().color())
+        
+        # 绘制文本，自动省略过长部分（...）
+        elided_text = painter.fontMetrics().elidedText(
+            text, 
+            Qt.TextElideMode.ElideRight, 
+            text_rect.width()
+        )
+        painter.drawText(
+            text_rect, 
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            elided_text
+        )
+        
+        painter.restore()
+
+
 class MyTableWidget(QTableWidget):
     """
     自定义表格控件类
@@ -1999,8 +2153,13 @@ class MyTableWidget(QTableWidget):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setColumnCount(2)
-        self.setHorizontalHeaderLabels(["变量名", "单位"])
+        self.setColumnCount(3)
+        self.setHorizontalHeaderLabels(["变量名", "单位", "序号"])
+        self.original_indices = {}  # 存储原始索引
+        self._column_sort_order = {}  # 记录每列的当前排序状态：{column_index: order}
+
+        # 设置自定义委托，从绘制层面彻底禁用悬停和焦点效果
+        self.setItemDelegate(NoHoverDelegate(self))
 
         # 字体 
         # hdr = self.horizontalHeader()
@@ -2008,7 +2167,8 @@ class MyTableWidget(QTableWidget):
         header_font.setBold(False)  
         self.horizontalHeader().setFont(header_font)
         
-        # 设置表格选择行为的样式，避免选中时影响表头
+        # 设置表格选择行为的样式
+        # 保留未选中行的自定义背景色，仅在选中时使用高亮色
         self.setStyleSheet("""
             QTableWidget::item:selected {
                 font-weight: normal;         /* 确保选中项字体也不加粗 */
@@ -2016,33 +2176,157 @@ class MyTableWidget(QTableWidget):
         """)
 
 
-        # 默认 3:1 的初始宽度 
-        total = 255          # 首次拿不到 width 时给一个兜底
-        self.setColumnWidth(0, int(total * 0.75))
-        self.setColumnWidth(1, int(total * 0.25))
+        # 默认列宽度：变量名:单位:序号 = 5:2:1
+        total = 300
+        self.setColumnWidth(0, int(total * 0.625))  # 变量名列
+        self.setColumnWidth(1, int(total * 0.25))   # 单位列
+        self.setColumnWidth(2, int(total * 0.125))  # 序号列
 
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.horizontalHeader().setStretchLastSection(False)  # 关闭自动拉伸最后一列
         self.verticalHeader().setVisible(False)  # 隐藏行号
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # 允许多选
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        
+        # 禁用鼠标追踪和视口追踪，避免白色块跟随鼠标移动
+        self.setMouseTracking(False)
+        self.viewport().setMouseTracking(False)  # 同时禁用视口的鼠标跟踪
+        
+        # 禁用焦点指示器
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
+        # 禁用自动滚动（当鼠标向表格边缘移动时不会自动滚动）
+        self.setAutoScroll(False)
+        
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.setSortingEnabled(False)  
+        
+        # 禁用Qt自动排序，使用自定义排序
+        self.setSortingEnabled(False)
+        self.horizontalHeader().setSortIndicatorShown(True)
+        self.horizontalHeader().sectionClicked.connect(self._handle_header_click)
+          
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         # 设置字体大小
         # font = QFont()
         # font.setPointSize(12)  # 调小字体大小
-        # self.setFont(font) 
+        # self.setFont(font)
+    
+    def _handle_header_click(self, logicalIndex):
+        """自定义排序处理，确保有效性始终是第一优先级"""
+        # 如果该列之前没有排序过，或者上次是降序，则设为升序；否则设为降序
+        if logicalIndex not in self._column_sort_order:
+            new_order = Qt.SortOrder.AscendingOrder  # 第一次点击：升序
+        else:
+            current_order = self._column_sort_order[logicalIndex]
+            # 切换排序顺序
+            new_order = Qt.SortOrder.DescendingOrder if current_order == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
+        
+        # 记录当前列的排序状态
+        self._column_sort_order[logicalIndex] = new_order
+        
+        # 直接调用自定义排序方法（不使用sortByColumn，因为setSortingEnabled=False）
+        self.sortItems(logicalIndex, new_order)
+    
+    def sortItems(self, column, order=Qt.SortOrder.AscendingOrder):
+        """重写排序方法，确保有效性始终是第一优先级"""
+        # 收集所有行数据（整行移动）
+        rows = []
+        for row in range(self.rowCount()):
+            name_item = self.item(row, 0)
+            unit_item = self.item(row, 1)
+            index_item = self.item(row, 2)
+            
+            if name_item and unit_item and index_item:
+                valid = name_item.data(Qt.ItemDataRole.UserRole)
+                # 获取原始变量名（存储在UserRole+1中）
+                original_name = name_item.data(Qt.ItemDataRole.UserRole + 1)
+                rows.append({
+                    'name': original_name if original_name else '',
+                    'unit': unit_item.text(),
+                    'index': index_item.data(Qt.ItemDataRole.DisplayRole),
+                    'valid': valid if valid is not None else -999,
+                })
+        
+        # 排序逻辑：
+        # Level 1: 有效性降序（1 → 0 → -1，即有效的在前）
+        # Level 2: 按选择的列升序或降序
+        
+        # 使用分组排序：先按有效性分组，再在组内排序
+        from itertools import groupby
+        
+        # 先按有效性降序排序（保证有效的在前）
+        rows.sort(key=lambda x: -x['valid'])
+        
+        # 按有效性分组，然后在每组内按第二级字段排序
+        rows_sorted = []
+        for valid_value, group in groupby(rows, key=lambda x: x['valid']):
+            group_list = list(group)
+            
+            # 在组内按选择的列排序
+            if column == 0:  # 变量名
+                group_list.sort(
+                    key=lambda x: x['name'].lower(),
+                    reverse=(order == Qt.SortOrder.DescendingOrder)
+                )
+            elif column == 1:  # 单位
+                group_list.sort(
+                    key=lambda x: x['unit'].lower(),
+                    reverse=(order == Qt.SortOrder.DescendingOrder)
+                )
+            elif column == 2:  # 序号
+                group_list.sort(
+                    key=lambda x: x['index'],
+                    reverse=(order == Qt.SortOrder.DescendingOrder)
+                )
+            
+            rows_sorted.extend(group_list)
+        
+        rows = rows_sorted
+        
+        # 重新填充表格（整行移动，包括颜色）
+        # 注意：不需要再次禁用排序，因为已经在__init__中禁用了
+        
+        for row, data in enumerate(rows):
+            # 创建新的item（不含emoji，彩色方块由delegate绘制）
+            valid_value = data['valid']
+            original_name = data['name']
+            
+            name_item = QTableWidgetItem()  # 变量名列（文本留空，由delegate绘制）
+            unit_item = QTableWidgetItem(data['unit'])
+            index_item = QTableWidgetItem()
+            index_item.setData(Qt.ItemDataRole.DisplayRole, data['index'])
+            
+            # 存储原始变量名到UserRole+1（用于delegate绘制和所有操作）
+            name_item.setData(Qt.ItemDataRole.UserRole + 1, original_name)
+            
+            # 设置有效性数据（用于排序和delegate绘制彩色方块）
+            name_item.setData(Qt.ItemDataRole.UserRole, valid_value)
+            unit_item.setData(Qt.ItemDataRole.UserRole, valid_value)
+            index_item.setData(Qt.ItemDataRole.UserRole, valid_value)
+            
+            # 设置到表格
+            self.setItem(row, 0, name_item)
+            self.setItem(row, 1, unit_item)
+            self.setItem(row, 2, index_item)
+        
+        # 更新排序指示器
+        self.horizontalHeader().setSortIndicator(column, order)
 
     def _show_context_menu(self, pos):
         index = self.indexAt(pos)
         if not index.isValid():
             return
 
-        var_name = self.item(index.row(), 0).text()
+        item = self.item(index.row(), 0)  # 变量名在第0列（索引0）
+        # 获取原始变量名（不含彩色方框标识符）
+        var_name = item.data(Qt.ItemDataRole.UserRole + 1)
+        if not var_name:
+            # 兼容旧数据
+            var_name = item.text()
 
         menu = QMenu(self)
         
@@ -2056,7 +2340,7 @@ class MyTableWidget(QTableWidget):
         act_add_blank_plot.triggered.connect(lambda: self._add_to_blank_plot(var_name))
         menu.addAction(act_add_blank_plot)
         
-        # c. 复制变量名
+        # c. 复制变量名（复制时也使用原始名称，不含方框标识符）
         act_copy = QAction("复制变量名", menu)
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(var_name))
         menu.addAction(act_copy)
@@ -2136,16 +2420,34 @@ class MyTableWidget(QTableWidget):
         QTimer.singleShot(_delay, _job) 
 
     def startDrag(self, supportedActions):
-        indexes = self.selectedIndexes()
-        if not indexes:
+        """支持多选变量拖拽"""
+        selected_rows = set()
+        for index in self.selectedIndexes():
+            selected_rows.add(index.row())
+        
+        if not selected_rows:
             return
-        row = indexes[0].row()
-        item = self.item(row, 0)
-        if item is None:
+        
+        # 收集所有选中的变量名（使用原始变量名，不含彩色方框标识符）
+        var_names = []
+        for row in sorted(selected_rows):
+            item = self.item(row, 0)  # 变量名在第0列
+            if item is not None:
+                # 获取原始变量名（UserRole+1存储了不含方框的原始名称）
+                original_name = item.data(Qt.ItemDataRole.UserRole + 1)
+                if original_name:
+                    var_names.append(original_name)
+                else:
+                    # 兼容旧数据，如果没有存储原始名称，则使用显示文本
+                    var_names.append(item.text())
+        
+        if not var_names:
             return
+        
         drag = QDrag(self)
         mime_data = QMimeData()
-        mime_data.setText(item.text())
+        # 用分隔符连接多个变量名
+        mime_data.setText(';;'.join(var_names))
         drag.setMimeData(mime_data)
         drag.exec(Qt.DropAction.MoveAction)
 
@@ -2156,7 +2458,13 @@ class MyTableWidget(QTableWidget):
             return
 
         row = index.row()
-        var_name = self.item(row, 0).text()
+        item = self.item(row, 0)  # 变量名在第0列
+        # 获取原始变量名（不含彩色方框标识符）
+        var_name = item.data(Qt.ItemDataRole.UserRole + 1)
+        if not var_name:
+            # 兼容旧数据
+            var_name = item.text()
+            
         main_window = self.window()
         if not hasattr(main_window, 'loader') or main_window.loader is None:
             return
@@ -2173,6 +2481,7 @@ class MyTableWidget(QTableWidget):
 
     def populate(self, var_names, units, validity):
         self.clearContents()
+        self.clearSelection()  # 清除选择状态
         self.setRowCount(len(var_names))
 
         # 创建列表并排序: 先按validity降序, 然后按原顺序 (使用stable sort)
@@ -2182,26 +2491,32 @@ class MyTableWidget(QTableWidget):
         indexed_items.sort(key=lambda x: (-x[0], x[1]))  # valid desc (-valid), then original idx asc
         sorted_names = [name for valid, idx, name, unit in indexed_items]
         sorted_units = [unit for valid, idx, name, unit in indexed_items]
+        sorted_indices = [idx for valid, idx, name, unit in indexed_items]
+        
+        # 保存原始索引映射（用于排序）
+        for row, (name, idx) in enumerate(zip(sorted_names, sorted_indices)):
+            self.original_indices[name] = idx
         sorted_valids = [valid for valid, idx, name, unit in indexed_items]
 
-        for row, (name, unit, valid) in enumerate(zip(sorted_names, sorted_units, sorted_valids)):
-            name_item = QTableWidgetItem(name)
-            unit_item = QTableWidgetItem(unit)
+        for row, (idx, name, unit, valid) in enumerate(zip(sorted_indices, sorted_names, sorted_units, sorted_valids)):
+            # 创建三列的item（不含emoji，彩色方块由delegate绘制）
+            name_item = QTableWidgetItem()  # 变量名列（文本留空，由delegate绘制）
+            unit_item = QTableWidgetItem(unit)  # 单位列
+            index_item = QTableWidgetItem()  # 序号列
+            index_item.setData(Qt.ItemDataRole.DisplayRole, idx)  # 设置为整数，便于数字排序
+            
+            # 存储原始变量名到UserRole+1（用于delegate绘制和所有操作）
+            name_item.setData(Qt.ItemDataRole.UserRole + 1, name)
+            
+            # 为所有item设置有效性数据（用于排序和delegate绘制彩色方块）
+            name_item.setData(Qt.ItemDataRole.UserRole, valid)
+            unit_item.setData(Qt.ItemDataRole.UserRole, valid)
+            index_item.setData(Qt.ItemDataRole.UserRole, valid)
 
-            if valid == 1:
-                brush = QBrush(QColor(0, 255, 0, 50))  # 半透明绿色
-            elif valid == 0:
-                brush = QBrush(QColor(255, 255, 0, 50))  # 半透明黄色
-            elif valid == -1:
-                brush = QBrush(QColor(255, 192, 203, 50))  # 半透明粉色
-            else:
-                brush = QBrush(Qt.GlobalColor.transparent)
-            #print(f"channel: {name} validity is {valid}")
-            name_item.setBackground(brush)
-            unit_item.setBackground(brush)
-
-            self.setItem(row, 0, name_item)
-            self.setItem(row, 1, unit_item)
+            # 设置到正确的列
+            self.setItem(row, 0, name_item)   # 第0列：变量名
+            self.setItem(row, 1, unit_item)   # 第1列：单位
+            self.setItem(row, 2, index_item)  # 第2列：序号
 
 
 # 新增自定义 ViewBox 类
@@ -2251,7 +2566,17 @@ class CustomViewBox(pg.ViewBox):
             else:
                 menu.addAction(jump_act)
         
-        # 添加 Pin Cursor/Free Cursor 功能 (放在Jump to Data之后)
+        # 添加"自动调节y轴"选项（第二个位置，作用于所有plot）
+        if "Autoscale in x-Range" not in existing_texts:
+            auto_y_act = QAction("Autoscale in x-Range", menu)
+            auto_y_act.triggered.connect(self.trigger_auto_y_axis)
+            # 在Jump to Data之后插入（第二个位置）
+            if len(menu.actions()) >= 1:
+                menu.insertAction(menu.actions()[1] if len(menu.actions()) > 1 else None, auto_y_act)
+            else:
+                menu.addAction(auto_y_act)
+        
+        # 添加 Pin Cursor/Free Cursor 功能 (第三个位置，在自动调节y轴之后)
         # 检查是否有任何plot处于pin状态
         is_pinned = False
         if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
@@ -2276,11 +2601,46 @@ class CustomViewBox(pg.ViewBox):
             pin_act = QAction("Pin Cursor", menu)
             pin_act.triggered.connect(self.trigger_pin_cursor)
         
-        # 在Jump to Data之后插入
-        if menu.actions():
-            menu.insertAction(menu.actions()[1], pin_act)
+        # 在自动调节y轴之后插入（第三个位置）
+        if len(menu.actions()) >= 2:
+            menu.insertAction(menu.actions()[2] if len(menu.actions()) > 2 else None, pin_act)
         else:
             menu.addAction(pin_act)
+        
+        # 添加 Cursor Value 显示/隐藏选项 (第四个位置，在Pin Cursor之后)
+        # 先移除可能存在的旧菜单项
+        actions_to_remove = []
+        for action in menu.actions():
+            if action.text() in ["Show Cursor Value", "Hide Cursor Value"]:
+                actions_to_remove.append(action)
+        for action in actions_to_remove:
+            menu.removeAction(action)
+        
+        # 检查cursor是否激活
+        cursor_enabled = False
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_btn'):
+            cursor_enabled = self.plot_widget.window().cursor_btn.isChecked()
+        
+        # 根据当前全局状态添加正确的菜单项
+        values_hidden = False
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_values_hidden'):
+            values_hidden = self.plot_widget.window().cursor_values_hidden
+        
+        if values_hidden:
+            cursor_value_act = QAction("Show Cursor Value", menu)
+            cursor_value_act.triggered.connect(self.trigger_show_cursor_value)
+        else:
+            cursor_value_act = QAction("Hide Cursor Value", menu)
+            cursor_value_act.triggered.connect(self.trigger_hide_cursor_value)
+        
+        # 只有当cursor激活时才启用此菜单项
+        cursor_value_act.setEnabled(cursor_enabled)
+        
+        # 在Pin Cursor之后插入（第四个位置）
+        if len(menu.actions()) >= 3:
+            menu.insertAction(menu.actions()[3] if len(menu.actions()) > 3 else None, cursor_value_act)
+        else:
+            menu.addAction(cursor_value_act)
 
         # 添加 "Copy Name" 按钮：复制当前绘图的变量名
         if "Copy Name" not in existing_texts:
@@ -2293,6 +2653,19 @@ class CustomViewBox(pg.ViewBox):
             )
             copy_act.setEnabled(has_data)
             menu.addAction(copy_act)
+        
+        # 添加"绘图变量编辑器"选项
+        if "Plot Variable Editor" not in existing_texts:
+            editor_act = QAction("Plot Variable Editor", menu)
+            editor_act.triggered.connect(self.trigger_variable_editor)
+            # 检查是否有数据可以编辑
+            has_data = bool(
+                self.plot_widget 
+                and (getattr(self.plot_widget, 'curve', None) is not None 
+                     or getattr(self.plot_widget, 'curves', None))
+            )
+            editor_act.setEnabled(has_data)
+            menu.addAction(editor_act)
                 
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
@@ -2327,10 +2700,93 @@ class CustomViewBox(pg.ViewBox):
         """复制当前绘图变量名到剪贴板（无数据则不执行）"""
         if not self.plot_widget:
             return
-        var_name = getattr(self.plot_widget, 'y_name', '')
-        if not var_name:
+        
+        # 收集所有变量名
+        var_names = []
+        
+        # 检查是否是多曲线模式
+        if hasattr(self.plot_widget, 'is_multi_curve_mode') and self.plot_widget.is_multi_curve_mode:
+            # 多曲线模式：复制所有曲线的变量名
+            if hasattr(self.plot_widget, 'curves') and self.plot_widget.curves:
+                var_names = list(self.plot_widget.curves.keys())
+        else:
+            # 单曲线模式：复制单个变量名
+            var_name = getattr(self.plot_widget, 'y_name', '')
+            if var_name:
+                var_names = [var_name]
+        
+        if not var_names:
             return
-        QApplication.clipboard().setText(var_name)
+        
+        # 将变量名用空格分隔
+        clipboard_text = ' '.join(var_names)
+        QApplication.clipboard().setText(clipboard_text)
+    
+    def trigger_auto_y_axis(self):
+        """
+        触发自动调节y轴功能（右键菜单）
+        
+        功能：根据当前可见的x轴范围，自动调整所有plot的y轴范围，
+              使当前可见数据的y值完整显示（与顶部"自动调节y轴"按钮功能一致）
+        
+        应用范围：所有plot（不仅仅是右键点击的plot）
+        """
+        if self.plot_widget and self.plot_widget.window():
+            main_window = self.plot_widget.window()
+            # 调用主窗口的auto_y_in_x_range方法，功能和顶部按钮完全一致
+            if hasattr(main_window, 'auto_y_in_x_range'):
+                main_window.auto_y_in_x_range()
+    
+    def trigger_show_cursor_value(self):
+        """显示cursor值（包括圆圈和y值标签）- 同步所有plot
+        
+        在多plot环境中，同步所有plot的cursor显示状态。
+        如果cursor已启用，显示完整的cursor（vline + x值 + 圆圈 + y值）。
+        """
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
+            main_window = self.plot_widget.window()
+            # 设置全局状态：cursor值不隐藏
+            main_window.cursor_values_hidden = False
+            
+            # 检查cursor按钮状态
+            cursor_enabled = main_window.cursor_btn.isChecked() if hasattr(main_window, 'cursor_btn') else False
+            
+            # 同步所有plot的cursor显示状态
+            for container in main_window.plot_widgets:
+                if container.plot_widget and cursor_enabled:
+                    container.plot_widget.toggle_cursor(True)
+        elif self.plot_widget:
+            # 单plot模式
+            self.plot_widget.toggle_cursor(True)
+    
+    def trigger_hide_cursor_value(self):
+        """隐藏cursor值（只隐藏圆圈和y值，保留vline和x值）- 同步所有plot
+        
+        在多plot环境中，同步所有plot的cursor显示状态。
+        只隐藏y值标签和圆圈，保留垂直线和x值显示。
+        """
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
+            main_window = self.plot_widget.window()
+            # 设置全局状态：cursor值隐藏
+            main_window.cursor_values_hidden = True
+            
+            # 检查cursor按钮状态
+            cursor_enabled = main_window.cursor_btn.isChecked() if hasattr(main_window, 'cursor_btn') else False
+            
+            # 同步所有plot的cursor隐藏状态
+            for container in main_window.plot_widgets:
+                if container.plot_widget and cursor_enabled:
+                    container.plot_widget.toggle_cursor(False, hide_values_only=True)
+        elif self.plot_widget:
+            # 单plot模式
+            self.plot_widget.toggle_cursor(False, hide_values_only=True)
+    
+    def trigger_variable_editor(self):
+        """打开绘图变量编辑器"""
+        if self.plot_widget:
+            dialog = PlotVariableEditorDialog(self.plot_widget, self.plot_widget.window())
+            dialog.show()
+            dialog.raise_()
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     """
@@ -2369,6 +2825,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.synchronizer = synchronizer
         self.curve = None
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
+        
+        # 多曲线支持
+        self.curves = {}  # 存储所有曲线 {var_name: curve_info}
+        self.is_multi_curve_mode = False  # 是否处于多曲线模式
+        self._batch_adding = False  # 是否正在批量添加变量
+        self.curve_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']  # 默认颜色列表
+        self.current_color_index = 0  # 当前颜色索引
         
         self.y_name = ''
         self.y_format = ''
@@ -2422,29 +2885,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """)
         self.label_left.setSizePolicy(QSizePolicy.Policy.Minimum,
                                       QSizePolicy.Policy.Preferred)
+        self.label_left.setTextFormat(Qt.TextFormat.RichText)  # 支持HTML格式
+        self.label_left.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)  # 支持交互
+        self.label_left.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)  # 禁用右键菜单
+        self.label_left.mousePressEvent = self._on_legend_clicked  # 绑定点击事件
         #self.label_left.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         proxy_left = QGraphicsProxyWidget()
         proxy_left.setWidget(self.label_left)
 
-        # 右侧文本（使用代理窗口部件）
-        self.label_right = QLabel("")
-        self.label_right.setStyleSheet("""
-            color: #000;
-            background-color: transparent;
-        """)
-        self.label_right.setSizePolicy(QSizePolicy.Policy.Minimum,
-                                       QSizePolicy.Policy.Preferred)
-        #self.label_right.setAlignment(Qt.AlignmentFlag.AlignBottom| Qt.AlignmentFlag.AlignRight)
-        proxy_right = QGraphicsProxyWidget()
-        proxy_right.setWidget(self.label_right)
-        
-        # 添加文本到布局
+        # 只添加左侧文本到布局
         layout.addItem(proxy_left)
-        layout.addItem(proxy_right)
-        layout.setStretchFactor(proxy_left, 2)
-        layout.setStretchFactor(proxy_right, 1)
+        layout.setStretchFactor(proxy_left, 1)
         layout.setAlignment(proxy_left, Qt.AlignmentFlag.AlignBottom| Qt.AlignmentFlag.AlignLeft)
-        layout.setAlignment(proxy_right, Qt.AlignmentFlag.AlignBottom| Qt.AlignmentFlag.AlignRight)
 
         #layout.setAlignment(Qt.AlignmentFlag.AlignBottom)
 
@@ -2488,7 +2940,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.view_box.sigRangeChanged.connect(self._on_range_changed)
         
     def jump_to_data_impl(self, x):
-        if not self.curve or not self.y_name:
+        # 检查是否有数据
+        has_data = False
+        var_names = []
+        
+        # 收集所有要显示的变量名
+        if self.is_multi_curve_mode and self.curves:
+            # 多曲线模式：使用curves字典中的所有变量
+            var_names = list(self.curves.keys())
+            has_data = len(var_names) > 0
+        elif self.curve and self.y_name:
+            # 单曲线模式
+            var_names = [self.y_name]
+            has_data = True
+        
+        if not has_data:
             # 没有曲线，直接返回
             return
 
@@ -2496,12 +2962,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not hasattr(main_window, 'loader') or main_window.loader is None:
             return
 
-        y_name = self.y_name
+        # a. 打开/激活数值变量表，并添加所有变量
+        dlg = None
+        for var_name in var_names:
+            if var_name not in main_window.loader.df.columns:
+                continue
+            dlg = DataTableDialog.popup(var_name, main_window.loader.df[var_name], parent=main_window)
 
-        # a. 打开/激活数值变量表，并添加系列（如果不存在）
-        dlg = DataTableDialog.popup(y_name, main_window.loader.df[y_name], parent=main_window)
+        # 如果没有成功打开任何dialog，直接返回
+        if dlg is None:
+            return
 
-        # 判断“数值变量表”窗口是否被最小化了，如果是，则恢复正常状态
+        # 判断"数值变量表"窗口是否被最小化了，如果是，则恢复正常状态
         if dlg.isMinimized():
             dlg.showNormal()
             
@@ -2515,12 +2987,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         index = int(round(index)) - 1  # 转换为 0-based 行索引
         index = max(0, min(index, len(main_window.loader.df) - 1))  # 夹到有效范围
 
+        # 使用第一个变量来定位和选中
+        first_var_name = var_names[0]
+        
         # 获取模型和列索引
         model = dlg.model
-        col_idx = dlg._df.columns.get_loc(y_name)  # 逻辑列索引
+        col_idx = dlg._df.columns.get_loc(first_var_name)  # 逻辑列索引
 
         # 确定使用哪个视图（冻结或主视图）
-        if y_name in dlg.frozen_columns:
+        if first_var_name in dlg.frozen_columns:
             view = dlg.frozen_view
         else:
             view = dlg.main_view
@@ -2539,23 +3014,73 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         QTimer.singleShot(0, lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect))
 
     def auto_range(self):
-        if not self.curve:
+        # 检查是否有数据可显示
+        if not self.curve and not self.curves:
             return False
         
-        x_values = self.offset + self.factor * self.original_index_x
+        # 获取x_values
+        if self.is_multi_curve_mode and self.curves:
+            # 多曲线模式：使用第一个曲线的x_data
+            first_curve_info = next(iter(self.curves.values()))
+            if 'x_data' in first_curve_info:
+                x_values = first_curve_info['x_data']
+            else:
+                return False
+        else:
+            # 单曲线模式
+            if self.original_index_x is not None:
+                x_values = self.offset + self.factor * self.original_index_x
+            elif self.curve:
+                # 如果original_index_x为None，尝试从curve获取数据
+                x_data, _ = self.curve.getData()
+                if x_data is not None:
+                    x_values = x_data
+                else:
+                    return False
+            else:
+                return False
+        
         global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
         
         padding_xVal = DEFAULT_PADDING_VAL_X  
         padding_yVal = 0.5
 
-        special_limits = self.handle_single_point_limits(x_values, self.original_y)
-        if special_limits:
-            min_x, max_x, min_y, max_y = special_limits
+        # 计算X轴范围
+        min_x = np.min(x_values)
+        max_x = np.max(x_values)
+        
+        # 计算Y轴范围
+        if self.is_multi_curve_mode and self.curves:
+            # 多曲线模式：计算所有可见曲线的Y轴范围
+            all_y_values = []
+            for var_name, curve_info in self.curves.items():
+                if curve_info.get('visible', True) and 'y_data' in curve_info:
+                    all_y_values.extend(curve_info['y_data'])
+            
+            if all_y_values:
+                min_y = np.nanmin(all_y_values)
+                max_y = np.nanmax(all_y_values)
+            else:
+                min_y, max_y = 0, 1  # 默认范围
         else:
-            min_x = np.min(x_values)
-            max_x = np.max(x_values)
-            min_y = np.nanmin(self.original_y)
-            max_y = np.nanmax(self.original_y)
+            # 单曲线模式
+            if self.original_y is not None:
+                special_limits = self.handle_single_point_limits(x_values, self.original_y)
+                if special_limits:
+                    min_x, max_x, min_y, max_y = special_limits
+                else:
+                    min_y = np.nanmin(self.original_y)
+                    max_y = np.nanmax(self.original_y)
+            elif self.curve:
+                # 如果original_y为None，尝试从curve获取数据
+                _, y_data = self.curve.getData()
+                if y_data is not None:
+                    min_y = np.nanmin(y_data)
+                    max_y = np.nanmax(y_data)
+                else:
+                    min_y, max_y = 0, 1
+            else:
+                min_y, max_y = 0, 1
         
         limits_xMin = min_x - padding_xVal * (max_x - min_x)
         limits_xMax = max_x + padding_xVal * (max_x - min_x)
@@ -2588,10 +3113,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.label_left.setText(left_text)
 
     def update_right_header(self, right_text=None):
-        """更新顶部文本内容"""
-        if right_text is not None:
-            self.label_right.setText(right_text)
-            self.label_right.setAlignment(Qt.AlignmentFlag.AlignRight)
+        """更新顶部文本内容（已移除右侧label）"""
+        # 右侧label已被移除，此方法保留以兼容现有代码
+        pass
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """
@@ -2689,7 +3213,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.y_name = ''
         self.y_format = ''
         #self.plot_item.update()
-        self.plot_item.clearPlots() 
+        # 先清除cursor items（包括scene中的items）
+        # 重置plot时完全清除对象池，避免复用异常状态的items
+        self._clear_cursor_items(hide_only=False)
+        self._safe_clear_plot_items() 
         self.axis_y.setLabel(text="")
         self.update_left_header("channel name")
         self.update_right_header("")
@@ -2746,13 +3273,41 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.vline.setVisible(False)
         self.cursor_label.setVisible(False)
         
+        # 多曲线cursor元素
+        self.multi_cursor_items = []  # 存储多曲线cursor的可视化元素
+        self.show_values_only = True  # 是否只显示x值（不显示圆圈和y值）
+        
+        # 【内存优化】对象池 - 复用ScatterPlotItem和TextItem，避免重复创建
+        self._cursor_item_pool = {
+            'circles': [],  # ScatterPlotItem对象池
+            'labels': [],   # TextItem对象池（y值标签）
+            'x_label': None  # X轴标签（只需要一个）
+        }
+        
         # 信号连接
-        self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self.mouse_moved)
+        # 【性能优化】控制cursor更新频率，减少CPU占用
+        # 多曲线时降低频率可显著提升响应速度
+        self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=20, slot=self.mouse_moved)
         self.vline.sigPositionChanged.connect(self.on_vline_position_changed)
         self.setAntialiasing(False)
+        
+        # 【性能优化】cursor更新节流控制
+        self._last_cursor_update_time = 0
+        self._cursor_update_throttle = 0.016  # 基础节流：16ms（约60fps）
+        self._adaptive_throttle_enabled = True  # 启用自适应节流
 
     def handle_single_point_limits(self, x_values, y_values):
+        """处理单点或所有点x坐标相同的特殊情况，避免x轴范围为0
+        
+        Args:
+            x_values: x坐标数组
+            y_values: y坐标数组
+            
+        Returns:
+            tuple: (min_x, max_x, min_y, max_y) 或 None（正常情况不需要特殊处理）
+        """
         if len(x_values) == 1:
+            # 单点情况：扩展x轴范围
             x = x_values[0]
             min_x, max_x = self._get_safe_x_range(x, x)
             if len(y_values) == 1:
@@ -2764,7 +3319,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 max_y = np.nanmax(y_values)
             return min_x, max_x, min_y, max_y
         else:
-            return None  # 返回None表示不特殊处理
+            # 检查是否所有x值都相同（多点但x坐标相同的情况）
+            unique_x = set(x_values)
+            if len(unique_x) == 1:
+                # 所有点的x坐标相同，扩展x轴范围
+                x = list(unique_x)[0]
+                min_x, max_x = self._get_safe_x_range(x, x)
+                min_y = np.nanmin(y_values)
+                max_y = np.nanmax(y_values)
+                return min_x, max_x, min_y, max_y
+            else:
+                # 正常情况：有多个不同的x值
+                return None
         
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
@@ -2828,21 +3394,30 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         widget.pinned_x_value = x_pos
         else:
             # 正常模式下更新cursor标签
-            self.update_cursor_label()
+            if self.show_values_only:
+                # 如果只显示x值，调用相应方法
+                self._show_x_position_only()
+            else:
+                self.update_cursor_label()
 
-    def sInt_to_fmtStr(self,value:int):
-        td = pd.to_timedelta(pd.Series(value, dtype='float64'), unit='s')
-        total = td.dt.total_seconds() % (24*3600)           # Series of float (秒)
-        hh = (total // 3600).astype(int)
-        mm = (total % 3600 // 60).astype(int)
+    def sInt_to_fmtStr(self, value: int):
+        """将秒数转换为时间字符串 HH:MM:SS.SS - 优化版避免内存泄漏"""
+        # 【优化】直接计算而不创建pandas对象，避免内存累积
+        total = value % (24*3600)  # 一天内的秒数
+        hh = int(total // 3600)
+        mm = int((total % 3600) // 60)
         ss = total % 60
-        return (hh.apply(lambda x: f"{x:02d}") + ':' +
-                mm.apply(lambda x: f"{x:02d}") + ':' +
-                ss.apply(lambda x: f"{x:05.2f}")).tolist()
+        return f"{hh:02d}:{mm:02d}:{ss:05.2f}"
     
-    def dateInt_to_fmtStr(self,value:int):
-        correct_dates = pd.to_datetime(pd.Series(value), unit='s').dt.strftime('%Y/%m/%d')
-        return correct_dates.tolist()
+    def dateInt_to_fmtStr(self, value: int):
+        """将时间戳转换为日期字符串 - 优化版避免内存泄漏"""
+        # 【优化】直接使用datetime而不创建pandas Series，避免内存累积
+        from datetime import datetime
+        try:
+            dt = datetime.fromtimestamp(value)
+            return dt.strftime('%Y/%m/%d')
+        except:
+            return str(value)
     
     def _significant_decimal_format_str(self,value: float, ref: float, max_dp:int | None = None) -> str:
         """
@@ -2887,8 +3462,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
+        # 统一使用多曲线样式的cursor显示
+        self._update_multi_curve_cursor_label()
+    
+    def _update_single_curve_cursor_label(self):
+        """更新单曲线模式的光标标签"""
         if len(self.plot_item.listDataItems()) == 0:
-            #self.cursor_label.setText("")
             self.update_right_header("")
             return
         
@@ -2897,43 +3476,682 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             curve = self.plot_item.listDataItems()[0]
             x_data, y_data = curve.getData()
             if x_data is None or len(x_data) == 0:
-                #self.cursor_label.setText("")
                 self.update_right_header("")
                 return
             x = np.clip(x, x_data.min(), x_data.max())
             idx = np.argmin(np.abs(x_data - x))
             y_val = y_data[idx]
-            #(x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
             x_str = self._significant_decimal_format_str(value=float(x),ref=self.factor)
             if self.y_format == 's':
                 time_str=self.sInt_to_fmtStr(y_val)
-                #self.update_right_header(f"x={x:.0f}, y={time_str}")
                 self.update_right_header(f"x={x_str}, y={time_str}")
             elif self.y_format == 'date':
                 date_str=self.dateInt_to_fmtStr(y_val)
-                #self.update_right_header(f"x={x:.0f}, y={date_str}")
                 self.update_right_header(f"x={x_str}, y={date_str}")
             else:
-                #self.update_right_header(f"x={x:.0f}, y={y_val:.2f}")
-
                 self.update_right_header(f"x={x_str}, y={y_val:.5g}")
 
         except Exception as e:
             print(f"Cursor update error: {e}")
-            # self.cursor_label.setText("")
+            self.update_right_header("")
+    
+    def _get_circle_from_pool(self, index):
+        """从对象池获取ScatterPlotItem，如果不存在则创建
+        
+        使用对象池复用ScatterPlotItem，避免重复创建导致内存泄漏。
+        每个索引位置对应一个ScatterPlotItem实例，用于在cursor交点处显示圆圈标记。
+        
+        Args:
+            index: 对象池索引位置
+            
+        Returns:
+            ScatterPlotItem: 从池中获取或新创建的圆圈标记对象
+        """
+        pool = self._cursor_item_pool['circles']
+        
+        # 如果池中已有该索引的对象，直接复用
+        if index < len(pool):
+            return pool[index]
+        
+        # 否则创建新对象并加入池
+        circle = pg.ScatterPlotItem(
+            symbol='o',
+            size=8,
+            brush=None
+        )
+        pool.append(circle)
+        return circle
+    
+    def _get_label_from_pool(self, index):
+        """从对象池获取TextItem，如果不存在则创建
+        
+        使用对象池复用TextItem，避免重复创建导致内存泄漏。
+        每个索引位置对应一个TextItem实例，用于显示cursor交点处的y值标签。
+        
+        Args:
+            index: 对象池索引位置
+            
+        Returns:
+            TextItem: 从池中获取或新创建的文本标签对象
+        """
+        pool = self._cursor_item_pool['labels']
+        
+        # 如果池中已有该索引的对象，直接复用
+        if index < len(pool):
+            return pool[index]
+        
+        # 否则创建新对象并加入池
+        label = pg.TextItem(
+            color=(0, 0, 0),
+            fill=pg.mkBrush(255, 255, 255, 220),
+            anchor=(0.5, 0.5)
+        )
+        label.setFont(QFont('Arial', 8))
+        pool.append(label)
+        return label
+    
+    def _get_x_label_from_pool(self):
+        """获取X轴标签（只需要一个，总是复用同一个实例）
+        
+        X轴位置标签在plot下方显示cursor的x坐标值，全局只需要一个实例。
+        使用对象池复用这个唯一的TextItem，避免重复创建。
+        
+        Returns:
+            TextItem: x轴位置标签对象（全局唯一）
+        """
+        if self._cursor_item_pool['x_label'] is None:
+            x_label = pg.TextItem(
+                color=(255, 255, 255),
+                fill=pg.mkBrush(64, 64, 64, 230),
+                border=pg.mkPen(128, 128, 128, width=1),
+                anchor=(0.5, 0)
+            )
+            x_label.setFont(QFont('Arial', 9))
+            self._cursor_item_pool['x_label'] = x_label
+        return self._cursor_item_pool['x_label']
+    
+    def _clear_cursor_items(self, hide_only=True):
+        """清除或隐藏所有cursor可视化元素
+        
+        默认模式下只隐藏元素（供下次复用），完全清除模式下才会删除对象。
+        这种策略通过对象池复用机制避免频繁创建/销毁对象导致的内存泄漏。
+        
+        Args:
+            hide_only: 如果为True，只隐藏所有元素（默认，用于复用）
+                      如果为False，完全删除所有元素和对象池（用于切换数据文件等场景）
+        """
+        # 分类处理：对象池中的元素只隐藏，非池对象删除
+        for item in self.multi_cursor_items:
+            try:
+                item_type = type(item).__name__
+                if item_type == 'ScatterPlotItem':
+                    # 对象池中的圆圈标记：只隐藏
+                    item.setVisible(False)
+                elif item == self._cursor_item_pool.get('x_label'):
+                    # X轴标签：只隐藏
+                    item.setVisible(False)
+                elif item in self._cursor_item_pool.get('labels', []):
+                    # 对象池中的y值标签：只隐藏
+                    item.setVisible(False)
+                else:
+                    # 不在对象池中的项（理论上不应该存在）：删除
+                    if item.scene():
+                        item.scene().removeItem(item)
+                    if hasattr(item, 'deleteLater'):
+                        item.deleteLater()
+            except Exception as e:
+                # 忽略清理过程中的错误
+                pass
+        
+        # 清空当前使用列表
+        self.multi_cursor_items.clear()
+        
+        if not hide_only:
+            # 完全清除模式（仅在真正需要清理时使用，如切换数据文件）
+            # 清空对象池
+            for circle in self._cursor_item_pool['circles']:
+                try:
+                    if circle.scene():
+                        circle.scene().removeItem(circle)
+                    circle.deleteLater()
+                except:
+                    pass
+            
+            for label in self._cursor_item_pool.get('labels', []):
+                try:
+                    if label.scene():
+                        label.scene().removeItem(label)
+                    label.deleteLater()
+                except:
+                    pass
+            
+            if self._cursor_item_pool['x_label']:
+                try:
+                    x_label = self._cursor_item_pool['x_label']
+                    if x_label.scene():
+                        x_label.scene().removeItem(x_label)
+                    x_label.deleteLater()
+                except:
+                    pass
+            
+            # 重置对象池
+            self._cursor_item_pool = {
+                'circles': [],
+                'labels': [],
+                'x_label': None
+            }
+        
+    
+    def _safe_clear_plot_items(self):
+        """安全地清理所有plot items，避免scene不匹配问题"""
+        try:
+            current_scene = self.plot_item.scene()
+            
+            if current_scene is not None:
+                # 获取所有items
+                all_items = current_scene.items()
+                
+                # 手动清理所有items，避免使用clearPlots()
+                items_removed = 0
+                for i, item in enumerate(all_items):
+                    try:
+                        # 检查item是否仍然有效
+                        item_scene = item.scene()
+                        if item_scene == current_scene:
+                            # 只移除数据曲线，不移除cursor相关items（由_clear_cursor_items管理）
+                            should_remove = False
+                            item_type = type(item).__name__
+                            
+                            # 检查是否是数据曲线（PlotDataItem）
+                            if hasattr(item, 'getData') and hasattr(item, 'opts'):
+                                # 确保不是坐标轴
+                                if not hasattr(item, 'setLabel'):
+                                    should_remove = True
+                            
+                            # 注意：不在这里清理TextItem和ScatterPlotItem
+                            # 这些cursor相关的items由_clear_cursor_items()管理
+                            
+                            if should_remove:
+                                current_scene.removeItem(item)
+                                items_removed += 1
+                            else:
+                                pass
+                        else:
+                            pass
+                    except Exception as e:
+                        pass
+                
+            
+            
+        except Exception as e:
+            pass
+    
+    def _update_multi_curve_cursor_label(self):
+        """更新多曲线模式的光标标签"""
+        # 【性能优化】自适应节流控制 - 根据曲线数量动态调整更新频率
+        import time
+        current_time = time.time()
+        
+        # 动态计算节流时间：曲线越多，节流越激进
+        if self._adaptive_throttle_enabled and hasattr(self, 'curves'):
+            curve_count = len(self.curves)
+            # 基础16ms + 每条曲线增加2ms，最多100ms
+            adaptive_throttle = min(0.016 + curve_count * 0.002, 0.1)
+        else:
+            adaptive_throttle = self._cursor_update_throttle
+        
+        if hasattr(self, '_last_cursor_update_time'):
+            time_since_last = current_time - self._last_cursor_update_time
+            if time_since_last < adaptive_throttle:
+                return  # 跳过此次更新
+        self._last_cursor_update_time = current_time
+        
+        # 【内存优化】清除旧的cursor元素
+        old_count = len(self.multi_cursor_items)
+        self._clear_cursor_items()
+        
+        # 【内存监控】使用tracemalloc跟踪内存
+        if not hasattr(self, '_tracemalloc_started'):
+            import tracemalloc
+            tracemalloc.start()
+            self._tracemalloc_started = True
+            self._last_snapshot = None
+        
+        # 检查vline是否可见，如果不可见则不显示任何cursor元素
+        vline_visible = self.vline.isVisible()
+        if not vline_visible:
+            self.update_right_header("")
+            return
+        
+        # 如果设置了只显示x值，则只显示x位置信息（即使没有数据曲线）
+        has_attr = hasattr(self, 'show_values_only')
+        show_values_only = self.show_values_only if has_attr else False
+        if has_attr and show_values_only:
+            self._show_x_position_only()
+            return
+        
+        # 检查是否有数据
+        if not self.curves and not self.curve:
+            self.update_right_header("")
+            return
+            
+        try:
+            x = self.vline.value()
+            cursor_values = []
+            
+            # 获取当前视图范围
+            (x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
+            
+            # 检查x是否在可见范围内
+            if x < x_min or x > x_max:
+                self.update_right_header("")
+                return
+            
+            # 准备曲线数据列表
+            curves_to_process = []
+            
+            if self.curves:
+                # 有curves字典：处理curves中的曲线（无论是否是多曲线模式）
+                for var_name, curve_info in self.curves.items():
+                    if not curve_info.get('visible', True):
+                        continue
+                    curves_to_process.append({
+                        'var_name': var_name,
+                        'x_data': curve_info['x_data'],
+                        'y_data': curve_info['y_data'],
+                        'color': curve_info['color'],
+                        'y_format': curve_info.get('y_format', ''),
+                        'unit': self.units.get(var_name, '')
+                    })
+            elif not self.is_multi_curve_mode and self.curve and self.y_name:
+                # 单曲线模式
+                x_data, y_data = self.curve.getData()
+                if x_data is not None and len(x_data) > 0:
+                    # 获取曲线颜色
+                    curve_color = 'blue'
+                    try:
+                        if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
+                            pen = self.curve.opts['pen']
+                            if hasattr(pen, 'color'):
+                                curve_color = pen.color().name()
+                    except:
+                        pass
+                    
+                    curves_to_process.append({
+                        'var_name': self.y_name,
+                        'x_data': x_data,
+                        'y_data': y_data,
+                        'color': curve_color,
+                        'y_format': self.y_format,
+                        'unit': self.units.get(self.y_name, '')
+                    })
+            
+            # 为每个曲线计算y值
+            for curve_data in curves_to_process:
+                var_name = curve_data['var_name']
+                x_data = curve_data['x_data']
+                y_data = curve_data['y_data']
+                color = curve_data['color']
+                y_format = curve_data['y_format']
+                
+                if x_data is None or len(x_data) == 0:
+                    continue
+                    
+                # 检查x是否在数据范围内
+                if x < x_data.min() or x > x_data.max():
+                    continue
+                    
+                # 【性能优化】使用二分查找代替argmin，速度提升10-100倍
+                # 假设x_data是排序的（大多数情况下是），使用searchsorted
+                try:
+                    idx = np.searchsorted(x_data, x, side='left')
+                    # 边界检查
+                    if idx >= len(x_data):
+                        idx = len(x_data) - 1
+                    elif idx > 0:
+                        # 检查左边的点是否更接近
+                        if abs(x_data[idx - 1] - x) < abs(x_data[idx] - x):
+                            idx = idx - 1
+                except (ValueError, TypeError):
+                    # 如果x_data不是排序的，回退到argmin
+                    idx = np.argmin(np.abs(x_data - x))
+                    
+                y_val = y_data[idx]
+                x_actual = x_data[idx]
+                
+                # 检查是否为NaN（避免All-NaN slice encountered警告）
+                if np.isnan(x_actual) or np.isnan(y_val):
+                    continue
+                
+                # 检查y是否在可见范围内
+                if y_val < y_min or y_val > y_max:
+                    continue
+                
+                # 格式化y值
+                if y_format == 's':
+                    y_str = self.sInt_to_fmtStr(y_val)
+                elif y_format == 'date':
+                    y_str = self.dateInt_to_fmtStr(y_val)
+                else:
+                    y_str = f"{y_val:.5g}"
+                
+                # 添加到结果列表
+                cursor_values.append({
+                    'var_name': var_name,
+                    'x_pos': x_actual,
+                    'y_pos': y_val,
+                    'y_value': y_str,
+                    'color': color
+                })
+                
+                # 从对象池获取ScatterPlotItem，用于显示cursor交点圆圈
+                circle = self._get_circle_from_pool(len(cursor_values) - 1)
+                
+                # 清除旧数据并设置新位置
+                circle.clear()
+                circle.setData([x_actual], [y_val])
+                
+                # 复用pen对象优化：避免每次创建新pen导致内存泄漏
+                if not hasattr(circle, '_cached_pen'):
+                    # 首次使用：创建并缓存pen对象
+                    circle._cached_pen = pg.mkPen(color, width=1.5)
+                    circle.setPen(circle._cached_pen)
+                else:
+                    # 后续使用：只更新颜色
+                    circle._cached_pen.setColor(QColor(color))
+                
+                # 显示圆圈并添加到场景
+                circle.setVisible(True)
+                circle.setZValue(200)
+                # 确保item在正确的plot中（避免重复添加警告）
+                circle_scene = circle.scene()
+                plot_scene = self.plot_item.scene()
+                
+                if circle_scene != plot_scene:
+                    # 如果item在其他scene中，先移除
+                    if circle_scene is not None:
+                        circle_scene.removeItem(circle)
+                    # 关键修复：ignoreBounds=True 让圆圈不影响y轴范围的自动计算
+                    # 这样即使圆圈在边缘，也不会导致y轴扩展，避免抖动
+                    self.plot_item.addItem(circle, ignoreBounds=True)
+                
+                self.multi_cursor_items.append(circle)
+            
+            # 智能定位所有文本标签，避免重叠
+            self._position_labels_avoid_overlap(cursor_values, x_min, x_max, y_min, y_max)
+            
+            # 在cursor位置的x轴处添加x位置信息（放在plot外部，与x轴文字同高度）
+            x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
+            x_info_text = x_str
+            
+            # 从对象池获取x轴标签（复用单个TextItem）
+            x_info_item = self._get_x_label_from_pool()
+            x_info_item.setText(x_info_text)
+            x_info_item.setVisible(True)
+            
+            # 计算场景坐标：将TextItem放在plot区域外部，与x轴相切
+            # 1. 获取ViewBox在场景中的矩形区域
+            view_rect = self.plot_item.vb.sceneBoundingRect()
+            
+            # 2. 将x坐标从数据坐标转换到场景坐标
+            scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
+            scene_x = scene_point.x()
+            
+            # 3. y坐标：ViewBox底部边缘（与x轴相切的位置）
+            # 文本框的顶边（anchor=(0.5,0)）将对齐到这个位置
+            scene_y = view_rect.bottom()
+            
+            # 使用场景坐标设置位置
+            x_info_item.setPos(scene_x, scene_y)
+            # 设置极高的zValue确保在最前面
+            x_info_item.setZValue(100000)
+            # 添加到场景中（使用场景坐标系）
+            scene = self.plot_item.scene()
+            x_scene = x_info_item.scene()
+            
+            if x_scene != scene:
+                if x_scene is not None:
+                    x_scene.removeItem(x_info_item)
+                scene.addItem(x_info_item)
+            
+            self.multi_cursor_items.append(x_info_item)
+            
+            # 不再更新右上角显示，使用可视化标签代替
+
+        except Exception as e:
+            print(f"Multi-curve cursor update error: {e}")
             self.update_right_header("")
 
-    def toggle_cursor(self, show: bool):
-        """切换光标显示状态"""
-        self.vline.setVisible(show)
-        self.cursor_label.setVisible(show)
-        if show:
-            self.update_cursor_label()
+    def _position_labels_avoid_overlap(self, cursor_values, x_min, x_max, y_min, y_max):
+        """优化的标签定位，使用对角线位置避免遮挡曲线
+        
+        【内存优化】使用对象池复用TextItem
+        """
+        if not cursor_values:
+            return
+        
+        # 计算视图范围，用于边界检查
+        x_range = x_max - x_min
+        y_range = y_max - y_min
+        
+        # 标签尺寸估算（像素转数据坐标）
+        label_width_data = 80 * x_range / 500
+        label_height_data = 25 * y_range / 400
+        
+        for idx, item in enumerate(cursor_values):
+            var_name = item['var_name']
+            x_pos = item['x_pos']
+            y_pos = item['y_pos']
+            y_value = item['y_value']
+            color = item['color']
+            
+            # 从对象池获取TextItem并更新其属性
+            text_item = self._get_label_from_pool(idx)
+            text_item.setText(y_value)
+            
+            # 复用border pen对象优化：避免每次创建新pen导致内存泄漏
+            if not hasattr(text_item, '_cached_border_pen'):
+                # 首次使用：创建并缓存border pen对象
+                text_item._cached_border_pen = pg.mkPen(color, width=1.5)
+                text_item.border = text_item._cached_border_pen
+            else:
+                # 后续使用：只更新颜色
+                text_item._cached_border_pen.setColor(QColor(color))
+            
+            text_item.setVisible(True)
+            
+            # 使用对角线位置策略，避免直接遮挡曲线
+            # 优先使用右上方向，如果空间不足则尝试其他方向
+            offset_x = label_width_data * 0.2   # 水平偏移（缩短距离）
+            offset_y = label_height_data * 0.35  # 垂直偏移（缩短距离）
+            
+            # 候选位置策略（按优先级排序）
+            strategies = [
+                (offset_x, offset_y),      # 右上（优先）
+                (-offset_x, offset_y),     # 左上
+                (offset_x, -offset_y),     # 右下
+                (-offset_x, -offset_y),    # 左下
+            ]
+            
+            # 选择第一个不超出边界的位置
+            label_x, label_y = None, None
+            for dx, dy in strategies:
+                candidate_x = x_pos + dx
+                candidate_y = y_pos + dy
+                
+                # 检查是否在边界内
+                if (candidate_x - label_width_data * 0.5 >= x_min and
+                    candidate_x + label_width_data * 0.5 <= x_max and
+                    candidate_y - label_height_data * 0.5 >= y_min and
+                    candidate_y + label_height_data * 0.5 <= y_max):
+                    label_x = candidate_x
+                    label_y = candidate_y
+                    break
+            
+            # 如果所有对角线位置都超出边界，使用约束后的右上位置
+            if label_x is None:
+                label_x = x_pos + offset_x
+                label_y = y_pos + offset_y
+                # 强制约束在边界内
+                label_x = max(x_min + label_width_data * 0.5, 
+                             min(x_max - label_width_data * 0.5, label_x))
+                label_y = max(y_min + label_height_data * 0.5, 
+                             min(y_max - label_height_data * 0.5, label_y))
+            
+            # ========== 边缘避让逻辑（加强版）==========
+            # 问题：当cursor的y值接近plot上下边缘时，标签可能会上下抖动，
+            #      导致y轴宽度变化，进而引起整个plot的抖动。
+            #      特别是在自动调节y轴后，边缘空间更小，抖动更明显。
+            # 
+            # 解决策略（加强版）：
+            # 1. 增大安全边距（3倍标签高度）
+            # 2. 检测数据点位置而非标签位置，更早触发避让
+            # 3. 更激进地向中心推动，确保标签完全远离边缘
+            # 4. 考虑标签实际高度，预留足够空间
+            
+            # 定义更大的安全边距
+            edge_margin_strict = label_height_data * 1.5 # 严格安全距离（1.5倍标签高度）
+            y_center = (y_min + y_max) / 2                 # plot中心线
+            y_quarter_upper = y_min + (y_max - y_min) * 0.25  # 下1/4位置
+            y_quarter_lower = y_max - (y_max - y_min) * 0.25  # 上3/4位置
+            
+            # 首先检查数据点位置（y_pos），而非标签位置（label_y）
+            # 这样可以更早触发避让，避免标签在边缘附近徘徊
+            data_point_near_bottom = (y_pos - y_min) < edge_margin_strict
+            data_point_near_top = (y_max - y_pos) < edge_margin_strict
+            
+            # 如果数据点靠近下边缘
+            if data_point_near_bottom:
+                # 激进策略：将标签直接推到下1/4位置（向上推）
+                # 这样即使数据点在最底部，标签也能保持稳定
+                label_y = max(y_quarter_upper, y_pos + offset_y)
+                # 但不要超过中心线
+                label_y = min(label_y, y_center)
+            
+            # 如果数据点靠近上边缘
+            elif data_point_near_top:
+                # 激进策略：将标签直接推到上3/4位置（向下推）
+                label_y = min(y_quarter_lower, y_pos + offset_y)
+                # 但不要超过中心线
+                label_y = max(label_y, y_center)
+            
+            # 二次检查：即使数据点不在边缘，如果标签计算位置仍然太靠近边缘，也要调整
+            else:
+                # 使用较小的安全边距进行二次检查
+                edge_margin_soft = label_height_data * 2.0
+                
+                if label_y - y_min < edge_margin_soft:
+                    # 向上推到安全位置
+                    label_y = y_min + edge_margin_soft
+                elif y_max - label_y < edge_margin_soft:
+                    # 向下推到安全位置
+                    label_y = y_max - edge_margin_soft
+            
+            # 设置标签位置
+            text_item.setPos(label_x, label_y)
+            text_item.setZValue(201)
+            # 确保item在正确的plot中（避免重复添加警告）
+            text_scene = text_item.scene()
+            plot_scene = self.plot_item.scene()
+            
+            if text_scene != plot_scene:
+                if text_scene is not None:
+                    text_scene.removeItem(text_item)
+                # ignoreBounds=True：文本标签不影响y轴范围，配合边缘避让逻辑彻底消除抖动
+                self.plot_item.addItem(text_item, ignoreBounds=True)
+            
+            self.multi_cursor_items.append(text_item)
+
+    def toggle_cursor(self, show: bool, hide_values_only: bool = False):
+        """切换光标显示状态
+        
+        Args:
+            show: 是否显示cursor
+            hide_values_only: 如果为True，只隐藏圆圈和y值标签，保留vline和x值
+        """
+        if hide_values_only:
+            # 只隐藏圆圈和y值标签，保留vline和x值
+            self.vline.setVisible(True)
+            self.cursor_label.setVisible(False)
+            self.show_values_only = True  # 设置状态
+            # 清除多曲线cursor元素（圆圈和y值标签）
+            self._clear_cursor_items()
+            # 但保留x值显示
+            self._show_x_position_only()
         else:
-            self.update_right_header("")
-            # 隐藏光标时重置pin状态
-            self.is_cursor_pinned = False
-            self.pinned_x_value = None
+            # 正常模式：完全显示或隐藏cursor
+            self.vline.setVisible(show)
+            self.cursor_label.setVisible(show)
+            self.show_values_only = not show  # show=True时显示完整cursor（False），show=False时不显示
+            
+            if not show:
+                # 如果隐藏光标，清除多曲线cursor元素
+                self._clear_cursor_items()
+                self.update_right_header("")
+                # 隐藏光标时重置pin状态
+                self.is_cursor_pinned = False
+                self.pinned_x_value = None
+            else:
+                # 显示完整cursor（圆圈、y值标签、x值框）
+                self.update_cursor_label()
+    
+    def _show_x_position_only(self):
+        """只显示x轴位置信息，不显示圆圈和y值标签"""
+        try:
+            # 检查vline是否可见
+            if not self.vline.isVisible():
+                return
+            
+            x = self.vline.value()
+            (x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
+            
+            # 检查x是否在可见范围内
+            if x < x_min or x > x_max:
+                return
+            
+            # 清除旧的cursor元素
+            self._clear_cursor_items()
+            
+            # 只显示x轴位置信息
+            x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
+            x_info_text = x_str  # 只显示数值，不显示"x="
+            
+            # 【内存优化】从对象池获取x轴标签（只需要一个，总是复用）
+            x_info_item = self._get_x_label_from_pool()
+            x_info_item.setText(x_info_text)
+            x_info_item.setVisible(True)
+            
+            # 计算场景坐标：将TextItem放在plot区域外部，与x轴相切
+            # 1. 获取ViewBox在场景中的矩形区域
+            view_rect = self.plot_item.vb.sceneBoundingRect()
+            
+            # 2. 将x坐标从数据坐标转换到场景坐标
+            scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
+            scene_x = scene_point.x()
+            
+            # 3. y坐标：ViewBox底部边缘（与x轴相切的位置）
+            # 文本框的顶边（anchor=(0.5,0)）将对齐到这个位置
+            scene_y = view_rect.bottom()
+            
+            # 使用场景坐标设置位置
+            x_info_item.setPos(scene_x, scene_y)
+            
+            # 设置极高的zValue确保在最前面
+            x_info_item.setZValue(100000)
+            # 添加到场景中（使用场景坐标系）
+            scene = self.plot_item.scene()
+            x_scene = x_info_item.scene()
+            
+            if x_scene != scene:
+                if x_scene is not None:
+                    x_scene.removeItem(x_info_item)
+                scene.addItem(x_info_item)
+            
+            self.multi_cursor_items.append(x_info_item)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
     def pin_cursor(self, x_value):
         """
@@ -3017,15 +4235,31 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.view_box.is_cursor_pinned = False
 
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
-        """
-        在绘图或自动缩放后，更新光标线的边界和可见性。
+        """在绘图或自动缩放后，更新光标线的边界和可见性
+        
+        根据数据范围更新cursor的移动边界，并根据主窗口的cursor状态决定显示模式。
+        
+        Args:
+            min_x_bound: cursor允许的最小x值
+            max_x_bound: cursor允许的最大x值
         """
         main_window = self.window()
         if main_window and hasattr(main_window, 'cursor_btn'):
+            # 设置cursor的移动边界
             self.vline.setBounds([min_x_bound, max_x_bound])
-            self.toggle_cursor(main_window.cursor_btn.isChecked())
+            cursor_enabled = main_window.cursor_btn.isChecked()
+            cursor_values_hidden = getattr(main_window, 'cursor_values_hidden', False)
+            
+            # 根据全局cursor状态决定显示模式
+            if cursor_enabled and cursor_values_hidden:
+                # cursor启用但只显示vline和x值
+                self.toggle_cursor(False, hide_values_only=True)
+            else:
+                # cursor完全启用或禁用
+                self.toggle_cursor(cursor_enabled)
         else:
-            self.vline.setBounds([None, None]) # 确保清除边界
+            # 无主窗口或cursor按钮，禁用cursor
+            self.vline.setBounds([None, None])
             self.toggle_cursor(False)
 
     def clear_value_cache(self):
@@ -3089,9 +4323,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.factor = new_factor
         self.offset = new_offset
         
-        if self.original_index_x is not None:
-            new_x = self.offset + self.factor * self.original_index_x
-            self.curve.setData(new_x, self.original_y)
+        if self.is_multi_curve_mode:
+            # 多曲线模式：更新所有曲线的x数据
+            for var_name, curve_info in self.curves.items():
+                if 'curve' in curve_info and 'x_data' in curve_info:
+                    curve = curve_info['curve']
+                    # 重新计算x数据
+                    new_x = self.offset + self.factor * self.original_index_x
+                    curve.setData(new_x, curve_info['y_data'])
+                    # 更新存储的x_data
+                    curve_info['x_data'] = new_x
+        else:
+            # 单曲线模式
+            if self.original_index_x is not None:
+                new_x = self.offset + self.factor * self.original_index_x
+                self.curve.setData(new_x, self.original_y)
 
         datalength = len(self.original_index_x) if self.original_index_x is not None else (
             self.window().loader.datalength if hasattr(self.window(), 'loader') else 0)
@@ -3138,8 +4384,48 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             event.ignore()
 
     def dropEvent(self, event):
-        var_name = event.mimeData().text()
-        self.plot_variable(var_name)
+        """处理变量拖放事件，支持单个或多个变量同时拖入
+        
+        拖入多个变量时，自动激活多曲线模式并批量添加所有变量。
+        批量添加过程中会抑制重复提示，最后统一显示失败的变量。
+        
+        Args:
+            event: 拖放事件对象，包含拖入的变量名（用;;分隔）
+        """
+        var_names_text = event.mimeData().text()
+        # 支持多变量拖放，用;;分隔
+        var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+        
+        if len(var_names) > 1:
+            # 多个变量：激活多曲线模式并批量添加
+            self.is_multi_curve_mode = True
+            self._batch_adding = True
+            
+            # 逐个添加变量，收集失败的（重复的）变量
+            failed_vars = []
+            for var_name in var_names:
+                success = self.plot_variable(var_name, show_duplicate_warning=False)
+                if not success:
+                    failed_vars.append(var_name)
+            
+            # 批量添加完成
+            self._batch_adding = False
+            
+            # 确保多曲线模式保持激活
+            if len(self.curves) > 1:
+                self.is_multi_curve_mode = True
+                self.update_legend()
+            
+            # 批量添加完成后统一更新坐标轴
+            self._update_axes_for_multi_curve()
+            
+            # 统一提示已存在的变量
+            if failed_vars:
+                QMessageBox.information(self, "提示", f"以下变量已在绘图中:\n" + "\n".join(failed_vars))
+        elif len(var_names) == 1:
+            # 单个变量：正常处理
+            self.plot_variable(var_names[0])
+        
         event.acceptProposedAction()
         self.window().update_mark_stats()
 
@@ -3206,7 +4492,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         except Exception as e:
             return False, f"处理数据时出错: {str(e)}", None, None, ""
 
-    def plot_variable(self, var_name: str) -> bool:
+    def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
         """
         绘制变量到图表
         
@@ -3215,6 +4501,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         Args:
             var_name: 要绘制的变量名称
+            show_duplicate_warning: 是否显示重复变量警告
             
         Returns:
             bool: 绘制是否成功
@@ -3232,17 +4519,37 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return False
         
         try:
-            # 设置绘图数据
+            # 检查是否是多曲线模式
+            if self.is_multi_curve_mode:
+                # 多曲线模式：直接添加新曲线
+                x_values = self.offset + self.factor * x_array
+                return self.add_variable_to_plot(var_name, x_values, y_array, y_format, show_duplicate_warning=show_duplicate_warning)
+            
+            # 单曲线模式：设置绘图数据
             self.y_format = y_format
             self.y_name = var_name
             self.original_index_x = x_array
             self.original_y = y_array
             x_values = self.offset + self.factor * self.original_index_x
-
-            # 清除旧图并绘制新图
-            self.plot_item.clearPlots()             
+            
+            # 单曲线模式：清除旧图并绘制新图
+            # 先清除cursor items（包括scene中的items）
+            # 绘制新变量时完全清除对象池，避免复用异常状态的items
+            self._clear_cursor_items(hide_only=False)
+            
+            # 手动清理所有图形项，避免PyQtGraph的clearPlots scene不匹配问题
+            self._safe_clear_plot_items()
+            self.curves.clear()  # 清空多曲线数据
+            
             _pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)
             self.curve = self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
+            
+            # 性能优化：启用降采样和剪裁
+            if len(x_values) > 1000:  # 只对大数据集启用
+                self.curve.setDownsampling(auto=True, method='subsample')
+                self.curve.setClipToView(True)
+                if len(x_values) > 10000:
+                    self.curve.setSkipFiniteCheck(True)  # 数据量大时跳过有限性检查
             
             # 延迟更新样式
             QTimer.singleShot(0, lambda: self.update_plot_style(self.view_box, self.view_box.viewRange(), None))
@@ -3267,8 +4574,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return False
 
     def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray):
-        """设置绘图坐标轴"""
+        """设置绘图坐标轴
+        
+        根据数据范围设置X和Y轴的显示范围和限制范围。
+        对于单点或所有点x坐标相同的特殊情况，会自动扩展x轴范围。
+        
+        Args:
+            x_values: X轴数据数组
+            y_values: Y轴数据数组
+        """
         try:
+            # 处理特殊情况（单点或所有点x坐标相同）
             special_limits = self.handle_single_point_limits(x_values, y_values)
             if special_limits:
                 min_x, max_x, min_y, max_y = special_limits
@@ -3278,16 +4594,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 min_y = np.nanmin(y_values)
                 max_y = np.nanmax(y_values)
                 
+            # 计算X轴的限制范围（允许的最大范围）
             padding_x = DEFAULT_PADDING_VAL_X
             limits_xMin = min_x - padding_x * (max_x - min_x)
             limits_xMax = max_x + padding_x * (max_x - min_x)
-
+            
+            # 设置X轴的viewRange（显示范围）
+            self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
+            
+            # 设置Y轴范围和X轴limits
             self._set_safe_y_range(min_y, max_y)
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
         except Exception as e:
-            print(f"设置坐标轴时出错: {e}")
-            # 使用默认范围
+            # 出错时使用默认范围
             self._set_safe_y_range(0, 1)
             self._set_x_limits_with_min_range(0, 1)
 
@@ -3303,7 +4623,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _clear_plot_data(self):
         """清除绘图数据"""
         try:
-            self.plot_item.clearPlots()
+            # 先清除cursor items（包括scene中的items）
+            # 重要：清除plot时需要完全清除对象池（hide_only=False）
+            # 这样可以避免对象池中的items处于异常状态（scene=None但PyQtGraph仍认为它属于PlotItem）
+            self._clear_cursor_items(hide_only=False)
+            
+            # 清除所有plot items
+            self._safe_clear_plot_items()
             self.axis_y.setLabel(text="")
             self.y_name = ''
             self.y_format = ''
@@ -3312,6 +4638,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.curve = None
             self.original_index_x = None
             self.original_y = None
+            
+            # 清除多曲线数据
+            self.curves.clear()
+            self.is_multi_curve_mode = False
+            self.current_color_index = 0
         except Exception as e:
             print(f"清除绘图数据时出错: {e}")
 
@@ -3319,6 +4650,414 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """清除绘图项"""
         self._reset_plot_limits()
         self._clear_plot_data()
+        
+    def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None, y_format: str = None, skip_existence_check: bool = False, show_duplicate_warning: bool = True) -> bool:
+        """添加变量到多曲线绘图
+        
+        这是多曲线绘图的核心方法，支持以下功能：
+        1. 自动处理单曲线到多曲线模式的转换
+        2. 防止重复添加相同变量
+        3. 支持批量添加模式（抑制中间坐标轴更新）
+        4. 自动颜色分配和曲线样式优化
+        
+        工作流程：
+        - 检查变量是否已存在（可选）
+        - 如果是从单曲线模式转换，将现有单曲线迁移到curves字典
+        - 创建新曲线并设置性能优化选项
+        - 更新坐标轴范围（非批量模式）
+        - 更新cursor显示
+        
+        Args:
+            var_name: 变量名称
+            x_values: X轴数据（可选，如果为None则从dataframe准备）
+            y_values: Y轴数据（可选，如果为None则从dataframe准备）
+            y_format: Y轴格式（可选，如's'时间格式、'date'日期格式等）
+            skip_existence_check: 是否跳过存在性检查（内部使用）
+            show_duplicate_warning: 是否显示重复变量警告（批量添加时设为False）
+            
+        Returns:
+            bool: 添加是否成功。失败原因可能是：变量已存在、数据无效等
+        """
+        try:
+            # 如果数据未提供，则准备数据
+            if x_values is None or y_values is None:
+                success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(var_name)
+                if not success:
+                    QMessageBox.warning(self, "错误", error_msg)
+                    return False
+                x_values = self.offset + self.factor * x_array
+                y_values = y_array
+            
+            # 检查变量是否已存在（除非跳过检查）
+            if not skip_existence_check:
+                if (self.is_multi_curve_mode and var_name in self.curves) or \
+                   (not self.is_multi_curve_mode and var_name == self.y_name):
+                    if show_duplicate_warning:
+                        QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
+                    return False
+            
+            # 特殊情况：多曲线模式但curves为空，需要迁移单曲线
+            # 说明正在从单曲线过渡到多曲线，需要先将self.curve迁移到curves字典
+            if self.is_multi_curve_mode and len(self.curves) == 0 and self.curve and self.y_name:
+                # 将当前单曲线添加到curves字典
+                current_color = 'blue'
+                if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
+                    current_pen = self.curve.opts['pen']
+                    if hasattr(current_pen, 'color'):
+                        current_color = current_pen.color().name()
+                
+                self.curves[self.y_name] = {
+                    'curve': self.curve,
+                    'x_data': self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None,
+                    'y_data': self.original_y if self.original_y is not None else None,
+                    'color': current_color,
+                    'y_format': self.y_format,
+                    'visible': True
+                }
+                self.current_color_index = 1  # 从第二个颜色开始
+                
+                # 如果要添加的变量与已迁移的相同，直接返回
+                if var_name == self.y_name:
+                    if not skip_existence_check and show_duplicate_warning:
+                        QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
+                    return False
+            
+            # 如果当前是单曲线模式，需要先转换到多曲线模式
+            if not self.is_multi_curve_mode and self.curve and self.y_name:
+                # 检查要添加的变量是否与当前单曲线相同
+                if var_name == self.y_name:
+                    # 相同变量，不需要转换模式，直接返回
+                    if not skip_existence_check and show_duplicate_warning:
+                        QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
+                    return False
+                
+                # 将当前单曲线添加到curves字典
+                current_color = 'blue'  # 默认颜色
+                if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
+                    current_pen = self.curve.opts['pen']
+                    if hasattr(current_pen, 'color'):
+                        current_color = current_pen.color().name()
+                
+                self.curves[self.y_name] = {
+                    'curve': self.curve,
+                    'x_data': self.offset + self.factor * self.original_index_x if self.original_index_x is not None else x_values,
+                    'y_data': self.original_y if self.original_y is not None else y_values,
+                    'color': current_color,
+                    'y_format': self.y_format,
+                    'visible': True
+                }
+                self.current_color_index = 1  # 从第二个颜色开始
+            
+            # 选择颜色
+            color = self.curve_colors[self.current_color_index % len(self.curve_colors)]
+            self.current_color_index += 1
+            
+            # 创建曲线
+            pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            curve = self.plot_item.plot(x_values, y_values, pen=pen, name=var_name)
+            
+            # 性能优化：启用降采样和剪裁（大数据集）
+            if len(x_values) > 1000:
+                curve.setDownsampling(auto=True, method='subsample')
+                curve.setClipToView(True)
+                if len(x_values) > 10000:
+                    curve.setSkipFiniteCheck(True)
+            
+            # 存储曲线信息到curves字典
+            self.curves[var_name] = {
+                'curve': curve,
+                'x_data': x_values,
+                'y_data': y_values,
+                'color': color,
+                'y_format': y_format or '',
+                'visible': True
+            }
+            
+            # 更新多曲线模式
+            self.update_multi_curve_mode()
+            
+            # 更新坐标轴范围（批量添加时跳过，避免x轴闪烁）
+            batch_adding = getattr(self, '_batch_adding', False)
+            if not batch_adding:
+                self._update_axes_for_multi_curve()
+            
+            # 更新cursor边界
+            min_x, max_x = np.min(x_values), np.max(x_values)
+            self.vline.setBounds([min_x, max_x])
+            
+            # 应用全局cursor值显示状态
+            self._update_cursor_after_plot(min_x, max_x)
+            
+            # 如果cursor可见，立即更新cursor标签以显示新添加的曲线
+            if self.vline.isVisible():
+                self.update_cursor_label()
+            
+            return True
+            
+        except Exception as e:
+            QMessageBox.critical(self, "绘图错误", f"添加变量时发生错误: {str(e)}")
+            return False
+    
+    def update_multi_curve_mode(self):
+        """更新多曲线模式状态"""
+        curve_count = len(self.curves)
+        
+        # 如果正在批量添加，不要自动切换模式
+        if not hasattr(self, '_batch_adding'):
+            self._batch_adding = False
+            
+        if not self._batch_adding:
+            self.is_multi_curve_mode = curve_count > 1
+        
+        if self.is_multi_curve_mode:
+            # 多曲线模式：显示legend
+            self.update_legend()
+        else:
+            # 单曲线模式：显示传统标题
+            if curve_count == 1:
+                var_name = list(self.curves.keys())[0]
+                full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
+                self.update_left_header(full_title)
+            else:
+                self.update_left_header("channel name")
+                self.update_right_header("")
+    
+    def update_legend(self):
+        """更新图例显示
+        
+        在多曲线模式下，在左上角显示所有曲线的图例。
+        图例样式：
+        - 可见曲线：实心方块(■) + 曲线颜色 + 变量名(单位)
+        - 隐藏曲线：空心方块(□) + 半透明颜色 + 灰色文字
+        
+        点击图例中的曲线名可以切换该曲线的显示/隐藏状态。
+        """
+        if not self.is_multi_curve_mode:
+            return
+            
+        # 构建图例文本（包含所有曲线，不管是否可见）
+        legend_items = []
+        for var_name, curve_info in self.curves.items():
+            color = curve_info['color']
+            unit = self.units.get(var_name, '')
+            legend_text = f"{var_name} ({unit})" if unit else var_name
+            
+            # 根据可见性调整显示样式
+            if curve_info['visible']:
+                # 可见：实心方块 + 加粗文字
+                legend_items.append(f"<span style='color: {color}; font-weight: bold;'>■</span> {legend_text}")
+            else:
+                # 隐藏：空心方块 + 灰色文字
+                legend_items.append(f"<span style='color: {color}; opacity: 0.5;'>□</span> <span style='color: gray;'>{legend_text}</span>")
+        
+        if legend_items:
+            legend_text = " | ".join(legend_items)
+            self.update_left_header(legend_text)
+        else:
+            self.update_left_header("channel name")
+    
+    def toggle_curve_visibility_by_name(self, var_name):
+        """通过变量名切换曲线可见性
+        
+        点击图例中的曲线名时调用，切换该曲线的显示/隐藏状态。
+        如果曲线对象失效（不在scene中），会尝试重新创建。
+        
+        Args:
+            var_name: 要切换可见性的变量名
+        """
+        if var_name not in self.curves:
+            return
+            
+        curve_info = self.curves[var_name]
+        # 切换可见性状态
+        curve_info['visible'] = not curve_info['visible']
+        new_visible = curve_info['visible']
+        
+        # 更新曲线对象的可见性
+        if 'curve' in curve_info:
+            curve_obj = curve_info['curve']
+            
+            try:
+                # 检查曲线对象是否仍然有效
+                if curve_obj.scene() is not None:
+                    curve_obj.setVisible(new_visible)
+                else:
+                    # 曲线对象已经不在scene中，重新创建
+                    self._recreate_curve(var_name)
+            except Exception:
+                # 尝试重新创建曲线
+                self._recreate_curve(var_name)
+        
+        # 更新图例显示
+        self.update_legend()
+        
+        # 更新cursor显示（如果cursor可见）
+        if self.vline.isVisible():
+            self.update_cursor_label()
+    
+    def _recreate_curve(self, var_name):
+        """重新创建失效的曲线"""
+        try:
+            if var_name in self.curves:
+                curve_info = self.curves[var_name]
+                # 重新绘制曲线
+                success = self.add_variable_to_plot(var_name, skip_existence_check=True)
+                if success:
+                    pass
+                else:
+                    pass
+            else:
+                pass
+        except Exception as e:
+            pass
+    
+    def _on_legend_clicked(self, event):
+        """Legend点击事件处理
+        
+        使用QTextDocument进行精确的hitTest，定位用户点击的是哪条曲线，
+        然后切换该曲线的显示/隐藏状态。
+        
+        处理流程：
+        1. 将legend HTML文本解析为QTextDocument
+        2. 使用hitTest找到点击位置对应的文本位置
+        3. 根据文本位置确定对应的曲线索引
+        4. 调用toggle_curve_visibility_by_name切换曲线可见性
+        
+        Args:
+            event: 鼠标点击事件
+        """
+        if not self.is_multi_curve_mode:
+            return
+        
+        # 获取点击位置
+        pos = event.pos()
+        click_x = pos.x()
+        
+        # 改进的点击检测：基于实际legend文本内容进行更精确的匹配
+        if not self.curves:
+            return
+            
+        # 获取当前曲线列表（按legend显示顺序）
+        curve_list = list(self.curves.items())
+        
+        if not curve_list:
+            return
+        
+        # 使用QTextDocument + hitTest精确定位点击位置
+        from PyQt6.QtGui import QTextDocument, QTextCursor
+        from PyQt6.QtCore import QPointF
+        
+        # 构建完整的legend HTML（与update_legend完全一致）
+        legend_parts = []
+        for var_name, curve_info in curve_list:
+            color = curve_info['color']
+            unit = self.units.get(var_name, '')
+            legend_text = f"{var_name} ({unit})" if unit else var_name
+            
+            if curve_info['visible']:
+                symbol = f"<span style='color: {color}; font-weight: bold;'>■</span>"
+                legend_parts.append(f"{symbol} {legend_text}")
+            else:
+                # 隐藏时：空心方格 + 灰色文字（与update_legend一致）
+                symbol = f"<span style='color: {color}; opacity: 0.5;'>□</span>"
+                legend_parts.append(f"{symbol} <span style='color: gray;'>{legend_text}</span>")
+        
+        full_html = " | ".join(legend_parts)
+        
+        # 创建QTextDocument来进行hitTest
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(self.label_left.font())
+        doc.setHtml(full_html)
+        
+        # 使用hitTest找到点击位置对应的字符位置
+        layout = doc.documentLayout()
+        hit_pos = layout.hitTest(QPointF(click_x, pos.y()), Qt.HitTestAccuracy.ExactHit)
+        
+        # 计算每个legend部分在HTML中的字符位置范围
+        clicked_index = -1
+        char_pos = 0
+        item_ranges = []
+        
+        for i, part in enumerate(legend_parts):
+            if i > 0:
+                # 加上分隔符" | "的长度（注意：纯文本长度，不是HTML长度）
+                char_pos += 3  # " | " = 3个字符
+            
+            part_start = char_pos
+            # 计算这个part的纯文本长度（去除HTML标签）
+            part_doc = QTextDocument()
+            part_doc.setHtml(part)
+            part_text_length = len(part_doc.toPlainText())
+            part_end = part_start + part_text_length
+            
+            item_ranges.append({
+                'index': i,
+                'start': part_start,
+                'end': part_end,
+                'var_name': curve_list[i][0]
+            })
+            
+            if hit_pos >= part_start and hit_pos < part_end:
+                clicked_index = i
+                break
+            
+            char_pos = part_end
+        
+        # 如果hitTest没有精确匹配（点击在分隔符区域或文本范围外），找距离最近的item
+        if clicked_index == -1:
+            # 如果hitTest失败（返回-1），说明点击在文本范围外
+            if hit_pos < 0:
+                # 根据实际点击像素位置判断：左侧选第一个，右侧选最后一个
+                total_text_width = doc.size().width()
+                if click_x < total_text_width / 2:
+                    clicked_index = 0
+                else:
+                    clicked_index = len(curve_list) - 1
+            else:
+                # 计算到每个item的距离，选择最近的
+                min_distance = float('inf')
+                for item in item_ranges:
+                    if hit_pos < item['start']:
+                        distance = item['start'] - hit_pos
+                    elif hit_pos >= item['end']:
+                        distance = hit_pos - item['end']
+                    else:
+                        distance = 0
+                    
+                    if distance < min_distance:
+                        min_distance = distance
+                        clicked_index = item['index']
+        
+        # 确保索引在有效范围内
+        clicked_index = max(0, min(clicked_index, len(curve_list) - 1))
+        
+        # 切换对应曲线的可见性
+        var_name = curve_list[clicked_index][0]
+        self.toggle_curve_visibility_by_name(var_name)
+    
+    def _update_axes_for_multi_curve(self):
+        """为多曲线更新坐标轴范围
+        
+        计算所有可见曲线的数据范围，并更新坐标轴显示范围。
+        只考虑visible=True的曲线，忽略隐藏的曲线。
+        """
+        if not self.curves:
+            return
+            
+        # 计算所有可见曲线的数据范围
+        all_x_values = []
+        all_y_values = []
+        
+        for var_name, curve_info in self.curves.items():
+            if curve_info['visible']:
+                all_x_values.extend(curve_info['x_data'])
+                all_y_values.extend(curve_info['y_data'])
+        
+        if all_x_values and all_y_values:
+            x_values = np.array(all_x_values)
+            y_values = np.array(all_y_values)
+            self._setup_plot_axes(x_values, y_values)
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
@@ -3333,16 +5072,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.pos())
+            
+            # 获取坐标轴区域
             y_axis_rect_scene = self.axis_y.mapToScene(self.axis_y.boundingRect()).boundingRect()
             x_axis_rect_scene = self.axis_x.mapToScene(self.axis_x.boundingRect()).boundingRect()
+            
+            # 获取绘图区域的实际范围（排除坐标轴区域）- 使用view_box而不是plot_item
+            view_box_rect = self.view_box.boundingRect()
+            view_box_rect_scene = self.view_box.mapToScene(view_box_rect).boundingRect()
+            
+            # 缩小X轴检测区域，只检测X轴标签区域（底部部分）
+            x_axis_label_rect = QRectF(x_axis_rect_scene.left(), x_axis_rect_scene.bottom() - 30, x_axis_rect_scene.width(), 30)
 
             global DEFAULT_PADDING_VAL_X
-            if y_axis_rect_scene.contains(scene_pos):
-                dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
-                if dialog.exec():
-                    self.plot_item.update()
-                return 
-            elif x_axis_rect_scene.contains(scene_pos):
+            
+            # 优先检测X轴标签区域（最具体）
+            if x_axis_label_rect.contains(scene_pos):
                 dialog = AxisDialog(self.axis_x, self.view_box, "X", self)
                 if dialog.exec():
                     min_val, max_val = self.view_box.viewRange()[0]
@@ -3351,6 +5096,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         #view.plot_item.setXRange(min_val, max_val, padding=0.00)
                         self.set_xrange_with_link_handling(xmin=min_val,xmax=max_val,padding=DEFAULT_PADDING_VAL_X)
                         view.plot_item.update()
+                return
+            # 然后检测绘图区域（在检测Y轴之前）
+            elif view_box_rect_scene.contains(scene_pos):
+                # 双击绘图区域（网格内部），弹出变量编辑器
+                dialog = PlotVariableEditorDialog(self, self.window())
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            # 最后检测Y轴区域（最后兜底）
+            elif y_axis_rect_scene.contains(scene_pos):
+                dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
+                if dialog.exec():
+                    self.plot_item.update()
                 return
         return super().mouseDoubleClickEvent(event)
 
@@ -3411,9 +5170,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.mark_region.sigRegionChanged.connect(self.window().sync_mark_regions)
 
     def remove_mark_region(self):
-        if self.mark_region:
+        if self.mark_region and self.mark_region.scene() is not None:
             self.plot_item.removeItem(self.mark_region)
-            self.mark_region = None
+        self.mark_region = None
 
     def update_mark_region(self):
         if self.mark_region:
@@ -3422,33 +5181,86 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.mark_region.setRegion([old_min, old_max])  # 实际不需要变，因为x已scale
 
     def get_mark_stats(self):
-        if not self.curve or not self.mark_region:
+        """获取标记区域的统计信息"""
+        if not self.mark_region:
             return None
+        
         min_x, max_x = self.mark_region.getRegion()
-        x_data, y_data = self.curve.getData()
-        if x_data is None or len(x_data) == 0:
-            return None
-        idx_left = np.argmin(np.abs(x_data - min_x))
-        idx_right = np.argmin(np.abs(x_data - max_x))
-        x1 = x_data[idx_left]
-        y1 = y_data[idx_left]
-        x2 = x_data[idx_right]
-        y2 = y_data[idx_right]
-        dx = x2 - x1
-        dy = y2 - y1
-        slope = float('inf') if dx == 0 else dy / dx  # Handle zero division
         
-        # 计算区域内 y 的统计
-        mask = (x_data >= min_x) & (x_data <= max_x)
-        y_region = y_data[mask]
-        if len(y_region) == 0:
-            y_avg = y_max = y_min = np.nan
+        if self.is_multi_curve_mode:
+            # 多曲线模式：返回每个曲线的统计信息
+            stats_list = []
+            for var_name, curve_info in self.curves.items():
+                if not curve_info.get('visible', True):
+                    continue
+                
+                if 'curve' not in curve_info:
+                    continue
+                    
+                curve = curve_info['curve']
+                x_data, y_data = curve.getData()
+                
+                if x_data is None or len(x_data) == 0:
+                    continue
+                
+                # 计算边界点
+                idx_left = np.argmin(np.abs(x_data - min_x))
+                idx_right = np.argmin(np.abs(x_data - max_x))
+                x1 = x_data[idx_left]
+                y1 = y_data[idx_left]
+                x2 = x_data[idx_right]
+                y2 = y_data[idx_right]
+                dx = x2 - x1
+                dy = y2 - y1
+                slope = float('inf') if dx == 0 else dy / dx
+                
+                # 计算区域内 y 的统计
+                mask = (x_data >= min_x) & (x_data <= max_x)
+                y_region = y_data[mask]
+                if len(y_region) == 0:
+                    y_avg = y_max = y_min = np.nan
+                else:
+                    y_avg = np.nanmean(y_region)
+                    y_max = np.nanmax(y_region)
+                    y_min = np.nanmin(y_region)
+                
+                # 添加变量名到标签
+                unit = self.units.get(var_name, '')
+                label = f"{var_name} ({unit})" if unit else var_name
+                
+                stats_list.append((x1, x2, y1, y2, dx, dy, slope, label, y_avg, y_max, y_min))
+            
+            return stats_list if stats_list else None
         else:
-            y_avg = np.nanmean(y_region)
-            y_max = np.nanmax(y_region)
-            y_min = np.nanmin(y_region)
-        
-        return (x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)
+            # 单曲线模式
+            if not self.curve:
+                return None
+            
+            x_data, y_data = self.curve.getData()
+            if x_data is None or len(x_data) == 0:
+                return None
+            
+            idx_left = np.argmin(np.abs(x_data - min_x))
+            idx_right = np.argmin(np.abs(x_data - max_x))
+            x1 = x_data[idx_left]
+            y1 = y_data[idx_left]
+            x2 = x_data[idx_right]
+            y2 = y_data[idx_right]
+            dx = x2 - x1
+            dy = y2 - y1
+            slope = float('inf') if dx == 0 else dy / dx
+            
+            # 计算区域内 y 的统计
+            mask = (x_data >= min_x) & (x_data <= max_x)
+            y_region = y_data[mask]
+            if len(y_region) == 0:
+                y_avg = y_max = y_min = np.nan
+            else:
+                y_avg = np.nanmean(y_region)
+                y_max = np.nanmax(y_region)
+                y_min = np.nanmin(y_region)
+            
+            return [(x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)]
     def _get_visible_points_count(self, x_data: np.ndarray, x_min: float, x_max: float) -> int:
         """计算可见点数量"""
         try:
@@ -3478,47 +5290,79 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return visible_points > threshold * (1 + tolerance)
 
     def _apply_plot_style(self, use_thick_line: bool, show_symbols: bool):
-        """应用绘图样式"""
+        """应用绘图样式 - 统一应用到所有曲线"""
         try:
-            if use_thick_line:
-                pen = pg.mkPen(color='blue', width=THICK_LINE_WIDTH)
-                self.curve.setPen(pen)
-                self.curve.setSymbol(None)
-            elif show_symbols:
-                pen = pg.mkPen(color='blue', width=THIN_LINE_WIDTH)
-                self.curve.setPen(pen)
-                self.curve.setSymbol('s')
-                self.curve.setSymbolSize(3)
-                self.curve.setSymbolPen('blue')
-                self.curve.setSymbolBrush('blue')
-            # 如果都不满足，保持当前样式
+            if self.is_multi_curve_mode:
+                # 多曲线模式：统一样式应用到所有曲线
+                for var_name, curve_info in self.curves.items():
+                    if 'curve' not in curve_info:
+                        continue
+                        
+                    curve = curve_info['curve']
+                    color = curve_info.get('color', 'blue')
+                    
+                    # 统一应用样式（不再单独计算）
+                    if show_symbols:
+                        # 显示符号：细线 + 符号
+                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                        curve.setPen(pen)
+                        curve.setSymbol('s')
+                        curve.setSymbolSize(3)
+                        curve.setSymbolPen(color)
+                        curve.setSymbolBrush(color)
+                    elif use_thick_line:
+                        # 不显示符号且xRange大：粗线
+                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                        curve.setPen(pen)
+                        curve.setSymbol(None)
+                    else:
+                        # 默认样式：细线无符号
+                        pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        curve.setPen(pen)
+                        curve.setSymbol(None)
+            else:
+                # 单曲线模式：使用当前曲线的颜色
+                if self.curve:
+                    # 获取当前曲线的颜色
+                    current_pen = self.curve.opts.get('pen', pg.mkPen('blue'))
+                    color = current_pen.color().name() if hasattr(current_pen, 'color') else 'blue'
+                    
+                    if use_thick_line:
+                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                        self.curve.setPen(pen)
+                        self.curve.setSymbol(None)
+                    elif show_symbols:
+                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                        self.curve.setPen(pen)
+                        self.curve.setSymbol('s')
+                        self.curve.setSymbolSize(3)
+                        self.curve.setSymbolPen(color)
+                        self.curve.setSymbolBrush(color)
+                    else:
+                        # 默认样式：细线无符号
+                        pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        self.curve.setPen(pen)
+                        self.curve.setSymbol(None)
         except Exception as e:
             print(f"应用绘图样式时出错: {e}")
 
     def update_plot_style(self, view_box, range, rect=None):
-        """更新绘图样式"""
-        if not self.curve:
-            return
-        
+        """更新绘图样式 - 使用全局xRange宽度判断"""
         try:
-            # 使用原始数据而不是裁剪后的数据
-            if self.original_index_x is not None:
-                x_data = self.offset + self.factor * self.original_index_x
-            else:
-                x_data, _ = self.curve.getData()
-                if x_data is None:
-                    return
-            
+            # 获取当前视图的xRange
             x_min, x_max = range[0]
-            visible_points = self._get_visible_points_count(x_data, x_min, x_max)
+            x_range_width = x_max - x_min
             
-            # 让pyqtgraph自行处理downsample，不再进行额外采样
+            # 考虑factor的影响 - 将xRange转换为索引范围
+            # x = offset + factor * index，所以 index_range = x_range / factor
+            index_range_width = x_range_width / self.factor if self.factor != 0 else x_range_width
             
-            # 判断样式
-            use_thick_line = self._should_use_thick_line(visible_points)
-            show_symbols = self._should_show_symbols(visible_points)
+            # 基于索引范围宽度判断样式（全局统一）
+            global XRANGE_THRESHOLD_FOR_SYMBOLS
+            show_symbols = index_range_width < XRANGE_THRESHOLD_FOR_SYMBOLS
+            use_thick_line = not show_symbols  # 不显示symbols时用粗线
             
-            # 应用样式
+            # 应用样式到所有曲线
             self._apply_plot_style(use_thick_line, show_symbols)
             
         except Exception as e:
@@ -3526,21 +5370,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
 
     def _on_range_changed(self, view_box, range):
-        """范围变化时的防抖处理"""
+        """范围变化时的防抖处理
+        
+        性能优化：根据曲线数量动态调整防抖延迟。
+        """
         try:
             # 停止之前的定时器
             if hasattr(self, '_update_timer'):
                 self._update_timer.stop()
-                # 延迟50ms执行更新，避免频繁更新
-                self._update_timer.start(50)
+                # 动态延迟：曲线少时快速响应(20ms)，曲线多时避免卡顿(100ms)
+                curve_count = len(self.curves) if hasattr(self, 'curves') else 0
+                delay = 20 if curve_count <= 5 else (50 if curve_count <= 15 else 100)
+                self._update_timer.start(delay)
         except Exception as e:
             print(f"处理范围变化时出错: {e}")
 
     def _delayed_update_plot_style(self):
-        """延迟更新绘图样式"""
+        """延迟更新绘图样式
+        
+        性能优化：缩放/拖动时不更新cursor，避免多曲线模式下的性能问题。
+        Cursor只在真正移动时才更新（通过鼠标移动或点击触发）。
+        """
         try:
             if hasattr(self, 'view_box'):
                 self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
+                # 【性能优化】不在缩放/拖动时更新cursor标签
+                # cursor标签只在cursor真正移动时更新（mouseMoveEvent等）
         except Exception as e:
             print(f"延迟更新绘图样式时出错: {e}")
 
@@ -3588,23 +5443,50 @@ class MarkStatsWindow(QDialog):
             self.resize(1200, 300)
 
     def update_stats(self, stats_list):
+        """更新统计信息显示
+        
+        Args:
+            stats_list: 每个plot的统计信息列表
+                - 单曲线模式：每个元素是一个包含11个值的元组列表
+                - 多曲线模式：每个元素是一个包含多个元组的列表
+        """
         self.tree.clear()
         self.no_curve_item = QTreeWidgetItem(self.tree, ["No Curve"])
         self.no_curve_item.setExpanded(False)
         has_no_curve = False
+        
         for idx, stats in enumerate(stats_list):
             if stats:
+                # stats现在是一个列表，可能包含多个曲线的统计信息
+                if len(stats) == 1:
+                    # 单曲线模式：直接显示
+                    stat = stats[0]
                     item = QTreeWidgetItem(self.tree, [
-                    f"Plot {idx+1} -> {stats[7]}",
-                    f"{stats[0]:.2f}", f"{stats[1]:.2f}",
-                    f"{stats[2]:.2f}", f"{stats[3]:.2f}",
-                    f"{stats[4]:.2f}", f"{stats[5]:.2f}",
-                    f"{stats[6]:.2f}" if not np.isinf(stats[6]) else "inf",
-                    f"{stats[8]:.2f}", f"{stats[9]:.2f}", f"{stats[10]:.2f}"
-                ])            
+                        f"Plot {idx+1} -> {stat[7]}",
+                        f"{stat[0]:.2f}", f"{stat[1]:.2f}",
+                        f"{stat[2]:.2f}", f"{stat[3]:.2f}",
+                        f"{stat[4]:.2f}", f"{stat[5]:.2f}",
+                        f"{stat[6]:.2f}" if not np.isinf(stat[6]) else "inf",
+                        f"{stat[8]:.2f}", f"{stat[9]:.2f}", f"{stat[10]:.2f}"
+                    ])
+                else:
+                    # 多曲线模式：创建父节点和子节点
+                    parent_item = QTreeWidgetItem(self.tree, [f"Plot {idx+1} (多曲线)", "", "", "", "", "", "", "", "", "", ""])
+                    parent_item.setExpanded(True)
+                    
+                    for stat in stats:
+                        child_item = QTreeWidgetItem(parent_item, [
+                            f"  → {stat[7]}",
+                            f"{stat[0]:.2f}", f"{stat[1]:.2f}",
+                            f"{stat[2]:.2f}", f"{stat[3]:.2f}",
+                            f"{stat[4]:.2f}", f"{stat[5]:.2f}",
+                            f"{stat[6]:.2f}" if not np.isinf(stat[6]) else "inf",
+                            f"{stat[8]:.2f}", f"{stat[9]:.2f}", f"{stat[10]:.2f}"
+                        ])
             else:
                 has_no_curve = True
                 sub_item = QTreeWidgetItem(self.no_curve_item, [f"Plot {idx+1}", "", "", "", "", "", "", "", "", "", ""])
+        
         if not has_no_curve:
             self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(self.no_curve_item))
     
@@ -3781,13 +5663,30 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
 
-        # 总水平布局：左侧变量列表 + 右侧绘图区
+        # ========== 主布局：可调整分界线 ==========
+        # 使用QSplitter实现变量表和绘图区之间的可拖动分界线
         main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for precise alignment
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 创建水平分隔器
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setHandleWidth(5)             # 分界线宽度（可拖动区域）
+        self.main_splitter.setChildrenCollapsible(False)  # 禁止折叠（确保两侧始终可见）
+        
+        # 变量表宽度管理
+        # - 默认宽度：280px（首次启动时）
+        # - 用户调整标记：记录用户是否手动拖动过分界线
+        # - 行为逻辑：
+        #   * 窗口缩放时，如果用户未手动调整过，保持变量表宽度不变，只改变绘图区宽度
+        #   * 一旦用户手动拖动分界线，后续窗口缩放会按比例调整两侧宽度
+        self.var_table_default_width = 280
+        self.var_table_user_adjusted = False
+        
+        # 监听分界线拖动事件
+        self.main_splitter.splitterMoved.connect(self._on_splitter_moved)
 
         # ---------------- 左侧变量列表 ----------------
         left_widget = QWidget()
-        left_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(5, 0, 5, 0)
 
@@ -3854,14 +5753,11 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.toggle_plot_btn)
         left_layout.setSpacing(2)
         self.left_widget=left_widget
-        main_layout.addWidget(left_widget, 0)
 
         # 添加成员变量来保存窗口状态
         self._plot_area_visible = True
         self._saved_geometry = None
 
-
-            
         # ---------------- 右侧绘图区 ----------------
         self.plot_widget = QWidget()
         root_layout = QVBoxLayout(self.plot_widget)
@@ -3900,6 +5796,9 @@ class MainWindow(QMainWindow):
         self.cursor_btn = QPushButton("显示光标")
         self.cursor_btn.setCheckable(True)
         self.cursor_btn.clicked.connect(self.toggle_cursor_all)
+        
+        # 全局cursor值显示状态：False表示显示所有值，True表示只显示x值
+        self.cursor_values_hidden = True  # 默认只显示x轴数值框，不显示圆圈和y值
 
         self.mark_region_btn = QPushButton("标记区域")
         self.mark_region_btn.setCheckable(True)
@@ -3909,7 +5808,7 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
         # 新增：绘图区截图按钮（位于“修改布局”的左侧）
-        self.screenshot_plots_btn = QPushButton("绘图区截图")
+        self.screenshot_plots_btn = QPushButton("截图")
         self.screenshot_plots_btn.clicked.connect(self.copy_plots_screenshot_to_clipboard)
 
         self.set_button_status(False)
@@ -3929,7 +5828,20 @@ class MainWindow(QMainWindow):
         self.plot_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         self.plot_layout.setSpacing(0)  # No spacing
         root_layout.addLayout(self.plot_layout, 1)    # 1 表示可伸缩
-        main_layout.addWidget(self.plot_widget, 4)
+        
+        # 将左右两个widget添加到splitter
+        self.main_splitter.addWidget(left_widget)
+        self.main_splitter.addWidget(self.plot_widget)
+        
+        # 设置初始分割比例（左侧固定宽度，右侧自适应）
+        self.main_splitter.setSizes([self.var_table_default_width, 800])
+        
+        # 设置拉伸因子：左侧0（不拉伸），右侧1（可拉伸）
+        self.main_splitter.setStretchFactor(0, 0)  # 变量表不拉伸
+        self.main_splitter.setStretchFactor(1, 1)  # 绘图区可拉伸
+        
+        # 将splitter添加到主布局
+        main_layout.addWidget(self.main_splitter)
 
         # ---------------- 子图 ----------------
         self.plot_widgets = []
@@ -3991,6 +5903,54 @@ class MainWindow(QMainWindow):
             DataTableDialog._instance.set_skip_close_confirmation(True)
         super().closeEvent(event)
         
+    def _on_splitter_moved(self, pos, index):
+        """
+        处理分界线拖动事件
+        
+        当用户手动拖动变量表和绘图区之间的分界线时触发。
+        记录用户偏好的变量表宽度，并标记为"用户已手动调整"。
+        
+        Args:
+            pos: 分界线的新位置（像素）
+            index: 分隔符索引（对于单个分隔符，始终为0）
+        """
+        # 标记用户已手动调整（影响后续窗口缩放行为）
+        self.var_table_user_adjusted = True
+        
+        # 记录当前的变量表宽度作为新的默认值
+        sizes = self.main_splitter.sizes()
+        if len(sizes) >= 1:
+            self.var_table_default_width = sizes[0]
+    
+    def resizeEvent(self, event):
+        """
+        重写窗口大小调整事件
+        
+        实现智能宽度调整策略：
+        - 未手动调整过：窗口缩放时保持变量表宽度固定，只改变绘图区宽度
+        - 已手动调整过：窗口缩放时按比例调整两侧宽度（QSplitter默认行为）
+        
+        Args:
+            event: QResizeEvent窗口调整事件
+        """
+        super().resizeEvent(event)
+        
+        # 如果用户从未手动调整过分界线，执行固定宽度策略
+        if not self.var_table_user_adjusted and hasattr(self, 'main_splitter'):
+            sizes = self.main_splitter.sizes()
+            if len(sizes) >= 2:
+                # 计算总可用宽度
+                total_width = sum(sizes)
+                
+                # 保持变量表宽度不变，剩余空间全部给绘图区
+                new_sizes = [self.var_table_default_width, total_width - self.var_table_default_width]
+                
+                # 临时阻止信号，避免触发_on_splitter_moved
+                # （这不是用户的手动操作，不应标记为"已调整"）
+                self.main_splitter.blockSignals(True)
+                self.main_splitter.setSizes(new_sizes)
+                self.main_splitter.blockSignals(False)
+    
     def toggle_plot_area(self, checked):
         if checked:
             self._saved_geometry = self.saveGeometry()
@@ -4533,32 +6493,36 @@ class MainWindow(QMainWindow):
         if etype == QEvent.Type.DragEnter:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
-                if len(urls)<1:
-                    event.ignore()
-                    return True
+                # 检查是否有支持的文件
+                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01')) for u in urls)
                 
-                self.show_drop_overlay()
-                if any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','t01'))
-                       for u in urls):                    
+                if supported:
+                    self.show_drop_overlay()
                     self.drop_overlay.adjust_text(file_type_supported=True)
                     event.acceptProposedAction()
+                    return True
                 else:
+                    self.show_drop_overlay()
                     self.drop_overlay.adjust_text(file_type_supported=False)
-                    event.acceptProposedAction()
+                    event.ignore()
                     return True
         elif etype == QEvent.Type.DragLeave:
             self.hide_drop_overlay()
-        elif etype == QEvent.Type.Drop:
+            return True
+        elif etype == QEvent.Type.DragMove:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
-                if len(urls)<1:
-                    event.ignore()
+                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01')) for u in urls)
+                if supported:
+                    event.acceptProposedAction()
                     return True
-                
+        elif etype == QEvent.Type.Drop:
+            self.hide_drop_overlay()
+            if event.mimeData().hasUrls():
+                urls = event.mimeData().urls()
                 for u in urls:
                     path = u.toLocalFile()
-                    if path.lower().endswith(('.csv','.txt','.mfile','.t00','t01')):
-                        self.hide_drop_overlay()
+                    if path.lower().endswith(('.csv','.txt','.mfile','.t00','.t01')):
                         self.load_csv_file(path)
                         event.accept()
                         return True
@@ -4594,9 +6558,22 @@ class MainWindow(QMainWindow):
 
     # ---------------- 公用函数 ----------------
     def toggle_cursor_all(self, checked):
+        """切换所有plot的cursor显示状态
+        
+        根据checked状态和cursor_values_hidden标志，同步所有plot的cursor显示。
+        
+        Args:
+            checked: True表示显示cursor，False表示隐藏cursor
+        """
         for container in self.plot_widgets:
-            widget=container.plot_widget
-            widget.toggle_cursor(checked)
+            widget = container.plot_widget
+            # 根据全局cursor_values_hidden状态决定如何显示cursor
+            if checked and self.cursor_values_hidden:
+                # cursor启用但值被隐藏：只显示vline和x值
+                widget.toggle_cursor(False, hide_values_only=True)
+            else:
+                # cursor完全启用或禁用
+                widget.toggle_cursor(checked)
         self.cursor_btn.setText("隐藏光标" if checked else "显示光标")
         
     def sync_crosshair(self, x, sender_widget):
@@ -4617,7 +6594,10 @@ class MainWindow(QMainWindow):
             pass
         else:
             # 没有plot被pin，正常同步所有plot
+            # 性能优化：只更新可见的plots
             for container in self.plot_widgets:
+                if not container.isVisible():
+                    continue
                 w = container.plot_widget
                 w.vline.setVisible(True)
                 w.vline.setPos(x)
@@ -5003,7 +6983,12 @@ class MainWindow(QMainWindow):
         for r in range(m):
             for c in range(n):
                 plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data, self.time_channels_infos)
-                plot_widget.toggle_cursor(self.cursor_btn.isChecked())
+                # 设置cursor状态，考虑全局cursor值显示状态
+                cursor_enabled = self.cursor_btn.isChecked()
+                if cursor_enabled and self.cursor_values_hidden:
+                    plot_widget.toggle_cursor(False, hide_values_only=True)
+                else:
+                    plot_widget.toggle_cursor(cursor_enabled)
 
                 # XLink：让同一行的所有列都 link 到第一列
                 if c == 0 and r == 0:
@@ -5094,9 +7079,8 @@ class MainWindow(QMainWindow):
             global DEFAULT_PADDING_VAL_X
             for idx, container in enumerate(self.plot_widgets):
                 widget = container.plot_widget
-                y_name = widget.y_name
+                
                 # 更新 limits
-
                 original_index_x = np.arange(1, self.loader.datalength + 1)
                 min_x = widget.offset + widget.factor * np.min(original_index_x)
                 max_x = widget.offset + widget.factor * np.max(original_index_x)
@@ -5105,17 +7089,50 @@ class MainWindow(QMainWindow):
                 limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
                 widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
                 widget.vline.setBounds([min_x, max_x])
-                if not y_name:
-                    continue
-                if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) >=0 :
-                    success = widget.plot_variable(y_name)
-                    if not success:
-                        widget.clear_plot_item()
-                        cleared.append((idx + 1, "无效数据"))
+                
+                if widget.is_multi_curve_mode:
+                    # 多曲线模式：先清除所有曲线，然后重新添加有效的曲线
+                    # 保存当前曲线信息
+                    current_curves = dict(widget.curves)
+                    
+                    # 清除所有曲线
+                    widget.curves.clear()
+                    widget.is_multi_curve_mode = False
+                    widget.current_color_index = 0
+                    
+                    # 清理图形项
+                    # 重新加载数据时完全清除对象池，避免复用异常状态的items
+                    widget._clear_cursor_items(hide_only=False)
+                    widget._safe_clear_plot_items()
+                    
+                    # 重新添加有效的曲线
+                    curves_added = 0
+                    for var_name, curve_info in current_curves.items():
+                        if var_name in self.loader.df.columns and self.loader.df_validity.get(var_name, -1) >= 0:
+                            # 变量仍然有效，重新绘制
+                            success = widget.add_variable_to_plot(var_name, skip_existence_check=True)
+                            if success:
+                                curves_added += 1
+                    
+                    # 更新多曲线模式状态
+                    widget.update_multi_curve_mode()
+                    
+                    if curves_added == 0:
+                        cleared.append((idx + 1, "所有变量无效"))
                 else:
-                    widget.clear_plot_item()
-                    reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
-                    cleared.append((idx + 1, reason))
+                    # 单曲线模式
+                    y_name = widget.y_name
+                    if not y_name:
+                        continue
+                    if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) >= 0:
+                        success = widget.plot_variable(y_name)
+                        if not success:
+                            widget.clear_plot_item()
+                            cleared.append((idx + 1, "无效数据"))
+                    else:
+                        widget.clear_plot_item()
+                        reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
+                        cleared.append((idx + 1, reason))
 
             # 恢复 xRange     
             if self.plot_widgets:
@@ -5130,6 +7147,489 @@ class MainWindow(QMainWindow):
                 for plot_idx, reason in cleared:
                     msg += f"Plot {plot_idx}: {reason}\n"
                 QMessageBox.information(self, "更新通知", msg)
+
+# ---------------- 绘图变量编辑器对话框 ----------------
+class PlotVariableEditorDialog(QDialog):
+    """
+    绘图变量编辑器对话框类
+    用于管理plot中的多个曲线，支持添加、删除、颜色自定义等功能
+    """
+    def __init__(self, plot_widget, parent=None):
+        super().__init__(parent)
+        self.plot_widget = plot_widget
+        self.setWindowTitle("绘图变量编辑器")
+        self.setModal(False)  # 改为非模态，允许与主窗口交互
+        self.resize(600, 400)
+        self.setAcceptDrops(True)  # 启用拖拽功能
+        
+        # 高DPI支持 - PyQt6中不需要WA_UseHighDpiPixmaps
+        # PyQt6默认支持高DPI，通过样式表控制字体大小
+        
+        self.setup_ui()
+        self.load_current_curves()
+        
+    def setup_ui(self):
+        """设置UI界面"""
+        layout = QVBoxLayout()
+        
+        # 标题
+        title_label = QLabel("绘图变量编辑器")
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 15px;")
+        layout.addWidget(title_label)
+        
+        # 创建表格
+        self.var_table = QTableWidget()
+        self.var_table.setColumnCount(3)
+        self.var_table.setHorizontalHeaderLabels(["显示", "变量名", "颜色"])
+        
+        # 设置表格属性
+        self.var_table.setDragDropMode(QTableWidget.DragDropMode.DropOnly)
+        self.var_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.var_table.setAlternatingRowColors(True)
+        self.var_table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #d0d0d0;
+                background-color: white;
+                font-size: 12px;
+            }
+            QTableWidget::item {
+                padding: 6px;
+                border: none;
+            }
+            QTableWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #000000;
+            }
+            QCheckBox {
+                font-size: 12px;
+            }
+        """)
+        
+        # 设置列宽
+        header = self.var_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)  # 显示列固定宽度
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # 变量名列自适应
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  # 颜色列固定宽度
+        self.var_table.setColumnWidth(0, 60)   # 显示列
+        self.var_table.setColumnWidth(2, 80)   # 颜色列
+        
+        layout.addWidget(self.var_table)
+        
+        # 按钮区域
+        button_layout = QHBoxLayout()
+        
+        # 删除按钮
+        self.remove_btn = QPushButton("删除选中")
+        self.remove_btn.clicked.connect(self.remove_selected_variable)
+        self.remove_btn.setEnabled(False)
+        button_layout.addWidget(self.remove_btn)
+        
+        # 清空按钮
+        self.clear_btn = QPushButton("清空所有")
+        self.clear_btn.clicked.connect(self.clear_all_variables)
+        self.clear_btn.setEnabled(False)
+        button_layout.addWidget(self.clear_btn)
+        
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        # 说明文本
+        info_label = QLabel("提示：从变量表拖拽变量到此窗口可添加新变量")
+        info_label.setStyleSheet("color: gray; font-size: 12px; margin-top: 10px;")
+        layout.addWidget(info_label)
+        
+        # 底部按钮
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        
+        self.ok_btn = QPushButton("确定")
+        self.ok_btn.clicked.connect(self.accept)
+        bottom_layout.addWidget(self.ok_btn)
+        
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        bottom_layout.addWidget(self.cancel_btn)
+        
+        layout.addLayout(bottom_layout)
+        self.setLayout(layout)
+        
+        # 连接信号
+        self.var_table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.var_table.cellClicked.connect(self.on_cell_clicked)
+        # 不再需要itemChanged信号，因为使用QCheckBox控件
+        
+    def load_current_curves(self):
+        """加载当前绘图中的曲线"""
+        # 先清空表格
+        self.var_table.setRowCount(0)
+        
+        # 检查多曲线模式
+        if self.plot_widget.curves:
+            # 有curves字典：从curves字典加载（无论是否是多曲线模式）
+            for var_name, curve_info in self.plot_widget.curves.items():
+                self._add_variable_to_table(var_name, curve_info)
+        elif self.plot_widget.curve and self.plot_widget.y_name:
+            # 单曲线模式：从curve和y_name加载
+            var_name = self.plot_widget.y_name
+            
+            # 获取曲线的实际可见性状态
+            curve_visible = True
+            try:
+                if hasattr(self.plot_widget.curve, 'isVisible'):
+                    curve_visible = self.plot_widget.curve.isVisible()
+            except Exception as e:
+                print(f"获取曲线可见性失败: {e}")
+            
+            # 获取曲线的实际颜色
+            curve_color = 'blue'
+            try:
+                if hasattr(self.plot_widget.curve, 'opts') and 'pen' in self.plot_widget.curve.opts:
+                    pen = self.plot_widget.curve.opts['pen']
+                    if hasattr(pen, 'color'):
+                        curve_color = pen.color().name()
+            except Exception as e:
+                print(f"获取曲线颜色失败: {e}")
+            
+            curve_info = {
+                'color': curve_color,
+                'visible': curve_visible,
+                'y_format': self.plot_widget.y_format
+            }
+            self._add_variable_to_table(var_name, curve_info)
+            
+        self.update_button_states()
+    
+    def _add_variable_to_table(self, var_name, curve_info):
+        """添加变量到表格"""
+        row = self.var_table.rowCount()
+        self.var_table.insertRow(row)
+        
+        # 显示状态复选框 - 使用QCheckBox控件
+        checkbox = QCheckBox()
+        checkbox.setChecked(curve_info.get('visible', True))
+        checkbox.stateChanged.connect(lambda state, name=var_name: self._on_checkbox_changed(name, state))
+        self.var_table.setCellWidget(row, 0, checkbox)
+        
+        # 获取可见性状态
+        is_visible = curve_info.get('visible', True)
+        
+        # 变量名和单位
+        unit = self.plot_widget.units.get(var_name, '')
+        display_text = f"{var_name} ({unit})" if unit else var_name
+        name_item = QTableWidgetItem(display_text)
+        name_item.setData(Qt.ItemDataRole.UserRole, var_name)
+        name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        self.var_table.setItem(row, 1, name_item)
+        
+        # 颜色 - 使用QWidget显示真实颜色
+        color = curve_info.get('color', 'blue')
+        color_widget = QWidget()
+        color_widget.setStyleSheet(f"background-color: {color}; border: 1px solid #333;")
+        color_widget.setFixedSize(30, 20)
+        self.var_table.setCellWidget(row, 2, color_widget)
+        
+        # 同时设置一个隐藏的item来存储数据
+        color_item = QTableWidgetItem()
+        color_item.setData(Qt.ItemDataRole.UserRole, var_name)
+        color_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        self.var_table.setItem(row, 2, color_item)
+        
+    def _on_checkbox_changed(self, var_name, state):
+        """复选框状态变化处理"""
+        is_visible = state == Qt.CheckState.Checked.value
+        
+        # 更新曲线可见性
+        if self.plot_widget.curves and var_name in self.plot_widget.curves:
+            self.plot_widget.curves[var_name]['visible'] = is_visible
+            curve_info = self.plot_widget.curves[var_name]
+            if 'curve' in curve_info:
+                curve_obj = curve_info['curve']
+                curve_obj.setVisible(is_visible)
+            self.plot_widget.update_legend()
+        elif not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name:
+            if self.plot_widget.curve:
+                self.plot_widget.curve.setVisible(is_visible)
+
+    def on_selection_changed(self):
+        """选择改变时的处理"""
+        self.update_button_states()
+    
+    def on_cell_clicked(self, row, column):
+        """单元格点击事件"""
+        if column == 2:  # 颜色列
+            self.set_variable_color(row)
+    
+    def toggle_variable_visibility(self, row):
+        """切换变量显示状态"""
+        var_name = self.var_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        visible_item = self.var_table.item(row, 0)
+        is_visible = visible_item.checkState() == Qt.CheckState.Checked
+        
+        if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
+            # 多曲线模式：更新curves字典中的可见性
+            self.plot_widget.curves[var_name]['visible'] = is_visible
+            
+            # 更新曲线显示
+            curve_info = self.plot_widget.curves[var_name]
+            if 'curve' in curve_info:
+                try:
+                    # 检查曲线对象是否仍然有效
+                    if curve_info['curve'].scene() is not None:
+                        curve_info['curve'].setVisible(is_visible)
+                    else:
+                        # 曲线对象已经不在scene中，重新创建
+                        self.plot_widget._recreate_curve(var_name)
+                except Exception as e:
+                    print(f"Warning: Error toggling curve visibility for {var_name}: {e}")
+                    # 尝试重新创建曲线
+                    self.plot_widget._recreate_curve(var_name)
+            
+            # 更新legend
+            self.plot_widget.update_legend()
+        elif not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name:
+            # 单曲线模式：更新curve的可见性
+            if self.plot_widget.curve:
+                try:
+                    if self.plot_widget.curve.scene() is not None:
+                        self.plot_widget.curve.setVisible(is_visible)
+                except Exception as e:
+                    print(f"Warning: Error toggling single curve visibility: {e}")
+        
+    def update_button_states(self):
+        """更新按钮状态"""
+        has_selection = len(self.var_table.selectedItems()) > 0
+        has_items = self.var_table.rowCount() > 0
+        
+        self.remove_btn.setEnabled(has_selection)
+        self.clear_btn.setEnabled(has_items)
+        
+    def remove_selected_variable(self):
+        """删除选中的变量"""
+        selected_items = self.var_table.selectedItems()
+        if not selected_items:
+            return
+        
+        # 获取所有选中的行号
+        selected_rows = set()
+        for item in selected_items:
+            selected_rows.add(item.row())
+        
+        # 记录最小的被删除行号，用于后续选中
+        min_deleted_row = min(selected_rows)
+        
+        # 从后往前删除，避免行号变化
+        for row in sorted(selected_rows, reverse=True):
+            # 获取变量名 - 现在从第二列（变量名列）获取
+            var_name_item = self.var_table.item(row, 1)
+            if var_name_item is None:
+                continue
+            var_name = var_name_item.data(Qt.ItemDataRole.UserRole)
+            
+            if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
+                # 多曲线模式：从curves字典中移除
+                curve_info = self.plot_widget.curves[var_name]
+                if 'curve' in curve_info and curve_info['curve'].scene() is not None:
+                    self.plot_widget.plot_item.removeItem(curve_info['curve'])
+                del self.plot_widget.curves[var_name]
+            elif var_name in self.plot_widget.curves:
+                # 单曲线模式但曲线在curves字典中：从curves字典中移除
+                curve_info = self.plot_widget.curves[var_name]
+                if 'curve' in curve_info and curve_info['curve'].scene() is not None:
+                    self.plot_widget.plot_item.removeItem(curve_info['curve'])
+                del self.plot_widget.curves[var_name]
+            elif not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name:
+                # 单曲线模式：清除整个plot
+                self.plot_widget.clear_plot_item()
+            
+            # 从表格中移除
+            self.var_table.removeRow(row)
+        
+        # 删除后自动选中下一条或上一条曲线
+        row_count = self.var_table.rowCount()
+        if row_count > 0:
+            # 优先选中下一条（原来被删除行的位置）
+            if min_deleted_row < row_count:
+                next_row = min_deleted_row
+            else:
+                # 如果没有下一条，选中上一条
+                next_row = row_count - 1
+            
+            # 选中整行
+            self.var_table.selectRow(next_row)
+        
+        # 更新多曲线模式
+        self.plot_widget.update_multi_curve_mode()
+        
+        # 如果删除了所有曲线，确保完全清理
+        if not self.plot_widget.curves:
+            # 清理所有可能的残留
+            if self.plot_widget.curve and self.plot_widget.curve.scene() is not None:
+                self.plot_widget.plot_item.removeItem(self.plot_widget.curve)
+            self.plot_widget.curve = None
+            self.plot_widget.y_name = ''
+            self.plot_widget.y_format = ''
+            self.plot_widget.original_index_x = None
+            self.plot_widget.original_y = None
+            self.plot_widget.current_color_index = 0
+            self.plot_widget.is_multi_curve_mode = False
+            self.plot_widget.update_left_header("channel name")
+            self.plot_widget.update_right_header("")
+            
+            # 清理所有plot item（先清除cursor items）
+            # 清空所有变量时完全清除对象池，避免复用异常状态的items
+            self.plot_widget._clear_cursor_items(hide_only=False)
+            self.plot_widget._safe_clear_plot_items()
+        
+        self.update_button_states()
+        
+    def clear_all_variables(self):
+        """清空所有变量"""
+        reply = QMessageBox.question(self, "确认", "确定要清空所有绘图变量吗？",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            # 清空所有曲线
+            if self.plot_widget.is_multi_curve_mode:
+                # 多曲线模式：清空curves字典
+                for var_name, curve_info in list(self.plot_widget.curves.items()):
+                    if 'curve' in curve_info and curve_info['curve'].scene() is not None:
+                        self.plot_widget.plot_item.removeItem(curve_info['curve'])
+                self.plot_widget.curves.clear()
+            else:
+                # 单曲线模式：清空整个plot
+                self.plot_widget.clear_plot_item()
+            
+            self.plot_widget.is_multi_curve_mode = False
+            self.plot_widget.current_color_index = 0
+            
+            # 清空表格
+            self.var_table.setRowCount(0)
+            self.update_button_states()
+            
+            # 更新显示
+            self.plot_widget.update_left_header("channel name")
+            self.plot_widget.update_right_header("")
+            
+    def set_variable_color(self, row=None):
+        """设置变量颜色"""
+        if row is None:
+            # 从选中项获取行号
+            selected_items = self.var_table.selectedItems()
+            if not selected_items:
+                return
+            row = selected_items[0].row()
+        
+        # 获取变量名 - 现在从第二列（变量名列）获取
+        var_name_item = self.var_table.item(row, 1)
+        if var_name_item is None:
+            return
+        var_name = var_name_item.data(Qt.ItemDataRole.UserRole)
+        
+        # 打开颜色选择对话框
+        current_color = 'blue'  # 默认颜色
+        if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
+            current_color = self.plot_widget.curves[var_name].get('color', 'blue')
+        
+        color = QColorDialog.getColor(QColor(current_color), self, "选择颜色")
+        
+        if color.isValid():
+            if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
+                # 多曲线模式：更新curves字典中的颜色
+                self.plot_widget.curves[var_name]['color'] = color.name()
+                
+                # 重新绘制曲线
+                curve_info = self.plot_widget.curves[var_name]
+                if 'curve' in curve_info and 'x_data' in curve_info and 'y_data' in curve_info:
+                    # 移除旧曲线（如果还在scene中）
+                    if curve_info['curve'].scene() is not None:
+                        self.plot_widget.plot_item.removeItem(curve_info['curve'])
+                    
+                    # 创建新曲线
+                    pen = pg.mkPen(color=color.name(), width=DEFAULT_LINE_WIDTH)
+                    new_curve = self.plot_widget.plot_item.plot(
+                        curve_info['x_data'], 
+                        curve_info['y_data'], 
+                        pen=pen,
+                        name=var_name
+                    )
+                    
+                    # 性能优化：启用降采样和剪裁
+                    x_len = len(curve_info['x_data'])
+                    if x_len > 1000:
+                        new_curve.setDownsampling(auto=True, method='subsample')
+                        new_curve.setClipToView(True)
+                        if x_len > 10000:
+                            new_curve.setSkipFiniteCheck(True)
+                    
+                    # 更新曲线信息
+                    curve_info['curve'] = new_curve
+                    
+                    # 更新legend
+                    self.plot_widget.update_legend()
+            else:
+                # 单曲线模式：重新绘制整个曲线
+                if var_name == self.plot_widget.y_name and self.plot_widget.curve:
+                    # 移除旧曲线（如果还在scene中）
+                    if self.plot_widget.curve.scene() is not None:
+                        self.plot_widget.plot_item.removeItem(self.plot_widget.curve)
+                    
+                    # 创建新曲线
+                    pen = pg.mkPen(color=color.name(), width=DEFAULT_LINE_WIDTH)
+                    self.plot_widget.curve = self.plot_widget.plot_item.plot(
+                        self.plot_widget.original_index_x,
+                        self.plot_widget.original_y,
+                        pen=pen,
+                        name=var_name
+                    )
+                    
+                    # 性能优化：启用降采样和剪裁
+                    x_len = len(self.plot_widget.original_index_x)
+                    if x_len > 1000:
+                        self.plot_widget.curve.setDownsampling(auto=True, method='subsample')
+                        self.plot_widget.curve.setClipToView(True)
+                        if x_len > 10000:
+                            self.plot_widget.curve.setSkipFiniteCheck(True)
+            
+            # 更新表格项颜色
+            color_widget = self.var_table.cellWidget(row, 2)
+            if color_widget:
+                color_widget.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #333;")
+                
+    def dragEnterEvent(self, event):
+        """拖拽进入事件"""
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+    
+    def dragMoveEvent(self, event):
+        """拖拽移动事件"""
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+            
+    def dropEvent(self, event):
+        """拖拽放下事件"""
+        if event.mimeData().hasText():
+            var_name = event.mimeData().text()
+            
+            # 检查变量是否已存在
+            if (self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves) or \
+               (not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name):
+                QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
+                return
+                
+            # 添加变量到绘图
+            success = self.plot_widget.add_variable_to_plot(var_name)
+            if success:
+                # 重新加载列表以显示新添加的变量
+                self.load_current_curves()
+            else:
+                QMessageBox.warning(self, "错误", f"无法添加变量 {var_name}")
+                
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
 # ---------------- 主程序 ----------------
 if __name__ == "__main__":
