@@ -11,28 +11,25 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent,QObject,QMargins,Qt, QAbstractTableModel, QModelIndex,QModelIndex, QPoint, QSize, QRect, QRectF,QItemSelectionModel
-from PyQt6.QtGui import  QFontMetrics, QDrag, QPen, QColor,QBrush,QAction,QIcon,QFont,QFontDatabase, QPixmap, QImage, QPainter
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QSize, QRect, QRectF, QItemSelectionModel
+from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,QProgressDialog,QGridLayout,QSpinBox,QMenu,QTextEdit,
-    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,QTableView,QStyledItemDelegate,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy,QGraphicsLinearLayout,QGraphicsProxyWidget,QGraphicsWidget,QTableWidget,QTableWidgetItem,QHeaderView, QRubberBand,QDoubleSpinBox,QTreeWidget,QTreeWidgetItem, QSplitter, QSystemTrayIcon,
-    QListWidget, QListWidgetItem, QColorDialog, QCheckBox
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
+    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
+    QMessageBox, QDialog, QFormLayout, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QTableWidget, QTableWidgetItem, QHeaderView, QRubberBand, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem, QSplitter,
+    QColorDialog, QCheckBox
 )
 import pyqtgraph as pg
 from threading import Lock
 
 
-global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, NOTIFICATION_ENABLE, XRANGE_THRESHOLD_FOR_SYMBOLS
+global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, XRANGE_THRESHOLD_FOR_SYMBOLS
 DEFAULT_PADDING_VAL_X = 0.05
 DEFAULT_PADDING_VAL_Y = 0.1
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
 RATIO_RESET_PLOTS = 0.3
 FROZEN_VIEW_WIDTH_DEFAULT = 180
-NOTIFICATION_ENABLE = False  # 通知功能开关，默认关闭
-THRESHOLD_LINE_TO_SYMBOL = 100  # 已废弃，使用XRANGE_THRESHOLD_FOR_SYMBOLS
-TOLERANCE_LINE_TO_SYMBOL = 0.2  # 已废弃
-XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols
+XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol
 BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
 MIN_INDEX_LENGTH = 3
@@ -3040,7 +3037,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             else:
                 return False
         
-        global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, THRESHOLD_LINE_TO_SYMBOL, TOLERANCE_LINE_TO_SYMBOL, BLINK_PULSE, FACTOR_SCROLL_ZOOM
+        global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM
         
         padding_xVal = DEFAULT_PADDING_VAL_X  
         padding_yVal = 0.5
@@ -5462,36 +5459,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 y_min = np.nanmin(y_region)
             
             return [(x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)]
-    def _get_visible_points_count(self, x_data: np.ndarray, x_min: float, x_max: float) -> int:
-        """计算可见点数量"""
-        try:
-            visible_mask = (x_data >= x_min) & (x_data <= x_max)
-            return int(np.sum(visible_mask))
-        except Exception:
-            return 0
 
-    def _should_show_symbols(self, visible_points: int) -> bool:
-        """判断是否应该显示符号"""
-        if visible_points <= 0:
-            return False
-            
-        threshold = THRESHOLD_LINE_TO_SYMBOL
-        tolerance = TOLERANCE_LINE_TO_SYMBOL
-        
-        return visible_points < threshold * (1 - tolerance)
-
-    def _should_use_thick_line(self, visible_points: int) -> bool:
-        """判断是否应该使用粗线"""
-        if visible_points <= 0:
-            return False
-            
-        threshold = THRESHOLD_LINE_TO_SYMBOL
-        tolerance = TOLERANCE_LINE_TO_SYMBOL
-        
-        return visible_points > threshold * (1 + tolerance)
-
-    def _apply_plot_style(self, use_thick_line: bool, show_symbols: bool):
-        """应用绘图样式 - 统一应用到所有曲线"""
+    def _apply_plot_style(self, show_symbols: bool):
+        """应用绘图样式 - 基于xrange只有两种搭配：细线+symbol 或 粗线无symbol"""
         try:
             if self.is_multi_curve_mode:
                 # 多曲线模式：统一样式应用到所有曲线
@@ -5502,23 +5472,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     curve = curve_info['curve']
                     color = curve_info.get('color', 'blue')
                     
-                    # 统一应用样式（不再单独计算）
                     if show_symbols:
-                        # 显示符号：细线 + 符号
+                        # xrange小：细线 + 符号
                         pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
                         curve.setPen(pen)
                         curve.setSymbol('s')
                         curve.setSymbolSize(3)
                         curve.setSymbolPen(color)
                         curve.setSymbolBrush(color)
-                    elif use_thick_line:
-                        # 不显示符号且xRange大：粗线
-                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                        curve.setPen(pen)
-                        curve.setSymbol(None)
                     else:
-                        # 默认样式：细线无符号
-                        pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        # xrange大：粗线无符号
+                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
                         curve.setPen(pen)
                         curve.setSymbol(None)
             else:
@@ -5528,11 +5492,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     current_pen = self.curve.opts.get('pen', pg.mkPen('blue'))
                     color = current_pen.color().name() if hasattr(current_pen, 'color') else 'blue'
                     
-                    if use_thick_line:
-                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                        self.curve.setPen(pen)
-                        self.curve.setSymbol(None)
-                    elif show_symbols:
+                    if show_symbols:
+                        # xrange小：细线 + 符号
                         pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
                         self.curve.setPen(pen)
                         self.curve.setSymbol('s')
@@ -5540,15 +5501,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         self.curve.setSymbolPen(color)
                         self.curve.setSymbolBrush(color)
                     else:
-                        # 默认样式：细线无符号
-                        pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        # xrange大：粗线无符号
+                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
                         self.curve.setPen(pen)
                         self.curve.setSymbol(None)
         except Exception as e:
             print(f"应用绘图样式时出错: {e}")
 
     def update_plot_style(self, view_box, range, rect=None):
-        """更新绘图样式 - 使用全局xRange宽度判断"""
+        """更新绘图样式 - 基于xRange宽度判断，只有两种搭配：细线+symbol 或 粗线无symbol"""
         try:
             # 获取当前视图的xRange
             x_min, x_max = range[0]
@@ -5558,13 +5519,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # x = offset + factor * index，所以 index_range = x_range / factor
             index_range_width = x_range_width / self.factor if self.factor != 0 else x_range_width
             
-            # 基于索引范围宽度判断样式（全局统一）
+            # 基于索引范围宽度判断样式：小于阈值显示symbol（细线+symbol），否则粗线无symbol
             global XRANGE_THRESHOLD_FOR_SYMBOLS
             show_symbols = index_range_width < XRANGE_THRESHOLD_FOR_SYMBOLS
-            use_thick_line = not show_symbols  # 不显示symbols时用粗线
             
             # 应用样式到所有曲线
-            self._apply_plot_style(use_thick_line, show_symbols)
+            self._apply_plot_style(show_symbols)
             
         except Exception as e:
             print(f"更新绘图样式时出错: {e}")
@@ -6008,13 +5968,8 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn = QPushButton("修改布局")
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
-        # 新增：绘图区截图按钮（位于“修改布局”的左侧）
-        self.screenshot_plots_btn = QPushButton("截图")
-        self.screenshot_plots_btn.clicked.connect(self.copy_plots_screenshot_to_clipboard)
-
         self.set_button_status(False)
         
-        top_bar.addWidget(self.screenshot_plots_btn)
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
@@ -6263,8 +6218,6 @@ class MainWindow(QMainWindow):
             self.cursor_btn.setEnabled(status)
             self.mark_region_btn.setEnabled(status)
             self.grid_layout_btn.setEnabled(status)
-            if hasattr(self, 'screenshot_plots_btn'):
-                self.screenshot_plots_btn.setEnabled(status)
 
     def reload_data(self):
         """重新加载当前数据"""
@@ -6836,340 +6789,6 @@ class MainWindow(QMainWindow):
             widget=container.plot_widget
             widget.auto_y_in_x_range()
 
-    def copy_plots_screenshot_to_clipboard(self):
-        """将当前可见布局中的每个plot连同左右上角文本拼接为大图并复制到剪贴板。"""
-        if not self.plot_widgets:
-            return
-        # 计算当前可见的 MxN
-        rows, cols = self._plot_row_current, self._plot_col_current
-        # 先渲染每个可见格子的图像
-        cell_images: list[list[QImage | None]] = [[None for _ in range(cols)] for _ in range(rows)]
-        cell_w = 0
-        cell_h = 0
-        for idx, container in enumerate(self.plot_widgets):
-            r = idx // self._plot_col_max_default
-            c = idx % self._plot_col_max_default
-            if r >= rows or c >= cols:
-                continue
-            if not container.isVisible():
-                continue
-            # 取实际widget尺寸
-            w = max(1, container.width())
-            h = max(1, container.height())
-            cell_w = max(cell_w, w)
-            cell_h = max(cell_h, h)
-
-            image = QImage(w, h, QImage.Format.Format_ARGB32)
-            image.fill(Qt.GlobalColor.white)
-            painter = QPainter(image)
-            container.render(painter)
-            painter.end()
-            cell_images[r][c] = image
-
-        if cell_w == 0 or cell_h == 0:
-            return
-
-        total_w = cell_w * cols
-        total_h = cell_h * rows
-        final_image = QImage(total_w, total_h, QImage.Format.Format_ARGB32)
-        final_image.fill(Qt.GlobalColor.white)
-        painter = QPainter(final_image)
-
-        for r in range(rows):
-            for c in range(cols):
-                img = cell_images[r][c]
-                if img is None:
-                    continue
-                target_x = c * cell_w
-                target_y = r * cell_h
-                painter.drawImage(target_x, target_y, img)
-
-        painter.end()
-
-        # 放入剪贴板
-        QApplication.clipboard().setImage(final_image)
-
-        # 平台通知
-        self._notify_copy_done()
-
-    def _notify_copy_done(self):
-        """跨平台提醒复制完成。"""
-        # 检查通知开关
-        if not NOTIFICATION_ENABLE:
-            # print("通知功能已关闭")
-            return
-        
-        title = "已复制"
-        message = "绘图区截图已复制到剪贴板"
-        
-        # 检测操作系统
-        import platform
-        system = platform.system()
-        
-        try:
-            if system == "Darwin":  # macOS
-                self._show_macos_notification(title, message)
-            elif system == "Windows":  # Windows
-                self._show_windows_notification(title, message)
-            elif QSystemTrayIcon.isSystemTrayAvailable():
-                tray = getattr(self, '_tray_icon', None)
-                if tray is None:
-                    icon = QIcon(str(resource_path('icon.png')))
-                    tray = QSystemTrayIcon(icon, self)
-                    tray.setVisible(True)
-                    self._tray_icon = tray
-                self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
-            else:
-                QMessageBox.information(self, title, message)
-        except Exception:
-            QMessageBox.information(self, title, message)
-    
-    def _show_macos_notification(self, title, message):
-        """在macOS上显示原生通知。"""
-        try:
-            # 首先尝试使用PyObjC调用macOS原生通知API
-            try:
-                import objc
-                from Foundation import NSUserNotification, NSUserNotificationCenter
-                
-                # 创建通知
-                notification = NSUserNotification.alloc().init()
-                notification.setTitle_(title)
-                notification.setInformativeText_(message)
-                notification.setSoundName_("Glass")
-                
-                # 显示通知
-                center = NSUserNotificationCenter.defaultUserNotificationCenter()
-                if center is None:
-                    print("NSUserNotificationCenter不可用，可能是bundle identifier问题")
-                    raise Exception("NSUserNotificationCenter不可用")
-                
-                center.deliverNotification_(notification)
-                print(f"macOS通知已发送: {title} - {message}")
-                return
-                
-            except ImportError:
-                print("PyObjC未安装，尝试其他方法")
-                pass
-            except Exception as e:
-                print(f"PyObjC通知失败: {e}")
-                pass
-            
-            # 优先使用terminal-notifier工具（最可靠的方法）
-            try:
-                import subprocess
-                result = subprocess.run(['terminal-notifier', '-title', title, '-message', message, '-sound', 'Glass'], 
-                                     capture_output=True, text=True, check=True)
-                print(f"terminal-notifier通知已发送: {title} - {message}")
-                return
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"terminal-notifier失败: {e}")
-                print("提示：可以通过 'brew install terminal-notifier' 安装terminal-notifier")
-                pass
-            
-            # 尝试使用macOS的通知中心API（最可靠的方法）
-            try:
-                import subprocess
-                # 使用osascript调用macOS的通知中心
-                script = f'''
-                display notification "{message}" with title "{title}" sound name "Glass"
-                '''
-                result = subprocess.run(['osascript', '-e', script], 
-                                     capture_output=True, text=True, check=True)
-                print(f"macOS通知已发送: {title} - {message}")
-                return
-            except subprocess.CalledProcessError as e:
-                print(f"macOS通知失败: {e}")
-                if e.stderr:
-                    print(f"错误信息: {e.stderr}")
-                pass
-            
-            # 尝试使用macOS的通知中心API（简化版本，避免权限问题）
-            try:
-                import subprocess
-                # 使用简化的AppleScript，避免System Events权限问题
-                script = f'''
-                display notification "{message}" with title "{title}" sound name "Glass"
-                '''
-                result = subprocess.run(['osascript', '-e', script], 
-                                     capture_output=True, text=True, check=True)
-                print(f"AppleScript通知已发送: {title} - {message}")
-                return
-            except subprocess.CalledProcessError as e:
-                print(f"AppleScript失败: {e}")
-                if e.stderr:
-                    print(f"错误信息: {e.stderr}")
-                pass
-            
-            # 使用osascript调用macOS的通知系统（最终备用方案）
-            import subprocess
-            
-            # 转义特殊字符
-            title_escaped = title.replace('"', '\\"')
-            message_escaped = message.replace('"', '\\"')
-            
-            script = f'''
-            display notification "{message_escaped}" with title "{title_escaped}" sound name "Glass"
-            '''
-            
-            # 执行AppleScript
-            try:
-                result = subprocess.run(['osascript', '-e', script], 
-                                     capture_output=True, text=True, check=True)
-                print(f"最终AppleScript通知已发送: {title} - {message}")
-            except subprocess.CalledProcessError as e:
-                print(f"最终AppleScript失败: {e}")
-                if e.stderr:
-                    print(f"错误信息: {e.stderr}")
-                # 如果AppleScript失败，尝试使用系统声音
-                try:
-                    subprocess.run(['afplay', '/System/Library/Sounds/Glass.aiff'], check=True)
-                    print("播放系统声音作为备用提醒")
-                except:
-                    pass
-            
-        except Exception as e:
-            print(f"macOS通知异常: {e}")
-            # 如果原生通知失败，尝试使用系统托盘
-            try:
-                if QSystemTrayIcon.isSystemTrayAvailable():
-                    tray = getattr(self, '_tray_icon', None)
-                    if tray is None:
-                        icon = QIcon(str(resource_path('icon.png')))
-                        tray = QSystemTrayIcon(icon, self)
-                        tray.setVisible(True)
-                        self._tray_icon = tray
-                    self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
-                    print(f"系统托盘通知已发送: {title} - {message}")
-                else:
-                    QMessageBox.information(self, title, message)
-                    print(f"消息框通知已显示: {title} - {message}")
-            except Exception as e2:
-                print(f"备用通知失败: {e2}")
-                QMessageBox.information(self, title, message)
-    
-    def _show_windows_notification(self, title, message):
-        """在Windows上显示现代Toast通知。"""
-        try:
-            # 首先尝试使用win10toast库
-            try:
-                from win10toast import ToastNotifier
-                toaster = ToastNotifier()
-                toaster.show_toast(
-                    title=title,
-                    msg=message,
-                    duration=3,
-                    icon_path=str(resource_path('icon.ico')),
-                    threaded=True
-                )
-                return
-            except ImportError:
-                pass
-            
-            # 尝试使用plyer库（跨平台通知）
-            try:
-                from plyer import notification
-                notification.notify(
-                    title=title,
-                    message=message,
-                    timeout=3,
-                    app_icon=str(resource_path('icon.ico'))
-                )
-                return
-            except ImportError:
-                pass
-            
-            # 尝试使用winrt库（Windows Runtime）
-            try:
-                import winrt.windows.ui.notifications as notifications
-                import winrt.windows.data.xml.dom as dom
-                import winrt.windows.applicationmodel as app_model
-                
-                # 创建Toast通知
-                app = app_model.Package.current
-                if app:
-                    # 创建Toast XML模板
-                    toast_xml = f'''
-                    <toast>
-                        <visual>
-                            <binding template="ToastGeneric">
-                                <text>{title}</text>
-                                <text>{message}</text>
-                                <image placement="appLogoOverride" src="file:///{resource_path('icon.ico')}"/>
-                            </binding>
-                        </visual>
-                        <audio src="ms-winsoundevent:Notification.Default"/>
-                    </toast>
-                    '''
-                    
-                    # 解析XML
-                    xml_doc = dom.XmlDocument()
-                    xml_doc.load_xml(toast_xml)
-                    
-                    # 创建通知
-                    toast = notifications.ToastNotification(xml_doc)
-                    notifier = notifications.ToastNotificationManager.create_toast_notifier()
-                    notifier.show(toast)
-                    return
-            except ImportError:
-                pass
-            
-            # 尝试使用Windows原生API（更现代的方式）
-            try:
-                import ctypes
-                from ctypes import wintypes
-                
-                # 定义Windows API函数
-                user32 = ctypes.windll.user32
-                kernel32 = ctypes.windll.kernel32
-                
-                # 创建通知
-                MessageBox = user32.MessageBoxW
-                MessageBox.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
-                MessageBox.restype = ctypes.c_int
-                
-                # 显示通知（使用系统托盘样式）
-                MessageBox(None, message, title, 0x40)  # MB_ICONINFORMATION
-                return
-            except Exception:
-                pass
-            
-            # 尝试使用Windows原生API（更现代的方式）
-            try:
-                import ctypes
-                from ctypes import wintypes
-                
-                # 定义Windows API函数
-                user32 = ctypes.windll.user32
-                kernel32 = ctypes.windll.kernel32
-                
-                # 创建通知
-                MessageBox = user32.MessageBoxW
-                MessageBox.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
-                MessageBox.restype = ctypes.c_int
-                
-                # 显示通知（使用系统托盘样式）
-                MessageBox(None, message, title, 0x40)  # MB_ICONINFORMATION
-                return
-            except Exception:
-                pass
-            
-            # 备用方案：使用系统托盘
-            if QSystemTrayIcon.isSystemTrayAvailable():
-                tray = getattr(self, '_tray_icon', None)
-                if tray is None:
-                    icon = QIcon(str(resource_path('icon.ico')))
-                    tray = QSystemTrayIcon(icon, self)
-                    tray.setVisible(True)
-                    self._tray_icon = tray
-                self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 3000)
-            else:
-                QMessageBox.information(self, title, message)
-                
-        except Exception as e:
-            # 最终备用方案
-            QMessageBox.information(self, title, message)
-    
     def create_subplots_matrix(self, m: int, n: int):
         # 先全部清掉
         for i in reversed(range(self.plot_layout.count())):
