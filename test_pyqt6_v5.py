@@ -3151,9 +3151,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         minXRange_val = self._get_min_x_range_value()
         self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
 
-    def _set_safe_y_range(self, min_y: float, max_y: float):
+    def _set_safe_y_range(self, min_y: float, max_y: float, set_limits: bool = True):
         """
         设置 Y 轴的 viewRange 和 limits，自动处理 NaN 或恒定值。
+        
+        Args:
+            min_y: Y轴最小值
+            max_y: Y轴最大值
+            set_limits: 是否同时设置y轴limits，默认为True。当为False时只设置viewRange。
         """
         global DEFAULT_PADDING_VAL_Y
         
@@ -3182,7 +3187,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             y_min_limit = min_y - padding_yVal_limit * y_range
             y_max_limit = max_y + padding_yVal_limit * y_range
 
-        self.plot_item.setLimits(yMin=y_min_limit, yMax=y_max_limit)
+        # 只在需要时设置limits
+        if set_limits:
+            self.plot_item.setLimits(yMin=y_min_limit, yMax=y_max_limit)
         # ViewRange 使用 PADDING_Y (默认0.1) 的内边距
         self.view_box.setYRange(y_min_view, y_max_view, padding=DEFAULT_PADDING_VAL_Y)
 
@@ -3851,14 +3858,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 circle.clear()
                 circle.setData([x_actual], [y_val])
                 
-                # 复用pen对象优化：避免每次创建新pen导致内存泄漏
-                if not hasattr(circle, '_cached_pen'):
-                    # 首次使用：创建并缓存pen对象
-                    circle._cached_pen = pg.mkPen(color, width=1.5)
-                    circle.setPen(circle._cached_pen)
-                else:
-                    # 后续使用：只更新颜色
-                    circle._cached_pen.setColor(QColor(color))
+                # 设置圆圈的边框颜色为曲线颜色
+                # 每次都创建新pen以确保颜色正确应用（pen创建开销很小）
+                pen = pg.mkPen(color, width=1.5)
+                circle.setPen(pen)
                 
                 # 显示圆圈并添加到场景
                 circle.setVisible(True)
@@ -3949,14 +3952,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             text_item = self._get_label_from_pool(idx)
             text_item.setText(y_value)
             
-            # 复用border pen对象优化：避免每次创建新pen导致内存泄漏
-            if not hasattr(text_item, '_cached_border_pen'):
-                # 首次使用：创建并缓存border pen对象
-                text_item._cached_border_pen = pg.mkPen(color, width=1.5)
-                text_item.border = text_item._cached_border_pen
-            else:
-                # 后续使用：只更新颜色
-                text_item._cached_border_pen.setColor(QColor(color))
+            # 设置标签边框颜色为曲线颜色
+            # 每次都创建新pen以确保颜色正确应用（pen创建开销很小）
+            border_pen = pg.mkPen(color, width=1.5)
+            text_item.border = border_pen
             
             text_item.setVisible(True)
             
@@ -4430,7 +4429,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.update_legend()
             
             # 批量添加完成后统一更新坐标轴
-            self._update_axes_for_multi_curve()
+            # 始终不更新x轴范围，只更新y轴范围
+            self._update_axes_for_multi_curve(update_x_range=False)
             
             # 统一提示已存在的变量
             if failed_vars:
@@ -4572,7 +4572,39 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.update_left_header(full_title)
             
             # 设置坐标轴范围
-            self._setup_plot_axes(x_values, self.original_y)
+            # 始终保持x轴范围不变，只更新y轴范围
+            # 因为所有plot的x轴都是linked的，改变x轴会影响其他plot
+            
+            # 处理单点或所有点x坐标相同的特殊情况
+            special_limits = self.handle_single_point_limits(x_values, self.original_y)
+            if special_limits:
+                # 单点数据：使用特殊处理的范围
+                # handle_single_point_limits已经返回了扩展后的x范围，直接使用
+                min_x, max_x, min_y, max_y = special_limits
+                # 更新y轴范围和limits
+                self._set_safe_y_range(min_y, max_y)
+                # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
+                self._set_x_limits_with_min_range(min_x, max_x)
+            else:
+                # 正常数据：
+                # 1. 基于数据的全范围设置y轴limits（允许用户缩放到所有数据）
+                data_min_y = np.nanmin(self.original_y)
+                data_max_y = np.nanmax(self.original_y)
+                self._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
+                
+                # 2. 基于当前x轴范围内的数据设置y轴viewRange（初始显示范围）
+                current_x_range = self.view_box.viewRange()[0]
+                x_min, x_max = current_x_range
+                min_y, max_y = self._get_y_range_in_x_window(x_values, self.original_y, x_min, x_max)
+                self._set_safe_y_range(min_y, max_y, set_limits=False)
+                
+                # 3. 更新x轴limits（允许的最大范围），确保可以平移/缩放到数据的范围
+                data_min_x = np.min(x_values)
+                data_max_x = np.max(x_values)
+                padding_x = DEFAULT_PADDING_VAL_X
+                limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
             # 更新光标
             min_x, max_x = np.min(x_values), np.max(x_values)
@@ -4586,7 +4618,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             QMessageBox.critical(self, "绘图错误", f"绘制变量时发生错误: {str(e)}")
             return False
 
-    def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray):
+    def _get_y_range_in_x_window(self, x_values: np.ndarray, y_values: np.ndarray, x_min: float, x_max: float):
+        """计算在指定x轴范围内的y值范围
+        
+        Args:
+            x_values: X轴数据数组
+            y_values: Y轴数据数组
+            x_min: X轴范围最小值
+            x_max: X轴范围最大值
+            
+        Returns:
+            tuple: (min_y, max_y) 在x范围内的y值最小值和最大值
+        """
+        try:
+            # 找到在x范围内的数据点
+            mask = (x_values >= x_min) & (x_values <= x_max)
+            if not np.any(mask):
+                # 如果没有数据点在范围内，返回全部数据的范围
+                return np.nanmin(y_values), np.nanmax(y_values)
+            
+            y_in_range = y_values[mask]
+            return np.nanmin(y_in_range), np.nanmax(y_in_range)
+        except Exception as e:
+            # 出错时返回全部数据范围
+            return np.nanmin(y_values), np.nanmax(y_values)
+    
+    def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray, update_x_range: bool = True):
         """设置绘图坐标轴
         
         根据数据范围设置X和Y轴的显示范围和限制范围。
@@ -4595,6 +4652,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         Args:
             x_values: X轴数据数组
             y_values: Y轴数据数组
+            update_x_range: 是否更新X轴范围，默认为True
         """
         try:
             # 处理特殊情况（单点或所有点x坐标相同）
@@ -4612,8 +4670,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             limits_xMin = min_x - padding_x * (max_x - min_x)
             limits_xMax = max_x + padding_x * (max_x - min_x)
             
-            # 设置X轴的viewRange（显示范围）
-            self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
+            # 只在update_x_range为True时设置X轴的viewRange（显示范围）
+            if update_x_range:
+                self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
             
             # 设置Y轴范围和X轴limits
             self._set_safe_y_range(min_y, max_y)
@@ -4789,10 +4848,85 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 更新多曲线模式
             self.update_multi_curve_mode()
             
-            # 更新坐标轴范围（批量添加时跳过，避免x轴闪烁）
+            # 更新坐标轴范围（批量添加时跳过，避免重复更新）
             batch_adding = getattr(self, '_batch_adding', False)
             if not batch_adding:
-                self._update_axes_for_multi_curve()
+                # 始终保持x轴范围不变，只更新y轴范围
+                # 因为所有plot的x轴都是linked的，改变x轴会影响其他plot
+                
+                # 1. 先计算所有曲线的全范围y值，用于设置y轴limits
+                all_y_values = []
+                for curve_info in self.curves.values():
+                    if curve_info['visible']:
+                        all_y_values.extend(curve_info['y_data'])
+                
+                if all_y_values:
+                    all_data_min_y = np.nanmin(all_y_values)
+                    all_data_max_y = np.nanmax(all_y_values)
+                    # 设置y轴limits为所有数据的范围
+                    self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
+                
+                # 2. 再根据当前x范围设置y轴viewRange
+                # 检查是否是单点数据
+                special_limits = self.handle_single_point_limits(x_values, y_values)
+                if special_limits:
+                    # 单点数据：使用特殊处理
+                    min_x, max_x, min_y, max_y = special_limits
+                    
+                    # 检查是否是第一个曲线
+                    has_other_curves = len(self.curves) > 1
+                    
+                    if not has_other_curves:
+                        # 第一次添加曲线：直接设置y轴viewRange
+                        self._set_safe_y_range(min_y, max_y, set_limits=False)
+                    else:
+                        # 已有曲线：根据新曲线扩展y轴viewRange
+                        current_y_range = self.view_box.viewRange()[1]
+                        current_min_y, current_max_y = current_y_range
+                        final_min_y = min(current_min_y, min_y)
+                        final_max_y = max(current_max_y, max_y)
+                        self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                    
+                    # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
+                    self._set_x_limits_with_min_range(min_x, max_x)
+                else:
+                    # 正常数据
+                    current_x_range = self.view_box.viewRange()[0]
+                    x_min, x_max = current_x_range
+                    
+                    # 计算新曲线在当前x轴范围内的y值范围
+                    new_min_y, new_max_y = self._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
+                    
+                    # 检查是否是第一个曲线
+                    has_other_curves = len(self.curves) > 1
+                    
+                    if not has_other_curves:
+                        # 第一次添加曲线：直接设置y轴viewRange为新曲线在当前x范围内的范围
+                        self._set_safe_y_range(new_min_y, new_max_y, set_limits=False)
+                    else:
+                        # 已有曲线：根据新曲线扩展y轴viewRange
+                        current_y_range = self.view_box.viewRange()[1]
+                        current_min_y, current_max_y = current_y_range
+                        
+                        # 扩展y轴viewRange（只考虑新曲线的min/max）
+                        final_min_y = min(current_min_y, new_min_y)
+                        final_max_y = max(current_max_y, new_max_y)
+                        
+                        # 更新y轴viewRange
+                        self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                    
+                    # 3. 更新x轴limits（允许的最大范围）以包含所有曲线的数据
+                    all_x_values = []
+                    for curve_info in self.curves.values():
+                        if curve_info['visible']:
+                            all_x_values.extend(curve_info['x_data'])
+                    if all_x_values:
+                        data_min_x = np.min(all_x_values)
+                        data_max_x = np.max(all_x_values)
+                        padding_x = DEFAULT_PADDING_VAL_X
+                        limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                        limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
             # 更新cursor边界
             min_x, max_x = np.min(x_values), np.max(x_values)
@@ -5049,11 +5183,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         var_name = curve_list[clicked_index][0]
         self.toggle_curve_visibility_by_name(var_name)
     
-    def _update_axes_for_multi_curve(self):
+    def _update_axes_for_multi_curve(self, update_x_range: bool = False):
         """为多曲线更新坐标轴范围
         
         计算所有可见曲线的数据范围，并更新坐标轴显示范围。
         只考虑visible=True的曲线，忽略隐藏的曲线。
+        
+        Args:
+            update_x_range: 是否更新X轴范围。默认为False，保持当前x轴范围不变。
+                           当为True时（通常是第一次添加曲线或批量添加完成），会设置x轴范围为数据的全范围。
         """
         if not self.curves:
             return
@@ -5070,7 +5208,57 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if all_x_values and all_y_values:
             x_values = np.array(all_x_values)
             y_values = np.array(all_y_values)
-            self._setup_plot_axes(x_values, y_values)
+            
+            if update_x_range:
+                # 更新x和y轴范围（第一次添加曲线或批量添加完成）
+                self._setup_plot_axes(x_values, y_values, update_x_range=True)
+            else:
+                # 保持x轴范围不变，只更新y轴范围
+                
+                # 1. 先基于所有数据的全范围设置y轴limits
+                all_data_min_y = np.nanmin(y_values)
+                all_data_max_y = np.nanmax(y_values)
+                self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
+                
+                # 2. 再根据当前x范围设置y轴viewRange
+                # 检查是否是单点数据
+                special_limits = self.handle_single_point_limits(x_values, y_values)
+                if special_limits:
+                    # 单点数据：使用特殊处理
+                    # handle_single_point_limits已经返回了扩展后的x范围，直接使用
+                    min_x, max_x, min_y, max_y = special_limits
+                    self._set_safe_y_range(min_y, max_y, set_limits=False)
+                    # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
+                    self._set_x_limits_with_min_range(min_x, max_x)
+                else:
+                    # 正常数据
+                    current_x_range = self.view_box.viewRange()[0]
+                    x_min, x_max = current_x_range
+                    
+                    # 计算所有曲线在当前x轴范围内的y值范围
+                    all_y_in_range = []
+                    for var_name, curve_info in self.curves.items():
+                        if curve_info['visible']:
+                            min_y, max_y = self._get_y_range_in_x_window(
+                                np.array(curve_info['x_data']), 
+                                np.array(curve_info['y_data']), 
+                                x_min, 
+                                x_max
+                            )
+                            all_y_in_range.extend([min_y, max_y])
+                    
+                    if all_y_in_range:
+                        final_min_y = np.nanmin(all_y_in_range)
+                        final_max_y = np.nanmax(all_y_in_range)
+                        self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                    
+                    # 3. 更新x轴limits（允许的最大范围）
+                    data_min_x = np.min(x_values)
+                    data_max_x = np.max(x_values)
+                    padding_x = DEFAULT_PADDING_VAL_X
+                    limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                    limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                    self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
@@ -7105,7 +7293,7 @@ class MainWindow(QMainWindow):
                 
                 if widget.is_multi_curve_mode:
                     # 多曲线模式：先清除所有曲线，然后重新添加有效的曲线
-                    # 保存当前曲线信息
+                    # 保存当前曲线信息（包括可见性状态）
                     current_curves = dict(widget.curves)
                     
                     # 清除所有曲线
@@ -7120,15 +7308,34 @@ class MainWindow(QMainWindow):
                     
                     # 重新添加有效的曲线
                     curves_added = 0
+                    visibility_to_restore = {}  # 记录需要恢复的可见性状态
+                    
                     for var_name, curve_info in current_curves.items():
                         if var_name in self.loader.df.columns and self.loader.df_validity.get(var_name, -1) >= 0:
                             # 变量仍然有效，重新绘制
                             success = widget.add_variable_to_plot(var_name, skip_existence_check=True)
                             if success:
                                 curves_added += 1
+                                # 保存原来的可见性状态，稍后恢复
+                                visibility_to_restore[var_name] = curve_info.get('visible', True)
                     
                     # 更新多曲线模式状态
                     widget.update_multi_curve_mode()
+                    
+                    # 恢复所有曲线的可见性状态（在update_multi_curve_mode之后）
+                    for var_name, original_visible in visibility_to_restore.items():
+                        if var_name in widget.curves:
+                            widget.curves[var_name]['visible'] = original_visible
+                            # 更新曲线对象的可见性
+                            if 'curve' in widget.curves[var_name]:
+                                try:
+                                    widget.curves[var_name]['curve'].setVisible(original_visible)
+                                except Exception:
+                                    pass
+                    
+                    # 更新legend显示（重要！确保legend样式与可见性状态一致）
+                    if curves_added > 0:
+                        widget.update_legend()
                     
                     if curves_added == 0:
                         cleared.append((idx + 1, "所有变量无效"))
