@@ -11,7 +11,7 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QSize, QRect, QRectF, QItemSelectionModel
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel
 from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
@@ -26,7 +26,7 @@ from threading import Lock
 global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, XRANGE_THRESHOLD_FOR_SYMBOLS
 DEFAULT_PADDING_VAL_X = 0.05
 DEFAULT_PADDING_VAL_Y = 0.1
-FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2
+FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
 RATIO_RESET_PLOTS = 0.3
 FROZEN_VIEW_WIDTH_DEFAULT = 180
 XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol
@@ -217,7 +217,8 @@ class FastDataLoader:
         sep: str = ",",
         _progress: Callable | None = None,
         do_parse_date: bool =False,
-        hasunit:bool = True
+        hasunit:bool = True,
+        verbose_timing: bool = False
     ):
         """
         初始化快速数据加载器
@@ -237,7 +238,14 @@ class FastDataLoader:
             _progress: 进度回调函数
             do_parse_date: 是否解析日期
             hasunit: 是否包含单位行
+            verbose_timing: 是否打印详细的时间统计
         """
+        import time
+        t_total_start = time.perf_counter()
+        
+        # 时间统计字典
+        self.timing = {}
+        
         #print("Calling inside FastDataLoader with _progress:", _progress) 
         self._path = csv_path
         self.file_size = os.path.getsize(csv_path) 
@@ -250,15 +258,21 @@ class FastDataLoader:
         self._progress_cb = _progress
         self.do_parse_date=do_parse_date
         self.hasunit=hasunit
+        self.verbose_timing = verbose_timing
 
         # 一次性读取 header + 单位行，并回退编码
+        t_header_start = time.perf_counter()
         self._var_names, self._units, self.encoding_used = self._load_header_units(
             self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,hasunit=self.hasunit
         )
+        t_header_end = time.perf_counter()
+        self.timing['header_and_units'] = t_header_end - t_header_start
+        
         if self._progress_cb:
             self._progress_cb(5)
 
-        # 推断 dtype        
+        # 推断 dtype
+        t_sample_start = time.perf_counter()
         sample = pd.read_csv(
             self._path,
             skiprows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
@@ -271,15 +285,17 @@ class FastDataLoader:
             na_values=self._NA_VALUES,
             keep_default_na=True,
         )
-        dtype_map, parse_dates, date_formats,downcast_ratio = self._infer_schema(sample)
+        t_sample_end = time.perf_counter()
+        self.timing['sample_reading'] = t_sample_end - t_sample_start
+        
+        # 推断schema（包含时间格式）
+        dtype_map, parse_dates, date_formats,downcast_ratio = self._infer_schema(sample, self.timing)
         self.date_formats = date_formats
+        
         self.sample_mem_size = sample.memory_usage(deep=True).sum()
-        # print(f"the estimated downcast ratio is {downcast_ratio*100:2f} %, the compression ratio estimated {(0.5*downcast_ratio+1*(1-downcast_ratio))}")
-        # print(f"sample of {sample.shape[0]} lines has costed memory {self.sample_mem_size/(1024**2):2f}Mb")
-        # self.byte_per_line = ((0.5*downcast_ratio+1*(1-downcast_ratio))*self.sample_mem_size)/sample.shape[0]
         self.byte_per_line = (0.6*self.sample_mem_size)/sample.shape[0]
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
-        # print(f"this file might have lines of {self.estimated_lines}")
+        
         import gc
         del sample 
         gc.collect()
@@ -290,8 +306,8 @@ class FastDataLoader:
         if chunksize is None:
             chunksize = 3600
         
-        # print(f"chunk size is {chunksize}")
-        # 正式读取
+        # 正式读取数据
+        t_read_start = time.perf_counter()
         self._df = self._read_chunks(
             self._path,
             dtype_map,
@@ -301,20 +317,80 @@ class FastDataLoader:
             descRows=self.descRows,
             hasunit=self.hasunit
         )
-        #print(f"actual lines of data files is {self.row_count}")
+        t_read_end = time.perf_counter()
+        self.timing['data_reading'] = t_read_end - t_read_start
+        
         # 后处理
+        t_postprocess_start = time.perf_counter()
         if drop_empty:
             self._df = self._df.dropna(axis=1, how="all")
         if downcast_float:
             self._downcast_numeric()
+        
+        t_validity_start = time.perf_counter()
         self._df_validity=self._check_df_validity()
+        t_validity_end = time.perf_counter()
+        self.timing['validity_check'] = t_validity_end - t_validity_start
+        
+        self.timing['postprocessing'] = t_validity_end - t_postprocess_start
         
         # 强制垃圾回收
-        import gc
         gc.collect()
+        
+        t_total_end = time.perf_counter()
+        self.timing['total'] = t_total_end - t_total_start
+        
+        # 打印时间统计（如果启用）
+        if self.verbose_timing:
+            self._print_timing_stats()
         
         if self._progress_cb:
             self._progress_cb(100)
+    
+    def _print_timing_stats(self):
+        """打印详细的时间统计信息"""
+        print("\n" + "="*60)
+        print(f"数据加载时间统计 - 文件: {os.path.basename(self._path)}")
+        print(f"文件大小: {self.file_size/(1024**2):.2f} MB")
+        print(f"数据行数: {self.row_count:,} 行")
+        print(f"列数: {self.column_count} 列")
+        print("="*60)
+        print(f"{'步骤':<30} {'耗时(秒)':<12} {'占比':<8}")
+        print("-"*60)
+        
+        total_time = self.timing.get('total', 1)
+        
+        # 各步骤时间
+        steps = [
+            ('1. 头部和单位识别', 'header_and_units'),
+            ('2. 样本数据读取', 'sample_reading'),
+            ('3. 数据类型推断', 'dtype_inference'),
+            ('4. 时间格式推断', 'time_format_inference'),
+            ('5. Schema推断总计', 'schema_inference_total'),
+            ('6. 完整数据读取', 'data_reading'),
+            ('7. 有效性检查', 'validity_check'),
+            ('8. 后处理总计', 'postprocessing'),
+        ]
+        
+        for step_name, key in steps:
+            if key in self.timing:
+                time_val = self.timing[key]
+                percent = (time_val / total_time * 100) if total_time > 0 else 0
+                print(f"{step_name:<30} {time_val:>10.3f}s  {percent:>6.1f}%")
+        
+        print("-"*60)
+        print(f"{'总计':<30} {total_time:>10.3f}s  {100:>6.1f}%")
+        print("="*60)
+        
+        # 发现的时间列
+        if self.date_formats:
+            print(f"\n发现 {len(self.date_formats)} 个时间列:")
+            for col, fmt in self.date_formats.items():
+                print(f"  - {col}: {fmt}")
+        else:
+            print("\n未发现时间列")
+        
+        print("="*60 + "\n")
 
     @staticmethod
     def _load_header_units(
@@ -388,35 +464,82 @@ class FastDataLoader:
         return var_names, units, enc
 
     @staticmethod
-    def _infer_schema(sample: pd.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str],float]:
+    def _infer_schema(sample: pd.DataFrame, timing_dict: dict = None) -> tuple[dict[str, str], list[str], dict[str, str],float]:
+        """推断数据类型和时间格式
+        
+        优化策略：
+        1. 只对列名包含时间相关关键字的列进行时间格式推断
+        2. 使用更精简的日期格式候选列表
+        3. 对每列只采样前10行进行格式推断
+        """
+        import time
+        t_start = time.perf_counter()
+        
         dtype_map: dict[str, str] = {}
         parse_dates: list[str] = []
         date_formats: dict[str, str] = {}
 
+        # 精简的日期格式候选列表（最常用的格式）
         date_candidates = [
-            "%Y/%m/%d","%H:%M:%S", "%H:%M:%S.%f",
-            "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d","%d-%m-%Y", "%m-%d-%Y"
+            "%H:%M:%S",      # 时间格式
+            "%H:%M:%S.%f",   # 带微秒的时间
+            "%d/%m/%Y",      # 欧洲日期格式 (例: 18/11/2017)
+            "%Y/%m/%d",      # 日期格式 (例: 2024/10/31)
+            "%Y-%m-%d",      # ISO日期格式 (例: 2024-10-31)
         ]
+        
+        # 时间列的关键字（不区分大小写）
+        time_keywords = ['time', 'date', 'datetime', 'timestamp', 'zeit', 'TMD']
+        
         float_cols = sample.select_dtypes(include=['float', 'float64','category'])
         downcast_ratio_est = float_cols.shape[1] / sample.shape[1] if sample.shape[1] > 0 else 0.000001
+        
+        t_dtype_start = time.perf_counter()
+        
         for col in sample.columns:
             s = sample[col]
             if s.isna().all():
                 dtype_map[col] = "category"
                 continue
-            for fmt in date_candidates:
-                try:
-                    pd.to_datetime(s, format=fmt, errors="raise")
-                    parse_dates.append(col)
-                    date_formats[col] = fmt
-                    break
-                except (ValueError, TypeError):
-                    continue
+            
+            # 只对列名包含时间关键字的列进行时间格式推断
+            col_lower = col.lower()
+            is_time_candidate = any(keyword in col_lower for keyword in time_keywords)
+            
+            if is_time_candidate:
+                # 只采样前10行进行格式推断（大大加快速度）
+                s_sample = s.head(10).dropna()
+                if len(s_sample) > 0:
+                    for fmt in date_candidates:
+                        try:
+                            pd.to_datetime(s_sample, format=fmt, errors="raise")
+                            parse_dates.append(col)
+                            date_formats[col] = fmt
+                            break
+                        except (ValueError, TypeError):
+                            continue
+                    else:
+                        # 不是时间格式，按数值处理
+                        if pd.api.types.is_numeric_dtype(s):
+                            dtype_map[col] = "float32"
+                        else:
+                            dtype_map[col] = "category"
+                else:
+                    dtype_map[col] = "category"
             else:
+                # 非时间列，直接判断数值类型
                 if pd.api.types.is_numeric_dtype(s):
                     dtype_map[col] = "float32"
                 else:
                     dtype_map[col] = "category"
+        
+        t_end = time.perf_counter()
+        
+        if timing_dict is not None:
+            timing_dict['dtype_inference'] = t_dtype_start - t_start
+            timing_dict['time_format_inference'] = t_end - t_dtype_start
+            timing_dict['schema_inference_total'] = t_end - t_start
+        
         return dtype_map, parse_dates, date_formats,downcast_ratio_est
 
     def _read_chunks(
@@ -3584,25 +3707,44 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             hide_only: 如果为True，只隐藏所有元素（默认，用于复用）
                       如果为False，完全删除所有元素和对象池（用于切换数据文件等场景）
         """
-        # 分类处理：对象池中的元素只隐藏，非池对象删除
+        # 【修复QPainter错误】先隐藏所有item，避免清理过程中触发绘制
+        for item in self.multi_cursor_items:
+            try:
+                item.setVisible(False)
+            except:
+                pass
+        
+        # 分类处理：对象池中的元素清除数据，非池对象删除
         for item in self.multi_cursor_items:
             try:
                 item_type = type(item).__name__
                 if item_type == 'ScatterPlotItem':
-                    # 对象池中的圆圈标记：只隐藏
-                    item.setVisible(False)
+                    # 对象池中的圆圈标记：清除数据
+                    try:
+                        item.clear()  # 清除ScatterPlotItem的数据，释放内存
+                    except:
+                        pass
                 elif item == self._cursor_item_pool.get('x_label'):
-                    # X轴标签：只隐藏
-                    item.setVisible(False)
+                    # X轴标签：清空文本
+                    try:
+                        item.setText("")  # 清空文本，释放字符串占用的内存
+                    except:
+                        pass
                 elif item in self._cursor_item_pool.get('labels', []):
-                    # 对象池中的y值标签：只隐藏
-                    item.setVisible(False)
+                    # 对象池中的y值标签：清空文本
+                    try:
+                        item.setText("")  # 清空文本，释放字符串占用的内存
+                    except:
+                        pass
                 else:
                     # 不在对象池中的项（理论上不应该存在）：删除
-                    if item.scene():
-                        item.scene().removeItem(item)
-                    if hasattr(item, 'deleteLater'):
-                        item.deleteLater()
+                    try:
+                        if item.scene():
+                            item.scene().removeItem(item)
+                        if hasattr(item, 'deleteLater'):
+                            item.deleteLater()
+                    except:
+                        pass
             except Exception as e:
                 # 忽略清理过程中的错误
                 pass
@@ -3647,7 +3789,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
     
     def _safe_clear_plot_items(self):
-        """安全地清理所有plot items，避免scene不匹配问题"""
+        """安全地清理所有plot items，避免scene不匹配问题
+        
+        【内存优化】清除曲线时释放其数据和样式缓存
+        """
         try:
             current_scene = self.plot_item.scene()
             
@@ -3671,6 +3816,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                                 # 确保不是坐标轴
                                 if not hasattr(item, 'setLabel'):
                                     should_remove = True
+                                    
+                                    # 清除曲线的缓存数据，释放内存
+                                    if hasattr(item, '_cached_pen_key'):
+                                        delattr(item, '_cached_pen_key')
+                                    if hasattr(item, '_has_symbols'):
+                                        delattr(item, '_has_symbols')
+                                    
+                                    # 清除曲线数据
+                                    try:
+                                        item.clear()
+                                    except:
+                                        pass
                             
                             # 注意：不在这里清理TextItem和ScatterPlotItem
                             # 这些cursor相关的items由_clear_cursor_items()管理
@@ -3713,13 +3870,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 【内存优化】清除旧的cursor元素
         old_count = len(self.multi_cursor_items)
         self._clear_cursor_items()
-        
-        # 【内存监控】使用tracemalloc跟踪内存
-        if not hasattr(self, '_tracemalloc_started'):
-            import tracemalloc
-            tracemalloc.start()
-            self._tracemalloc_started = True
-            self._last_snapshot = None
         
         # 检查vline是否可见，如果不可见则不显示任何cursor元素
         vline_visible = self.vline.isVisible()
@@ -3856,9 +4006,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 circle.setData([x_actual], [y_val])
                 
                 # 设置圆圈的边框颜色为曲线颜色
-                # 每次都创建新pen以确保颜色正确应用（pen创建开销很小）
-                pen = pg.mkPen(color, width=1.5)
-                circle.setPen(pen)
+                # 复用pen对象或只在颜色变化时创建
+                if not hasattr(circle, '_cached_color') or circle._cached_color != color:
+                    pen = pg.mkPen(color, width=1.5)
+                    circle.setPen(pen)
+                    circle._cached_color = color
                 
                 # 显示圆圈并添加到场景
                 circle.setVisible(True)
@@ -3934,9 +4086,26 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         x_range = x_max - x_min
         y_range = y_max - y_min
         
-        # 标签尺寸估算（像素转数据坐标）
+        # 标签尺寸估算（像素转数据坐标）用于边界检查
         label_width_data = 80 * x_range / 500
         label_height_data = 25 * y_range / 400
+        
+        # 使用场景坐标（真实屏幕像素）定位，确保在任何布局下距离一致
+        view_box = self.plot_item.getViewBox()
+        
+        # 设置固定的屏幕像素偏移
+        gap_pixels = 5  # 文本框左边缘距离cursor的水平像素间隔
+        vertical_gap_pixels = 10  # 垂直像素间隔
+        
+        # 获取TextItem的字体来动态计算标签尺寸（缓存font_metrics避免重复创建）
+        if not hasattr(self, '_cached_font_metrics'):
+            sample_text_item = self._get_label_from_pool(0)
+            text_font = sample_text_item.textItem.font()
+            self._cached_font_metrics = QFontMetrics(text_font)
+            self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
+        
+        font_metrics = self._cached_font_metrics
+        label_height_pixels = self._cached_label_height_pixels
         
         for idx, item in enumerate(cursor_values):
             var_name = item['var_name']
@@ -3949,111 +4118,109 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             text_item = self._get_label_from_pool(idx)
             text_item.setText(y_value)
             
-            # 设置标签边框颜色为曲线颜色
-            # 每次都创建新pen以确保颜色正确应用（pen创建开销很小）
-            border_pen = pg.mkPen(color, width=1.5)
-            text_item.border = border_pen
-            
+            # 复用pen对象或只在颜色变化时创建
+            if not hasattr(text_item, '_cached_border_color') or text_item._cached_border_color != color:
+                border_pen = pg.mkPen(color, width=1.5)
+                text_item.border = border_pen
+                text_item._cached_border_color = color
             text_item.setVisible(True)
             
-            # 使用对角线位置策略，避免直接遮挡曲线
-            # 优先使用右上方向，如果空间不足则尝试其他方向
-            offset_x = label_width_data * 0.2   # 水平偏移（缩短距离）
-            offset_y = label_height_data * 0.35  # 垂直偏移（缩短距离）
+            # 根据实际文本内容动态计算标签宽度
+            text_width = font_metrics.horizontalAdvance(y_value)
+            label_width_pixels = text_width + 12
             
-            # 候选位置策略（按优先级排序）
+            # 将数据坐标转换为场景坐标（屏幕像素）
+            cursor_scene_pos = view_box.mapViewToScene(QPointF(x_pos, y_pos))
+            cursor_scene_x = cursor_scene_pos.x()
+            cursor_scene_y = cursor_scene_pos.y()
+            
+            # 计算文本框中心的偏移（TextItem的anchor=(0.5, 0.5)）
+            offset_x_right = gap_pixels + label_width_pixels / 2
+            offset_x_left = -(gap_pixels + label_width_pixels / 2)
+            offset_y_up = -(vertical_gap_pixels + label_height_pixels / 2)
+            offset_y_down = vertical_gap_pixels + label_height_pixels / 2
+            
+            # 尝试4个候选位置（右上、左上、右下、左下）
             strategies = [
-                (offset_x, offset_y),      # 右上（优先）
-                (-offset_x, offset_y),     # 左上
-                (offset_x, -offset_y),     # 右下
-                (-offset_x, -offset_y),    # 左下
+                (offset_x_right, offset_y_up, "右上"),
+                (offset_x_left, offset_y_up, "左上"),
+                (offset_x_right, offset_y_down, "右下"),
+                (offset_x_left, offset_y_down, "左下"),
             ]
             
-            # 选择第一个不超出边界的位置
-            label_x, label_y = None, None
-            for dx, dy in strategies:
-                candidate_x = x_pos + dx
-                candidate_y = y_pos + dy
+            label_scene_x, label_scene_y = None, None
+            selected_strategy = None
+            
+            for strategy_idx, (dx_pixels, dy_pixels, name) in enumerate(strategies):
+                candidate_scene_x = cursor_scene_x + dx_pixels
+                candidate_scene_y = cursor_scene_y + dy_pixels
                 
-                # 检查是否在边界内
-                if (candidate_x - label_width_data * 0.5 >= x_min and
-                    candidate_x + label_width_data * 0.5 <= x_max and
-                    candidate_y - label_height_data * 0.5 >= y_min and
-                    candidate_y + label_height_data * 0.5 <= y_max):
+                # 转换回数据坐标检查边界
+                candidate_data_pos = view_box.mapSceneToView(QPointF(candidate_scene_x, candidate_scene_y))
+                candidate_x = candidate_data_pos.x()
+                candidate_y = candidate_data_pos.y()
+                
+                # 检查是否在数据范围内
+                left_ok = candidate_x - label_width_data * 0.5 >= x_min
+                right_ok = candidate_x + label_width_data * 0.5 <= x_max
+                bottom_ok = candidate_y - label_height_data * 0.5 >= y_min
+                top_ok = candidate_y + label_height_data * 0.5 <= y_max
+                
+                in_bounds = left_ok and right_ok and bottom_ok and top_ok
+                
+                if in_bounds:
+                    label_scene_x = candidate_scene_x
+                    label_scene_y = candidate_scene_y
                     label_x = candidate_x
                     label_y = candidate_y
+                    selected_strategy = name
                     break
             
-            # 如果所有对角线位置都超出边界，使用约束后的右上位置
-            if label_x is None:
-                label_x = x_pos + offset_x
-                label_y = y_pos + offset_y
-                # 强制约束在边界内
+            # 如果所有策略都超界，默认使用右上并约束在边界内
+            if label_scene_x is None:
+                label_scene_x = cursor_scene_x + offset_x_right
+                label_scene_y = cursor_scene_y + offset_y_up
+                
+                label_data_pos = view_box.mapSceneToView(QPointF(label_scene_x, label_scene_y))
+                label_x = label_data_pos.x()
+                label_y = label_data_pos.y()
+                
                 label_x = max(x_min + label_width_data * 0.5, 
                              min(x_max - label_width_data * 0.5, label_x))
                 label_y = max(y_min + label_height_data * 0.5, 
                              min(y_max - label_height_data * 0.5, label_y))
+                selected_strategy = "约束右上"
             
-            # ========== 边缘避让逻辑（加强版）==========
-            # 问题：当cursor的y值接近plot上下边缘时，标签可能会上下抖动，
-            #      导致y轴宽度变化，进而引起整个plot的抖动。
-            #      特别是在自动调节y轴后，边缘空间更小，抖动更明显。
-            # 
-            # 解决策略（加强版）：
-            # 1. 增大安全边距（3倍标签高度）
-            # 2. 检测数据点位置而非标签位置，更早触发避让
-            # 3. 更激进地向中心推动，确保标签完全远离边缘
-            # 4. 考虑标签实际高度，预留足够空间
+            # 边缘避让逻辑：防止标签在边缘抖动
+            edge_margin_strict = label_height_data * 1.5
+            y_center = (y_min + y_max) / 2
+            y_quarter_upper = y_min + (y_max - y_min) * 0.25
+            y_quarter_lower = y_max - (y_max - y_min) * 0.25
             
-            # 定义更大的安全边距
-            edge_margin_strict = label_height_data * 1.5 # 严格安全距离（1.5倍标签高度）
-            y_center = (y_min + y_max) / 2                 # plot中心线
-            y_quarter_upper = y_min + (y_max - y_min) * 0.25  # 下1/4位置
-            y_quarter_lower = y_max - (y_max - y_min) * 0.25  # 上3/4位置
-            
-            # 首先检查数据点位置（y_pos），而非标签位置（label_y）
-            # 这样可以更早触发避让，避免标签在边缘附近徘徊
             data_point_near_bottom = (y_pos - y_min) < edge_margin_strict
             data_point_near_top = (y_max - y_pos) < edge_margin_strict
             
-            # 如果数据点靠近下边缘
             if data_point_near_bottom:
-                # 激进策略：将标签直接推到下1/4位置（向上推）
-                # 这样即使数据点在最底部，标签也能保持稳定
-                label_y = max(y_quarter_upper, y_pos + offset_y)
-                # 但不要超过中心线
+                label_y = max(y_quarter_upper, label_y)
                 label_y = min(label_y, y_center)
-            
-            # 如果数据点靠近上边缘
             elif data_point_near_top:
-                # 激进策略：将标签直接推到上3/4位置（向下推）
-                label_y = min(y_quarter_lower, y_pos + offset_y)
-                # 但不要超过中心线
+                label_y = min(y_quarter_lower, label_y)
                 label_y = max(label_y, y_center)
-            
-            # 二次检查：即使数据点不在边缘，如果标签计算位置仍然太靠近边缘，也要调整
             else:
-                # 使用较小的安全边距进行二次检查
                 edge_margin_soft = label_height_data * 2.0
-                
                 if label_y - y_min < edge_margin_soft:
-                    # 向上推到安全位置
                     label_y = y_min + edge_margin_soft
                 elif y_max - label_y < edge_margin_soft:
-                    # 向下推到安全位置
                     label_y = y_max - edge_margin_soft
             
-            # 设置标签位置
             text_item.setPos(label_x, label_y)
             text_item.setZValue(201)
-            # 确保item在正确的plot中（避免重复添加警告）
+            
             text_scene = text_item.scene()
             plot_scene = self.plot_item.scene()
-            
             if text_scene != plot_scene:
                 if text_scene is not None:
                     text_scene.removeItem(text_item)
-                # ignoreBounds=True：文本标签不影响y轴范围，配合边缘避让逻辑彻底消除抖动
                 self.plot_item.addItem(text_item, ignoreBounds=True)
             
             self.multi_cursor_items.append(text_item)
@@ -4243,6 +4410,44 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if hasattr(self.view_box, 'is_cursor_pinned'):
             self.view_box.is_cursor_pinned = False
 
+    def _update_vline_bounds_from_data(self):
+        """根据当前绘制的数据更新vline bounds
+        
+        这个函数计算当前所有可见曲线的x范围，并更新vline的移动边界。
+        在多曲线模式下，使用所有曲线的范围；在单曲线模式下，使用当前曲线的范围。
+        """
+        try:
+            if self.is_multi_curve_mode and self.curves:
+                # 多曲线模式：收集所有可见曲线的x值
+                all_x_values = []
+                for curve_info in self.curves.values():
+                    if curve_info.get('visible', True) and curve_info.get('x_data') is not None:
+                        all_x_values.extend(curve_info['x_data'])
+                
+                if all_x_values:
+                    min_x, max_x = np.min(all_x_values), np.max(all_x_values)
+                    self.vline.setBounds([min_x, max_x])
+                    return min_x, max_x
+            elif self.curve is not None:
+                # 单曲线模式：使用当前曲线的x值
+                x_data, _ = self.curve.getData()
+                if x_data is not None and len(x_data) > 0:
+                    min_x, max_x = np.min(x_data), np.max(x_data)
+                    self.vline.setBounds([min_x, max_x])
+                    return min_x, max_x
+            
+            # 如果没有数据，使用默认bounds
+            if hasattr(self, 'xMin') and hasattr(self, 'xMax'):
+                self.vline.setBounds([self.xMin, self.xMax])
+                return self.xMin, self.xMax
+            else:
+                self.vline.setBounds([None, None])
+                return None, None
+        except Exception as e:
+            print(f"Warning: Error updating vline bounds: {e}")
+            self.vline.setBounds([None, None])
+            return None, None
+    
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
         """在绘图或自动缩放后，更新光标线的边界和可见性
         
@@ -4603,7 +4808,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
                 self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
-            # 更新光标
+            # 更新光标 - 在单曲线模式下使用当前数据范围即可
             min_x, max_x = np.min(x_values), np.max(x_values)
             self.vline.setBounds([min_x, max_x])
             self.plot_item.update()
@@ -4704,14 +4909,45 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.y_format = ''
             self.update_left_header("channel name")
             self.update_right_header("")
+            
+            # 清除单曲线的缓存数据
+            if self.curve:
+                if hasattr(self.curve, '_cached_pen_key'):
+                    delattr(self.curve, '_cached_pen_key')
+                if hasattr(self.curve, '_has_symbols'):
+                    delattr(self.curve, '_has_symbols')
+                try:
+                    self.curve.clear()
+                except:
+                    pass
+            
             self.curve = None
             self.original_index_x = None
             self.original_y = None
             
             # 清除多曲线数据
+            # 先清除每个曲线的缓存数据
+            for var_name, curve_info in self.curves.items():
+                if 'curve' in curve_info:
+                    curve = curve_info['curve']
+                    # 清除样式缓存
+                    if hasattr(curve, '_cached_pen_key'):
+                        delattr(curve, '_cached_pen_key')
+                    if hasattr(curve, '_has_symbols'):
+                        delattr(curve, '_has_symbols')
+                    # 清除数据
+                    try:
+                        curve.clear()
+                    except:
+                        pass
+            
             self.curves.clear()
             self.is_multi_curve_mode = False
             self.current_color_index = 0
+            
+            # 强制垃圾回收，释放内存
+            import gc
+            gc.collect()
         except Exception as e:
             print(f"清除绘图数据时出错: {e}")
 
@@ -4925,8 +5161,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
                         self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
-            # 更新cursor边界
-            min_x, max_x = np.min(x_values), np.max(x_values)
+            # 更新cursor边界 - 使用所有曲线的x范围（而不仅仅是当前添加的变量）
+            all_x_values = []
+            for curve_info in self.curves.values():
+                if curve_info['visible'] and curve_info['x_data'] is not None:
+                    all_x_values.extend(curve_info['x_data'])
+            if all_x_values:
+                min_x, max_x = np.min(all_x_values), np.max(all_x_values)
+            else:
+                # 如果没有其他曲线，使用当前变量的范围
+                min_x, max_x = np.min(x_values), np.max(x_values)
             self.vline.setBounds([min_x, max_x])
             
             # 应用全局cursor值显示状态
@@ -5461,7 +5705,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return [(x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)]
 
     def _apply_plot_style(self, show_symbols: bool):
-        """应用绘图样式 - 基于xrange只有两种搭配：细线+symbol 或 粗线无symbol"""
+        """应用绘图样式 - 基于xrange只有两种搭配：细线+symbol 或 粗线无symbol
+        
+        【内存优化】缓存pen对象，避免zoom时重复创建导致内存泄漏
+        """
         try:
             if self.is_multi_curve_mode:
                 # 多曲线模式：统一样式应用到所有曲线
@@ -5472,19 +5719,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     curve = curve_info['curve']
                     color = curve_info.get('color', 'blue')
                     
+                    # 缓存pen对象：检查当前样式是否匹配，避免重复创建
                     if show_symbols:
                         # xrange小：细线 + 符号
-                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
-                        curve.setPen(pen)
-                        curve.setSymbol('s')
-                        curve.setSymbolSize(3)
-                        curve.setSymbolPen(color)
-                        curve.setSymbolBrush(color)
+                        cache_key = f'thin_{color}'
+                        if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                            pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                            curve.setPen(pen)
+                            curve._cached_pen_key = cache_key
+                        
+                        if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
+                            curve.setSymbol('s')
+                            curve.setSymbolSize(3)
+                            curve.setSymbolPen(color)
+                            curve.setSymbolBrush(color)
+                            curve._has_symbols = True
                     else:
                         # xrange大：粗线无符号
-                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                        curve.setPen(pen)
-                        curve.setSymbol(None)
+                        cache_key = f'thick_{color}'
+                        if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                            pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                            curve.setPen(pen)
+                            curve._cached_pen_key = cache_key
+                        
+                        if not hasattr(curve, '_has_symbols') or curve._has_symbols:
+                            curve.setSymbol(None)
+                            curve._has_symbols = False
             else:
                 # 单曲线模式：使用当前曲线的颜色
                 if self.curve:
@@ -5492,19 +5752,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     current_pen = self.curve.opts.get('pen', pg.mkPen('blue'))
                     color = current_pen.color().name() if hasattr(current_pen, 'color') else 'blue'
                     
+                    # 缓存pen对象：检查当前样式是否匹配，避免重复创建
                     if show_symbols:
                         # xrange小：细线 + 符号
-                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
-                        self.curve.setPen(pen)
-                        self.curve.setSymbol('s')
-                        self.curve.setSymbolSize(3)
-                        self.curve.setSymbolPen(color)
-                        self.curve.setSymbolBrush(color)
+                        cache_key = f'thin_{color}'
+                        if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
+                            pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                            self.curve.setPen(pen)
+                            self.curve._cached_pen_key = cache_key
+                        
+                        if not hasattr(self.curve, '_has_symbols') or not self.curve._has_symbols:
+                            self.curve.setSymbol('s')
+                            self.curve.setSymbolSize(3)
+                            self.curve.setSymbolPen(color)
+                            self.curve.setSymbolBrush(color)
+                            self.curve._has_symbols = True
                     else:
                         # xrange大：粗线无符号
-                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                        self.curve.setPen(pen)
-                        self.curve.setSymbol(None)
+                        cache_key = f'thick_{color}'
+                        if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
+                            pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                            self.curve.setPen(pen)
+                            self.curve._cached_pen_key = cache_key
+                        
+                        if not hasattr(self.curve, '_has_symbols') or self.curve._has_symbols:
+                            self.curve.setSymbol(None)
+                            self.curve._has_symbols = False
         except Exception as e:
             print(f"应用绘图样式时出错: {e}")
 
@@ -7299,6 +7572,9 @@ class PlotVariableEditorDialog(QDialog):
         # 更新多曲线模式
         self.plot_widget.update_multi_curve_mode()
         
+        # 更新vline bounds以反映移除变量后的数据范围
+        self.plot_widget._update_vline_bounds_from_data()
+        
         # 如果删除了所有曲线，确保完全清理
         if not self.plot_widget.curves:
             # 清理所有可能的残留
@@ -7347,6 +7623,9 @@ class PlotVariableEditorDialog(QDialog):
             # 更新显示
             self.plot_widget.update_left_header("channel name")
             self.plot_widget.update_right_header("")
+            
+            # 重置vline bounds到默认值
+            self.plot_widget._update_vline_bounds_from_data()
             
     def set_variable_color(self, row=None):
         """设置变量颜色"""
