@@ -1,4 +1,4 @@
-# CSV Plot Viewer (PyQt6)
+# CSV Plot (PyQt6)
 
 一个基于 PyQt6 + pyqtgraph 的交互式数据可视化工具，专为快速加载、浏览和分析CSV数据而设计。
 
