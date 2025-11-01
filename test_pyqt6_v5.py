@@ -2923,6 +2923,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.mark_region = None
         self.is_cursor_pinned = False  # 记录cursor是否被固定
         self.pinned_x_value = None  # 记录固定的x值
+        self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
+        self._is_being_destroyed = False  # 标志：对象正在被销毁
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -3707,10 +3709,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             hide_only: 如果为True，只隐藏所有元素（默认，用于复用）
                       如果为False，完全删除所有元素和对象池（用于切换数据文件等场景）
         """
+        # 【安全检查】确保关键对象存在
+        if not hasattr(self, 'multi_cursor_items') or not hasattr(self, 'plot_item'):
+            return
+        
         # 【修复QPainter错误】先隐藏所有item，避免清理过程中触发绘制
         for item in self.multi_cursor_items:
             try:
-                item.setVisible(False)
+                if item is not None:
+                    item.setVisible(False)
             except:
                 pass
         
@@ -3794,6 +3801,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         【内存优化】清除曲线时释放其数据和样式缓存
         """
         try:
+            # 【安全检查】确保plot_item存在且有效
+            if not hasattr(self, 'plot_item') or self.plot_item is None:
+                return
+            
             current_scene = self.plot_item.scene()
             
             if current_scene is not None:
@@ -4542,8 +4553,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             for var_name, curve_info in self.curves.items():
                 if 'curve' in curve_info and 'x_data' in curve_info:
                     curve = curve_info['curve']
+                    # 从旧的x_data反推原始索引，然后应用新的factor和offset
+                    old_x = curve_info['x_data']
+                    if old_factor != 0:
+                        # 反推原始索引：original_index = (old_x - old_offset) / old_factor
+                        original_index = (old_x - old_offset) / old_factor
+                    else:
+                        # 如果old_factor为0（不应该发生），使用默认索引
+                        original_index = np.arange(1, len(old_x) + 1)
                     # 重新计算x数据
-                    new_x = self.offset + self.factor * self.original_index_x
+                    new_x = self.offset + self.factor * original_index
                     curve.setData(new_x, curve_info['y_data'])
                     # 更新存储的x_data
                     curve_info['x_data'] = new_x
@@ -4553,8 +4572,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 new_x = self.offset + self.factor * self.original_index_x
                 self.curve.setData(new_x, self.original_y)
 
-        datalength = len(self.original_index_x) if self.original_index_x is not None else (
-            self.window().loader.datalength if hasattr(self.window(), 'loader') else 0)
+        # 计算数据长度
+        if self.is_multi_curve_mode and self.curves:
+            # 多曲线模式：从任一曲线获取数据长度
+            first_curve_info = next(iter(self.curves.values()))
+            datalength = len(first_curve_info['y_data']) if 'y_data' in first_curve_info else 0
+        elif self.original_index_x is not None:
+            # 单曲线模式：使用original_index_x
+            datalength = len(self.original_index_x)
+        else:
+            # 回退：从loader获取
+            datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
         
         global DEFAULT_PADDING_VAL_X
         padding_xVal = DEFAULT_PADDING_VAL_X
@@ -4580,8 +4608,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.mark_region.setRegion([new_min, new_max])
                 self.window().sync_mark_regions(self.mark_region)  # 同步到其他plot
         
-        # 确保曲线数据更新后立即更新标记统计
-        QTimer.singleShot(0, self.window().update_mark_stats)
+        # 确保曲线数据更新后立即更新标记统计（带安全检查）
+        def safe_update_mark_stats():
+            if hasattr(self, 'window') and self.window() is not None:
+                if not getattr(self, '_is_being_destroyed', False):
+                    self.window().update_mark_stats()
+        QTimer.singleShot(0, safe_update_mark_stats)
 
 
     # ---------------- 拖拽相关 ----------------
@@ -4759,15 +4791,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             _pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)
             self.curve = self.plot_item.plot(x_values, self.original_y, pen=_pen, name=var_name)
             
-            # 性能优化：启用降采样和剪裁
-            if len(x_values) > 1000:  # 只对大数据集启用
-                self.curve.setDownsampling(auto=True, method='subsample')
-                self.curve.setClipToView(True)
-                if len(x_values) > 10000:
-                    self.curve.setSkipFiniteCheck(True)  # 数据量大时跳过有限性检查
+            # 性能优化：plot_item级别已启用peak模式的downsample（见setup_plot_area）
+            # 因此这里无需额外设置，PyQtGraph会自动处理
+            # 注意：如果要在curve级别设置，必须使用'peak'模式而非'subsample'，以保留瞬时峰值
+            # 当前的plot_item.setDownsampling(mode='peak', auto=True)已经足够
             
-            # 延迟更新样式
-            QTimer.singleShot(0, lambda: self.update_plot_style(self.view_box, self.view_box.viewRange(), None))
+            # 延迟更新样式（带安全检查）
+            def safe_update_style():
+                if not getattr(self, '_is_updating_data', False) and not getattr(self, '_is_being_destroyed', False):
+                    if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
+                        self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
+            QTimer.singleShot(0, safe_update_style)
 
             # 更新标题
             full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
@@ -5061,12 +5095,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             curve = self.plot_item.plot(x_values, y_values, pen=pen, name=var_name)
             
-            # 性能优化：启用降采样和剪裁（大数据集）
-            if len(x_values) > 1000:
-                curve.setDownsampling(auto=True, method='subsample')
-                curve.setClipToView(True)
-                if len(x_values) > 10000:
-                    curve.setSkipFiniteCheck(True)
+            # 性能优化：plot_item级别已启用peak模式的downsample（见setup_plot_area）
+            # 因此这里无需额外设置，PyQtGraph会自动处理
+            # 注意：如果要在curve级别设置，必须使用'peak'模式而非'subsample'，以保留瞬时峰值
+            # 当前的plot_item.setDownsampling(mode='peak', auto=True)已经足够
             
             # 存储曲线信息到curves字典
             self.curves[var_name] = {
@@ -5784,6 +5816,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def update_plot_style(self, view_box, range, rect=None):
         """更新绘图样式 - 基于xRange宽度判断，只有两种搭配：细线+symbol 或 粗线无symbol"""
         try:
+            # 【安全检查】如果正在更新数据或对象被销毁，跳过样式更新
+            if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+                return
+            
+            # 【安全检查】确保关键对象存在
+            if not hasattr(self, 'factor') or not hasattr(self, 'plot_item'):
+                return
+            
             # 获取当前视图的xRange
             x_min, x_max = range[0]
             x_range_width = x_max - x_min
@@ -5809,6 +5849,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         性能优化：根据曲线数量动态调整防抖延迟。
         """
         try:
+            # 【安全检查】如果正在更新数据或对象被销毁，停止timer但不启动新的
+            if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+                if hasattr(self, '_update_timer'):
+                    self._update_timer.stop()
+                return
+            
             # 停止之前的定时器
             if hasattr(self, '_update_timer'):
                 self._update_timer.stop()
@@ -5826,7 +5872,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         Cursor只在真正移动时才更新（通过鼠标移动或点击触发）。
         """
         try:
-            if hasattr(self, 'view_box'):
+            # 【安全检查】如果正在更新数据或对象被销毁，跳过
+            if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+                return
+            
+            if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
                 self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
                 # 【性能优化】不在缩放/拖动时更新cursor标签
                 # cursor标签只在cursor真正移动时更新（mouseMoveEvent等）
@@ -6966,22 +7016,45 @@ class MainWindow(QMainWindow):
 
 
     def reset_plots_after_loading(self,index_xMin,index_xMax):
+        # 【安全标志】设置所有widget为更新中状态
         for container in self.plot_widgets:
-             # 先清空plot内容，然后重置坐标轴
-             container.plot_widget.clear_plot_item()
-             container.plot_widget.reset_plot(index_xMin, index_xMax)
-             container.plot_widget.clear_value_cache()
-             # 重置pin状态
-             container.plot_widget.reset_pin_state()
+            container.plot_widget._is_updating_data = True
+            if hasattr(container.plot_widget, '_update_timer'):
+                container.plot_widget._update_timer.stop()
+        
+        try:
+            for container in self.plot_widgets:
+                 # 先清空plot内容，然后重置坐标轴
+                 container.plot_widget.clear_plot_item()
+                 container.plot_widget.reset_plot(index_xMin, index_xMax)
+                 container.plot_widget.clear_value_cache()
+                 # 重置pin状态
+                 container.plot_widget.reset_pin_state()
 
-        self.saved_mark_range = None
-        if self.mark_stats_window:
-            self.mark_stats_window.hide()  # Hide instead of close
-            self.mark_stats_window.tree.clear()  # Clear stats to prevent duplication
+            self.saved_mark_range = None
+            if self.mark_stats_window:
+                self.mark_stats_window.hide()  # Hide instead of close
+                self.mark_stats_window.tree.clear()  # Clear stats to prevent duplication
 
-        if self.mark_region_btn.isChecked():
-            self.mark_region_btn.setChecked(False)
-            self.toggle_mark_region(False)
+            if self.mark_region_btn.isChecked():
+                self.mark_region_btn.setChecked(False)
+                self.toggle_mark_region(False)
+        
+        finally:
+            # 【安全标志】恢复所有widget的正常状态
+            for container in self.plot_widgets:
+                container.plot_widget._is_updating_data = False
+            
+            # 【样式同步】恢复标志后，主动触发一次样式更新
+            for container in self.plot_widgets:
+                widget = container.plot_widget
+                try:
+                    if hasattr(widget, 'view_box') and hasattr(widget, 'plot_item'):
+                        has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
+                        if has_data:
+                            widget.update_plot_style(widget.view_box, widget.view_box.viewRange(), None)
+                except Exception:
+                    pass
 
     # ---------------- 公用函数 ----------------
     def toggle_cursor_all(self, checked):
@@ -7143,108 +7216,125 @@ class MainWindow(QMainWindow):
                     widget.plot_item.update()  # 强制更新渲染
 
     def replots_after_loading(self):
-        # 如果加载文件为空
-        if self.loader.datalength == 0: 
-                return
+        # 【安全标志】设置所有widget为更新中状态，防止信号回调访问不完整的数据
+        for container in self.plot_widgets:
+            container.plot_widget._is_updating_data = True
+            # 停止所有pending的timer
+            if hasattr(container.plot_widget, '_update_timer'):
+                container.plot_widget._update_timer.stop()
         
-        # 重置所有plot的pin状态
-        self.reset_all_pin_states()
-        
-        # 收集所有 y_name (包括未显示的)
-        all_y_names = [container.plot_widget.y_name for container in self.plot_widgets if container.plot_widget.y_name]
-        if DataTableDialog._instance is not None:
-            all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
-
-        unique_y_names = set(all_y_names)
-        if not unique_y_names:
-            self.reset_plots_after_loading(1, self.loader.datalength)
-            return
-
-        # 找到在新数据中存在的有效 y_name
-        found = [y for y in unique_y_names if y in self.loader.var_names and self.loader.df_validity.get(y, -1) == 1]
-        ratio = len(found) / len(unique_y_names)
-
-        if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
-            self.reset_plots_after_loading(1, self.loader.datalength)
-        else:
-            self.value_cache = {}
-            cleared = []
-            global DEFAULT_PADDING_VAL_X
-            for idx, container in enumerate(self.plot_widgets):
+        try:
+            # 如果加载文件为空
+            if self.loader.datalength == 0: 
+                    return
+            
+            # 重置所有plot的pin状态
+            self.reset_all_pin_states()
+            
+            # 收集所有 y_name (包括未显示的)
+            all_y_names = []
+            for container in self.plot_widgets:
                 widget = container.plot_widget
-                
-                # 更新 limits
-                original_index_x = np.arange(1, self.loader.datalength + 1)
-                min_x = widget.offset + widget.factor * np.min(original_index_x)
-                max_x = widget.offset + widget.factor * np.max(original_index_x)
-                min_x, max_x = widget._get_safe_x_range(min_x, max_x)
-                limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-                widget.vline.setBounds([min_x, max_x])
-                
-                if widget.is_multi_curve_mode:
-                    # 多曲线模式：先清除所有曲线，然后重新添加有效的曲线
-                    # 保存当前曲线信息（包括可见性状态）
-                    current_curves = dict(widget.curves)
+                # 单曲线模式：收集y_name
+                if widget.y_name:
+                    all_y_names.append(widget.y_name)
+                # 多曲线模式：收集curves字典中的所有变量名
+                if widget.is_multi_curve_mode and widget.curves:
+                    all_y_names.extend(widget.curves.keys())
+            
+            if DataTableDialog._instance is not None:
+                all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
+
+            unique_y_names = set(all_y_names)
+            if not unique_y_names:
+                self.reset_plots_after_loading(1, self.loader.datalength)
+                return
+
+            # 找到在新数据中存在的有效 y_name
+            found = [y for y in unique_y_names if y in self.loader.var_names and self.loader.df_validity.get(y, -1) == 1]
+            ratio = len(found) / len(unique_y_names)
+
+            if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
+                self.reset_plots_after_loading(1, self.loader.datalength)
+            else:
+                self.value_cache = {}
+                cleared = []
+                global DEFAULT_PADDING_VAL_X
+                for idx, container in enumerate(self.plot_widgets):
+                    widget = container.plot_widget
                     
-                    # 清除所有曲线
-                    widget.curves.clear()
-                    widget.is_multi_curve_mode = False
-                    widget.current_color_index = 0
+                    # 更新 limits
+                    original_index_x = np.arange(1, self.loader.datalength + 1)
+                    min_x = widget.offset + widget.factor * np.min(original_index_x)
+                    max_x = widget.offset + widget.factor * np.max(original_index_x)
+                    min_x, max_x = widget._get_safe_x_range(min_x, max_x)
+                    limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
+                    limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
+                    widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                    widget.vline.setBounds([min_x, max_x])
                     
-                    # 清理图形项
-                    # 重新加载数据时完全清除对象池，避免复用异常状态的items
-                    widget._clear_cursor_items(hide_only=False)
-                    widget._safe_clear_plot_items()
-                    
-                    # 重新添加有效的曲线
-                    curves_added = 0
-                    visibility_to_restore = {}  # 记录需要恢复的可见性状态
-                    
-                    for var_name, curve_info in current_curves.items():
-                        if var_name in self.loader.df.columns and self.loader.df_validity.get(var_name, -1) >= 0:
-                            # 变量仍然有效，重新绘制
-                            success = widget.add_variable_to_plot(var_name, skip_existence_check=True)
-                            if success:
-                                curves_added += 1
-                                # 保存原来的可见性状态，稍后恢复
-                                visibility_to_restore[var_name] = curve_info.get('visible', True)
-                    
-                    # 更新多曲线模式状态
-                    widget.update_multi_curve_mode()
-                    
-                    # 恢复所有曲线的可见性状态（在update_multi_curve_mode之后）
-                    for var_name, original_visible in visibility_to_restore.items():
-                        if var_name in widget.curves:
-                            widget.curves[var_name]['visible'] = original_visible
-                            # 更新曲线对象的可见性
-                            if 'curve' in widget.curves[var_name]:
-                                try:
-                                    widget.curves[var_name]['curve'].setVisible(original_visible)
-                                except Exception:
-                                    pass
-                    
-                    # 更新legend显示（重要！确保legend样式与可见性状态一致）
-                    if curves_added > 0:
-                        widget.update_legend()
-                    
-                    if curves_added == 0:
-                        cleared.append((idx + 1, "所有变量无效"))
-                else:
-                    # 单曲线模式
-                    y_name = widget.y_name
-                    if not y_name:
-                        continue
-                    if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) >= 0:
-                        success = widget.plot_variable(y_name)
-                        if not success:
-                            widget.clear_plot_item()
-                            cleared.append((idx + 1, "无效数据"))
+                    if widget.is_multi_curve_mode:
+                        # 多曲线模式：先清除所有曲线，然后重新添加有效的曲线
+                        # 保存当前曲线信息（包括可见性状态）
+                        current_curves = dict(widget.curves)
+                        
+                        # 清除所有曲线
+                        widget.curves.clear()
+                        widget.is_multi_curve_mode = False
+                        widget.current_color_index = 0
+                        
+                        # 清理图形项
+                        # 重新加载数据时完全清除对象池，避免复用异常状态的items
+                        widget._clear_cursor_items(hide_only=False)
+                        widget._safe_clear_plot_items()
+                        
+                        # 重新添加有效的曲线
+                        curves_added = 0
+                        visibility_to_restore = {}  # 记录需要恢复的可见性状态
+                        
+                        for var_name, curve_info in current_curves.items():
+                            if var_name in self.loader.df.columns and self.loader.df_validity.get(var_name, -1) >= 0:
+                                # 变量仍然有效，重新绘制
+                                success = widget.add_variable_to_plot(var_name, skip_existence_check=True)
+                                if success:
+                                    curves_added += 1
+                                    # 保存原来的可见性状态，稍后恢复
+                                    visibility_to_restore[var_name] = curve_info.get('visible', True)
+                        
+                        # 更新多曲线模式状态
+                        widget.update_multi_curve_mode()
+                        
+                        # 恢复所有曲线的可见性状态（在update_multi_curve_mode之后）
+                        for var_name, original_visible in visibility_to_restore.items():
+                            if var_name in widget.curves:
+                                widget.curves[var_name]['visible'] = original_visible
+                                # 更新曲线对象的可见性
+                                if 'curve' in widget.curves[var_name]:
+                                    try:
+                                        widget.curves[var_name]['curve'].setVisible(original_visible)
+                                    except Exception:
+                                        pass
+                        
+                        # 更新legend显示（重要！确保legend样式与可见性状态一致）
+                        if curves_added > 0:
+                            widget.update_legend()
+                        
+                        if curves_added == 0:
+                            cleared.append((idx + 1, "所有变量无效"))
                     else:
-                        widget.clear_plot_item()
-                        reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
-                        cleared.append((idx + 1, reason))
+                        # 单曲线模式
+                        y_name = widget.y_name
+                        if not y_name:
+                            continue
+                        if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) >= 0:
+                            success = widget.plot_variable(y_name)
+                            if not success:
+                                widget.clear_plot_item()
+                                cleared.append((idx + 1, "无效数据"))
+                        else:
+                            widget.clear_plot_item()
+                            reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
+                            cleared.append((idx + 1, reason))
 
             # 恢复 xRange     
             if self.plot_widgets:
@@ -7253,12 +7343,30 @@ class MainWindow(QMainWindow):
                 first_plot.view_box.setXRange(curr_min, curr_max, padding=0) 
                 # first_plot.set_xrange_with_link_handling(curr_min, curr_max, padding=DEFAULT_PADDING_VAL_X) 
             
-            # 如果有清除，弹窗
-            if cleared:
-                msg = "以下图表被清除：\n"
-                for plot_idx, reason in cleared:
-                    msg += f"Plot {plot_idx}: {reason}\n"
-                QMessageBox.information(self, "更新通知", msg)
+                # 如果有清除，弹窗
+                if cleared:
+                    msg = "以下图表被清除：\n"
+                    for plot_idx, reason in cleared:
+                        msg += f"Plot {plot_idx}: {reason}\n"
+                    QMessageBox.information(self, "更新通知", msg)
+        
+        finally:
+            # 【安全标志】恢复所有widget的正常状态
+            for container in self.plot_widgets:
+                container.plot_widget._is_updating_data = False
+            
+            # 【样式同步】恢复标志后，主动触发一次样式更新，确保所有plot样式一致
+            # 这解决了重载后样式不一致的问题（需要等用户zoom才会更新）
+            for container in self.plot_widgets:
+                widget = container.plot_widget
+                try:
+                    if hasattr(widget, 'view_box') and hasattr(widget, 'plot_item'):
+                        # 检查是否有数据（单曲线或多曲线）
+                        has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
+                        if has_data:
+                            widget.update_plot_style(widget.view_box, widget.view_box.viewRange(), None)
+                except Exception as e:
+                    pass  # 忽略样式更新错误，不影响数据加载
 
 # ---------------- 绘图变量编辑器对话框 ----------------
 class PlotVariableEditorDialog(QDialog):
@@ -7670,13 +7778,9 @@ class PlotVariableEditorDialog(QDialog):
                         name=var_name
                     )
                     
-                    # 性能优化：启用降采样和剪裁
-                    x_len = len(curve_info['x_data'])
-                    if x_len > 1000:
-                        new_curve.setDownsampling(auto=True, method='subsample')
-                        new_curve.setClipToView(True)
-                        if x_len > 10000:
-                            new_curve.setSkipFiniteCheck(True)
+                    # 性能优化：plot_item级别已启用peak模式的downsample
+                    # 无需在curve级别额外设置
+                    # 注意：若要设置，必须用'peak'而非'subsample'以保留瞬时峰值
                     
                     # 更新曲线信息
                     curve_info['curve'] = new_curve
@@ -7699,13 +7803,9 @@ class PlotVariableEditorDialog(QDialog):
                         name=var_name
                     )
                     
-                    # 性能优化：启用降采样和剪裁
-                    x_len = len(self.plot_widget.original_index_x)
-                    if x_len > 1000:
-                        self.plot_widget.curve.setDownsampling(auto=True, method='subsample')
-                        self.plot_widget.curve.setClipToView(True)
-                        if x_len > 10000:
-                            self.plot_widget.curve.setSkipFiniteCheck(True)
+                    # 性能优化：plot_item级别已启用peak模式的downsample
+                    # 无需在curve级别额外设置
+                    # 注意：若要设置，必须用'peak'而非'subsample'以保留瞬时峰值
             
             # 更新表格项颜色
             color_widget = self.var_table.cellWidget(row, 2)
