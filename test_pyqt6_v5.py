@@ -2665,6 +2665,10 @@ class CustomViewBox(pg.ViewBox):
         self.context_x = None  # 记录右键点击时的 x 坐标
         self.plot_widget = None  # 将在 DraggableGraphicsLayoutWidget 中设置
         self.is_cursor_pinned = False  # 记录cursor是否被固定
+        self._drag_in_progress = False  # 【优化】拖动状态跟踪，用于简化模式
+        
+        # 【优化策略1】监听状态变化，跟踪拖动操作
+        self.sigStateChanged.connect(self._on_state_changed)
 
     def getMenu(self, ev):
         # 记录鼠标位置的 x 值
@@ -2830,6 +2834,31 @@ class CustomViewBox(pg.ViewBox):
         if self.plot_widget:
             self.plot_widget.free_cursor()
 
+    def _on_state_changed(self):
+        """【优化策略1】跟踪ViewBox状态变化，检测拖动操作
+        
+        当用户开始拖动（pan）时，进入简化模式；拖动结束时退出简化模式
+        """
+        try:
+            # 检查当前是否正在拖动（pan模式）
+            # pyqtgraph的ViewBox在拖动时state会包含'pan'
+            state = self.stateGroup()
+            is_panning = 'pan' in state
+            
+            if is_panning and not self._drag_in_progress:
+                # 开始拖动：进入简化模式
+                self._drag_in_progress = True
+                if self.plot_widget and hasattr(self.plot_widget, '_enter_simplified_mode'):
+                    self.plot_widget._enter_simplified_mode()
+            elif not is_panning and self._drag_in_progress:
+                # 结束拖动：退出简化模式
+                self._drag_in_progress = False
+                if self.plot_widget and hasattr(self.plot_widget, '_exit_simplified_mode'):
+                    self.plot_widget._exit_simplified_mode()
+        except Exception as e:
+            # 静默处理错误，避免影响正常拖动
+            pass
+    
     def trigger_copy_name(self):
         """复制当前绘图变量名到剪贴板（无数据则不执行）"""
         if not self.plot_widget:
@@ -3055,6 +3084,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._update_timer = QTimer()
         self._update_timer.setSingleShot(True)
         self._update_timer.timeout.connect(self._delayed_update_plot_style)
+        
+        # 【优化策略1】简化模式标志：拖动时使用简化渲染（细线、无symbol）
+        self._simplified_mode = False
+        self._needs_style_update = False  # 【优化策略2】标记式更新标志
         
         # 移除 self._customize_plot_menu()，因为现在用 CustomViewBox 实现菜单定制
         
@@ -5895,6 +5928,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
                 return
             
+            # 【优化策略1】如果正在拖动且处于简化模式，跳过精细样式更新
+            # 拖动时只更新视图范围（pyqtgraph自动处理），不更新样式，保持流畅
+            if getattr(self, '_simplified_mode', False):
+                return
+            
             # 【安全检查】确保关键对象存在
             if not hasattr(self, 'factor') or not hasattr(self, 'plot_item'):
                 return
@@ -5921,7 +5959,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _on_range_changed(self, view_box, range):
         """范围变化时的防抖处理
         
-        性能优化：根据曲线数量动态调整防抖延迟。
+        【优化策略2】缩短延迟到50ms以获得更好的跟手感，同时使用标记式更新避免高频调用
         """
         try:
             # 【安全检查】如果正在更新数据或对象被销毁，停止timer但不启动新的
@@ -5930,31 +5968,112 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     self._update_timer.stop()
                 return
             
+            # 【优化策略2】标记需要更新，但不立即执行
+            self._needs_style_update = True
+            
             # 停止之前的定时器
             if hasattr(self, '_update_timer'):
                 self._update_timer.stop()
-                # 动态延迟：曲线少时快速响应(20ms)，曲线多时避免卡顿(100ms)
-                curve_count = len(self.curves) if hasattr(self, 'curves') else 0
-                delay = 20 if curve_count <= 5 else (50 if curve_count <= 15 else 100)
-                self._update_timer.start(delay)
+                # 【优化策略2】固定延迟50ms，确保跟手感（不再根据曲线数量动态调整）
+                # 50ms足够快以保持跟手感，又能合并多次快速zoom事件
+                self._update_timer.start(50)
         except Exception as e:
             print(f"处理范围变化时出错: {e}")
 
+    def _enter_simplified_mode(self):
+        """【优化策略1】进入简化模式：拖动时使用细线、无symbol以减少渲染开销
+        
+        在拖动开始时调用，临时简化曲线样式，保持视图响应流畅
+        """
+        try:
+            if getattr(self, '_simplified_mode', False):
+                return  # 已经在简化模式
+            
+            self._simplified_mode = True
+            
+            # 停止样式更新定时器，避免在拖动时触发
+            if hasattr(self, '_update_timer'):
+                self._update_timer.stop()
+            
+            # 单曲线模式：简化样式
+            if self.curve:
+                # 获取当前pen颜色
+                try:
+                    current_pen = self.curve.opts.get('pen', pg.mkPen('blue'))
+                    if hasattr(current_pen, 'color'):
+                        color = current_pen.color().name()
+                    else:
+                        color = 'blue'
+                except:
+                    color = 'blue'
+                
+                # 应用简化样式：细线、无symbol
+                simplified_pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                self.curve.setPen(simplified_pen)
+                self.curve.setSymbol(None)
+            
+            # 多曲线模式：简化所有曲线
+            if self.is_multi_curve_mode and self.curves:
+                for var_name, curve_info in self.curves.items():
+                    if 'curve' not in curve_info:
+                        continue
+                    
+                    curve = curve_info['curve']
+                    color = curve_info.get('color', 'blue')
+                    
+                    # 应用简化样式：细线、无symbol
+                    simplified_pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                    curve.setPen(simplified_pen)
+                    curve.setSymbol(None)
+                    
+        except Exception as e:
+            print(f"进入简化模式时出错: {e}")
+    
+    def _exit_simplified_mode(self):
+        """【优化策略1】退出简化模式：拖动结束后恢复精细样式
+        
+        在拖动结束时调用，恢复原始样式并触发一次精细更新
+        """
+        try:
+            if not getattr(self, '_simplified_mode', False):
+                return  # 不在简化模式
+            
+            self._simplified_mode = False
+            
+            # 触发精细样式更新（会使用正确的样式）
+            if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
+                # 延迟一小段时间（50ms）再更新，确保拖动完全结束
+                QTimer.singleShot(50, lambda: self.update_plot_style(
+                    self.view_box, self.view_box.viewRange(), None
+                ))
+                
+        except Exception as e:
+            print(f"退出简化模式时出错: {e}")
+    
     def _delayed_update_plot_style(self):
         """延迟更新绘图样式
         
+        【优化策略2】标记式更新：只在标记为需要更新时才执行精细样式更新
         性能优化：缩放/拖动时不更新cursor，避免多曲线模式下的性能问题。
         Cursor只在真正移动时才更新（通过鼠标移动或点击触发）。
         """
         try:
             # 【安全检查】如果正在更新数据或对象被销毁，跳过
             if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+                self._needs_style_update = False
+                return
+            
+            # 【优化策略2】只在标记为需要更新时才执行
+            if not getattr(self, '_needs_style_update', False):
                 return
             
             if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
                 self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
                 # 【性能优化】不在缩放/拖动时更新cursor标签
                 # cursor标签只在cursor真正移动时更新（mouseMoveEvent等）
+            
+            # 清除更新标记
+            self._needs_style_update = False
         except Exception as e:
             print(f"延迟更新绘图样式时出错: {e}")
 
