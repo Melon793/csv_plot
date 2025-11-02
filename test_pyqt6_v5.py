@@ -496,6 +496,10 @@ class FastDataLoader:
         
         t_dtype_start = time.perf_counter()
         
+        # 【NumPy优化】批量识别numeric列和非numeric列（用于后续优化）
+        numeric_cols = sample.select_dtypes(include=['float32', 'float64', 'int', 'int32', 'int64']).columns
+        non_numeric_cols = [col for col in sample.columns if col not in numeric_cols]
+        
         for col in sample.columns:
             s = sample[col]
             if s.isna().all():
@@ -630,6 +634,8 @@ class FastDataLoader:
         1: （全部可转数字，且 ≥2 个不同有效值） 或 （该列是日期格式） 或 （数据长度为1，且可转换为数字）
         0: 数据长度>=2, 且全部可转数字，且唯一有效值
         -1: 存在非数字（不含日期格式） 或 全部 NaN
+        
+        【NumPy优化】使用NumPy直接检查唯一值，避免Pandas的循环操作
         """
         # 如果该列是日期格式，则直接返回1（有效）   
         if col_name in date_formats:
@@ -637,21 +643,29 @@ class FastDataLoader:
 
         # 1) 先尝试整列转 float，失败直接 -1
         try:
-            numeric = pd.to_numeric(series, errors="raise")
+            numeric = pd.to_numeric(series, errors="raise").values  # 转为NumPy array
         except (ValueError, TypeError):
             return -1
 
-        # 2) 去掉 NaN 后看有效值
-        valid = numeric.dropna()
-        if valid.empty:          # 全 NaN
+        # 2) 【NumPy优化】用NumPy过滤NaN（兼容整数类型）
+        # 先转换为浮点类型以支持NaN检查，避免整数类型的NaN检查错误
+        if numeric.dtype.kind in 'iu':  # 整数类型
+            # 整数类型没有NaN，直接使用
+            valid = numeric
+        else:
+            # 浮点类型，需要过滤NaN
+            valid = numeric[~np.isnan(numeric)]
+        
+        if len(valid) == 0:          # 全 NaN 或空数组
             return -1
 
         # 数据长度为1且可转数字 → 返回1
         if len(series) == 1:
             return 1
 
-        unique_vals = valid.unique()
-        if len(unique_vals) == 1:
+        # 【NumPy优化】用np.unique直接计算唯一值数量，比Pandas更快
+        unique_count = np.unique(valid).size
+        if unique_count == 1:
             return 0
         else:
             return 1
@@ -4722,17 +4736,33 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if y_values is None or len(y_values) == 0:
                 return False, f"变量 {var_name} 没有有效数据", None, None, ""
             
-            # 转换为numpy数组
+            # 【NumPy优化】转换为numpy数组，并确保使用float32以减少内存
+            # 注意：对于需要高精度的数据，可能需要保持float64，但大多数绘图场景float32足够
             if isinstance(y_values, pd.Series):
-                y_array = y_values.to_numpy()
+                # 尝试转换为float32，但如果数据范围超出float32范围，使用float64
+                try:
+                    y_array = y_values.to_numpy(dtype=np.float32)
+                    # 检查是否有inf值（表示溢出）
+                    if np.any(np.isinf(y_array)):
+                        y_array = y_values.to_numpy(dtype=np.float64)
+                except (OverflowError, ValueError):
+                    # 如果转换失败（如整数超出float32范围），使用float64
+                    y_array = y_values.to_numpy(dtype=np.float64)
             else:
-                y_array = np.array(y_values)
+                y_array = np.asarray(y_values)
+                # 尝试转换为float32（如果已经是浮点类型）
+                if y_array.dtype.kind == 'f' and not np.any(np.isinf(y_array)):
+                    try:
+                        y_array = y_array.astype(np.float32)
+                    except (OverflowError, ValueError):
+                        pass  # 保持原类型
                 
             # 检查数据是否全为NaN
             if np.all(np.isnan(y_array)):
                 return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
                 
-            x_array = np.arange(1, len(y_array) + 1)
+            # 【NumPy优化】使用float32类型的索引数组
+            x_array = np.arange(1, len(y_array) + 1, dtype=np.float32)
             
             return True, "", x_array, y_array, y_format
             
@@ -4775,8 +4805,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 单曲线模式：设置绘图数据
             self.y_format = y_format
             self.y_name = var_name
-            self.original_index_x = x_array
-            self.original_y = y_array
+            # 【NumPy优化】确保使用float32数组以减少内存
+            self.original_index_x = np.asarray(x_array, dtype=np.float32)
+            self.original_y = np.asarray(y_array, dtype=np.float32)
             x_values = self.offset + self.factor * self.original_index_x
             
             # 单曲线模式：清除旧图并绘制新图
@@ -5655,7 +5686,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.mark_region.setRegion([old_min, old_max])  # 实际不需要变，因为x已scale
 
     def get_mark_stats(self):
-        """获取标记区域的统计信息"""
+        """获取标记区域的统计信息
+        
+        【NumPy优化】使用NumPy掩码数组批量计算统计值，避免循环过滤
+        """
         if not self.mark_region:
             return None
         
@@ -5670,12 +5704,31 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 
                 if 'curve' not in curve_info:
                     continue
-                    
-                curve = curve_info['curve']
-                x_data, y_data = curve.getData()
                 
-                if x_data is None or len(x_data) == 0:
-                    continue
+                # 【NumPy优化】优先使用缓存的x_data和y_data，如果没有则从curve获取
+                if 'x_data' in curve_info and 'y_data' in curve_info:
+                    # 使用缓存的x_data和y_data（更准确且更快）
+                    x_data = curve_info['x_data']
+                    y_data = curve_info['y_data']
+                elif 'y_data' in curve_info:
+                    # 只有y_data，需要重新计算x_data（向后兼容）
+                    x_data = self.offset + self.factor * np.arange(1, len(curve_info['y_data']) + 1, dtype=np.float32)
+                    y_data = curve_info['y_data']
+                else:
+                    # 从curve获取（最慢但最可靠）
+                    curve = curve_info['curve']
+                    x_data, y_data = curve.getData()
+                    if x_data is None or len(x_data) == 0:
+                        continue
+                
+                # 确保是NumPy数组（保持原有精度，不强制转换）
+                x_data = np.asarray(x_data)
+                y_data = np.asarray(y_data)
+                # 如果是整数类型，转换为float32以减少内存
+                if x_data.dtype.kind in 'iu':
+                    x_data = x_data.astype(np.float32)
+                if y_data.dtype.kind in 'iu':
+                    y_data = y_data.astype(np.float32)
                 
                 # 计算边界点
                 idx_left = np.argmin(np.abs(x_data - min_x))
@@ -5688,15 +5741,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 dy = y2 - y1
                 slope = float('inf') if dx == 0 else dy / dx
                 
-                # 计算区域内 y 的统计
+                # 【NumPy优化】使用掩码数组批量计算统计值
                 mask = (x_data >= min_x) & (x_data <= max_x)
-                y_region = y_data[mask]
-                if len(y_region) == 0:
+                if not np.any(mask):
                     y_avg = y_max = y_min = np.nan
                 else:
-                    y_avg = np.nanmean(y_region)
-                    y_max = np.nanmax(y_region)
-                    y_min = np.nanmin(y_region)
+                    y_masked = y_data[mask]
+                    valid_y = y_masked[~np.isnan(y_masked)]
+                    if len(valid_y) > 0:
+                        y_avg = np.mean(valid_y)
+                        y_max = np.max(valid_y)
+                        y_min = np.min(valid_y)
+                    else:
+                        y_avg = y_max = y_min = np.nan
                 
                 # 添加变量名到标签
                 unit = self.units.get(var_name, '')
@@ -5706,13 +5763,27 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
             return stats_list if stats_list else None
         else:
-            # 单曲线模式
+            # 单曲线模式：优先使用original_index_x和original_y
             if not self.curve:
                 return None
             
-            x_data, y_data = self.curve.getData()
-            if x_data is None or len(x_data) == 0:
-                return None
+            # 【NumPy优化】优先使用original_index_x和original_y
+            if hasattr(self, 'original_index_x') and hasattr(self, 'original_y') and self.original_index_x is not None:
+                x_data = self.offset + self.factor * self.original_index_x
+                y_data = self.original_y
+            else:
+                x_data, y_data = self.curve.getData()
+                if x_data is None or len(x_data) == 0:
+                    return None
+            
+            # 确保是NumPy数组（保持原有精度，不强制转换）
+            x_data = np.asarray(x_data)
+            y_data = np.asarray(y_data)
+            # 如果是整数类型，转换为float32以减少内存
+            if x_data.dtype.kind in 'iu':
+                x_data = x_data.astype(np.float32)
+            if y_data.dtype.kind in 'iu':
+                y_data = y_data.astype(np.float32)
             
             idx_left = np.argmin(np.abs(x_data - min_x))
             idx_right = np.argmin(np.abs(x_data - max_x))
@@ -5724,15 +5795,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             dy = y2 - y1
             slope = float('inf') if dx == 0 else dy / dx
             
-            # 计算区域内 y 的统计
+            # 【NumPy优化】使用掩码数组批量计算统计值
             mask = (x_data >= min_x) & (x_data <= max_x)
-            y_region = y_data[mask]
-            if len(y_region) == 0:
+            if not np.any(mask):
                 y_avg = y_max = y_min = np.nan
             else:
-                y_avg = np.nanmean(y_region)
-                y_max = np.nanmax(y_region)
-                y_min = np.nanmin(y_region)
+                y_masked = y_data[mask]
+                valid_y = y_masked[~np.isnan(y_masked)]
+                if len(valid_y) > 0:
+                    y_avg = np.mean(valid_y)
+                    y_max = np.max(valid_y)
+                    y_min = np.min(valid_y)
+                else:
+                    y_avg = y_max = y_min = np.nan
             
             return [(x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)]
 
@@ -7250,9 +7325,22 @@ class MainWindow(QMainWindow):
                 self.reset_plots_after_loading(1, self.loader.datalength)
                 return
 
-            # 找到在新数据中存在的有效 y_name
-            found = [y for y in unique_y_names if y in self.loader.var_names and self.loader.df_validity.get(y, -1) == 1]
-            ratio = len(found) / len(unique_y_names)
+            # 【NumPy优化】批量检查validity：先过滤出在var_names中的变量，然后批量检查validity
+            var_names_set = set(self.loader.var_names)
+            in_var_names = [y for y in unique_y_names if y in var_names_set]
+            
+            # 批量检查validity值（validity==1表示有效）
+            if in_var_names:
+                # 将validity字典转换为批量检查：获取所有变量的validity值
+                validity_values = [self.loader.df_validity.get(y, -1) for y in in_var_names]
+                # 使用NumPy批量检查哪些validity值等于1
+                validity_array = np.array(validity_values)
+                valid_mask = validity_array == 1
+                found = [in_var_names[i] for i in np.where(valid_mask)[0]]
+            else:
+                found = []
+            
+            ratio = len(found) / len(unique_y_names) if unique_y_names else 0
 
             if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
                 self.reset_plots_after_loading(1, self.loader.datalength)
@@ -7263,8 +7351,8 @@ class MainWindow(QMainWindow):
                 for idx, container in enumerate(self.plot_widgets):
                     widget = container.plot_widget
                     
-                    # 更新 limits
-                    original_index_x = np.arange(1, self.loader.datalength + 1)
+                    # 【NumPy优化】更新 limits，使用float32数组
+                    original_index_x = np.arange(1, self.loader.datalength + 1, dtype=np.float32)
                     min_x = widget.offset + widget.factor * np.min(original_index_x)
                     max_x = widget.offset + widget.factor * np.max(original_index_x)
                     min_x, max_x = widget._get_safe_x_range(min_x, max_x)
