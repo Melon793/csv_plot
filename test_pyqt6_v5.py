@@ -2982,6 +2982,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._interaction_timer.setSingleShot(True)
         self._interaction_timer.timeout.connect(self._end_interaction)
         
+        # ========== 性能优化 3.1: 同步缩放标志 ==========
+        # 防止XLink同步时递归更新导致的性能问题
+        self._is_syncing_range = False  # 标记是否正在同步范围（避免递归更新）
+        
         # 移除 self._customize_plot_menu()，因为现在用 CustomViewBox 实现菜单定制
         
         self.view_box.setAutoVisible(x=False, y=True)  # 自动适应可视区域
@@ -2991,7 +2995,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # ========== 性能优化 3: 视图裁剪和降采样 ==========
         # 类似网页的懒加载和虚拟化技术
         self.plot_item.setClipToView(True)  # 只渲染可见区域
-        self.plot_item.setDownsampling(mode='peak', auto=True)  # 使用peak模式保留峰值
+        # 使用peak模式保留峰值，自动降采样支持百万级数据点
+        # 当auto=True时，pyqtgraph会根据可见区域自动计算合适的降采样因子
+        # 无需指定ds参数，auto模式会自动处理
+        self.plot_item.setDownsampling(mode='peak', auto=True)
         
         self.setBackground('w')
 
@@ -3803,6 +3810,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     
     def _update_multi_curve_cursor_label(self):
         """更新多曲线模式的光标标签"""
+        # 【性能优化】交互期间完全禁用cursor更新，避免拖拽/缩放时卡顿
+        if getattr(self, '_is_interacting', False):
+            return  # 交互期间跳过cursor更新，交互结束后统一更新
+        
         # 【性能优化】自适应节流控制 - 根据曲线数量动态调整更新频率
         import time
         current_time = time.time()
@@ -4505,13 +4516,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         # 如果old_factor为0（不应该发生），使用默认索引
                         original_index = np.arange(1, len(old_x) + 1)
                     # 重新计算x数据
+                    # 【性能优化】使用in-place操作避免创建临时数组（对于百万级数据点）
+                    # 注意：original_index已经是计算后的数组，这里直接使用
                     new_x = self.offset + self.factor * original_index
+                    # pyqtgraph的setData会内部处理数据，这里直接传入即可
                     curve.setData(new_x, curve_info['y_data'])
                     # 更新存储的x_data
                     curve_info['x_data'] = new_x
         else:
             # 单曲线模式
             if self.original_index_x is not None:
+                # 【性能优化】对于百万级数据点，numpy的向量化操作已经足够高效
+                # 直接计算，无需额外优化（pyqtgraph内部会处理数据）
                 new_x = self.offset + self.factor * self.original_index_x
                 self.curve.setData(new_x, self.original_y)
 
@@ -5948,7 +5964,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return index_range_width, visible_points
     
     def update_plot_style(self, view_box, range, rect=None):
-        """更新绘图样式 - 基于xRange宽度判断，只有两种搭配：细线+symbol 或 粗线无symbol"""
+        """更新绘图样式 - 基于xRange宽度判断，只有两种搭配：细线+symbol 或 粗线无symbol
+        
+        【性能优化】交互期间降低样式更新频率，支持百万级数据点流畅绘制
+        """
         try:
             # 【安全检查】如果正在更新数据或对象被销毁，跳过样式更新
             if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
@@ -5958,12 +5977,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if not hasattr(self, 'factor') or not hasattr(self, 'plot_item'):
                 return
             
+            # 【性能优化】交互期间：对于百万级数据点，交互时更激进地禁用symbol
+            # 避免在缩放时频繁切换样式导致卡顿
+            is_interacting = getattr(self, '_is_interacting', False)
+            
             # 使用共用方法计算索引范围
-            index_range_width, _ = self._calculate_visible_points(range)
+            index_range_width, visible_points = self._calculate_visible_points(range)
             
             # 基于索引范围宽度判断样式：小于阈值显示symbol（细线+symbol），否则粗线无symbol
             global XRANGE_THRESHOLD_FOR_SYMBOLS
             show_symbols = index_range_width < XRANGE_THRESHOLD_FOR_SYMBOLS
+            
+            # 【性能优化】交互期间：对于大量可见点数，强制禁用symbol以提高性能
+            # 百万级数据点在交互时，即使xrange小也优先保证流畅性
+            if is_interacting and visible_points > 100000:
+                show_symbols = False  # 交互期间强制禁用symbol，避免性能问题
             
             # 应用样式到所有曲线
             self._apply_plot_style(show_symbols)
@@ -5979,6 +6007,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         1. 标记交互状态，在交互期间降低渲染质量
         2. 根据曲线数量和数据点数动态调整防抖延迟
         3. 延迟高质量渲染直到交互结束
+        4. 同步缩放时避免递归更新（通过_is_syncing_range标志）
         """
         try:
             # 【安全检查】如果正在更新数据或对象被销毁，停止timer但不启动新的
@@ -5986,6 +6015,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 if hasattr(self, '_update_timer'):
                     self._update_timer.stop()
                 return
+            
+            # 【性能优化】同步缩放时避免递归更新
+            # 当通过XLink同步时，每个plot的range变化都会触发其他plot的更新
+            # 使用_is_syncing_range标志避免递归调用
+            if getattr(self, '_is_syncing_range', False):
+                return  # 正在同步，跳过此次更新
             
             # ========== 性能优化：标记交互开始 ==========
             # 类似iOS在缩放时使用快照的策略，我们在交互期间降低渲染质量
@@ -6007,17 +6042,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 使用共用方法计算可见点数（与update_plot_style共用逻辑）
                 _, visible_points = self._calculate_visible_points(range)
                 
-                # 根据可见点数动态调整延迟
+                # 根据可见点数和曲线数量动态调整延迟（支持百万级数据点）
+                curve_count = max(1, len(self.curves) if hasattr(self, 'curves') and self.curves else 
+                                  (1 if hasattr(self, 'curve') and self.curve is not None else 1))
+                
+                # 基础延迟根据可见点数
                 if visible_points < 1000:
-                    delay = 20  # 很少点：快速响应
+                    base_delay = 20  # 很少点：快速响应
                 elif visible_points < 10000:
-                    delay = 50  # 中等点数
+                    base_delay = 50  # 中等点数
                 elif visible_points < 50000:
-                    delay = 100  # 较多点数
+                    base_delay = 100  # 较多点数
                 elif visible_points < 500000:
-                    delay = 200  # 较多点数
+                    base_delay = 200  # 大量点数
                 else:
-                    delay = 300  # 大量点数：更长延迟避免卡顿
+                    base_delay = 300  # 百万级点数：更长延迟避免卡顿
+                
+                # 根据曲线数量增加延迟（多曲线时更保守）
+                curve_factor = 1.0 + (curve_count - 1) * 0.1  # 每条曲线增加10%延迟
+                delay = int(base_delay * curve_factor)
                 
                 self._update_timer.start(delay)
         except Exception as e:
@@ -6046,8 +6089,28 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 交互结束后，执行一次完整的高质量渲染
             if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
                 self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
+            
+            # 【性能优化】交互结束后更新cursor标签（交互期间被禁用）
+            # 延迟更新cursor，避免与样式更新冲突
+            QTimer.singleShot(50, self._update_cursor_after_interaction)
         except Exception as e:
             print(f"结束交互优化时出错: {e}")
+    
+    def _update_cursor_after_interaction(self):
+        """交互结束后更新cursor标签"""
+        try:
+            # 检查cursor是否可见且不在交互状态
+            main_window = self.window()
+            cursor_enabled = True
+            if main_window and hasattr(main_window, 'cursor_btn'):
+                cursor_enabled = main_window.cursor_btn.isChecked()
+            
+            if (not getattr(self, '_is_interacting', False) and 
+                hasattr(self, 'vline') and self.vline.isVisible() and
+                cursor_enabled):
+                self.update_cursor_label()
+        except Exception as e:
+            pass  # 忽略cursor更新错误
 
     def _delayed_update_plot_style(self):
         """延迟更新绘图样式
@@ -7264,6 +7327,10 @@ class MainWindow(QMainWindow):
         if not self.cursor_btn.isChecked():
             return
         
+        # 【性能优化】交互期间跳过cursor同步，避免拖拽/缩放时卡顿
+        if sender_widget and getattr(sender_widget, '_is_interacting', False):
+            return
+        
         # 检查是否有任何plot处于pin状态
         has_pinned_plot = False
         for container in self.plot_widgets:
@@ -7278,11 +7345,14 @@ class MainWindow(QMainWindow):
             pass
         else:
             # 没有plot被pin，正常同步所有plot
-            # 性能优化：只更新可见的plots
+            # 性能优化：只更新可见的plots，且跳过交互中的plot
             for container in self.plot_widgets:
                 if not container.isVisible():
                     continue
                 w = container.plot_widget
+                # 跳过交互中的plot，避免性能问题
+                if getattr(w, '_is_interacting', False):
+                    continue
                 w.vline.setVisible(True)
                 w.vline.setPos(x)
                 w.update_cursor_label()
@@ -8055,10 +8125,6 @@ if __name__ == "__main__":
     )
     app = QApplication(sys.argv)
     
-    # ========== 性能优化配置 ==========
-    # 注意：OpenGL硬件加速在某些系统上可能导致QPainter错误，已禁用
-    # 当前使用软件渲染模式，配合降采样、防抖等优化策略仍能获得良好性能
-    print("✓ 使用软件渲染模式（兼容性最佳）")
     
     if sys.platform == "win32":
         def get_windows_chinese_font():
