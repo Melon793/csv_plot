@@ -730,10 +730,29 @@ class CustomDelegate(QStyledItemDelegate):
         self.highlighted_cols = set()  # 新增：用于存储需要高亮的列（用于闪烁效果）
 
     def paint(self, painter, option, index):
+        from PyQt6.QtWidgets import QStyle
+        from PyQt6.QtGui import QColor
+        
         painter.save()
-        # 高亮选中的单元格所在的行和列
-        if index.row() in self.selected_rows or index.column() in self.selected_cols:
-            painter.fillRect(option.rect, QColor(200, 200, 255, 64))  # 浅蓝高亮，半透明
+        
+        # 判断单元格是否被选中（同时在被选中的行和列中）
+        is_selected_cell = (index.row() in self.selected_rows and 
+                           index.column() in self.selected_cols)
+        
+        # 判断单元格是否只在被选中的行或列中（但不是同时）
+        is_in_selected_row = index.row() in self.selected_rows
+        is_in_selected_col = index.column() in self.selected_cols
+        is_in_selected_row_or_col = (is_in_selected_row or is_in_selected_col) and not is_selected_cell
+        
+        # 被选中的单元格本身：使用系统高亮颜色（和主界面变量列表一致），50%透明度
+        if is_selected_cell:
+            highlight_color = option.palette.highlight().color()
+            # 设置50%透明度（alpha = 128）
+            highlight_color.setAlpha(128)
+            painter.fillRect(option.rect, highlight_color)
+        # 被选中的单元格所在的行或列：使用浅蓝色，提高透明度
+        elif is_in_selected_row_or_col:
+            painter.fillRect(option.rect, QColor(200, 200, 255, 32))  # 浅蓝高亮，更透明（从64降低到32）
         
         # 新增：高亮来自另一个视图的行
         if index.row() in self.highlighted_rows:
@@ -1065,6 +1084,9 @@ class DataTableDialog(QMainWindow):
         if var_name not in loader.df.columns:  # 改为 loader
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
+        
+        # 保存当前的垂直滚动位置，避免添加变量后列表位置变化
+        self._saved_scroll_pos = self.main_view.verticalScrollBar().value() if self.main_view else None
             
         series = loader.df[var_name]  # 改为 loader
         self._add_variable_to_table(var_name, series)
@@ -5977,9 +5999,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if not hasattr(self, 'factor') or not hasattr(self, 'plot_item'):
                 return
             
-            # 【性能优化】交互期间：对于百万级数据点，交互时更激进地禁用symbol
-            # 避免在缩放时频繁切换样式导致卡顿
+            # 【性能优化】交互期间：完全跳过样式更新，避免遍历所有曲线导致卡顿
+            # 样式更新只在交互结束后执行一次，保证缩放时的流畅性
             is_interacting = getattr(self, '_is_interacting', False)
+            if is_interacting:
+                return  # 交互期间完全跳过样式更新，避免卡顿
             
             # 使用共用方法计算索引范围
             index_range_width, visible_points = self._calculate_visible_points(range)
@@ -5987,11 +6011,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 基于索引范围宽度判断样式：小于阈值显示symbol（细线+symbol），否则粗线无symbol
             global XRANGE_THRESHOLD_FOR_SYMBOLS
             show_symbols = index_range_width < XRANGE_THRESHOLD_FOR_SYMBOLS
-            
-            # 【性能优化】交互期间：对于大量可见点数，强制禁用symbol以提高性能
-            # 百万级数据点在交互时，即使xrange小也优先保证流畅性
-            if is_interacting and visible_points > 100000:
-                show_symbols = False  # 交互期间强制禁用symbol，避免性能问题
             
             # 应用样式到所有曲线
             self._apply_plot_style(show_symbols)
@@ -6034,6 +6053,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 交互结束后等待200ms才恢复高质量渲染
                 self._interaction_timer.start(200)
             
+            # 【性能优化】交互期间不启动样式更新定时器
+            # 样式更新只在交互结束后执行一次，保证缩放时的流畅性
+            # 这样可以避免在快速缩放时频繁触发样式更新导致卡顿
+            if self._is_interacting:
+                # 交互期间：停止更新定时器，不执行样式更新
+                if hasattr(self, '_update_timer'):
+                    self._update_timer.stop()
+                return  # 交互期间直接返回，不执行任何更新
+            
             # 停止之前的定时器
             if hasattr(self, '_update_timer'):
                 self._update_timer.stop()
@@ -6072,9 +6100,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         类似iOS的快照策略：在交互期间临时降低渲染质量
         """
         try:
-            # 可以在这里添加更多交互开始时的优化
-            # 例如：临时禁用抗锯齿、降低降采样阈值等
-            pass
+            # 【性能优化】交互期间临时提高降采样阈值，减少渲染的点数
+            # 这样可以显著提升缩放时的流畅度
+            if hasattr(self, 'plot_item'):
+                # 保存原始降采样设置
+                if not hasattr(self, '_original_downsample_ds'):
+                    # 获取当前降采样设置（如果有）
+                    self._original_downsample_ds = getattr(self.plot_item, '_downsample', None)
+                
+                # 临时提高降采样阈值：交互期间使用更激进的降采样
+                # 通过设置更大的ds值来减少渲染的点数
+                # 注意：pyqtgraph的auto模式会自动处理，这里主要是确保降采样更激进
+                # 实际上，pyqtgraph的auto模式已经会根据可见区域自动调整
+                # 但我们可以通过临时禁用某些昂贵的操作来提升性能
+                pass  # pyqtgraph的auto模式已经足够智能，无需手动调整
+            
+            # 【性能优化】交互期间禁用样式更新（已在update_plot_style中实现）
+            # 这样可以避免在缩放时遍历所有曲线并更新样式
         except Exception as e:
             print(f"开始交互优化时出错: {e}")
     
