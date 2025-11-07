@@ -400,17 +400,17 @@ class FastDataLoader:
         parse_dates: list[str] = []
         date_formats: dict[str, str] = {}
 
-        # 精简的日期格式候选列表（最常用的格式）
+        # 日期格式候选列表（按优先级排序）
         date_candidates = [
+            "%H:%M:%S.%f",   # 带微秒的时间格式（支持毫秒和微秒）
             "%H:%M:%S",      # 时间格式
-            "%H:%M:%S.%f",   # 带微秒的时间
             "%d/%m/%Y",      # 欧洲日期格式 (例: 18/11/2017)
             "%Y/%m/%d",      # 日期格式 (例: 2024/10/31)
             "%Y-%m-%d",      # ISO日期格式 (例: 2024-10-31)
         ]
         
         # 时间列的关键字（不区分大小写）
-        time_keywords = ['time', 'date', 'datetime', 'timestamp', 'zeit', 'TMD']
+        time_keywords = ['time', 'date', 'datetime', 'timestamp', 'zeit', 'tmod']
         
         float_cols = sample.select_dtypes(include=['float', 'float64','category'])
         downcast_ratio_est = float_cols.shape[1] / sample.shape[1] if sample.shape[1] > 0 else 0.000001
@@ -430,7 +430,7 @@ class FastDataLoader:
             is_time_candidate = any(keyword in col_lower for keyword in time_keywords)
             
             if is_time_candidate:
-                # 只采样前10行进行格式推断（大大加快速度）
+                # 采样前10行进行格式推断
                 s_sample = s.head(10).dropna()
                 if len(s_sample) > 0:
                     for fmt in date_candidates:
@@ -4466,13 +4466,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def clear_value_cache(self):
         #self._value_cache: dict[str, tuple] = {}
         pass
-    def datetime_to_unix_seconds(self,series: pd.Series) -> pd.Series:
+    def datetime_to_unix_seconds(self, series: pd.Series) -> pd.Series:
+        """将datetime Series转换为Unix时间戳（秒，float64精度）"""
         if "ns" in str(series.dtype):
-            return series.astype("int64") / 10**9
+            return (series.astype("int64") / 10**9).astype("float64")
         elif "us" in str(series.dtype):
-            return series.astype("int64") / 10**6
+            return (series.astype("int64") / 10**6).astype("float64")
         elif "ms" in str(series.dtype):
-            return series.astype("int64") / 10**3
+            return (series.astype("int64") / 10**3).astype("float64")
         else:
             raise ValueError(f"Unsupported datetime dtype: {series.dtype}")
         
@@ -4491,28 +4492,26 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             fmt = self.time_channels_info[var_name]
             try:
                 if "%H:%M:%S" in fmt:
-                    #time
+                    # 时间格式：提取时间部分并转换为Unix时间戳
                     times = pd.to_datetime(raw_values, format=fmt, errors="coerce")
                     today = pd.Timestamp.today().normalize()
-                    dt_values = today + (times.dt.hour.astype("timedelta64[h]") +
-                        times.dt.minute.astype("timedelta64[m]") +
-                        times.dt.second.astype("timedelta64[s]"))
-                    
+                    # 提取从午夜开始的时间差（保留毫秒/微秒精度）
+                    time_deltas = times - times.dt.normalize()
+                    dt_values = today + time_deltas
                     y_values = self.datetime_to_unix_seconds(dt_values)
                     y_format = 's'
-
                 else:
-                    #date
-                    dt_values = pd.to_datetime(raw_values,format=fmt, errors='coerce')
+                    # 日期格式：直接转换为Unix时间戳
+                    dt_values = pd.to_datetime(raw_values, format=fmt, errors='coerce')
                     y_values = self.datetime_to_unix_seconds(dt_values)
                     y_format = 'date'
-            except:
-                # cannot parse the format
-                return None,None
+            except (ValueError, TypeError) as e:
+                # 无法解析时间格式
+                return None, None
 
         else:
-            # cannot get right info
-            return None,None
+            # 非时间通道，返回None
+            return None, None
         
         # finally
         main_window.value_cache[var_name] = (y_values, y_format)
@@ -4782,26 +4781,36 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if y_values is None or len(y_values) == 0:
                 return False, f"变量 {var_name} 没有有效数据", None, None, ""
             
-            # 【NumPy优化】转换为numpy数组，并确保使用float32以减少内存
-            # 注意：对于需要高精度的数据，可能需要保持float64，但大多数绘图场景float32足够
+            # 转换为numpy数组，根据数据类型选择合适的精度
+            # 时间数据（Unix时间戳）使用float64以保留毫秒精度
+            # 其他数据使用float32以减少内存
             if isinstance(y_values, pd.Series):
-                # 尝试转换为float32，但如果数据范围超出float32范围，使用float64
-                try:
-                    y_array = y_values.to_numpy(dtype=np.float32)
-                    # 检查是否有inf值（表示溢出）
-                    if np.any(np.isinf(y_array)):
-                        y_array = y_values.to_numpy(dtype=np.float64)
-                except (OverflowError, ValueError):
-                    # 如果转换失败（如整数超出float32范围），使用float64
+                y_array_temp = y_values.to_numpy()
+                # 检测时间数据：Unix时间戳通常 > 1e8
+                is_time_data = (len(y_array_temp) > 0 and 
+                               np.max(np.abs(y_array_temp)) > 1e8)
+                
+                if is_time_data:
                     y_array = y_values.to_numpy(dtype=np.float64)
+                else:
+                    try:
+                        y_array = y_values.to_numpy(dtype=np.float32)
+                        if np.any(np.isinf(y_array)):
+                            y_array = y_values.to_numpy(dtype=np.float64)
+                    except (OverflowError, ValueError):
+                        y_array = y_values.to_numpy(dtype=np.float64)
             else:
                 y_array = np.asarray(y_values)
-                # 尝试转换为float32（如果已经是浮点类型）
-                if y_array.dtype.kind == 'f' and not np.any(np.isinf(y_array)):
+                is_time_data = (len(y_array) > 0 and 
+                               np.max(np.abs(y_array)) > 1e8)
+                
+                if is_time_data:
+                    y_array = y_array.astype(np.float64)
+                elif y_array.dtype.kind == 'f' and not np.any(np.isinf(y_array)):
                     try:
                         y_array = y_array.astype(np.float32)
                     except (OverflowError, ValueError):
-                        pass  # 保持原类型
+                        pass
                 
             # 检查数据是否全为NaN
             if np.all(np.isnan(y_array)):
@@ -4851,9 +4860,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 单曲线模式：设置绘图数据
             self.y_format = y_format
             self.y_name = var_name
-            # 【NumPy优化】确保使用float32数组以减少内存
+            # x_array是索引数组，使用float32足够
             self.original_index_x = np.asarray(x_array, dtype=np.float32)
-            self.original_y = np.asarray(y_array, dtype=np.float32)
+            # y_array根据数据类型选择精度：时间数据使用float64，其他数据使用float32
+            if y_format in ['s', 'date'] or (y_array.dtype == np.float64 and 
+                                            len(y_array) > 0 and 
+                                            np.max(np.abs(y_array)) > 1e8):
+                self.original_y = np.asarray(y_array, dtype=np.float64)
+            else:
+                self.original_y = np.asarray(y_array, dtype=np.float32)
             x_values = self.offset + self.factor * self.original_index_x
             
             # 单曲线模式：清除旧图并绘制新图
