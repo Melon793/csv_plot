@@ -6769,7 +6769,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def load_btn_click(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;all File (*.*)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11);;all File (*.*)")
         if file_path:
             self.load_csv_file(file_path)
 
@@ -6898,7 +6898,7 @@ class MainWindow(QMainWindow):
                 delimiter_typ = ','
                 descRows = 0
                 hasunit = True
-            elif file_ext in ['.mfile','.t00','.t01','t10','t11']:
+            elif file_ext in ['.mfile','.t00','.t01','.t10','.t11']:
                 delimiter_typ = '\t'
                 descRows = 2
                 hasunit=True       
@@ -7275,7 +7275,7 @@ class MainWindow(QMainWindow):
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
                 # 检查是否有支持的文件
-                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01')) for u in urls)
+                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
                 
                 if supported:
                     self.show_drop_overlay()
@@ -7293,7 +7293,7 @@ class MainWindow(QMainWindow):
         elif etype == QEvent.Type.DragMove:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
-                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01')) for u in urls)
+                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
                 if supported:
                     event.acceptProposedAction()
                     return True
@@ -7303,7 +7303,7 @@ class MainWindow(QMainWindow):
                 urls = event.mimeData().urls()
                 for u in urls:
                     path = u.toLocalFile()
-                    if path.lower().endswith(('.csv','.txt','.mfile','.t00','.t01')):
+                    if path.lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')):
                         self.load_csv_file(path)
                         event.accept()
                         return True
