@@ -1074,8 +1074,8 @@ class DataTableDialog(QMainWindow):
             self._blink_column(var_name,pulse=BLINK_PULSE)
             return
             
-        # 获取主窗口
-        loader = get_main_loader()       # 如果你只需要 loader
+        # 获取主窗口loader
+        loader = get_main_loader()      
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
@@ -2416,8 +2416,8 @@ class MyTableWidget(QTableWidget):
         menu.exec(self.mapToGlobal(pos))
 
     def _add_to_data_table(self, var_name: str):
-        # 获取 MainWindow 实例（假设 self.window() 是 MainWindow）
-        loader = get_main_loader()       # 如果你只需要 loader
+        # 获取 MainWindow 的 loader
+        loader = get_main_loader()
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
@@ -2430,8 +2430,8 @@ class MyTableWidget(QTableWidget):
 
     def _add_to_blank_plot(self, var_name: str):
         # 获取 MainWindow 实例
-        main_window = get_main_window() # 如果你需要 main_window 本身
-        loader = get_main_loader()       # 如果你只需要 loader
+        main_window = get_main_window() 
+        loader = get_main_loader()
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
