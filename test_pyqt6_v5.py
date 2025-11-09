@@ -7360,7 +7360,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-    # ---------------- 公用函数 ----------------
+
     def toggle_cursor_all(self, checked):
         """切换所有plot的cursor显示状态
         
@@ -7694,7 +7694,6 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     pass  # 忽略样式更新错误，不影响数据加载
 
-# ---------------- 绘图变量编辑器对话框 ----------------
 class PlotVariableEditorDialog(QDialog):
     """
     绘图变量编辑器对话框类
@@ -8104,10 +8103,6 @@ class PlotVariableEditorDialog(QDialog):
                         name=var_name
                     )
                     
-                    # 性能优化：plot_item级别已启用peak模式的downsample
-                    # 无需在curve级别额外设置
-                    # 注意：若要设置，必须用'peak'而非'subsample'以保留瞬时峰值
-                    
                     # 更新曲线信息
                     curve_info['curve'] = new_curve
                     
@@ -8128,11 +8123,7 @@ class PlotVariableEditorDialog(QDialog):
                         pen=pen,
                         name=var_name
                     )
-                    
-                    # 性能优化：plot_item级别已启用peak模式的downsample
-                    # 无需在curve级别额外设置
-                    # 注意：若要设置，必须用'peak'而非'subsample'以保留瞬时峰值
-            
+                          
             # 更新表格项颜色
             color_widget = self.var_table.cellWidget(row, 2)
             if color_widget:
