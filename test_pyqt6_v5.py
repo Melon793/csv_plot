@@ -3111,7 +3111,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 检查是否有数据可显示
         if not self.curve and not self.curves:
             return False
-        
+            
+        # 清除X轴和Y轴的刻度
+        self.axis_x.setTicks(None)
+        self.axis_y.setTicks(None)
+
         # 获取x_values
         if self.is_multi_curve_mode and self.curves:
             # 多曲线模式：使用第一个曲线的x_data
@@ -3200,6 +3204,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def auto_y_in_x_range(self):
         vb=self.view_box
         vb.enableAutoRange(axis=vb.YAxis, enable=True)
+        vb.plot_widget.axis_y.setTicks(None)
 
     def update_left_header(self, left_text=None):
         """更新顶部文本内容"""
