@@ -3360,14 +3360,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         font = QApplication.font()
         fm = QFontMetrics(font)
         self.axis_y.setWidth(fm.horizontalAdvance("-10000.01") )
-        
+
+        # 基于应用程序基础字体大小，增加2像素作为标签字体大小
+        font_family = font.family() 
+        # 使用 font.pixelSize() 保证跨平台一致性，并略微增大
+        pixel_size = font.pixelSize() + 2
+
         # Y轴标签
+        # self.axis_y.setLabel(
+        #     color='black',
+        #     angle=-90,
+        #     **{'font-family': 'Arial', 'font-size': '12pt', 'font-weight': 'bold'}
+        # )
         self.axis_y.setLabel(
             color='black',
             angle=-90,
-            **{'font-family': 'Arial', 'font-size': '12pt', 'font-weight': 'bold'}
+            # 修正：使用像素大小 'px' 代替点大小 'pt'，并使用系统字体
+            **{'font-family': font_family, 'font-size': f'{pixel_size}px', 'font-weight': 'bold'}
         )
-    
+
     def setup_interaction(self):
         """配置交互元素"""
         # 光标线
@@ -8259,9 +8270,16 @@ if __name__ == "__main__":
             return QApplication.font()
         
         font = get_windows_chinese_font()        
-        font.setPointSize(9)
+        # font.setPointSize(9)
+        font.setPixelSize(12)
         app.setFont(font)
         # app.setStyle("Fusion")
+        
+    elif sys.platform == "darwin":
+        font = QApplication.font()
+        font.setPixelSize(13) # macOS 默认字体稍大一点可能观感更好
+        app.setFont(font)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
