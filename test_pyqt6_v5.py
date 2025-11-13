@@ -3652,7 +3652,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             fill=pg.mkBrush(255, 255, 255, 220),
             anchor=(0.5, 0.5)
         )
-        label.setFont(QFont('Arial', 8))
+        # label.setFont(QFont('Arial', 8))
+
+        font = QApplication.font()  # 获取App的默认字体
+        font.setPixelSize(11)     # 设置一个跨平台一致的逻辑像素大小 (11px)
+        label.setFont(font)
+
         pool.append(label)
         return label
     
@@ -3672,7 +3677,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 border=pg.mkPen(128, 128, 128, width=1),
                 anchor=(0.5, 0)
             )
-            x_label.setFont(QFont('Arial', 9))
+            # x_label.setFont(QFont('Arial', 9))
+
+            # 设置一个跨平台一致的逻辑像素大小 (12px)
+            font = QApplication.font()
+            font.setPixelSize(12)
+            x_label.setFont(font)
+
             self._cursor_item_pool['x_label'] = x_label
         return self._cursor_item_pool['x_label']
     
@@ -4316,49 +4327,99 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         固定后cursor不会跟随鼠标移动，但可以通过拖动vline来改变位置。
         
         Args:
-            x_value (float): 要固定到的x坐标值
+            x_value (float): 要固定到的x坐标值 (这是显示坐标)
         """
         if not self.window() or not hasattr(self.window(), 'cursor_btn') or not self.window().cursor_btn.isChecked():
             # 如果cursor未显示，先显示cursor
             self.window().cursor_btn.setChecked(True)
             self.window().toggle_cursor_all(True)
         
-        # 找到最近的数据点
-        if len(self.plot_item.listDataItems()) > 0:
-            curve = self.plot_item.listDataItems()[0]
-            x_data, y_data = curve.getData()
-            if x_data is not None and len(x_data) > 0:
-                # 考虑factor和offset
-                adjusted_x = (x_value - self.offset) / self.factor if self.factor != 0 else x_value
-                idx = np.argmin(np.abs(x_data - adjusted_x))
-                pinned_x = x_data[idx]
-                # 转换回显示坐标
-                display_x = pinned_x * self.factor + self.offset
+        # --- 修正：支持多曲线 ---
+        
+        # 1. 收集所有可见曲线的 x_data (它们已经是显示坐标)
+        curves_x_data = []
+        if self.is_multi_curve_mode and self.curves:
+            # 多曲线模式：从 self.curves 字典收集
+            for var_name, curve_info in self.curves.items():
+                if curve_info.get('visible', True) and 'x_data' in curve_info and curve_info['x_data'] is not None:
+                    curves_x_data.append(curve_info['x_data'])
+        elif self.curve:
+            # 单曲线模式：从 self.curve 获取
+            x_data, _ = self.curve.getData()
+            if x_data is not None:
+                curves_x_data.append(x_data)
+
+        if not curves_x_data:
+            # 没有数据，无法pin
+            return
+
+        # 2. 找到所有曲线中，离点击位置 x_value 最近的 实际数据点x坐标
+        globally_closest_x = None
+        min_distance = float('inf')
+
+        for x_data in curves_x_data:
+            if x_data is None or len(x_data) == 0:
+                continue
                 
-                # 设置所有plot为pin状态并同步位置
-                if self.window() and hasattr(self.window(), 'plot_widgets'):
-                    for container in self.window().plot_widgets:
-                        widget = container.plot_widget
-                        widget.is_cursor_pinned = True
-                        widget.pinned_x_value = display_x
-                        widget.vline.setMovable(True)
-                        widget.vline.setPos(display_x)
-                        
-                        # 重置节流时间戳，确保update_cursor_label能立即执行
-                        # 这样可以绕过自适应节流控制，立即更新cursor标签到正确位置
-                        if hasattr(widget, '_last_cursor_update_time'):
-                            widget._last_cursor_update_time = 0
-                        
-                        if hasattr(widget.view_box, 'is_cursor_pinned'):
-                            widget.view_box.is_cursor_pinned = True
+            # 找到此曲线中最近点的索引
+            # x_value 是显示坐标, x_data 也是显示坐标, 直接比较
+            try:
+                # 假设 x_data 是排序的, 使用 searchsorted 提高效率
+                idx = np.searchsorted(x_data, x_value, side='left')
+                
+                # 检查左右邻居
+                if idx > 0 and idx < len(x_data):
+                    dist_left = abs(x_data[idx-1] - x_value)
+                    dist_right = abs(x_data[idx] - x_value)
+                    if dist_left < dist_right:
+                        idx = idx - 1
+                elif idx == len(x_data): # 超出右边界
+                    idx = len(x_data) - 1
+                # if idx == 0, 保持 0
+                
+            except (ValueError, TypeError):
+                # 如果数据未排序 (异常情况), 回退到 argmin
+                idx = np.argmin(np.abs(x_data - x_value))
+
+            # 获取该点的实际x坐标
+            nearest_x_in_curve = x_data[idx]
+            distance = abs(nearest_x_in_curve - x_value)
+
+            # 比较并更新全局最近点
+            if distance < min_distance:
+                min_distance = distance
+                globally_closest_x = nearest_x_in_curve
+
+        # 3. 如果找到了一个最近点，就使用它来设置pin
+        if globally_closest_x is not None:
+            # 最终用于pin的显示坐标 (已修正，不再进行双重缩放)
+            display_x = globally_closest_x 
+            
+            # 4. 设置所有plot为pin状态并同步位置
+            if self.window() and hasattr(self.window(), 'plot_widgets'):
+                for container in self.window().plot_widgets:
+                    widget = container.plot_widget
+                    widget.is_cursor_pinned = True
+                    widget.pinned_x_value = display_x
+                    widget.vline.setMovable(True)
+                    widget.vline.setPos(display_x)
                     
-                    # 强制处理Qt事件队列，确保所有vline位置都已更新
-                    QApplication.processEvents()
+                    # 重置节流时间戳，确保update_cursor_label能立即执行
+                    # 这样可以绕过自适应节流控制，立即更新cursor标签到正确位置
+                    if hasattr(widget, '_last_cursor_update_time'):
+                        widget._last_cursor_update_time = 0
                     
-                    # 然后再更新所有plot的cursor标签
-                    for container in self.window().plot_widgets:
-                        widget = container.plot_widget
-                        widget.update_cursor_label()
+                    if hasattr(widget.view_box, 'is_cursor_pinned'):
+                        widget.view_box.is_cursor_pinned = True
+                
+                # 强制处理Qt事件队列，确保所有vline位置都已更新
+                QApplication.processEvents()
+                
+                # 然后再更新所有plot的cursor标签
+                for container in self.window().plot_widgets:
+                    widget = container.plot_widget
+                    widget.update_cursor_label()
+        
 
     def free_cursor(self):
         """
