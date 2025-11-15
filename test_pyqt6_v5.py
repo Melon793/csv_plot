@@ -3,6 +3,7 @@ import sys
 import os
 import numpy as np
 import pandas as pd
+from typing import Any
 
 if sys.platform == "darwin":  # macOS
     # 屏蔽 macOS ICC 警告
@@ -36,6 +37,44 @@ MIN_INDEX_LENGTH = 3
 DEFAULT_LINE_WIDTH = 3
 THICK_LINE_WIDTH = 3
 THIN_LINE_WIDTH = 1
+
+FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
+
+
+def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
+    """
+    判断数值是否能安全表示为 float32。
+
+    参数:
+        values: pandas Series、NumPy 数组或其他可迭代的数值序列。
+
+    返回:
+        tuple[bool, float | None]: (是否安全、绝对值最大值)
+            当数据中不存在有限值时，绝对值最大值为 None。
+    """
+    if values is None:
+        return False, None
+
+    try:
+        if isinstance(values, pd.Series):
+            arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
+        else:
+            try:
+                arr = np.asarray(values, dtype=np.float64)
+            except (ValueError, TypeError, OverflowError):
+                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64)
+    except Exception:
+        return False, None
+
+    if arr.size == 0:
+        return True, 0.0
+
+    finite_mask = np.isfinite(arr)
+    if not finite_mask.any():
+        return False, None
+
+    abs_max = float(np.max(np.abs(arr[finite_mask])))
+    return abs_max <= FLOAT32_SAFE_MAX, abs_max
 
 # 主界面
 global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
@@ -444,7 +483,8 @@ class FastDataLoader:
                     else:
                         # 不是时间格式，按数值处理
                         if pd.api.types.is_numeric_dtype(s):
-                            dtype_map[col] = "float32"
+                            is_safe, _ = _evaluate_float32_safety(s)
+                            dtype_map[col] = "float32" if is_safe else "float64"
                         else:
                             dtype_map[col] = "category"
                 else:
@@ -452,7 +492,8 @@ class FastDataLoader:
             else:
                 # 非时间列，直接判断数值类型
                 if pd.api.types.is_numeric_dtype(s):
-                    dtype_map[col] = "float32"
+                    is_safe, _ = _evaluate_float32_safety(s)
+                    dtype_map[col] = "float32" if is_safe else "float64"
                 else:
                     dtype_map[col] = "category"
         
@@ -511,11 +552,13 @@ class FastDataLoader:
     def _downcast_numeric(self) -> None:
         float_cols = self._df.select_dtypes(include=["float32", "float64"]).columns
         for col in float_cols:
-            self._df[col] = (
-                pd.to_numeric(self._df[col], errors="coerce")
-                .replace([np.inf, -np.inf], np.nan)
-                .astype("float32")
-            )
+            cleaned = pd.to_numeric(self._df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            is_safe, _ = _evaluate_float32_safety(cleaned)
+            if is_safe:
+                self._df[col] = cleaned.astype("float32")
+            else:
+                # 当 float32 会溢出时改用 float64 保留精度
+                self._df[col] = cleaned.astype("float64", copy=False)
 
 
     def _check_df_validity(self) -> dict:
@@ -4862,33 +4905,35 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 时间数据（Unix时间戳）使用float64以保留毫秒精度
             # 其他数据使用float32以减少内存
             if isinstance(y_values, pd.Series):
-                y_array_temp = y_values.to_numpy()
-                # 检测时间数据：Unix时间戳通常 > 1e8
-                is_time_data = (len(y_array_temp) > 0 and 
-                               np.max(np.abs(y_array_temp)) > 1e8)
-                
-                if is_time_data:
+                array_source = y_values.to_numpy()
+                safety_source = y_values
+            else:
+                array_source = np.asarray(y_values)
+                safety_source = array_source
+
+            float32_safe, abs_max = _evaluate_float32_safety(safety_source)
+            # 检查时间数据：Unix时间戳通常 > 1e8
+            is_time_data = bool(abs_max is not None and abs_max > 1e8)
+            prefer_float64 = is_time_data or not float32_safe
+            target_dtype = np.float64 if prefer_float64 else np.float32
+
+            try:
+                if isinstance(y_values, pd.Series):
+                    y_array = y_values.to_numpy(dtype=target_dtype)
+                else:
+                    y_array = np.asarray(array_source, dtype=target_dtype)
+            except (OverflowError, ValueError, TypeError):
+                if isinstance(y_values, pd.Series):
                     y_array = y_values.to_numpy(dtype=np.float64)
                 else:
-                    try:
-                        y_array = y_values.to_numpy(dtype=np.float32)
-                        if np.any(np.isinf(y_array)):
-                            y_array = y_values.to_numpy(dtype=np.float64)
-                    except (OverflowError, ValueError):
-                        y_array = y_values.to_numpy(dtype=np.float64)
-            else:
-                y_array = np.asarray(y_values)
-                is_time_data = (len(y_array) > 0 and 
-                               np.max(np.abs(y_array)) > 1e8)
-                
-                if is_time_data:
-                    y_array = y_array.astype(np.float64)
-                elif y_array.dtype.kind == 'f' and not np.any(np.isinf(y_array)):
-                    try:
-                        y_array = y_array.astype(np.float32)
-                    except (OverflowError, ValueError):
-                        pass
-                
+                    y_array = np.asarray(array_source, dtype=np.float64)
+
+            if target_dtype == np.float32 and np.any(np.isinf(y_array)):
+                if isinstance(y_values, pd.Series):
+                    y_array = y_values.to_numpy(dtype=np.float64)
+                else:
+                    y_array = np.asarray(array_source, dtype=np.float64)
+
             # 检查数据是否全为NaN
             if np.all(np.isnan(y_array)):
                 return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
@@ -4939,13 +4984,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.y_name = var_name
             # x_array是索引数组，使用float32足够
             self.original_index_x = np.asarray(x_array, dtype=np.float32)
-            # y_array根据数据类型选择精度：时间数据使用float64，其他数据使用float32
-            if y_format in ['s', 'date'] or (y_array.dtype == np.float64 and 
-                                            len(y_array) > 0 and 
-                                            np.max(np.abs(y_array)) > 1e8):
-                self.original_y = np.asarray(y_array, dtype=np.float64)
-            else:
-                self.original_y = np.asarray(y_array, dtype=np.float32)
+            safe_for_float32, abs_max_plot = _evaluate_float32_safety(y_array)
+            keep_float64 = (
+                y_format in ['s', 'date']
+                or not safe_for_float32
+                or (abs_max_plot is not None and abs_max_plot > 1e8)
+            )
+            target_y_dtype = np.float64 if keep_float64 else np.float32
+            self.original_y = np.asarray(y_array, dtype=target_y_dtype)
             x_values = self.offset + self.factor * self.original_index_x
             
             # 单曲线模式：清除旧图并绘制新图
@@ -5875,11 +5921,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 确保是NumPy数组（保持原有精度，不强制转换）
                 x_data = np.asarray(x_data)
                 y_data = np.asarray(y_data)
-                # 如果是整数类型，转换为float32以减少内存
+                # 如果是整数类型且幅值适合，则转换为float32以减少内存
                 if x_data.dtype.kind in 'iu':
-                    x_data = x_data.astype(np.float32)
+                    safe_x, _ = _evaluate_float32_safety(x_data)
+                    x_dtype = np.float32 if safe_x else np.float64
+                    x_data = x_data.astype(x_dtype)
                 if y_data.dtype.kind in 'iu':
-                    y_data = y_data.astype(np.float32)
+                    safe_y, _ = _evaluate_float32_safety(y_data)
+                    y_dtype = np.float32 if safe_y else np.float64
+                    y_data = y_data.astype(y_dtype)
                 
                 # 计算边界点
                 idx_left = np.argmin(np.abs(x_data - min_x))
@@ -5930,11 +5980,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 确保是NumPy数组（保持原有精度，不强制转换）
             x_data = np.asarray(x_data)
             y_data = np.asarray(y_data)
-            # 如果是整数类型，转换为float32以减少内存
+            # 如果是整数类型且幅值适合，则转换为float32以减少内存
             if x_data.dtype.kind in 'iu':
-                x_data = x_data.astype(np.float32)
+                safe_x, _ = _evaluate_float32_safety(x_data)
+                x_dtype = np.float32 if safe_x else np.float64
+                x_data = x_data.astype(x_dtype)
             if y_data.dtype.kind in 'iu':
-                y_data = y_data.astype(np.float32)
+                safe_y, _ = _evaluate_float32_safety(y_data)
+                y_dtype = np.float32 if safe_y else np.float64
+                y_data = y_data.astype(y_dtype)
             
             idx_left = np.argmin(np.abs(x_data - min_x))
             idx_right = np.argmin(np.abs(x_data - max_x))
