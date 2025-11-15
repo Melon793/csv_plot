@@ -2914,8 +2914,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.mark_region = None
         self.is_cursor_pinned = False  # 记录cursor是否被固定
         self.pinned_x_value = None  # 记录固定的x值
+        self.pinned_index_value = None  # 记录固定的索引值
         self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
         self._is_being_destroyed = False  # 标志：对象正在被销毁
+        self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -3542,8 +3544,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         在正常状态下会更新cursor标签显示。
         """
         if self.is_cursor_pinned:
+            if getattr(self, "_suppress_pin_update", False):
+                return
             # 在pin状态下，同步所有被pin的plot的cursor位置
             x_pos = self.vline.value()
+            self.pinned_x_value = x_pos
+            if self.factor != 0:
+                self.pinned_index_value = (x_pos - self.offset) / self.factor
+            else:
+                self.pinned_index_value = None
             if self.window() and hasattr(self.window(), 'plot_widgets'):
                 for container in self.window().plot_widgets:
                     widget = container.plot_widget
@@ -3552,6 +3561,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         widget.vline.setPos(x_pos)
                         widget.update_cursor_label()
                         widget.pinned_x_value = x_pos
+                        if widget.factor != 0:
+                            widget.pinned_index_value = (x_pos - widget.offset) / widget.factor
+                        else:
+                            widget.pinned_index_value = None
         else:
             # 正常模式下更新cursor标签
             if self.show_values_only:
@@ -4455,6 +4468,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     widget = container.plot_widget
                     widget.is_cursor_pinned = True
                     widget.pinned_x_value = display_x
+                    if widget.factor != 0:
+                        widget.pinned_index_value = (display_x - widget.offset) / widget.factor
+                    else:
+                        widget.pinned_index_value = None
                     widget.vline.setMovable(True)
                     widget.vline.setPos(display_x)
                     
@@ -4484,6 +4501,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         self.is_cursor_pinned = False
         self.pinned_x_value = None
+        self.pinned_index_value = None
         
         # 让vline不可移动
         self.vline.setMovable(False)
@@ -4498,6 +4516,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 widget = container.plot_widget
                 widget.is_cursor_pinned = False
                 widget.pinned_x_value = None
+                widget.pinned_index_value = None
                 widget.vline.setMovable(False)
                 if hasattr(widget.view_box, 'is_cursor_pinned'):
                     widget.view_box.is_cursor_pinned = False
@@ -4513,6 +4532,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         self.is_cursor_pinned = False
         self.pinned_x_value = None
+        self.pinned_index_value = None
         self.vline.setMovable(False)
         if hasattr(self.view_box, 'is_cursor_pinned'):
             self.view_box.is_cursor_pinned = False
@@ -4638,83 +4658,61 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return y_values, y_format
     
     def update_time_correction(self, new_factor, new_offset):
-        old_factor = self.factor
-        old_offset = self.offset
-        self.factor = new_factor
-        self.offset = new_offset
-        
-        if self.is_multi_curve_mode:
-            # 多曲线模式：更新所有曲线的x数据
-            for var_name, curve_info in self.curves.items():
-                if 'curve' in curve_info and 'x_data' in curve_info:
-                    curve = curve_info['curve']
-                    # 从旧的x_data反推原始索引，然后应用新的factor和offset
-                    old_x = curve_info['x_data']
-                    if old_factor != 0:
-                        # 反推原始索引：original_index = (old_x - old_offset) / old_factor
-                        original_index = (old_x - old_offset) / old_factor
-                    else:
-                        # 如果old_factor为0（不应该发生），使用默认索引
-                        original_index = np.arange(1, len(old_x) + 1)
-                    # 重新计算x数据
-                    # 【性能优化】使用in-place操作避免创建临时数组（对于百万级数据点）
-                    # 注意：original_index已经是计算后的数组，这里直接使用
-                    new_x = self.offset + self.factor * original_index
-                    # pyqtgraph的setData会内部处理数据，这里直接传入即可
-                    curve.setData(new_x, curve_info['y_data'])
-                    # 更新存储的x_data
-                    curve_info['x_data'] = new_x
-        else:
-            # 单曲线模式
-            if self.original_index_x is not None:
-                # 【性能优化】对于百万级数据点，numpy的向量化操作已经足够高效
-                # 直接计算，无需额外优化（pyqtgraph内部会处理数据）
-                new_x = self.offset + self.factor * self.original_index_x
-                self.curve.setData(new_x, self.original_y)
-
-        # 计算数据长度
-        if self.is_multi_curve_mode and self.curves:
-            # 多曲线模式：从任一曲线获取数据长度
-            first_curve_info = next(iter(self.curves.values()))
-            datalength = len(first_curve_info['y_data']) if 'y_data' in first_curve_info else 0
-        elif self.original_index_x is not None:
-            # 单曲线模式：使用original_index_x
-            datalength = len(self.original_index_x)
-        else:
-            # 回退：从loader获取
-            datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
-        
-        global DEFAULT_PADDING_VAL_X
-        padding_xVal = DEFAULT_PADDING_VAL_X
-
-        index_min = 1 - padding_xVal * datalength
-        index_max = datalength + padding_xVal * datalength
-        limits_xMin = self.offset + self.factor * index_min
-        limits_xMax = self.offset + self.factor * index_max
-        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-
-        data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
-        data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
-        self.vline.setBounds([data_min_x, data_max_x])
-
-        # 更新标记区域（仅在第一个plot上更新，避免重复）
-        if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
-            old_min, old_max = self.mark_region.getRegion()
-            if old_factor != 0:
-                index_min = (old_min - old_offset) / old_factor
-                index_max = (old_max - old_offset) / old_factor
-                new_min = new_offset + new_factor * index_min
-                new_max = new_offset + new_factor * index_max
-                self.mark_region.setRegion([new_min, new_max])
-                self.window().sync_mark_regions(self.mark_region)  # 同步到其他plot
-        
-        # 确保曲线数据更新后立即更新标记统计（带安全检查）
-        def safe_update_mark_stats():
-            if hasattr(self, 'window') and self.window() is not None:
-                if not getattr(self, '_is_being_destroyed', False):
-                    self.window().update_mark_stats()
-        QTimer.singleShot(0, safe_update_mark_stats)
-
+        self._suppress_pin_update = True
+        try:
+            old_factor = self.factor
+            old_offset = self.offset
+            self.factor = new_factor
+            self.offset = new_offset
+            if self.is_multi_curve_mode:
+                for var_name, curve_info in self.curves.items():
+                    if 'curve' in curve_info and 'x_data' in curve_info:
+                        curve = curve_info['curve']
+                        old_x = curve_info['x_data']
+                        if old_factor != 0:
+                            original_index = (old_x - old_offset) / old_factor
+                        else:
+                            original_index = np.arange(1, len(old_x) + 1)
+                        new_x = self.offset + self.factor * original_index
+                        curve.setData(new_x, curve_info['y_data'])
+                        curve_info['x_data'] = new_x
+            else:
+                if self.original_index_x is not None:
+                    new_x = self.offset + self.factor * self.original_index_x
+                    self.curve.setData(new_x, self.original_y)
+            if self.is_multi_curve_mode and self.curves:
+                first_curve_info = next(iter(self.curves.values()))
+                datalength = len(first_curve_info['y_data']) if 'y_data' in first_curve_info else 0
+            elif self.original_index_x is not None:
+                datalength = len(self.original_index_x)
+            else:
+                datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
+            global DEFAULT_PADDING_VAL_X
+            padding_xVal = DEFAULT_PADDING_VAL_X
+            index_min = 1 - padding_xVal * datalength
+            index_max = datalength + padding_xVal * datalength
+            limits_xMin = self.offset + self.factor * index_min
+            limits_xMax = self.offset + self.factor * index_max
+            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
+            data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
+            self.vline.setBounds([data_min_x, data_max_x])
+            if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
+                old_min, old_max = self.mark_region.getRegion()
+                if old_factor != 0:
+                    index_min = (old_min - old_offset) / old_factor
+                    index_max = (old_max - old_offset) / old_factor
+                    new_min = new_offset + new_factor * index_min
+                    new_max = new_offset + new_factor * index_max
+                    self.mark_region.setRegion([new_min, new_max])
+                    self.window().sync_mark_regions(self.mark_region)
+        finally:
+            def safe_update_mark_stats():
+                if hasattr(self, 'window') and self.window() is not None:
+                    if not getattr(self, '_is_being_destroyed', False):
+                        self.window().update_mark_stats()
+            QTimer.singleShot(0, safe_update_mark_stats)
+            self._suppress_pin_update = False
 
     # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
@@ -7415,6 +7413,7 @@ class MainWindow(QMainWindow):
                 first_plot = self.plot_widgets[0].plot_widget
                 first_plot.view_box.enableAutoRange(x=False)  # 禁用自动范围调整
                 first_plot.view_box.setXRange(new_min, new_max, padding=0)  # 明确设置 padding=0
+                self._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
 
             # 更新标记统计
             self.update_mark_stats()
@@ -7547,7 +7546,68 @@ class MainWindow(QMainWindow):
                 # cursor完全启用或禁用
                 widget.toggle_cursor(checked)
         self.cursor_btn.setText("隐藏光标" if checked else "显示光标")
-        
+
+    def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
+        """时间修正后统一调整所有plot上的固定cursor"""
+        if not self.plot_widgets:
+            return
+
+        pinned_value = None
+        pinned_index = None
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            if widget.is_cursor_pinned and widget.pinned_x_value is not None:
+                pinned_value = widget.pinned_x_value
+                pinned_index = widget.pinned_index_value
+                break
+
+        if pinned_value is None or not np.isfinite(pinned_value):
+            return
+
+        if pinned_index is not None and np.isfinite(pinned_index):
+            index_pos = pinned_index
+        else:
+            if old_factor == 0:
+                return
+            index_pos = (pinned_value - old_offset) / old_factor
+
+        if not np.isfinite(index_pos):
+            return
+
+        datalength = 0
+        if hasattr(self, "loader") and self.loader is not None:
+            datalength = max(int(self.loader.datalength), 0)
+        elif self.plot_widgets[0].plot_widget.original_index_x is not None:
+            datalength = len(self.plot_widgets[0].plot_widget.original_index_x)
+
+        if datalength > 0:
+            index_pos = min(max(index_pos, 1), datalength)
+
+        new_display_x = new_offset + new_factor * index_pos
+        if not np.isfinite(new_display_x):
+            return
+
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            widget.is_cursor_pinned = True
+            widget.pinned_x_value = new_display_x
+            widget.pinned_index_value = index_pos if widget.factor != 0 else None
+
+            widget.vline.blockSignals(True)
+            widget.vline.setBounds([None, None])
+            widget.vline.setMovable(True)
+            widget.vline.setPos(new_display_x)
+            widget.vline.blockSignals(False)
+            widget._update_vline_bounds_from_data()
+
+            if hasattr(widget.view_box, "is_cursor_pinned"):
+                widget.view_box.is_cursor_pinned = True
+            if hasattr(widget, "_last_cursor_update_time"):
+                widget._last_cursor_update_time = 0
+            widget.update_cursor_label()
+
+        QApplication.processEvents()
+
     def sync_crosshair(self, x, sender_widget):
         if not self.cursor_btn.isChecked():
             return
