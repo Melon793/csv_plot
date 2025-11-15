@@ -6952,7 +6952,7 @@ class MainWindow(QMainWindow):
             is_reload: 是否为重新加载
         """
         
-        file_ext = os.path.splitext(file_path)[1].lower()
+        file_ext = self._extract_file_extension(file_path)
 
         # load default
         delimiter_typ = ','
@@ -7074,6 +7074,41 @@ class MainWindow(QMainWindow):
         except json.JSONDecodeError:
             return {} if default is None else default
         
+    def _extract_file_extension(self, file_path: str) -> str:
+        """
+        智能提取文件后缀，优先检测不带数字的后缀
+        支持处理像't00.1'或't00.5'这样的带数字变体的后缀
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            提取的真实文件后缀（如'.t00'），如果无法识别则返回None
+        """
+        import re
+        
+        # 支持的文件类型列表
+        supported_extensions = ['.csv', '.mfile', '.t00', '.t01', '.t10', '.t11', '.txt']
+        
+        # 首先尝试直接提取后缀（不带数字的情况）
+        base_ext = os.path.splitext(file_path)[1].lower()
+        if base_ext in supported_extensions:
+            return base_ext
+        
+        # 如果不带数字的后缀不匹配，尝试匹配带数字变体的后缀
+        base_name = os.path.basename(file_path).lower()
+        
+        # 定义正则表达式模式，匹配支持的后缀后跟数字变体
+        pattern = r'(' + '|'.join(re.escape(ext) for ext in supported_extensions) + r')\.\d+$'
+        match = re.search(pattern, base_name)
+        
+        if match:
+            # 返回匹配的真实后缀（不带数字部分）
+            return match.group(1)
+        
+        # 如果都不匹配，返回None
+        return None
+    
     def _validate_load_parameters(self, file_path: str, descRows: int, sep: str, hasunit: bool) -> tuple[bool, str]:
         """验证加载参数"""
         if not isinstance(file_path, str) or not file_path.strip():
@@ -7352,8 +7387,9 @@ class MainWindow(QMainWindow):
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
                 # 检查是否有支持的文件
-                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
-                
+                # supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
+                supported = any(self._extract_file_extension(u.toLocalFile()) is not None for u in urls)
+
                 if supported:
                     self.show_drop_overlay()
                     self.drop_overlay.adjust_text(file_type_supported=True)
@@ -7370,7 +7406,8 @@ class MainWindow(QMainWindow):
         elif etype == QEvent.Type.DragMove:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
-                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
+                # supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
+                supported = any(self._extract_file_extension(u.toLocalFile()) is not None for u in urls)
                 if supported:
                     event.acceptProposedAction()
                     return True
@@ -7380,7 +7417,7 @@ class MainWindow(QMainWindow):
                 urls = event.mimeData().urls()
                 for u in urls:
                     path = u.toLocalFile()
-                    if path.lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')):
+                    if self._extract_file_extension(path) is not None:
                         self.load_csv_file(path)
                         event.accept()
                         return True
