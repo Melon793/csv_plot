@@ -239,7 +239,7 @@ class FastDataLoader:
     """
     # 脏数据清单
     _NA_VALUES = [
-        "", "nan", "NaN", "NAN", "NULL", "null", "None",
+        "", "nan", "NaN", "NAN", "NULL", "null", "None", "plus infinity", "minus infinity",
         "Inf", "inf", "-inf", "-Inf", "1.#INF", "-1.#INF", "data err", '* *', '----', 'Infinity', 'no value'
     ]
     from typing import Callable
