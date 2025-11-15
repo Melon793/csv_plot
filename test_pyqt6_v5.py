@@ -7930,18 +7930,35 @@ class PlotVariableEditorDialog(QDialog):
         
         # 按钮区域
         button_layout = QHBoxLayout()
-        
+
+        # 上移/下移按钮
+        self.move_up_btn = QPushButton("上移")
+        self.move_up_btn.clicked.connect(lambda: self._move_selected_row(-1))
+        self.move_up_btn.setEnabled(False)
+        button_layout.addWidget(self.move_up_btn)
+
+        self.move_down_btn = QPushButton("下移")
+        self.move_down_btn.clicked.connect(lambda: self._move_selected_row(1))
+        self.move_down_btn.setEnabled(False)
+        button_layout.addWidget(self.move_down_btn)
+
         # 删除按钮
         self.remove_btn = QPushButton("删除选中")
         self.remove_btn.clicked.connect(self.remove_selected_variable)
         self.remove_btn.setEnabled(False)
         button_layout.addWidget(self.remove_btn)
-        
+
         # 清空按钮
         self.clear_btn = QPushButton("清空所有")
         self.clear_btn.clicked.connect(self.clear_all_variables)
         self.clear_btn.setEnabled(False)
         button_layout.addWidget(self.clear_btn)
+
+        # 重置颜色按钮
+        self.reset_color_btn = QPushButton("重置颜色")
+        self.reset_color_btn.clicked.connect(self.reset_curve_colors)
+        self.reset_color_btn.setEnabled(False)
+        button_layout.addWidget(self.reset_color_btn)
         
         button_layout.addStretch()
         layout.addLayout(button_layout)
@@ -8009,8 +8026,59 @@ class PlotVariableEditorDialog(QDialog):
                 'y_format': self.plot_widget.y_format
             }
             self._add_variable_to_table(var_name, curve_info)
-            
+        
         self.update_button_states()
+
+    def _get_selected_row(self) -> int | None:
+        """获取当前选中的行号"""
+        selected_items = self.var_table.selectedItems()
+        if not selected_items:
+            return None
+        return selected_items[0].row()
+
+    def _move_selected_row(self, offset: int):
+        """移动选中行的位置"""
+        if self.var_table.rowCount() <= 1 or not self.plot_widget.curves:
+            return
+        current_row = self._get_selected_row()
+        if current_row is None:
+            return
+        target_row = current_row + offset
+        if target_row < 0 or target_row >= self.var_table.rowCount():
+            return
+
+        order = []
+        for row in range(self.var_table.rowCount()):
+            name_item = self.var_table.item(row, 1)
+            if name_item is not None:
+                order.append(name_item.data(Qt.ItemDataRole.UserRole))
+
+        if len(order) <= 1:
+            return
+
+        order[current_row], order[target_row] = order[target_row], order[current_row]
+        self._apply_curve_order(order)
+        self.load_current_curves()
+        self.var_table.selectRow(target_row)
+
+    def _apply_curve_order(self, new_order: list[str]):
+        """根据给定顺序重排plot中的曲线"""
+        if not self.plot_widget.curves:
+            return
+        reordered: dict[str, dict] = {}
+        for name in new_order:
+            if name in self.plot_widget.curves:
+                reordered[name] = self.plot_widget.curves[name]
+        # 附加遗漏的变量（理论上不会发生）
+        for name, info in self.plot_widget.curves.items():
+            if name not in reordered:
+                reordered[name] = info
+        self.plot_widget.curves = reordered
+        self.plot_widget.update_legend()
+        # 立即刷新光标显示顺序
+        self.plot_widget._clear_cursor_items()
+        if self.plot_widget.vline.isVisible():
+            self.plot_widget.update_cursor_label()
     
     def _add_variable_to_table(self, var_name, curve_info):
         """添加变量到表格"""
@@ -8115,6 +8183,18 @@ class PlotVariableEditorDialog(QDialog):
         
         self.remove_btn.setEnabled(has_selection)
         self.clear_btn.setEnabled(has_items)
+        self.reset_color_btn.setEnabled(has_items)
+
+        selected_row = self._get_selected_row()
+        can_move = (
+            has_selection
+            and self.var_table.rowCount() > 1
+            and bool(self.plot_widget.curves)
+        )
+        self.move_up_btn.setEnabled(can_move and selected_row is not None and selected_row > 0)
+        self.move_down_btn.setEnabled(
+            can_move and selected_row is not None and selected_row < self.var_table.rowCount() - 1
+        )
         
     def remove_selected_variable(self):
         """删除选中的变量"""
@@ -8228,6 +8308,69 @@ class PlotVariableEditorDialog(QDialog):
             # 重置vline bounds到默认值
             self.plot_widget._update_vline_bounds_from_data()
             
+    def reset_curve_colors(self):
+        """按照默认顺序重新分配曲线颜色"""
+        row_count = self.var_table.rowCount()
+        if row_count == 0:
+            return
+        color_cycle = getattr(self.plot_widget, 'curve_colors', ['blue'])
+        if not color_cycle:
+            return
+
+        if self.plot_widget.curves:
+            for idx, var_name in enumerate(self.plot_widget.curves.keys()):
+                color_name = color_cycle[idx % len(color_cycle)]
+                self._apply_color_to_curve(var_name, color_name)
+        elif self.plot_widget.curve and self.plot_widget.y_name:
+            self._apply_color_to_curve(self.plot_widget.y_name, color_cycle[0])
+
+        # 重新加载表格以更新颜色显示
+        selected_row = self._get_selected_row()
+        self.load_current_curves()
+        if selected_row is not None and selected_row < self.var_table.rowCount():
+            self.var_table.selectRow(selected_row)
+
+    def _apply_color_to_curve(self, var_name: str, color_name: str):
+        """将指定变量的颜色更新为给定颜色"""
+        updated = False
+        if self.plot_widget.curves and var_name in self.plot_widget.curves:
+            curve_info = self.plot_widget.curves[var_name]
+            curve_info['color'] = color_name
+            if 'curve' in curve_info and curve_info['curve'] is not None:
+                curve_obj = curve_info['curve']
+                old_pen = curve_obj.opts.get('pen')
+                width = DEFAULT_LINE_WIDTH
+                if hasattr(old_pen, 'widthF'):
+                    width = old_pen.widthF()
+                elif hasattr(old_pen, 'width'):
+                    width = old_pen.width()
+                curve_obj.setPen(pg.mkPen(color=color_name, width=width))
+            updated = True
+        elif var_name == self.plot_widget.y_name and self.plot_widget.curve:
+            old_pen = self.plot_widget.curve.opts.get('pen')
+            width = DEFAULT_LINE_WIDTH
+            if hasattr(old_pen, 'widthF'):
+                width = old_pen.widthF()
+            elif hasattr(old_pen, 'width'):
+                width = old_pen.width()
+            self.plot_widget.curve.setPen(pg.mkPen(color=color_name, width=width))
+            updated = True
+
+        if updated:
+            self.plot_widget.update_legend()
+            # 重新应用样式以确保symbol/线宽保持一致
+            if hasattr(self.plot_widget, 'view_box'):
+                self.plot_widget.update_plot_style(
+                    self.plot_widget.view_box,
+                    self.plot_widget.view_box.viewRange(),
+                    None
+                )
+            self.plot_widget._clear_cursor_items()
+            if hasattr(self.plot_widget, '_last_cursor_update_time'):
+                self.plot_widget._last_cursor_update_time = 0
+            if self.plot_widget.vline.isVisible():
+                self.plot_widget.update_cursor_label()
+
     def set_variable_color(self, row=None):
         """设置变量颜色"""
         if row is None:
@@ -8251,47 +8394,7 @@ class PlotVariableEditorDialog(QDialog):
         color = QColorDialog.getColor(QColor(current_color), self, "选择颜色")
         
         if color.isValid():
-            if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
-                # 多曲线模式：更新curves字典中的颜色
-                self.plot_widget.curves[var_name]['color'] = color.name()
-                
-                # 重新绘制曲线
-                curve_info = self.plot_widget.curves[var_name]
-                if 'curve' in curve_info and 'x_data' in curve_info and 'y_data' in curve_info:
-                    # 移除旧曲线（如果还在scene中）
-                    if curve_info['curve'].scene() is not None:
-                        self.plot_widget.plot_item.removeItem(curve_info['curve'])
-                    
-                    # 创建新曲线
-                    pen = pg.mkPen(color=color.name(), width=DEFAULT_LINE_WIDTH)
-                    new_curve = self.plot_widget.plot_item.plot(
-                        curve_info['x_data'], 
-                        curve_info['y_data'], 
-                        pen=pen,
-                        name=var_name
-                    )
-                    
-                    # 更新曲线信息
-                    curve_info['curve'] = new_curve
-                    
-                    # 更新legend
-                    self.plot_widget.update_legend()
-            else:
-                # 单曲线模式：重新绘制整个曲线
-                if var_name == self.plot_widget.y_name and self.plot_widget.curve:
-                    # 移除旧曲线（如果还在scene中）
-                    if self.plot_widget.curve.scene() is not None:
-                        self.plot_widget.plot_item.removeItem(self.plot_widget.curve)
-                    
-                    # 创建新曲线
-                    pen = pg.mkPen(color=color.name(), width=DEFAULT_LINE_WIDTH)
-                    self.plot_widget.curve = self.plot_widget.plot_item.plot(
-                        self.plot_widget.original_index_x,
-                        self.plot_widget.original_y,
-                        pen=pen,
-                        name=var_name
-                    )
-                          
+            self._apply_color_to_curve(var_name, color.name())
             # 更新表格项颜色
             color_widget = self.var_table.cellWidget(row, 2)
             if color_widget:
