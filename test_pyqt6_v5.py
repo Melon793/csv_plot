@@ -3457,6 +3457,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._last_cursor_update_time = 0
         self._cursor_update_throttle = 0.016  # 基础节流：16ms（约60fps）
         self._adaptive_throttle_enabled = True  # 启用自适应节流
+        self._cursor_refresh_timer = QTimer(self)
+        self._cursor_refresh_timer.setSingleShot(True)
+        self._cursor_refresh_timer.timeout.connect(self._refresh_cursor_geometry)
 
     def handle_single_point_limits(self, x_values, y_values):
         """处理单点或所有点x坐标相同的特殊情况，避免x轴范围为0
@@ -3535,6 +3538,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if hasattr(self.window(), 'sync_crosshair'):
                 self.window().sync_crosshair(mousePoint.x(), self)
             #print(f"mouse in pos {mousePoint.x()}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_cursor_geometry_update()
 
     def on_vline_position_changed(self):
         """
@@ -6315,6 +6322,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # cursor标签只在cursor真正移动时更新（mouseMoveEvent等）
         except Exception as e:
             print(f"延迟更新绘图样式时出错: {e}")
+
+    def _schedule_cursor_geometry_update(self):
+        if not hasattr(self, 'vline') or not self.vline.isVisible():
+            return
+        if getattr(self, '_cursor_refresh_timer', None) is None:
+            return
+        # 重启单次定时器，合并短时间内的多次请求
+        self._cursor_refresh_timer.start(0)
+
+    def _refresh_cursor_geometry(self):
+        if not hasattr(self, 'vline') or not self.vline.isVisible():
+            return
+        if self.show_values_only:
+            self._show_x_position_only()
+        else:
+            self.update_cursor_label()
 
 # ---------------- 主窗口 ----------------
 class MarkStatsWindow(QDialog):
