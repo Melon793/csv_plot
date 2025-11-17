@@ -5096,6 +5096,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             QMessageBox.critical(self, "绘图错误", f"绘制变量时发生错误: {str(e)}")
             return False
 
+    def _compute_valid_min_max(self, values) -> tuple[float | None, float | None]:
+        """Safely compute min/max ignoring NaN/INF values."""
+        if values is None:
+            return None, None
+
+        try:
+            if isinstance(values, pd.Series):
+                arr = pd.to_numeric(values, errors='coerce').to_numpy(dtype=np.float64)
+            else:
+                arr = np.asarray(values, dtype=np.float64)
+        except (ValueError, TypeError):
+            try:
+                arr = pd.to_numeric(pd.Series(values), errors='coerce').to_numpy(dtype=np.float64)
+            except Exception:
+                return None, None
+
+        if arr.size == 0:
+            return None, None
+
+        finite_mask = np.isfinite(arr)
+        if not finite_mask.any():
+            return None, None
+
+        finite_values = arr[finite_mask]
+        return float(np.min(finite_values)), float(np.max(finite_values))
+
     def _get_y_range_in_x_window(self, x_values: np.ndarray, y_values: np.ndarray, x_min: float, x_max: float):
         """计算在指定x轴范围内的y值范围
         
@@ -5113,13 +5139,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             mask = (x_values >= x_min) & (x_values <= x_max)
             if not np.any(mask):
                 # 如果没有数据点在范围内，返回全部数据的范围
-                return np.nanmin(y_values), np.nanmax(y_values)
-            
-            y_in_range = y_values[mask]
-            return np.nanmin(y_in_range), np.nanmax(y_in_range)
-        except Exception as e:
+                bounds = self._compute_valid_min_max(y_values)
+            else:
+                y_in_range = y_values[mask]
+                bounds = self._compute_valid_min_max(y_in_range)
+                if bounds[0] is None or bounds[1] is None:
+                    bounds = self._compute_valid_min_max(y_values)
+
+            if bounds[0] is None or bounds[1] is None:
+                return 0.0, 1.0
+            return bounds
+        except Exception:
             # 出错时返回全部数据范围
-            return np.nanmin(y_values), np.nanmax(y_values)
+            bounds = self._compute_valid_min_max(y_values)
+            if bounds[0] is None or bounds[1] is None:
+                return 0.0, 1.0
+            return bounds
     
     def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray, update_x_range: bool = True):
         """设置绘图坐标轴
