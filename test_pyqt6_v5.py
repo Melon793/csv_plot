@@ -4631,10 +4631,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         raw_values = self.data[var_name]
         dtype_kind = raw_values.dtype.kind
+        y_values = None
+        y_format = 'number'
+
         if dtype_kind in "iuf":
             y_values = raw_values
-            y_format = 'number'
-            return y_values, y_format
+        elif dtype_kind == "b":
+            y_values = raw_values.astype(np.int32)
         elif var_name in self.time_channels_info:
             fmt = self.time_channels_info[var_name]
             try:
@@ -4652,15 +4655,28 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     dt_values = pd.to_datetime(raw_values, format=fmt, errors='coerce')
                     y_values = self.datetime_to_unix_seconds(dt_values)
                     y_format = 'date'
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError):
                 # 无法解析时间格式
                 return None, None
-
         else:
-            # 非时间通道，返回None
-            return None, None
+            # 非时间通道：尝试将object等类型转换为数字，只要存在至少一个有效值就接受
+            try:
+                numeric_values = pd.to_numeric(raw_values, errors='coerce')
+            except Exception:
+                numeric_values = None
+
+            if numeric_values is not None:
+                finite_mask = np.isfinite(numeric_values.to_numpy(dtype=np.float64))
+                if finite_mask.any():
+                    y_values = numeric_values
+                else:
+                    return None, None
+            else:
+                return None, None
         
-        # finally
+        if y_values is None:
+            return None, None
+
         main_window.value_cache[var_name] = (y_values, y_format)
         return y_values, y_format
     
@@ -6624,6 +6640,8 @@ class MainWindow(QMainWindow):
         
         # 监听分界线拖动事件
         self.main_splitter.splitterMoved.connect(self._on_splitter_moved)
+        self._splitter_ready = False  # 用于防止首个 resize 时重复 setSizes
+        self._pending_splitter_adjustment = False
 
         # ---------------- 左侧变量列表 ----------------
         left_widget = QWidget()
@@ -6777,6 +6795,8 @@ class MainWindow(QMainWindow):
         
         # 将splitter添加到主布局
         main_layout.addWidget(self.main_splitter)
+        QTimer.singleShot(0, self._ensure_splitter_ready)
+        QTimer.singleShot(0, self._ensure_splitter_ready)
 
         # ---------------- 子图 ----------------
         self.plot_widgets = []
@@ -6851,11 +6871,51 @@ class MainWindow(QMainWindow):
         """
         # 标记用户已手动调整（影响后续窗口缩放行为）
         self.var_table_user_adjusted = True
+        self._splitter_ready = True
         
         # 记录当前的变量表宽度作为新的默认值
         sizes = self.main_splitter.sizes()
         if len(sizes) >= 1:
             self.var_table_default_width = sizes[0]
+
+    def _ensure_splitter_ready(self):
+        """
+        延迟标记 splitter 尺寸已稳定，避免首个 resizeEvent 中重复 setSizes 触发布局闪烁。
+        """
+        if not hasattr(self, 'main_splitter'):
+            return
+        sizes = self.main_splitter.sizes()
+        if len(sizes) >= 2 and all(size > 0 for size in sizes):
+            self._splitter_ready = True
+        else:
+            # 尚未获得有效尺寸，延迟重试
+            QTimer.singleShot(50, self._ensure_splitter_ready)
+
+    def _apply_fixed_splitter_width(self):
+        """
+        在事件循环空闲时执行的分隔条宽度调整，避免在 resizeEvent 内立即 setSizes 导致闪烁。
+        """
+        self._pending_splitter_adjustment = False
+        if (self.var_table_user_adjusted
+                or not getattr(self, '_splitter_ready', False)
+                or not hasattr(self, 'main_splitter')):
+            return
+
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 2:
+            return
+
+        total_width = sum(sizes)
+        if total_width <= 0 or total_width <= self.var_table_default_width:
+            return
+
+        right_width = max(total_width - self.var_table_default_width, 0)
+        if right_width <= 0:
+            return
+
+        self.main_splitter.blockSignals(True)
+        self.main_splitter.setSizes([self.var_table_default_width, right_width])
+        self.main_splitter.blockSignals(False)
     
     def resizeEvent(self, event):
         """
@@ -6870,22 +6930,14 @@ class MainWindow(QMainWindow):
         """
         super().resizeEvent(event)
         
-        # 如果用户从未手动调整过分界线，执行固定宽度策略
-        if not self.var_table_user_adjusted and hasattr(self, 'main_splitter'):
-            sizes = self.main_splitter.sizes()
-            if len(sizes) >= 2:
-                # 计算总可用宽度
-                total_width = sum(sizes)
-                
-                # 保持变量表宽度不变，剩余空间全部给绘图区
-                new_sizes = [self.var_table_default_width, total_width - self.var_table_default_width]
-                
-                # 临时阻止信号，避免触发_on_splitter_moved
-                # （这不是用户的手动操作，不应标记为"已调整"）
-                self.main_splitter.blockSignals(True)
-                self.main_splitter.setSizes(new_sizes)
-                self.main_splitter.blockSignals(False)
-    
+        # 如果用户从未手动调整过分界线，延迟执行固定宽度策略
+        if (not self.var_table_user_adjusted 
+                and getattr(self, '_splitter_ready', False) 
+                and hasattr(self, 'main_splitter')):
+            if not getattr(self, '_pending_splitter_adjustment', False):
+                self._pending_splitter_adjustment = True
+                QTimer.singleShot(0, self._apply_fixed_splitter_width)
+
     def toggle_plot_area(self, checked):
         if checked:
             self._saved_geometry = self.saveGeometry()
