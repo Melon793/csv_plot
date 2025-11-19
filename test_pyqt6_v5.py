@@ -14,7 +14,7 @@ if sys.platform == "darwin":  # macOS
     )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel
-from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase, QPainter, QPixmap
+from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
@@ -1051,6 +1051,14 @@ class DataTableDialog(QMainWindow):
         if index == 1:  # Handle for the first splitter section
             self.user_left_width = self.splitter.sizes()[0]
 
+    def _cancel_plot_drag_indicator(self):
+        main_window = get_main_window()
+        if not main_window:
+            return
+        container = getattr(main_window, '_active_drag_container', None)
+        if container and getattr(container, 'plot_widget', None):
+            main_window._hide_drag_indicator_for_plot(container.plot_widget)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # On window resize, fix left width to user preference, stretch right
@@ -1060,17 +1068,20 @@ class DataTableDialog(QMainWindow):
     # 拖放相关方法
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
+            self._cancel_plot_drag_indicator()
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasText():
+            self._cancel_plot_drag_indicator()
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
+        self._cancel_plot_drag_indicator()
         var_name = event.mimeData().text()
         self._handle_dropped_variable(var_name)
         event.acceptProposedAction()
@@ -2964,6 +2975,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
         self._is_being_destroyed = False  # 标志：对象正在被销毁
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
+        self._drag_indicator_source = None
+        self._drag_indicator_guard = QTimer(self)
+        self._drag_indicator_guard.setInterval(120)
+        self._drag_indicator_guard.timeout.connect(self._enforce_drag_indicator_visibility)
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -3511,23 +3526,92 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         return [name.strip() for name in (text or '').split(';;') if name.strip()]
 
+    def _should_hide_drag_indicator(self, main_window) -> bool:
+        cursor_pos = QCursor.pos()
+        top_left = main_window.mapToGlobal(QPoint(0, 0))
+        window_rect = QRect(top_left, main_window.size())
+        if not window_rect.contains(cursor_pos):
+            return True
 
+        container = None
+        if hasattr(main_window, '_get_plot_container'):
+            container = main_window._get_plot_container(self)
+        if container is None:
+            container = getattr(main_window, '_active_drag_container', None)
+        if not container or not container.isVisible():
+            return True
 
-    def _notify_drag_indicator(self, var_names: list[str] | None = None, hide: bool = False):
+        container_rect = QRect(container.mapToGlobal(QPoint(0, 0)), container.size())
+        if container_rect.contains(cursor_pos):
+            return False
 
+        widget_under_cursor = QApplication.widgetAt(cursor_pos)
+        if widget_under_cursor:
+            current = widget_under_cursor
+            while current:
+                if current is container:
+                    return False
+                current = current.parentWidget()
+
+            target_window = widget_under_cursor.window()
+            if isinstance(target_window, (DataTableDialog, PlotVariableEditorDialog)):
+                return True
+            if target_window is not main_window:
+                return True
+
+        return True
+
+    def _enforce_drag_indicator_visibility(self):
+        main_window = self.window()
+        if not main_window:
+            self._drag_indicator_guard.stop()
+            self._drag_indicator_source = None
+            return
+
+        container = getattr(main_window, '_active_drag_container', None)
+        if not container or getattr(container, 'plot_widget', None) is not self:
+            self._drag_indicator_guard.stop()
+            if self._drag_indicator_source is not None:
+                self._drag_indicator_source = None
+            return
+
+        if self._drag_indicator_source is not None:
+            source_widget = self._drag_indicator_source
+            if not source_widget or not source_widget.isVisible():
+                self._drag_indicator_source = None
+            else:
+                return
+
+        if self._should_hide_drag_indicator(main_window):
+            self._drag_indicator_source = None
+            self._drag_indicator_guard.stop()
+            main_window._hide_drag_indicator_for_plot(self)
+
+    def _notify_drag_indicator(
+        self,
+        var_names: list[str] | None = None,
+        hide: bool = False,
+        source_widget: QWidget | None = None,
+        indicator_text: str | None = None,
+    ):
         main_window = self.window()
 
         if not main_window or not hasattr(main_window, '_show_drag_indicator_for_plot'):
-
             return
 
+        if not hide and source_widget is None and self._should_hide_drag_indicator(main_window):
+            hide = True
+
         if hide:
-
+            self._drag_indicator_source = None
+            self._drag_indicator_guard.stop()
             main_window._hide_drag_indicator_for_plot(self)
+            return
 
-        else:
-
-            main_window._show_drag_indicator_for_plot(self, var_names or [])
+        self._drag_indicator_source = source_widget
+        main_window._show_drag_indicator_for_plot(self, var_names or [], indicator_text)
+        if not self._drag_indicator_guard.isActive():
+            self._drag_indicator_guard.start()
 
 
     def handle_single_point_limits(self, x_values, y_values):
@@ -6668,19 +6752,20 @@ class PlotContainerWidget(QWidget):
         layout.addWidget(self._indicator_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def _build_indicator_text(self, var_names: list[str]) -> str:
-        has_curve = bool(getattr(self.plot_widget, "curve", None) or getattr(self.plot_widget, "curves", None))
-        multi_mode = bool(getattr(self.plot_widget, "is_multi_curve_mode", False) or len(var_names) > 1)
+        has_curve = bool(getattr(self.plot_widget, "curve", None))
+        has_multi_curves = bool(getattr(self.plot_widget, "curves", None))
+        multi_mode = bool(getattr(self.plot_widget, "is_multi_curve_mode", False) or len(var_names) > 1 or has_multi_curves)
 
         if multi_mode:
             return "释放以添加"
 
-        if len(var_names) == 1:
-            return "释放以替换" if has_curve else "释放以添加"
+        if has_curve:
+            return "释放以替换"
 
         return "释放以添加"
 
-    def show_drag_indicator(self, var_names: list[str] | None = None):
-        text = self._build_indicator_text(var_names or [])
+    def show_drag_indicator(self, var_names: list[str] | None = None, text_override: str | None = None):
+        text = text_override or self._build_indicator_text(var_names or [])
         self._indicator_label.setText(text)
         self._indicator.setGeometry(self.rect())
         self._indicator.raise_()
@@ -7160,13 +7245,13 @@ class MainWindow(QMainWindow):
             return parent
         return None
 
-    def _show_drag_indicator_for_plot(self, plot_widget, var_names: list[str]):
+    def _show_drag_indicator_for_plot(self, plot_widget, var_names: list[str], text_override: str | None = None):
         container = self._get_plot_container(plot_widget)
         if not container:
             return
         if self._active_drag_container and self._active_drag_container is not container:
             self._active_drag_container.hide_drag_indicator()
-        container.show_drag_indicator(var_names)
+        container.show_drag_indicator(var_names, text_override)
         self._active_drag_container = container
 
     def _hide_drag_indicator_for_plot(self, plot_widget):
@@ -8750,16 +8835,36 @@ class PlotVariableEditorDialog(QDialog):
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
         if event.mimeData().hasText():
+            var_names = self.plot_widget._extract_var_names_from_text(event.mimeData().text())
+            self.plot_widget._notify_drag_indicator(
+                var_names,
+                hide=False,
+                source_widget=self,
+                indicator_text="释放以添加"
+            )
             event.acceptProposedAction()
         else:
+            self.plot_widget._notify_drag_indicator(hide=True, source_widget=self)
             event.ignore()
     
     def dragMoveEvent(self, event):
         """拖拽移动事件"""
         if event.mimeData().hasText():
+            var_names = self.plot_widget._extract_var_names_from_text(event.mimeData().text())
+            self.plot_widget._notify_drag_indicator(
+                var_names,
+                hide=False,
+                source_widget=self,
+                indicator_text="释放以添加"
+            )
             event.acceptProposedAction()
         else:
+            self.plot_widget._notify_drag_indicator(hide=True, source_widget=self)
             event.ignore()
+            
+    def dragLeaveEvent(self, event):
+        self.plot_widget._notify_drag_indicator(hide=True, source_widget=self)
+        event.accept()
             
     def dropEvent(self, event):
         """拖拽放下事件"""
@@ -8783,6 +8888,7 @@ class PlotVariableEditorDialog(QDialog):
             event.acceptProposedAction()
         else:
             event.ignore()
+        self.plot_widget._notify_drag_indicator(hide=True, source_widget=self)
 
 # ---------------- 主程序 ----------------
 if __name__ == "__main__":
