@@ -1,6 +1,7 @@
 from __future__ import annotations 
 import sys
 import os
+import weakref
 import numpy as np
 import pandas as pd
 
@@ -6456,6 +6457,7 @@ class MainWindow(QMainWindow):
         self._offset_default = 0
         self.factor = self._factor_default
         self.offset = self._offset_default
+        self._clone_windows: list[MainWindow] = []
 
         # try to load config json files
         _read_status = False
@@ -6569,6 +6571,11 @@ class MainWindow(QMainWindow):
 
         # 添加弹簧，将按钮推到右侧
         title_layout.addStretch(1)
+
+        self.clone_btn = QPushButton("分身")
+        self.clone_btn.setToolTip("新建一个全新的窗口实例")
+        self.clone_btn.clicked.connect(self.spawn_clone_window)
+        title_layout.addWidget(self.clone_btn)
 
         # 帮助按钮（使用小图标按钮样式）
         self.help_btn_small = QPushButton("?")
@@ -6815,6 +6822,18 @@ class MainWindow(QMainWindow):
     def show_help(self):
         dlg = HelpDialog(self)
         dlg.exec()
+
+    def spawn_clone_window(self):
+        clone_window = MainWindow()
+        clone_window.show()
+        self._clone_windows.append(clone_window)
+
+        def _cleanup_clone(_, wref=weakref.ref(clone_window)):
+            window = wref()
+            if window and window in self._clone_windows:
+                self._clone_windows.remove(window)
+
+        clone_window.destroyed.connect(_cleanup_clone)
 
     def load_btn_click(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11);;all File (*.*)")
