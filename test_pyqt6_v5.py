@@ -4,6 +4,7 @@ import os
 import weakref
 import numpy as np
 import pandas as pd
+from typing import Any
 
 if sys.platform == "darwin":  # macOS
     # 屏蔽 macOS ICC 警告
@@ -13,7 +14,7 @@ if sys.platform == "darwin":  # macOS
     )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel
-from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase
+from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
@@ -37,6 +38,44 @@ MIN_INDEX_LENGTH = 3
 DEFAULT_LINE_WIDTH = 3
 THICK_LINE_WIDTH = 3
 THIN_LINE_WIDTH = 1
+
+FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
+
+
+def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
+    """
+    判断数值是否能安全表示为 float32。
+
+    参数:
+        values: pandas Series、NumPy 数组或其他可迭代的数值序列。
+
+    返回:
+        tuple[bool, float | None]: (是否安全、绝对值最大值)
+            当数据中不存在有限值时，绝对值最大值为 None。
+    """
+    if values is None:
+        return False, None
+
+    try:
+        if isinstance(values, pd.Series):
+            arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
+        else:
+            try:
+                arr = np.asarray(values, dtype=np.float64)
+            except (ValueError, TypeError, OverflowError):
+                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64)
+    except Exception:
+        return False, None
+
+    if arr.size == 0:
+        return True, 0.0
+
+    finite_mask = np.isfinite(arr)
+    if not finite_mask.any():
+        return False, None
+
+    abs_max = float(np.max(np.abs(arr[finite_mask])))
+    return abs_max <= FLOAT32_SAFE_MAX, abs_max
 
 # 主界面
 global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
@@ -201,7 +240,7 @@ class FastDataLoader:
     """
     # 脏数据清单
     _NA_VALUES = [
-        "", "nan", "NaN", "NAN", "NULL", "null", "None",
+        "", "nan", "NaN", "NAN", "NULL", "null", "None", "plus infinity", "minus infinity",
         "Inf", "inf", "-inf", "-Inf", "1.#INF", "-1.#INF", "data err", '* *', '----', 'Infinity', 'no value'
     ]
     from typing import Callable
@@ -445,7 +484,8 @@ class FastDataLoader:
                     else:
                         # 不是时间格式，按数值处理
                         if pd.api.types.is_numeric_dtype(s):
-                            dtype_map[col] = "float32"
+                            is_safe, _ = _evaluate_float32_safety(s)
+                            dtype_map[col] = "float32" if is_safe else "float64"
                         else:
                             dtype_map[col] = "category"
                 else:
@@ -453,7 +493,8 @@ class FastDataLoader:
             else:
                 # 非时间列，直接判断数值类型
                 if pd.api.types.is_numeric_dtype(s):
-                    dtype_map[col] = "float32"
+                    is_safe, _ = _evaluate_float32_safety(s)
+                    dtype_map[col] = "float32" if is_safe else "float64"
                 else:
                     dtype_map[col] = "category"
         
@@ -512,11 +553,13 @@ class FastDataLoader:
     def _downcast_numeric(self) -> None:
         float_cols = self._df.select_dtypes(include=["float32", "float64"]).columns
         for col in float_cols:
-            self._df[col] = (
-                pd.to_numeric(self._df[col], errors="coerce")
-                .replace([np.inf, -np.inf], np.nan)
-                .astype("float32")
-            )
+            cleaned = pd.to_numeric(self._df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            is_safe, _ = _evaluate_float32_safety(cleaned)
+            if is_safe:
+                self._df[col] = cleaned.astype("float32")
+            else:
+                # 当 float32 会溢出时改用 float64 保留精度
+                self._df[col] = cleaned.astype("float64", copy=False)
 
 
     def _check_df_validity(self) -> dict:
@@ -2518,7 +2561,52 @@ class MyTableWidget(QTableWidget):
         # 用分隔符连接多个变量名
         mime_data.setText(';;'.join(var_names))
         drag.setMimeData(mime_data)
+
+        preview_pixmap = self._create_drag_pixmap(var_names)
+        if preview_pixmap:
+            drag.setPixmap(preview_pixmap)
+            hot_spot = QPoint(preview_pixmap.width() // 2, preview_pixmap.height() // 2)
+            drag.setHotSpot(hot_spot)
+
         drag.exec(Qt.DropAction.MoveAction)
+
+    def _create_drag_pixmap(self, var_names: list[str]) -> QPixmap | None:
+        """????????????????????"""
+        if not var_names:
+            return None
+
+        font = self.font()
+        metrics = QFontMetrics(font)
+        bullet_names = [f"• {name}" for name in var_names]
+        max_visible = 8
+        display_lines = bullet_names[:max_visible]
+        if len(bullet_names) > max_visible:
+            display_lines.append(f"… ???{len(var_names)}??")
+
+        text_width = max((metrics.horizontalAdvance(line) for line in display_lines), default=80)
+        margin = 12
+        line_height = metrics.lineSpacing()
+        width = max(140, text_width + margin * 2)
+        height = line_height * len(display_lines) + margin * 2
+
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor("#2b6def"), 2))
+        painter.setBrush(QColor(255, 255, 255, 240))
+        painter.drawRoundedRect(QRectF(1, 1, width - 2, height - 2), 10, 10)
+        painter.setPen(QColor("#1f1f1f"))
+
+        y = margin + metrics.ascent()
+        for line in display_lines:
+            painter.drawText(QPointF(margin, y), line)
+            y += line_height
+
+        painter.end()
+        return pixmap
 
     def mouseDoubleClickEvent(self, event):
         index = self.indexAt(event.pos())
@@ -2872,8 +2960,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.mark_region = None
         self.is_cursor_pinned = False  # 记录cursor是否被固定
         self.pinned_x_value = None  # 记录固定的x值
+        self.pinned_index_value = None  # 记录固定的索引值
         self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
         self._is_being_destroyed = False  # 标志：对象正在被销毁
+        self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -3413,6 +3503,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._last_cursor_update_time = 0
         self._cursor_update_throttle = 0.016  # 基础节流：16ms（约60fps）
         self._adaptive_throttle_enabled = True  # 启用自适应节流
+        self._cursor_refresh_timer = QTimer(self)
+        self._cursor_refresh_timer.setSingleShot(True)
+        self._cursor_refresh_timer.timeout.connect(self._refresh_cursor_geometry)
+
+    def _extract_var_names_from_text(self, text: str) -> list[str]:
+
+        return [name.strip() for name in (text or '').split(';;') if name.strip()]
+
+
+
+    def _notify_drag_indicator(self, var_names: list[str] | None = None, hide: bool = False):
+
+        main_window = self.window()
+
+        if not main_window or not hasattr(main_window, '_show_drag_indicator_for_plot'):
+
+            return
+
+        if hide:
+
+            main_window._hide_drag_indicator_for_plot(self)
+
+        else:
+
+            main_window._show_drag_indicator_for_plot(self, var_names or [])
+
 
     def handle_single_point_limits(self, x_values, y_values):
         """处理单点或所有点x坐标相同的特殊情况，避免x轴范围为0
@@ -3492,6 +3608,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.window().sync_crosshair(mousePoint.x(), self)
             #print(f"mouse in pos {mousePoint.x()}")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_cursor_geometry_update()
+
     def on_vline_position_changed(self):
         """
         vline位置变化时的处理
@@ -3500,8 +3620,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         在正常状态下会更新cursor标签显示。
         """
         if self.is_cursor_pinned:
+            if getattr(self, "_suppress_pin_update", False):
+                return
             # 在pin状态下，同步所有被pin的plot的cursor位置
             x_pos = self.vline.value()
+            self.pinned_x_value = x_pos
+            if self.factor != 0:
+                self.pinned_index_value = (x_pos - self.offset) / self.factor
+            else:
+                self.pinned_index_value = None
             if self.window() and hasattr(self.window(), 'plot_widgets'):
                 for container in self.window().plot_widgets:
                     widget = container.plot_widget
@@ -3510,6 +3637,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         widget.vline.setPos(x_pos)
                         widget.update_cursor_label()
                         widget.pinned_x_value = x_pos
+                        if widget.factor != 0:
+                            widget.pinned_index_value = (x_pos - widget.offset) / widget.factor
+                        else:
+                            widget.pinned_index_value = None
         else:
             # 正常模式下更新cursor标签
             if self.show_values_only:
@@ -4413,6 +4544,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     widget = container.plot_widget
                     widget.is_cursor_pinned = True
                     widget.pinned_x_value = display_x
+                    if widget.factor != 0:
+                        widget.pinned_index_value = (display_x - widget.offset) / widget.factor
+                    else:
+                        widget.pinned_index_value = None
                     widget.vline.setMovable(True)
                     widget.vline.setPos(display_x)
                     
@@ -4442,6 +4577,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         self.is_cursor_pinned = False
         self.pinned_x_value = None
+        self.pinned_index_value = None
         
         # 让vline不可移动
         self.vline.setMovable(False)
@@ -4456,6 +4592,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 widget = container.plot_widget
                 widget.is_cursor_pinned = False
                 widget.pinned_x_value = None
+                widget.pinned_index_value = None
                 widget.vline.setMovable(False)
                 if hasattr(widget.view_box, 'is_cursor_pinned'):
                     widget.view_box.is_cursor_pinned = False
@@ -4471,6 +4608,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         self.is_cursor_pinned = False
         self.pinned_x_value = None
+        self.pinned_index_value = None
         self.vline.setMovable(False)
         if hasattr(self.view_box, 'is_cursor_pinned'):
             self.view_box.is_cursor_pinned = False
@@ -4562,10 +4700,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         raw_values = self.data[var_name]
         dtype_kind = raw_values.dtype.kind
+        y_values = None
+        y_format = 'number'
+
         if dtype_kind in "iuf":
             y_values = raw_values
-            y_format = 'number'
-            return y_values, y_format
+        elif dtype_kind == "b":
+            y_values = raw_values.astype(np.int32)
         elif var_name in self.time_channels_info:
             fmt = self.time_channels_info[var_name]
             try:
@@ -4583,109 +4724,110 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     dt_values = pd.to_datetime(raw_values, format=fmt, errors='coerce')
                     y_values = self.datetime_to_unix_seconds(dt_values)
                     y_format = 'date'
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError):
                 # 无法解析时间格式
                 return None, None
-
         else:
-            # 非时间通道，返回None
-            return None, None
+            # 非时间通道：尝试将object等类型转换为数字，只要存在至少一个有效值就接受
+            try:
+                numeric_values = pd.to_numeric(raw_values, errors='coerce')
+            except Exception:
+                numeric_values = None
+
+            if numeric_values is not None:
+                finite_mask = np.isfinite(numeric_values.to_numpy(dtype=np.float64))
+                if finite_mask.any():
+                    y_values = numeric_values
+                else:
+                    return None, None
+            else:
+                return None, None
         
-        # finally
+        if y_values is None:
+            return None, None
+
         main_window.value_cache[var_name] = (y_values, y_format)
         return y_values, y_format
     
     def update_time_correction(self, new_factor, new_offset):
-        old_factor = self.factor
-        old_offset = self.offset
-        self.factor = new_factor
-        self.offset = new_offset
-        
-        if self.is_multi_curve_mode:
-            # 多曲线模式：更新所有曲线的x数据
-            for var_name, curve_info in self.curves.items():
-                if 'curve' in curve_info and 'x_data' in curve_info:
-                    curve = curve_info['curve']
-                    # 从旧的x_data反推原始索引，然后应用新的factor和offset
-                    old_x = curve_info['x_data']
-                    if old_factor != 0:
-                        # 反推原始索引：original_index = (old_x - old_offset) / old_factor
-                        original_index = (old_x - old_offset) / old_factor
-                    else:
-                        # 如果old_factor为0（不应该发生），使用默认索引
-                        original_index = np.arange(1, len(old_x) + 1)
-                    # 重新计算x数据
-                    # 【性能优化】使用in-place操作避免创建临时数组（对于百万级数据点）
-                    # 注意：original_index已经是计算后的数组，这里直接使用
-                    new_x = self.offset + self.factor * original_index
-                    # pyqtgraph的setData会内部处理数据，这里直接传入即可
-                    curve.setData(new_x, curve_info['y_data'])
-                    # 更新存储的x_data
-                    curve_info['x_data'] = new_x
-        else:
-            # 单曲线模式
-            if self.original_index_x is not None:
-                # 【性能优化】对于百万级数据点，numpy的向量化操作已经足够高效
-                # 直接计算，无需额外优化（pyqtgraph内部会处理数据）
-                new_x = self.offset + self.factor * self.original_index_x
-                self.curve.setData(new_x, self.original_y)
-
-        # 计算数据长度
-        if self.is_multi_curve_mode and self.curves:
-            # 多曲线模式：从任一曲线获取数据长度
-            first_curve_info = next(iter(self.curves.values()))
-            datalength = len(first_curve_info['y_data']) if 'y_data' in first_curve_info else 0
-        elif self.original_index_x is not None:
-            # 单曲线模式：使用original_index_x
-            datalength = len(self.original_index_x)
-        else:
-            # 回退：从loader获取
-            datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
-        
-        global DEFAULT_PADDING_VAL_X
-        padding_xVal = DEFAULT_PADDING_VAL_X
-
-        index_min = 1 - padding_xVal * datalength
-        index_max = datalength + padding_xVal * datalength
-        limits_xMin = self.offset + self.factor * index_min
-        limits_xMax = self.offset + self.factor * index_max
-        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-
-        data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
-        data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
-        self.vline.setBounds([data_min_x, data_max_x])
-
-        # 更新标记区域（仅在第一个plot上更新，避免重复）
-        if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
-            old_min, old_max = self.mark_region.getRegion()
-            if old_factor != 0:
-                index_min = (old_min - old_offset) / old_factor
-                index_max = (old_max - old_offset) / old_factor
-                new_min = new_offset + new_factor * index_min
-                new_max = new_offset + new_factor * index_max
-                self.mark_region.setRegion([new_min, new_max])
-                self.window().sync_mark_regions(self.mark_region)  # 同步到其他plot
-        
-        # 确保曲线数据更新后立即更新标记统计（带安全检查）
-        def safe_update_mark_stats():
-            if hasattr(self, 'window') and self.window() is not None:
-                if not getattr(self, '_is_being_destroyed', False):
-                    self.window().update_mark_stats()
-        QTimer.singleShot(0, safe_update_mark_stats)
-
+        self._suppress_pin_update = True
+        try:
+            old_factor = self.factor
+            old_offset = self.offset
+            self.factor = new_factor
+            self.offset = new_offset
+            if self.is_multi_curve_mode:
+                for var_name, curve_info in self.curves.items():
+                    if 'curve' in curve_info and 'x_data' in curve_info:
+                        curve = curve_info['curve']
+                        old_x = curve_info['x_data']
+                        if old_factor != 0:
+                            original_index = (old_x - old_offset) / old_factor
+                        else:
+                            original_index = np.arange(1, len(old_x) + 1)
+                        new_x = self.offset + self.factor * original_index
+                        curve.setData(new_x, curve_info['y_data'])
+                        curve_info['x_data'] = new_x
+            else:
+                if self.original_index_x is not None:
+                    new_x = self.offset + self.factor * self.original_index_x
+                    self.curve.setData(new_x, self.original_y)
+            if self.is_multi_curve_mode and self.curves:
+                first_curve_info = next(iter(self.curves.values()))
+                datalength = len(first_curve_info['y_data']) if 'y_data' in first_curve_info else 0
+            elif self.original_index_x is not None:
+                datalength = len(self.original_index_x)
+            else:
+                datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
+            global DEFAULT_PADDING_VAL_X
+            padding_xVal = DEFAULT_PADDING_VAL_X
+            index_min = 1 - padding_xVal * datalength
+            index_max = datalength + padding_xVal * datalength
+            limits_xMin = self.offset + self.factor * index_min
+            limits_xMax = self.offset + self.factor * index_max
+            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
+            data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
+            self.vline.setBounds([data_min_x, data_max_x])
+            if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
+                old_min, old_max = self.mark_region.getRegion()
+                if old_factor != 0:
+                    index_min = (old_min - old_offset) / old_factor
+                    index_max = (old_max - old_offset) / old_factor
+                    new_min = new_offset + new_factor * index_min
+                    new_max = new_offset + new_factor * index_max
+                    self.mark_region.setRegion([new_min, new_max])
+                    self.window().sync_mark_regions(self.mark_region)
+        finally:
+            def safe_update_mark_stats():
+                if hasattr(self, 'window') and self.window() is not None:
+                    if not getattr(self, '_is_being_destroyed', False):
+                        self.window().update_mark_stats()
+            QTimer.singleShot(0, safe_update_mark_stats)
+            self._suppress_pin_update = False
 
     # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
+            var_names = self._extract_var_names_from_text(event.mimeData().text())
+            self._notify_drag_indicator(var_names, hide=False)
             event.acceptProposedAction()
         else:
+            self._notify_drag_indicator(hide=True)
             event.ignore()
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasText():
+            var_names = self._extract_var_names_from_text(event.mimeData().text())
+            self._notify_drag_indicator(var_names, hide=False)
             event.acceptProposedAction()
         else:
+            self._notify_drag_indicator(hide=True)
             event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._notify_drag_indicator(hide=True)
+        event.accept()
 
     def dropEvent(self, event):
         """处理变量拖放事件，支持单个或多个变量同时拖入
@@ -4696,6 +4838,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         Args:
             event: 拖放事件对象，包含拖入的变量名（用;;分隔）
         """
+        self._notify_drag_indicator(hide=True)
         var_names_text = event.mimeData().text()
         # 支持多变量拖放，用;;分隔
         var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
@@ -4863,33 +5006,35 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 时间数据（Unix时间戳）使用float64以保留毫秒精度
             # 其他数据使用float32以减少内存
             if isinstance(y_values, pd.Series):
-                y_array_temp = y_values.to_numpy()
-                # 检测时间数据：Unix时间戳通常 > 1e8
-                is_time_data = (len(y_array_temp) > 0 and 
-                               np.max(np.abs(y_array_temp)) > 1e8)
-                
-                if is_time_data:
+                array_source = y_values.to_numpy()
+                safety_source = y_values
+            else:
+                array_source = np.asarray(y_values)
+                safety_source = array_source
+
+            float32_safe, abs_max = _evaluate_float32_safety(safety_source)
+            # 检查时间数据：Unix时间戳通常 > 1e8
+            is_time_data = bool(abs_max is not None and abs_max > 1e8)
+            prefer_float64 = is_time_data or not float32_safe
+            target_dtype = np.float64 if prefer_float64 else np.float32
+
+            try:
+                if isinstance(y_values, pd.Series):
+                    y_array = y_values.to_numpy(dtype=target_dtype)
+                else:
+                    y_array = np.asarray(array_source, dtype=target_dtype)
+            except (OverflowError, ValueError, TypeError):
+                if isinstance(y_values, pd.Series):
                     y_array = y_values.to_numpy(dtype=np.float64)
                 else:
-                    try:
-                        y_array = y_values.to_numpy(dtype=np.float32)
-                        if np.any(np.isinf(y_array)):
-                            y_array = y_values.to_numpy(dtype=np.float64)
-                    except (OverflowError, ValueError):
-                        y_array = y_values.to_numpy(dtype=np.float64)
-            else:
-                y_array = np.asarray(y_values)
-                is_time_data = (len(y_array) > 0 and 
-                               np.max(np.abs(y_array)) > 1e8)
-                
-                if is_time_data:
-                    y_array = y_array.astype(np.float64)
-                elif y_array.dtype.kind == 'f' and not np.any(np.isinf(y_array)):
-                    try:
-                        y_array = y_array.astype(np.float32)
-                    except (OverflowError, ValueError):
-                        pass
-                
+                    y_array = np.asarray(array_source, dtype=np.float64)
+
+            if target_dtype == np.float32 and np.any(np.isinf(y_array)):
+                if isinstance(y_values, pd.Series):
+                    y_array = y_values.to_numpy(dtype=np.float64)
+                else:
+                    y_array = np.asarray(array_source, dtype=np.float64)
+
             # 检查数据是否全为NaN
             if np.all(np.isnan(y_array)):
                 return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
@@ -4940,13 +5085,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.y_name = var_name
             # x_array是索引数组，使用float32足够
             self.original_index_x = np.asarray(x_array, dtype=np.float32)
-            # y_array根据数据类型选择精度：时间数据使用float64，其他数据使用float32
-            if y_format in ['s', 'date'] or (y_array.dtype == np.float64 and 
-                                            len(y_array) > 0 and 
-                                            np.max(np.abs(y_array)) > 1e8):
-                self.original_y = np.asarray(y_array, dtype=np.float64)
-            else:
-                self.original_y = np.asarray(y_array, dtype=np.float32)
+            safe_for_float32, abs_max_plot = _evaluate_float32_safety(y_array)
+            keep_float64 = (
+                y_format in ['s', 'date']
+                or not safe_for_float32
+                or (abs_max_plot is not None and abs_max_plot > 1e8)
+            )
+            target_y_dtype = np.float64 if keep_float64 else np.float32
+            self.original_y = np.asarray(y_array, dtype=target_y_dtype)
             x_values = self.offset + self.factor * self.original_index_x
             
             # 单曲线模式：清除旧图并绘制新图
@@ -5030,6 +5176,32 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             QMessageBox.critical(self, "绘图错误", f"绘制变量时发生错误: {str(e)}")
             return False
 
+    def _compute_valid_min_max(self, values) -> tuple[float | None, float | None]:
+        """Safely compute min/max ignoring NaN/INF values."""
+        if values is None:
+            return None, None
+
+        try:
+            if isinstance(values, pd.Series):
+                arr = pd.to_numeric(values, errors='coerce').to_numpy(dtype=np.float64)
+            else:
+                arr = np.asarray(values, dtype=np.float64)
+        except (ValueError, TypeError):
+            try:
+                arr = pd.to_numeric(pd.Series(values), errors='coerce').to_numpy(dtype=np.float64)
+            except Exception:
+                return None, None
+
+        if arr.size == 0:
+            return None, None
+
+        finite_mask = np.isfinite(arr)
+        if not finite_mask.any():
+            return None, None
+
+        finite_values = arr[finite_mask]
+        return float(np.min(finite_values)), float(np.max(finite_values))
+
     def _get_y_range_in_x_window(self, x_values: np.ndarray, y_values: np.ndarray, x_min: float, x_max: float):
         """计算在指定x轴范围内的y值范围
         
@@ -5047,13 +5219,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             mask = (x_values >= x_min) & (x_values <= x_max)
             if not np.any(mask):
                 # 如果没有数据点在范围内，返回全部数据的范围
-                return np.nanmin(y_values), np.nanmax(y_values)
-            
-            y_in_range = y_values[mask]
-            return np.nanmin(y_in_range), np.nanmax(y_in_range)
-        except Exception as e:
+                bounds = self._compute_valid_min_max(y_values)
+            else:
+                y_in_range = y_values[mask]
+                bounds = self._compute_valid_min_max(y_in_range)
+                if bounds[0] is None or bounds[1] is None:
+                    bounds = self._compute_valid_min_max(y_values)
+
+            if bounds[0] is None or bounds[1] is None:
+                return 0.0, 1.0
+            return bounds
+        except Exception:
             # 出错时返回全部数据范围
-            return np.nanmin(y_values), np.nanmax(y_values)
+            bounds = self._compute_valid_min_max(y_values)
+            if bounds[0] is None or bounds[1] is None:
+                return 0.0, 1.0
+            return bounds
     
     def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray, update_x_range: bool = True):
         """设置绘图坐标轴
@@ -5876,11 +6057,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 确保是NumPy数组（保持原有精度，不强制转换）
                 x_data = np.asarray(x_data)
                 y_data = np.asarray(y_data)
-                # 如果是整数类型，转换为float32以减少内存
+                # 如果是整数类型且幅值适合，则转换为float32以减少内存
                 if x_data.dtype.kind in 'iu':
-                    x_data = x_data.astype(np.float32)
+                    safe_x, _ = _evaluate_float32_safety(x_data)
+                    x_dtype = np.float32 if safe_x else np.float64
+                    x_data = x_data.astype(x_dtype)
                 if y_data.dtype.kind in 'iu':
-                    y_data = y_data.astype(np.float32)
+                    safe_y, _ = _evaluate_float32_safety(y_data)
+                    y_dtype = np.float32 if safe_y else np.float64
+                    y_data = y_data.astype(y_dtype)
                 
                 # 计算边界点
                 idx_left = np.argmin(np.abs(x_data - min_x))
@@ -5931,11 +6116,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 确保是NumPy数组（保持原有精度，不强制转换）
             x_data = np.asarray(x_data)
             y_data = np.asarray(y_data)
-            # 如果是整数类型，转换为float32以减少内存
+            # 如果是整数类型且幅值适合，则转换为float32以减少内存
             if x_data.dtype.kind in 'iu':
-                x_data = x_data.astype(np.float32)
+                safe_x, _ = _evaluate_float32_safety(x_data)
+                x_dtype = np.float32 if safe_x else np.float64
+                x_data = x_data.astype(x_dtype)
             if y_data.dtype.kind in 'iu':
-                y_data = y_data.astype(np.float32)
+                safe_y, _ = _evaluate_float32_safety(y_data)
+                y_dtype = np.float32 if safe_y else np.float64
+                y_data = y_data.astype(y_dtype)
             
             idx_left = np.argmin(np.abs(x_data - min_x))
             idx_right = np.argmin(np.abs(x_data - max_x))
@@ -6265,6 +6454,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         except Exception as e:
             print(f"延迟更新绘图样式时出错: {e}")
 
+    def _schedule_cursor_geometry_update(self):
+        if not hasattr(self, 'vline') or not self.vline.isVisible():
+            return
+        if getattr(self, '_cursor_refresh_timer', None) is None:
+            return
+        # 重启单次定时器，合并短时间内的多次请求
+        self._cursor_refresh_timer.start(0)
+
+    def _refresh_cursor_geometry(self):
+        if not hasattr(self, 'vline') or not self.vline.isVisible():
+            return
+        if self.show_values_only:
+            self._show_x_position_only()
+        else:
+            self.update_cursor_label()
+
 # ---------------- 主窗口 ----------------
 class MarkStatsWindow(QDialog):
     """
@@ -6429,6 +6634,66 @@ class TimeCorrectionDialog(QDialog):
         self.parent().time_correction_geometry = self.saveGeometry()
         super().closeEvent(event)
 
+class PlotContainerWidget(QWidget):
+    """包装单个 Plot, 负责显示拖拽提示"""
+    def __init__(self, plot_widget: DraggableGraphicsLayoutWidget, parent=None):
+        super().__init__(parent)
+        self.plot_widget = plot_widget
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(QMargins(0, 0, 5, 5))
+        layout.addWidget(plot_widget)
+        self._init_indicator()
+
+    def _init_indicator(self):
+        self._indicator = QWidget(self)
+        self._indicator.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._indicator.hide()
+        self._indicator.setStyleSheet(
+            "background-color: rgba(0, 120, 215, 40);"
+            "border: 2px dashed #0078d7;"
+            "border-radius: 12px;"
+        )
+        layout = QVBoxLayout(self._indicator)
+        layout.setContentsMargins(16, 16, 16, 16)
+        self._indicator_label = QLabel("", self._indicator)
+        self._indicator_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._indicator_label.setWordWrap(True)
+        self._indicator_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum
+        )
+        self._indicator_label.setStyleSheet(
+            "color: #0b365a; font-size: 16px; font-weight: bold; background: transparent; border: none;"
+        )
+        layout.addWidget(self._indicator_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def _build_indicator_text(self, var_names: list[str]) -> str:
+        has_curve = bool(getattr(self.plot_widget, "curve", None) or getattr(self.plot_widget, "curves", None))
+        multi_mode = bool(getattr(self.plot_widget, "is_multi_curve_mode", False) or len(var_names) > 1)
+
+        if multi_mode:
+            return "释放以添加"
+
+        if len(var_names) == 1:
+            return "释放以替换" if has_curve else "释放以添加"
+
+        return "释放以添加"
+
+    def show_drag_indicator(self, var_names: list[str] | None = None):
+        text = self._build_indicator_text(var_names or [])
+        self._indicator_label.setText(text)
+        self._indicator.setGeometry(self.rect())
+        self._indicator.raise_()
+        self._indicator.show()
+
+    def hide_drag_indicator(self):
+        self._indicator.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._indicator.isVisible():
+            self._indicator.setGeometry(self.rect())
+
 class MainWindow(QMainWindow):
     """
     主窗口类
@@ -6458,6 +6723,7 @@ class MainWindow(QMainWindow):
         self.factor = self._factor_default
         self.offset = self._offset_default
         self._clone_windows: list[MainWindow] = []
+        self._active_drag_container: PlotContainerWidget | None = None
 
         # try to load config json files
         _read_status = False
@@ -6551,6 +6817,8 @@ class MainWindow(QMainWindow):
         
         # 监听分界线拖动事件
         self.main_splitter.splitterMoved.connect(self._on_splitter_moved)
+        self._splitter_ready = False  # 用于防止首个 resize 时重复 setSizes
+        self._pending_splitter_adjustment = False
 
         # ---------------- 左侧变量列表 ----------------
         left_widget = QWidget()
@@ -6709,6 +6977,8 @@ class MainWindow(QMainWindow):
         
         # 将splitter添加到主布局
         main_layout.addWidget(self.main_splitter)
+        QTimer.singleShot(0, self._ensure_splitter_ready)
+        QTimer.singleShot(0, self._ensure_splitter_ready)
 
         # ---------------- 子图 ----------------
         self.plot_widgets = []
@@ -6783,12 +7053,73 @@ class MainWindow(QMainWindow):
         """
         # 标记用户已手动调整（影响后续窗口缩放行为）
         self.var_table_user_adjusted = True
+        self._splitter_ready = True
         
         # 记录当前的变量表宽度作为新的默认值
         sizes = self.main_splitter.sizes()
         if len(sizes) >= 1:
             self.var_table_default_width = sizes[0]
+
+    def _ensure_splitter_ready(self):
+        """
+        延迟标记 splitter 尺寸已稳定，避免首个 resizeEvent 中重复 setSizes 触发布局闪烁。
+        """
+        if not hasattr(self, 'main_splitter'):
+            return
+        sizes = self.main_splitter.sizes()
+        if len(sizes) >= 2 and all(size > 0 for size in sizes):
+            self._splitter_ready = True
+        else:
+            # 尚未获得有效尺寸，延迟重试
+            QTimer.singleShot(50, self._ensure_splitter_ready)
+
+    def _apply_fixed_splitter_width(self):
+        """
+        在事件循环空闲时执行的分隔条宽度调整，避免在 resizeEvent 内立即 setSizes 导致闪烁。
+        """
+        self._pending_splitter_adjustment = False
+        if (self.var_table_user_adjusted
+                or not getattr(self, '_splitter_ready', False)
+                or not hasattr(self, 'main_splitter')):
+            return
+
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 2:
+            return
+
+        total_width = sum(sizes)
+        if total_width <= 0 or total_width <= self.var_table_default_width:
+            return
+
+        right_width = max(total_width - self.var_table_default_width, 0)
+        if right_width <= 0:
+            return
+
+        self.main_splitter.blockSignals(True)
+        self.main_splitter.setSizes([self.var_table_default_width, right_width])
+        self.main_splitter.blockSignals(False)
     
+    def resizeEvent(self, event):
+        """
+        重写窗口大小调整事件
+        
+        实现智能宽度调整策略：
+        - 未手动调整过：窗口缩放时保持变量表宽度固定，只改变绘图区宽度
+        - 已手动调整过：窗口缩放时按比例调整两侧宽度（QSplitter默认行为）
+        
+        Args:
+            event: QResizeEvent窗口调整事件
+        """
+        super().resizeEvent(event)
+        
+        # 如果用户从未手动调整过分界线，延迟执行固定宽度策略
+        if (not self.var_table_user_adjusted 
+                and getattr(self, '_splitter_ready', False) 
+                and hasattr(self, 'main_splitter')):
+            if not getattr(self, '_pending_splitter_adjustment', False):
+                self._pending_splitter_adjustment = True
+                QTimer.singleShot(0, self._apply_fixed_splitter_width)
+
     def toggle_plot_area(self, checked):
         if checked:
             self._saved_geometry = self.saveGeometry()
@@ -6823,17 +7154,40 @@ class MainWindow(QMainWindow):
         dlg = HelpDialog(self)
         dlg.exec()
 
+    def _get_plot_container(self, plot_widget) -> PlotContainerWidget | None:
+        parent = plot_widget.parentWidget()
+        if isinstance(parent, PlotContainerWidget):
+            return parent
+        return None
+
+    def _show_drag_indicator_for_plot(self, plot_widget, var_names: list[str]):
+        container = self._get_plot_container(plot_widget)
+        if not container:
+            return
+        if self._active_drag_container and self._active_drag_container is not container:
+            self._active_drag_container.hide_drag_indicator()
+        container.show_drag_indicator(var_names)
+        self._active_drag_container = container
+
+    def _hide_drag_indicator_for_plot(self, plot_widget):
+        container = self._get_plot_container(plot_widget)
+        if not container:
+            return
+        container.hide_drag_indicator()
+        if self._active_drag_container is container:
+            self._active_drag_container = None
+
     def spawn_clone_window(self):
         clone_window = MainWindow()
         clone_window.show()
         self._clone_windows.append(clone_window)
 
-        def _cleanup_clone(_, wref=weakref.ref(clone_window)):
+        def _cleanup(_, wref=weakref.ref(clone_window)):
             window = wref()
             if window and window in self._clone_windows:
                 self._clone_windows.remove(window)
 
-        clone_window.destroyed.connect(_cleanup_clone)
+        clone_window.destroyed.connect(_cleanup)
 
     def load_btn_click(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11);;all File (*.*)")
@@ -6942,7 +7296,7 @@ class MainWindow(QMainWindow):
             is_reload: 是否为重新加载
         """
         
-        file_ext = os.path.splitext(file_path)[1].lower()
+        file_ext = self._extract_file_extension(file_path)
 
         # load default
         delimiter_typ = ','
@@ -7064,6 +7418,41 @@ class MainWindow(QMainWindow):
         except json.JSONDecodeError:
             return {} if default is None else default
         
+    def _extract_file_extension(self, file_path: str) -> str:
+        """
+        智能提取文件后缀，优先检测不带数字的后缀
+        支持处理像't00.1'或't00.5'这样的带数字变体的后缀
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            提取的真实文件后缀（如'.t00'），如果无法识别则返回None
+        """
+        import re
+        
+        # 支持的文件类型列表
+        supported_extensions = ['.csv', '.mfile', '.t00', '.t01', '.t10', '.t11', '.txt']
+        
+        # 首先尝试直接提取后缀（不带数字的情况）
+        base_ext = os.path.splitext(file_path)[1].lower()
+        if base_ext in supported_extensions:
+            return base_ext
+        
+        # 如果不带数字的后缀不匹配，尝试匹配带数字变体的后缀
+        base_name = os.path.basename(file_path).lower()
+        
+        # 定义正则表达式模式，匹配支持的后缀后跟数字变体
+        pattern = r'(' + '|'.join(re.escape(ext) for ext in supported_extensions) + r')\.\d+$'
+        match = re.search(pattern, base_name)
+        
+        if match:
+            # 返回匹配的真实后缀（不带数字部分）
+            return match.group(1)
+        
+        # 如果都不匹配，返回None
+        return None
+    
     def _validate_load_parameters(self, file_path: str, descRows: int, sep: str, hasunit: bool) -> tuple[bool, str]:
         """验证加载参数"""
         if not isinstance(file_path, str) or not file_path.strip():
@@ -7316,6 +7705,7 @@ class MainWindow(QMainWindow):
                 first_plot = self.plot_widgets[0].plot_widget
                 first_plot.view_box.enableAutoRange(x=False)  # 禁用自动范围调整
                 first_plot.view_box.setXRange(new_min, new_max, padding=0)  # 明确设置 padding=0
+                self._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
 
             # 更新标记统计
             self.update_mark_stats()
@@ -7342,8 +7732,9 @@ class MainWindow(QMainWindow):
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
                 # 检查是否有支持的文件
-                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
-                
+                # supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
+                supported = any(self._extract_file_extension(u.toLocalFile()) is not None for u in urls)
+
                 if supported:
                     self.show_drop_overlay()
                     self.drop_overlay.adjust_text(file_type_supported=True)
@@ -7360,7 +7751,8 @@ class MainWindow(QMainWindow):
         elif etype == QEvent.Type.DragMove:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
-                supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
+                # supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
+                supported = any(self._extract_file_extension(u.toLocalFile()) is not None for u in urls)
                 if supported:
                     event.acceptProposedAction()
                     return True
@@ -7370,7 +7762,7 @@ class MainWindow(QMainWindow):
                 urls = event.mimeData().urls()
                 for u in urls:
                     path = u.toLocalFile()
-                    if path.lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')):
+                    if self._extract_file_extension(path) is not None:
                         self.load_csv_file(path)
                         event.accept()
                         return True
@@ -7446,7 +7838,68 @@ class MainWindow(QMainWindow):
                 # cursor完全启用或禁用
                 widget.toggle_cursor(checked)
         self.cursor_btn.setText("隐藏光标" if checked else "显示光标")
-        
+
+    def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
+        """时间修正后统一调整所有plot上的固定cursor"""
+        if not self.plot_widgets:
+            return
+
+        pinned_value = None
+        pinned_index = None
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            if widget.is_cursor_pinned and widget.pinned_x_value is not None:
+                pinned_value = widget.pinned_x_value
+                pinned_index = widget.pinned_index_value
+                break
+
+        if pinned_value is None or not np.isfinite(pinned_value):
+            return
+
+        if pinned_index is not None and np.isfinite(pinned_index):
+            index_pos = pinned_index
+        else:
+            if old_factor == 0:
+                return
+            index_pos = (pinned_value - old_offset) / old_factor
+
+        if not np.isfinite(index_pos):
+            return
+
+        datalength = 0
+        if hasattr(self, "loader") and self.loader is not None:
+            datalength = max(int(self.loader.datalength), 0)
+        elif self.plot_widgets[0].plot_widget.original_index_x is not None:
+            datalength = len(self.plot_widgets[0].plot_widget.original_index_x)
+
+        if datalength > 0:
+            index_pos = min(max(index_pos, 1), datalength)
+
+        new_display_x = new_offset + new_factor * index_pos
+        if not np.isfinite(new_display_x):
+            return
+
+        for container in self.plot_widgets:
+            widget = container.plot_widget
+            widget.is_cursor_pinned = True
+            widget.pinned_x_value = new_display_x
+            widget.pinned_index_value = index_pos if widget.factor != 0 else None
+
+            widget.vline.blockSignals(True)
+            widget.vline.setBounds([None, None])
+            widget.vline.setMovable(True)
+            widget.vline.setPos(new_display_x)
+            widget.vline.blockSignals(False)
+            widget._update_vline_bounds_from_data()
+
+            if hasattr(widget.view_box, "is_cursor_pinned"):
+                widget.view_box.is_cursor_pinned = True
+            if hasattr(widget, "_last_cursor_update_time"):
+                widget._last_cursor_update_time = 0
+            widget.update_cursor_label()
+
+        QApplication.processEvents()
+
     def sync_crosshair(self, x, sender_widget):
         if not self.cursor_btn.isChecked():
             return
@@ -7541,12 +7994,7 @@ class MainWindow(QMainWindow):
                     plot_widget.view_box.setXLink(first_viewbox)
 
                 # 用一个 QWidget 包一层，方便隐藏
-                wrapper = QVBoxLayout()
-                wrapper.setContentsMargins(QMargins(0, 0, 5, 5))
-                wrapper.addWidget(plot_widget)
-
-                container = QWidget()
-                container.setLayout(wrapper)
+                container = PlotContainerWidget(plot_widget)
                 container.plot_widget = plot_widget   # 保留引用，方便后面找
                 #container.setVisible(True)            # 默认全部显示
 
@@ -7829,18 +8277,35 @@ class PlotVariableEditorDialog(QDialog):
         
         # 按钮区域
         button_layout = QHBoxLayout()
-        
+
+        # 上移/下移按钮
+        self.move_up_btn = QPushButton("上移")
+        self.move_up_btn.clicked.connect(lambda: self._move_selected_row(-1))
+        self.move_up_btn.setEnabled(False)
+        button_layout.addWidget(self.move_up_btn)
+
+        self.move_down_btn = QPushButton("下移")
+        self.move_down_btn.clicked.connect(lambda: self._move_selected_row(1))
+        self.move_down_btn.setEnabled(False)
+        button_layout.addWidget(self.move_down_btn)
+
         # 删除按钮
         self.remove_btn = QPushButton("删除选中")
         self.remove_btn.clicked.connect(self.remove_selected_variable)
         self.remove_btn.setEnabled(False)
         button_layout.addWidget(self.remove_btn)
-        
+
         # 清空按钮
         self.clear_btn = QPushButton("清空所有")
         self.clear_btn.clicked.connect(self.clear_all_variables)
         self.clear_btn.setEnabled(False)
         button_layout.addWidget(self.clear_btn)
+
+        # 重置颜色按钮
+        self.reset_color_btn = QPushButton("重置颜色")
+        self.reset_color_btn.clicked.connect(self.reset_curve_colors)
+        self.reset_color_btn.setEnabled(False)
+        button_layout.addWidget(self.reset_color_btn)
         
         button_layout.addStretch()
         layout.addLayout(button_layout)
@@ -7908,8 +8373,59 @@ class PlotVariableEditorDialog(QDialog):
                 'y_format': self.plot_widget.y_format
             }
             self._add_variable_to_table(var_name, curve_info)
-            
+        
         self.update_button_states()
+
+    def _get_selected_row(self) -> int | None:
+        """获取当前选中的行号"""
+        selected_items = self.var_table.selectedItems()
+        if not selected_items:
+            return None
+        return selected_items[0].row()
+
+    def _move_selected_row(self, offset: int):
+        """移动选中行的位置"""
+        if self.var_table.rowCount() <= 1 or not self.plot_widget.curves:
+            return
+        current_row = self._get_selected_row()
+        if current_row is None:
+            return
+        target_row = current_row + offset
+        if target_row < 0 or target_row >= self.var_table.rowCount():
+            return
+
+        order = []
+        for row in range(self.var_table.rowCount()):
+            name_item = self.var_table.item(row, 1)
+            if name_item is not None:
+                order.append(name_item.data(Qt.ItemDataRole.UserRole))
+
+        if len(order) <= 1:
+            return
+
+        order[current_row], order[target_row] = order[target_row], order[current_row]
+        self._apply_curve_order(order)
+        self.load_current_curves()
+        self.var_table.selectRow(target_row)
+
+    def _apply_curve_order(self, new_order: list[str]):
+        """根据给定顺序重排plot中的曲线"""
+        if not self.plot_widget.curves:
+            return
+        reordered: dict[str, dict] = {}
+        for name in new_order:
+            if name in self.plot_widget.curves:
+                reordered[name] = self.plot_widget.curves[name]
+        # 附加遗漏的变量（理论上不会发生）
+        for name, info in self.plot_widget.curves.items():
+            if name not in reordered:
+                reordered[name] = info
+        self.plot_widget.curves = reordered
+        self.plot_widget.update_legend()
+        # 立即刷新光标显示顺序
+        self.plot_widget._clear_cursor_items()
+        if self.plot_widget.vline.isVisible():
+            self.plot_widget.update_cursor_label()
     
     def _add_variable_to_table(self, var_name, curve_info):
         """添加变量到表格"""
@@ -8014,6 +8530,18 @@ class PlotVariableEditorDialog(QDialog):
         
         self.remove_btn.setEnabled(has_selection)
         self.clear_btn.setEnabled(has_items)
+        self.reset_color_btn.setEnabled(has_items)
+
+        selected_row = self._get_selected_row()
+        can_move = (
+            has_selection
+            and self.var_table.rowCount() > 1
+            and bool(self.plot_widget.curves)
+        )
+        self.move_up_btn.setEnabled(can_move and selected_row is not None and selected_row > 0)
+        self.move_down_btn.setEnabled(
+            can_move and selected_row is not None and selected_row < self.var_table.rowCount() - 1
+        )
         
     def remove_selected_variable(self):
         """删除选中的变量"""
@@ -8127,6 +8655,69 @@ class PlotVariableEditorDialog(QDialog):
             # 重置vline bounds到默认值
             self.plot_widget._update_vline_bounds_from_data()
             
+    def reset_curve_colors(self):
+        """按照默认顺序重新分配曲线颜色"""
+        row_count = self.var_table.rowCount()
+        if row_count == 0:
+            return
+        color_cycle = getattr(self.plot_widget, 'curve_colors', ['blue'])
+        if not color_cycle:
+            return
+
+        if self.plot_widget.curves:
+            for idx, var_name in enumerate(self.plot_widget.curves.keys()):
+                color_name = color_cycle[idx % len(color_cycle)]
+                self._apply_color_to_curve(var_name, color_name)
+        elif self.plot_widget.curve and self.plot_widget.y_name:
+            self._apply_color_to_curve(self.plot_widget.y_name, color_cycle[0])
+
+        # 重新加载表格以更新颜色显示
+        selected_row = self._get_selected_row()
+        self.load_current_curves()
+        if selected_row is not None and selected_row < self.var_table.rowCount():
+            self.var_table.selectRow(selected_row)
+
+    def _apply_color_to_curve(self, var_name: str, color_name: str):
+        """将指定变量的颜色更新为给定颜色"""
+        updated = False
+        if self.plot_widget.curves and var_name in self.plot_widget.curves:
+            curve_info = self.plot_widget.curves[var_name]
+            curve_info['color'] = color_name
+            if 'curve' in curve_info and curve_info['curve'] is not None:
+                curve_obj = curve_info['curve']
+                old_pen = curve_obj.opts.get('pen')
+                width = DEFAULT_LINE_WIDTH
+                if hasattr(old_pen, 'widthF'):
+                    width = old_pen.widthF()
+                elif hasattr(old_pen, 'width'):
+                    width = old_pen.width()
+                curve_obj.setPen(pg.mkPen(color=color_name, width=width))
+            updated = True
+        elif var_name == self.plot_widget.y_name and self.plot_widget.curve:
+            old_pen = self.plot_widget.curve.opts.get('pen')
+            width = DEFAULT_LINE_WIDTH
+            if hasattr(old_pen, 'widthF'):
+                width = old_pen.widthF()
+            elif hasattr(old_pen, 'width'):
+                width = old_pen.width()
+            self.plot_widget.curve.setPen(pg.mkPen(color=color_name, width=width))
+            updated = True
+
+        if updated:
+            self.plot_widget.update_legend()
+            # 重新应用样式以确保symbol/线宽保持一致
+            if hasattr(self.plot_widget, 'view_box'):
+                self.plot_widget.update_plot_style(
+                    self.plot_widget.view_box,
+                    self.plot_widget.view_box.viewRange(),
+                    None
+                )
+            self.plot_widget._clear_cursor_items()
+            if hasattr(self.plot_widget, '_last_cursor_update_time'):
+                self.plot_widget._last_cursor_update_time = 0
+            if self.plot_widget.vline.isVisible():
+                self.plot_widget.update_cursor_label()
+
     def set_variable_color(self, row=None):
         """设置变量颜色"""
         if row is None:
@@ -8150,47 +8741,7 @@ class PlotVariableEditorDialog(QDialog):
         color = QColorDialog.getColor(QColor(current_color), self, "选择颜色")
         
         if color.isValid():
-            if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
-                # 多曲线模式：更新curves字典中的颜色
-                self.plot_widget.curves[var_name]['color'] = color.name()
-                
-                # 重新绘制曲线
-                curve_info = self.plot_widget.curves[var_name]
-                if 'curve' in curve_info and 'x_data' in curve_info and 'y_data' in curve_info:
-                    # 移除旧曲线（如果还在scene中）
-                    if curve_info['curve'].scene() is not None:
-                        self.plot_widget.plot_item.removeItem(curve_info['curve'])
-                    
-                    # 创建新曲线
-                    pen = pg.mkPen(color=color.name(), width=DEFAULT_LINE_WIDTH)
-                    new_curve = self.plot_widget.plot_item.plot(
-                        curve_info['x_data'], 
-                        curve_info['y_data'], 
-                        pen=pen,
-                        name=var_name
-                    )
-                    
-                    # 更新曲线信息
-                    curve_info['curve'] = new_curve
-                    
-                    # 更新legend
-                    self.plot_widget.update_legend()
-            else:
-                # 单曲线模式：重新绘制整个曲线
-                if var_name == self.plot_widget.y_name and self.plot_widget.curve:
-                    # 移除旧曲线（如果还在scene中）
-                    if self.plot_widget.curve.scene() is not None:
-                        self.plot_widget.plot_item.removeItem(self.plot_widget.curve)
-                    
-                    # 创建新曲线
-                    pen = pg.mkPen(color=color.name(), width=DEFAULT_LINE_WIDTH)
-                    self.plot_widget.curve = self.plot_widget.plot_item.plot(
-                        self.plot_widget.original_index_x,
-                        self.plot_widget.original_y,
-                        pen=pen,
-                        name=var_name
-                    )
-                          
+            self._apply_color_to_curve(var_name, color.name())
             # 更新表格项颜色
             color_widget = self.var_table.cellWidget(row, 2)
             if color_widget:
