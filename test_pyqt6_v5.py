@@ -879,6 +879,8 @@ class DataTableDialog(QMainWindow):
     def popup(cls, var_name: str, data, parent=None):
         if cls._instance is None:
             cls._instance = cls(parent)
+        else:
+            cls._instance._update_owner_from_widget(parent)
 
         dlg = cls._instance
         dlg.save_geom()
@@ -899,13 +901,37 @@ class DataTableDialog(QMainWindow):
         QTimer.singleShot(100, lambda: dlg._blink_column(var_name,pulse=BLINK_PULSE))
         return dlg
 
+    def _update_owner_from_widget(self, widget):
+        window = None
+        if isinstance(widget, QWidget):
+            window = widget.window()
+        self._owner_window_ref = weakref.ref(window) if window else None
+
+    def _get_owner_window(self):
+        if self._owner_window_ref:
+            window = self._owner_window_ref()
+            if window:
+                return window
+        active = QApplication.activeWindow()
+        if active and isinstance(active, QMainWindow) and hasattr(active, "loader"):
+            return active
+        return get_main_window()
+
+    def _resolve_loader(self):
+        owner = self._get_owner_window()
+        if owner and hasattr(owner, "loader"):
+            return owner.loader
+        return None
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("变量数值表")
-        self.window_geometry = None 
+        self.window_geometry = None
         self.scatter_plot_windows = []
         self._skip_close_confirmation = False
         self.frozen_columns = []
+        self._owner_window_ref = None
+        self._update_owner_from_widget(parent)
 
         # 创建中央部件
         central_widget = QWidget()
@@ -1052,7 +1078,7 @@ class DataTableDialog(QMainWindow):
             self.user_left_width = self.splitter.sizes()[0]
 
     def _cancel_plot_drag_indicator(self):
-        main_window = get_main_window()
+        main_window = self._get_owner_window()
         if not main_window:
             return
         container = getattr(main_window, '_active_drag_container', None)
@@ -1130,7 +1156,7 @@ class DataTableDialog(QMainWindow):
             return
             
         # 获取主窗口loader
-        loader = get_main_loader()      
+        loader = self._resolve_loader()
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
@@ -1164,7 +1190,7 @@ class DataTableDialog(QMainWindow):
         """
         self._df[var_name] = data
         # 使用新函数替换循环
-        loader = get_main_loader() 
+        loader = self._resolve_loader()
         
         if loader:
             self.units = loader.units
@@ -2472,7 +2498,10 @@ class MyTableWidget(QTableWidget):
 
     def _add_to_data_table(self, var_name: str):
         # 获取 MainWindow 的 loader
-        loader = get_main_loader()
+        main_window = self.window()
+        loader = getattr(main_window, 'loader', None) if main_window else None
+        if loader is None:
+            loader = get_main_loader()
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
@@ -2485,8 +2514,14 @@ class MyTableWidget(QTableWidget):
 
     def _add_to_blank_plot(self, var_name: str):
         # 获取 MainWindow 实例
-        main_window = get_main_window() 
-        loader = get_main_loader()
+        main_window = self.window()
+        if not (main_window and hasattr(main_window, 'loader')):
+            main_window = get_main_window()
+        loader = getattr(main_window, 'loader', None)
+
+        if main_window is None:
+            QMessageBox.warning(self, "错误", "未找到主窗口实例")
+            return
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
@@ -6787,6 +6822,8 @@ class MainWindow(QMainWindow):
     """
     def __init__(self):
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._drop_event_filter_registered = False
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
 
         # 设置应用程序图标（影响Dock图标）
@@ -7077,8 +7114,11 @@ class MainWindow(QMainWindow):
         self.drop_overlay.lower()          # 初始在最下层
         self.drop_overlay.hide()
 
-        # 全局拖拽过滤器
-        QApplication.instance().installEventFilter(self)
+        # 全局拖拽过滤器（按需安装，便于多窗口独立卸载）
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+            self._drop_event_filter_registered = True
    
         if _hide_plot_area:
             # 临时设置离屏属性，模拟显示以计算布局尺寸（无闪烁）
@@ -7123,6 +7163,7 @@ class MainWindow(QMainWindow):
         # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
         if DataTableDialog._instance is not None:
             DataTableDialog._instance.set_skip_close_confirmation(True)
+        self._unregister_global_event_filter()
         super().closeEvent(event)
         
     def _on_splitter_moved(self, pos, index):
@@ -7811,7 +7852,19 @@ class MainWindow(QMainWindow):
                     container.plot_widget.add_mark_region(min_x, max_x)
             self.update_mark_stats()
 
+    def _unregister_global_event_filter(self):
+        if not getattr(self, "_drop_event_filter_registered", False):
+            return
+        app = QApplication.instance()
+        if app:
+            app.removeEventFilter(self)
+        self._drop_event_filter_registered = False
+
     def eventFilter(self, obj, event):
+        if not isinstance(obj, QWidget):
+            return super().eventFilter(obj, event)
+        if obj.window() is not self:
+            return super().eventFilter(obj, event)
         etype = event.type()
         if etype == QEvent.Type.DragEnter:
             if event.mimeData().hasUrls():
