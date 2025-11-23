@@ -5145,7 +5145,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     
                     # 创建曲线
                     pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-                    curve = self.plot_item.plot(x_values, y_values, pen=pen, name=var_name)
+                    curve = self.plot_item.plot(x_values, y_values, pen=pen, name=var_name,skipFiniteCheck=True)
                     
                     # 存储曲线信息
                     self.curves[var_name] = {
@@ -5351,7 +5351,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.curve = self.plot_item.plot(
                 x_values, self.original_y, 
                 pen=_pen, 
-                name=var_name
+                name=var_name,
+                skipFiniteCheck=True
             )
             
             # 性能优化说明：
@@ -5693,7 +5694,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             curve = self.plot_item.plot(
                 x_values, y_values, 
                 pen=pen, 
-                name=var_name
+                name=var_name,
+                skipFiniteCheck=True
             )
             
             # 性能优化说明：
@@ -8988,6 +8990,13 @@ class PlotVariableEditorDialog(QDialog):
 
 # ---------------- 主程序 ----------------
 if __name__ == "__main__":
+
+    # 启用 OpenGL (极大提升大数据的渲染性能)
+    # pg.setConfigOptions(useOpenGL=True) 
+    
+    # 禁用抗锯齿 (大数据量下抗锯齿非常消耗资源且视觉收益低)
+    # pg.setConfigOptions(antialias=False)
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -9032,4 +9041,4 @@ if __name__ == "__main__":
     # win: pyinstaller --noconsole --onefile --add-data "README.md;." test_pyqt6_v5.py
 
     # nuitka
-    # nuitka --standalone --output-filename=test_pyqt6_v5 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data test_pyqt6_v5.py
+    # nuitka --onefile --standalone --output-filename=test_pyqt6_v5 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data test_pyqt6_v5.py
