@@ -91,16 +91,25 @@ def resource_path(relative_path: str) -> Path:
     
     用于处理PyInstaller打包后的资源文件路径问题
     在开发环境中返回相对路径，在打包环境中返回临时解包路径
-    
+    (兼容 PyInstaller/Nuitka/PyOxidizer Standalone)
     Args:
         relative_path: 资源文件的相对路径
         
     Returns:
         Path: 正确的资源文件路径
     """
-    if hasattr(sys, "_MEIPASS"):  
+    if hasattr(sys, "_MEIPASS"):
+        # 模式 1: PyInstaller OneFile 模式
         return Path(os.path.join(sys._MEIPASS, relative_path))
-    return Path(relative_path)
+    
+    elif getattr(sys, "frozen", False):
+        # 模式 2: 其他 Standalone 模式 (PyOxidizer/Nuitka)
+        # 资源文件通常位于可执行文件所在目录
+        return Path(os.path.dirname(sys.executable)) / relative_path
+        
+    else:
+        # 模式 3: 开发环境
+        return Path(relative_path)
 
 # 设置应用程序和窗口图标
 if sys.platform == "win32": # Windows
@@ -9021,3 +9030,6 @@ if __name__ == "__main__":
     # compile
     # mac: pyinstaller --noconsole --onefile --add-data "README.md:." test_pyqt6_v5.py
     # win: pyinstaller --noconsole --onefile --add-data "README.md;." test_pyqt6_v5.py
+
+    # nuitka
+    # nuitka --standalone --output-filename=test_pyqt6_v5 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data test_pyqt6_v5.py
