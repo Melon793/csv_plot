@@ -38,6 +38,7 @@ MIN_INDEX_LENGTH = 3
 DEFAULT_LINE_WIDTH = 3
 THICK_LINE_WIDTH = 3
 THIN_LINE_WIDTH = 1
+UI_DEBOUNCE_DELAY_MS = 200
 
 FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
 
@@ -141,6 +142,72 @@ def get_main_loader() -> FastDataLoader | None:
     if main_window and hasattr(main_window, 'loader') and main_window.loader:
         return main_window.loader
     return None
+
+class UnifiedUpdateScheduler(QObject):
+    """
+    ????????UI??????,??style/cursor/stat???,??200ms?????????????
+    """
+    def __init__(self, *, delay_ms: int = UI_DEBOUNCE_DELAY_MS, order: tuple[str, ...] | None = None, parent=None):
+        super().__init__(parent)
+        self._delay_ms = max(0, delay_ms)
+        self._order = list(order) if order else []
+        self._pending: list[str] = []
+        self._callbacks: dict[str, Any] = {}
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._flush_pending)
+
+    def register(self, name: str, callback) -> None:
+        self._callbacks[name] = callback
+
+    def schedule(self, *names: str) -> None:
+        scheduled = False
+        for name in names:
+            if name not in self._callbacks:
+                continue
+            if name not in self._pending:
+                self._pending.append(name)
+            scheduled = True
+        if scheduled:
+            self._timer.start(self._delay_ms)
+
+    def cancel(self, *names: str) -> None:
+        if not names:
+            self._pending.clear()
+            self._timer.stop()
+            return
+        remaining = [name for name in self._pending if name not in names]
+        self._pending[:] = remaining
+        if not self._pending:
+            self._timer.stop()
+
+    def run_immediately(self, *names: str) -> None:
+        tasks = list(names) if names else (self._order or list(self._pending))
+        if not tasks:
+            return
+        for name in tasks:
+            if name in self._pending:
+                self._pending.remove(name)
+            self._invoke(name)
+
+    def _flush_pending(self) -> None:
+        if not self._pending:
+            return
+        pending = self._pending.copy()
+        self._pending.clear()
+        ordered = [name for name in self._order if name in pending]
+        ordered += [name for name in pending if name not in ordered]
+        for name in ordered:
+            self._invoke(name)
+
+    def _invoke(self, name: str) -> None:
+        callback = self._callbacks.get(name)
+        if not callback:
+            return
+        try:
+            callback()
+        except Exception as e:
+            print(f"UI?????????? {name}: {e}")
 
 class HelpDialog(QDialog):
     """
@@ -2573,7 +2640,7 @@ class MyTableWidget(QTableWidget):
             # 4. 将变量添加至空白图中
             success = blank_plot.plot_variable(var_name)
             if success:
-                main_window.update_mark_stats()
+                main_window.request_mark_stats_refresh()
 
         QTimer.singleShot(_delay, _job) 
 
@@ -2887,7 +2954,7 @@ class CustomViewBox(pg.ViewBox):
         if self.plot_widget:
             self.plot_widget.clear_plot_item()
             if self.plot_widget.window():
-                self.plot_widget.window().update_mark_stats()
+                self.plot_widget.window().request_mark_stats_refresh(immediate=True)
     
     def trigger_pin_cursor(self):
         """固定cursor到最近的数据点"""
@@ -3059,6 +3126,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.setup_axes()
         # 交互元素设置
         self.setup_interaction()
+        self._init_ui_refresh_coordinator()
 
         # 布局比例设置 (绘图区占90%)
         self.ci.layout.setContentsMargins(0, 0, 10, 5)  # 消除所有边距
@@ -3131,12 +3199,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item = self.addPlot(row=1, col=0, colspan=2, viewBox=CustomViewBox())
         self.view_box = self.plot_item.vb
         self.view_box.plot_widget = self  # 设置 plot_widget 以确保 trigger_jump_to_data 能调用 jump_to_data_impl
-        
-        # ========== 性能优化 1: 防抖定时器 ==========
-        # 优化缩放性能，避免频繁重绘
-        self._update_timer = QTimer()
-        self._update_timer.setSingleShot(True)
-        self._update_timer.timeout.connect(self._delayed_update_plot_style)
         
         # ========== 性能优化 2: 交互状态管理 ==========
         # 类似iOS的快照技术，在交互期间使用降级渲染
@@ -3336,7 +3398,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.vline.setBounds([min_x, max_x])
 
         # 在设置完新范围后，立即直接调用样式更新函数。
-        self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
+        self._queue_ui_refresh(immediate=True)
         self.plot_item.update()
         self._update_cursor_after_plot(min_x, max_x)
 
@@ -3556,6 +3618,60 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_refresh_timer = QTimer(self)
         self._cursor_refresh_timer.setSingleShot(True)
         self._cursor_refresh_timer.timeout.connect(self._refresh_cursor_geometry)
+
+    def _init_ui_refresh_coordinator(self):
+        self._ui_refresh = UnifiedUpdateScheduler(
+            delay_ms=UI_DEBOUNCE_DELAY_MS,
+            order=("style", "cursor", "stats"),
+            parent=self
+        )
+        self._ui_refresh.register("style", self._run_style_refresh)
+        self._ui_refresh.register("cursor", self._run_cursor_refresh)
+        self._ui_refresh.register("stats", self._run_stats_refresh)
+
+    def _queue_ui_refresh(self, *, style=True, cursor=True, stats=True, immediate=False):
+        if not hasattr(self, '_ui_refresh'):
+            return
+        tasks: list[str] = []
+        if style:
+            tasks.append("style")
+        if cursor:
+            tasks.append("cursor")
+        if stats:
+            tasks.append("stats")
+        if not tasks:
+            return
+        if immediate:
+            self._ui_refresh.run_immediately(*tasks)
+        else:
+            self._ui_refresh.schedule(*tasks)
+
+    def _cancel_ui_refresh(self, *tasks):
+        if hasattr(self, '_ui_refresh'):
+            if tasks:
+                self._ui_refresh.cancel(*tasks)
+            else:
+                self._ui_refresh.cancel()
+
+    def _run_style_refresh(self):
+        if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+            return
+        if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
+            self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
+
+    def _run_cursor_refresh(self):
+        if getattr(self, '_is_interacting', False):
+            return
+        if hasattr(self, 'vline') and self.vline.isVisible():
+            try:
+                self.update_cursor_label()
+            except Exception:
+                pass
+
+    def _run_stats_refresh(self):
+        main_window = self.window()
+        if main_window is not None:
+            main_window.request_mark_stats_refresh(immediate=True)
 
     def _extract_var_names_from_text(self, text: str) -> list[str]:
 
@@ -4918,11 +5034,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     self.mark_region.setRegion([new_min, new_max])
                     self.window().sync_mark_regions(self.mark_region)
         finally:
-            def safe_update_mark_stats():
-                if hasattr(self, 'window') and self.window() is not None:
-                    if not getattr(self, '_is_being_destroyed', False):
-                        self.window().update_mark_stats()
-            QTimer.singleShot(0, safe_update_mark_stats)
+            if hasattr(self, 'window') and self.window() is not None:
+                if not getattr(self, '_is_being_destroyed', False):
+                    self.window().request_mark_stats_refresh()
             self._suppress_pin_update = False
 
     # ---------------- 拖拽相关 ----------------
@@ -5073,7 +5187,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.plot_variable(var_names[0])
         
         event.acceptProposedAction()
-        self.window().update_mark_stats()
+        self.window().request_mark_stats_refresh()
 
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
         """
@@ -5238,11 +5352,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 这些设置会自动应用到曲线，无需OpenGL也能获得良好性能
             
             # 延迟更新样式（带安全检查）
-            def safe_update_style():
-                if not getattr(self, '_is_updating_data', False) and not getattr(self, '_is_being_destroyed', False):
-                    if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
-                        self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
-            QTimer.singleShot(0, safe_update_style)
+            self._queue_ui_refresh()
 
             # 更新标题
             full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
@@ -6024,7 +6134,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         if event.button() == Qt.MouseButton.MiddleButton:
             self.clear_plot_item()
-            self.window().update_mark_stats()
+            self.window().request_mark_stats_refresh(immediate=True)
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -6421,80 +6531,31 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
 
     def _on_range_changed(self, view_box, range):
-        """范围变化时的防抖处理
-        
-        性能优化策略（参考iOS/Android经验）：
-        1. 标记交互状态，在交互期间降低渲染质量
-        2. 根据曲线数量和数据点数动态调整防抖延迟
-        3. 延迟高质量渲染直到交互结束
-        4. 同步缩放时避免递归更新（通过_is_syncing_range标志）
-        """
+        """?? ViewBox ?????????????"""
         try:
-            # 【安全检查】如果正在更新数据或对象被销毁，停止timer但不启动新的
             if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-                if hasattr(self, '_update_timer'):
-                    self._update_timer.stop()
+                self._cancel_ui_refresh()
                 return
-            
-            # 【性能优化】同步缩放时避免递归更新
-            # 当通过XLink同步时，每个plot的range变化都会触发其他plot的更新
-            # 使用_is_syncing_range标志避免递归调用
+
             if getattr(self, '_is_syncing_range', False):
-                return  # 正在同步，跳过此次更新
-            
-            # ========== 性能优化：标记交互开始 ==========
-            # 类似iOS在缩放时使用快照的策略，我们在交互期间降低渲染质量
+                return
+
             if not self._is_interacting:
                 self._is_interacting = True
                 self._start_interaction()
-            
-            # 重置交互结束定时器
+
             if hasattr(self, '_interaction_timer'):
                 self._interaction_timer.stop()
-                # 交互结束后等待200ms才恢复高质量渲染
-                self._interaction_timer.start(200)
-            
-            # 【性能优化】交互期间不启动样式更新定时器
-            # 样式更新只在交互结束后执行一次，保证缩放时的流畅性
-            # 这样可以避免在快速缩放时频繁触发样式更新导致卡顿
+                self._interaction_timer.start(UI_DEBOUNCE_DELAY_MS)
+
             if self._is_interacting:
-                # 交互期间：停止更新定时器，不执行样式更新
-                if hasattr(self, '_update_timer'):
-                    self._update_timer.stop()
-                return  # 交互期间直接返回，不执行任何更新
-            
-            # 停止之前的定时器
-            if hasattr(self, '_update_timer'):
-                self._update_timer.stop()
-                
-                # ========== 性能优化：智能防抖延迟 ==========
-                # 使用共用方法计算可见点数（与update_plot_style共用逻辑）
-                _, visible_points = self._calculate_visible_points(range)
-                
-                # 根据可见点数和曲线数量动态调整延迟（支持百万级数据点）
-                curve_count = max(1, len(self.curves) if hasattr(self, 'curves') and self.curves else 
-                                  (1 if hasattr(self, 'curve') and self.curve is not None else 1))
-                
-                # 基础延迟根据可见点数
-                if visible_points < 1000:
-                    base_delay = 20  # 很少点：快速响应
-                elif visible_points < 10000:
-                    base_delay = 50  # 中等点数
-                elif visible_points < 50000:
-                    base_delay = 100  # 较多点数
-                elif visible_points < 500000:
-                    base_delay = 200  # 大量点数
-                else:
-                    base_delay = 300  # 百万级点数：更长延迟避免卡顿
-                
-                # 根据曲线数量增加延迟（多曲线时更保守）
-                curve_factor = 1.0 + (curve_count - 1) * 0.1  # 每条曲线增加10%延迟
-                delay = int(base_delay * curve_factor)
-                
-                self._update_timer.start(delay)
+                self._cancel_ui_refresh('style', 'cursor')
+                return
+
+            self._queue_ui_refresh()
         except Exception as e:
-            print(f"处理范围变化时出错: {e}")
-    
+            print(f"????????: {e}")
+
     def _start_interaction(self):
         """开始交互时的优化处理
         
@@ -6522,56 +6583,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             print(f"开始交互优化时出错: {e}")
     
     def _end_interaction(self):
-        """交互结束时恢复正常渲染质量
-        
-        类似iOS在缩放结束后重新渲染页面内容
-        """
+        """???????????"""
         try:
             self._is_interacting = False
-            
-            # 交互结束后，执行一次完整的高质量渲染
-            if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
-                self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
-            
-            # 【性能优化】交互结束后更新cursor标签（交互期间被禁用）
-            # 延迟更新cursor，避免与样式更新冲突
-            QTimer.singleShot(50, self._update_cursor_after_interaction)
+            self._queue_ui_refresh(immediate=True)
         except Exception as e:
-            print(f"结束交互优化时出错: {e}")
-    
-    def _update_cursor_after_interaction(self):
-        """交互结束后更新cursor标签"""
-        try:
-            # 检查cursor是否可见且不在交互状态
-            main_window = self.window()
-            cursor_enabled = True
-            if main_window and hasattr(main_window, 'cursor_btn'):
-                cursor_enabled = main_window.cursor_btn.isChecked()
-            
-            if (not getattr(self, '_is_interacting', False) and 
-                hasattr(self, 'vline') and self.vline.isVisible() and
-                cursor_enabled):
-                self.update_cursor_label()
-        except Exception as e:
-            pass  # 忽略cursor更新错误
-
-    def _delayed_update_plot_style(self):
-        """延迟更新绘图样式
-        
-        性能优化：缩放/拖动时不更新cursor，避免多曲线模式下的性能问题。
-        Cursor只在真正移动时才更新（通过鼠标移动或点击触发）。
-        """
-        try:
-            # 【安全检查】如果正在更新数据或对象被销毁，跳过
-            if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-                return
-            
-            if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
-                self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
-                # 【性能优化】不在缩放/拖动时更新cursor标签
-                # cursor标签只在cursor真正移动时更新（mouseMoveEvent等）
-        except Exception as e:
-            print(f"延迟更新绘图样式时出错: {e}")
+            print(f"???????: {e}")
 
     def _schedule_cursor_geometry_update(self):
         if not hasattr(self, 'vline') or not self.vline.isVisible():
@@ -6910,6 +6927,10 @@ class MainWindow(QMainWindow):
         self.data_table_geometry = None
         self.mark_stats_geometry = None
         self.time_correction_geometry = None
+        self._mark_stats_dirty = False
+        self._mark_stats_timer = QTimer(self)
+        self._mark_stats_timer.setSingleShot(True)
+        self._mark_stats_timer.timeout.connect(self._flush_mark_stats_refresh)
 
         # value cache
         self.value_cache = {}
@@ -7692,7 +7713,7 @@ class MainWindow(QMainWindow):
 
         self.filter_variables() 
         if self.mark_region_btn.isChecked():
-            self.update_mark_stats()
+            self.request_mark_stats_refresh(immediate=True)
 
     def filter_variables(self):
         if self.var_names is None:
@@ -7750,7 +7771,7 @@ class MainWindow(QMainWindow):
                 self.mark_stats_window.restoreGeometry(geom)
 
             self.mark_stats_window.showNormal()
-            self.update_mark_stats()
+            self.request_mark_stats_refresh(immediate=True)
         else:
             self.mark_region_btn.setText("标记区域")
             # 保存当前范围
@@ -7768,6 +7789,24 @@ class MainWindow(QMainWindow):
         for container in self.plot_widgets:
             if container.isVisible() and container.plot_widget.mark_region and container.plot_widget.mark_region != region_item:
                 container.plot_widget.mark_region.setRegion([min_x, max_x])
+        self.request_mark_stats_refresh(immediate=True)
+
+    def request_mark_stats_refresh(self, *, immediate: bool = False):
+        if not getattr(self, 'mark_stats_window', None):
+            return
+        if immediate:
+            if self._mark_stats_timer.isActive():
+                self._mark_stats_timer.stop()
+            self._mark_stats_dirty = False
+            self.update_mark_stats()
+            return
+        self._mark_stats_dirty = True
+        self._mark_stats_timer.start(UI_DEBOUNCE_DELAY_MS)
+
+    def _flush_mark_stats_refresh(self):
+        if not self._mark_stats_dirty:
+            return
+        self._mark_stats_dirty = False
         self.update_mark_stats()
 
     def update_mark_stats(self):
@@ -7834,7 +7873,7 @@ class MainWindow(QMainWindow):
                 self._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
 
             # 更新标记统计
-            self.update_mark_stats()
+            self.request_mark_stats_refresh(immediate=True)
 
     def update_mark_regions_on_layout_change(self):
         if self.mark_region_btn.isChecked():
@@ -7850,7 +7889,7 @@ class MainWindow(QMainWindow):
             for container in self.plot_widgets:
                 if container.isVisible():
                     container.plot_widget.add_mark_region(min_x, max_x)
-            self.update_mark_stats()
+            self.request_mark_stats_refresh(immediate=True)
 
     def _unregister_global_event_filter(self):
         if not getattr(self, "_drop_event_filter_registered", False):
@@ -7920,8 +7959,8 @@ class MainWindow(QMainWindow):
         # 【安全标志】设置所有widget为更新中状态
         for container in self.plot_widgets:
             container.plot_widget._is_updating_data = True
-            if hasattr(container.plot_widget, '_update_timer'):
-                container.plot_widget._update_timer.stop()
+            if hasattr(container.plot_widget, '_cancel_ui_refresh'):
+                container.plot_widget._cancel_ui_refresh()
         
         try:
             for container in self.plot_widgets:
@@ -7950,10 +7989,9 @@ class MainWindow(QMainWindow):
             for container in self.plot_widgets:
                 widget = container.plot_widget
                 try:
-                    if hasattr(widget, 'view_box') and hasattr(widget, 'plot_item'):
-                        has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
-                        if has_data:
-                            widget.update_plot_style(widget.view_box, widget.view_box.viewRange(), None)
+                    has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
+                    if has_data:
+                        widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
                     pass
 
@@ -8089,7 +8127,7 @@ class MainWindow(QMainWindow):
             # 重置pin状态
             widget.reset_pin_state()
         self.saved_mark_range = None
-        self.update_mark_stats()
+        self.request_mark_stats_refresh(immediate=True)
 
     def auto_range_all_plots(self):
         if not self.loader or self.loader.datalength == 0:
@@ -8184,8 +8222,8 @@ class MainWindow(QMainWindow):
         for container in self.plot_widgets:
             container.plot_widget._is_updating_data = True
             # 停止所有pending的timer
-            if hasattr(container.plot_widget, '_update_timer'):
-                container.plot_widget._update_timer.stop()
+            if hasattr(container.plot_widget, '_cancel_ui_refresh'):
+                container.plot_widget._cancel_ui_refresh()
         
         try:
             # 如果加载文件为空
@@ -8343,7 +8381,7 @@ class MainWindow(QMainWindow):
                         # 检查是否有数据（单曲线或多曲线）
                         has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
                         if has_data:
-                            widget.update_plot_style(widget.view_box, widget.view_box.viewRange(), None)
+                            widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception as e:
                     pass  # 忽略样式更新错误，不影响数据加载
 
@@ -8844,12 +8882,8 @@ class PlotVariableEditorDialog(QDialog):
         if updated:
             self.plot_widget.update_legend()
             # 重新应用样式以确保symbol/线宽保持一致
-            if hasattr(self.plot_widget, 'view_box'):
-                self.plot_widget.update_plot_style(
-                    self.plot_widget.view_box,
-                    self.plot_widget.view_box.viewRange(),
-                    None
-                )
+            if hasattr(self.plot_widget, '_queue_ui_refresh'):
+                self.plot_widget._queue_ui_refresh(immediate=True)
             self.plot_widget._clear_cursor_items()
             if hasattr(self.plot_widget, '_last_cursor_update_time'):
                 self.plot_widget._last_cursor_update_time = 0
