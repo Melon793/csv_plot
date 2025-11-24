@@ -7353,7 +7353,7 @@ class MainWindow(QMainWindow):
         dialog = QFileDialog(self, "选择数据文件")
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
-        dialog.setNameFilter("CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11);;all File (*.*)")
+        dialog.setNameFilter("all File (*.*);;CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11)")
         if initial_dir:
             dialog.setDirectory(initial_dir)
 
