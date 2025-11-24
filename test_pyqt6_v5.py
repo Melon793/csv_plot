@@ -13,7 +13,7 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths
 from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
@@ -6928,6 +6928,7 @@ class MainWindow(QMainWindow):
             _hide_plot_area = False
 
         self.loaded_path = ''
+        self._last_open_dir: str | None = None
         self.var_names = None
         self.units = None
         self.time_channels_infos = None
@@ -7348,9 +7349,18 @@ class MainWindow(QMainWindow):
         clone_window.destroyed.connect(_cleanup)
 
     def load_btn_click(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11);;all File (*.*)")
-        if file_path:
-            self.load_csv_file(file_path)
+        initial_dir = self._get_dialog_initial_directory()
+        dialog = QFileDialog(self, "选择数据文件")
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
+        dialog.setNameFilter("CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11);;all File (*.*)")
+        if initial_dir:
+            dialog.setDirectory(initial_dir)
+
+        if dialog.exec():
+            selected_files = dialog.selectedFiles()
+            if selected_files:
+                self.load_csv_file(selected_files[0])
 
     def _validate_file_path(self, file_path: str) -> bool:
         """验证文件路径是否有效"""
@@ -7555,6 +7565,7 @@ class MainWindow(QMainWindow):
 
     def _post_load_actions(self, file_path: str):
         self.loaded_path = file_path
+        self._remember_last_open_dir(file_path)
 
         def truncate_string(file_path, max_length=79):
             # directory = os.path.dirname(file_path)
@@ -7564,6 +7575,40 @@ class MainWindow(QMainWindow):
             return "..." + file_path[min(-filename_length-1,-(max_length-3)):]
         self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{truncate_string(file_path)}]")
         self.set_button_status(True)
+
+    def _remember_last_open_dir(self, file_path: str):
+        """记录最近一次成功加载的数据所在目录"""
+        directory = os.path.dirname(file_path)
+        if directory and os.path.isdir(directory):
+            self._last_open_dir = directory
+
+    def _get_dialog_initial_directory(self) -> str:
+        """根据历史记录或系统默认值返回文件对话框初始目录"""
+        if getattr(self, "_last_open_dir", None) and os.path.isdir(self._last_open_dir):
+            return self._last_open_dir
+        return self._default_system_directory()
+
+    def _default_system_directory(self) -> str:
+        """在不同平台上生成类似“我的电脑”的默认目录"""
+        candidates: list[str | None] = []
+        if sys.platform.startswith("win"):
+            # Windows 的“我的电脑”Shell 路径，Qt 可识别；如不支持将自动回退
+            candidates.append("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")
+        def _safe_location(location):
+            try:
+                return QStandardPaths.writableLocation(location)
+            except AttributeError:
+                return ""
+
+        candidates.extend([
+            _safe_location(QStandardPaths.StandardLocation.HomeLocation),
+            _safe_location(QStandardPaths.StandardLocation.DesktopLocation),
+            QDir.rootPath()
+        ])
+        for path in candidates:
+            if path:
+                return path
+        return ""
 
     @staticmethod
     def load_dict(path: str, *, default=None) -> dict:
