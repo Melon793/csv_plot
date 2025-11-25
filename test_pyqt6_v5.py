@@ -3840,6 +3840,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         pos = evt[0]
         if not self.plot_item.sceneBoundingRect().contains(pos):
             return
+        if self._is_cursor_update_locked():
+            return
         mousePoint = self.plot_item.vb.mapSceneToView(pos)
         
         # 如果cursor被固定，不跟随鼠标移动
@@ -3852,6 +3854,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.window().sync_crosshair(mousePoint.x(), self)
             #print(f"mouse in pos {mousePoint.x()}")
 
+    def _is_cursor_update_locked(self) -> bool:
+        """
+        判断cursor相关回调是否需要被暂时禁用
+        
+        当plot正在更新数据或主窗口处于新数据加载流程中时，所有cursor相关的信号都会跳过，
+        以避免访问不完整的数据结构。
+        """
+        if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+            return True
+        window = self.window()
+        if window and hasattr(window, '_is_loading_new_data'):
+            return bool(getattr(window, '_is_loading_new_data'))
+        return False
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._schedule_cursor_geometry_update()
@@ -3863,6 +3879,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         当vline被拖动时触发，在pin状态下会同步所有被pin的plot的cursor位置。
         在正常状态下会更新cursor标签显示。
         """
+        if self._is_cursor_update_locked():
+            return
         if self.is_cursor_pinned:
             if getattr(self, "_suppress_pin_update", False):
                 return
@@ -3955,6 +3973,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
+        if self._is_cursor_update_locked():
+            return
         # 统一使用多曲线样式的cursor显示
         self._update_multi_curve_cursor_label()
     
@@ -6934,6 +6954,7 @@ class MainWindow(QMainWindow):
         self.time_channels_infos = None
         self.data = None
         self.data_validity = None
+        self._is_loading_new_data = False  # 标志：是否正在加载新数据，用于屏蔽交互信号
 
         # 窗口几何信息
         self.data_table_geometry = None
@@ -7394,6 +7415,44 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "文件访问错误", f"无法访问文件: {e}")
             return False
 
+    def _begin_data_reload(self):
+        """
+        标记开始加载新数据
+        
+        会立即清理所有Pin状态并锁定plot的cursor更新，防止旧信号在加载阶段继续触发。
+        """
+        if self._is_loading_new_data:
+            return
+        self._is_loading_new_data = True
+        try:
+            self.reset_all_pin_states()
+        except Exception:
+            pass
+        for container in getattr(self, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if not widget:
+                continue
+            widget._is_updating_data = True
+            if hasattr(widget, "_cancel_ui_refresh"):
+                widget._cancel_ui_refresh()
+
+    def _end_data_reload(self):
+        """
+        标记数据加载结束
+        
+        恢复cursor/样式刷新，让UI重新响应交互。
+        """
+        if not self._is_loading_new_data:
+            return
+        self._is_loading_new_data = False
+        for container in getattr(self, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if not widget:
+                continue
+            widget._is_updating_data = False
+            if hasattr(widget, "_queue_ui_refresh"):
+                widget._queue_ui_refresh(immediate=True)
+
     def load_csv_file(self, file_path: str):
         """
         加载CSV文件
@@ -7499,29 +7558,40 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
                 return
 
+        self._begin_data_reload()
+        started_async = False
         _Threshold_Size_Mb=FILE_SIZE_LIMIT_BACKGROUND_LOADING 
 
         # < 5 MB 直接读
         file_size =os.path.getsize(file_path)
-        if file_size < _Threshold_Size_Mb * 1024 * 1024:
-            status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
-            if status:
-                self.set_button_status(True)
-                self._post_load_actions(file_path)
-        else:
-            # 5 MB 以上走线程
-            self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
-            self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-            self._progress.setAutoClose(True)
-            self._progress.setCancelButton(None)            # 不可取消
-            self._progress.setMinimumDuration(0)  # 立即显示，避免延迟
-            self._progress.show()
+        try:
+            if file_size < _Threshold_Size_Mb * 1024 * 1024:
+                try:
+                    status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+                finally:
+                    self._end_data_reload()
+                if status:
+                    self.set_button_status(True)
+                    self._post_load_actions(file_path)
+            else:
+                # 5 MB 以上走线程
+                self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
+                self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+                self._progress.setAutoClose(True)
+                self._progress.setCancelButton(None)            # 不可取消
+                self._progress.setMinimumDuration(0)  # 立即显示，避免延迟
+                self._progress.show()
 
-            self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
-            self._thread.progress.connect(self._progress.setValue)
-            self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
-            self._thread.error.connect(self._on_load_error)
-            self._thread.start()
+                self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+                self._thread.progress.connect(self._progress.setValue)
+                self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
+                self._thread.error.connect(self._on_load_error)
+                self._thread.start()
+                started_async = True
+        except Exception:
+            if not started_async:
+                self._end_data_reload()
+            raise
 
     @property
     def _has_valid_loader(self) -> bool:
@@ -7721,10 +7791,12 @@ class MainWindow(QMainWindow):
         self.loader=loader
         self._apply_loader()
         self._post_load_actions(file_path)
+        self._end_data_reload()
 
     def _on_load_error(self, msg):
         self._progress.close()
         QMessageBox.critical(self, "读取失败", msg)
+        self._end_data_reload()
 
     def _apply_loader(self):
         """把 loader 的内容同步到 UI"""
@@ -8134,6 +8206,8 @@ class MainWindow(QMainWindow):
 
     def sync_crosshair(self, x, sender_widget):
         if not self.cursor_btn.isChecked():
+            return
+        if getattr(self, "_is_loading_new_data", False):
             return
         
         # 【性能优化】交互期间跳过cursor同步，避免拖拽/缩放时卡顿
@@ -9087,3 +9161,4 @@ if __name__ == "__main__":
 
     # nuitka
     # nuitka --onefile --standalone --output-filename=test_pyqt6_v5 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data test_pyqt6_v5.py
+    
