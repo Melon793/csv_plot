@@ -3362,14 +3362,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 计算Y轴范围
         if self.is_multi_curve_mode and self.curves:
             # 多曲线模式：计算所有可见曲线的Y轴范围
-            all_y_values = []
-            for var_name, curve_info in self.curves.items():
-                if curve_info.get('visible', True) and 'y_data' in curve_info:
-                    all_y_values.extend(curve_info['y_data'])
-            
-            if all_y_values:
-                min_y = np.nanmin(all_y_values)
-                max_y = np.nanmax(all_y_values)
+            y_arrays = self._collect_visible_curve_arrays('y_data')
+            if y_arrays:
+                combined = np.concatenate(y_arrays)
+                if combined.size:
+                    min_y = np.nanmin(combined)
+                    max_y = np.nanmax(combined)
+                else:
+                    min_y, max_y = 0, 1
             else:
                 min_y, max_y = 0, 1  # 默认范围
         else:
@@ -3627,6 +3627,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_refresh_timer = QTimer(self)
         self._cursor_refresh_timer.setSingleShot(True)
         self._cursor_refresh_timer.timeout.connect(self._refresh_cursor_geometry)
+        self._pending_cursor_geometry_update = False
 
     def _init_ui_refresh_coordinator(self):
         self._ui_refresh = UnifiedUpdateScheduler(
@@ -4153,7 +4154,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 清空当前使用列表
         self.multi_cursor_items.clear()
-        
+
         if not hide_only:
             # 完全清除模式（仅在真正需要清理时使用，如切换数据文件）
             # 清空对象池
@@ -4188,7 +4189,41 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 'labels': [],
                 'x_label': None
             }
-        
+
+    def _collect_visible_curve_arrays(self, key: str) -> list[np.ndarray]:
+        arrays: list[np.ndarray] = []
+        if not getattr(self, 'curves', None):
+            return arrays
+        for curve_info in self.curves.values():
+            if not curve_info.get('visible', True):
+                continue
+            data = curve_info.get(key)
+            if data is None:
+                continue
+            arr = np.asarray(data)
+            if arr.size == 0:
+                continue
+            arrays.append(arr)
+        return arrays
+
+    def _collect_visible_curve_pairs(self) -> list[tuple[np.ndarray, np.ndarray]]:
+        pairs: list[tuple[np.ndarray, np.ndarray]] = []
+        if not getattr(self, 'curves', None):
+            return pairs
+        for curve_info in self.curves.values():
+            if not curve_info.get('visible', True):
+                continue
+            x_data = curve_info.get('x_data')
+            y_data = curve_info.get('y_data')
+            if x_data is None or y_data is None:
+                continue
+            x_arr = np.asarray(x_data)
+            y_arr = np.asarray(y_data)
+            if x_arr.size == 0 or y_arr.size == 0:
+                continue
+            pairs.append((x_arr, y_arr))
+        return pairs
+
     
     def _safe_clear_plot_items(self):
         """安全地清理所有plot items，避免scene不匹配问题
@@ -4886,13 +4921,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         try:
             if self.is_multi_curve_mode and self.curves:
                 # 多曲线模式：收集所有可见曲线的x值
-                all_x_values = []
-                for curve_info in self.curves.values():
-                    if curve_info.get('visible', True) and curve_info.get('x_data') is not None:
-                        all_x_values.extend(curve_info['x_data'])
-                
-                if all_x_values:
-                    min_x, max_x = np.min(all_x_values), np.max(all_x_values)
+                x_arrays = self._collect_visible_curve_arrays('x_data')
+                if x_arrays:
+                    combined = np.concatenate(x_arrays)
+                    min_x, max_x = np.nanmin(combined), np.nanmax(combined)
                     self.vline.setBounds([min_x, max_x])
                     return min_x, max_x
             elif self.curve is not None:
@@ -5193,14 +5225,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 
                 # 统一更新坐标轴
                 self._update_axes_for_multi_curve(update_x_range=False)
-                
+
                 # 统一更新cursor边界
-                all_x_values = []
-                for curve_info in self.curves.values():
-                    if curve_info['visible'] and curve_info['x_data'] is not None:
-                        all_x_values.extend(curve_info['x_data'])
-                if all_x_values:
-                    min_x, max_x = np.min(all_x_values), np.max(all_x_values)
+                x_arrays = self._collect_visible_curve_arrays('x_data')
+                if x_arrays:
+                    combined = np.concatenate(x_arrays)
+                    min_x, max_x = np.nanmin(combined), np.nanmax(combined)
                     self.vline.setBounds([min_x, max_x])
                     self._update_cursor_after_plot(min_x, max_x)
                 
@@ -5744,17 +5774,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 因为所有plot的x轴都是linked的，改变x轴会影响其他plot
                 
                 # 1. 先计算所有曲线的全范围y值，用于设置y轴limits
-                all_y_values = []
-                for curve_info in self.curves.values():
-                    if curve_info['visible']:
-                        all_y_values.extend(curve_info['y_data'])
-                
-                if all_y_values:
-                    all_data_min_y = np.nanmin(all_y_values)
-                    all_data_max_y = np.nanmax(all_y_values)
-                    # 设置y轴limits为所有数据的范围
-                    self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
-                
+                y_arrays = self._collect_visible_curve_arrays('y_data')
+                if y_arrays:
+                    combined_y = np.concatenate(y_arrays)
+                    if combined_y.size:
+                        all_data_min_y = np.nanmin(combined_y)
+                        all_data_max_y = np.nanmax(combined_y)
+                        # 设置y轴limits为所有数据的范围
+                        self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
+
                 # 2. 再根据当前x范围设置y轴viewRange
                 # 检查是否是单点数据
                 special_limits = self.handle_single_point_limits(x_values, y_values)
@@ -5805,25 +5833,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
                     
                     # 3. 更新x轴limits（允许的最大范围）以包含所有曲线的数据
-                    all_x_values = []
-                    for curve_info in self.curves.values():
-                        if curve_info['visible']:
-                            all_x_values.extend(curve_info['x_data'])
-                    if all_x_values:
-                        data_min_x = np.min(all_x_values)
-                        data_max_x = np.max(all_x_values)
-                        padding_x = DEFAULT_PADDING_VAL_X
-                        limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                        limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                    x_arrays = self._collect_visible_curve_arrays('x_data')
+                    if x_arrays:
+                        combined_x = np.concatenate(x_arrays)
+                        if combined_x.size:
+                            data_min_x = np.nanmin(combined_x)
+                            data_max_x = np.nanmax(combined_x)
+                            padding_x = DEFAULT_PADDING_VAL_X
+                            limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                            limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
             # 更新cursor边界 - 使用所有曲线的x范围（而不仅仅是当前添加的变量）
-            all_x_values = []
-            for curve_info in self.curves.values():
-                if curve_info['visible'] and curve_info['x_data'] is not None:
-                    all_x_values.extend(curve_info['x_data'])
-            if all_x_values:
-                min_x, max_x = np.min(all_x_values), np.max(all_x_values)
+            x_arrays = self._collect_visible_curve_arrays('x_data')
+            if x_arrays:
+                combined_x = np.concatenate(x_arrays)
+                min_x, max_x = np.nanmin(combined_x), np.nanmax(combined_x)
             else:
                 # 如果没有其他曲线，使用当前变量的范围
                 min_x, max_x = np.min(x_values), np.max(x_values)
@@ -6092,70 +6117,64 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         if not self.curves:
             return
-            
-        # 计算所有可见曲线的数据范围
-        all_x_values = []
-        all_y_values = []
-        
-        for var_name, curve_info in self.curves.items():
-            if curve_info['visible']:
-                all_x_values.extend(curve_info['x_data'])
-                all_y_values.extend(curve_info['y_data'])
-        
-        if all_x_values and all_y_values:
-            x_values = np.array(all_x_values)
-            y_values = np.array(all_y_values)
-            
-            if update_x_range:
-                # 更新x和y轴范围（第一次添加曲线或批量添加完成）
-                self._setup_plot_axes(x_values, y_values, update_x_range=True)
+
+        pairs = self._collect_visible_curve_pairs()
+        if not pairs:
+            return
+        x_values = np.concatenate([p[0] for p in pairs])
+        y_values = np.concatenate([p[1] for p in pairs])
+        if x_values.size == 0 or y_values.size == 0:
+            return
+
+        if update_x_range:
+            # 更新x和y轴范围（第一次添加曲线或批量添加完成）
+            self._setup_plot_axes(x_values, y_values, update_x_range=True)
+        else:
+            # 保持x轴范围不变，只更新y轴范围
+
+            # 1. 先基于所有数据的全范围设置y轴limits
+            all_data_min_y = np.nanmin(y_values)
+            all_data_max_y = np.nanmax(y_values)
+            self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
+
+            # 2. 再根据当前x范围设置y轴viewRange
+            # 检查是否是单点数据
+            special_limits = self.handle_single_point_limits(x_values, y_values)
+            if special_limits:
+                # 单点数据：使用特殊处理
+                # handle_single_point_limits已经返回了扩展后的x范围，直接使用
+                min_x, max_x, min_y, max_y = special_limits
+                self._set_safe_y_range(min_y, max_y, set_limits=False)
+                # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
+                self._set_x_limits_with_min_range(min_x, max_x)
             else:
-                # 保持x轴范围不变，只更新y轴范围
-                
-                # 1. 先基于所有数据的全范围设置y轴limits
-                all_data_min_y = np.nanmin(y_values)
-                all_data_max_y = np.nanmax(y_values)
-                self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
-                
-                # 2. 再根据当前x范围设置y轴viewRange
-                # 检查是否是单点数据
-                special_limits = self.handle_single_point_limits(x_values, y_values)
-                if special_limits:
-                    # 单点数据：使用特殊处理
-                    # handle_single_point_limits已经返回了扩展后的x范围，直接使用
-                    min_x, max_x, min_y, max_y = special_limits
-                    self._set_safe_y_range(min_y, max_y, set_limits=False)
-                    # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
-                    self._set_x_limits_with_min_range(min_x, max_x)
-                else:
-                    # 正常数据
-                    current_x_range = self.view_box.viewRange()[0]
-                    x_min, x_max = current_x_range
-                    
-                    # 计算所有曲线在当前x轴范围内的y值范围
-                    all_y_in_range = []
-                    for var_name, curve_info in self.curves.items():
-                        if curve_info['visible']:
-                            min_y, max_y = self._get_y_range_in_x_window(
-                                np.array(curve_info['x_data']), 
-                                np.array(curve_info['y_data']), 
-                                x_min, 
-                                x_max
-                            )
-                            all_y_in_range.extend([min_y, max_y])
-                    
-                    if all_y_in_range:
-                        final_min_y = np.nanmin(all_y_in_range)
-                        final_max_y = np.nanmax(all_y_in_range)
-                        self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
-                    
-                    # 3. 更新x轴limits（允许的最大范围）
-                    data_min_x = np.min(x_values)
-                    data_max_x = np.max(x_values)
-                    padding_x = DEFAULT_PADDING_VAL_X
-                    limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                    limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                    self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                # 正常数据
+                current_x_range = self.view_box.viewRange()[0]
+                x_min, x_max = current_x_range
+
+                # 计算所有曲线在当前x轴范围内的y值范围
+                all_y_in_range = []
+                for x_arr, y_arr in pairs:
+                    min_y, max_y = self._get_y_range_in_x_window(
+                        x_arr,
+                        y_arr,
+                        x_min,
+                        x_max
+                    )
+                    all_y_in_range.extend([min_y, max_y])
+
+                if all_y_in_range:
+                    final_min_y = np.nanmin(all_y_in_range)
+                    final_max_y = np.nanmax(all_y_in_range)
+                    self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+
+                # 3. 更新x轴limits（允许的最大范围）
+                data_min_x = np.min(x_values)
+                data_max_x = np.max(x_values)
+                padding_x = DEFAULT_PADDING_VAL_X
+                limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
@@ -6618,6 +6637,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         try:
             self._is_interacting = False
             self._queue_ui_refresh(immediate=True)
+            if getattr(self, '_pending_cursor_geometry_update', False):
+                self._pending_cursor_geometry_update = False
+                self._schedule_cursor_geometry_update()
         except Exception as e:
             print(f"???????: {e}")
 
@@ -6626,11 +6648,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         if getattr(self, '_cursor_refresh_timer', None) is None:
             return
+        if getattr(self, '_is_interacting', False):
+            self._pending_cursor_geometry_update = True
+            return
+        self._pending_cursor_geometry_update = False
         # 重启单次定时器，合并短时间内的多次请求
-        self._cursor_refresh_timer.start(0)
+        self._cursor_refresh_timer.start(max(15, UI_DEBOUNCE_DELAY_MS // 2))
 
     def _refresh_cursor_geometry(self):
         if not hasattr(self, 'vline') or not self.vline.isVisible():
+            return
+        if getattr(self, '_is_interacting', False):
+            self._pending_cursor_geometry_update = True
             return
         if self.show_values_only:
             self._show_x_position_only()
@@ -9155,10 +9184,13 @@ if __name__ == "__main__":
     window.show()
     sys.exit(app.exec())
 
-    # compile
-    # mac: pyinstaller --noconsole --onefile --add-data "README.md:." test_pyqt6_v5.py
-    # win: pyinstaller --noconsole --onefile --add-data "README.md;." test_pyqt6_v5.py
+# pyinstaller
+#     - one file
+# pyinstaller test_pyqt6_v5.py --onefile --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --noupx --clean --noconfirm
+#     - one dir
+# pyinstaller test_pyqt6_v5.py --onedir --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --clean --noconfirm
 
-    # nuitka
-    # nuitka --onefile --standalone --output-filename=test_pyqt6_v5 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data test_pyqt6_v5.py
-    
+
+# nuitka
+# nuitka --onefile --standalone --output-filename=test_pyqt6_v5 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data test_pyqt6_v5.py
+
