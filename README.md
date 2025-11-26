@@ -70,7 +70,7 @@
 
 2. **运行程序**
    ```
-   python test_pyqt6_v5.py
+   python csv_plot_pyqt6.py
    ```
 
 ## 使用指南
