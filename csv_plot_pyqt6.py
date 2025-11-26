@@ -13,7 +13,7 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker
 from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
@@ -623,7 +623,6 @@ class FastDataLoader:
             if idx % 5 == 0:
                 import gc
                 gc.collect()
-                
         return pd.concat(chunks, ignore_index=True)
 
     def _downcast_numeric(self) -> None:
@@ -769,8 +768,7 @@ class DropOverlay(QWidget):
             self.label.setText("请丢入数据")
         else:
             self.label.setText("数据格式不支持")
-                               
-        
+                       
     def adjust_font(self):
         # 根据 label 当前尺寸动态字号
         side = min(self.label.width(), self.label.height())
@@ -1085,8 +1083,10 @@ class DataTableDialog(QMainWindow):
         self.main_view.horizontalHeader().setFont(font)
         self.frozen_view.horizontalHeader().setFont(font)
 
-        self.main_view.verticalScrollBar().valueChanged.connect(self.frozen_view.verticalScrollBar().setValue)
-        self.frozen_view.verticalScrollBar().valueChanged.connect(self.main_view.verticalScrollBar().setValue)
+        self._syncing_vertical_scroll = False
+        self._syncing_row_height = False
+        self.main_view.verticalScrollBar().valueChanged.connect(self._on_main_vertical_scroll)
+        self.frozen_view.verticalScrollBar().valueChanged.connect(self._on_frozen_vertical_scroll)
         self.main_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
         self.frozen_view.verticalHeader().sectionResized.connect(self._sync_row_heights)
         self.main_view.horizontalHeader().setResizeContentsPrecision(1)  # 0: BalanceSpeedAndAccuracy, 試1 (Speed)
@@ -1152,6 +1152,22 @@ class DataTableDialog(QMainWindow):
     def _update_user_left_width(self, pos, index):
         if index == 1:  # Handle for the first splitter section
             self.user_left_width = self.splitter.sizes()[0]
+
+    def _on_main_vertical_scroll(self, value: int):
+        self._sync_vertical_scrollbars(self.frozen_view.verticalScrollBar(), value)
+
+    def _on_frozen_vertical_scroll(self, value: int):
+        self._sync_vertical_scrollbars(self.main_view.verticalScrollBar(), value)
+
+    def _sync_vertical_scrollbars(self, target_scrollbar, value: int):
+        if self._syncing_vertical_scroll:
+            return
+        self._syncing_vertical_scroll = True
+        try:
+            if target_scrollbar.value() != value:
+                target_scrollbar.setValue(value)
+        finally:
+            self._syncing_vertical_scroll = False
 
     def _cancel_plot_drag_indicator(self):
         main_window = self._get_owner_window()
@@ -1895,11 +1911,26 @@ class DataTableDialog(QMainWindow):
 
 
     def _sync_row_heights(self, logicalIndex, oldSize, newSize):
+        if self._syncing_row_height:
+            return
         sender = self.sender()
+        target_header = None
+        target_view = None
         if sender == self.main_view.verticalHeader():
-            self.frozen_view.setRowHeight(logicalIndex, newSize)
-        elif sender == self.sender() == self.frozen_view.verticalHeader():
-            self.main_view.setRowHeight(logicalIndex, newSize)     
+            target_header = self.frozen_view.verticalHeader()
+            target_view = self.frozen_view
+        elif sender == self.frozen_view.verticalHeader():
+            target_header = self.main_view.verticalHeader()
+            target_view = self.main_view
+        if target_view is None:
+            return
+        self._syncing_row_height = True
+        try:
+            current_size = target_header.sectionSize(logicalIndex)
+            if current_size != newSize:
+                target_view.setRowHeight(logicalIndex, newSize)
+        finally:
+            self._syncing_row_height = False
 
     def _on_frozen_header_right_click(self, pos):
         self._on_header_right_click(pos, self.frozen_view)
@@ -3086,6 +3117,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
         self._is_being_destroyed = False  # 标志：对象正在被销毁
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
+        self._cursor_label_busy = False
+        self._cursor_label_dirty = False
         self._drag_indicator_source = None
         self._drag_indicator_guard = QTimer(self)
         self._drag_indicator_guard.setInterval(120)
@@ -3897,6 +3930,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     widget = container.plot_widget
                     if widget.is_cursor_pinned and widget != self:
                         # 同步其他被pin的plot
+                        blocker = QSignalBlocker(widget.vline)
                         widget.vline.setPos(x_pos)
                         widget.update_cursor_label()
                         widget.pinned_x_value = x_pos
@@ -3904,6 +3938,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                             widget.pinned_index_value = (x_pos - widget.offset) / widget.factor
                         else:
                             widget.pinned_index_value = None
+            self.update_cursor_label()
         else:
             # 正常模式下更新cursor标签
             if self.show_values_only:
@@ -3976,8 +4011,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """更新光标标签位置和内容"""
         if self._is_cursor_update_locked():
             return
-        # 统一使用多曲线样式的cursor显示
-        self._update_multi_curve_cursor_label()
+        if self._cursor_label_busy:
+            self._cursor_label_dirty = True
+            return
+        self._cursor_label_busy = True
+        try:
+            # 统一使用多曲线样式的cursor显示
+            self._update_multi_curve_cursor_label()
+        finally:
+            self._cursor_label_busy = False
+        if self._cursor_label_dirty:
+            self._cursor_label_dirty = False
+            self.update_cursor_label()
     
     def _update_single_curve_cursor_label(self):
         """更新单曲线模式的光标标签"""
@@ -4848,6 +4893,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     else:
                         widget.pinned_index_value = None
                     widget.vline.setMovable(True)
+                    blocker = QSignalBlocker(widget.vline)
                     widget.vline.setPos(display_x)
                     
                     # 重置节流时间戳，确保update_cursor_label能立即执行
@@ -4858,8 +4904,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     if hasattr(widget.view_box, 'is_cursor_pinned'):
                         widget.view_box.is_cursor_pinned = True
                 
-                # 强制处理Qt事件队列，确保所有vline位置都已更新
-                QApplication.processEvents()
                 
                 # 然后再更新所有plot的cursor标签
                 for container in self.window().plot_widgets:
@@ -5092,6 +5136,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     index_max = (old_max - old_offset) / old_factor
                     new_min = new_offset + new_factor * index_min
                     new_max = new_offset + new_factor * index_max
+                    blocker = QSignalBlocker(self.mark_region)
                     self.mark_region.setRegion([new_min, new_max])
                     self.window().sync_mark_regions(self.mark_region)
         finally:
@@ -6295,6 +6340,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if self.mark_region:
             old_min, old_max = self.mark_region.getRegion()
             # 更新基于新factor/offset，但由于x是scaled的，不需要额外缩放
+            blocker = QSignalBlocker(self.mark_region)
             self.mark_region.setRegion([old_min, old_max])  # 实际不需要变，因为x已scale
 
     def get_mark_stats(self):
@@ -6993,6 +7039,8 @@ class MainWindow(QMainWindow):
         self._mark_stats_timer = QTimer(self)
         self._mark_stats_timer.setSingleShot(True)
         self._mark_stats_timer.timeout.connect(self._flush_mark_stats_refresh)
+        self._is_syncing_crosshair = False
+        self._is_syncing_mark_region = False
 
         # value cache
         self.value_cache = {}
@@ -7942,11 +7990,20 @@ class MainWindow(QMainWindow):
                 # Do not set to None to maintain singleton
 
     def sync_mark_regions(self, region_item):
-        min_x, max_x = region_item.getRegion()
-        for container in self.plot_widgets:
-            if container.isVisible() and container.plot_widget.mark_region and container.plot_widget.mark_region != region_item:
-                container.plot_widget.mark_region.setRegion([min_x, max_x])
-        self.request_mark_stats_refresh(immediate=True)
+        if self._is_syncing_mark_region:
+            return
+        self._is_syncing_mark_region = True
+        try:
+            min_x, max_x = region_item.getRegion()
+            for container in self.plot_widgets:
+                mark = getattr(container.plot_widget, 'mark_region', None)
+                if not (container.isVisible() and mark and mark is not region_item):
+                    continue
+                blocker = QSignalBlocker(mark)
+                mark.setRegion([min_x, max_x])
+            self.request_mark_stats_refresh()
+        finally:
+            self._is_syncing_mark_region = False
 
     def request_mark_stats_refresh(self, *, immediate: bool = False):
         if not getattr(self, 'mark_stats_window', None):
@@ -8231,43 +8288,43 @@ class MainWindow(QMainWindow):
                 widget._last_cursor_update_time = 0
             widget.update_cursor_label()
 
-        QApplication.processEvents()
 
     def sync_crosshair(self, x, sender_widget):
         if not self.cursor_btn.isChecked():
             return
         if getattr(self, "_is_loading_new_data", False):
             return
-        
-        # 【性能优化】交互期间跳过cursor同步，避免拖拽/缩放时卡顿
+        if self._is_syncing_crosshair:
+            return
+
+        # ???????????
         if sender_widget and getattr(sender_widget, '_is_interacting', False):
             return
-        
-        # 检查是否有任何plot处于pin状态
-        has_pinned_plot = False
-        for container in self.plot_widgets:
-            w = container.plot_widget
-            if w.is_cursor_pinned:
-                has_pinned_plot = True
-                break
-        
-        # 如果有plot被pin，完全忽略鼠标移动的同步
-        if has_pinned_plot:
-            # 不更新任何plot的cursor位置，保持pin状态
-            pass
-        else:
-            # 没有plot被pin，正常同步所有plot
-            # 性能优化：只更新可见的plots，且跳过交互中的plot
+
+        self._is_syncing_crosshair = True
+        try:
+            has_pinned_plot = False
+            for container in self.plot_widgets:
+                w = container.plot_widget
+                if w.is_cursor_pinned:
+                    has_pinned_plot = True
+                    break
+
+            if has_pinned_plot:
+                return
+
             for container in self.plot_widgets:
                 if not container.isVisible():
                     continue
                 w = container.plot_widget
-                # 跳过交互中的plot，避免性能问题
                 if getattr(w, '_is_interacting', False):
                     continue
                 w.vline.setVisible(True)
+                blocker = QSignalBlocker(w.vline)
                 w.vline.setPos(x)
                 w.update_cursor_label()
+        finally:
+            self._is_syncing_crosshair = False
 
     def reset_all_pin_states(self):
         """
@@ -9186,11 +9243,10 @@ if __name__ == "__main__":
 
 # pyinstaller
 #     - one file
-# pyinstaller test_pyqt6_v5.py --onefile --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --noupx --clean --noconfirm
+# pyinstaller csv_plot_pyqt6.py --onefile --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --noupx --clean --noconfirm
 #     - one dir
-# pyinstaller test_pyqt6_v5.py --onedir --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --clean --noconfirm
+# pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --clean --noconfirm
 
 
 # nuitka
-# nuitka --onefile --standalone --output-filename=test_pyqt6_v5 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data test_pyqt6_v5.py
-
+# nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
