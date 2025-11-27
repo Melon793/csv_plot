@@ -5,6 +5,10 @@ import weakref
 import numpy as np
 import pandas as pd
 import logging
+import faulthandler
+import signal
+import threading
+import traceback
 from typing import Any
 
 if sys.platform == "darwin":  # macOS
@@ -14,7 +18,7 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, QtMsgType, qInstallMessageHandler
 from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
@@ -35,6 +39,11 @@ if DEBUG_LOG_ENABLED and not _DEBUG_LOGGER.handlers:
 else:
     _DEBUG_LOGGER.addHandler(logging.NullHandler())
 
+_FAULTHANDLER_FILE = None
+_ORIGINAL_EXCEPTHOOK = sys.excepthook
+_ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
+_QT_MESSAGE_HANDLER_INSTALLED = False
+
 
 def debug_log(message: str, *args) -> None:
     """简单封装，方便随处开关调试日志"""
@@ -44,6 +53,76 @@ def debug_log(message: str, *args) -> None:
         _DEBUG_LOGGER.debug(message, *args)
     except Exception:
         pass
+
+
+def _install_faulthandler() -> None:
+    """启用 faulthandler 并记录 native crash。"""
+    global _FAULTHANDLER_FILE
+    if not DEBUG_LOG_ENABLED or _FAULTHANDLER_FILE is not None:
+        return
+    try:
+        log_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(log_dir, "csv_plot_faulthandler.log")
+        _FAULTHANDLER_FILE = open(path, "a", encoding="utf-8")
+        faulthandler.enable(_FAULTHANDLER_FILE, all_threads=True)
+        for sig in (signal.SIGSEGV, signal.SIGFPE, signal.SIGABRT, signal.SIGILL):
+            try:
+                faulthandler.register(sig, file=_FAULTHANDLER_FILE, all_threads=True, chain=True)
+            except (ValueError, OSError):
+                continue
+        debug_log("Faulthandler enabled at %s", path)
+    except Exception as exc:
+        debug_log("Failed to enable faulthandler: %s", exc)
+
+
+def _log_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
+    formatted = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    debug_log("Uncaught exception:\n%s", formatted)
+    if _ORIGINAL_EXCEPTHOOK:
+        _ORIGINAL_EXCEPTHOOK(exc_type, exc_value, exc_traceback)
+
+
+def _threading_exception_logger(args):
+    formatted = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+    thread_name = getattr(args.thread, "name", "unknown")
+    debug_log("Thread %s crashed:\n%s", thread_name, formatted)
+    if _ORIGINAL_THREADING_EXCEPTHOOK:
+        _ORIGINAL_THREADING_EXCEPTHOOK(args)
+
+
+def _qt_message_handler(mode, context, message):
+    level_map = {
+        QtMsgType.QtDebugMsg: "DEBUG",
+        QtMsgType.QtInfoMsg: "INFO",
+        QtMsgType.QtWarningMsg: "WARNING",
+        QtMsgType.QtCriticalMsg: "CRITICAL",
+        QtMsgType.QtFatalMsg: "FATAL",
+    }
+    location = ""
+    if context and context.file:
+        location = f"{context.file}:{context.line}"
+    elif context and context.category:
+        location = context.category
+    debug_log("QtMsg[%s] %s %s", level_map.get(mode, str(mode)), message, location)
+
+
+def install_global_debug_hooks(app: QApplication) -> None:
+    """一次性安装崩溃/日志钩子，便于定位 native 问题。"""
+    if not DEBUG_LOG_ENABLED:
+        return
+    _install_faulthandler()
+    if sys.excepthook is not _log_uncaught_exception:
+        sys.excepthook = _log_uncaught_exception
+    if hasattr(threading, "excepthook") and threading.excepthook is not _threading_exception_logger:
+        threading.excepthook = _threading_exception_logger
+    global _QT_MESSAGE_HANDLER_INSTALLED
+    if not _QT_MESSAGE_HANDLER_INSTALLED:
+        qInstallMessageHandler(_qt_message_handler)
+        _QT_MESSAGE_HANDLER_INSTALLED = True
+    try:
+        app.aboutToQuit.connect(lambda: debug_log("QApplication.aboutToQuit emitted"))
+    except Exception as exc:
+        debug_log("Failed to connect aboutToQuit: %s", exc)
 
 
 global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, XRANGE_THRESHOLD_FOR_SYMBOLS
@@ -5763,7 +5842,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._reset_plot_limits()
         self._clear_plot_data()
         
-    def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None, y_format: str = None, skip_existence_check: bool = False, show_duplicate_warning: bool = True) -> bool:
+    def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
+                             y_format: str = None, skip_existence_check: bool = False,
+                             show_duplicate_warning: bool = True, preferred_color: str | None = None) -> bool:
         """添加变量到多曲线绘图
         
         这是多曲线绘图的核心方法，支持以下功能：
@@ -5786,6 +5867,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             y_format: Y轴格式（可选，如's'时间格式、'date'日期格式等）
             skip_existence_check: 是否跳过存在性检查（内部使用）
             show_duplicate_warning: 是否显示重复变量警告（批量添加时设为False）
+            preferred_color: 恢复曲线时指定的颜色（可选）
             
         Returns:
             bool: 添加是否成功。失败原因可能是：变量已存在、数据无效等
@@ -5829,17 +5911,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.current_color_index = 1  # 从第二个颜色开始
                 
                 # 如果要添加的变量与已迁移的相同，直接返回
-                if var_name == self.y_name:
-                    if not skip_existence_check and show_duplicate_warning:
+                if var_name == self.y_name and not skip_existence_check:
+                    if show_duplicate_warning:
                         QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
                     return False
             
             # 如果当前是单曲线模式，需要先转换到多曲线模式
             if not self.is_multi_curve_mode and self.curve and self.y_name:
                 # 检查要添加的变量是否与当前单曲线相同
-                if var_name == self.y_name:
+                if var_name == self.y_name and not skip_existence_check:
                     # 相同变量，不需要转换模式，直接返回
-                    if not skip_existence_check and show_duplicate_warning:
+                    if show_duplicate_warning:
                         QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
                     return False
                 
@@ -5861,8 +5943,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.current_color_index = 1  # 从第二个颜色开始
             
             # 选择颜色
-            color = self.curve_colors[self.current_color_index % len(self.curve_colors)]
+            default_color = self.curve_colors[self.current_color_index % len(self.curve_colors)]
             self.current_color_index += 1
+            color = preferred_color or default_color
             
             # ========== 性能优化：创建曲线并配置渲染选项 ==========
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
@@ -6097,7 +6180,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if var_name in self.curves:
                 curve_info = self.curves[var_name]
                 # 重新绘制曲线
-                success = self.add_variable_to_plot(var_name, skip_existence_check=True)
+                success = self.add_variable_to_plot(
+                    var_name,
+                    skip_existence_check=True,
+                    preferred_color=curve_info.get('color')
+                )
                 if success:
                     pass
                 else:
@@ -8636,6 +8723,10 @@ class MainWindow(QMainWindow):
                         # 重新加载数据时完全清除对象池，避免复用异常状态的items
                         widget._clear_cursor_items(hide_only=False)
                         widget._safe_clear_plot_items()
+                        widget.curve = None
+                        widget.y_name = ''
+                        widget.original_index_x = None
+                        widget.original_y = None
                         
                         # 重新添加有效的曲线
                         curves_added = 0
@@ -8644,7 +8735,12 @@ class MainWindow(QMainWindow):
                         for var_name, curve_info in current_curves.items():
                             if var_name in self.loader.df.columns and self.loader.df_validity.get(var_name, -1) >= 0:
                                 # 变量仍然有效，重新绘制
-                                success = widget.add_variable_to_plot(var_name, skip_existence_check=True)
+                                preferred_color = curve_info.get('color')
+                                success = widget.add_variable_to_plot(
+                                    var_name,
+                                    skip_existence_check=True,
+                                    preferred_color=preferred_color
+                                )
                                 if success:
                                     curves_added += 1
                                     # 保存原来的可见性状态，稍后恢复
@@ -9322,6 +9418,7 @@ if __name__ == "__main__":
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    install_global_debug_hooks(app)
     
     
     if sys.platform == "win32":
