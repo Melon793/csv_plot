@@ -4,6 +4,7 @@ import os
 import weakref
 import numpy as np
 import pandas as pd
+import logging
 from typing import Any
 
 if sys.platform == "darwin":  # macOS
@@ -23,6 +24,26 @@ from PyQt6.QtWidgets import (
 )
 import pyqtgraph as pg
 from threading import Lock
+DEBUG_LOG_ENABLED = True  # 临时排查日志开关
+_DEBUG_LOGGER = logging.getLogger("csv_plot_debug")
+if DEBUG_LOG_ENABLED and not _DEBUG_LOGGER.handlers:
+    _DEBUG_LOGGER.setLevel(logging.DEBUG)
+    _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csv_plot_debug.log")
+    _log_handler = logging.FileHandler(_log_path, encoding="utf-8")
+    _log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _DEBUG_LOGGER.addHandler(_log_handler)
+else:
+    _DEBUG_LOGGER.addHandler(logging.NullHandler())
+
+
+def debug_log(message: str, *args) -> None:
+    """简单封装，方便随处开关调试日志"""
+    if not DEBUG_LOG_ENABLED:
+        return
+    try:
+        _DEBUG_LOGGER.debug(message, *args)
+    except Exception:
+        pass
 
 
 global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, XRANGE_THRESHOLD_FOR_SYMBOLS
@@ -280,8 +301,17 @@ class DataLoadThread(QThread):
         在后台线程中执行数据加载操作，避免阻塞主界面
         通过信号机制向主线程发送进度更新和结果
         """
+        debug_log("DataLoadThread.start path=%s descRows=%s sep=%s hasunit=%s",
+                  self.file_path, self.descRows, self.sep, self.hasunit)
         try:
+            last_logged = {"value": -10}
             def _progress_cb(progress: int):
+                if DEBUG_LOG_ENABLED:
+                    prev = last_logged["value"]
+                    if progress in (0, 100) or progress - prev >= 10:
+                        debug_log("DataLoadThread.progress path=%s value=%s",
+                                  self.file_path, progress)
+                        last_logged["value"] = progress
                 self.progress.emit(progress)
 
             # 检查文件是否仍然存在
@@ -300,12 +330,19 @@ class DataLoadThread(QThread):
                 chunksize=3600,          
                 _progress= _progress_cb,
             )
+            debug_log("DataLoadThread.finish path=%s datalength=%s columns=%s",
+                      self.file_path,
+                      getattr(loader, "datalength", None),
+                      len(getattr(loader, "var_names", []) or []))
             self.finished.emit(loader)
         except MemoryError:
+            debug_log("DataLoadThread.memory_error path=%s", self.file_path)
             self.error.emit("内存不足，无法加载此文件。请尝试加载较小的文件。")
         except OSError as e:
+            debug_log("DataLoadThread.os_error path=%s err=%s", self.file_path, e)
             self.error.emit(f"文件访问错误: {e}")
         except Exception as e:
+            debug_log("DataLoadThread.exception path=%s err=%r", self.file_path, e)
             self.error.emit(f"加载文件时发生未知错误: {str(e)}")
 
 class FastDataLoader:
@@ -3684,6 +3721,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             tasks.append("stats")
         if not tasks:
             return
+        if DEBUG_LOG_ENABLED and (immediate or getattr(self, '_is_updating_data', False)):
+            debug_log(
+                "Plot._queue_ui_refresh y=%s tasks=%s immediate=%s updating=%s pinned=%s loading=%s",
+                getattr(self, 'y_name', None),
+                tasks,
+                immediate,
+                getattr(self, '_is_updating_data', False),
+                getattr(self, 'is_cursor_pinned', False),
+                bool(self.window() and getattr(self.window(), '_is_loading_new_data', False)),
+            )
         if immediate:
             self._ui_refresh.run_immediately(*tasks)
         else:
@@ -3698,21 +3745,42 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _run_style_refresh(self):
         if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+            if DEBUG_LOG_ENABLED:
+                debug_log(
+                    "Plot._run_style_refresh skipped y=%s updating=%s destroying=%s",
+                    getattr(self, "y_name", None),
+                    getattr(self, "_is_updating_data", False),
+                    getattr(self, "_is_being_destroyed", False),
+                )
             return
         if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
+            if DEBUG_LOG_ENABLED:
+                debug_log("Plot._run_style_refresh exec y=%s", getattr(self, "y_name", None))
             self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
 
     def _run_cursor_refresh(self):
         if getattr(self, '_is_interacting', False):
+            if DEBUG_LOG_ENABLED:
+                debug_log("Plot._run_cursor_refresh skipped-interacting y=%s", getattr(self, "y_name", None))
             return
         if hasattr(self, 'vline') and self.vline.isVisible():
             try:
+                if DEBUG_LOG_ENABLED:
+                    debug_log("Plot._run_cursor_refresh exec y=%s pinned=%s",
+                              getattr(self, "y_name", None),
+                              getattr(self, "is_cursor_pinned", False))
                 self.update_cursor_label()
             except Exception:
                 pass
 
     def _run_stats_refresh(self):
         main_window = self.window()
+        if DEBUG_LOG_ENABLED:
+            debug_log(
+                "Plot._run_stats_refresh window=%s has_mark_stats=%s",
+                bool(main_window),
+                bool(main_window and getattr(main_window, "mark_stats_window", None)),
+            )
         if main_window is not None:
             main_window.request_mark_stats_refresh(immediate=True)
 
@@ -4009,6 +4077,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
+        debug_log(
+            "Plot.update_cursor_label start y=%s locked=%s busy=%s dirty=%s",
+            getattr(self, "y_name", None),
+            self._is_cursor_update_locked(),
+            getattr(self, "_cursor_label_busy", False),
+            getattr(self, "_cursor_label_dirty", False),
+        )
         if self._is_cursor_update_locked():
             return
         if self._cursor_label_busy:
@@ -4716,12 +4791,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.multi_cursor_items.append(text_item)
 
     def toggle_cursor(self, show: bool, hide_values_only: bool = False):
-        """切换光标显示状态
-        
-        Args:
-            show: 是否显示cursor
-            hide_values_only: 如果为True，只隐藏圆圈和y值标签，保留vline和x值
-        """
+        """切换光标显示状态"""
+        debug_log(
+            "Plot.toggle_cursor start y=%s show=%s hide_values_only=%s data_ready=%s",
+            getattr(self, "y_name", None),
+            show,
+            hide_values_only,
+            bool(self.curve or self.curves),
+        )
+
         if hide_values_only:
             # 只隐藏圆圈和y值标签，保留vline和x值
             self.vline.setVisible(True)
@@ -4816,6 +4894,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         Args:
             x_value (float): 要固定到的x坐标值 (这是显示坐标)
         """
+        debug_log("Plot.pin_cursor request x=%s multi_mode=%s curve_count=%s",
+                  x_value, getattr(self, "is_multi_curve_mode", False),
+                  len(getattr(self, "curves", {}) or []))
         if not self.window() or not hasattr(self.window(), 'cursor_btn') or not self.window().cursor_btn.isChecked():
             # 如果cursor未显示，先显示cursor
             self.window().cursor_btn.setChecked(True)
@@ -4918,6 +4999,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         解除所有plot的cursor固定状态，恢复cursor跟随鼠标移动的默认行为。
         同时将vline设置为不可移动状态。
         """
+        debug_log("Plot.free_cursor invoked window=%s", bool(self.window()))
         self.is_cursor_pinned = False
         self.pinned_x_value = None
         self.pinned_index_value = None
@@ -7501,6 +7583,12 @@ class MainWindow(QMainWindow):
         if self._is_loading_new_data:
             return
         self._is_loading_new_data = True
+        pinned = [
+            idx for idx, container in enumerate(getattr(self, "plot_widgets", []), start=1)
+            if getattr(container, "plot_widget", None)
+            and getattr(container.plot_widget, "is_cursor_pinned", False)
+        ]
+        debug_log("MainWindow.begin_data_reload pinned_plots=%s", pinned)
         try:
             self.reset_all_pin_states()
         except Exception:
@@ -7522,6 +7610,7 @@ class MainWindow(QMainWindow):
         if not self._is_loading_new_data:
             return
         self._is_loading_new_data = False
+        debug_log("MainWindow.end_data_reload resume_ui")
         for container in getattr(self, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if not widget:
@@ -7540,6 +7629,8 @@ class MainWindow(QMainWindow):
         Args:
             file_path: CSV文件路径
         """
+        debug_log("MainWindow.load_csv_file start path=%s is_loading=%s",
+                  file_path, getattr(self, "_is_loading_new_data", False))
         if not self._validate_file_path(file_path):
             return
             
@@ -7641,6 +7732,8 @@ class MainWindow(QMainWindow):
 
         # < 5 MB 直接读
         file_size =os.path.getsize(file_path)
+        debug_log("MainWindow._load_file start path=%s size=%.2fMB reload=%s",
+                  file_path, file_size/1024/1024, is_reload)
         try:
             if file_size < _Threshold_Size_Mb * 1024 * 1024:
                 try:
@@ -7650,8 +7743,11 @@ class MainWindow(QMainWindow):
                 if status:
                     self.set_button_status(True)
                     self._post_load_actions(file_path)
+                else:
+                    debug_log("MainWindow._load_file sync load failed path=%s", file_path)
             else:
                 # 5 MB 以上走线程
+                debug_log("MainWindow._load_file spawn thread path=%s", file_path)
                 self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
                 self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
                 self._progress.setAutoClose(True)
@@ -7825,6 +7921,8 @@ class MainWindow(QMainWindow):
                    sep: str = ',',
                    hasunit: bool = True):
         """小文件直接读"""
+        debug_log("MainWindow._load_sync start path=%s descRows=%s sep=%s hasunit=%s",
+                  file_path, descRows, sep, hasunit)
         # 验证参数
         is_valid, error_msg = self._validate_load_parameters(file_path, descRows, sep, hasunit)
         if not is_valid:
@@ -7852,13 +7950,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "读取失败", f"加载文件时发生错误: {str(e)}")
             status = False
         finally:
+            debug_log("MainWindow._load_sync done path=%s status=%s rows=%s",
+                      file_path, status,
+                      getattr(loader, "datalength", None) if loader is not None else None)
             if loader is not None:
                 loader = None
             return status
 
     def _on_load_done(self,loader, file_path: str):
         self._progress.close()
-        
+        debug_log("MainWindow._on_load_done apply new loader path=%s", file_path)
         # 清理旧的loader数据（无论是重载还是加载新数据）
         if hasattr(self, 'loader') and self.loader is not None:
             if hasattr(self.loader, '_df'):
@@ -7872,11 +7973,15 @@ class MainWindow(QMainWindow):
 
     def _on_load_error(self, msg):
         self._progress.close()
+        debug_log("MainWindow._on_load_error %s", msg)
         QMessageBox.critical(self, "读取失败", msg)
         self._end_data_reload()
 
     def _apply_loader(self):
         """把 loader 的内容同步到 UI"""
+        debug_log("MainWindow._apply_loader datalength=%s columns=%s",
+                  getattr(self.loader, "datalength", None),
+                  len(getattr(self.loader, "var_names", []) or []))
         self.var_names = self.loader.var_names
         self.units = self.loader.units
         self.time_channels_infos = self.loader.time_channels_info
@@ -8154,6 +8259,7 @@ class MainWindow(QMainWindow):
                 for u in urls:
                     path = u.toLocalFile()
                     if self._extract_file_extension(path) is not None:
+                        debug_log("MainWindow.eventFilter drop load path=%s", path)
                         self.load_csv_file(path)
                         event.accept()
                         return True
@@ -8169,8 +8275,10 @@ class MainWindow(QMainWindow):
         self.drop_overlay.hide()
 
 
-    def reset_plots_after_loading(self,index_xMin,index_xMax):
+    def reset_plots_after_loading(self,index_xMin,index_xMax, *, reason: str | None = None):
         # 【安全标志】设置所有widget为更新中状态
+        debug_log("MainWindow.reset_plots_after_loading reason=%s range=(%s,%s)",
+                  reason, index_xMin, index_xMax)
         for container in self.plot_widgets:
             container.plot_widget._is_updating_data = True
             if hasattr(container.plot_widget, '_cancel_ui_refresh'):
@@ -8218,6 +8326,8 @@ class MainWindow(QMainWindow):
         Args:
             checked: True表示显示cursor，False表示隐藏cursor
         """
+        debug_log("MainWindow.toggle_cursor_all start checked=%s has_plot=%s",
+                  checked, len(self.plot_widgets))
         for container in self.plot_widgets:
             widget = container.plot_widget
             # 根据全局cursor_values_hidden状态决定如何显示cursor
@@ -8333,6 +8443,8 @@ class MainWindow(QMainWindow):
         遍历所有plot widget，将它们的cursor从固定状态重置为默认状态。
         用于数据重载、清除图表等操作时统一重置pin状态。
         """
+        debug_log("MainWindow.reset_all_pin_states total=%s",
+                  len(getattr(self, "plot_widgets", [])))
         for container in self.plot_widgets:
             container.plot_widget.reset_pin_state()
 
@@ -8465,7 +8577,8 @@ class MainWindow(QMainWindow):
 
             unique_y_names = set(all_y_names)
             if not unique_y_names:
-                self.reset_plots_after_loading(1, self.loader.datalength)
+                debug_log("MainWindow.replots_after_loading no tracked curves, reset plots")
+                self.reset_plots_after_loading(1, self.loader.datalength, reason="no tracked curves")
                 return
 
             # 【NumPy优化】批量检查validity：先过滤出在var_names中的变量，然后批量检查validity
@@ -8484,12 +8597,15 @@ class MainWindow(QMainWindow):
                 found = []
             
             ratio = len(found) / len(unique_y_names) if unique_y_names else 0
+            debug_log("MainWindow.replots_after_loading reuse_ratio=%.2f tracked=%s valid=%s",
+                      ratio, len(unique_y_names), len(found))
             
             # 初始化cleared列表（用于记录被清除的plot）
             cleared = []
 
             if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
-                self.reset_plots_after_loading(1, self.loader.datalength)
+                debug_log("MainWindow.replots_after_loading reset due to low ratio %.2f", ratio)
+                self.reset_plots_after_loading(1, self.loader.datalength, reason="insufficient valid vars")
             else:
                 self.value_cache = {}
                 global DEFAULT_PADDING_VAL_X
