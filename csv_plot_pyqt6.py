@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 )
 import pyqtgraph as pg
 from threading import Lock
-DEBUG_LOG_ENABLED = True  # 临时排查日志开关
+DEBUG_LOG_ENABLED = False  # 临时排查日志开关
 _DEBUG_LOGGER = logging.getLogger("csv_plot_debug")
 if DEBUG_LOG_ENABLED and not _DEBUG_LOGGER.handlers:
     _DEBUG_LOGGER.setLevel(logging.DEBUG)
