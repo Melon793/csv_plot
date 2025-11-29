@@ -55,6 +55,36 @@ def debug_log(message: str, *args) -> None:
         pass
 
 
+def safe_callback(func):
+    """
+    装饰器：捕获回调中的异常，防止崩溃
+
+    【稳定性优化】用于保护关键的信号回调函数，防止因对象已销毁等原因导致的崩溃。
+    特别处理RuntimeError（C++对象已删除）和AttributeError。
+    """
+    from functools import wraps
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except RuntimeError as e:
+            # C++对象已删除
+            err_msg = str(e).lower()
+            if "deleted" in err_msg or "wrapped" in err_msg or "c++ object" in err_msg:
+                debug_log("%s skipped: object deleted", func.__name__)
+                return None
+            raise
+        except AttributeError as e:
+            # 属性访问错误（对象可能部分销毁）
+            debug_log("%s error: %s", func.__name__, e)
+            return None
+        except Exception as e:
+            debug_log("%s unexpected error: %s", func.__name__, e)
+            return None
+    return wrapper
+
+
 def _install_faulthandler() -> None:
     """启用 faulthandler 并记录 native crash。"""
     global _FAULTHANDLER_FILE
@@ -254,7 +284,7 @@ def get_main_loader() -> FastDataLoader | None:
 
 class UnifiedUpdateScheduler(QObject):
     """
-    ????????UI??????,??style/cursor/stat???,??200ms?????????????
+    统一UI更新调度器，合并style/cursor/stat等更新请求，延迟200ms批量执行避免频繁刷新
     """
     def __init__(self, *, delay_ms: int = UI_DEBOUNCE_DELAY_MS, order: tuple[str, ...] | None = None, parent=None):
         super().__init__(parent)
@@ -316,7 +346,7 @@ class UnifiedUpdateScheduler(QObject):
         try:
             callback()
         except Exception as e:
-            print(f"UI?????????? {name}: {e}")
+            print(f"UI更新调度器执行 {name} 出错: {e}")
 
 class HelpDialog(QDialog):
     """
@@ -2840,7 +2870,7 @@ class MyTableWidget(QTableWidget):
         drag.exec(Qt.DropAction.MoveAction)
 
     def _create_drag_pixmap(self, var_names: list[str]) -> QPixmap | None:
-        """????????????????????"""
+        """创建拖拽时显示的变量名缩略图"""
         if not var_names:
             return None
 
@@ -2850,7 +2880,7 @@ class MyTableWidget(QTableWidget):
         max_visible = 8
         display_lines = bullet_names[:max_visible]
         if len(bullet_names) > max_visible:
-            display_lines.append(f"… ???{len(var_names)}??")
+            display_lines.append(f"... 共{len(var_names)}项")
 
         text_width = max((metrics.horizontalAdvance(line) for line in display_lines), default=80)
         margin = 12
@@ -3235,10 +3265,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self._cursor_label_busy = False
         self._cursor_label_dirty = False
+        self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
+        self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
         self._drag_indicator_source = None
         self._drag_indicator_guard = QTimer(self)
         self._drag_indicator_guard.setInterval(120)
         self._drag_indicator_guard.timeout.connect(self._enforce_drag_indicator_visibility)
+        # 【稳定性优化】安全删除timer
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.setSingleShot(True)
+        self._cleanup_timer.timeout.connect(self._process_pending_deletes)
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
@@ -4016,6 +4052,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         #ev.accept()  # 确保事件被处理
     
+    @safe_callback
     def mouse_moved(self, evt):
         """鼠标移动事件处理"""
         pos = evt[0]
@@ -4024,7 +4061,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if self._is_cursor_update_locked():
             return
         mousePoint = self.plot_item.vb.mapSceneToView(pos)
-        
+
         # 如果cursor被固定，不跟随鼠标移动
         if self.is_cursor_pinned:
             # 在pin状态下，cursor保持固定位置，不跟随鼠标
@@ -4038,21 +4075,33 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _is_cursor_update_locked(self) -> bool:
         """
         判断cursor相关回调是否需要被暂时禁用
-        
+
         当plot正在更新数据或主窗口处于新数据加载流程中时，所有cursor相关的信号都会跳过，
         以避免访问不完整的数据结构。
+        【稳定性优化】添加版本号检查，确保数据一致性。
         """
         if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
             return True
+
         window = self.window()
-        if window and hasattr(window, '_is_loading_new_data'):
-            return bool(getattr(window, '_is_loading_new_data'))
+        if window:
+            # 检查是否正在加载新数据
+            if getattr(window, '_is_loading_new_data', False):
+                return True
+
+            # 【版本号检查】确保数据版本一致
+            current_version = getattr(window, '_data_version', 0)
+            my_version = getattr(self, '_cached_data_version', 0)
+            if my_version != 0 and my_version != current_version:
+                return True  # 版本不匹配，说明正在加载中
+
         return False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._schedule_cursor_geometry_update()
 
+    @safe_callback
     def on_vline_position_changed(self):
         """
         vline位置变化时的处理
@@ -4155,28 +4204,53 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             plot.setXLink(linked)
 
     def update_cursor_label(self):
-        """更新光标标签位置和内容"""
-        debug_log(
-            "Plot.update_cursor_label start y=%s locked=%s busy=%s dirty=%s",
-            getattr(self, "y_name", None),
-            self._is_cursor_update_locked(),
-            getattr(self, "_cursor_label_busy", False),
-            getattr(self, "_cursor_label_dirty", False),
-        )
-        if self._is_cursor_update_locked():
-            return
-        if self._cursor_label_busy:
-            self._cursor_label_dirty = True
-            return
-        self._cursor_label_busy = True
-        try:
-            # 统一使用多曲线样式的cursor显示
-            self._update_multi_curve_cursor_label()
-        finally:
-            self._cursor_label_busy = False
-        if self._cursor_label_dirty:
-            self._cursor_label_dirty = False
-            self.update_cursor_label()
+        """
+        更新光标标签位置和内容
+
+        【稳定性优化】使用循环替代递归，限制最大重试次数，防止栈溢出。
+        """
+        MAX_RETRIES = 3  # 最大重试次数
+        retry_count = 0
+
+        while retry_count < MAX_RETRIES:
+            debug_log(
+                "Plot.update_cursor_label start y=%s locked=%s busy=%s dirty=%s retry=%s",
+                getattr(self, "y_name", None),
+                self._is_cursor_update_locked(),
+                getattr(self, "_cursor_label_busy", False),
+                getattr(self, "_cursor_label_dirty", False),
+                retry_count,
+            )
+
+            if self._is_cursor_update_locked():
+                return
+
+            if self._cursor_label_busy:
+                self._cursor_label_dirty = True
+                return
+
+            self._cursor_label_busy = True
+            self._cursor_label_dirty = False  # 进入时清除dirty
+
+            try:
+                # 统一使用多曲线样式的cursor显示
+                self._update_multi_curve_cursor_label()
+            except (RuntimeError, AttributeError) as e:
+                # 对象可能已被销毁
+                debug_log("update_cursor_label error: %s", e)
+            finally:
+                self._cursor_label_busy = False
+
+            # 检查是否需要重试
+            if self._cursor_label_dirty:
+                self._cursor_label_dirty = False
+                retry_count += 1
+                continue  # 循环重试，而非递归
+            else:
+                break  # 无需重试，退出
+
+        if retry_count >= MAX_RETRIES:
+            debug_log("update_cursor_label exceeded max retries for y=%s", getattr(self, "y_name", None))
     
     def _update_single_curve_cursor_label(self):
         """更新单曲线模式的光标标签"""
@@ -4296,10 +4370,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     
     def _clear_cursor_items(self, hide_only=True):
         """清除或隐藏所有cursor可视化元素
-        
+
         默认模式下只隐藏元素（供下次复用），完全清除模式下才会删除对象。
         这种策略通过对象池复用机制避免频繁创建/销毁对象导致的内存泄漏。
-        
+        【稳定性优化】使用延迟删除队列，避免deleteLater与即时访问冲突。
+
         Args:
             hide_only: 如果为True，只隐藏所有元素（默认，用于复用）
                       如果为False，完全删除所有元素和对象池（用于切换数据文件等场景）
@@ -4307,15 +4382,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 【安全检查】确保关键对象存在
         if not hasattr(self, 'multi_cursor_items') or not hasattr(self, 'plot_item'):
             return
-        
+
         # 【修复QPainter错误】先隐藏所有item，避免清理过程中触发绘制
         for item in self.multi_cursor_items:
             try:
                 if item is not None:
                     item.setVisible(False)
-            except:
-                pass
-        
+            except (RuntimeError, AttributeError):
+                pass  # 对象可能已被销毁
+
         # 分类处理：对象池中的元素清除数据，非池对象删除
         for item in self.multi_cursor_items:
             try:
@@ -4324,70 +4399,95 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     # 对象池中的圆圈标记：清除数据
                     try:
                         item.clear()  # 清除ScatterPlotItem的数据，释放内存
-                    except:
+                    except (RuntimeError, AttributeError):
                         pass
                 elif item == self._cursor_item_pool.get('x_label'):
                     # X轴标签：清空文本
                     try:
                         item.setText("")  # 清空文本，释放字符串占用的内存
-                    except:
+                    except (RuntimeError, AttributeError):
                         pass
                 elif item in self._cursor_item_pool.get('labels', []):
                     # 对象池中的y值标签：清空文本
                     try:
                         item.setText("")  # 清空文本，释放字符串占用的内存
-                    except:
+                    except (RuntimeError, AttributeError):
                         pass
                 else:
-                    # 不在对象池中的项（理论上不应该存在）：删除
-                    try:
-                        if item.scene():
-                            item.scene().removeItem(item)
-                        if hasattr(item, 'deleteLater'):
-                            item.deleteLater()
-                    except:
-                        pass
-            except Exception as e:
+                    # 不在对象池中的项（理论上不应该存在）：加入待删除队列
+                    self._queue_item_for_deletion(item)
+            except Exception:
                 # 忽略清理过程中的错误
                 pass
-        
+
         # 清空当前使用列表
         self.multi_cursor_items.clear()
 
         if not hide_only:
             # 完全清除模式（仅在真正需要清理时使用，如切换数据文件）
-            # 清空对象池
-            for circle in self._cursor_item_pool['circles']:
-                try:
-                    if circle.scene():
-                        circle.scene().removeItem(circle)
-                    circle.deleteLater()
-                except:
-                    pass
-            
+            # 将对象池中的对象加入待删除队列
+            for circle in self._cursor_item_pool.get('circles', []):
+                self._queue_item_for_deletion(circle)
+
             for label in self._cursor_item_pool.get('labels', []):
-                try:
-                    if label.scene():
-                        label.scene().removeItem(label)
-                    label.deleteLater()
-                except:
-                    pass
-            
-            if self._cursor_item_pool['x_label']:
-                try:
-                    x_label = self._cursor_item_pool['x_label']
-                    if x_label.scene():
-                        x_label.scene().removeItem(x_label)
-                    x_label.deleteLater()
-                except:
-                    pass
-            
+                self._queue_item_for_deletion(label)
+
+            if self._cursor_item_pool.get('x_label'):
+                self._queue_item_for_deletion(self._cursor_item_pool['x_label'])
+
             # 重置对象池
             self._cursor_item_pool = {
                 'circles': [],
                 'labels': [],
                 'x_label': None
             }
+
+            # 延迟执行实际删除（等待当前事件循环完成）
+            if self._pending_delete_items and not self._cleanup_timer.isActive():
+                self._cleanup_timer.start(100)  # 100ms后执行
+
+    def _queue_item_for_deletion(self, item):
+        """将item加入待删除队列"""
+        if item is not None and item not in self._pending_delete_items:
+            try:
+                item.setVisible(False)
+            except (RuntimeError, AttributeError):
+                pass
+            self._pending_delete_items.append(item)
+
+    def _process_pending_deletes(self):
+        """安全地处理待删除队列 - 延迟删除回调"""
+        if self._is_updating_data or self._is_being_destroyed:
+            # 数据正在更新，延迟处理
+            if self._pending_delete_items:
+                self._cleanup_timer.start(100)
+            return
+
+        items_to_delete = self._pending_delete_items.copy()
+        self._pending_delete_items.clear()
+
+        for item in items_to_delete:
+            try:
+                if item is None:
+                    continue
+
+                # 安全地从scene移除
+                try:
+                    scene = item.scene()
+                    if scene is not None:
+                        scene.removeItem(item)
+                except (RuntimeError, AttributeError):
+                    pass  # scene可能已被销毁
+
+                # 安全地删除
+                try:
+                    if hasattr(item, 'deleteLater'):
+                        item.deleteLater()
+                except (RuntimeError, AttributeError):
+                    pass
+
+            except Exception as e:
+                debug_log("_process_pending_deletes error: %s", e)
 
     def _collect_visible_curve_arrays(self, key: str) -> list[np.ndarray]:
         arrays: list[np.ndarray] = []
@@ -6795,8 +6895,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             print(f"更新绘图样式时出错: {e}")
 
 
+    @safe_callback
     def _on_range_changed(self, view_box, range):
-        """?? ViewBox ?????????????"""
+        """ViewBox范围变化回调处理"""
         try:
             if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
                 self._cancel_ui_refresh()
@@ -6819,7 +6920,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
             self._queue_ui_refresh()
         except Exception as e:
-            print(f"????????: {e}")
+            print(f"范围变化处理出错: {e}")
 
     def _start_interaction(self):
         """开始交互时的优化处理
@@ -6848,7 +6949,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             print(f"开始交互优化时出错: {e}")
     
     def _end_interaction(self):
-        """???????????"""
+        """结束交互时的处理"""
         try:
             self._is_interacting = False
             self._queue_ui_refresh(immediate=True)
@@ -6856,7 +6957,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()
         except Exception as e:
-            print(f"???????: {e}")
+            print(f"结束交互出错: {e}")
 
     def _schedule_cursor_geometry_update(self):
         if not hasattr(self, 'vline') or not self.vline.isVisible():
@@ -7199,6 +7300,13 @@ class MainWindow(QMainWindow):
         self.data = None
         self.data_validity = None
         self._is_loading_new_data = False  # 标志：是否正在加载新数据，用于屏蔽交互信号
+
+        # 【稳定性优化】数据版本号机制，用于检测竞态条件
+        self._data_version = 0  # 每次加载新数据时递增
+        self._pending_crosshair_x = None  # 待更新的crosshair位置
+        self._crosshair_update_timer = QTimer(self)
+        self._crosshair_update_timer.setSingleShot(True)
+        self._crosshair_update_timer.timeout.connect(self._flush_crosshair_updates)
 
         # 窗口几何信息
         self.data_table_geometry = None
@@ -7664,18 +7772,26 @@ class MainWindow(QMainWindow):
     def _begin_data_reload(self):
         """
         标记开始加载新数据
-        
+
         会立即清理所有Pin状态并锁定plot的cursor更新，防止旧信号在加载阶段继续触发。
+        【稳定性优化】递增版本号使旧的pending回调失效，停止所有相关timer。
         """
         if self._is_loading_new_data:
             return
         self._is_loading_new_data = True
+        self._data_version += 1  # 版本号递增，使旧回调失效
+
+        # 停止crosshair更新timer
+        if hasattr(self, '_crosshair_update_timer'):
+            self._crosshair_update_timer.stop()
+        self._pending_crosshair_x = None
+
         pinned = [
             idx for idx, container in enumerate(getattr(self, "plot_widgets", []), start=1)
             if getattr(container, "plot_widget", None)
             and getattr(container.plot_widget, "is_cursor_pinned", False)
         ]
-        debug_log("MainWindow.begin_data_reload pinned_plots=%s", pinned)
+        debug_log("MainWindow.begin_data_reload pinned_plots=%s version=%s", pinned, self._data_version)
         try:
             self.reset_all_pin_states()
         except Exception:
@@ -7685,25 +7801,46 @@ class MainWindow(QMainWindow):
             if not widget:
                 continue
             widget._is_updating_data = True
+            widget._cached_data_version = self._data_version  # 记录当前版本
             if hasattr(widget, "_cancel_ui_refresh"):
                 widget._cancel_ui_refresh()
+            # 停止cursor相关timer
+            if hasattr(widget, '_cursor_refresh_timer'):
+                widget._cursor_refresh_timer.stop()
+            if hasattr(widget, '_interaction_timer'):
+                widget._interaction_timer.stop()
 
     def _end_data_reload(self):
         """
         标记数据加载结束
-        
+
         恢复cursor/样式刷新，让UI重新响应交互。
+        【稳定性优化】使用延迟刷新确保所有状态已稳定。
         """
         if not self._is_loading_new_data:
             return
-        self._is_loading_new_data = False
-        debug_log("MainWindow.end_data_reload resume_ui")
+
+        # 先恢复所有widget状态
         for container in getattr(self, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
             widget._is_updating_data = False
-            if hasattr(widget, "_queue_ui_refresh"):
+
+        # 最后才清除加载标志
+        self._is_loading_new_data = False
+        debug_log("MainWindow.end_data_reload resume_ui version=%s", self._data_version)
+
+        # 使用延迟刷新，确保所有状态已稳定
+        QTimer.singleShot(50, self._post_reload_ui_refresh)
+
+    def _post_reload_ui_refresh(self):
+        """数据加载完成后的延迟UI刷新"""
+        if self._is_loading_new_data:
+            return  # 又开始新的加载了，跳过
+        for container in getattr(self, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if widget and hasattr(widget, "_queue_ui_refresh"):
                 widget._queue_ui_refresh(immediate=True)
 
     def load_csv_file(self, file_path: str):
@@ -8487,6 +8624,12 @@ class MainWindow(QMainWindow):
 
 
     def sync_crosshair(self, x, sender_widget):
+        """
+        同步所有plot的crosshair位置
+
+        【稳定性优化】使用批量更新+防抖机制，减少信号风暴。
+        cursor label更新延迟执行，避免高频调用导致的性能问题。
+        """
         if not self.cursor_btn.isChecked():
             return
         if getattr(self, "_is_loading_new_data", False):
@@ -8494,39 +8637,72 @@ class MainWindow(QMainWindow):
         if self._is_syncing_crosshair:
             return
 
-        # ???????????
+        # 如果发送者正在交互中，跳过
         if sender_widget and getattr(sender_widget, '_is_interacting', False):
             return
 
+        # 【优化】如果已经有pending的更新且x值变化很小，直接跳过
+        if self._pending_crosshair_x is not None:
+            if abs(x - self._pending_crosshair_x) < 0.0001:
+                return
+
         self._is_syncing_crosshair = True
         try:
-            has_pinned_plot = False
-            for container in self.plot_widgets:
-                w = container.plot_widget
-                if w.is_cursor_pinned:
-                    has_pinned_plot = True
-                    break
+            has_pinned_plot = any(
+                c.plot_widget.is_cursor_pinned
+                for c in self.plot_widgets
+                if c.isVisible() and hasattr(c.plot_widget, 'is_cursor_pinned')
+            )
 
             if has_pinned_plot:
                 return
 
+            # 【批量更新】先设置所有vline位置（使用SignalBlocker防止级联信号）
             for container in self.plot_widgets:
                 if not container.isVisible():
                     continue
                 w = container.plot_widget
                 if getattr(w, '_is_interacting', False):
                     continue
+                if getattr(w, '_is_updating_data', False):
+                    continue
                 w.vline.setVisible(True)
-                blocker = QSignalBlocker(w.vline)
-                w.vline.setPos(x)
-                w.update_cursor_label()
+                with QSignalBlocker(w.vline):
+                    w.vline.setPos(x)
+
+            # 【防抖】延迟执行cursor label更新
+            self._pending_crosshair_x = x
+            if not self._crosshair_update_timer.isActive():
+                self._crosshair_update_timer.start(16)  # ~60fps
+
         finally:
             self._is_syncing_crosshair = False
+
+    def _flush_crosshair_updates(self):
+        """批量执行cursor label更新 - 防抖回调"""
+        if self._is_loading_new_data:
+            self._pending_crosshair_x = None
+            return
+
+        self._pending_crosshair_x = None
+
+        for container in self.plot_widgets:
+            if not container.isVisible():
+                continue
+            w = container.plot_widget
+            if getattr(w, '_is_interacting', False):
+                continue
+            if getattr(w, '_is_updating_data', False):
+                continue
+            try:
+                w.update_cursor_label()
+            except (RuntimeError, AttributeError):
+                pass  # 对象可能已被销毁
 
     def reset_all_pin_states(self):
         """
         重置所有plot的pin状态
-        
+
         遍历所有plot widget，将它们的cursor从固定状态重置为默认状态。
         用于数据重载、清除图表等操作时统一重置pin状态。
         """
@@ -9463,3 +9639,4 @@ if __name__ == "__main__":
 
 # nuitka
 # nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
+# nuitka --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
