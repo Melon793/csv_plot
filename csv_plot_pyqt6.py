@@ -6748,19 +6748,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _apply_plot_style(self, show_symbols: bool):
         """应用绘图样式 - 基于xrange只有两种搭配：细线+symbol 或 粗线无symbol
-        
+
         【内存优化】缓存pen对象，避免zoom时重复创建导致内存泄漏
         """
         try:
-            if self.is_multi_curve_mode:
-                # 多曲线模式：统一样式应用到所有曲线
+            # 优先检查curves字典（多曲线模式或从多曲线删到单曲线的情况）
+            if self.curves:
+                # 有curves字典：遍历所有曲线应用样式
                 for var_name, curve_info in self.curves.items():
                     if 'curve' not in curve_info:
                         continue
-                        
+
                     curve = curve_info['curve']
                     color = curve_info.get('color', 'blue')
-                    
+
                     # 缓存pen对象：检查当前样式是否匹配，避免重复创建
                     if show_symbols:
                         # xrange小：细线 + 符号
@@ -6769,7 +6770,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                             pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
                             curve.setPen(pen)
                             curve._cached_pen_key = cache_key
-                        
+
                         if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
                             curve.setSymbol('s')
                             curve.setSymbolSize(3)
@@ -6783,43 +6784,42 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                             pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
                             curve.setPen(pen)
                             curve._cached_pen_key = cache_key
-                        
+
                         if not hasattr(curve, '_has_symbols') or curve._has_symbols:
                             curve.setSymbol(None)
                             curve._has_symbols = False
-            else:
-                # 单曲线模式：使用当前曲线的颜色
-                if self.curve:
-                    # 获取当前曲线的颜色
-                    current_pen = self.curve.opts.get('pen', pg.mkPen('blue'))
-                    color = current_pen.color().name() if hasattr(current_pen, 'color') else 'blue'
-                    
-                    # 缓存pen对象：检查当前样式是否匹配，避免重复创建
-                    if show_symbols:
-                        # xrange小：细线 + 符号
-                        cache_key = f'thin_{color}'
-                        if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
-                            pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
-                            self.curve.setPen(pen)
-                            self.curve._cached_pen_key = cache_key
-                        
-                        if not hasattr(self.curve, '_has_symbols') or not self.curve._has_symbols:
-                            self.curve.setSymbol('s')
-                            self.curve.setSymbolSize(3)
-                            self.curve.setSymbolPen(color)
-                            self.curve.setSymbolBrush(color)
-                            self.curve._has_symbols = True
-                    else:
-                        # xrange大：粗线无符号
-                        cache_key = f'thick_{color}'
-                        if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
-                            pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                            self.curve.setPen(pen)
-                            self.curve._cached_pen_key = cache_key
-                        
-                        if not hasattr(self.curve, '_has_symbols') or self.curve._has_symbols:
-                            self.curve.setSymbol(None)
-                            self.curve._has_symbols = False
+            elif self.curve:
+                # 没有curves字典但有单曲线：使用self.curve
+                # 获取当前曲线的颜色
+                current_pen = self.curve.opts.get('pen', pg.mkPen('blue'))
+                color = current_pen.color().name() if hasattr(current_pen, 'color') else 'blue'
+
+                # 缓存pen对象：检查当前样式是否匹配，避免重复创建
+                if show_symbols:
+                    # xrange小：细线 + 符号
+                    cache_key = f'thin_{color}'
+                    if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
+                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                        self.curve.setPen(pen)
+                        self.curve._cached_pen_key = cache_key
+
+                    if not hasattr(self.curve, '_has_symbols') or not self.curve._has_symbols:
+                        self.curve.setSymbol('s')
+                        self.curve.setSymbolSize(3)
+                        self.curve.setSymbolPen(color)
+                        self.curve.setSymbolBrush(color)
+                        self.curve._has_symbols = True
+                else:
+                    # xrange大：粗线无符号
+                    cache_key = f'thick_{color}'
+                    if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
+                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                        self.curve.setPen(pen)
+                        self.curve._cached_pen_key = cache_key
+
+                    if not hasattr(self.curve, '_has_symbols') or self.curve._has_symbols:
+                        self.curve.setSymbol(None)
+                        self.curve._has_symbols = False
         except Exception as e:
             print(f"应用绘图样式时出错: {e}")
 
@@ -6880,14 +6880,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             is_interacting = getattr(self, '_is_interacting', False)
             if is_interacting:
                 return  # 交互期间完全跳过样式更新，避免卡顿
-            
+
             # 使用共用方法计算索引范围
             index_range_width, visible_points = self._calculate_visible_points(range)
-            
+
             # 基于索引范围宽度判断样式：小于阈值显示symbol（细线+symbol），否则粗线无symbol
             global XRANGE_THRESHOLD_FOR_SYMBOLS
             show_symbols = index_range_width < XRANGE_THRESHOLD_FOR_SYMBOLS
-            
+
             # 应用样式到所有曲线
             self._apply_plot_style(show_symbols)
             
@@ -6896,7 +6896,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
 
     @safe_callback
-    def _on_range_changed(self, view_box, range):
+    def _on_range_changed(self, view_box, range, changed=None):
         """ViewBox范围变化回调处理"""
         try:
             if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
