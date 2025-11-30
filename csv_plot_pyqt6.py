@@ -61,6 +61,8 @@ def safe_callback(func):
 
     【稳定性优化】用于保护关键的信号回调函数，防止因对象已销毁等原因导致的崩溃。
     特别处理RuntimeError（C++对象已删除）和AttributeError。
+
+    【开发模式】当DEBUG_LOG_ENABLED=True时，所有异常都会被打印到控制台，便于调试。
     """
     from functools import wraps
 
@@ -75,11 +77,21 @@ def safe_callback(func):
                 debug_log("%s skipped: object deleted", func.__name__)
                 return None
             raise
-        except AttributeError as e:
-            # 属性访问错误（对象可能部分销毁）
+        except (AttributeError, TypeError) as e:
+            # 属性访问错误或参数类型错误（对象可能部分销毁，或信号参数不匹配）
+            if DEBUG_LOG_ENABLED:
+                # 开发模式：打印详细错误信息到控制台
+                print(f"[safe_callback] {func.__name__} error: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
             debug_log("%s error: %s", func.__name__, e)
             return None
         except Exception as e:
+            if DEBUG_LOG_ENABLED:
+                # 开发模式：打印详细错误信息到控制台
+                print(f"[safe_callback] {func.__name__} unexpected error: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
             debug_log("%s unexpected error: %s", func.__name__, e)
             return None
     return wrapper
@@ -4102,12 +4114,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._schedule_cursor_geometry_update()
 
     @safe_callback
-    def on_vline_position_changed(self):
+    def on_vline_position_changed(self, line_obj=None):
         """
         vline位置变化时的处理
-        
+
         当vline被拖动时触发，在pin状态下会同步所有被pin的plot的cursor位置。
         在正常状态下会更新cursor标签显示。
+
+        Args:
+            line_obj: pyqtgraph的InfiniteLine对象，信号发送者（PyQt6需要接收此参数）
         """
         if self._is_cursor_update_locked():
             return
