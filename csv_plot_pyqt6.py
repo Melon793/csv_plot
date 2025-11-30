@@ -5234,28 +5234,52 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _update_vline_bounds_from_data(self):
         """根据当前绘制的数据更新vline bounds
-        
+
         这个函数计算当前所有可见曲线的x范围，并更新vline的移动边界。
-        在多曲线模式下，使用所有曲线的范围；在单曲线模式下，使用当前曲线的范围。
+        优先使用理论值（基于original_index_x + factor/offset）计算bounds，
+        避免因异步更新导致的bounds不一致问题。
         """
         try:
+            # 优先策略1：单曲线模式下，使用 original_index_x + factor/offset 计算理论bounds
+            if hasattr(self, 'original_index_x') and self.original_index_x is not None and len(self.original_index_x) > 0:
+                min_index = np.min(self.original_index_x)
+                max_index = np.max(self.original_index_x)
+                min_x = self.offset + self.factor * min_index
+                max_x = self.offset + self.factor * max_index
+                self.vline.setBounds([min_x, max_x])
+                return min_x, max_x
+
+            # 优先策略2：多曲线模式下，使用数据长度 + factor/offset 计算理论bounds
             if self.is_multi_curve_mode and self.curves:
-                # 多曲线模式：收集所有可见曲线的x值
+                # 获取任一curve的数据长度
+                for curve_info in self.curves.values():
+                    if 'y_data' in curve_info and curve_info['y_data'] is not None:
+                        datalength = len(curve_info['y_data'])
+                        if datalength > 0:
+                            min_x = self.offset + self.factor * 1
+                            max_x = self.offset + self.factor * datalength
+                            self.vline.setBounds([min_x, max_x])
+                            return min_x, max_x
+                        break
+
+            # Fallback策略1：从实际curve数据读取（多曲线模式）
+            if self.is_multi_curve_mode and self.curves:
                 x_arrays = self._collect_visible_curve_arrays('x_data')
                 if x_arrays:
                     combined = np.concatenate(x_arrays)
                     min_x, max_x = np.nanmin(combined), np.nanmax(combined)
                     self.vline.setBounds([min_x, max_x])
                     return min_x, max_x
-            elif self.curve is not None:
-                # 单曲线模式：使用当前曲线的x值
+
+            # Fallback策略2：从实际curve数据读取（单曲线模式）
+            if self.curve is not None:
                 x_data, _ = self.curve.getData()
                 if x_data is not None and len(x_data) > 0:
                     min_x, max_x = np.min(x_data), np.max(x_data)
                     self.vline.setBounds([min_x, max_x])
                     return min_x, max_x
-            
-            # 如果没有数据，使用默认bounds
+
+            # Fallback策略3：使用xMin/xMax
             if hasattr(self, 'xMin') and hasattr(self, 'xMax'):
                 self.vline.setBounds([self.xMin, self.xMax])
                 return self.xMin, self.xMax
@@ -5402,9 +5426,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             limits_xMin = self.offset + self.factor * index_min
             limits_xMax = self.offset + self.factor * index_max
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-            data_min_x = self.offset + self.factor * 1 if datalength > 0 else 0
-            data_max_x = self.offset + self.factor * datalength if datalength > 0 else 1
-            self.vline.setBounds([data_min_x, data_max_x])
+            # 注意：不在这里设置vline bounds，而是在 _realign_pinned_cursor_after_time_correction() 中
+            # 通过延迟调用 _update_vline_bounds_from_data() 来统一处理，避免异步更新导致的bounds不一致
             if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
                 old_min, old_max = self.mark_region.getRegion()
                 if old_factor != 0:
@@ -8618,18 +8641,42 @@ class MainWindow(QMainWindow):
         if not np.isfinite(new_display_x):
             return
 
+        # 先计算所有widget的新bounds（基于理论值，不依赖异步更新的curve数据）
         for container in self.plot_widgets:
             widget = container.plot_widget
+
+            # 计算新的bounds（使用理论值，确保一致性）
+            if hasattr(widget, 'original_index_x') and widget.original_index_x is not None and len(widget.original_index_x) > 0:
+                min_index = np.min(widget.original_index_x)
+                max_index = np.max(widget.original_index_x)
+                new_min_x = widget.offset + widget.factor * min_index
+                new_max_x = widget.offset + widget.factor * max_index
+            elif widget.is_multi_curve_mode and widget.curves:
+                # 多曲线模式：使用数据长度计算
+                first_curve_info = next(iter(widget.curves.values()), None)
+                if first_curve_info and 'y_data' in first_curve_info:
+                    data_len = len(first_curve_info['y_data'])
+                    new_min_x = widget.offset + widget.factor * 1
+                    new_max_x = widget.offset + widget.factor * data_len
+                else:
+                    new_min_x = widget.offset + widget.factor * 1
+                    new_max_x = widget.offset + widget.factor * datalength
+            else:
+                # Fallback
+                new_min_x = widget.offset + widget.factor * 1
+                new_max_x = widget.offset + widget.factor * datalength
+
             widget.is_cursor_pinned = True
             widget.pinned_x_value = new_display_x
             widget.pinned_index_value = index_pos if widget.factor != 0 else None
 
             widget.vline.blockSignals(True)
-            widget.vline.setBounds([None, None])
+            # 关键：先设置正确的bounds，再设置position
+            # 这样可以确保setPos不会被错误的bounds限制
+            widget.vline.setBounds([new_min_x, new_max_x])
             widget.vline.setMovable(True)
             widget.vline.setPos(new_display_x)
             widget.vline.blockSignals(False)
-            widget._update_vline_bounds_from_data()
 
             if hasattr(widget.view_box, "is_cursor_pinned"):
                 widget.view_box.is_cursor_pinned = True
