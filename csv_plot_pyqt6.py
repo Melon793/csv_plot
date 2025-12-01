@@ -1301,8 +1301,10 @@ class DataTableDialog(QMainWindow):
                     return True
             elif event.type() == QEvent.Type.Drop:
                 if event.mimeData().hasText():
-                    var_name = event.mimeData().text()
-                    self.parent_dialog._handle_dropped_variable(var_name)
+                    var_names_text = event.mimeData().text()
+                    # 支持多变量拖放，用;;分隔
+                    var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+                    self.parent_dialog._handle_dropped_variables(var_names)
                     event.acceptProposedAction()
                     return True
             return super().eventFilter(obj, event)
@@ -1358,8 +1360,10 @@ class DataTableDialog(QMainWindow):
 
     def dropEvent(self, event):
         self._cancel_plot_drag_indicator()
-        var_name = event.mimeData().text()
-        self._handle_dropped_variable(var_name)
+        var_names_text = event.mimeData().text()
+        # 支持多变量拖放，用;;分隔
+        var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+        self._handle_dropped_variables(var_names)
         event.acceptProposedAction()
 
     def _blink_step_on(self, delegate, col_idx, view):
@@ -1388,14 +1392,91 @@ class DataTableDialog(QMainWindow):
             QTimer.singleShot(pulse, lambda: self._blink_step_off(delegate, col_idx, view))  
         return
     
+    # 内部函数：处理拖放的多个变量
+    def _handle_dropped_variables(self, var_names: list[str]):
+        """
+        处理拖放的多个变量，添加到非冻结区
+
+        支持单个或多个变量同时拖入
+        对于多个变量，批量添加并显示结果
+
+        Args:
+            var_names: 要添加的变量名称列表
+        """
+        if not var_names:
+            return
+
+        if len(var_names) == 1:
+            # 单个变量：使用原有逻辑
+            self._handle_dropped_variable(var_names[0])
+            return
+
+        # 多个变量：批量处理
+        loader = self._resolve_loader()
+        if loader is None:
+            QMessageBox.warning(self, "错误", "没有加载数据")
+            return
+
+        existing_vars = []
+        invalid_vars = []
+        added_vars = []
+
+        # 保存当前的垂直滚动位置
+        self._saved_scroll_pos = self.main_view.verticalScrollBar().value() if self.main_view else None
+
+        for var_name in var_names:
+            # 检查变量是否已存在
+            if self.has_column(var_name):
+                existing_vars.append(var_name)
+                continue
+
+            # 检查变量是否在数据中存在
+            if var_name not in loader.df.columns:
+                invalid_vars.append(var_name)
+                continue
+
+            # 添加变量
+            try:
+                series = loader.df[var_name]
+                self._add_variable_to_table(var_name, series)
+                added_vars.append(var_name)
+            except Exception as e:
+                invalid_vars.append(f"{var_name} (错误: {str(e)})")
+
+        # 显示结果消息（只在有问题时提示）
+        msg_parts = []
+        if added_vars:
+            # 滚动到最后添加的变量
+            last_var = added_vars[-1]
+            QTimer.singleShot(100, lambda: self.scroll_to_column(last_var))
+            QTimer.singleShot(100, lambda: self._blink_column(last_var, pulse=BLINK_PULSE))
+
+        # 只在有错误或已存在变量时显示提示
+        if existing_vars or invalid_vars:
+            if added_vars:
+                msg_parts.append(f"成功添加 {len(added_vars)} 个变量")
+
+            if existing_vars:
+                msg_parts.append(f"已存在 {len(existing_vars)} 个变量")
+
+            if invalid_vars:
+                msg_parts.append(f"无效变量: {', '.join(invalid_vars[:5])}")  # 最多显示5个
+                if len(invalid_vars) > 5:
+                    msg_parts.append(f"等共 {len(invalid_vars)} 个")
+
+            if invalid_vars:
+                QMessageBox.warning(self, "批量添加结果", "\n".join(msg_parts))
+            else:
+                QMessageBox.information(self, "批量添加结果", "\n".join(msg_parts))
+
     # 内部函数：处理拖放的变量
     def _handle_dropped_variable(self, var_name: str):
         """
         处理拖放的变量，添加到非冻结区
-        
+
         处理从变量列表拖拽到表格的变量
         检查变量是否已存在，如果存在则高亮显示，否则添加到表格
-        
+
         Args:
             var_name: 要添加的变量名称
         """
@@ -1404,24 +1485,24 @@ class DataTableDialog(QMainWindow):
             self.scroll_to_column(var_name)
             self._blink_column(var_name,pulse=BLINK_PULSE)
             return
-            
+
         # 获取主窗口loader
         loader = self._resolve_loader()
 
         if loader is None:
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
-            
+
         if var_name not in loader.df.columns:  # 改为 loader
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
-        
+
         # 保存当前的垂直滚动位置，避免添加变量后列表位置变化
         self._saved_scroll_pos = self.main_view.verticalScrollBar().value() if self.main_view else None
-            
+
         series = loader.df[var_name]  # 改为 loader
         self._add_variable_to_table(var_name, series)
-        
+
         # 滚动到新添加的列
         QTimer.singleShot(100, lambda: self.scroll_to_column(var_name))
         QTimer.singleShot(100, lambda: self._blink_column(var_name,pulse=BLINK_PULSE))
@@ -9534,6 +9615,16 @@ class PlotVariableEditorDialog(QDialog):
                 elif hasattr(old_pen, 'width'):
                     width = old_pen.width()
                 curve_obj.setPen(pg.mkPen(color=color_name, width=width))
+
+                # 如果curve当前有symbols，也需要更新symbol的颜色
+                if hasattr(curve_obj, '_has_symbols') and curve_obj._has_symbols:
+                    curve_obj.setSymbolPen(color_name)
+                    curve_obj.setSymbolBrush(color_name)
+
+                # 清除缓存标志，强制下次刷新时重新应用样式
+                if hasattr(curve_obj, '_cached_pen_key'):
+                    delattr(curve_obj, '_cached_pen_key')
+
             updated = True
         elif var_name == self.plot_widget.y_name and self.plot_widget.curve:
             old_pen = self.plot_widget.curve.opts.get('pen')
@@ -9543,6 +9634,16 @@ class PlotVariableEditorDialog(QDialog):
             elif hasattr(old_pen, 'width'):
                 width = old_pen.width()
             self.plot_widget.curve.setPen(pg.mkPen(color=color_name, width=width))
+
+            # 如果curve当前有symbols，也需要更新symbol的颜色
+            if hasattr(self.plot_widget.curve, '_has_symbols') and self.plot_widget.curve._has_symbols:
+                self.plot_widget.curve.setSymbolPen(color_name)
+                self.plot_widget.curve.setSymbolBrush(color_name)
+
+            # 清除缓存标志，强制下次刷新时重新应用样式
+            if hasattr(self.plot_widget.curve, '_cached_pen_key'):
+                delattr(self.plot_widget.curve, '_cached_pen_key')
+
             updated = True
 
         if updated:
@@ -9620,24 +9721,61 @@ class PlotVariableEditorDialog(QDialog):
         event.accept()
             
     def dropEvent(self, event):
-        """拖拽放下事件"""
+        """拖拽放下事件，支持单个或多个变量同时拖入"""
         if event.mimeData().hasText():
-            var_name = event.mimeData().text()
-            
-            # 检查变量是否已存在
-            if (self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves) or \
-               (not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name):
-                QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
-                return
-                
-            # 添加变量到绘图
-            success = self.plot_widget.add_variable_to_plot(var_name)
-            if success:
+            var_names_text = event.mimeData().text()
+            # 支持多变量拖放，用;;分隔
+            var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+
+            if len(var_names) > 1:
+                # 多个变量：批量添加
+                failed_vars = []
+                success_count = 0
+
+                for var_name in var_names:
+                    # 检查变量是否已存在
+                    if (self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves) or \
+                       (not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name):
+                        failed_vars.append(f"{var_name} (已存在)")
+                        continue
+
+                    # 添加变量到绘图
+                    success = self.plot_widget.add_variable_to_plot(var_name)
+                    if success:
+                        success_count += 1
+                    else:
+                        failed_vars.append(var_name)
+
                 # 重新加载列表以显示新添加的变量
-                self.load_current_curves()
+                if success_count > 0:
+                    self.load_current_curves()
+
+                # 显示结果消息（只在有失败时提示）
+                if failed_vars:
+                    QMessageBox.warning(self, "批量添加结果",
+                                      f"成功添加 {success_count} 个变量\n失败的变量: {', '.join(failed_vars)}")
             else:
-                QMessageBox.warning(self, "错误", f"无法添加变量 {var_name}")
-                
+                # 单个变量：原有逻辑
+                var_name = var_names[0] if var_names else ""
+                if not var_name:
+                    event.ignore()
+                    self.plot_widget._notify_drag_indicator(hide=True, source_widget=self)
+                    return
+
+                # 检查变量是否已存在
+                if (self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves) or \
+                   (not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name):
+                    QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
+                    return
+
+                # 添加变量到绘图
+                success = self.plot_widget.add_variable_to_plot(var_name)
+                if success:
+                    # 重新加载列表以显示新添加的变量
+                    self.load_current_curves()
+                else:
+                    QMessageBox.warning(self, "错误", f"无法添加变量 {var_name}")
+
             event.acceptProposedAction()
         else:
             event.ignore()
