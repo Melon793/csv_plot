@@ -6168,7 +6168,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
             # ========== 性能优化：创建曲线并配置渲染选项 ==========
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-            
+
             # 创建曲线（保持简单参数以确保兼容性）
             curve = self.plot_item.plot(
                 x_values, y_values, 
@@ -6356,39 +6356,59 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     
     def toggle_curve_visibility_by_name(self, var_name):
         """通过变量名切换曲线可见性
-        
+
         点击图例中的曲线名时调用，切换该曲线的显示/隐藏状态。
         如果曲线对象失效（不在scene中），会尝试重新创建。
-        
+
         Args:
             var_name: 要切换可见性的变量名
         """
         if var_name not in self.curves:
+            if DEBUG_LOG_ENABLED:
+                print(f"警告：变量 {var_name} 不在curves字典中")
+                print(f"当前curves键: {list(self.curves.keys())}")
+                print(f"当前y_name: {getattr(self, 'y_name', 'None')}")
             return
-            
+
         curve_info = self.curves[var_name]
         # 切换可见性状态
         curve_info['visible'] = not curve_info['visible']
         new_visible = curve_info['visible']
-        
+
+        if DEBUG_LOG_ENABLED:
+            print(f"切换 {var_name} 可见性: {new_visible}")
+
         # 更新曲线对象的可见性
         if 'curve' in curve_info:
             curve_obj = curve_info['curve']
-            
+
             try:
                 # 检查曲线对象是否仍然有效
                 if curve_obj.scene() is not None:
                     curve_obj.setVisible(new_visible)
+                    if DEBUG_LOG_ENABLED:
+                        print(f"  成功设置可见性")
                 else:
+                    if DEBUG_LOG_ENABLED:
+                        print(f"  曲线不在scene中，尝试重新创建")
                     # 曲线对象已经不在scene中，重新创建
                     self._recreate_curve(var_name)
-            except Exception:
+            except Exception as e:
+                if DEBUG_LOG_ENABLED:
+                    print(f"  异常: {e}，尝试重新创建")
                 # 尝试重新创建曲线
                 self._recreate_curve(var_name)
-        
+        else:
+            if DEBUG_LOG_ENABLED:
+                print(f"  警告：curve_info中没有'curve'键")
+
         # 更新图例显示
         self.update_legend()
-        
+
+        # 更新 Y轴范围以适应所有可见曲线
+        # 当切换曲线可见性时，需要重新计算y轴范围，确保所有可见曲线都能完整显示
+        if self.is_multi_curve_mode:
+            self._update_axes_for_multi_curve(update_x_range=False)
         # 更新cursor显示（如果cursor可见）
         if self.vline.isVisible():
             self.update_cursor_label()
@@ -9788,7 +9808,7 @@ if __name__ == "__main__":
     # pg.setConfigOptions(useOpenGL=True) 
     
     # 禁用抗锯齿 (大数据量下抗锯齿非常消耗资源且视觉收益低)
-    # pg.setConfigOptions(antialias=False)
+    pg.setConfigOptions(antialias=False)
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
