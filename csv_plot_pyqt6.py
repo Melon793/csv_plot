@@ -1133,6 +1133,41 @@ class DataTableDialog(QMainWindow):
         QTimer.singleShot(100, lambda: dlg._blink_column(var_name,pulse=BLINK_PULSE))
         return dlg
 
+    @classmethod
+    def add_variables(cls, var_names, parent=None):
+        """批量添加变量至数值变量表，复用拖拽逻辑"""
+        if isinstance(var_names, str):
+            candidates = [var_names]
+        else:
+            candidates = [name for name in (var_names or []) if isinstance(name, str)]
+
+        normalized = []
+        seen = set()
+        for name in candidates:
+            clean = name.strip()
+            if not clean or clean in seen:
+                continue
+            normalized.append(clean)
+            seen.add(clean)
+
+        if not normalized:
+            return
+
+        if cls._instance is None:
+            cls._instance = cls(parent)
+        else:
+            cls._instance._update_owner_from_widget(parent)
+
+        dlg = cls._instance
+        dlg.save_geom()
+        dlg.load_geom()
+        dlg.show()
+        if dlg.isMinimized():
+            dlg.showNormal()
+        dlg.raise_()
+        dlg.activateWindow()
+        dlg._handle_dropped_variables(normalized)
+
     def _update_owner_from_widget(self, widget):
         window = None
         if isinstance(widget, QWidget):
@@ -1549,9 +1584,10 @@ class DataTableDialog(QMainWindow):
             # 清除主视图的同步高亮
             self.delegate_main.highlighted_rows = set()
             self.delegate_frozen.highlighted_rows = set()
-
-            # 获取冻结区选中的单元格
-            selected_indexes = self.frozen_view.selectionModel().selectedIndexes()
+            selection_model = self.frozen_view.selectionModel()
+            if selection_model is None:
+                return
+            selected_indexes = selection_model.selectedIndexes()
             self.delegate_frozen.selected_rows = set(idx.row() for idx in selected_indexes)
             self.delegate_frozen.selected_cols = set(idx.column() for idx in selected_indexes)
             
@@ -1566,8 +1602,10 @@ class DataTableDialog(QMainWindow):
             # 清除冻结视图的同步高亮
             self.delegate_frozen.highlighted_rows = set()
             self.delegate_main.highlighted_rows = set()
-            # 获取主视图选中的单元格
-            selected_indexes = self.main_view.selectionModel().selectedIndexes()
+            selection_model = self.main_view.selectionModel()
+            if selection_model is None:
+                return
+            selected_indexes = selection_model.selectedIndexes()
             self.delegate_main.selected_rows = set(idx.row() for idx in selected_indexes)
             self.delegate_main.selected_cols = set(idx.column() for idx in selected_indexes)
             
@@ -2823,16 +2861,20 @@ class MyTableWidget(QTableWidget):
             # 兼容旧数据
             var_name = item.text()
 
+        selected_var_names = self._collect_selected_var_names()
+        if var_name not in selected_var_names:
+            selected_var_names = [var_name]
+
         menu = QMenu(self)
         
         # a. 添加至数值变量表
         act_add_table = QAction("添加至数值变量表", menu)
-        act_add_table.triggered.connect(lambda: self._add_to_data_table(var_name))
+        act_add_table.triggered.connect(lambda: self._add_to_data_table(selected_var_names))
         menu.addAction(act_add_table)
         
         # b. 添加至空白绘图区
         act_add_blank_plot = QAction("添加至空白绘图区", menu)
-        act_add_blank_plot.triggered.connect(lambda: self._add_to_blank_plot(var_name))
+        act_add_blank_plot.triggered.connect(lambda: self._add_to_blank_plot(selected_var_names))
         menu.addAction(act_add_blank_plot)
         
         # c. 复制变量名（复制时也使用原始名称，不含方框标识符）
@@ -2842,23 +2884,19 @@ class MyTableWidget(QTableWidget):
         
         menu.exec(self.mapToGlobal(pos))
 
-    def _add_to_data_table(self, var_name: str):
-        # 获取 MainWindow 的 loader
+    def _add_to_data_table(self, var_names):
+        var_list = self._normalize_var_list(var_names)
+        if not var_list:
+            return
+
         main_window = self.window()
-        loader = getattr(main_window, 'loader', None) if main_window else None
-        if loader is None:
-            loader = get_main_loader()
+        DataTableDialog.add_variables(var_list, parent=main_window)
 
-        if loader is None:
-            QMessageBox.warning(self, "错误", "没有加载数据")
+    def _add_to_blank_plot(self, var_names):
+        var_list = self._normalize_var_list(var_names)
+        if not var_list:
             return
-        if var_name not in loader.df.columns:
-            QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
-            return
-        data = loader.df[var_name]
-        DataTableDialog.popup(var_name, data, self)
 
-    def _add_to_blank_plot(self, var_name: str):
         # 获取 MainWindow 实例
         main_window = self.window()
         if not (main_window and hasattr(main_window, 'loader')):
@@ -2867,18 +2905,6 @@ class MyTableWidget(QTableWidget):
 
         if main_window is None:
             QMessageBox.warning(self, "错误", "未找到主窗口实例")
-            return
-
-        if loader is None:
-            QMessageBox.warning(self, "错误", "没有加载数据")
-            return
-        if var_name not in main_window.loader.df.columns:
-            QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
-            return
-
-        # 1. 首先判断该变量是否含有有效值
-        if main_window.loader.df_validity.get(var_name, -1) <0:
-            QMessageBox.warning(self, "错误", f"变量 '{var_name}' 没有足够有效数值")
             return
 
         # 2. 在用户设置的当前布局(mxn)中查找空白绘图区，无论绘图区整体是否可见
@@ -2917,11 +2943,40 @@ class MyTableWidget(QTableWidget):
                 return  # 用户选择不激活，则不执行后续操作
         def _job():
             # 4. 将变量添加至空白图中
-            success = blank_plot.plot_variable(var_name)
-            if success:
-                main_window.request_mark_stats_refresh()
+            blank_plot.add_variables_to_plot(var_list)
+            main_window.request_mark_stats_refresh()
 
         QTimer.singleShot(_delay, _job) 
+
+    def _collect_selected_var_names(self) -> list[str]:
+        """返回当前选中的变量原始名称列表"""
+        selected_rows = sorted({index.row() for index in self.selectedIndexes()})
+        result = []
+        for row in selected_rows:
+            item = self.item(row, 0)
+            if item is None:
+                continue
+            var_name = item.data(Qt.ItemDataRole.UserRole + 1) or item.text()
+            if var_name and var_name not in result:
+                result.append(var_name)
+        return result
+
+    def _normalize_var_list(self, var_names) -> list[str]:
+        """将输入标准化为不重复的变量名列表"""
+        if isinstance(var_names, str):
+            candidates = [var_names]
+        else:
+            candidates = list(var_names) if var_names is not None else []
+
+        normalized = []
+        seen = set()
+        for name in candidates:
+            clean_name = (name or "").strip()
+            if not clean_name or clean_name in seen:
+                continue
+            normalized.append(clean_name)
+            seen.add(clean_name)
+        return normalized
 
     def startDrag(self, supportedActions):
         """支持多选变量拖拽"""
@@ -5549,58 +5604,54 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         event.accept()
 
     def dropEvent(self, event):
-        """处理变量拖放事件，支持单个或多个变量同时拖入
-        
-        拖入多个变量时，自动激活多曲线模式并批量添加所有变量。
-        批量添加过程中会抑制重复提示，最后统一显示失败的变量。
-        
-        Args:
-            event: 拖放事件对象，包含拖入的变量名（用;;分隔）
-        """
         self._notify_drag_indicator(hide=True)
         var_names_text = event.mimeData().text()
         # 支持多变量拖放，用;;分隔
         var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
-        
-        if len(var_names) > 1:
-            # 多个变量：批量添加优化
+        self.add_variables_to_plot(var_names)
+        event.acceptProposedAction()
+        if self.window():
+            self.window().request_mark_stats_refresh()
+
+    def add_variables_to_plot(self, var_names: list[str]):
+        """批量添加变量到当前绘图区，供拖拽或右键操作复用"""
+        names = [name.strip() for name in (var_names or []) if isinstance(name, str) and name.strip()]
+        if not names:
+            return
+
+        if len(names) > 1:
             failed_vars = []
             success_vars = []
-            
-            # 阶段1：验证所有变量，准备数据
             variables_data = []
-            for var_name in var_names:
-                is_valid, error_msg = self._validate_plot_data(var_name)
+
+            for var_name in names:
+                is_valid, _ = self._validate_plot_data(var_name)
                 if not is_valid:
                     failed_vars.append(var_name)
                     continue
-                
-                success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(var_name)
+
+                success, _, x_array, y_array, y_format = self._prepare_plot_data(var_name)
                 if not success:
                     failed_vars.append(var_name)
                     continue
-                
-                # 检查是否已存在
+
                 if (self.is_multi_curve_mode and var_name in self.curves) or \
                    (not self.is_multi_curve_mode and var_name == self.y_name):
                     failed_vars.append(var_name)
                     continue
-                
+
                 variables_data.append((var_name, x_array, y_array, y_format))
-            
-            # 阶段2：批量添加变量（设置标志避免中间更新）
+
             self._batch_adding = True
-            
+
             if variables_data:
-                # 检查是否需要从单曲线转换
                 if not self.is_multi_curve_mode and self.curve and self.y_name:
-                    # 迁移单曲线到多曲线字典
                     current_color = 'blue'
                     if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
                         current_pen = self.curve.opts['pen']
                         if hasattr(current_pen, 'color'):
                             current_color = current_pen.color().name()
-                    
+
                     self.curves[self.y_name] = {
                         'curve': self.curve,
                         'x_data': self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None,
@@ -5610,68 +5661,50 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         'visible': True
                     }
                     self.current_color_index = 1
-                
-                # 批量创建所有曲线
+
                 for var_name, x_array, y_array, y_format in variables_data:
                     x_values = self.offset + self.factor * x_array
-                    y_values = y_array
-                    
-                    # 选择颜色
                     color = self.curve_colors[self.current_color_index % len(self.curve_colors)]
                     self.current_color_index += 1
-                    
-                    # 创建曲线
+
                     pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-                    curve = self.plot_item.plot(x_values, y_values, pen=pen, name=var_name,skipFiniteCheck=True)
-                    
-                    # 存储曲线信息
+                    curve = self.plot_item.plot(x_values, y_array, pen=pen, name=var_name, skipFiniteCheck=True)
+
                     self.curves[var_name] = {
                         'curve': curve,
                         'x_data': x_values,
-                        'y_data': y_values,
+                        'y_data': y_array,
                         'color': color,
                         'y_format': y_format or '',
                         'visible': True
                     }
-                    
+
                     success_vars.append(var_name)
-                
-                # 更新模式状态
+
                 self.is_multi_curve_mode = len(self.curves) > 1
-            
-            # 阶段3：批量添加完成，恢复标志
+
             self._batch_adding = False
-            
-            # 阶段4：统一更新边界、坐标轴和legend（只执行一次）
+
             if success_vars:
-                # 更新legend
                 if self.is_multi_curve_mode:
                     self.update_legend()
-                
-                # 统一更新坐标轴
+
                 self._update_axes_for_multi_curve(update_x_range=False)
 
-                # 统一更新cursor边界
                 x_arrays = self._collect_visible_curve_arrays('x_data')
                 if x_arrays:
                     combined = np.concatenate(x_arrays)
                     min_x, max_x = np.nanmin(combined), np.nanmax(combined)
                     self.vline.setBounds([min_x, max_x])
                     self._update_cursor_after_plot(min_x, max_x)
-                
-                # 更新cursor标签
+
                 if self.vline.isVisible():
                     self.update_cursor_label()
-            
-            # 提示失败的变量
+
             if failed_vars:
                 QMessageBox.information(self, "提示", f"以下变量已在绘图中:\n" + "\n".join(failed_vars))
-        elif len(var_names) == 1:
-            # 单个变量：正常处理
-            self.plot_variable(var_names[0])
-        
-        event.acceptProposedAction()
-        self.window().request_mark_stats_refresh()
+        else:
+            self.plot_variable(names[0])
 
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
         """
