@@ -1710,84 +1710,52 @@ class DataTableDialog(QMainWindow):
         # 计算绘图相关（尽量保持原有逻辑）
         plot_enabled = False
         x_col = y_col = None
-        min_row = num_rows = 0
+        plot_rows: list[int] = []
 
-        # 使用当前视图与对侧分别计算两种情形
-        # 1) 当前视图内正好2列，且行集合一致且>=2
-        this_cols = set()
-        rows_per_col_this: dict[int, set[int]] = {}
-        for idx in selected_indexes:
-            this_cols.add(idx.column())
-            rows_per_col_this.setdefault(idx.column(), set()).add(idx.row())
-        if view == self.main_view:
-            this_cols = this_cols - frozen_cols
-        else:
-            this_cols = this_cols & frozen_cols
+        all_rows = set()
+        for rows in rows_per_col_all.values():
+            all_rows.update(rows)
 
-        if len(this_cols) == 2:
-            cols_list = sorted(list(this_cols))
-            r0 = rows_per_col_this.get(cols_list[0], set())
-            r1 = rows_per_col_this.get(cols_list[1], set())
-            if len(r0) >= 2 and r0 == r1:
-                header = view.horizontalHeader()
-                vis1 = header.visualIndex(cols_list[0])
-                vis2 = header.visualIndex(cols_list[1])
-                if vis1 < vis2:
-                    x_col, y_col = cols_list[0], cols_list[1]
-                else:
-                    x_col, y_col = cols_list[1], cols_list[0]
-                min_row = min(r0)
-                num_rows = len(r0)
+        if len(total_cols) == 2 and len(all_rows) >= 2:
+            cols_list = list(total_cols)
+            frozen_sel = [c for c in cols_list if c in frozen_cols]
+            main_sel = [c for c in cols_list if c not in frozen_cols]
+
+            if len(frozen_sel) == 2:
+                header = self.frozen_view.horizontalHeader()
+                frozen_sel.sort(key=lambda c: header.visualIndex(c))
+                x_col, y_col = frozen_sel[0], frozen_sel[1]
+            elif len(main_sel) == 2:
+                header = self.main_view.horizontalHeader()
+                main_sel.sort(key=lambda c: header.visualIndex(c))
+                x_col, y_col = main_sel[0], main_sel[1]
+            elif len(frozen_sel) == 1 and len(main_sel) == 1:
+                x_col, y_col = frozen_sel[0], main_sel[0]
+
+            if x_col is not None and y_col is not None:
+                plot_rows = sorted(all_rows)
                 plot_enabled = True
 
-        # 2) 跨两视图各1列，且行集合一致且>=2
-        if not plot_enabled:
-            # 统计对侧列与行
-            other_cols = set()
-            rows_per_col_other: dict[int, set[int]] = {}
-            for idx in other_selected:
-                other_cols.add(idx.column())
-                rows_per_col_other.setdefault(idx.column(), set()).add(idx.row())
-
-            # 归一化集合
-            if view == self.main_view:
-                this_cols = this_cols  # 已经去除了冻结列
-                other_cols = other_cols & frozen_cols
-            else:
-                this_cols = this_cols  # 已经只保留冻结列
-                other_cols = other_cols - frozen_cols
-
-            if len(this_cols) == 1 and len(other_cols) == 1:
-                this_col = next(iter(this_cols))
-                other_col = next(iter(other_cols))
-                this_rows = rows_per_col_this.get(this_col, set())
-                other_rows = rows_per_col_other.get(other_col, set())
-                if len(this_rows) >= 2 and this_rows == other_rows:
-                    if view == self.frozen_view:
-                        x_col, y_col = this_col, other_col
-                    else:
-                        x_col, y_col = other_col, this_col
-                    min_row = min(this_rows)
-                    num_rows = len(this_rows)
-                    plot_enabled = True
-
-        # 构建统一菜单
         menu = QMenu(self)
 
         # 绘图菜单（仅在正好两列被选中时展示；保持原行为）
         scatter_actions_added = False
-        if len(total_cols) == 2:
+        plot_candidate_cols = total_cols
+        if len(plot_candidate_cols) == 2:
             # 获取列名用于展示
-            cols_list = sorted(list(total_cols))
-            x_show, y_show = cols_list[0], cols_list[1]
+            cols_list = sorted(list(plot_candidate_cols))
+            if plot_enabled and x_col is not None and y_col is not None:
+                x_show, y_show = x_col, y_col
+            else:
+                x_show, y_show = cols_list[0], cols_list[1]
             x_name = self.model.headerData(x_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
             y_name = self.model.headerData(y_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
 
             act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
             act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
             if plot_enabled and x_col is not None and y_col is not None:
-                act1.triggered.connect(lambda: self._plot_xy_scatter(x_col, y_col, min_row, num_rows))
-                act2.triggered.connect(lambda: self._plot_xy_scatter(y_col, x_col, min_row, num_rows))
+                act1.triggered.connect(lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(x, y, rows))
+                act2.triggered.connect(lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(y, x, rows))
                 act1.setEnabled(True)
                 act2.setEnabled(True)
                 # 若可激活绘图，则先放绘图菜单
@@ -1820,7 +1788,7 @@ class DataTableDialog(QMainWindow):
             menu.addAction(act_copy_selected)
             menu.addAction(act_copy_all)
             # 若存在两列但不可激活，也追加禁用的绘图项在其后
-            if len(total_cols) == 2:
+            if len(plot_candidate_cols) == 2:
                 menu.addSeparator()
                 act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
                 act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
@@ -1831,28 +1799,35 @@ class DataTableDialog(QMainWindow):
 
         menu.exec(view.mapToGlobal(pos))
 
-    def _show_plot_menu(self, pos, view, x_col, y_col, min_row, num_rows, enabled=True):
+    def _show_plot_menu(self, pos, view, x_col, y_col, rows, enabled=True):
         x_name = self.model.headerData(x_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
         y_name = self.model.headerData(y_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole).replace('\n', ' ')
         menu = QMenu(self)
         act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
-        act1.triggered.connect(lambda: self._plot_xy_scatter(x_col, y_col, min_row, num_rows))
+        act1.triggered.connect(lambda _checked=False, rows=rows, x=x_col, y=y_col: self._plot_xy_scatter(x, y, rows))
         act1.setEnabled(enabled)
         act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
-        act2.triggered.connect(lambda: self._plot_xy_scatter(y_col, x_col, min_row, num_rows))
+        act2.triggered.connect(lambda _checked=False, rows=rows, x=x_col, y=y_col: self._plot_xy_scatter(y, x, rows))
         act2.setEnabled(enabled)
         menu.addAction(act1)
         menu.addAction(act2)
         menu.exec(view.mapToGlobal(pos))
 
-    def _plot_xy_scatter(self, x_col_idx, y_col_idx, start_row, num_rows):
+    def _plot_xy_scatter(self, x_col_idx, y_col_idx, rows=None, start_row=None, num_rows=None):
         """
         接收已按视觉顺序确定的逻辑列索引进行绘图。
         """
         try:
+            if rows is None:
+                if start_row is None or num_rows is None:
+                    return
+                row_indexer = slice(start_row, start_row + num_rows)
+            else:
+                row_indexer = rows
+
             # 直接使用正确的逻辑索引提取数据
-            x_data_series = pd.to_numeric(self._df.iloc[start_row : start_row + num_rows, x_col_idx], errors='coerce')
-            y_data_series = pd.to_numeric(self._df.iloc[start_row : start_row + num_rows, y_col_idx], errors='coerce')
+            x_data_series = pd.to_numeric(self._df.iloc[row_indexer, x_col_idx], errors='coerce')
+            y_data_series = pd.to_numeric(self._df.iloc[row_indexer, y_col_idx], errors='coerce')
 
             # 验证1：检查是否有非数值数据
             if x_data_series.isnull().any() or y_data_series.isnull().any():
