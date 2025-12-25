@@ -3221,29 +3221,38 @@ class CustomViewBox(pg.ViewBox):
         else:
             menu.addAction(cursor_value_act)
 
-        # 添加 "Copy Name" 按钮：复制当前绘图的变量名
-        if "Copy Name" not in existing_texts:
+        # Copy Name: 每次右键都更新 enable 状态（支持单曲线/多曲线）
+        copy_act = None
+        for act in menu.actions():
+            if act.text() == "Copy Name":
+                copy_act = act
+                break
+        if copy_act is None:
             copy_act = QAction("Copy Name", menu)
             copy_act.triggered.connect(self.trigger_copy_name)
-            has_data = bool(
-                self.plot_widget
-                and getattr(self.plot_widget, 'curve', None) is not None
-                and bool(getattr(self.plot_widget, 'y_name', ''))
-            )
-            copy_act.setEnabled(has_data)
             menu.addAction(copy_act)
+
+        curves = getattr(self.plot_widget, 'curves', {}) if self.plot_widget else {}
+        has_single = bool(
+            self.plot_widget
+            and getattr(self.plot_widget, 'curve', None) is not None
+            and bool(getattr(self.plot_widget, 'y_name', ''))
+        )
+        has_multi = bool(curves)
+        has_data = has_single or has_multi
+        copy_act.setEnabled(has_data)
         
         # 添加"绘图变量编辑器"选项
         if "Plot Variable Editor" not in existing_texts:
             editor_act = QAction("Plot Variable Editor", menu)
             editor_act.triggered.connect(self.trigger_variable_editor)
             # 检查是否有数据可以编辑
-            has_data = bool(
-                self.plot_widget 
-                and (getattr(self.plot_widget, 'curve', None) is not None 
-                     or getattr(self.plot_widget, 'curves', None))
-            )
-            editor_act.setEnabled(has_data)
+            # has_data = bool(
+            #     self.plot_widget 
+            #     and (getattr(self.plot_widget, 'curve', None) is not None 
+            #          or getattr(self.plot_widget, 'curves', None))
+            # )
+            # editor_act.setEnabled(has_data)
             menu.addAction(editor_act)
                 
         # 将 "Clear Plot" action 添加到菜单末尾
@@ -3295,10 +3304,23 @@ class CustomViewBox(pg.ViewBox):
                 var_names = [var_name]
         
         if not var_names:
+            if DEBUG_LOG_ENABLED:
+                try:
+                    print(
+                        "[CopyNameDebug] trigger_copy_name no_vars",
+                        "is_multi=", bool(getattr(self.plot_widget, 'is_multi_curve_mode', False)),
+                        "y_name=", repr(getattr(self.plot_widget, 'y_name', '')),
+                        "curves_count=", len(getattr(self.plot_widget, 'curves', {}) or {}),
+                        "curve=", getattr(self.plot_widget, 'curve', None) is not None,
+                    )
+                except Exception as e:
+                    print(f"[CopyNameDebug] trigger_copy_name error: {e}")
             return
         
         # 将变量名用空格分隔
         clipboard_text = ' '.join(var_names)
+        if DEBUG_LOG_ENABLED:
+            print("[CopyNameDebug] clipboard_text", repr(clipboard_text))
         QApplication.clipboard().setText(clipboard_text)
     
     def trigger_auto_y_axis(self):
