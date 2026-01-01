@@ -19,7 +19,7 @@ if sys.platform == "darwin":  # macOS
     )
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, QtMsgType, qInstallMessageHandler
-from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
+from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
@@ -3157,34 +3157,38 @@ class CustomViewBox(pg.ViewBox):
         
         # 添加 Pin Cursor/Free Cursor 功能 (第三个位置，在自动调节y轴之后)
         # 检查是否有任何plot处于pin状态
-        is_pinned = False
-        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
-            for container in self.plot_widget.window().plot_widgets:
-                if container.plot_widget.is_cursor_pinned:
-                    is_pinned = True
-                    break
-        
-        # 先移除可能存在的旧按钮
         actions_to_remove = []
         for action in menu.actions():
-            if action.text() in ["Pin Cursor", "Free Cursor"]:
+            if action.text() in ["Pin Cursor", "Free Cursor", "Cursor Mode"]:
                 actions_to_remove.append(action)
         for action in actions_to_remove:
             menu.removeAction(action)
-        
-        # 根据全局pin状态添加相应的按钮（严格互斥）
-        if is_pinned:
-            pin_act = QAction("Free Cursor", menu)
-            pin_act.triggered.connect(self.trigger_free_cursor)
-        else:
-            pin_act = QAction("Pin Cursor", menu)
-            pin_act.triggered.connect(self.trigger_pin_cursor)
-        
-        # 在自动调节y轴之后插入（第三个位置）
+
+        cursor_enabled = False
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_btn'):
+            cursor_enabled = self.plot_widget.window().cursor_btn.isChecked()
+
+        cursor_menu = QMenu("Cursor Mode", menu)
+        cursor_menu.setEnabled(cursor_enabled)
+        cursor_group = QActionGroup(cursor_menu)
+        cursor_group.setExclusive(True)
+        current_mode = "1 free cursor"
+        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_mode'):
+            current_mode = self.plot_widget.window().cursor_mode
+
+        for mode_text in ["1 free cursor", "1 anchored cursor", "2 anchored cursor"]:
+            mode_act = QAction(mode_text, cursor_menu)
+            mode_act.setCheckable(True)
+            mode_act.setChecked(mode_text == current_mode)
+            mode_act.setEnabled(cursor_enabled)
+            mode_act.triggered.connect(lambda checked, m=mode_text: self.trigger_cursor_mode(m))
+            cursor_group.addAction(mode_act)
+            cursor_menu.addAction(mode_act)
+
         if len(menu.actions()) >= 2:
-            menu.insertAction(menu.actions()[2] if len(menu.actions()) > 2 else None, pin_act)
+            menu.insertMenu(menu.actions()[2] if len(menu.actions()) > 2 else None, cursor_menu)
         else:
-            menu.addAction(pin_act)
+            menu.addMenu(cursor_menu)
         
         # 添加 Cursor Value 显示/隐藏选项 (第四个位置，在Pin Cursor之后)
         # 先移除可能存在的旧菜单项
@@ -3283,6 +3287,14 @@ class CustomViewBox(pg.ViewBox):
         """解除cursor固定，恢复跟随鼠标"""
         if self.plot_widget:
             self.plot_widget.free_cursor()
+
+    def trigger_cursor_mode(self, mode: str):
+        if self.plot_widget and self.plot_widget.window():
+            self.plot_widget.window().set_cursor_mode(
+                mode,
+                source_plot=self.plot_widget,
+                context_x=self.context_x,
+            )
 
     def trigger_copy_name(self):
         """复制当前绘图变量名到剪贴板（无数据则不执行）"""
@@ -3405,6 +3417,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.is_cursor_pinned = False  # 记录cursor是否被固定
         self.pinned_x_value = None  # 记录固定的x值
         self.pinned_index_value = None  # 记录固定的索引值
+        self.pinned_x_values = []
+        self.pinned_index_values = []
         self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
         self._is_being_destroyed = False  # 标志：对象正在被销毁
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
@@ -3734,7 +3748,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
 
         # self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
-        self.vline.setBounds([min_x, max_x])
+        self._set_vline_bounds([min_x, max_x])
 
         # 在设置完新范围后，立即直接调用样式更新函数。
         self._queue_ui_refresh(immediate=True)
@@ -3854,7 +3868,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
         self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
-        self.vline.setBounds([None, None]) 
+        self._set_vline_bounds([None, None]) 
 
         self.xMin = xMin
         self.xMax = xMax
@@ -3925,11 +3939,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """配置交互元素"""
         # 光标线
         self.vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((255, 0, 0, 100), width=4) )
+        self.vline2 = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((255, 0, 0, 100), width=4) )
+        self.vline.cursor_index = 0
+        self.vline2.cursor_index = 1
+        self.vline2.setZValue(100)
         self.vline.setZValue(100) 
         self.cursor_label = pg.TextItem("", anchor=(1, 1), color="red")
         self.plot_item.addItem(self.vline, ignoreBounds=True)
+        self.plot_item.addItem(self.vline2, ignoreBounds=True)
         self.plot_item.addItem(self.cursor_label, ignoreBounds=True)
         self.vline.setVisible(False)
+        self.vline2.setVisible(False)
         self.cursor_label.setVisible(False)
         
         # 多曲线cursor元素
@@ -3940,7 +3960,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_item_pool = {
             'circles': [],  # ScatterPlotItem对象池
             'labels': [],   # TextItem对象池（y值标签）
-            'x_label': None  # X轴标签（只需要一个）
+            'x_labels': []
         }
         
         # 信号连接
@@ -3948,6 +3968,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 多曲线时降低频率可显著提升响应速度
         self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=20, slot=self.mouse_moved)
         self.vline.sigPositionChanged.connect(self.on_vline_position_changed)
+        self.vline2.sigPositionChanged.connect(self.on_vline_position_changed)
         self.setAntialiasing(False)
         
         # 【性能优化】cursor更新节流控制
@@ -4248,45 +4269,61 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     @safe_callback
     def on_vline_position_changed(self, line_obj=None):
-        """
-        vline位置变化时的处理
-
-        当vline被拖动时触发，在pin状态下会同步所有被pin的plot的cursor位置。
-        在正常状态下会更新cursor标签显示。
-
-        Args:
-            line_obj: pyqtgraph的InfiniteLine对象，信号发送者（PyQt6需要接收此参数）
-        """
+        """vline 位置变化时更新光标状态"""
         if self._is_cursor_update_locked():
             return
+        # 时间修正期间禁止写回，避免固定值被边界夹住后污染
+        if self.window() and getattr(self.window(), "_is_time_correction_active", False):
+            return
+
+        line = line_obj if line_obj is not None else self.vline
+        cursor_index = getattr(line, "cursor_index", 0)
+
         if self.is_cursor_pinned:
             if getattr(self, "_suppress_pin_update", False):
                 return
-            # 在pin状态下，同步所有被pin的plot的cursor位置
-            x_pos = self.vline.value()
-            self.pinned_x_value = x_pos
-            if self.factor != 0:
-                self.pinned_index_value = (x_pos - self.offset) / self.factor
-            else:
-                self.pinned_index_value = None
-            if self.window() and hasattr(self.window(), 'plot_widgets'):
+            x_pos = line.value()
+            if len(self.pinned_x_values) <= cursor_index:
+                self.pinned_x_values += [x_pos] * (cursor_index + 1 - len(self.pinned_x_values))
+            self.pinned_x_values[cursor_index] = x_pos
+
+            if cursor_index == 0:
+                self.pinned_x_value = x_pos
+                if self.factor != 0:
+                    self.pinned_index_value = (x_pos - self.offset) / self.factor
+                else:
+                    self.pinned_index_value = None
+
+            self.pinned_index_values = []
+            for x_val in self.pinned_x_values:
+                if self.factor != 0:
+                    self.pinned_index_values.append((x_val - self.offset) / self.factor)
+
+            if self.window() and hasattr(self.window(), "pinned_x_values"):
+                self.window().pinned_x_values = list(self.pinned_x_values)
+
+            if self.window() and hasattr(self.window(), "plot_widgets"):
                 for container in self.window().plot_widgets:
                     widget = container.plot_widget
                     if widget.is_cursor_pinned and widget != self:
-                        # 同步其他被pin的plot
-                        blocker = QSignalBlocker(widget.vline)
-                        widget.vline.setPos(x_pos)
+                        target_line = widget.vline if cursor_index == 0 else getattr(widget, "vline2", None)
+                        if target_line is not None:
+                            with QSignalBlocker(target_line):
+                                target_line.setPos(x_pos)
+                        if len(widget.pinned_x_values) <= cursor_index:
+                            widget.pinned_x_values += [x_pos] * (cursor_index + 1 - len(widget.pinned_x_values))
+                        widget.pinned_x_values[cursor_index] = x_pos
+                        if cursor_index == 0:
+                            widget.pinned_x_value = x_pos
+                            if widget.factor != 0:
+                                widget.pinned_index_value = (x_pos - widget.offset) / widget.factor
+                            else:
+                                widget.pinned_index_value = None
                         widget.update_cursor_label()
-                        widget.pinned_x_value = x_pos
-                        if widget.factor != 0:
-                            widget.pinned_index_value = (x_pos - widget.offset) / widget.factor
-                        else:
-                            widget.pinned_index_value = None
+
             self.update_cursor_label()
         else:
-            # 正常模式下更新cursor标签
             if self.show_values_only:
-                # 如果只显示x值，调用相应方法
                 self._show_x_position_only()
             else:
                 self.update_cursor_label()
@@ -4350,6 +4387,123 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 4. 恢复联动
         if linked is not None:
             plot.setXLink(linked)
+
+    def _get_cursor_mode(self):
+        window = self.window()
+        if window and hasattr(window, "cursor_mode"):
+            return window.cursor_mode
+        return "1 free cursor"
+
+    def _get_cursor_x_positions(self):
+        mode = self._get_cursor_mode()
+        if mode == "2 anchored cursor":
+            if self.pinned_x_values and len(self.pinned_x_values) >= 2:
+                return list(self.pinned_x_values[:2])
+            positions = []
+            if hasattr(self, "vline") and self.vline.isVisible():
+                positions.append(self.vline.value())
+            if hasattr(self, "vline2") and self.vline2.isVisible():
+                positions.append(self.vline2.value())
+            return positions
+        if mode == "1 anchored cursor":
+            if self.pinned_x_values:
+                return [self.pinned_x_values[0]]
+            if self.pinned_x_value is not None:
+                return [self.pinned_x_value]
+        if hasattr(self, "vline"):
+            return [self.vline.value()]
+        return []
+
+    def _set_vline_visibility_for_mode(self, visible: bool, mode: str):
+        if not hasattr(self, "vline"):
+            return
+        if mode == "2 anchored cursor":
+            self.vline.setVisible(visible)
+            if hasattr(self, "vline2"):
+                self.vline2.setVisible(visible)
+        else:
+            self.vline.setVisible(visible)
+            if hasattr(self, "vline2"):
+                self.vline2.setVisible(False)
+
+    def _set_vline_bounds(self, bounds):
+        if hasattr(self, "vline"):
+            self.vline.setBounds(bounds)
+        if hasattr(self, "vline2"):
+            self.vline2.setBounds(bounds)
+
+    def apply_cursor_mode(self, mode, pinned_x_values):
+        if mode == "1 free cursor":
+            self.is_cursor_pinned = False
+            self.pinned_x_value = None
+            self.pinned_index_value = None
+            self.pinned_x_values = []
+            self.pinned_index_values = []
+            if hasattr(self, "vline"):
+                self.vline.setMovable(False)
+            if hasattr(self, "vline2"):
+                self.vline2.setMovable(False)
+            if hasattr(self.view_box, "is_cursor_pinned"):
+                self.view_box.is_cursor_pinned = False
+            self._set_vline_visibility_for_mode(True, mode)
+            return
+
+        if mode == "1 anchored cursor":
+            self.is_cursor_pinned = True
+            self.pinned_x_values = list(pinned_x_values[:1]) if pinned_x_values else self.pinned_x_values[:1]
+            if self.pinned_x_values:
+                self.pinned_x_value = self.pinned_x_values[0]
+            if self.factor != 0 and self.pinned_x_value is not None:
+                self.pinned_index_value = (self.pinned_x_value - self.offset) / self.factor
+            else:
+                self.pinned_index_value = None
+            self.pinned_index_values = [self.pinned_index_value] if self.pinned_index_value is not None else []
+            if hasattr(self, "vline") and self.pinned_x_value is not None:
+                self.vline.setMovable(True)
+                with QSignalBlocker(self.vline):
+                    self.vline.setPos(self.pinned_x_value)
+            if hasattr(self, "vline2"):
+                self.vline2.setMovable(False)
+            if hasattr(self.view_box, "is_cursor_pinned"):
+                self.view_box.is_cursor_pinned = True
+            self._set_vline_visibility_for_mode(True, mode)
+            return
+
+        if mode == "2 anchored cursor":
+            self.is_cursor_pinned = True
+            if pinned_x_values and len(pinned_x_values) >= 2:
+                self.pinned_x_values = list(pinned_x_values[:2])
+            elif len(self.pinned_x_values) >= 2:
+                self.pinned_x_values = list(self.pinned_x_values[:2])
+            elif len(self.pinned_x_values) == 1:
+                self.pinned_x_values = [self.pinned_x_values[0], self.pinned_x_values[0]]
+            else:
+                view_min, view_max = self.view_box.viewRange()[0]
+                if view_min is not None and view_max is not None:
+                    x1 = view_min + (view_max - view_min) / 3
+                    x2 = view_min + 2 * (view_max - view_min) / 3
+                    self.pinned_x_values = [x1, x2]
+                else:
+                    self.pinned_x_values = [0.0, 0.0]
+            self.pinned_x_value = self.pinned_x_values[0]
+            self.pinned_index_values = []
+            for x_val in self.pinned_x_values:
+                if self.factor != 0:
+                    self.pinned_index_values.append((x_val - self.offset) / self.factor)
+            if hasattr(self, "vline"):
+                self.vline.setMovable(True)
+            if hasattr(self, "vline2"):
+                self.vline2.setMovable(True)
+            if hasattr(self, "vline") and self.pinned_x_values:
+                with QSignalBlocker(self.vline):
+                    self.vline.setPos(self.pinned_x_values[0])
+            if hasattr(self, "vline2") and len(self.pinned_x_values) > 1:
+                with QSignalBlocker(self.vline2):
+                    self.vline2.setPos(self.pinned_x_values[1])
+            if hasattr(self.view_box, "is_cursor_pinned"):
+                self.view_box.is_cursor_pinned = True
+            self._set_vline_visibility_for_mode(True, mode)
+            return
 
     def update_cursor_label(self):
         """
@@ -4490,32 +4644,26 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         pool.append(label)
         return label
     
-    def _get_x_label_from_pool(self):
-        """获取X轴标签（只需要一个，总是复用同一个实例）
-        
-        X轴位置标签在plot下方显示cursor的x坐标值，全局只需要一个实例。
-        使用对象池复用这个唯一的TextItem，避免重复创建。
-        
-        Returns:
-            TextItem: x轴位置标签对象（全局唯一）
-        """
-        if self._cursor_item_pool['x_label'] is None:
-            x_label = pg.TextItem(
-                color=(255, 255, 255),
-                fill=pg.mkBrush(64, 64, 64, 230),
-                border=pg.mkPen(128, 128, 128, width=1),
-                anchor=(0.5, 0)
-            )
-            # x_label.setFont(QFont('Arial', 9))
+    def _get_x_label_from_pool(self, index: int):
+        """获取 X 轴标签 TextItem（用于光标显示）"""
+        pool = self._cursor_item_pool["x_labels"]
+        if index < len(pool):
+            return pool[index]
 
-            # 设置一个跨平台一致的逻辑像素大小 (12px)
-            font = QApplication.font()
-            font.setPixelSize(12)
-            x_label.setFont(font)
+        x_label = pg.TextItem(
+            color=(255, 255, 255),
+            fill=pg.mkBrush(64, 64, 64, 230),
+            border=pg.mkPen(128, 128, 128, width=1),
+            anchor=(0.5, 0)
+        )
 
-            self._cursor_item_pool['x_label'] = x_label
-        return self._cursor_item_pool['x_label']
-    
+        font = QApplication.font()
+        font.setPixelSize(12)
+        x_label.setFont(font)
+
+        pool.append(x_label)
+        return x_label
+
     def _clear_cursor_items(self, hide_only=True):
         """清除或隐藏所有cursor可视化元素
 
@@ -4549,7 +4697,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         item.clear()  # 清除ScatterPlotItem的数据，释放内存
                     except (RuntimeError, AttributeError):
                         pass
-                elif item == self._cursor_item_pool.get('x_label'):
+                elif item in self._cursor_item_pool.get('x_labels', []):
                     # X轴标签：清空文本
                     try:
                         item.setText("")  # 清空文本，释放字符串占用的内存
@@ -4580,14 +4728,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             for label in self._cursor_item_pool.get('labels', []):
                 self._queue_item_for_deletion(label)
 
-            if self._cursor_item_pool.get('x_label'):
-                self._queue_item_for_deletion(self._cursor_item_pool['x_label'])
+            for x_label in self._cursor_item_pool.get('x_labels', []):
+                self._queue_item_for_deletion(x_label)
 
             # 重置对象池
             self._cursor_item_pool = {
                 'circles': [],
                 'labels': [],
-                'x_label': None
+                'x_labels': []
             }
 
             # 延迟执行实际删除（等待当前事件循环完成）
@@ -4736,231 +4884,174 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             pass
     
     def _update_multi_curve_cursor_label(self):
-        """更新多曲线模式的光标标签"""
-        # 【性能优化】交互期间完全禁用cursor更新，避免拖拽/缩放时卡顿
-        if getattr(self, '_is_interacting', False):
-            return  # 交互期间跳过cursor更新，交互结束后统一更新
-        
-        # 【性能优化】自适应节流控制 - 根据曲线数量动态调整更新频率
+        """更新多曲线光标标签（多光标模式）"""
+        if getattr(self, "_is_interacting", False):
+            return
+
         import time
         current_time = time.time()
-        
-        # 动态计算节流时间：曲线越多，节流越激进
-        if self._adaptive_throttle_enabled and hasattr(self, 'curves'):
+
+        if self._adaptive_throttle_enabled and hasattr(self, "curves"):
             curve_count = len(self.curves)
-            # 基础16ms + 每条曲线增加2ms，最多100ms
             adaptive_throttle = min(0.016 + curve_count * 0.002, 0.1)
         else:
             adaptive_throttle = self._cursor_update_throttle
-        
-        if hasattr(self, '_last_cursor_update_time'):
+
+        if hasattr(self, "_last_cursor_update_time"):
             time_since_last = current_time - self._last_cursor_update_time
             if time_since_last < adaptive_throttle:
-                return  # 跳过此次更新
+                return
         self._last_cursor_update_time = current_time
-        
-        # 【内存优化】清除旧的cursor元素
-        old_count = len(self.multi_cursor_items)
+
         self._clear_cursor_items()
-        
-        # 检查vline是否可见，如果不可见则不显示任何cursor元素
-        vline_visible = self.vline.isVisible()
+
+        mode = self._get_cursor_mode()
+        if mode == "2 anchored cursor":
+            vline_visible = bool(self.vline.isVisible() or self.vline2.isVisible())
+        else:
+            vline_visible = self.vline.isVisible()
         if not vline_visible:
             self.update_right_header("")
             return
-        
-        # 如果设置了只显示x值，则只显示x位置信息（即使没有数据曲线）
-        has_attr = hasattr(self, 'show_values_only')
+
+        has_attr = hasattr(self, "show_values_only")
         show_values_only = self.show_values_only if has_attr else False
         if has_attr and show_values_only:
             self._show_x_position_only()
             return
-        
-        # 检查是否有数据
+
         if not self.curves and not self.curve:
             self.update_right_header("")
             return
-            
+
+        x_positions = self._get_cursor_x_positions()
+        if not x_positions:
+            self.update_right_header("")
+            return
+
         try:
-            x = self.vline.value()
             cursor_values = []
-            
-            # 获取当前视图范围
             (x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
-            
-            # 检查x是否在可见范围内
-            if x < x_min or x > x_max:
-                self.update_right_header("")
-                return
-            
-            # 准备曲线数据列表
+
             curves_to_process = []
-            
             if self.curves:
-                # 有curves字典：处理curves中的曲线（无论是否是多曲线模式）
                 for var_name, curve_info in self.curves.items():
-                    if not curve_info.get('visible', True):
+                    if not curve_info.get("visible", True):
                         continue
                     curves_to_process.append({
-                        'var_name': var_name,
-                        'x_data': curve_info['x_data'],
-                        'y_data': curve_info['y_data'],
-                        'color': curve_info['color'],
-                        'y_format': curve_info.get('y_format', ''),
-                        'unit': self.units.get(var_name, '')
+                        "var_name": var_name,
+                        "x_data": curve_info["x_data"],
+                        "y_data": curve_info["y_data"],
+                        "color": curve_info["color"],
+                        "y_format": curve_info.get("y_format", ""),
+                        "unit": self.units.get(var_name, "")
                     })
             elif not self.is_multi_curve_mode and self.curve and self.y_name:
-                # 单曲线模式
                 x_data, y_data = self.curve.getData()
                 if x_data is not None and len(x_data) > 0:
-                    # 获取曲线颜色
-                    curve_color = 'blue'
+                    curve_color = "blue"
                     try:
-                        if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
-                            pen = self.curve.opts['pen']
-                            if hasattr(pen, 'color'):
+                        if hasattr(self.curve, "opts") and "pen" in self.curve.opts:
+                            pen = self.curve.opts["pen"]
+                            if hasattr(pen, "color"):
                                 curve_color = pen.color().name()
-                    except:
+                    except Exception:
                         pass
-                    
                     curves_to_process.append({
-                        'var_name': self.y_name,
-                        'x_data': x_data,
-                        'y_data': y_data,
-                        'color': curve_color,
-                        'y_format': self.y_format,
-                        'unit': self.units.get(self.y_name, '')
+                        "var_name": self.y_name,
+                        "x_data": x_data,
+                        "y_data": y_data,
+                        "color": curve_color,
+                        "y_format": self.y_format,
+                        "unit": self.units.get(self.y_name, "")
                     })
-            
-            # 为每个曲线计算y值
-            for curve_data in curves_to_process:
-                var_name = curve_data['var_name']
-                x_data = curve_data['x_data']
-                y_data = curve_data['y_data']
-                color = curve_data['color']
-                y_format = curve_data['y_format']
-                
-                if x_data is None or len(x_data) == 0:
+
+            for x in x_positions:
+                if x < x_min or x > x_max:
                     continue
-                    
-                # 检查x是否在数据范围内
-                if x < x_data.min() or x > x_data.max():
-                    continue
-                    
-                # 【性能优化】使用二分查找代替argmin，速度提升10-100倍
-                # 假设x_data是排序的（大多数情况下是），使用searchsorted
-                try:
-                    idx = np.searchsorted(x_data, x, side='left')
-                    # 边界检查
-                    if idx >= len(x_data):
-                        idx = len(x_data) - 1
-                    elif idx > 0:
-                        # 检查左边的点是否更接近
-                        if abs(x_data[idx - 1] - x) < abs(x_data[idx] - x):
-                            idx = idx - 1
-                except (ValueError, TypeError):
-                    # 如果x_data不是排序的，回退到argmin
-                    idx = np.argmin(np.abs(x_data - x))
-                    
-                y_val = y_data[idx]
-                x_actual = x_data[idx]
-                
-                # 检查是否为NaN（避免All-NaN slice encountered警告）
-                if np.isnan(x_actual) or np.isnan(y_val):
-                    continue
-                
-                # 检查y是否在可见范围内
-                if y_val < y_min or y_val > y_max:
-                    continue
-                
-                # 格式化y值
-                if y_format == 's':
-                    y_str = self.sInt_to_fmtStr(y_val)
-                elif y_format == 'date':
-                    y_str = self.dateInt_to_fmtStr(y_val)
-                else:
-                    y_str = f"{y_val:.5g}"
-                
-                # 添加到结果列表
-                cursor_values.append({
-                    'var_name': var_name,
-                    'x_pos': x_actual,
-                    'y_pos': y_val,
-                    'y_value': y_str,
-                    'color': color
-                })
-                
-                # 从对象池获取ScatterPlotItem，用于显示cursor交点圆圈
-                circle = self._get_circle_from_pool(len(cursor_values) - 1)
-                
-                # 清除旧数据并设置新位置
-                circle.clear()
-                circle.setData([x_actual], [y_val])
-                
-                # 设置圆圈的边框颜色为曲线颜色
-                # 复用pen对象或只在颜色变化时创建
-                if not hasattr(circle, '_cached_color') or circle._cached_color != color:
-                    pen = pg.mkPen(color, width=1.5)
-                    circle.setPen(pen)
-                    circle._cached_color = color
-                
-                # 显示圆圈并添加到场景
-                circle.setVisible(True)
-                circle.setZValue(200)
-                # 确保item在正确的plot中（避免重复添加警告）
-                circle_scene = circle.scene()
-                plot_scene = self.plot_item.scene()
-                
-                if circle_scene != plot_scene:
-                    # 如果item在其他scene中，先移除
-                    if circle_scene is not None:
-                        circle_scene.removeItem(circle)
-                    # 关键修复：ignoreBounds=True 让圆圈不影响y轴范围的自动计算
-                    # 这样即使圆圈在边缘，也不会导致y轴扩展，避免抖动
-                    self.plot_item.addItem(circle, ignoreBounds=True)
-                
-                self.multi_cursor_items.append(circle)
-            
-            # 智能定位所有文本标签，避免重叠
+                for curve_data in curves_to_process:
+                    var_name = curve_data["var_name"]
+                    x_data = curve_data["x_data"]
+                    y_data = curve_data["y_data"]
+                    color = curve_data["color"]
+                    y_format = curve_data["y_format"]
+
+                    if x_data is None or len(x_data) == 0:
+                        continue
+                    if x < x_data.min() or x > x_data.max():
+                        continue
+
+                    try:
+                        idx = np.searchsorted(x_data, x, side="left")
+                        if idx >= len(x_data):
+                            idx = len(x_data) - 1
+                        elif idx > 0:
+                            if abs(x_data[idx - 1] - x) < abs(x_data[idx] - x):
+                                idx = idx - 1
+                    except (ValueError, TypeError):
+                        idx = np.argmin(np.abs(x_data - x))
+
+                    y_val = y_data[idx]
+                    x_actual = x_data[idx]
+                    if np.isnan(x_actual) or np.isnan(y_val):
+                        continue
+                    if y_val < y_min or y_val > y_max:
+                        continue
+
+                    if y_format == "s":
+                        y_str = self.sInt_to_fmtStr(y_val)
+                    elif y_format == "date":
+                        y_str = self.dateInt_to_fmtStr(y_val)
+                    else:
+                        y_str = f"{y_val:.5g}"
+
+                    cursor_values.append({
+                        "var_name": var_name,
+                        "x_pos": x_actual,
+                        "y_pos": y_val,
+                        "y_value": y_str,
+                        "color": color
+                    })
+
+                    circle = self._get_circle_from_pool(len(cursor_values) - 1)
+                    circle.clear()
+                    circle.setData([x_actual], [y_val])
+                    if not hasattr(circle, "_cached_color") or circle._cached_color != color:
+                        pen = pg.mkPen(color, width=1.5)
+                        circle.setPen(pen)
+                        circle._cached_color = color
+                    circle.setVisible(True)
+                    circle.setZValue(200)
+                    circle_scene = circle.scene()
+                    plot_scene = self.plot_item.scene()
+                    if circle_scene != plot_scene:
+                        if circle_scene is not None:
+                            circle_scene.removeItem(circle)
+                        self.plot_item.addItem(circle, ignoreBounds=True)
+                    self.multi_cursor_items.append(circle)
+
             self._position_labels_avoid_overlap(cursor_values, x_min, x_max, y_min, y_max)
-            
-            # 在cursor位置的x轴处添加x位置信息（放在plot外部，与x轴文字同高度）
-            x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
-            x_info_text = x_str
-            
-            # 从对象池获取x轴标签（复用单个TextItem）
-            x_info_item = self._get_x_label_from_pool()
-            x_info_item.setText(x_info_text)
-            x_info_item.setVisible(True)
-            
-            # 计算场景坐标：将TextItem放在plot区域外部，与x轴相切
-            # 1. 获取ViewBox在场景中的矩形区域
-            view_rect = self.plot_item.vb.sceneBoundingRect()
-            
-            # 2. 将x坐标从数据坐标转换到场景坐标
-            scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
-            scene_x = scene_point.x()
-            
-            # 3. y坐标：ViewBox底部边缘（与x轴相切的位置）
-            # 文本框的顶边（anchor=(0.5,0)）将对齐到这个位置
-            scene_y = view_rect.bottom()
-            
-            # 使用场景坐标设置位置
-            x_info_item.setPos(scene_x, scene_y)
-            # 设置极高的zValue确保在最前面
-            x_info_item.setZValue(100000)
-            # 添加到场景中（使用场景坐标系）
-            scene = self.plot_item.scene()
-            x_scene = x_info_item.scene()
-            
-            if x_scene != scene:
-                if x_scene is not None:
-                    x_scene.removeItem(x_info_item)
-                scene.addItem(x_info_item)
-            
-            self.multi_cursor_items.append(x_info_item)
-            
-            # 不再更新右上角显示，使用可视化标签代替
+
+            for idx, x in enumerate(x_positions):
+                if x < x_min or x > x_max:
+                    continue
+                x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
+                x_info_item = self._get_x_label_from_pool(idx)
+                x_info_item.setText(x_str)
+                x_info_item.setVisible(True)
+                view_rect = self.plot_item.vb.sceneBoundingRect()
+                scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
+                scene_x = scene_point.x()
+                scene_y = view_rect.bottom()
+                x_info_item.setPos(scene_x, scene_y)
+                x_info_item.setZValue(100000)
+                scene = self.plot_item.scene()
+                x_scene = x_info_item.scene()
+                if x_scene != scene:
+                    if x_scene is not None:
+                        x_scene.removeItem(x_info_item)
+                    scene.addItem(x_info_item)
+                self.multi_cursor_items.append(x_info_item)
 
         except Exception as e:
             print(f"Multi-curve cursor update error: {e}")
@@ -5127,242 +5218,184 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             bool(self.curve or self.curves),
         )
 
+        mode = self._get_cursor_mode()
+
         if hide_values_only:
-            # 只隐藏圆圈和y值标签，保留vline和x值
-            self.vline.setVisible(True)
+            self._set_vline_visibility_for_mode(True, mode)
             self.cursor_label.setVisible(False)
-            self.show_values_only = True  # 设置状态
-            # 清除多曲线cursor元素（圆圈和y值标签）
+            self.show_values_only = True
             self._clear_cursor_items()
-            # 但保留x值显示
             self._show_x_position_only()
         else:
-            # 正常模式：完全显示或隐藏cursor
-            self.vline.setVisible(show)
+            self._set_vline_visibility_for_mode(show, mode)
             self.cursor_label.setVisible(show)
-            self.show_values_only = not show  # show=True时显示完整cursor（False），show=False时不显示
-            
+            self.show_values_only = not show
+
             if not show:
-                # 如果隐藏光标，清除多曲线cursor元素
                 self._clear_cursor_items()
                 self.update_right_header("")
-                # 隐藏光标时重置pin状态
                 self.is_cursor_pinned = False
                 self.pinned_x_value = None
+                self.pinned_index_value = None
+                self.pinned_x_values = []
+                self.pinned_index_values = []
             else:
-                # 显示完整cursor（圆圈、y值标签、x值框）
                 self.update_cursor_label()
-    
-    def _show_x_position_only(self):
-        """只显示x轴位置信息，不显示圆圈和y值标签"""
+
+    def _show_x_position_only(self, x_positions=None):
+        """仅显示 x 位置标签（隐藏光标数值）"""
         try:
-            # 检查vline是否可见
-            if not self.vline.isVisible():
+            x_positions = x_positions if x_positions is not None else self._get_cursor_x_positions()
+            if not x_positions:
                 return
-            
-            x = self.vline.value()
+
             (x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
-            
-            # 检查x是否在可见范围内
-            if x < x_min or x > x_max:
-                return
-            
-            # 清除旧的cursor元素
             self._clear_cursor_items()
-            
-            # 只显示x轴位置信息
-            x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
-            x_info_text = x_str  # 只显示数值，不显示"x="
-            
-            # 【内存优化】从对象池获取x轴标签（只需要一个，总是复用）
-            x_info_item = self._get_x_label_from_pool()
-            x_info_item.setText(x_info_text)
-            x_info_item.setVisible(True)
-            
-            # 计算场景坐标：将TextItem放在plot区域外部，与x轴相切
-            # 1. 获取ViewBox在场景中的矩形区域
-            view_rect = self.plot_item.vb.sceneBoundingRect()
-            
-            # 2. 将x坐标从数据坐标转换到场景坐标
-            scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
-            scene_x = scene_point.x()
-            
-            # 3. y坐标：ViewBox底部边缘（与x轴相切的位置）
-            # 文本框的顶边（anchor=(0.5,0)）将对齐到这个位置
-            scene_y = view_rect.bottom()
-            
-            # 使用场景坐标设置位置
-            x_info_item.setPos(scene_x, scene_y)
-            
-            # 设置极高的zValue确保在最前面
-            x_info_item.setZValue(100000)
-            # 添加到场景中（使用场景坐标系）
-            scene = self.plot_item.scene()
-            x_scene = x_info_item.scene()
-            
-            if x_scene != scene:
-                if x_scene is not None:
-                    x_scene.removeItem(x_info_item)
-                scene.addItem(x_info_item)
-            
-            self.multi_cursor_items.append(x_info_item)
-            
+
+            for idx, x in enumerate(x_positions):
+                if x < x_min or x > x_max:
+                    continue
+                x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
+                x_info_item = self._get_x_label_from_pool(idx)
+                x_info_item.setText(x_str)
+                x_info_item.setVisible(True)
+
+                view_rect = self.plot_item.vb.sceneBoundingRect()
+                scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
+                scene_x = scene_point.x()
+                scene_y = view_rect.bottom()
+                x_info_item.setPos(scene_x, scene_y)
+                x_info_item.setZValue(100000)
+
+                scene = self.plot_item.scene()
+                x_scene = x_info_item.scene()
+                if x_scene != scene:
+                    if x_scene is not None:
+                        x_scene.removeItem(x_info_item)
+                    scene.addItem(x_info_item)
+
+                self.multi_cursor_items.append(x_info_item)
+
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            print(f"x_position_only error: {e}")
 
     def pin_cursor(self, x_value):
-        """
-        固定cursor到指定x值并同步所有plot
-        
-        将当前plot的cursor固定到离指定x值最近的数据点，并同步所有plot的cursor位置。
-        固定后cursor不会跟随鼠标移动，但可以通过拖动vline来改变位置。
-        
-        Args:
-            x_value (float): 要固定到的x坐标值 (这是显示坐标)
-        """
-        debug_log("Plot.pin_cursor request x=%s multi_mode=%s curve_count=%s",
-                  x_value, getattr(self, "is_multi_curve_mode", False),
-                  len(getattr(self, "curves", {}) or []))
-        if not self.window() or not hasattr(self.window(), 'cursor_btn') or not self.window().cursor_btn.isChecked():
-            # 如果cursor未显示，先显示cursor
-            self.window().cursor_btn.setChecked(True)
-            self.window().toggle_cursor_all(True)
-        
-        # --- 修正：支持多曲线 ---
-        
-        # 1. 收集所有可见曲线的 x_data (它们已经是显示坐标)
-        curves_x_data = []
-        if self.is_multi_curve_mode and self.curves:
-            # 多曲线模式：从 self.curves 字典收集
-            for var_name, curve_info in self.curves.items():
-                if curve_info.get('visible', True) and 'x_data' in curve_info and curve_info['x_data'] is not None:
-                    curves_x_data.append(curve_info['x_data'])
-        elif self.curve:
-            # 单曲线模式：从 self.curve 获取
-            x_data, _ = self.curve.getData()
-            if x_data is not None:
-                curves_x_data.append(x_data)
-
-        if not curves_x_data:
-            # 没有数据，无法pin
+        """将光标固定到最近的 x 并同步到所有 plot"""
+        if getattr(self, "_is_pinning_cursor", False):
             return
+        self._is_pinning_cursor = True
+        try:
+            if not self.window() or not hasattr(self.window(), "cursor_btn") or not self.window().cursor_btn.isChecked():
+                self.window().cursor_btn.setChecked(True)
+                self.window().toggle_cursor_all(True)
 
-        # 2. 找到所有曲线中，离点击位置 x_value 最近的 实际数据点x坐标
-        globally_closest_x = None
-        min_distance = float('inf')
+            curves_x_data = []
+            if self.is_multi_curve_mode and self.curves:
+                for _, curve_info in self.curves.items():
+                    if curve_info.get("visible", True) and "x_data" in curve_info and curve_info["x_data"] is not None:
+                        curves_x_data.append(curve_info["x_data"])
+            elif self.curve:
+                x_data, _ = self.curve.getData()
+                if x_data is not None:
+                    curves_x_data.append(x_data)
 
-        for x_data in curves_x_data:
-            if x_data is None or len(x_data) == 0:
-                continue
-                
-            # 找到此曲线中最近点的索引
-            # x_value 是显示坐标, x_data 也是显示坐标, 直接比较
-            try:
-                # 假设 x_data 是排序的, 使用 searchsorted 提高效率
-                idx = np.searchsorted(x_data, x_value, side='left')
-                
-                # 检查左右邻居
-                if idx > 0 and idx < len(x_data):
-                    dist_left = abs(x_data[idx-1] - x_value)
-                    dist_right = abs(x_data[idx] - x_value)
-                    if dist_left < dist_right:
-                        idx = idx - 1
-                elif idx == len(x_data): # 超出右边界
-                    idx = len(x_data) - 1
-                # if idx == 0, 保持 0
-                
-            except (ValueError, TypeError):
-                # 如果数据未排序 (异常情况), 回退到 argmin
-                idx = np.argmin(np.abs(x_data - x_value))
+            if not curves_x_data:
+                return
 
-            # 获取该点的实际x坐标
-            nearest_x_in_curve = x_data[idx]
-            distance = abs(nearest_x_in_curve - x_value)
+            globally_closest_x = None
+            min_distance = float("inf")
+            for x_data in curves_x_data:
+                if x_data is None or len(x_data) == 0:
+                    continue
+                try:
+                    idx = np.searchsorted(x_data, x_value, side="left")
+                    if idx > 0 and idx < len(x_data):
+                        dist_left = abs(x_data[idx - 1] - x_value)
+                        dist_right = abs(x_data[idx] - x_value)
+                        if dist_left < dist_right:
+                            idx = idx - 1
+                    elif idx == len(x_data):
+                        idx = len(x_data) - 1
+                except (ValueError, TypeError):
+                    idx = np.argmin(np.abs(x_data - x_value))
+                nearest_x_in_curve = x_data[idx]
+                distance = abs(nearest_x_in_curve - x_value)
+                if distance < min_distance:
+                    min_distance = distance
+                    globally_closest_x = nearest_x_in_curve
 
-            # 比较并更新全局最近点
-            if distance < min_distance:
-                min_distance = distance
-                globally_closest_x = nearest_x_in_curve
+            if globally_closest_x is not None:
+                display_x = globally_closest_x
+                if self.window() and hasattr(self.window(), "plot_widgets"):
+                    main_window = self.window()
+                    if hasattr(main_window, "cursor_mode"):
+                        main_window.cursor_mode = "1 anchored cursor"
+                    if hasattr(main_window, "pinned_x_values"):
+                        main_window.pinned_x_values = [display_x]
+                    widgets_to_update = []
+                    for container in main_window.plot_widgets:
+                        widget = container.plot_widget
+                        widget.apply_cursor_mode("1 anchored cursor", [display_x])
+                        if hasattr(widget, "_last_cursor_update_time"):
+                            widget._last_cursor_update_time = 0
+                        if hasattr(widget.view_box, "is_cursor_pinned"):
+                            widget.view_box.is_cursor_pinned = True
+                        widgets_to_update.append(widget)
 
-        # 3. 如果找到了一个最近点，就使用它来设置pin
-        if globally_closest_x is not None:
-            # 最终用于pin的显示坐标 (已修正，不再进行双重缩放)
-            display_x = globally_closest_x 
-            
-            # 4. 设置所有plot为pin状态并同步位置
-            if self.window() and hasattr(self.window(), 'plot_widgets'):
-                for container in self.window().plot_widgets:
-                    widget = container.plot_widget
-                    widget.is_cursor_pinned = True
-                    widget.pinned_x_value = display_x
-                    if widget.factor != 0:
-                        widget.pinned_index_value = (display_x - widget.offset) / widget.factor
-                    else:
-                        widget.pinned_index_value = None
-                    widget.vline.setMovable(True)
-                    blocker = QSignalBlocker(widget.vline)
-                    widget.vline.setPos(display_x)
-                    
-                    # 重置节流时间戳，确保update_cursor_label能立即执行
-                    # 这样可以绕过自适应节流控制，立即更新cursor标签到正确位置
-                    if hasattr(widget, '_last_cursor_update_time'):
-                        widget._last_cursor_update_time = 0
-                    
-                    if hasattr(widget.view_box, 'is_cursor_pinned'):
-                        widget.view_box.is_cursor_pinned = True
-                
-                
-                # 然后再更新所有plot的cursor标签
-                for container in self.window().plot_widgets:
-                    widget = container.plot_widget
-                    widget.update_cursor_label()
-        
+                    def _delayed_label_update(widgets=widgets_to_update):
+                        for widget in widgets:
+                            if not getattr(widget, "_is_being_destroyed", False):
+                                try:
+                                    widget.update_cursor_label()
+                                except (RuntimeError, AttributeError):
+                                    pass
+
+                    QTimer.singleShot(0, _delayed_label_update)
+        finally:
+            self._is_pinning_cursor = False
 
     def free_cursor(self):
-        """
-        解除cursor固定，恢复跟随鼠标
-        
-        解除所有plot的cursor固定状态，恢复cursor跟随鼠标移动的默认行为。
-        同时将vline设置为不可移动状态。
-        """
-        debug_log("Plot.free_cursor invoked window=%s", bool(self.window()))
+        """释放光标固定并恢复自由移动"""
         self.is_cursor_pinned = False
         self.pinned_x_value = None
         self.pinned_index_value = None
-        
-        # 让vline不可移动
-        self.vline.setMovable(False)
-        
-        # 更新ViewBox的pin状态
-        if hasattr(self.view_box, 'is_cursor_pinned'):
+        self.pinned_x_values = []
+        self.pinned_index_values = []
+
+        if hasattr(self, "vline"):
+            self.vline.setMovable(False)
+        if hasattr(self, "vline2"):
+            self.vline2.setMovable(False)
+
+        if hasattr(self.view_box, "is_cursor_pinned"):
             self.view_box.is_cursor_pinned = False
-        
-        # 同步所有plot解除固定
-        if self.window() and hasattr(self.window(), 'plot_widgets'):
-            for container in self.window().plot_widgets:
+
+        if self.window() and hasattr(self.window(), "plot_widgets"):
+            main_window = self.window()
+            if hasattr(main_window, "cursor_mode"):
+                main_window.cursor_mode = "1 free cursor"
+            if hasattr(main_window, "pinned_x_values"):
+                main_window.pinned_x_values = []
+            for container in main_window.plot_widgets:
                 widget = container.plot_widget
-                widget.is_cursor_pinned = False
-                widget.pinned_x_value = None
-                widget.pinned_index_value = None
-                widget.vline.setMovable(False)
-                if hasattr(widget.view_box, 'is_cursor_pinned'):
+                widget.apply_cursor_mode("1 free cursor", [])
+                if hasattr(widget.view_box, "is_cursor_pinned"):
                     widget.view_box.is_cursor_pinned = False
 
     def reset_pin_state(self):
-        """
-        重置当前plot的pin状态
-        
-        将当前plot的cursor从固定状态重置为默认状态，包括：
-        - 清除pin标志和固定位置
-        - 设置vline为不可移动
-        - 更新ViewBox的pin状态
-        """
+        """重置 pin 状态"""
         self.is_cursor_pinned = False
         self.pinned_x_value = None
         self.pinned_index_value = None
-        self.vline.setMovable(False)
-        if hasattr(self.view_box, 'is_cursor_pinned'):
+        self.pinned_x_values = []
+        self.pinned_index_values = []
+        if hasattr(self, "vline"):
+            self.vline.setMovable(False)
+        if hasattr(self, "vline2"):
+            self.vline2.setMovable(False)
+        if hasattr(self, "vline2"):
+            self.vline2.setVisible(False)
+        if hasattr(self.view_box, "is_cursor_pinned"):
             self.view_box.is_cursor_pinned = False
 
     def _update_vline_bounds_from_data(self):
@@ -5379,7 +5412,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 max_index = np.max(self.original_index_x)
                 min_x = self.offset + self.factor * min_index
                 max_x = self.offset + self.factor * max_index
-                self.vline.setBounds([min_x, max_x])
+                self._set_vline_bounds([min_x, max_x])
                 return min_x, max_x
 
             # 优先策略2：多曲线模式下，使用数据长度 + factor/offset 计算理论bounds
@@ -5391,7 +5424,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         if datalength > 0:
                             min_x = self.offset + self.factor * 1
                             max_x = self.offset + self.factor * datalength
-                            self.vline.setBounds([min_x, max_x])
+                            self._set_vline_bounds([min_x, max_x])
                             return min_x, max_x
                         break
 
@@ -5401,7 +5434,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 if x_arrays:
                     combined = np.concatenate(x_arrays)
                     min_x, max_x = np.nanmin(combined), np.nanmax(combined)
-                    self.vline.setBounds([min_x, max_x])
+                    self._set_vline_bounds([min_x, max_x])
                     return min_x, max_x
 
             # Fallback策略2：从实际curve数据读取（单曲线模式）
@@ -5409,19 +5442,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 x_data, _ = self.curve.getData()
                 if x_data is not None and len(x_data) > 0:
                     min_x, max_x = np.min(x_data), np.max(x_data)
-                    self.vline.setBounds([min_x, max_x])
+                    self._set_vline_bounds([min_x, max_x])
                     return min_x, max_x
 
             # Fallback策略3：使用xMin/xMax
             if hasattr(self, 'xMin') and hasattr(self, 'xMax'):
-                self.vline.setBounds([self.xMin, self.xMax])
+                self._set_vline_bounds([self.xMin, self.xMax])
                 return self.xMin, self.xMax
             else:
-                self.vline.setBounds([None, None])
+                self._set_vline_bounds([None, None])
                 return None, None
         except Exception as e:
             print(f"Warning: Error updating vline bounds: {e}")
-            self.vline.setBounds([None, None])
+            self._set_vline_bounds([None, None])
             return None, None
     
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
@@ -5436,7 +5469,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         main_window = self.window()
         if main_window and hasattr(main_window, 'cursor_btn'):
             # 设置cursor的移动边界
-            self.vline.setBounds([min_x_bound, max_x_bound])
+            self._set_vline_bounds([min_x_bound, max_x_bound])
             cursor_enabled = main_window.cursor_btn.isChecked()
             cursor_values_hidden = getattr(main_window, 'cursor_values_hidden', False)
             
@@ -5449,7 +5482,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.toggle_cursor(cursor_enabled)
         else:
             # 无主窗口或cursor按钮，禁用cursor
-            self.vline.setBounds([None, None])
+            self._set_vline_bounds([None, None])
             self.toggle_cursor(False)
 
     def clear_value_cache(self):
@@ -5559,8 +5592,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             limits_xMin = self.offset + self.factor * index_min
             limits_xMax = self.offset + self.factor * index_max
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-            # 注意：不在这里设置vline bounds，而是在 _realign_pinned_cursor_after_time_correction() 中
-            # 通过延迟调用 _update_vline_bounds_from_data() 来统一处理，避免异步更新导致的bounds不一致
+            self._update_vline_bounds_from_data()
             if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
                 old_min, old_max = self.mark_region.getRegion()
                 if old_factor != 0:
@@ -5692,7 +5724,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 if x_arrays:
                     combined = np.concatenate(x_arrays)
                     min_x, max_x = np.nanmin(combined), np.nanmax(combined)
-                    self.vline.setBounds([min_x, max_x])
+                    self._set_vline_bounds([min_x, max_x])
                     self._update_cursor_after_plot(min_x, max_x)
 
                 if self.vline.isVisible():
@@ -5910,7 +5942,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
             # 更新光标 - 在单曲线模式下使用当前数据范围即可
             min_x, max_x = np.min(x_values), np.max(x_values)
-            self.vline.setBounds([min_x, max_x])
+            self._set_vline_bounds([min_x, max_x])
             self.plot_item.update()
             self._update_cursor_after_plot(min_x, max_x)
 
@@ -6025,7 +6057,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         try:
             self.plot_item.setLimits(yMin=None, yMax=None)
             self.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
-            self.vline.setBounds([None, None])
+            self._set_vline_bounds([None, None])
         except Exception as e:
             print(f"重置绘图限制时出错: {e}")
 
@@ -6311,7 +6343,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             else:
                 # 如果没有其他曲线，使用当前变量的范围
                 min_x, max_x = np.min(x_values), np.max(x_values)
-            self.vline.setBounds([min_x, max_x])
+            self._set_vline_bounds([min_x, max_x])
             
             # 应用全局cursor值显示状态
             self._update_cursor_after_plot(min_x, max_x)
@@ -7638,6 +7670,8 @@ class MainWindow(QMainWindow):
         
         # 全局cursor值显示状态：False表示显示所有值，True表示只显示x值
         self.cursor_values_hidden = False  # 默认显示完整cursor（包括圆圈和y值）
+        self.cursor_mode = "1 free cursor"
+        self.pinned_x_values = []
 
         self.mark_region_btn = QPushButton("标记区域")
         self.mark_region_btn.setCheckable(True)
@@ -8542,6 +8576,9 @@ class MainWindow(QMainWindow):
             self.update_mark_regions_on_layout_change()
 
     def open_time_correction_dialog(self):
+        # 记录时间修正状态与固定cursor索引（用于稳定转换）
+        self._is_time_correction_active = False
+        self._time_correction_pinned_index_values = []
         dialog = TimeCorrectionDialog(self.factor, self.offset, self)
         if dialog.window_geometry:
             dialog.restoreGeometry(dialog.window_geometry)
@@ -8554,6 +8591,21 @@ class MainWindow(QMainWindow):
             old_offset = self.offset
             self.factor = new_factor
             self.offset = new_offset
+            # 时间修正开始：缓存固定cursor的索引位置
+            self._is_time_correction_active = True
+            self._time_correction_pinned_index_values = []
+            try:
+                if self.cursor_btn.isChecked():
+                    mode = getattr(self, "cursor_mode", "1 free cursor")
+                    if mode != "1 free cursor" and old_factor != 0 and self.pinned_x_values:
+                        for x_val in self.pinned_x_values:
+                            if x_val is None or not np.isfinite(x_val):
+                                continue
+                            index_pos = (x_val - old_offset) / old_factor
+                            if np.isfinite(index_pos):
+                                self._time_correction_pinned_index_values.append(index_pos)
+            except Exception:
+                self._time_correction_pinned_index_values = []
 
             # 获取当前视图范围（假设所有视图联动，使用第一个）
             if self.plot_widgets:
@@ -8586,6 +8638,12 @@ class MainWindow(QMainWindow):
 
             # 更新标记统计
             self.request_mark_stats_refresh(immediate=True)
+            # 时间修正结束：清理缓存
+            self._is_time_correction_active = False
+            self._time_correction_pinned_index_values = []
+            return
+        self._is_time_correction_active = False
+        self._time_correction_pinned_index_values = []
 
     def update_mark_regions_on_layout_change(self):
         if self.mark_region_btn.isChecked():
@@ -8686,6 +8744,8 @@ class MainWindow(QMainWindow):
                  # 重置pin状态
                  container.plot_widget.reset_pin_state()
 
+            self.cursor_mode = "1 free cursor"
+            self.pinned_x_values = []
             self.saved_mark_range = None
             if self.mark_stats_window:
                 self.mark_stats_window.hide()  # Hide instead of close
@@ -8711,6 +8771,108 @@ class MainWindow(QMainWindow):
                     pass
 
 
+    def _get_cursor_source_plot(self, source_plot=None):
+        if source_plot is not None and hasattr(source_plot, 'view_box'):
+            return source_plot
+        for container in getattr(self, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if widget is not None and container.isVisible():
+                return widget
+        for container in getattr(self, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if widget is not None:
+                return widget
+        return None
+
+    def _get_cursor_view_range(self, source_plot=None):
+        plot = self._get_cursor_source_plot(source_plot)
+        if plot is None or not hasattr(plot, "view_box"):
+            return None, None
+        try:
+            view_min, view_max = plot.view_box.viewRange()[0]
+            return view_min, view_max
+        except Exception:
+            return None, None
+
+    @staticmethod
+    def _clamp_value(value, min_val, max_val):
+        return max(min_val, min(max_val, value))
+
+    def _calc_second_cursor_position(self, pinned_x, view_min, view_max):
+        if view_min is None or view_max is None:
+            return pinned_x
+        if view_min > view_max:
+            view_min, view_max = view_max, view_min
+        clamped = self._clamp_value(pinned_x, view_min, view_max)
+        threshold = view_min + 0.6 * (view_max - view_min)
+        if clamped <= threshold:
+            return clamped + (view_max - clamped) / 2
+        return view_min + (clamped - view_min) / 2
+
+    def _select_farthest_cursor_index(self, context_x):
+        if not self.pinned_x_values:
+            return None
+        if context_x is None:
+            return len(self.pinned_x_values) - 1
+        distances = [abs(x - context_x) for x in self.pinned_x_values]
+        return int(np.argmax(distances))
+
+    def _apply_cursor_mode_to_plots(self):
+        for container in getattr(self, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            widget.apply_cursor_mode(self.cursor_mode, self.pinned_x_values)
+
+    def set_cursor_mode(self, mode, *, source_plot=None, context_x=None):
+        if not hasattr(self, "cursor_btn") or not self.cursor_btn.isChecked():
+            return
+        if mode not in ("1 free cursor", "1 anchored cursor", "2 anchored cursor"):
+            return
+
+        prev_mode = getattr(self, "cursor_mode", "1 free cursor")
+        view_min, view_max = self._get_cursor_view_range(source_plot)
+
+        if mode == "1 free cursor":
+            self.cursor_mode = mode
+            self.pinned_x_values = []
+        elif mode == "1 anchored cursor":
+            if prev_mode == "2 anchored cursor":
+                remove_idx = self._select_farthest_cursor_index(context_x)
+                if remove_idx is not None:
+                    remaining = [x for idx, x in enumerate(self.pinned_x_values) if idx != remove_idx]
+                    self.pinned_x_values = remaining[:1]
+            if not self.pinned_x_values:
+                if source_plot is not None and hasattr(source_plot, "vline"):
+                    self.pinned_x_values = [source_plot.vline.value()]
+            self.cursor_mode = mode
+        elif mode == "2 anchored cursor":
+            if prev_mode == "1 free cursor" or not self.pinned_x_values:
+                pinned = context_x
+                if pinned is None and source_plot is not None and hasattr(source_plot, "vline"):
+                    pinned = source_plot.vline.value()
+                if pinned is not None:
+                    second = self._calc_second_cursor_position(pinned, view_min, view_max)
+                    self.pinned_x_values = [pinned, second]
+            elif prev_mode == "1 anchored cursor":
+                pinned = self.pinned_x_values[0] if self.pinned_x_values else None
+                if pinned is None and source_plot is not None and hasattr(source_plot, "vline"):
+                    pinned = source_plot.vline.value()
+                if pinned is not None:
+                    second = self._calc_second_cursor_position(pinned, view_min, view_max)
+                    self.pinned_x_values = [pinned, second]
+            else:
+                if len(self.pinned_x_values) == 1:
+                    second = self._calc_second_cursor_position(self.pinned_x_values[0], view_min, view_max)
+                    self.pinned_x_values = [self.pinned_x_values[0], second]
+            self.cursor_mode = mode
+
+        self._apply_cursor_mode_to_plots()
+        for container in getattr(self, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if widget is not None:
+                widget.update_cursor_label()
+
     def toggle_cursor_all(self, checked):
         """切换所有plot的cursor显示状态
         
@@ -8730,6 +8892,13 @@ class MainWindow(QMainWindow):
             else:
                 # cursor完全启用或禁用
                 widget.toggle_cursor(checked)
+        if checked:
+            self.cursor_mode = "1 free cursor"
+            self.pinned_x_values = []
+            self._apply_cursor_mode_to_plots()
+        else:
+            self.cursor_mode = "1 free cursor"
+            self.pinned_x_values = []
         self.cursor_btn.setText("隐藏光标" if checked else "显示光标")
 
     def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
@@ -8737,26 +8906,24 @@ class MainWindow(QMainWindow):
         if not self.plot_widgets:
             return
 
-        pinned_value = None
-        pinned_index = None
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-            if widget.is_cursor_pinned and widget.pinned_x_value is not None:
-                pinned_value = widget.pinned_x_value
-                pinned_index = widget.pinned_index_value
-                break
-
-        if pinned_value is None or not np.isfinite(pinned_value):
+        if getattr(self, "cursor_mode", "1 free cursor") == "1 free cursor":
             return
 
-        if pinned_index is not None and np.isfinite(pinned_index):
-            index_pos = pinned_index
-        else:
+        # 优先使用索引值进行换算，避免display值被bounds夹住
+        pinned_indices = list(getattr(self, "_time_correction_pinned_index_values", []) or [])
+        if not pinned_indices:
+            pinned_values = list(getattr(self, "pinned_x_values", []) or [])
+            if not pinned_values:
+                return
             if old_factor == 0:
                 return
-            index_pos = (pinned_value - old_offset) / old_factor
-
-        if not np.isfinite(index_pos):
+            for pinned_value in pinned_values:
+                if pinned_value is None or not np.isfinite(pinned_value):
+                    continue
+                index_pos = (pinned_value - old_offset) / old_factor
+                if np.isfinite(index_pos):
+                    pinned_indices.append(index_pos)
+        if not pinned_indices:
             return
 
         datalength = 0
@@ -8765,56 +8932,54 @@ class MainWindow(QMainWindow):
         elif self.plot_widgets[0].plot_widget.original_index_x is not None:
             datalength = len(self.plot_widgets[0].plot_widget.original_index_x)
 
-        if datalength > 0:
-            index_pos = min(max(index_pos, 1), datalength)
+        new_display_values = []
+        for index_pos in pinned_indices:
+            if index_pos is None or not np.isfinite(index_pos):
+                continue
+            if datalength > 0:
+                index_pos = min(max(index_pos, 1), datalength)
+            new_display_x = new_offset + new_factor * index_pos
+            if np.isfinite(new_display_x):
+                new_display_values.append(new_display_x)
 
-        new_display_x = new_offset + new_factor * index_pos
-        if not np.isfinite(new_display_x):
+        if not new_display_values:
             return
 
-        # 先计算所有widget的新bounds（基于理论值，不依赖异步更新的curve数据）
+        self.pinned_x_values = new_display_values
+        self.pinned_index_values = list(pinned_indices)
+
         for container in self.plot_widgets:
             widget = container.plot_widget
 
-            # 计算新的bounds（使用理论值，确保一致性）
-            if hasattr(widget, 'original_index_x') and widget.original_index_x is not None and len(widget.original_index_x) > 0:
+            if hasattr(widget, "original_index_x") and widget.original_index_x is not None and len(widget.original_index_x) > 0:
                 min_index = np.min(widget.original_index_x)
                 max_index = np.max(widget.original_index_x)
                 new_min_x = widget.offset + widget.factor * min_index
                 new_max_x = widget.offset + widget.factor * max_index
             elif widget.is_multi_curve_mode and widget.curves:
-                # 多曲线模式：使用数据长度计算
                 first_curve_info = next(iter(widget.curves.values()), None)
-                if first_curve_info and 'y_data' in first_curve_info:
-                    data_len = len(first_curve_info['y_data'])
+                if first_curve_info and "y_data" in first_curve_info:
+                    data_len = len(first_curve_info["y_data"])
                     new_min_x = widget.offset + widget.factor * 1
                     new_max_x = widget.offset + widget.factor * data_len
                 else:
                     new_min_x = widget.offset + widget.factor * 1
                     new_max_x = widget.offset + widget.factor * datalength
             else:
-                # Fallback
                 new_min_x = widget.offset + widget.factor * 1
                 new_max_x = widget.offset + widget.factor * datalength
 
-            widget.is_cursor_pinned = True
-            widget.pinned_x_value = new_display_x
-            widget.pinned_index_value = index_pos if widget.factor != 0 else None
+            if hasattr(widget, "_set_vline_bounds"):
+                widget._set_vline_bounds([new_min_x, new_max_x])
+            else:
+                widget.vline.setBounds([new_min_x, new_max_x])
 
-            widget.vline.blockSignals(True)
-            # 关键：先设置正确的bounds，再设置position
-            # 这样可以确保setPos不会被错误的bounds限制
-            widget.vline.setBounds([new_min_x, new_max_x])
-            widget.vline.setMovable(True)
-            widget.vline.setPos(new_display_x)
-            widget.vline.blockSignals(False)
-
+            widget.apply_cursor_mode(self.cursor_mode, new_display_values)
             if hasattr(widget.view_box, "is_cursor_pinned"):
                 widget.view_box.is_cursor_pinned = True
             if hasattr(widget, "_last_cursor_update_time"):
                 widget._last_cursor_update_time = 0
             widget.update_cursor_label()
-
 
     def sync_crosshair(self, x, sender_widget):
         """
@@ -8824,6 +8989,8 @@ class MainWindow(QMainWindow):
         cursor label更新延迟执行，避免高频调用导致的性能问题。
         """
         if not self.cursor_btn.isChecked():
+            return
+        if getattr(self, "cursor_mode", "1 free cursor") != "1 free cursor":
             return
         if getattr(self, "_is_loading_new_data", False):
             return
@@ -8901,6 +9068,8 @@ class MainWindow(QMainWindow):
         """
         debug_log("MainWindow.reset_all_pin_states total=%s",
                   len(getattr(self, "plot_widgets", [])))
+        self.cursor_mode = "1 free cursor"
+        self.pinned_x_values = []
         for container in self.plot_widgets:
             container.plot_widget.reset_pin_state()
 
@@ -8946,6 +9115,8 @@ class MainWindow(QMainWindow):
                     plot_widget.toggle_cursor(False, hide_values_only=True)
                 else:
                     plot_widget.toggle_cursor(cursor_enabled)
+                if cursor_enabled:
+                    plot_widget.apply_cursor_mode(self.cursor_mode, self.pinned_x_values)
 
                 # XLink：让同一行的所有列都 link 到第一列
                 if c == 0 and r == 0:
@@ -9076,7 +9247,10 @@ class MainWindow(QMainWindow):
                     limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
                     limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
                     widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-                    widget.vline.setBounds([min_x, max_x])
+                    if hasattr(widget, '_set_vline_bounds'):
+                        widget._set_vline_bounds([min_x, max_x])
+                    else:
+                        widget.vline.setBounds([min_x, max_x])
                     
                     if widget.is_multi_curve_mode:
                         # 多曲线模式：先清除所有曲线，然后重新添加有效的曲线
