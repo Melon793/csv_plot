@@ -5284,7 +5284,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             print(f"x_position_only error: {e}")
 
     def _has_visible_curve_data(self) -> bool:
-        """???plot??????"""
+        """判断当前 plot 是否有可见且有数据的曲线"""
         try:
             if self.curves:
                 for curve_info in self.curves.values():
