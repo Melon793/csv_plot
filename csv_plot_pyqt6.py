@@ -177,8 +177,8 @@ XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后）�
 BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
 MIN_INDEX_LENGTH = 3
-DEFAULT_LINE_WIDTH = 3
-THICK_LINE_WIDTH = 3
+DEFAULT_LINE_WIDTH = 2
+THICK_LINE_WIDTH = 2
 THIN_LINE_WIDTH = 1
 UI_DEBOUNCE_DELAY_MS = 200
 
@@ -5245,6 +5245,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _show_x_position_only(self, x_positions=None):
         """仅显示 x 位置标签（隐藏光标数值）"""
         try:
+            if not self._has_visible_curve_data():
+                self._clear_cursor_items()
+                self.update_right_header("")
+                return
             x_positions = x_positions if x_positions is not None else self._get_cursor_x_positions()
             if not x_positions:
                 return
@@ -5278,6 +5282,24 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         except Exception as e:
             print(f"x_position_only error: {e}")
+
+    def _has_visible_curve_data(self) -> bool:
+        """???plot??????"""
+        try:
+            if self.curves:
+                for curve_info in self.curves.values():
+                    if not curve_info.get("visible", True):
+                        continue
+                    x_data = curve_info.get("x_data")
+                    if x_data is not None and len(x_data) > 0:
+                        return True
+                return False
+            if self.curve:
+                x_data, _ = self.curve.getData()
+                return x_data is not None and len(x_data) > 0
+            return False
+        except Exception:
+            return False
 
     def pin_cursor(self, x_value):
         """将光标固定到最近的 x 并同步到所有 plot"""
