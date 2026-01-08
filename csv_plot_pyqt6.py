@@ -7597,6 +7597,7 @@ class MainWindow(QMainWindow):
         self.clone_btn.setToolTip("新建一个全新的窗口实例")
         self.clone_btn.clicked.connect(self.spawn_clone_window)
         title_layout.addWidget(self.clone_btn)
+        self.clone_btn.setVisible(False)
 
         # 帮助按钮（使用小图标按钮样式）
         self.help_btn_small = QPushButton("?")
