@@ -2444,7 +2444,10 @@ class AxisDialog(QDialog):
         layout = QFormLayout()
         layout.addRow("最小值:", self.min_input)
         layout.addRow("最大值:", self.max_input)
-        layout.addRow("刻度数量:", self.tick_count_input)
+        tick_label = QLabel("刻度数量:")
+        layout.addRow(tick_label, self.tick_count_input)
+        tick_label.setVisible(False)
+        self.tick_count_input.setVisible(False)
 
         # 确定和取消按钮
         button_layout = QVBoxLayout()
