@@ -2,6 +2,7 @@ from __future__ import annotations
 import sys
 import os
 import weakref
+import subprocess
 import numpy as np
 import pandas as pd
 import logging
@@ -7460,7 +7461,6 @@ class MainWindow(QMainWindow):
         self._offset_default = 0
         self.factor = self._factor_default
         self.offset = self._offset_default
-        self._clone_windows: list[MainWindow] = []
         self._active_drag_container: PlotContainerWidget | None = None
 
         # try to load config json files
@@ -7594,10 +7594,10 @@ class MainWindow(QMainWindow):
         title_layout.addStretch(1)
 
         self.clone_btn = QPushButton("分身")
-        self.clone_btn.setToolTip("新建一个全新的窗口实例")
+        self.clone_btn.setToolTip("启动独立实例")
         self.clone_btn.clicked.connect(self.spawn_clone_window)
         title_layout.addWidget(self.clone_btn)
-        self.clone_btn.setVisible(False)
+        self.clone_btn.setVisible(True)
 
         # 帮助按钮（使用小图标按钮样式）
         self.help_btn_small = QPushButton("?")
@@ -7938,16 +7938,33 @@ class MainWindow(QMainWindow):
             self._active_drag_container = None
 
     def spawn_clone_window(self):
-        clone_window = MainWindow()
-        clone_window.show()
-        self._clone_windows.append(clone_window)
+        try:
+            if getattr(sys, "frozen", False):
+                args = [sys.executable]
+            else:
+                script_path = os.path.abspath(__file__)
+                args = [sys.executable, script_path]
 
-        def _cleanup(_, wref=weakref.ref(clone_window)):
-            window = wref()
-            if window and window in self._clone_windows:
-                self._clone_windows.remove(window)
-
-        clone_window.destroyed.connect(_cleanup)
+            if sys.platform == "win32":
+                subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    creationflags=(
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        | subprocess.DETACHED_PROCESS
+                        | subprocess.CREATE_NO_WINDOW
+                    ),
+                    close_fds=True,
+                )
+            else:
+                subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    start_new_session=True,
+                    close_fds=True,
+                )
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"启动独立实例失败: {e}")
 
     def load_btn_click(self):
         initial_dir = self._get_dialog_initial_directory()
