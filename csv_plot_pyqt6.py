@@ -3256,13 +3256,54 @@ class CustomViewBox(pg.ViewBox):
             editor_act.triggered.connect(self.trigger_variable_editor)
             # 检查是否有数据可以编辑
             # has_data = bool(
-            #     self.plot_widget 
-            #     and (getattr(self.plot_widget, 'curve', None) is not None 
+            #     self.plot_widget
+            #     and (getattr(self.plot_widget, 'curve', None) is not None
             #          or getattr(self.plot_widget, 'curves', None))
             # )
             # editor_act.setEnabled(has_data)
             menu.addAction(editor_act)
-                
+
+        # 添加 "Adjust Height" 子菜单（调整该行所有plot的高度）
+        # 先移除可能存在的旧菜单项
+        actions_to_remove = []
+        for action in menu.actions():
+            if action.text() == "Adjust Height":
+                actions_to_remove.append(action)
+        for action in actions_to_remove:
+            menu.removeAction(action)
+        
+        main_window = self.plot_widget.window() if self.plot_widget else None
+        if main_window and hasattr(main_window, 'plot_layout'):
+            row = self._get_plot_row_index()
+            adjust_height_menu = QMenu("Adjust Height", menu)
+            percentages = [25, 50, 75, 100, 125, 150, 200, 250, 300]
+            current_pct = main_window.get_row_height(row)
+
+            for pct in percentages:
+                if pct == current_pct:
+                    label = f"● {pct}%"
+                else:
+                    label = f"  {pct}%"
+                act = QAction(label, adjust_height_menu)
+                act.triggered.connect(lambda checked, p=pct: self._set_row_height(p))
+                adjust_height_menu.addAction(act)
+
+            # 在 "Plot Variable Editor" 之后插入菜单
+            insert_index = None
+            for i, action in enumerate(menu.actions()):
+                if action.text() == "Plot Variable Editor":
+                    insert_index = i + 1
+                    break
+            
+            if insert_index is not None:
+                # 在指定位置插入
+                if insert_index < len(menu.actions()):
+                    menu.insertMenu(menu.actions()[insert_index], adjust_height_menu)
+                else:
+                    menu.addMenu(adjust_height_menu)
+            else:
+                menu.addMenu(adjust_height_menu)
+
         # 将 "Clear Plot" action 添加到菜单末尾
         if "Clear Plot" not in existing_texts:
             menu.addSeparator()  # 在末尾添加一个分隔符
@@ -3281,7 +3322,31 @@ class CustomViewBox(pg.ViewBox):
             self.plot_widget.clear_plot_item()
             if self.plot_widget.window():
                 self.plot_widget.window().request_mark_stats_refresh(immediate=True)
-    
+
+    def _get_plot_row_index(self) -> int:
+        """获取当前plot所在的行索引"""
+        if not self.plot_widget:
+            return 0
+        main_window = self.plot_widget.window()
+        if not main_window or not hasattr(main_window, 'plot_layout'):
+            return 0
+        ncols = getattr(main_window, '_plot_col_max_default', 1)
+        for idx, container in enumerate(main_window.plot_widgets):
+            if container.plot_widget is self.plot_widget:
+                row, col = divmod(idx, ncols)
+                return row
+        return 0
+
+    def _set_row_height(self, percentage: int):
+        """设置当前plot所在行的所有plot的高度"""
+        if not self.plot_widget:
+            return
+        main_window = self.plot_widget.window()
+        if not main_window or not hasattr(main_window, 'set_row_height'):
+            return
+        row = self._get_plot_row_index()
+        main_window.set_row_height(row, percentage)
+
     def trigger_pin_cursor(self):
         """固定cursor到最近的数据点"""
         if self.plot_widget:
@@ -3453,6 +3518,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             time_channels_info: 时间通道信息
             synchronizer: 同步器实例
         """
+        # 设置大小策略，允许拉伸
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
         self.setAcceptDrops(True)
         self.units = units_dict
         self.data = dataframe
@@ -7378,9 +7448,15 @@ class PlotContainerWidget(QWidget):
     def __init__(self, plot_widget: DraggableGraphicsLayoutWidget, parent=None):
         super().__init__(parent)
         self.plot_widget = plot_widget
+        # 设置容器的大小策略，允许拉伸
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(QMargins(0, 0, 5, 5))
-        layout.addWidget(plot_widget)
+        layout.setSpacing(0)
+        layout.addWidget(plot_widget, 1)  # 拉伸因子1，让plot占用所有空间
         self._init_indicator()
 
     def _init_indicator(self):
@@ -7795,6 +7871,9 @@ class MainWindow(QMainWindow):
         # 标记区域相关
         self.saved_mark_range = None
         self.mark_stats_window = None
+
+        # 行高度百分比跟踪 {row_index: percentage}
+        self.row_height_factors: dict[int, int] = {}
 
     def closeEvent(self, event):
         # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
@@ -8425,7 +8504,7 @@ class MainWindow(QMainWindow):
                       getattr(loader, "datalength", None) if loader is not None else None)
             if loader is not None:
                 loader = None
-            return status
+        return status
 
     def _on_load_done(self,loader, file_path: str):
         self._progress.close()
@@ -9175,31 +9254,83 @@ class MainWindow(QMainWindow):
                 self.plot_layout.addWidget(container, r, c)
                 self.plot_widgets.append(container)   # 保存容器
 
-        # 设置行列权重=1，确保均分
+        # 设置行列权重（使用保存的高度因子）
         for r in range(m):
-            self.plot_layout.setRowStretch(r, 1)
+            percentage = self.row_height_factors.get(r, 100)
+            # 使用直接比例计算，25%=1, 50%=2, 75%=3, 100%=4, 125%=5, 150%=6, 200%=8, 250%=10, 300%=12
+            stretch_factor = max(1, percentage // 25)
+            self.plot_layout.setRowStretch(r, stretch_factor)
         for c in range(n):
             self.plot_layout.setColumnStretch(c, 1)
         if self.mark_region_btn.isChecked():
             self.toggle_mark_region(True)
 
+        # 初始化所有行的默认高度因子为100（保留已有的设置）
+        for r in range(m):
+            if r not in self.row_height_factors:
+                self.row_height_factors[r] = 100
+
+    def set_row_height(self, row: int, percentage: int) -> None:
+        """
+        设置某一行的所有plot的高度百分比（相对权重）
+
+        Args:
+            row: 行索引
+            percentage: 高度百分比 (25/50/75/100/125/150/200/250/300)
+        """
+        if row < 0 or row >= self._plot_row_max_default:
+            return
+
+        self.row_height_factors[row] = percentage
+
+        # 更新所有可见行的 stretch（基于相对权重）
+        ncols = self._plot_col_max_default
+        for r in range(self._plot_row_max_default):
+            visible = False
+            for c in range(ncols):
+                idx = r * ncols + c
+                if idx < len(self.plot_widgets) and self.plot_widgets[idx].isVisible():
+                    visible = True
+                    break
+            
+            if visible:
+                pct = self.row_height_factors.get(r, 100)
+                # 使用直接比例计算，25%=1, 50%=2, 75%=3, 100%=4, 125%=5, 150%=6, 200%=8, 250%=10, 300%=12
+                stretch_factor = max(1, pct // 25)
+                self.plot_layout.setRowStretch(r, stretch_factor)
+            else:
+                self.plot_layout.setRowStretch(r, 0)
+
+        debug_log("MainWindow.set_row_height row=%s percentage=%s", row, percentage)
+
+    def get_row_height(self, row: int) -> int:
+        """获取某一行的当前高度百分比"""
+        return self.row_height_factors.get(row, 100)
+
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
         m, n = self._plot_row_max_default, self._plot_col_max_default
 
+        # 设置可见性和列的 stretch
         for idx, container in enumerate(self.plot_widgets):
             r, c = divmod(idx, n)
             visible = r < row_set and c < col_set
             container.setVisible(visible)
-
-            # 同时改 stretch，避免隐藏后仍占空间
-            self.plot_layout.setRowStretch(r, 1 if visible else 0)
-            self.plot_layout.setColumnStretch(c, 1 if visible else 0)
-
-        # 把多余的行列 stretch 统一设为 0
-        for r in range(row_set, m):
-            self.plot_layout.setRowStretch(r, 0)
-        for c in range(col_set, n):
-            self.plot_layout.setColumnStretch(c, 0)
+            
+            if visible:
+                self.plot_layout.setColumnStretch(c, 1)
+            else:
+                self.plot_layout.setColumnStretch(c, 0)
+        
+        # 单独设置行的 stretch（避免同一行重复设置）
+        for r in range(m):
+            visible = r < row_set
+            if visible:
+                percentage = self.row_height_factors.get(r, 100)
+                # 使用直接比例计算，25%=1, 50%=2, 75%=3, 100%=4, 125%=5, 150%=6, 200%=8, 250%=10, 300%=12
+                stretch_factor = max(1, percentage // 25)
+                self.plot_layout.setRowStretch(r, stretch_factor)
+            else:
+                self.plot_layout.setRowStretch(r, 0)
 
         self._plot_row_current = row_set
         self._plot_col_current = col_set
