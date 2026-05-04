@@ -10308,6 +10308,7 @@ class PlotVariableEditorDialog(QDialog):
 if __name__ == "__main__":
 
     # 启用 OpenGL (极大提升大数据的渲染性能)
+    # pyqtgraph 0.14.0 以后不需要 enableExperimental=True 了
     # pg.setConfigOptions(useOpenGL=True) 
     
     # 禁用抗锯齿 (大数据量下抗锯齿非常消耗资源且视觉收益低)
