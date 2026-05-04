@@ -169,19 +169,24 @@ def install_global_debug_hooks(app: QApplication) -> None:
 
 
 global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, XRANGE_THRESHOLD_FOR_SYMBOLS
-DEFAULT_PADDING_VAL_X = 0.05
-DEFAULT_PADDING_VAL_Y = 0.1
+DEFAULT_PADDING_VAL_X = 0.05 # 默认x轴padding，单位为plot宽度   
+DEFAULT_PADDING_VAL_Y = 0.1 # 默认y轴padding，单位为plot高度
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
-RATIO_RESET_PLOTS = 0.3
-FROZEN_VIEW_WIDTH_DEFAULT = 180
+RATIO_RESET_PLOTS = 0.3 # 重置plot比例，超过此比例时，重置plot
+FROZEN_VIEW_WIDTH_DEFAULT = 180 # 冻结视图宽度，默认值为180px
 XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol
 BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
-MIN_INDEX_LENGTH = 3
-DEFAULT_LINE_WIDTH = 2
-THICK_LINE_WIDTH = 2
-THIN_LINE_WIDTH = 1
-UI_DEBOUNCE_DELAY_MS = 200
+MIN_INDEX_LENGTH = 3 # 每个plot，至少显示MIN_INDEX_LENGTH个点
+DEFAULT_LINE_WIDTH = 2 # 默认线宽
+THICK_LINE_WIDTH = 2 # 粗线宽
+THIN_LINE_WIDTH = 1 # 细线宽
+UI_DEBOUNCE_DELAY_MS = 50 # UI事件防抖延迟时间
+# 默认绘图布局配置
+PLOT_ROW_MAX_DEFAULT = 4
+PLOT_COL_MAX_DEFAULT = 3
+PLOT_ROW_CURRENT_DEFAULT = 3
+PLOT_COL_CURRENT_DEFAULT = 1
 
 FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
 
@@ -222,6 +227,7 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     return abs_max <= FLOAT32_SAFE_MAX, abs_max
 
 # 主界面
+# 屏幕边距系数（用于自动选择窗口大小时，窗口不超过屏幕尺寸的比例）
 global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
 SCREEN_WITDH_MARGIN = 0.3
 SCREEN_HEIGHT_MARGIN = 0.3
@@ -7266,7 +7272,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         self._pending_cursor_geometry_update = False
         # 重启单次定时器，合并短时间内的多次请求
-        self._cursor_refresh_timer.start(max(15, UI_DEBOUNCE_DELAY_MS // 2))
+        self._cursor_refresh_timer.start(max(15, UI_DEBOUNCE_DELAY_MS ))
 
     def _refresh_cursor_geometry(self):
         if not hasattr(self, 'vline') or not self.vline.isVisible():
@@ -7588,10 +7594,10 @@ class MainWindow(QMainWindow):
             self._window_width_default, self._window_height_default = best_resolution()
             self.resize(self._window_width_default, self._window_height_default)
             # put default plots into the window
-            self._plot_row_max_default = 4
-            self._plot_col_max_default = 3
-            self._plot_row_current = 3
-            self._plot_col_current = 1
+            self._plot_row_max_default = PLOT_ROW_MAX_DEFAULT
+            self._plot_col_max_default = PLOT_COL_MAX_DEFAULT
+            self._plot_row_current = PLOT_ROW_CURRENT_DEFAULT
+            self._plot_col_current = PLOT_COL_CURRENT_DEFAULT
             _hide_plot_area = False
 
         self.loaded_path = ''
