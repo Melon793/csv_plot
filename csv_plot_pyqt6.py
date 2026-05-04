@@ -3356,7 +3356,7 @@ class CustomViewBox(pg.ViewBox):
         if main_window and hasattr(main_window, 'plot_layout'):
             row = self._get_plot_row_index()
             adjust_height_menu = QMenu("Adjust Height", menu)
-            percentages = [25, 50, 75, 100, 125, 150, 200, 250, 300]
+            percentages = [25, 50, 75, 100, 125, 150, 200, 250, 300, 400]
             current_pct = main_window.get_row_height(row)
 
             for pct in percentages:
@@ -3367,6 +3367,12 @@ class CustomViewBox(pg.ViewBox):
                 act = QAction(label, adjust_height_menu)
                 act.triggered.connect(lambda checked, p=pct: self._set_row_height(p))
                 adjust_height_menu.addAction(act)
+            
+            # 添加分隔线和重置按钮
+            adjust_height_menu.addSeparator()
+            reset_act = QAction("100% to all", adjust_height_menu)
+            reset_act.triggered.connect(lambda checked: self._set_all_row_height_to_100())
+            adjust_height_menu.addAction(reset_act)
 
             # 在 "Plot Variable Editor" 之后插入菜单
             insert_index = None
@@ -3426,6 +3432,15 @@ class CustomViewBox(pg.ViewBox):
             return
         row = self._get_plot_row_index()
         main_window.set_row_height(row, percentage)
+    
+    def _set_all_row_height_to_100(self):
+        """将所有行的所有plot的高度重置为100%"""
+        if not self.plot_widget:
+            return
+        main_window = self.plot_widget.window()
+        if not main_window or not hasattr(main_window, 'set_all_row_height'):
+            return
+        main_window.set_all_row_height(100)
 
     def trigger_pin_cursor(self):
         """固定cursor到最近的数据点"""
@@ -9356,7 +9371,7 @@ class MainWindow(QMainWindow):
 
         Args:
             row: 行索引
-            percentage: 高度百分比 (25/50/75/100/125/150/200/250/300)
+            percentage: 高度百分比 (25/50/75/100/125/150/200/250/300/400)
         """
         if row < 0 or row >= self._plot_row_max_default:
             return
@@ -9383,6 +9398,36 @@ class MainWindow(QMainWindow):
 
         debug_log("MainWindow.set_row_height row=%s percentage=%s", row, percentage)
 
+    def set_all_row_height(self, percentage: int) -> None:
+        """
+        将所有行的高度都设置为指定的百分比
+        
+        Args:
+            percentage: 高度百分比
+        """
+        # 遍历所有可能的行索引
+        for r in range(self._plot_row_max_default):
+            self.row_height_factors[r] = percentage
+        
+        # 更新所有可见行的 stretch（基于相对权重）
+        ncols = self._plot_col_max_default
+        for r in range(self._plot_row_max_default):
+            visible = False
+            for c in range(ncols):
+                idx = r * ncols + c
+                if idx < len(self.plot_widgets) and self.plot_widgets[idx].isVisible():
+                    visible = True
+                    break
+            
+            if visible:
+                pct = self.row_height_factors.get(r, 100)
+                stretch_factor = max(1, pct // 25)
+                self.plot_layout.setRowStretch(r, stretch_factor)
+            else:
+                self.plot_layout.setRowStretch(r, 0)
+        
+        debug_log("MainWindow.set_all_row_height percentage=%s", percentage)
+    
     def get_row_height(self, row: int) -> int:
         """获取某一行的当前高度百分比"""
         return self.row_height_factors.get(row, 100)
