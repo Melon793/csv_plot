@@ -190,6 +190,10 @@ PLOT_COL_CURRENT_DEFAULT = 1
 
 FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
 
+# 单位行自动检测阈值
+UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判定为单位行
+VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判定为数据行
+
 
 def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     """
@@ -533,7 +537,7 @@ class FastDataLoader:
         self.hasunit=hasunit
 
         # 一次性读取 header + 单位行，并回退编码
-        self._var_names, self._units, self.encoding_used = self._load_header_units(
+        self._var_names, self._units, self.encoding_used, self.hasunit = self._load_header_units(
             self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,hasunit=self.hasunit
         )
         
@@ -604,12 +608,13 @@ class FastDataLoader:
         usecols: list[str] | None = None,
         sep: str = ",",
         hasunit:bool=True
-    ) -> tuple[list[str], dict[str, str], str]:
+    ) -> tuple[list[str], dict[str, str], str, bool]:
         """
         加载CSV文件的表头和单位信息
         
         自动检测文件编码，读取变量名和单位信息
         支持多行描述和单位行的处理
+        自动检测第2行是否真的是单位行
         
         Args:
             path: CSV文件路径
@@ -619,9 +624,28 @@ class FastDataLoader:
             hasunit: 是否包含单位行
             
         Returns:
-            tuple: (变量名列表, {变量名: 单位}, 最终编码)
+            tuple: (变量名列表, {变量名: 单位}, 最终编码, 实际使用的hasunit)
         """
-        nrows = 2 if hasunit else 1
+        # 常见单位关键字列表（包含发动机测试常用单位）
+        # 注意：使用子字符串匹配，所以不需要列出所有组合形式（如Pa可匹配kPa、MPa等）
+        unit_keywords = [
+            # 基本单位
+            'm', 's', 'kg', 'A', 'K', 'mol', 'cd',
+            # 工程单位
+            'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar',
+            # 流量单位
+            'L', 'm3', 'dm3', 'g',
+            # 浓度单位
+            'ppm', 'ppb', '%',
+            # 转速单位
+            'rpm', 'r/min', '1/min',
+            # 温度单位
+            '℃', '°F', '°C',
+            # 其他常见单位标记
+            '#',
+        ]
+        
+        nrows_read = 5 if hasunit else 1
         encodings_default = ["utf-8", "cp1252"]
 
         # chardet
@@ -644,7 +668,7 @@ class FastDataLoader:
                 df = pd.read_csv(
                     path,
                     skiprows=desc_rows,
-                    nrows=nrows,
+                    nrows=nrows_read,
                     header=None,
                     usecols=usecols,
                     sep=sep,
@@ -657,16 +681,66 @@ class FastDataLoader:
         else:
             raise RuntimeError("无法以任何可用编码读取文件")
 
-        if df.shape[0] < nrows:
-            raise ValueError("文件至少需要两行（变量名 + 单位）")
+        actual_hasunit = hasunit
+        
+        # 自动检测逻辑（仅当hasunit=True且文件至少有2行时）
+        if hasunit and df.shape[0] >= 2:
+            row2 = df.iloc[1].fillna("").astype(str).tolist()
+            
+            # 维度1：检查是否有明显的单位关键字（需要一定比例）
+            unit_keyword_count = 0
+            total_cols = len(row2)
+            
+            for cell in row2:
+                cell_lower = str(cell).lower().strip()
+                for keyword in unit_keywords:
+                    keyword_lower = keyword.lower()
+                    if keyword_lower in cell_lower:
+                        unit_keyword_count += 1
+                        break  # 一个单元格只统计一次
+            
+            # 计算单位关键字比例
+            unit_keyword_ratio = unit_keyword_count / total_cols if total_cols > 0 else 0
+            
+            if unit_keyword_ratio > UNIT_KEYWORD_RATIO_THRESHOLD:
+                # 超过阈值的列包含单位关键字，保持 hasunit=True
+                pass
+            else:
+                # 维度3：计算数值列比例（排除1和-1）
+                numeric_count = 0
+                valid_numeric_count = 0
+                total_cols = len(row2)
+                
+                for cell in row2:
+                    cell_str = str(cell).strip()
+                    try:
+                        val = float(cell_str)
+                        numeric_count += 1
+                        # 排除 1 和 -1
+                        if abs(val - 1.0) > 1e-9 and abs(val + 1.0) > 1e-9:
+                            valid_numeric_count += 1
+                    except (ValueError, TypeError):
+                        continue
+                
+                # 计算有效数值列比例
+                if total_cols > 0:
+                    valid_numeric_ratio = valid_numeric_count / total_cols
+                    if valid_numeric_ratio > VALID_NUMERIC_RATIO_THRESHOLD:
+                        # 有效数值列比例超过阈值，判定为数据行
+                        actual_hasunit = False
+        
+        # 确保至少有1行数据
+        min_required_rows = 2 if actual_hasunit else 1
+        if df.shape[0] < min_required_rows:
+            raise ValueError(f"文件至少需要{min_required_rows}行")
 
         var_names = df.iloc[0].astype(str).tolist()
         var_names = FastDataLoader._make_unique(var_names) 
-        if hasunit:
+        if actual_hasunit:
             units = dict(zip(var_names, df.iloc[1].fillna("").astype(str).tolist()))
         else:
             units = dict(zip(var_names, ['-'] * len(var_names)))
-        return var_names, units, enc
+        return var_names, units, enc, actual_hasunit
 
     @staticmethod
     def _infer_schema(sample: pd.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str],float]:
