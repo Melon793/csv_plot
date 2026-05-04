@@ -630,19 +630,19 @@ class FastDataLoader:
         # 注意：使用子字符串匹配，所以不需要列出所有组合形式（如Pa可匹配kPa、MPa等）
         unit_keywords = [
             # 基本单位
-            'm', 's', 'kg', 'A', 'K', 'mol', 'cd',
+            'm', 's', 'g', 'A', 'K', 'mol', 'cd',
             # 工程单位
-            'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar',
+            'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar','m2', '/min', '/h','kWh','mm','°CA',
             # 流量单位
-            'L', 'm3', 'dm3', 'g',
+            'L', 'm3', 
             # 浓度单位
             'ppm', 'ppb', '%',
             # 转速单位
-            'rpm', 'r/min', '1/min',
+            'rpm', 
             # 温度单位
             '℃', '°F', '°C',
             # 其他常见单位标记
-            '#',
+            '#/',
         ]
         
         nrows_read = 5 if hasunit else 1
