@@ -485,8 +485,16 @@ class FastDataLoader:
     """
     # 脏数据清单
     _NA_VALUES = [
-        "", "nan", "NaN", "NAN", "NULL", "null", "None", "plus infinity", "minus infinity",
-        "Inf", "inf", "-inf", "-Inf", "1.#INF", "-1.#INF", "data err", '* *', '----', 'Infinity', 'no value'
+        # 空缺 / 空字符串
+        "", "NULL", "None", "NA", "N/A", "n/a", "null ",
+        # Excel / 统计缺失标记
+        "#N/A", "#N/A N/A", "#NA",
+        # IEEE NaN / 非法数值
+        "NaN", "nan", "-NaN", "-nan", "1.#IND", "-1.#IND", "1.#QNAN", "-1.#QNAN",
+        # 无穷值表示
+        "Infinity", "Inf", "inf", "plus infinity", "minus infinity", "1.#INF", "-1.#INF",
+        # 其他脏数据字符串
+        "data err", "* *", "----", "no value"
     ]
     from typing import Callable
     def __init__(
@@ -10340,8 +10348,11 @@ if __name__ == "__main__":
             return QApplication.font()
         
         font = get_windows_chinese_font()        
-        # font.setPointSize(9)
-        font.setPixelSize(12)
+        dpi = app.primaryScreen().logicalDotsPerInch()
+        pixel_size = 12
+        point_size = pixel_size * 72.0 / dpi
+        font.setPointSizeF(point_size)
+        font.setPixelSize(pixel_size)
         app.setFont(font)
         # app.setStyle("Fusion")
         
