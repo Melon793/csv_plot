@@ -10347,11 +10347,11 @@ if __name__ == "__main__":
             # 回退到系统默认字体
             return QApplication.font()
         
-        font = get_windows_chinese_font()        
-        dpi = app.primaryScreen().logicalDotsPerInch()
-        pixel_size = 12
-        point_size = pixel_size * 72.0 / dpi
-        font.setPointSizeF(point_size)
+        font = get_windows_chinese_font()  
+        pixel_size = 12      
+        # dpi = app.primaryScreen().logicalDotsPerInch()
+        # point_size = pixel_size * 72.0 / dpi
+        # font.setPointSizeF(point_size)
         font.setPixelSize(pixel_size)
         app.setFont(font)
         # app.setStyle("Fusion")
