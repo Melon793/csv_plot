@@ -656,15 +656,29 @@ class FastDataLoader:
         nrows_read = 5 if hasunit else 1
         encodings_default = ["utf-8", "cp1252"]
 
-        # chardet
-        import chardet
+        from charset_normalizer import from_bytes
         from pathlib import Path
-        sample_sime = 2000 #bytes
+
+        sample_size = 2000  # bytes
+
         with Path(path).open('rb') as f:
-            raw_sample = f.read(sample_sime)
-        r = chardet.detect(raw_sample)
-        language_infer = r['language']
-        confidence_infer = r['confidence']
+            raw_sample = f.read(sample_size)
+
+        # 检测编码
+        result = from_bytes(raw_sample).best()
+        if result:
+            encoding_infer = result.encoding
+            language_infer = result.language
+            confidence_infer = result.coherence
+        else:
+            encoding_infer = None
+            language_infer = None
+            confidence_infer = 0.0
+
+        if language_infer is not None and language_infer.lower() in ['chinese', 'zh']  and confidence_infer > 0.7:
+            encoding_infer = ['gb18030']
+        else:
+            encoding_infer = ['utf-8']
 
         if language_infer is not None and language_infer.lower() =='chinese' and confidence_infer > 0.7:
             encoding_infer = ['gb18030']
@@ -10317,7 +10331,7 @@ if __name__ == "__main__":
 
     # 启用 OpenGL (极大提升大数据的渲染性能)
     # pyqtgraph 0.14.0 以后不需要 enableExperimental=True 了
-    pg.setConfigOptions(useOpenGL=True) 
+    # pg.setConfigOptions(useOpenGL=True) 
     
     # 禁用抗锯齿 (大数据量下抗锯齿非常消耗资源且视觉收益低)
     pg.setConfigOptions(antialias=False)

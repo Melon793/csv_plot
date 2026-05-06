@@ -66,7 +66,7 @@
 
 1. **安装依赖**
    ```
-   pip install pyqt6 pyqtgraph pandas numpy chardet ujson
+   pip install pyqt6 pyqtgraph pandas numpy charset-normalizer ujson
    ```
 
 2. **运行程序**
@@ -133,7 +133,7 @@
 - **pyqtgraph** - 高性能科学绘图库
 - **pandas** - 强大的数据分析库
 - **numpy** - 数值计算基础库
-- **chardet** - 字符编码检测
+- **charset-normalizer** - 字符编码检测
 - **ujson** - 高性能JSON处理
 
 
