@@ -5248,10 +5248,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             print(f"Multi-curve cursor update error: {e}")
             self.update_right_header("")
 
-    def _position_labels_avoid_overlap(self, cursor_values, x_min, x_max, y_min, y_max):
-        """优化的标签定位，使用对角线位置避免遮挡曲线
+    def _position_labels_avoid_overlap(self, cursor_values: list[dict], x_min: float, x_max: float, y_min: float, y_max: float) -> None:
+        """优化的标签定位算法，使用对角线位置避免遮挡曲线。
         
-        【内存优化】使用对象池复用TextItem
+        使用4个候选位置策略（右上、左上、右下、左下）依次尝试，
+        选择第一个在边界内的位置。如果都超出边界，则约束在右上位置。
+        
+        【内存优化】使用对象池复用TextItem，避免频繁创建销毁
+        
+        Args:
+            cursor_values: 光标值列表，每个元素为包含var_name, x_pos, y_pos, y_value, color的字典
+            x_min: 视图x轴最小值（数据坐标）
+            x_max: 视图x轴最大值（数据坐标）
+            y_min: 视图y轴最小值（数据坐标）
+            y_max: 视图y轴最大值（数据坐标）
         """
         if not cursor_values:
             return
@@ -5260,12 +5270,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         x_range = x_max - x_min
         y_range = y_max - y_min
         
-        # 标签尺寸估算（像素转数据坐标）用于边界检查
-        label_width_data = 80 * x_range / 500
-        label_height_data = 25 * y_range / 400
-        
-        # 使用场景坐标（真实屏幕像素）定位，确保在任何布局下距离一致
+        # 获取实际视图尺寸
         view_box = self.plot_item.getViewBox()
+        view_width_pixels = max(1, view_box.width())  # 防止除零
+        view_height_pixels = max(1, view_box.height())
+        
+        # 预计算转换比例（像素 -> 数据坐标）
+        pixel_to_data_x = x_range / view_width_pixels
+        pixel_to_data_y = y_range / view_height_pixels
         
         # 设置固定的屏幕像素偏移
         gap_pixels = 5  # 文本框左边缘距离cursor的水平像素间隔
@@ -5280,9 +5292,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         font_metrics = self._cached_font_metrics
         label_height_pixels = self._cached_label_height_pixels
+        label_height_data = label_height_pixels * pixel_to_data_y  # 在循环外计算
         
         for idx, item in enumerate(cursor_values):
-            var_name = item['var_name']
             x_pos = item['x_pos']
             y_pos = item['y_pos']
             y_value = item['y_value']
@@ -5302,6 +5314,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 根据实际文本内容动态计算标签宽度
             text_width = font_metrics.horizontalAdvance(y_value)
             label_width_pixels = text_width + 12
+            label_width_data = label_width_pixels * pixel_to_data_x  # 在循环内计算宽度（动态的）
             
             # 将数据坐标转换为场景坐标（屏幕像素）
             cursor_scene_pos = view_box.mapViewToScene(QPointF(x_pos, y_pos))
@@ -5323,7 +5336,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             ]
             
             label_scene_x, label_scene_y = None, None
-            selected_strategy = None
             
             for strategy_idx, (dx_pixels, dy_pixels, name) in enumerate(strategies):
                 candidate_scene_x = cursor_scene_x + dx_pixels
@@ -5347,7 +5359,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     label_scene_y = candidate_scene_y
                     label_x = candidate_x
                     label_y = candidate_y
-                    selected_strategy = name
                     break
             
             # 如果所有策略都超界，默认使用右上并约束在边界内
@@ -5363,7 +5374,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                              min(x_max - label_width_data * 0.5, label_x))
                 label_y = max(y_min + label_height_data * 0.5, 
                              min(y_max - label_height_data * 0.5, label_y))
-                selected_strategy = "约束右上"
             
             # 边缘避让逻辑：防止标签在边缘抖动
             edge_margin_strict = label_height_data * 1.5
