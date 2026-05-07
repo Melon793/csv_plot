@@ -195,6 +195,38 @@ UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判
 VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判定为数据行
 
 
+class AutoDetectError(Exception):
+    """自动检测文件格式失败，需要用户手动指定分隔符/标题行/单位行"""
+    pass
+
+
+from dataclasses import dataclass
+
+@dataclass
+class FormatInfo:
+    """文件格式自动检测结果
+    
+    包含一次文件扫描得到的全部格式信息：编码、分隔符、标题行位置、是否包含单位行。
+    供 auto_detect() 统一入口返回，也供未来的 ImportDialog 消费。
+    """
+    encoding: str | None    # 检测到的编码名称，None 表示检测失败
+    sep: str | None         # 检测到的分隔符，None 表示检测失败
+    header_row: int         # 标题行 0-based 行号
+    hasunit: bool           # 是否包含单位行
+
+
+# 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
+_UNIT_KEYWORDS = [
+    'm', 's', 'g', 'A', 'K', 'mol', 'cd',
+    'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar', 'm2', '/min', '/h', 'kWh', 'mm', '°CA',
+    'L', 'm3',
+    'ppm', 'ppb', '%',
+    'rpm',
+    '℃', '°F', '°C',
+    '#/',
+]
+
+
 def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     """
     判断数值是否能安全表示为 float32。
@@ -421,12 +453,14 @@ class DataLoadThread(QThread):
     finished = pyqtSignal(object)     # FastDataLoader 实例
     error = pyqtSignal(str)
 
-    def __init__(self, file_path: str, parent=None,descRows:int=0,sep:str=',',hasunit:bool=True):
+    def __init__(self, file_path: str, parent=None, descRows: int = 0, sep: str = ',',
+                 hasunit: bool = True, encoding: str | None = None):
         super().__init__(parent)
         self.file_path = file_path
-        self.descRows=descRows
-        self.sep=sep
-        self.hasunit=hasunit
+        self.descRows = descRows
+        self.sep = sep
+        self.hasunit = hasunit
+        self.encoding = encoding
     def run(self):
         """
         线程执行方法
@@ -459,6 +493,7 @@ class DataLoadThread(QThread):
                 descRows=self.descRows,
                 sep=self.sep,
                 hasunit=self.hasunit,
+                encoding=self.encoding,
                 chunksize=3600,          
                 _progress= _progress_cb,
             )
@@ -496,6 +531,203 @@ class FastDataLoader:
         # 其他脏数据字符串
         "data err", "* *", "----", "no value"
     ]
+
+    @staticmethod
+    def _detect_sep_from_lines(lines: list[str]) -> str | None:
+        """从已读取的行列表中检测分隔符（方差法，无 I/O）
+        
+        借鉴 Excel "分列"功能原理：统计候选分隔符在各行出现的次数，
+        选择出现次数最一致（方差最小）且出现次数>0的作为分隔符。
+        
+        Args:
+            lines: 已读取的非空行列表
+            
+        Returns:
+            检测到的分隔符，无法检测时返回 None
+        """
+        candidates = [',', ';', '\t']
+        counts = {c: [] for c in candidates}
+        for line in lines:
+            for c in candidates:
+                counts[c].append(line.count(c))
+        scores = {}
+        for c in candidates:
+            vals = counts[c]
+            if not vals or all(v == 0 for v in vals):
+                scores[c] = float('inf')
+                continue
+            mean = sum(vals) / len(vals)
+            variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+            scores[c] = variance
+        best = min(scores, key=lambda c: (scores[c], {';': 1, '\t': 2}.get(c, 0)))
+        if scores[best] == float('inf'):
+            return None
+        return best
+
+    @staticmethod
+    def _detect_header_from_lines(lines: list[str], sep: str) -> int:
+        """从已读取的行列表中定位标题行（非数值占比法，无 I/O）
+        
+        扫描行列表，找到第一个包含分隔符且非数值占比 > 50% 的行作为标题行。
+        
+        Args:
+            lines: 已读取的非空行列表
+            sep: 已检测到的分隔符
+            
+        Returns:
+            标题行在 lines 列表中的索引 (0-based)，未找到时返回 0
+        """
+        for idx, line in enumerate(lines):
+            if sep not in line:
+                continue
+            parts = line.split(sep)
+            if len(parts) < 2:
+                continue
+            non_numeric_count = 0
+            for cell in parts:
+                cell_stripped = cell.strip().strip('"').strip("'")
+                if not cell_stripped:
+                    continue
+                try:
+                    float(cell_stripped)
+                except (ValueError, TypeError):
+                    non_numeric_count += 1
+            total = len(parts)
+            if total > 0 and non_numeric_count / total > 0.5:
+                return idx
+        return 0
+
+    @staticmethod
+    def _detect_hasunit_from_lines(lines: list[str], sep: str, header_row: int) -> bool:
+        """从已读取的行列表中判断标题行下一行是否为单位行（无 I/O）
+        
+        检查 header_row+1 行，统计其中包含 _UNIT_KEYWORDS 中关键字的列比例。
+        比例超过 UNIT_KEYWORD_RATIO_THRESHOLD 时判定为单位行。
+        
+        Args:
+            lines: 已读取的非空行列表
+            sep: 分隔符
+            header_row: 标题行在 lines 中的索引
+            
+        Returns:
+            True 表示包含单位行
+        """
+        if header_row + 1 >= len(lines):
+            return False
+        parts = lines[header_row + 1].split(sep)
+        if len(parts) < 2:
+            return False
+        unit_hit = 0
+        total = 0
+        for cell in parts:
+            cell_stripped = cell.strip().strip('"').strip("'")
+            cell_lower = cell_stripped.lower()
+            if not cell_stripped:
+                continue
+            total += 1
+            for keyword in _UNIT_KEYWORDS:
+                if keyword.lower() in cell_lower:
+                    unit_hit += 1
+                    break
+        if total == 0:
+            return False
+        return (unit_hit / total) > UNIT_KEYWORD_RATIO_THRESHOLD
+
+    @staticmethod
+    def _auto_detect_format(file_path: str) -> FormatInfo:
+        """一次文件扫描完成编码探测 + 分隔符检测 + 标题行定位 + 单位行探测
+        
+        1. 用 charset_normalizer 读取文件前 2000 字节推断编码
+        2. 根据置信度选择回退策略（高置信度精简链、低置信度完整链）
+        3. 用正确编码打开文件，一次读取前 50 行
+        4. 在同一批行数据上依次检测分隔符→标题行→单位行
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            FormatInfo(encoding, sep, header_row, hasunit)
+            
+        Raises:
+            AutoDetectError: 文件内容不足（< 2 行）无法检测
+        """
+        from charset_normalizer import from_bytes
+        from pathlib import Path
+
+        sample_size = 2000
+        with Path(file_path).open('rb') as f:
+            raw_sample = f.read(sample_size)
+
+        result = from_bytes(raw_sample).best()
+        if result and result.encoding:
+            detected_encoding = result.encoding
+            coherence = result.coherence
+        else:
+            detected_encoding = 'utf-8'
+            coherence = 0.0
+
+        if coherence > 0.8:
+            encodings_to_try = list(dict.fromkeys([detected_encoding, 'utf-8']))
+        else:
+            encodings_to_try = list(dict.fromkeys(
+                [detected_encoding, 'utf-8', 'gb18030', 'cp1252', 'latin-1']
+            ))
+
+        lines = []
+        final_encoding = None
+        for enc in encodings_to_try:
+            try:
+                with open(file_path, 'r', encoding=enc, errors='replace') as f:
+                    for _ in range(50):
+                        line = f.readline()
+                        if not line:
+                            break
+                        stripped = line.rstrip('\n\r')
+                        if stripped.strip():
+                            lines.append(stripped)
+                        if len(lines) >= 40:
+                            break
+                final_encoding = enc
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+
+        if final_encoding is None:
+            return FormatInfo(encoding=None, sep=None, header_row=0, hasunit=False)
+
+        if len(lines) < 2:
+            raise AutoDetectError(f"文件内容不足（仅 {len(lines)} 行），无法自动检测格式: {file_path}")
+
+        sep = FastDataLoader._detect_sep_from_lines(lines)
+        if sep is not None:
+            header_row = FastDataLoader._detect_header_from_lines(lines, sep)
+            hasunit = FastDataLoader._detect_hasunit_from_lines(lines, sep, header_row)
+        else:
+            header_row = 0
+            hasunit = False
+
+        return FormatInfo(encoding=final_encoding, sep=sep, header_row=header_row, hasunit=hasunit)
+
+    @staticmethod
+    def auto_detect(file_path: str) -> FormatInfo:
+        """自动检测文件格式的统一入口
+        
+        调用 _auto_detect_format() 完成一次文件扫描，返回 FormatInfo。
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            FormatInfo(encoding, sep, header_row, hasunit)
+            
+        Raises:
+            AutoDetectError: 无法自动检测文件分隔符或文件内容不足
+        """
+        fmt = FastDataLoader._auto_detect_format(file_path)
+        if fmt.sep is None:
+            raise AutoDetectError(f"无法自动检测文件分隔符: {file_path}")
+        return fmt
+
     from typing import Callable
     def __init__(
         self,
@@ -510,13 +742,13 @@ class FastDataLoader:
         sep: str = ",",
         _progress: Callable | None = None,
         do_parse_date: bool =False,
-        hasunit:bool = True
+        hasunit:bool = True,
+        encoding: str | None = None,
     ):
-        """
-        初始化快速数据加载器
+        """初始化快速数据加载器
         
-        配置数据加载参数，包括文件路径、数据类型推断、分块大小等
-        自动检测文件编码和数据结构
+        配置数据加载参数，包括文件路径、数据类型推断、分块大小等。
+        当 encoding 不为 None 时跳过编码自动检测直接使用传入编码。
         
         Args:
             csv_path: CSV文件路径
@@ -530,8 +762,8 @@ class FastDataLoader:
             _progress: 进度回调函数
             do_parse_date: 是否解析日期
             hasunit: 是否包含单位行
+            encoding: 预检测的文件编码，为 None 时内部自动检测
         """
-        #print("Calling inside FastDataLoader with _progress:", _progress) 
         self._path = csv_path
         self.file_size = os.path.getsize(csv_path) 
         self.max_rows_infer = max_rows_infer
@@ -544,9 +776,9 @@ class FastDataLoader:
         self.do_parse_date=do_parse_date
         self.hasunit=hasunit
 
-        # 一次性读取 header + 单位行，并回退编码
         self._var_names, self._units, self.encoding_used, self.hasunit = self._load_header_units(
-            self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,hasunit=self.hasunit
+            self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,
+            hasunit=self.hasunit, encoding=encoding
         )
         
         if self._progress_cb:
@@ -615,14 +847,14 @@ class FastDataLoader:
         desc_rows: int = 0,
         usecols: list[str] | None = None,
         sep: str = ",",
-        hasunit:bool=True
+        hasunit: bool = True,
+        encoding: str | None = None,
     ) -> tuple[list[str], dict[str, str], str, bool]:
-        """
-        加载CSV文件的表头和单位信息
+        """加载CSV文件的表头和单位信息
         
-        自动检测文件编码，读取变量名和单位信息
-        支持多行描述和单位行的处理
-        自动检测第2行是否真的是单位行
+        根据传入编码或自动检测编码读取文件头部，提取变量名和单位信息。
+        当 encoding 不为 None 时跳过编码检测直接使用传入值（保留回退链兜底）。
+        单位行检测仅作为对照校验输出 debug 日志，不再覆盖传入的 hasunit。
         
         Args:
             path: CSV文件路径
@@ -630,62 +862,35 @@ class FastDataLoader:
             usecols: 要读取的列名列表
             sep: 分隔符
             hasunit: 是否包含单位行
+            encoding: 预检测的文件编码，为 None 时内部自动检测
             
         Returns:
             tuple: (变量名列表, {变量名: 单位}, 最终编码, 实际使用的hasunit)
         """
-        # 常见单位关键字列表（包含发动机测试常用单位）
-        # 注意：使用子字符串匹配，所以不需要列出所有组合形式（如Pa可匹配kPa、MPa等）
-        unit_keywords = [
-            # 基本单位
-            'm', 's', 'g', 'A', 'K', 'mol', 'cd',
-            # 工程单位
-            'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar','m2', '/min', '/h','kWh','mm','°CA',
-            # 流量单位
-            'L', 'm3', 
-            # 浓度单位
-            'ppm', 'ppb', '%',
-            # 转速单位
-            'rpm', 
-            # 温度单位
-            '℃', '°F', '°C',
-            # 其他常见单位标记
-            '#/',
-        ]
-        
         nrows_read = 5 if hasunit else 1
-        encodings_default = ["utf-8", "cp1252"]
 
-        from charset_normalizer import from_bytes
-        from pathlib import Path
-
-        sample_size = 2000  # bytes
-
-        with Path(path).open('rb') as f:
-            raw_sample = f.read(sample_size)
-
-        # 检测编码
-        result = from_bytes(raw_sample).best()
-        if result:
-            encoding_infer = result.encoding
-            language_infer = result.language
-            confidence_infer = result.coherence
+        if encoding is not None:
+            # 上游已检测编码，直接使用并追加回退链兜底
+            encodings_to_try = list(dict.fromkeys([encoding, 'utf-8', 'cp1252']))
         else:
-            encoding_infer = None
-            language_infer = None
-            confidence_infer = 0.0
+            # 自行检测编码
+            from charset_normalizer import from_bytes
+            from pathlib import Path
 
-        if language_infer is not None and language_infer.lower() in ['chinese', 'zh']  and confidence_infer > 0.7:
-            encoding_infer = ['gb18030']
-        else:
-            encoding_infer = ['utf-8']
+            sample_size = 2000
 
-        if language_infer is not None and language_infer.lower() =='chinese' and confidence_infer > 0.7:
-            encoding_infer = ['gb18030']
-        else:
-            encoding_infer = ['utf-8']
+            with Path(path).open('rb') as f:
+                raw_sample = f.read(sample_size)
 
-        for enc in list(dict.fromkeys(encoding_infer+encodings_default)):
+            result = from_bytes(raw_sample).best()
+            if result and result.encoding:
+                detected_enc = result.encoding
+            else:
+                detected_enc = 'utf-8'
+
+            encodings_to_try = list(dict.fromkeys([detected_enc, 'utf-8', 'cp1252']))
+
+        for enc in encodings_to_try:
             try:
                 df = pd.read_csv(
                     path,
@@ -703,61 +908,62 @@ class FastDataLoader:
         else:
             raise RuntimeError("无法以任何可用编码读取文件")
 
+        # 单位行对照校验（不覆盖传入的 hasunit，仅输出 debug 日志）
         actual_hasunit = hasunit
-        
-        # 自动检测逻辑（仅当hasunit=True且文件至少有2行时）
         if hasunit and df.shape[0] >= 2:
             row2 = df.iloc[1].fillna("").astype(str).tolist()
-            
-            # 维度1：检查是否有明显的单位关键字（需要一定比例）
+
             unit_keyword_count = 0
             total_cols = len(row2)
-            
+
             for cell in row2:
                 cell_lower = str(cell).lower().strip()
-                for keyword in unit_keywords:
+                for keyword in _UNIT_KEYWORDS:
                     keyword_lower = keyword.lower()
                     if keyword_lower in cell_lower:
                         unit_keyword_count += 1
-                        break  # 一个单元格只统计一次
-            
-            # 计算单位关键字比例
+                        break
+
             unit_keyword_ratio = unit_keyword_count / total_cols if total_cols > 0 else 0
-            
+
             if unit_keyword_ratio > UNIT_KEYWORD_RATIO_THRESHOLD:
-                # 超过阈值的列包含单位关键字，保持 hasunit=True
                 pass
             else:
-                # 维度3：计算数值列比例（排除1和-1）
                 numeric_count = 0
                 valid_numeric_count = 0
                 total_cols = len(row2)
-                
+
                 for cell in row2:
                     cell_str = str(cell).strip()
                     try:
                         val = float(cell_str)
                         numeric_count += 1
-                        # 排除 1 和 -1
                         if abs(val - 1.0) > 1e-9 and abs(val + 1.0) > 1e-9:
                             valid_numeric_count += 1
                     except (ValueError, TypeError):
                         continue
-                
-                # 计算有效数值列比例
+
                 if total_cols > 0:
                     valid_numeric_ratio = valid_numeric_count / total_cols
                     if valid_numeric_ratio > VALID_NUMERIC_RATIO_THRESHOLD:
-                        # 有效数值列比例超过阈值，判定为数据行
-                        actual_hasunit = False
-        
-        # 确保至少有1行数据
+                        debug_log(
+                            "_load_header_units: 上游检测 hasunit=True，但本行单位关键字占比仅 %.1f%%、"
+                            "有效数值列比例 %.1f%%，疑似为数据行。检查文件: %s",
+                            unit_keyword_ratio * 100, valid_numeric_ratio * 100, path
+                        )
+                    else:
+                        debug_log(
+                            "_load_header_units: 上游检测 hasunit=True，但本行单位关键字占比仅 %.1f%%，"
+                            "疑似误判。检查文件: %s",
+                            unit_keyword_ratio * 100, path
+                        )
+
         min_required_rows = 2 if actual_hasunit else 1
         if df.shape[0] < min_required_rows:
             raise ValueError(f"文件至少需要{min_required_rows}行")
 
         var_names = df.iloc[0].astype(str).tolist()
-        var_names = FastDataLoader._make_unique(var_names) 
+        var_names = FastDataLoader._make_unique(var_names)
         if actual_hasunit:
             units = dict(zip(var_names, df.iloc[1].fillna("").astype(str).tolist()))
         else:
@@ -8362,6 +8568,8 @@ class MainWindow(QMainWindow):
         无论是重载还是加载新数据，都不立即清理plot，等新数据加载完成后再处理
         这样可以避免UI立即清空，提供更好的用户体验
         
+        参数优先级：config_dict.json 配置 > 自动检测 > 默认回退
+        
         Args:
             file_path: 文件路径
             is_reload: 是否为重新加载
@@ -8369,38 +8577,92 @@ class MainWindow(QMainWindow):
         
         file_ext = self._extract_file_extension(file_path)
 
-        # load default
-        delimiter_typ = ','
-        descRows = 0
-        hasunit = True
+        delimiter_typ = None
+        descRows = None
+        hasunit = None
+        encoding = None
+        config_used = False
 
-        # try to load config json files
+        # 优先级1：尝试读取 config_dict.json
         if os.path.isfile("config_dict.json"):
             try:
-                config_dict=self.load_dict("config_dict.json")
-                ext_dict=config_dict.get(file_ext[1:],{})
-                delimiter_typ=ext_dict.get('sep')
-                descRows = int(ext_dict.get('skiprows'))
-                hasunit = bool(ext_dict.get('hasunit'))
+                config_dict = self.load_dict("config_dict.json")
+                ext_dict = config_dict.get(file_ext[1:], {})
+                cfg_sep = ext_dict.get('sep')
+                cfg_skip = ext_dict.get('skiprows')
+                cfg_hasunit = ext_dict.get('hasunit')
+                if cfg_sep is not None and cfg_skip is not None and cfg_hasunit is not None:
+                    delimiter_typ = cfg_sep
+                    descRows = int(cfg_skip)
+                    hasunit = bool(cfg_hasunit)
+                    config_used = True
+                    debug_log("MainWindow._load_file using config_dict.json sep=%s descRows=%s hasunit=%s",
+                              delimiter_typ, descRows, hasunit)
+            except Exception as e:
+                QMessageBox.warning(
+                    self, "配置文件错误",
+                    f"config_dict.json 读取失败，将使用自动检测方式加载文件。\n\n错误详情: {e}"
+                )
 
-            except Exception as e:     
-                print(f"配置文件读取失败: {e}")
-        else:
-            if file_ext in ['.csv',]:
-                delimiter_typ = ','
-                descRows = 0
-                hasunit = True
-            elif file_ext in ['.mfile','.t00','.t01','.t10','.t11']:
-                delimiter_typ = '\t'
-                descRows = 2
-                hasunit=True       
-            elif file_ext in ['.txt',]:
-                delimiter_typ = '\t'
-                descRows = 0
-                hasunit=True         
-            else:
-                QMessageBox.critical(self, "读取失败",f"无法读取后缀为:'{file_ext}'的文件")
+        # 优先级2：自动检测
+        if not config_used:
+            try:
+                fmt = FastDataLoader.auto_detect(file_path)
+                delimiter_typ = fmt.sep
+                descRows = fmt.header_row
+                hasunit = fmt.hasunit
+                encoding = fmt.encoding
+                debug_log("MainWindow._load_file auto-detected encoding=%s sep=%s descRows=%s hasunit=%s",
+                          encoding, delimiter_typ, descRows, hasunit)
+            except AutoDetectError as e:
+                debug_log("MainWindow._load_file auto-detection failed: %s", e)
+                # TODO: 优先级 P1 — ImportDialog 交互式弹窗
+                #   功能描述：当自动检测无法确定文件格式时，弹出类似 MATLAB "Import Data" 的交互式窗口，
+                #           允许用户手动指定分隔符、标题行、单位行和数据起始行。
+                #   预期实现方式：
+                #     1. 创建 ImportDialog(QDialog) 类，包含以下 UI 元素：
+                #        - QPlainTextEdit：预览文件原始内容（前 50 行），只读
+                #        - QComboBox：选择分隔符（逗号 / 分号 / Tab / 空格 / 自定义）
+                #        - QSpinBox：指定标题行（0-based 行号）
+                #        - QCheckBox：是否包含单位行
+                #        - QSpinBox：指定数据起始行（或通过标题行 + 单位行自动计算）
+                #        - 实时预览：切换分隔符后，自动高亮推荐标题行/单位行位置
+                #     2. ImportDialog 初始化时先调用 FastDataLoader._auto_detect_format(file_path)
+                #        获取 FormatInfo 作为智能默认建议，展示给用户
+                #     3. 用户切换分隔符时，调用 FastDataLoader._detect_header_from_lines(lines, new_sep)
+                #        和 _detect_hasunit_from_lines(lines, new_sep, header_row) 实时更新推荐
+                #     4. 调用方式：dialog = ImportDialog(file_path, self)
+                #                 if dialog.exec() == QDialog.DialogCode.Accepted:
+                #                     fmt = dialog.get_result()  # 返回 FormatInfo
+                #                     delimiter_typ = fmt.sep
+                #                     descRows = fmt.header_row
+                #                     hasunit = fmt.hasunit
+                #                     encoding = fmt.encoding
+                #                 else:
+                #                     return  # 用户取消
+                #   关联位置：
+                #     - FormatInfo dataclass: L215 附近
+                #     - FastDataLoader._auto_detect_format(): L660 附近
+                #     - FastDataLoader._detect_sep_from_lines(): L535 附近
+                #     - FastDataLoader._detect_header_from_lines(): L575 附近
+                #     - FastDataLoader._detect_hasunit_from_lines(): L600 附近
+                #     - MainWindow._load_file(): L8575 附近
+                #     - 当前 except 分支即为 ImportDialog 的触发入口
+                QMessageBox.critical(
+                    self, "数据解析失败",
+                    "无法自动识别文件的标题行和分隔符。\n"
+                    "请确认文件格式是否正确。\n"
+                    "支持的分隔符：逗号(,)、分号(;)、制表符(Tab)"
+                )
                 return
+
+        if delimiter_typ is None or descRows is None or hasunit is None:
+            QMessageBox.critical(
+                self, "数据解析失败",
+                "无法确定文件的分隔符和标题行位置。\n"
+                "请确认文件格式是否正确。"
+            )
+            return
 
         self._begin_data_reload()
         started_async = False
@@ -8413,7 +8675,8 @@ class MainWindow(QMainWindow):
         try:
             if file_size < _Threshold_Size_Mb * 1024 * 1024:
                 try:
-                    status = self._load_sync(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+                    status = self._load_sync(file_path, descRows=descRows, sep=delimiter_typ,
+                                             hasunit=hasunit, encoding=encoding)
                 finally:
                     self._end_data_reload()
                 if status:
@@ -8431,7 +8694,8 @@ class MainWindow(QMainWindow):
                 self._progress.setMinimumDuration(0)  # 立即显示，避免延迟
                 self._progress.show()
 
-                self._thread = DataLoadThread(file_path, descRows=descRows,sep=delimiter_typ,hasunit=hasunit)
+                self._thread = DataLoadThread(file_path, descRows=descRows, sep=delimiter_typ,
+                                                 hasunit=hasunit, encoding=encoding)
                 self._thread.progress.connect(self._progress.setValue)
                 self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
                 self._thread.error.connect(self._on_load_error)
@@ -8537,8 +8801,9 @@ class MainWindow(QMainWindow):
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except json.JSONDecodeError:
-            return {} if default is None else default
+        except json.JSONDecodeError as e:
+            debug_log("load_dict JSON decode error for %s: %s", path, e)
+            raise
         
     def _extract_file_extension(self, file_path: str) -> str:
         """
@@ -8575,31 +8840,26 @@ class MainWindow(QMainWindow):
         # 如果都不匹配，返回None
         return None
     
-    def _validate_load_parameters(self, file_path: str, descRows: int, sep: str, hasunit: bool) -> tuple[bool, str]:
-        """验证加载参数"""
+    def _validate_load_parameters(self, file_path: str, descRows, sep, hasunit) -> tuple[bool, str]:
         if not isinstance(file_path, str) or not file_path.strip():
             return False, "文件路径无效"
-            
-        if not isinstance(descRows, int) or descRows < 0:
+        if descRows is not None and (not isinstance(descRows, int) or descRows < 0):
             return False, "描述行数必须是非负整数"
-            
-        if not isinstance(sep, str) or not sep:
+        if sep is not None and (not isinstance(sep, str) or not sep):
             return False, "分隔符无效"
-            
-        if not isinstance(hasunit, bool):
+        if hasunit is not None and not isinstance(hasunit, bool):
             return False, "hasunit参数必须是布尔值"
-            
         return True, ""
 
     def _load_sync(self, 
                    file_path: str,
                    descRows: int = 0,
                    sep: str = ',',
-                   hasunit: bool = True):
+                   hasunit: bool = True,
+                   encoding: str | None = None):
         """小文件直接读"""
-        debug_log("MainWindow._load_sync start path=%s descRows=%s sep=%s hasunit=%s",
-                  file_path, descRows, sep, hasunit)
-        # 验证参数
+        debug_log("MainWindow._load_sync start path=%s descRows=%s sep=%s hasunit=%s encoding=%s",
+                  file_path, descRows, sep, hasunit, encoding)
         is_valid, error_msg = self._validate_load_parameters(file_path, descRows, sep, hasunit)
         if not is_valid:
             QMessageBox.critical(self, "参数错误", error_msg)
@@ -8609,7 +8869,8 @@ class MainWindow(QMainWindow):
         status = False
         
         try:
-            loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit)
+            loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
+                                    encoding=encoding)
             self.loader = loader
             self._apply_loader()
             status = True
@@ -8927,9 +9188,13 @@ class MainWindow(QMainWindow):
         if etype == QEvent.Type.DragEnter:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
-                # 检查是否有支持的文件
-                # supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
-                supported = any(self._extract_file_extension(u.toLocalFile()) is not None for u in urls)
+                supported = any(
+                    u.toLocalFile().lower().endswith(
+                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
+                    )
+                    or self._extract_file_extension(u.toLocalFile()) is not None
+                    for u in urls
+                )
 
                 if supported:
                     self.show_drop_overlay()
@@ -8947,8 +9212,13 @@ class MainWindow(QMainWindow):
         elif etype == QEvent.Type.DragMove:
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
-                # supported = any(u.toLocalFile().lower().endswith(('.csv','.txt','.mfile','.t00','.t01','.t10','.t11')) for u in urls)
-                supported = any(self._extract_file_extension(u.toLocalFile()) is not None for u in urls)
+                supported = any(
+                    u.toLocalFile().lower().endswith(
+                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
+                    )
+                    or self._extract_file_extension(u.toLocalFile()) is not None
+                    for u in urls
+                )
                 if supported:
                     event.acceptProposedAction()
                     return True
@@ -8958,7 +9228,8 @@ class MainWindow(QMainWindow):
                 urls = event.mimeData().urls()
                 for u in urls:
                     path = u.toLocalFile()
-                    if self._extract_file_extension(path) is not None:
+                    if (path.lower().endswith(('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11'))
+                            or self._extract_file_extension(path) is not None):
                         debug_log("MainWindow.eventFilter drop load path=%s", path)
                         self.load_csv_file(path)
                         event.accept()
@@ -10335,6 +10606,7 @@ class PlotVariableEditorDialog(QDialog):
         else:
             event.ignore()
         self.plot_widget._notify_drag_indicator(hide=True, source_widget=self)
+
 
 # ---------------- 主程序 ----------------
 if __name__ == "__main__":
