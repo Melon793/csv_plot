@@ -9818,9 +9818,9 @@ class MainWindow(QMainWindow):
             if in_var_names:
                 # 将validity字典转换为批量检查：获取所有变量的validity值
                 validity_values = [self.loader.df_validity.get(y, -1) for y in in_var_names]
-                # 使用NumPy批量检查哪些validity值等于1
+                # 使用NumPy批量检查哪些validity值为0或1（即非-1，存在于df_validity中）
                 validity_array = np.array(validity_values)
-                valid_mask = validity_array == 1
+                valid_mask = validity_array != -1
                 found = [in_var_names[i] for i in np.where(valid_mask)[0]]
             else:
                 found = []
