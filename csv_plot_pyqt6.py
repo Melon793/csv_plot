@@ -8972,6 +8972,10 @@ class MainWindow(QMainWindow):
 
         filtered_names = []
         for var in self.var_names:
+            # 过滤掉非字符串变量名
+            if not isinstance(var, str):
+                continue
+            
             var_lower = var.lower()
             unit = self.units.get(var, '').lower()
 
