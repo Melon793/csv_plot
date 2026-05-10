@@ -4,13 +4,14 @@ import os
 import weakref
 import subprocess
 import numpy as np
-import pandas as pd
+import polars as pl
 import logging
 import faulthandler
 import signal
 import threading
 import traceback
-from typing import Any
+from typing import Any, Dict, List
+from abc import ABC, abstractmethod
 
 if sys.platform == "darwin":  # macOS
     # 屏蔽 macOS ICC 警告
@@ -232,7 +233,7 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     判断数值是否能安全表示为 float32。
 
     参数:
-        values: pandas Series、NumPy 数组或其他可迭代的数值序列。
+        values: Polars Series、NumPy 数组或其他可迭代的数值序列。
 
     返回:
         tuple[bool, float | None]: (是否安全、绝对值最大值)
@@ -242,13 +243,13 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
         return False, None
 
     try:
-        if isinstance(values, pd.Series):
-            arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
+        if isinstance(values, pl.Series):
+            arr = values.cast(pl.Float64).to_numpy()
         else:
             try:
                 arr = np.asarray(values, dtype=np.float64)
             except (ValueError, TypeError, OverflowError):
-                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64)
+                arr = pl.Series(values).cast(pl.Float64).to_numpy()
     except Exception:
         return False, None
 
@@ -511,6 +512,49 @@ class DataLoadThread(QThread):
         except Exception as e:
             debug_log("DataLoadThread.exception path=%s err=%r", self.file_path, e)
             self.error.emit(f"加载文件时发生未知错误: {str(e)}")
+
+class DataLoaderInterface(ABC):
+    """数据加载器接口 - 预留未来 DuckDB 集成
+    
+    定义数据加载器的标准接口，使未来可以无缝切换至 DuckDB 按需加载架构。
+    当前由 FastDataLoader 隐式实现，阶段2将由 DuckDBDataLoader 实现。
+    """
+    
+    @property
+    @abstractmethod
+    def df(self) -> pl.DataFrame:
+        """返回完整 DataFrame（当前 Polars 阶段全部在内存中）"""
+        ...
+    
+    @abstractmethod
+    def get_variable_data(self, var_name: str) -> np.ndarray:
+        """获取变量数据 - 返回 numpy 数组"""
+        ...
+    
+    @abstractmethod
+    def get_metadata(self) -> Dict[str, Any]:
+        """获取元数据"""
+        ...
+    
+    @abstractmethod
+    def get_statistics(self, var_name: str) -> Dict[str, float]:
+        """获取统计信息"""
+        ...
+    
+    @property
+    @abstractmethod
+    def var_names(self) -> List[str]:
+        ...
+    
+    @property
+    @abstractmethod
+    def units(self) -> Dict[str, str]:
+        ...
+    
+    @property
+    @abstractmethod
+    def datalength(self) -> int:
+        ...
 
 class FastDataLoader:
     """
@@ -785,25 +829,23 @@ class FastDataLoader:
             self._progress_cb(5)
 
         # 推断 dtype
-        sample = pd.read_csv(
+        sample = pl.read_csv(
             self._path,
-            skiprows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
-            nrows=self.max_rows_infer,
-            names=self._var_names,
+            skip_rows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
+            n_rows=self.max_rows_infer,
+            new_columns=self._var_names,
             encoding=self.encoding_used,
-            usecols=self.usecols,
-            low_memory=False,
-            sep=self.sep,
-            na_values=self._NA_VALUES,
-            keep_default_na=True,
+            columns=self.usecols,
+            separator=self.sep,
+            null_values=self._NA_VALUES,
         )
         
         # 推断schema（包含时间格式）
         dtype_map, parse_dates, date_formats,downcast_ratio = self._infer_schema(sample)
         self.date_formats = date_formats
         
-        self.sample_mem_size = sample.memory_usage(deep=True).sum()
-        self.byte_per_line = (0.6*self.sample_mem_size)/sample.shape[0]
+        self.sample_mem_size = sample.estimated_size()
+        self.byte_per_line = (0.6*self.sample_mem_size)/sample.height
         self.estimated_lines = int(self.file_size/(self.byte_per_line ))
         
         import gc
@@ -829,7 +871,8 @@ class FastDataLoader:
         
         # 后处理
         if drop_empty:
-            self._df = self._df.dropna(axis=1, how="all")
+            non_null_cols = [col for col in self._df.columns if self._df[col].null_count() < self._df.height]
+            self._df = self._df.select(non_null_cols)
         if downcast_float:
             self._downcast_numeric()
         
@@ -892,15 +935,14 @@ class FastDataLoader:
 
         for enc in encodings_to_try:
             try:
-                df = pd.read_csv(
+                df = pl.read_csv(
                     path,
-                    skiprows=desc_rows,
-                    nrows=nrows_read,
-                    header=None,
-                    usecols=usecols,
-                    sep=sep,
+                    skip_rows=desc_rows,
+                    n_rows=nrows_read,
+                    has_header=False,
+                    columns=usecols,
+                    separator=sep,
                     encoding=enc,
-                    engine="python",
                 )
                 break
             except UnicodeDecodeError:
@@ -910,8 +952,8 @@ class FastDataLoader:
 
         # 单位行对照校验（不覆盖传入的 hasunit，仅输出 debug 日志）
         actual_hasunit = hasunit
-        if hasunit and df.shape[0] >= 2:
-            row2 = df.iloc[1].fillna("").astype(str).tolist()
+        if hasunit and df.height >= 2:
+            row2 = [str(v) if v is not None else "" for v in df.row(1)]
 
             unit_keyword_count = 0
             total_cols = len(row2)
@@ -959,52 +1001,52 @@ class FastDataLoader:
                         )
 
         min_required_rows = 2 if actual_hasunit else 1
-        if df.shape[0] < min_required_rows:
+        if df.height < min_required_rows:
             raise ValueError(f"文件至少需要{min_required_rows}行")
 
-        var_names = df.iloc[0].astype(str).tolist()
+        var_names = [str(v) for v in df.row(0)]
         var_names = FastDataLoader._make_unique(var_names)
         if actual_hasunit:
-            units = dict(zip(var_names, df.iloc[1].fillna("").astype(str).tolist()))
+            units = dict(zip(var_names, [str(v) if v is not None else "" for v in df.row(1)]))
         else:
             units = dict(zip(var_names, ['-'] * len(var_names)))
         return var_names, units, enc, actual_hasunit
 
     @staticmethod
-    def _infer_schema(sample: pd.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str],float]:
+    def _infer_schema(sample: pl.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str],float]:
         """推断数据类型和时间格式
         
         优化策略：
         1. 只对列名包含时间相关关键字的列进行时间格式推断
         2. 使用更精简的日期格式候选列表
         3. 对每列只采样前10行进行格式推断
+        4. 同时支持 pl.Datetime (完整日期+时间) 和 pl.Time (只有时间)
         """
         dtype_map: dict[str, str] = {}
         parse_dates: list[str] = []
         date_formats: dict[str, str] = {}
 
-        # 日期格式候选列表（按优先级排序）
+        # 日期/时间格式候选列表（按优先级排序）
         date_candidates = [
-            "%H:%M:%S.%f",   # 带微秒的时间格式（支持毫秒和微秒）
-            "%H:%M:%S",      # 时间格式
-            "%d/%m/%Y",      # 欧洲日期格式 (例: 18/11/2017)
-            "%Y/%m/%d",      # 日期格式 (例: 2024/10/31)
-            "%Y-%m-%d",      # ISO日期格式 (例: 2024-10-31)
+            "%H:%M:%S%.f",  # 带微秒的时间格式（支持毫秒和微秒）
+            "%H:%M:%S",     # 时间格式
+            "%d/%m/%Y",     # 欧洲日期格式 (例: 18/11/2017)
+            "%Y/%m/%d",     # 日期格式 (例: 2024/10/31)
+            "%Y-%m-%d",     # ISO日期格式 (例: 2024-10-31)
         ]
         
         # 时间列的关键字（不区分大小写）
         time_keywords = ['time', 'date', 'datetime', 'timestamp', 'zeit', 'tmod']
         
-        float_cols = sample.select_dtypes(include=['float', 'float64','category'])
-        downcast_ratio_est = float_cols.shape[1] / sample.shape[1] if sample.shape[1] > 0 else 0.000001
+        float_cols = sample.select(pl.col(pl.Float32, pl.Float64))
+        downcast_ratio_est = float_cols.width / sample.width if sample.width > 0 else 0.000001
         
-        # 【NumPy优化】批量识别numeric列和非numeric列（用于后续优化）
-        numeric_cols = sample.select_dtypes(include=['float32', 'float64', 'int', 'int32', 'int64']).columns
+        numeric_cols = [col for col in sample.columns if sample[col].dtype.is_numeric()]
         non_numeric_cols = [col for col in sample.columns if col not in numeric_cols]
         
         for col in sample.columns:
             s = sample[col]
-            if s.isna().all():
+            if s.null_count() == s.len():
                 dtype_map[col] = "category"
                 continue
             
@@ -1013,20 +1055,31 @@ class FastDataLoader:
             is_time_candidate = any(keyword in col_lower for keyword in time_keywords)
             
             if is_time_candidate:
-                # 采样前10行进行格式推断
-                s_sample = s.head(10).dropna()
-                if len(s_sample) > 0:
+                s_sample = s.head(10).drop_nulls()
+                if s_sample.len() > 0:
+                    matched = False
                     for fmt in date_candidates:
                         try:
-                            pd.to_datetime(s_sample, format=fmt, errors="raise")
+                            # 首先尝试解析为完整的 datetime
+                            s_sample.str.strptime(pl.Datetime, fmt, strict=True)
                             parse_dates.append(col)
                             date_formats[col] = fmt
+                            matched = True
                             break
-                        except (ValueError, TypeError):
-                            continue
-                    else:
-                        # 不是时间格式，按数值处理
-                        if pd.api.types.is_numeric_dtype(s):
+                        except Exception:
+                            try:
+                                # 如果 datetime 解析失败，尝试解析为 time (只有时间没有日期)
+                                s_sample.str.strptime(pl.Time, fmt, strict=True)
+                                # 我们用一个特殊标记来表示这是 time 格式而不是 datetime
+                                # 在格式字符串前加上 "TIME:" 前缀
+                                parse_dates.append(col)
+                                date_formats[col] = f"TIME:{fmt}"
+                                matched = True
+                                break
+                            except Exception:
+                                continue
+                    if not matched:
+                        if s.dtype.is_numeric():
                             is_safe, _ = _evaluate_float32_safety(s)
                             dtype_map[col] = "float32" if is_safe else "float64"
                         else:
@@ -1034,8 +1087,7 @@ class FastDataLoader:
                 else:
                     dtype_map[col] = "category"
             else:
-                # 非时间列，直接判断数值类型
-                if pd.api.types.is_numeric_dtype(s):
+                if s.dtype.is_numeric():
                     is_safe, _ = _evaluate_float32_safety(s)
                     dtype_map[col] = "float32" if is_safe else "float64"
                 else:
@@ -1052,56 +1104,49 @@ class FastDataLoader:
         sep: None | str = ",",
         descRows: int = 0,
         hasunit:bool = True,
-    ) -> pd.DataFrame:
-        chunks: list[pd.DataFrame] = []
-        # do not parse date
+    ) -> pl.DataFrame:
         if not self.do_parse_date:
             parse_dates=[]
-        total_chunks_est = max(1, self.estimated_lines // chunksize + (1 if self.estimated_lines % chunksize else 0))
-        increment = 80 / total_chunks_est
         
-        # 使用更小的chunk size来减少内存峰值
-        optimized_chunksize = min(chunksize, 2000)  # 限制最大chunk size
+        skip_base = (2 + descRows) if hasunit else (1 + descRows)
+        schema_overrides = {}
+        for col, dtype_str in dtype_map.items():
+            if dtype_str == "float32":
+                schema_overrides[col] = pl.Float32
+            elif dtype_str == "float64":
+                schema_overrides[col] = pl.Float64
+            elif dtype_str == "category":
+                schema_overrides[col] = pl.Utf8
         
-        for idx,chunk in enumerate(pd.read_csv(
+        if self._progress_cb:
+            self._progress_cb(30)
+        
+        df = pl.read_csv(
             path,
-            skiprows=(2 + descRows) if hasunit else (1+descRows),
-            names=self._var_names,
-            dtype=dtype_map,
-            parse_dates=parse_dates,
+            skip_rows=skip_base,
+            new_columns=self._var_names,
             encoding=self.encoding_used,
-            chunksize=optimized_chunksize,
-            usecols=self.usecols,
-            low_memory=False,
-            memory_map=True,
-            sep=sep,
-            na_values=self._NA_VALUES,
-            keep_default_na=True,
-            on_bad_lines='skip'
-        )):
-            #print(f"chunksize is {chunksize}, full size {self.file_size/(1024**2):2f}Mb")
-            if self._progress_cb:
-                chunk_progress = min(80, (idx + 1) * increment)
-                self._progress_cb(15 + int(chunk_progress))
-                #print (f"progress {idx} is {bytes_read}")
-            chunks.append(chunk)
-            
-            # 每处理几个chunk就进行一次垃圾回收
-            if idx % 5 == 0:
-                import gc
-                gc.collect()
-        return pd.concat(chunks, ignore_index=True)
+            columns=self.usecols,
+            separator=sep,
+            null_values=self._NA_VALUES,
+            schema_overrides=schema_overrides if schema_overrides else None,
+            truncate_ragged_lines=True,
+        )
+        
+        if self._progress_cb:
+            self._progress_cb(95)
+        
+        return df
 
     def _downcast_numeric(self) -> None:
-        float_cols = self._df.select_dtypes(include=["float32", "float64"]).columns
+        float_cols = [col for col in self._df.columns if self._df[col].dtype in (pl.Float32, pl.Float64)]
         for col in float_cols:
-            cleaned = pd.to_numeric(self._df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            cleaned = self._df[col].cast(pl.Float64)
             is_safe, _ = _evaluate_float32_safety(cleaned)
             if is_safe:
-                self._df[col] = cleaned.astype("float32")
+                self._df = self._df.with_columns(cleaned.cast(pl.Float32).alias(col))
             else:
-                # 当 float32 会溢出时改用 float64 保留精度
-                self._df[col] = cleaned.astype("float64", copy=False)
+                self._df = self._df.with_columns(cleaned.alias(col))
 
 
     def _check_df_validity(self) -> dict:
@@ -1127,41 +1172,33 @@ class FastDataLoader:
         return unique_names
     
     @staticmethod
-    def _classify_column(series: pd.Series, col_name: str, date_formats: dict) -> int:
+    def _classify_column(series: pl.Series, col_name: str, date_formats: dict) -> int:
         """
         1: （全部可转数字，且 ≥2 个不同有效值） 或 （该列是日期格式） 或 （数据长度为1，且可转换为数字）
         0: 数据长度>=2, 且全部可转数字，且唯一有效值
         -1: 存在非数字（不含日期格式） 或 全部 NaN
         
-        【NumPy优化】使用NumPy直接检查唯一值，避免Pandas的循环操作
+        【NumPy优化】使用NumPy直接检查唯一值，避免Polars的循环操作
         """
-        # 如果该列是日期格式，则直接返回1（有效）   
         if col_name in date_formats:
             return 1
 
-        # 1) 先尝试整列转 float，失败直接 -1
         try:
-            numeric = pd.to_numeric(series, errors="raise").values  # 转为NumPy array
-        except (ValueError, TypeError):
+            numeric = series.cast(pl.Float64).to_numpy()
+        except Exception:
             return -1
 
-        # 2) 【NumPy优化】用NumPy过滤NaN（兼容整数类型）
-        # 先转换为浮点类型以支持NaN检查，避免整数类型的NaN检查错误
-        if numeric.dtype.kind in 'iu':  # 整数类型
-            # 整数类型没有NaN，直接使用
+        if numeric.dtype.kind in 'iu':
             valid = numeric
         else:
-            # 浮点类型，需要过滤NaN
             valid = numeric[~np.isnan(numeric)]
         
-        if len(valid) == 0:          # 全 NaN 或空数组
+        if len(valid) == 0:
             return -1
 
-        # 数据长度为1且可转数字 → 返回1
         if len(series) == 1:
             return 1
 
-        # 【NumPy优化】用np.unique直接计算唯一值数量，比Pandas更快
         unique_count = np.unique(valid).size
         if unique_count == 1:
             return 0
@@ -1169,7 +1206,7 @@ class FastDataLoader:
             return 1
     
     @property
-    def df(self) -> pd.DataFrame:
+    def df(self) -> pl.DataFrame:
         return self._df
 
     @property
@@ -1182,19 +1219,19 @@ class FastDataLoader:
 
     @property
     def datalength(self) -> int:
-        return self._df.shape[0]
+        return self._df.height
 
     @property
     def var_names(self) -> list[str]:
-        return self._df.columns.tolist()
+        return self._df.columns
     
     @property
     def row_count(self) -> int:
-        return len(self._df)
+        return self._df.height
     
     @property
     def column_count(self) -> int:
-        return len(self._df.columns)
+        return self._df.width
     
     @property
     def time_channels_info(self) -> dict[str, str]:
@@ -1258,18 +1295,17 @@ class DropOverlay(QWidget):
         )
 
 
-class PandasTableModel(QAbstractTableModel):
+class PolarsTableModel(QAbstractTableModel):
     """
-    Pandas数据表格模型类
+    Polars数据表格模型类
     只读官方虚拟模型，支持千万行秒开
-    将pandas DataFrame数据适配到Qt的表格视图中，提供高效的数据访问功能
+    将Polars DataFrame数据适配到Qt的表格视图中，提供高效的数据访问功能
     """
-    def __init__(self, df: pd.DataFrame, units: dict[str, str], parent=None):
+    def __init__(self, df: pl.DataFrame, units: dict[str, str], parent=None):
         super().__init__(parent)
         self._df = df
         self._units = units
 
-    # 三个必须实现的纯虚函数
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else self._df.shape[0]
 
@@ -1279,25 +1315,26 @@ class PandasTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
             return None
-        value = self._df.iloc[index.row(), index.column()]
-        return str(value) if pd.notnull(value) else ""
+        value = self._df.item(index.row(), index.column())
+        return str(value) if value is not None else ""
 
     def headerData(self, section, orientation, role):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
-        if self._df.columns.empty:
+        if not self._df.columns:
             return None
         if orientation == Qt.Orientation.Horizontal:
             col_name = str(self._df.columns[section])
             unit = self._units.get(col_name, '')
             return f"{col_name}\n({unit})" if unit else f"{col_name}\n()"
-        return str(section + 1)           # 行号 1-based
+        return str(section + 1)
 
     def removeColumns(self, column, count, parent=QModelIndex()):
         if column < 0 or column + count > self.columnCount():
             return False
         self.beginRemoveColumns(parent, column, column + count - 1)
-        self._df.drop(self._df.columns[column:column + count], axis=1, inplace=True)
+        cols_to_drop = self._df.columns[column:column + count]
+        self._df = self._df.drop(cols_to_drop)
         self.endRemoveColumns()
         return True
     
@@ -1575,7 +1612,7 @@ class DataTableDialog(QMainWindow):
 
         main_layout.addWidget(splitter)
 
-        self._df = pd.DataFrame()
+        self._df = pl.DataFrame()
         self._df_lock = Lock()
         self.model = None
         self.units = {}
@@ -1723,7 +1760,7 @@ class DataTableDialog(QMainWindow):
     def _blink_column(self,var_name,pulse:int=800):
         if self.has_column(var_name):
             # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
-            col_idx = self._df.columns.get_loc(var_name)  # 获取逻辑列索引
+            col_idx = self._df.columns.index(var_name)  # 获取逻辑列索引
             if var_name in self.frozen_columns:
                 delegate = self.delegate_frozen
                 view = self.frozen_view
@@ -1852,7 +1889,7 @@ class DataTableDialog(QMainWindow):
         QTimer.singleShot(100, lambda: self._blink_column(var_name,pulse=BLINK_PULSE))
 
     # 内部函数：添加变量到表格
-    def _add_variable_to_table(self, var_name: str, data: pd.Series):
+    def _add_variable_to_table(self, var_name: str, data: pl.Series):
         """
         内部函数：将变量添加到表格的非冻结区
         
@@ -1863,14 +1900,14 @@ class DataTableDialog(QMainWindow):
             var_name: 变量名称
             data: 变量数据序列
         """
-        self._df[var_name] = data
+        self._df = self._df.with_columns(data.alias(var_name))
         # 使用新函数替换循环
         loader = self._resolve_loader()
         
         if loader:
             self.units = loader.units
             
-        self.model = PandasTableModel(self._df, self.units)
+        self.model = PolarsTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
@@ -1973,7 +2010,7 @@ class DataTableDialog(QMainWindow):
             return
 
         # 计算两侧选择与列集合
-        frozen_cols = set(self._df.columns.get_loc(col) for col in self.frozen_columns)
+        frozen_cols = set(self._df.columns.index(col) for col in self.frozen_columns)
         if view == self.main_view:
             other_view = self.frozen_view
         else:
@@ -2135,11 +2172,10 @@ class DataTableDialog(QMainWindow):
                 row_indexer = rows
 
             # 直接使用正确的逻辑索引提取数据
-            x_data_series = pd.to_numeric(self._df.iloc[row_indexer, x_col_idx], errors='coerce')
-            y_data_series = pd.to_numeric(self._df.iloc[row_indexer, y_col_idx], errors='coerce')
+            x_data_series = self._df[row_indexer, x_col_idx]
+            y_data_series = self._df[row_indexer, y_col_idx]
 
-            # 验证1：检查是否有非数值数据
-            if x_data_series.isnull().any() or y_data_series.isnull().any():
+            if x_data_series.null_count() > 0 or y_data_series.null_count() > 0:
                 QMessageBox.warning(self, "绘图错误", "选中区域包含无法转换为数字的单元格。")
                 return
 
@@ -2175,8 +2211,8 @@ class DataTableDialog(QMainWindow):
         for r in rows_order:
             row_vals = []
             for c in ordered_cols:
-                val = self._df.iloc[r, c]
-                if pd.isna(val):
+                val = self._df.item(r, c)
+                if val is None:
                     row_vals.append("")
                 else:
                     row_vals.append(str(val))
@@ -2213,8 +2249,8 @@ class DataTableDialog(QMainWindow):
         for r in range(self._df.shape[0]):
             row_vals = []
             for c in ordered_cols:
-                val = self._df.iloc[r, c]
-                if pd.isna(val):
+                val = self._df.item(r, c)
+                if val is None:
                     row_vals.append("")
                 else:
                     row_vals.append(str(val))
@@ -2251,36 +2287,48 @@ class DataTableDialog(QMainWindow):
             self.restoreGeometry(geom)
 
     def closeEvent(self, event):
-        for win in self.scatter_plot_windows[:]:
+        try:
+            for win in self.scatter_plot_windows[:]:
+                try:
+                    # 尝试访问窗口属性来检查是否有效
+                    if hasattr(win, 'isVisible'):
+                        win.close()
+                except RuntimeError:
+                    # 窗口已经被删除，跳过
+                    pass
+            if not (self._skip_close_confirmation) and (hasattr(self, '_df') and self._df is not None and len(self._df.columns) >= 4):
+                reply = QMessageBox.question(self,"确认关闭","是否清除所有列表，并关闭数值变量表窗口？",
+                                             QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+                # if user did not confirm to close the window
+                if reply !=QMessageBox.StandardButton.Yes:
+                    event.ignore()
+                    return
+
+            self.set_skip_close_confirmation(False)
+
+            self.scatter_plot_windows.clear()
+            
+            # 其他清理代码保持不变...
+            self.save_geom()
+            self._df = pl.DataFrame()
+            if hasattr(self, 'main_view') and self.main_view is not None:
+                self.main_view.setModel(None)
+            if hasattr(self, 'frozen_view') and self.frozen_view is not None:
+                self.frozen_view.setModel(None)
+            self._instance = None
+            self._saved_scroll_pos = None
+            self.frozen_columns = []  
+            self.hide()
+            event.accept()
+        except (RuntimeError, AttributeError, Exception) as e:
+            # 发生任何异常时，确保清理单例引用并接受关闭事件
+            debug_log(f"DataTableDialog.closeEvent error: {e}")
             try:
-                # 尝试访问窗口属性来检查是否有效
-                if hasattr(win, 'isVisible'):
-                    win.close()
-            except RuntimeError:
-                # 窗口已经被删除，跳过
+                self._instance = None
+                self.hide()
+            except:
                 pass
-        if not (self._skip_close_confirmation) and (len(self._df.columns) >= 4):
-            reply = QMessageBox.question(self,"确认关闭","是否清除所有列表，并关闭数值变量表窗口？",
-                                         QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
-            # if user did not confirm to close the window
-            if reply !=QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-
-        self.set_skip_close_confirmation(False)
-
-        self.scatter_plot_windows.clear()
-        
-        # 其他清理代码保持不变...
-        self.save_geom()
-        self._df = pd.DataFrame()
-        self.main_view.setModel(None)
-        self.frozen_view.setModel(None)
-        self._instance = None
-        self._saved_scroll_pos = None
-        self.frozen_columns = []  
-        self.hide()
-        event.accept()
+            event.accept()
 
     def set_skip_close_confirmation(self,status:bool):
         self._skip_close_confirmation=status
@@ -2288,7 +2336,7 @@ class DataTableDialog(QMainWindow):
     def has_column(self, var_name: str) -> bool:
         return var_name in self._df.columns
 
-    def add_series(self, var_name: str, data: pd.Series):
+    def add_series(self, var_name: str, data: pl.Series):
         self._add_variable_to_table(var_name, data)
 
     def _update_views(self):
@@ -2411,7 +2459,7 @@ class DataTableDialog(QMainWindow):
             
             # 重新排列DataFrame
             self._df = self._df[new_column_order]
-            self.model = PandasTableModel(self._df, self.units)
+            self.model = PolarsTableModel(self._df, self.units)
             self.main_view.setModel(self.model)
             self.frozen_view.setModel(self.model)
             self._connect_signals()
@@ -2461,7 +2509,7 @@ class DataTableDialog(QMainWindow):
             
             # 重新排列DataFrame
             self._df = self._df[new_column_order]
-            self.model = PandasTableModel(self._df, self.units)
+            self.model = PolarsTableModel(self._df, self.units)
             self.main_view.setModel(self.model)
             self.frozen_view.setModel(self.model)
             self._connect_signals()
@@ -2540,7 +2588,7 @@ class DataTableDialog(QMainWindow):
         # 清空所有列
         while self.model.columnCount() > 0:
             self.model.removeColumns(0, 1)
-        self._df = pd.DataFrame()
+        self._df = pl.DataFrame()
         self.frozen_columns = []
         self._update_views()
 
@@ -2551,7 +2599,7 @@ class DataTableDialog(QMainWindow):
             return False
         
         # 获取列的索引
-        col_idx = self._df.columns.get_loc(var_name)
+        col_idx = self._df.columns.index(var_name)
         
         # 确定列在哪个视图（冻结区或普通区）
         if var_name in self.frozen_columns:
@@ -2617,10 +2665,10 @@ class DataTableDialog(QMainWindow):
             self.frozen_columns.remove(var_name)
         
         # 从DataFrame中删除列
-        self._df.drop(columns=[var_name], inplace=True)
+        self._df = self._df.drop(var_name)
 
         # 刷新模型和视图
-        self.model = PandasTableModel(self._df, self.units)
+        self.model = PolarsTableModel(self._df, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
@@ -2636,54 +2684,56 @@ class DataTableDialog(QMainWindow):
         Args:
             loader: 数据加载器实例
         """
-        if self.model is None or self._df.empty:
-            return
-        
-        scroll_pos = self.main_view.verticalScrollBar().value()
-        frozen_cols = self.frozen_columns.copy()
-        current_cols = list(self._df.columns)
-        
-        # --- BUG修复 START ---
-        
-        # 创建一个新的DataFrame来保存更新后的数据
-        new_df = pd.DataFrame()
-        removed = []
+        try:
+            # 【安全检查】确保所有必要的属性都存在且有效
+            if (self.model is None or 
+                not hasattr(self, '_df') or 
+                self._df is None or 
+                self._df.is_empty() or 
+                not hasattr(self, 'main_view') or
+                self.main_view is None):
+                return
+            
+            scroll_pos = self.main_view.verticalScrollBar().value()
+            frozen_cols = self.frozen_columns.copy() if hasattr(self, 'frozen_columns') else []
+            current_cols = list(self._df.columns)
+            
+            # --- BUG修复 START ---
+            
+            valid_cols = [col for col in current_cols if col in loader.df.columns]
+            removed = [col for col in current_cols if col not in loader.df.columns]
+            new_df = loader.df.select(valid_cols) if valid_cols else pl.DataFrame()
 
-        # 遍历当前表中的列
-        for col in current_cols:
-            if col in loader.df.columns:
-                # 从新的加载器数据中复制完整的列
-                # 这是关键修复：确保新DataFrame获得完整行数
-                new_df[col] = loader.df[col]
-            else:
-                # 该列已从源文件中移除
-                removed.append(col)
+            # 用新的、行数正确的DataFrame替换旧的
+            self._df = new_df
+            
+            # --- BUG修复 END ---
 
-        # 用新的、行数正确的DataFrame替换旧的
-        self._df = new_df
-        
-        # --- BUG修复 END ---
-
-        self.units = loader.units
-        self.model = PandasTableModel(self._df, self.units)
-        self.main_view.setModel(self.model)
-        self.frozen_view.setModel(self.model)
-        self._connect_signals()
-        
-        # 重新应用冻结列，确保它们仍然存在
-        self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
-        
-        self._update_views()
-        QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(scroll_pos))
-        
-        if removed:
-            msg = f"以下变量已从数据中移除：{', '.join(removed)}"
-            QMessageBox.information(self, "更新通知", msg)
-        
-        if self._df.empty:
-            # 增加这行，避免在表格变空并关闭时弹出烦人的确认框
-            self.set_skip_close_confirmation(True)
-            self.close()
+            self.units = loader.units
+            self.model = PolarsTableModel(self._df, self.units)
+            self.main_view.setModel(self.model)
+            if hasattr(self, 'frozen_view') and self.frozen_view is not None:
+                self.frozen_view.setModel(self.model)
+            self._connect_signals()
+            
+            # 重新应用冻结列，确保它们仍然存在
+            self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
+            
+            self._update_views()
+            QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(scroll_pos))
+            
+            if removed:
+                msg = f"以下变量已从数据中移除：{', '.join(removed)}"
+                QMessageBox.information(self, "更新通知", msg)
+            
+            if self._df.is_empty():
+                # 增加这行，避免在表格变空并关闭时弹出烦人的确认框
+                self.set_skip_close_confirmation(True)
+                self.close()
+        except (RuntimeError, AttributeError, Exception) as e:
+            # 对象可能已经被销毁或无效，安全跳过
+            debug_log(f"DataTableDialog.update_data error: {e}")
+            pass
 
 class LayoutInputDialog(QDialog):
     """
@@ -4039,7 +4089,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 获取模型和列索引
         model = dlg.model
-        col_idx = dlg._df.columns.get_loc(first_var_name)  # 逻辑列索引
+        col_idx = dlg._df.columns.index(first_var_name)  # 逻辑列索引
 
         # 确定使用哪个视图（冻结或主视图）
         if first_var_name in dlg.frozen_columns:
@@ -4185,7 +4235,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         根据数据长度计算最小的可缩放 X 范围 (minXRange)。
         """
         global MIN_INDEX_LENGTH
-        if self.data is None or self.data.empty:
+        if self.data is None or self.data.is_empty():
             data_len = 0
         else:
             data_len = self.data.shape[0]
@@ -5917,14 +5967,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def clear_value_cache(self):
         #self._value_cache: dict[str, tuple] = {}
         pass
-    def datetime_to_unix_seconds(self, series: pd.Series) -> pd.Series:
+    def datetime_to_unix_seconds(self, series: pl.Series) -> pl.Series:
         """将datetime Series转换为Unix时间戳（秒，float64精度）"""
         if "ns" in str(series.dtype):
-            return (series.astype("int64") / 10**9).astype("float64")
+            return (series.cast(pl.Int64) / 10**9).cast(pl.Float64)
         elif "us" in str(series.dtype):
-            return (series.astype("int64") / 10**6).astype("float64")
+            return (series.cast(pl.Int64) / 10**6).cast(pl.Float64)
         elif "ms" in str(series.dtype):
-            return (series.astype("int64") / 10**3).astype("float64")
+            return (series.cast(pl.Int64) / 10**3).cast(pl.Float64)
         else:
             raise ValueError(f"Unsupported datetime dtype: {series.dtype}")
         
@@ -5934,47 +5984,45 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return main_window.value_cache[var_name]
 
         raw_values = self.data[var_name]
-        dtype_kind = raw_values.dtype.kind
+        dtype = raw_values.dtype
         y_values = None
         y_format = 'number'
 
-        if dtype_kind in "iuf":
+        if dtype.is_numeric():
             y_values = raw_values
-        elif dtype_kind == "b":
-            y_values = raw_values.astype(np.int32)
+        elif dtype == pl.Boolean:
+            y_values = raw_values.cast(pl.Int32)
         elif var_name in self.time_channels_info:
             fmt = self.time_channels_info[var_name]
             try:
-                if "%H:%M:%S" in fmt:
-                    # 时间格式：提取时间部分并转换为Unix时间戳
-                    times = pd.to_datetime(raw_values, format=fmt, errors="coerce")
-                    today = pd.Timestamp.today().normalize()
-                    # 提取从午夜开始的时间差（保留毫秒/微秒精度）
-                    time_deltas = times - times.dt.normalize()
-                    dt_values = today + time_deltas
-                    y_values = self.datetime_to_unix_seconds(dt_values)
+                if fmt.startswith("TIME:"):
+                    # 这是 time 格式，需要特殊处理
+                    actual_fmt = fmt[len("TIME:"):]
+                    times = raw_values.str.strptime(pl.Time, actual_fmt, strict=False)
+                    # 将 pl.Time 转换为从当天 00:00:00 开始的秒数
+                    # 通过提取 hour, minute, second, microsecond 来计算
+                    hours = times.dt.hour().cast(pl.Float64)
+                    minutes = times.dt.minute().cast(pl.Float64)
+                    seconds = times.dt.second().cast(pl.Float64)
+                    microseconds = times.dt.microsecond().cast(pl.Float64)
+                    y_values = hours * 3600 + minutes * 60 + seconds + microseconds / 1000000
                     y_format = 's'
                 else:
-                    # 日期格式：直接转换为Unix时间戳
-                    dt_values = pd.to_datetime(raw_values, format=fmt, errors='coerce')
-                    y_values = self.datetime_to_unix_seconds(dt_values)
-                    y_format = 'date'
-            except (ValueError, TypeError):
-                # 无法解析时间格式
+                    # 这是正常的 datetime 格式
+                    times = raw_values.str.strptime(pl.Datetime, fmt, strict=False)
+                    y_values = self.datetime_to_unix_seconds(times)
+                    y_format = 's' if "%H:%M:%S" in fmt else 'date'
+            except Exception:
                 return None, None
         else:
-            # 非时间通道：尝试将object等类型转换为数字，只要存在至少一个有效值就接受
             try:
-                numeric_values = pd.to_numeric(raw_values, errors='coerce')
+                numeric_values = raw_values.cast(pl.Float64)
             except Exception:
-                numeric_values = None
+                return None, None
 
-            if numeric_values is not None:
-                finite_mask = np.isfinite(numeric_values.to_numpy(dtype=np.float64))
-                if finite_mask.any():
-                    y_values = numeric_values
-                else:
-                    return None, None
+            finite_mask = np.isfinite(numeric_values.to_numpy())
+            if finite_mask.any():
+                y_values = numeric_values
             else:
                 return None, None
         
@@ -6213,7 +6261,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 转换为numpy数组，根据数据类型选择合适的精度
             # 时间数据（Unix时间戳）使用float64以保留毫秒精度
             # 其他数据使用float32以减少内存
-            if isinstance(y_values, pd.Series):
+            if isinstance(y_values, pl.Series):
                 array_source = y_values.to_numpy()
                 safety_source = y_values
             else:
@@ -6227,19 +6275,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             target_dtype = np.float64 if prefer_float64 else np.float32
 
             try:
-                if isinstance(y_values, pd.Series):
-                    y_array = y_values.to_numpy(dtype=target_dtype)
+                if isinstance(y_values, pl.Series):
+                    y_array = y_values.to_numpy().astype(target_dtype)
                 else:
                     y_array = np.asarray(array_source, dtype=target_dtype)
             except (OverflowError, ValueError, TypeError):
-                if isinstance(y_values, pd.Series):
-                    y_array = y_values.to_numpy(dtype=np.float64)
+                if isinstance(y_values, pl.Series):
+                    y_array = y_values.to_numpy().astype(np.float64)
                 else:
                     y_array = np.asarray(array_source, dtype=np.float64)
 
             if target_dtype == np.float32 and np.any(np.isinf(y_array)):
-                if isinstance(y_values, pd.Series):
-                    y_array = y_values.to_numpy(dtype=np.float64)
+                if isinstance(y_values, pl.Series):
+                    y_array = y_values.to_numpy().astype(np.float64)
                 else:
                     y_array = np.asarray(array_source, dtype=np.float64)
 
@@ -6387,13 +6435,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return None, None
 
         try:
-            if isinstance(values, pd.Series):
-                arr = pd.to_numeric(values, errors='coerce').to_numpy(dtype=np.float64)
+            if isinstance(values, pl.Series):
+                arr = values.cast(pl.Float64).to_numpy()
             else:
                 arr = np.asarray(values, dtype=np.float64)
         except (ValueError, TypeError):
             try:
-                arr = pd.to_numeric(pd.Series(values), errors='coerce').to_numpy(dtype=np.float64)
+                arr = pl.Series(values).cast(pl.Float64).to_numpy()
             except Exception:
                 return None, None
 
@@ -8209,10 +8257,18 @@ class MainWindow(QMainWindow):
         self.row_height_factors: dict[int, int] = {}
 
     def closeEvent(self, event):
-        # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
-        if DataTableDialog._instance is not None:
-            DataTableDialog._instance.set_skip_close_confirmation(True)
-        self._unregister_global_event_filter()
+        try:
+            # 在主窗口关闭前，安全地设置DataTableDialog的_skip_close_confirmation为True
+            if DataTableDialog._instance is not None:
+                try:
+                    if hasattr(DataTableDialog._instance, 'set_skip_close_confirmation'):
+                        DataTableDialog._instance.set_skip_close_confirmation(True)
+                except (RuntimeError, AttributeError):
+                    # 对象可能已销毁，安全跳过
+                    pass
+            self._unregister_global_event_filter()
+        except:
+            pass
         super().closeEvent(event)
         
     def _on_splitter_moved(self, pos, index):
@@ -8945,17 +9001,24 @@ class MainWindow(QMainWindow):
         # 清除cache
   
         self.replots_after_loading()
-        # 更新数值变量表（如果存在）
+        # 更新数值变量表（如果存在且有效）
         if DataTableDialog._instance is not None:
-            DataTableDialog._instance.update_data(self.loader)
-            # 只show如果有列
-            if not DataTableDialog._instance._df.empty:
-                DataTableDialog._instance.show()  # 确保窗口显示
-                DataTableDialog._instance.raise_()
-                DataTableDialog._instance.activateWindow()
-            else:
-                DataTableDialog._instance.set_skip_close_confirmation(True)
-                DataTableDialog._instance.close()
+            try:
+                # 安全检查对象是否有效
+                if hasattr(DataTableDialog._instance, 'update_data'):
+                    DataTableDialog._instance.update_data(self.loader)
+                    # 只show如果有列
+                    if hasattr(DataTableDialog._instance, '_df') and DataTableDialog._instance._df is not None:
+                        if not DataTableDialog._instance._df.is_empty():
+                            DataTableDialog._instance.show()
+                            DataTableDialog._instance.raise_()
+                            DataTableDialog._instance.activateWindow()
+                        else:
+                            DataTableDialog._instance.set_skip_close_confirmation(True)
+                            DataTableDialog._instance.close()
+            except (RuntimeError, AttributeError):
+                # 对象可能已经被销毁或无效，安全跳过
+                pass
 
 
         self.filter_variables() 
@@ -9805,8 +9868,15 @@ class MainWindow(QMainWindow):
                 if widget.is_multi_curve_mode and widget.curves:
                     all_y_names.extend(widget.curves.keys())
             
+            # 【安全访问】检查 DataTableDialog 实例是否有效且数据可用
             if DataTableDialog._instance is not None:
-                all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
+                try:
+                    # 检查对象是否仍然有效，并且有 _df 属性
+                    if hasattr(DataTableDialog._instance, '_df') and DataTableDialog._instance._df is not None:
+                        all_y_names.extend(DataTableDialog._instance._df.columns)
+                except (RuntimeError, AttributeError):
+                    # 对象可能已经被销毁或无效，安全跳过
+                    pass
 
             unique_y_names = set(all_y_names)
             if not unique_y_names:
