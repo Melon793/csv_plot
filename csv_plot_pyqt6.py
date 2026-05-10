@@ -597,7 +597,7 @@ class FastDataLoader:
         scores = {}
         for c in candidates:
             vals = counts[c]
-            if not vals or all(v == 0 for v in vals):
+            if not vals or all(v == 0 for v in vals) or len(vals) == 0:
                 scores[c] = float('inf')
                 continue
             mean = sum(vals) / len(vals)
@@ -834,19 +834,28 @@ class FastDataLoader:
             skip_rows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
             n_rows=self.max_rows_infer,
             new_columns=self._var_names,
+            has_header=False,  # 关键：告诉 Polars 这是纯数据，没有额外的 header 行
             encoding=self.encoding_used,
             columns=self.usecols,
             separator=self.sep,
             null_values=self._NA_VALUES,
+            infer_schema_length=10000,
+            ignore_errors=True,
         )
         
         # 推断schema（包含时间格式）
-        dtype_map, parse_dates, date_formats,downcast_ratio = self._infer_schema(sample)
+        dtype_map, parse_dates, date_formats, downcast_ratio = self._infer_schema(sample)
         self.date_formats = date_formats
         
         self.sample_mem_size = sample.estimated_size()
-        self.byte_per_line = (0.6*self.sample_mem_size)/sample.height
-        self.estimated_lines = int(self.file_size/(self.byte_per_line ))
+        if sample.height > 0:
+            self.byte_per_line = (0.6*self.sample_mem_size)/sample.height
+        else:
+            self.byte_per_line = 1.0
+        if self.byte_per_line > 0:
+            self.estimated_lines = int(self.file_size/(self.byte_per_line ))
+        else:
+            self.estimated_lines = 1
         
         import gc
         del sample 
@@ -943,6 +952,8 @@ class FastDataLoader:
                     columns=usecols,
                     separator=sep,
                     encoding=enc,
+                    infer_schema_length=10000,
+                    ignore_errors=True,
                 )
                 break
             except UnicodeDecodeError:
@@ -1109,14 +1120,20 @@ class FastDataLoader:
             parse_dates=[]
         
         skip_base = (2 + descRows) if hasunit else (1 + descRows)
-        schema_overrides = {}
-        for col, dtype_str in dtype_map.items():
-            if dtype_str == "float32":
-                schema_overrides[col] = pl.Float32
-            elif dtype_str == "float64":
-                schema_overrides[col] = pl.Float64
-            elif dtype_str == "category":
-                schema_overrides[col] = pl.Utf8
+        
+        # 检查是否所有列都被识别为 category，如果是说明 sample 可能没读到数据，禁用 schema_overrides
+        all_category = all(dtype == "category" for dtype in dtype_map.values())
+        if all_category:
+            schema_overrides = None
+        else:
+            schema_overrides = {}
+            for col, dtype_str in dtype_map.items():
+                if dtype_str == "float32":
+                    schema_overrides[col] = pl.Float32
+                elif dtype_str == "float64":
+                    schema_overrides[col] = pl.Float64
+                elif dtype_str == "category":
+                    schema_overrides[col] = pl.Utf8
         
         if self._progress_cb:
             self._progress_cb(30)
@@ -1125,12 +1142,15 @@ class FastDataLoader:
             path,
             skip_rows=skip_base,
             new_columns=self._var_names,
+            has_header=False,  # 关键：告诉 Polars 这是纯数据，没有额外的 header 行
             encoding=self.encoding_used,
             columns=self.usecols,
             separator=sep,
             null_values=self._NA_VALUES,
-            schema_overrides=schema_overrides if schema_overrides else None,
+            schema_overrides=schema_overrides,
             truncate_ragged_lines=True,
+            infer_schema_length=10000,
+            ignore_errors=True,
         )
         
         if self._progress_cb:
@@ -1307,16 +1327,54 @@ class PolarsTableModel(QAbstractTableModel):
         self._units = units
 
     def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else self._df.shape[0]
+        if parent.isValid():
+            return 0
+        # 使用更可靠的方式获取行数
+        try:
+            return self._df.height
+        except Exception as e:
+            try:
+                return len(self._df)
+            except Exception as e2:
+                return 0
 
     def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else self._df.shape[1]
+        if parent.isValid():
+            return 0
+        # 使用更可靠的方式获取列数
+        try:
+            return self._df.width
+        except Exception as e:
+            try:
+                return len(self._df.columns)
+            except Exception as e2:
+                return 0
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
             return None
-        value = self._df.item(index.row(), index.column())
-        return str(value) if value is not None else ""
+        
+        row = index.row()
+        col = index.column()
+        
+        try:
+            # 多种方法尝试获取数据
+            value = None
+            try:
+                value = self._df.item(row, col)
+            except Exception as e:
+                try:
+                    value = self._df[row, col]
+                except Exception as e2:
+                    try:
+                        col_name = self._df.columns[col]
+                        value = self._df[col_name][row]
+                    except Exception as e3:
+                        value = None
+            
+            return str(value) if value is not None else ""
+        except Exception as e:
+            return ""
 
     def headerData(self, section, orientation, role):
         if role != Qt.ItemDataRole.DisplayRole:
@@ -1804,7 +1862,9 @@ class DataTableDialog(QMainWindow):
 
         # 保存当前的垂直滚动位置
         self._saved_scroll_pos = self.main_view.verticalScrollBar().value() if self.main_view else None
-
+        
+        # 收集要添加的series
+        series_to_add = []
         for var_name in var_names:
             # 检查变量是否已存在
             if self.has_column(var_name):
@@ -1815,24 +1875,37 @@ class DataTableDialog(QMainWindow):
             if var_name not in loader.df.columns:
                 invalid_vars.append(var_name)
                 continue
-
-            # 添加变量
-            try:
-                series = loader.df[var_name]
-                self._add_variable_to_table(var_name, series)
-                added_vars.append(var_name)
-            except Exception as e:
-                invalid_vars.append(f"{var_name} (错误: {str(e)})")
+                
+            added_vars.append(var_name)
+            series_to_add.append(loader.df[var_name].alias(var_name))
+        
+        # 批量添加
+        if series_to_add:
+            if self._df.is_empty():
+                # 空DataFrame，直接创建
+                self._df = pl.DataFrame(series_to_add)
+            else:
+                # 批量添加列
+                self._df = self._df.with_columns(series_to_add)
+            
+            # 更新模型
+            self.units = loader.units
+            self.model = PolarsTableModel(self._df, self.units)
+            self.main_view.setModel(self.model)
+            self.frozen_view.setModel(self.model)
+            self._connect_signals()
+            self._update_views()
+            if self._saved_scroll_pos is not None:
+                QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(self._saved_scroll_pos))
+            
+            # 滚动到最后添加的变量并闪烁
+            if added_vars:
+                last_var = added_vars[-1]
+                QTimer.singleShot(100, lambda: self.scroll_to_column(last_var))
+                QTimer.singleShot(100, lambda: self._blink_column(last_var, pulse=BLINK_PULSE))
 
         # 显示结果消息（只在有问题时提示）
         msg_parts = []
-        if added_vars:
-            # 滚动到最后添加的变量
-            last_var = added_vars[-1]
-            QTimer.singleShot(100, lambda: self.scroll_to_column(last_var))
-            QTimer.singleShot(100, lambda: self._blink_column(last_var, pulse=BLINK_PULSE))
-
-        # 只在有错误或已存在变量时显示提示
         if existing_vars or invalid_vars:
             if added_vars:
                 msg_parts.append(f"成功添加 {len(added_vars)} 个变量")
@@ -1900,7 +1973,14 @@ class DataTableDialog(QMainWindow):
             var_name: 变量名称
             data: 变量数据序列
         """
-        self._df = self._df.with_columns(data.alias(var_name))
+        # 安全添加列
+        if self._df.is_empty():
+            # 如果是空DataFrame，直接用这个series创建
+            self._df = pl.DataFrame({var_name: data})
+        else:
+            # 正常添加列
+            self._df = self._df.with_columns(data.alias(var_name))
+        
         # 使用新函数替换循环
         loader = self._resolve_loader()
         
@@ -2686,19 +2766,30 @@ class DataTableDialog(QMainWindow):
         """
         try:
             # 【安全检查】确保所有必要的属性都存在且有效
-            if (self.model is None or 
-                not hasattr(self, '_df') or 
-                self._df is None or 
-                self._df.is_empty() or 
+            if (not hasattr(self, '_df') or 
                 not hasattr(self, 'main_view') or
                 self.main_view is None):
                 return
             
-            scroll_pos = self.main_view.verticalScrollBar().value()
-            frozen_cols = self.frozen_columns.copy() if hasattr(self, 'frozen_columns') else []
-            current_cols = list(self._df.columns)
+            # 如果 _df 是空的，或者没有 model，说明还没有数据，我们应该先初始化
+            need_init = (self.model is None or self._df is None or self._df.is_empty())
+            
+            scroll_pos = 0
+            frozen_cols = []
+            current_cols = []
+            
+            if not need_init:
+                scroll_pos = self.main_view.verticalScrollBar().value()
+                frozen_cols = self.frozen_columns.copy() if hasattr(self, 'frozen_columns') else []
+                current_cols = list(self._df.columns)
             
             # --- BUG修复 START ---
+            
+            if need_init:
+                # 还没有数据，不应该只更新现有列，而应该等待用户添加变量
+                # 只是保存一下 units，以便后续添加变量时使用
+                self.units = loader.units
+                return
             
             valid_cols = [col for col in current_cols if col in loader.df.columns]
             removed = [col for col in current_cols if col not in loader.df.columns]
@@ -8244,17 +8335,17 @@ class MainWindow(QMainWindow):
             # 保存原最大宽度（用于后续显示时恢复）
             self._old_max_width = self._window_width_default  # 或实际原宽
 
-        # ---------------- 命令行直接加载文件 ----------------
-        if len(sys.argv) > 1:
-            file_path = sys.argv[1]
-            self.load_csv_file(file_path)
-
         # 标记区域相关
         self.saved_mark_range = None
         self.mark_stats_window = None
 
         # 行高度百分比跟踪 {row_index: percentage}
         self.row_height_factors: dict[int, int] = {}
+
+        # ---------------- 命令行直接加载文件 ----------------
+        if len(sys.argv) > 1:
+            file_path = sys.argv[1]
+            self.load_csv_file(file_path)
 
     def closeEvent(self, event):
         try:

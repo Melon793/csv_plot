@@ -1,5 +1,5 @@
 numpy
-pandas
+polars>=0.20.0
 pyqt6
 pyqtgraph
 charset-normalizer
