@@ -8196,17 +8196,17 @@ class MainWindow(QMainWindow):
             # 保存原最大宽度（用于后续显示时恢复）
             self._old_max_width = self._window_width_default  # 或实际原宽
 
-        # ---------------- 命令行直接加载文件 ----------------
-        if len(sys.argv) > 1:
-            file_path = sys.argv[1]
-            self.load_csv_file(file_path)
-
         # 标记区域相关
         self.saved_mark_range = None
         self.mark_stats_window = None
 
         # 行高度百分比跟踪 {row_index: percentage}
         self.row_height_factors: dict[int, int] = {}
+
+        # ---------------- 命令行直接加载文件 ----------------
+        if len(sys.argv) > 1:
+            file_path = sys.argv[1]
+            self.load_csv_file(file_path)
 
     def closeEvent(self, event):
         # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
