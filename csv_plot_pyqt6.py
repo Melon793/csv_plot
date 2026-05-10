@@ -238,30 +238,53 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     返回:
         tuple[bool, float | None]: (是否安全、绝对值最大值)
             当数据中不存在有限值时，绝对值最大值为 None。
+            
+    【Polars原生优化】优先使用 Polars 原生操作获取最大值，避免 to_numpy() 内存拷贝。
     """
     if values is None:
         return False, None
 
     try:
         if isinstance(values, pl.Series):
-            arr = values.cast(pl.Float64).to_numpy()
+            abs_max_scalar = values.abs().max()
+            if abs_max_scalar is None:
+                return False, None
+            abs_max = float(abs_max_scalar)
         else:
             try:
                 arr = np.asarray(values, dtype=np.float64)
             except (ValueError, TypeError, OverflowError):
                 arr = pl.Series(values).cast(pl.Float64).to_numpy()
+            if arr.size == 0:
+                return True, 0.0
+            finite_mask = np.isfinite(arr)
+            if not finite_mask.any():
+                return False, None
+            abs_max = float(np.max(np.abs(arr[finite_mask])))
+            return abs_max <= FLOAT32_SAFE_MAX, abs_max
     except Exception:
         return False, None
 
-    if arr.size == 0:
-        return True, 0.0
-
-    finite_mask = np.isfinite(arr)
-    if not finite_mask.any():
-        return False, None
-
-    abs_max = float(np.max(np.abs(arr[finite_mask])))
     return abs_max <= FLOAT32_SAFE_MAX, abs_max
+
+
+def _sample_classify(series: pl.Series) -> int:
+    """基于样本 Series 快速分类列有效性（仅操作 ~200 行样本，极低内存开销）
+    
+    1: 可变数据（>1 个不同有效值）
+    0: 常数数据（恰好 1 个不同有效值）
+    -1: 全空/NaN
+    """
+    clean = series.drop_nulls()
+    if series.dtype in (pl.Float32, pl.Float64):
+        clean = clean.drop_nans()
+    if clean.len() == 0:
+        return -1
+    if clean.len() == 1:
+        return 1
+    if clean.n_unique() <= 1:
+        return 0
+    return 1
 
 # 主界面
 # 屏幕边距系数（用于自动选择窗口大小时，窗口不超过屏幕尺寸的比例）
@@ -834,7 +857,7 @@ class FastDataLoader:
             skip_rows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
             n_rows=self.max_rows_infer,
             new_columns=self._var_names,
-            has_header=False,  # 关键：告诉 Polars 这是纯数据，没有额外的 header 行
+            has_header=False,
             encoding=self.encoding_used,
             columns=self.usecols,
             separator=self.sep,
@@ -843,9 +866,10 @@ class FastDataLoader:
             ignore_errors=True,
         )
         
-        # 推断schema（包含时间格式）
-        dtype_map, parse_dates, date_formats, downcast_ratio = self._infer_schema(sample)
+        # 推断schema（包含时间格式及基于样本的列有效性分类）
+        dtype_map, parse_dates, date_formats, downcast_ratio, validity = self._infer_schema(sample)
         self.date_formats = date_formats
+        self._df_validity = validity
         
         self.sample_mem_size = sample.estimated_size()
         if sample.height > 0:
@@ -1024,18 +1048,20 @@ class FastDataLoader:
         return var_names, units, enc, actual_hasunit
 
     @staticmethod
-    def _infer_schema(sample: pl.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str],float]:
-        """推断数据类型和时间格式
+    def _infer_schema(sample: pl.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str], float, dict[str, int]]:
+        """推断数据类型和时间格式，同时基于样本数据分类列有效性
         
         优化策略：
         1. 只对列名包含时间相关关键字的列进行时间格式推断
         2. 使用更精简的日期格式候选列表
         3. 对每列只采样前10行进行格式推断
         4. 同时支持 pl.Datetime (完整日期+时间) 和 pl.Time (只有时间)
+        5. 【内存优化】在样本阶段完成列有效性分类，避免加载全量数据后逐列遍历
         """
         dtype_map: dict[str, str] = {}
         parse_dates: list[str] = []
         date_formats: dict[str, str] = {}
+        validity: dict[str, int] = {}
 
         # 日期/时间格式候选列表（按优先级排序）
         date_candidates = [
@@ -1059,9 +1085,9 @@ class FastDataLoader:
             s = sample[col]
             if s.null_count() == s.len():
                 dtype_map[col] = "category"
+                validity[col] = -1
                 continue
             
-            # 只对列名包含时间关键字的列进行时间格式推断
             col_lower = col.lower()
             is_time_candidate = any(keyword in col_lower for keyword in time_keywords)
             
@@ -1071,7 +1097,6 @@ class FastDataLoader:
                     matched = False
                     for fmt in date_candidates:
                         try:
-                            # 首先尝试解析为完整的 datetime
                             s_sample.str.strptime(pl.Datetime, fmt, strict=True)
                             parse_dates.append(col)
                             date_formats[col] = fmt
@@ -1079,32 +1104,35 @@ class FastDataLoader:
                             break
                         except Exception:
                             try:
-                                # 如果 datetime 解析失败，尝试解析为 time (只有时间没有日期)
                                 s_sample.str.strptime(pl.Time, fmt, strict=True)
-                                # 我们用一个特殊标记来表示这是 time 格式而不是 datetime
-                                # 在格式字符串前加上 "TIME:" 前缀
                                 parse_dates.append(col)
                                 date_formats[col] = f"TIME:{fmt}"
                                 matched = True
                                 break
                             except Exception:
                                 continue
-                    if not matched:
-                        if s.dtype.is_numeric():
-                            is_safe, _ = _evaluate_float32_safety(s)
-                            dtype_map[col] = "float32" if is_safe else "float64"
-                        else:
-                            dtype_map[col] = "category"
+                    if matched:
+                        validity[col] = 1
+                    elif s.dtype.is_numeric():
+                        is_safe, _ = _evaluate_float32_safety(s)
+                        dtype_map[col] = "float32" if is_safe else "float64"
+                        validity[col] = _sample_classify(s)
+                    else:
+                        dtype_map[col] = "category"
+                        validity[col] = -1
                 else:
                     dtype_map[col] = "category"
+                    validity[col] = -1
             else:
                 if s.dtype.is_numeric():
                     is_safe, _ = _evaluate_float32_safety(s)
                     dtype_map[col] = "float32" if is_safe else "float64"
+                    validity[col] = _sample_classify(s)
                 else:
                     dtype_map[col] = "category"
+                    validity[col] = -1
         
-        return dtype_map, parse_dates, date_formats,downcast_ratio_est
+        return dtype_map, parse_dates, date_formats, downcast_ratio_est, validity
 
     def _read_chunks(
         self,
@@ -1142,7 +1170,7 @@ class FastDataLoader:
             path,
             skip_rows=skip_base,
             new_columns=self._var_names,
-            has_header=False,  # 关键：告诉 Polars 这是纯数据，没有额外的 header 行
+            has_header=False,
             encoding=self.encoding_used,
             columns=self.usecols,
             separator=sep,
@@ -1159,23 +1187,31 @@ class FastDataLoader:
         return df
 
     def _downcast_numeric(self) -> None:
-        float_cols = [col for col in self._df.columns if self._df[col].dtype in (pl.Float32, pl.Float64)]
+        """
+        【内存优化】批量 with_columns，避免逐列重建 DataFrame 导致峰值内存翻倍。
+        将所有需要降级的列收集后一次性调用 with_columns。
+        """
+        float_cols = [col for col in self._df.columns if self._df[col].dtype == pl.Float64]
+        if not float_cols:
+            return
+        
+        safe_cols = []
+        unsafe_cols = []
         for col in float_cols:
-            cleaned = self._df[col].cast(pl.Float64)
-            is_safe, _ = _evaluate_float32_safety(cleaned)
+            s = self._df[col]
+            is_safe, _ = _evaluate_float32_safety(s)
             if is_safe:
-                self._df = self._df.with_columns(cleaned.cast(pl.Float32).alias(col))
+                safe_cols.append(col)
             else:
-                self._df = self._df.with_columns(cleaned.alias(col))
+                unsafe_cols.append(col)
+        
+        if safe_cols:
+            expressions = [pl.col(c).cast(pl.Float32).alias(c) for c in safe_cols]
+            self._df = self._df.with_columns(expressions)
 
 
     def _check_df_validity(self) -> dict:
-        validity : dict = {}
-        for col in self._df.columns:
-            # 传入列名和date_formats参数
-            validity[col] = self._classify_column(self._df[col], col, self.date_formats)
-        
-        return validity
+        return self._df_validity
 
     @staticmethod
     def _make_unique(names: list[str]) -> list[str]:
@@ -1194,36 +1230,14 @@ class FastDataLoader:
     @staticmethod
     def _classify_column(series: pl.Series, col_name: str, date_formats: dict) -> int:
         """
-        1: （全部可转数字，且 ≥2 个不同有效值） 或 （该列是日期格式） 或 （数据长度为1，且可转换为数字）
-        0: 数据长度>=2, 且全部可转数字，且唯一有效值
-        -1: 存在非数字（不含日期格式） 或 全部 NaN
-        
-        【NumPy优化】使用NumPy直接检查唯一值，避免Polars的循环操作
+        Deprecated: 已迁移到 _infer_schema 样本阶段分类。
+        保留此方法以兼容任何外部调用。
         """
         if col_name in date_formats:
             return 1
-
-        try:
-            numeric = series.cast(pl.Float64).to_numpy()
-        except Exception:
+        if not series.dtype.is_numeric():
             return -1
-
-        if numeric.dtype.kind in 'iu':
-            valid = numeric
-        else:
-            valid = numeric[~np.isnan(numeric)]
-        
-        if len(valid) == 0:
-            return -1
-
-        if len(series) == 1:
-            return 1
-
-        unique_count = np.unique(valid).size
-        if unique_count == 1:
-            return 0
-        else:
-            return 1
+        return _sample_classify(series)
     
     @property
     def df(self) -> pl.DataFrame:
@@ -8873,17 +8887,19 @@ class MainWindow(QMainWindow):
     def _cleanup_old_data(self):
         """清理旧数据以释放内存"""
         try:
-            # 清理旧的loader数据
             if self._has_valid_loader:
                 if hasattr(self.loader, '_df'):
                     del self.loader._df
                 del self.loader
                 self.loader = None
             
-            # 清理所有绘图数据
+            self.data = None
+            self.var_names = None
+            self.units = None
+            self.data_validity = None
+            
             self.clear_all_plots()
             
-            # 强制垃圾回收
             import gc
             gc.collect()
             
@@ -9011,6 +9027,10 @@ class MainWindow(QMainWindow):
         if not is_valid:
             QMessageBox.critical(self, "参数错误", error_msg)
             return False
+        
+        self._cleanup_old_data()
+        import gc
+        gc.collect()
             
         loader = None
         status = False
@@ -9044,11 +9064,12 @@ class MainWindow(QMainWindow):
     def _on_load_done(self,loader, file_path: str):
         self._progress.close()
         debug_log("MainWindow._on_load_done apply new loader path=%s", file_path)
-        # 清理旧的loader数据（无论是重载还是加载新数据）
         if hasattr(self, 'loader') and self.loader is not None:
             if hasattr(self.loader, '_df'):
                 del self.loader._df
             del self.loader
+        import gc
+        gc.collect()
         
         self.loader=loader
         self._apply_loader()
