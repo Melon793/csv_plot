@@ -1,10 +1,15 @@
 from __future__ import annotations 
 import sys
 import os
+import atexit
+import tempfile
+import shutil
+import gc
 import weakref
+import psutil
 import subprocess
 import numpy as np
-import polars as pl
+import duckdb
 import logging
 import faulthandler
 import signal
@@ -229,60 +234,46 @@ _UNIT_KEYWORDS = [
 
 
 def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
-    """
-    判断数值是否能安全表示为 float32。
-
-    参数:
-        values: Polars Series、NumPy 数组或其他可迭代的数值序列。
-
-    返回:
-        tuple[bool, float | None]: (是否安全、绝对值最大值)
-            当数据中不存在有限值时，绝对值最大值为 None。
-            
-    【Polars原生优化】优先使用 Polars 原生操作获取最大值，避免 to_numpy() 内存拷贝。
-    """
+    """Check if values can be safely stored as float32."""
     if values is None:
         return False, None
-
     try:
-        if isinstance(values, pl.Series):
-            abs_max_scalar = values.abs().max()
-            if abs_max_scalar is None:
-                return False, None
-            abs_max = float(abs_max_scalar)
-        else:
-            try:
-                arr = np.asarray(values, dtype=np.float64)
-            except (ValueError, TypeError, OverflowError):
-                arr = pl.Series(values).cast(pl.Float64).to_numpy()
-            if arr.size == 0:
-                return True, 0.0
-            finite_mask = np.isfinite(arr)
-            if not finite_mask.any():
-                return False, None
-            abs_max = float(np.max(np.abs(arr[finite_mask])))
-            return abs_max <= FLOAT32_SAFE_MAX, abs_max
-    except Exception:
+        arr = np.asarray(values, dtype=np.float64)
+    except (ValueError, TypeError, OverflowError):
         return False, None
-
+    if arr.size == 0:
+        return True, 0.0
+    finite_mask = np.isfinite(arr)
+    if not finite_mask.any():
+        return False, None
+    abs_max = float(np.max(np.abs(arr[finite_mask])))
     return abs_max <= FLOAT32_SAFE_MAX, abs_max
 
 
-def _sample_classify(series: pl.Series) -> int:
-    """基于样本 Series 快速分类列有效性（仅操作 ~200 行样本，极低内存开销）
-    
-    1: 可变数据（>1 个不同有效值）
-    0: 常数数据（恰好 1 个不同有效值）
-    -1: 全空/NaN
+def _debug_mem(label: str = ""):
+    """Print current RSS memory for debugging."""
+    try:
+        rss = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+        print(f"[MEM-DBG] {label}: {rss:.1f} MB")
+    except Exception:
+        pass
+
+
+def _sample_classify(arr: np.ndarray) -> int:
+    """Classify column validity from sample array (~200 rows).
+    1: variable data (>1 distinct valid values)
+    0: constant data (exactly 1 distinct valid value)
+    -1: all-null/NaN
     """
-    clean = series.drop_nulls()
-    if series.dtype in (pl.Float32, pl.Float64):
-        clean = clean.drop_nans()
-    if clean.len() == 0:
+    if arr.dtype.kind == 'f':
+        clean = arr[~np.isnan(arr)]
+    else:
+        clean = arr
+    if clean.size == 0:
         return -1
-    if clean.len() == 1:
+    if clean.size == 1:
         return 1
-    if clean.n_unique() <= 1:
+    if np.unique(clean).size <= 1:
         return 0
     return 1
 
@@ -346,15 +337,14 @@ def get_main_window() -> MainWindow | None:
             return widget
     return None
 
-def get_main_loader() -> FastDataLoader | None:
-    """
-    安全地查找并返回 MainWindow 的 loader 实例
+def get_main_loader() -> DuckDBDataLoader | None:
+    """安全地查找并返回 MainWindow 的 loader 实例
     
     通过主窗口获取数据加载器实例，用于全局数据访问
     提供安全的数据加载器引用获取方式
     
     Returns:
-        FastDataLoader | None: 找到的数据加载器实例，如果未找到则返回None
+        DuckDBDataLoader | None: 找到的数据加载器实例，如果未找到则返回None
     """
     main_window = get_main_window()
     if main_window and hasattr(main_window, 'loader') and main_window.loader:
@@ -474,7 +464,7 @@ class DataLoadThread(QThread):
     """
     # 信号：发送进度 0-100，或直接发 DataFrame
     progress = pyqtSignal(int)        # 百分比
-    finished = pyqtSignal(object)     # FastDataLoader 实例
+    finished = pyqtSignal(object)     # DuckDBDataLoader 实例
     error = pyqtSignal(str)
 
     def __init__(self, file_path: str, parent=None, descRows: int = 0, sep: str = ',',
@@ -494,7 +484,9 @@ class DataLoadThread(QThread):
         debug_log("DataLoadThread.start path=%s descRows=%s sep=%s hasunit=%s",
                   self.file_path, self.descRows, self.sep, self.hasunit)
         try:
+            import time
             last_logged = {"value": -10}
+            last_emit_time = {"t": 0.0}
             def _progress_cb(progress: int):
                 if DEBUG_LOG_ENABLED:
                     prev = last_logged["value"]
@@ -502,6 +494,10 @@ class DataLoadThread(QThread):
                         debug_log("DataLoadThread.progress path=%s value=%s",
                                   self.file_path, progress)
                         last_logged["value"] = progress
+                now = time.monotonic()
+                if now - last_emit_time["t"] < 0.05 and progress not in (0, 100):
+                    return
+                last_emit_time["t"] = now
                 self.progress.emit(progress)
 
             # 检查文件是否仍然存在
@@ -509,10 +505,7 @@ class DataLoadThread(QThread):
                 self.error.emit("文件不存在或已被删除")
                 return
 
-            # print("Calling FastDataLoader with _progress:", _progress_cb) 
-
-            # 给 FastDataLoader 打补丁：加一个回调
-            loader = FastDataLoader(
+            loader = DuckDBDataLoader(
                 self.file_path,
                 descRows=self.descRows,
                 sep=self.sep,
@@ -540,13 +533,13 @@ class DataLoaderInterface(ABC):
     """数据加载器接口 - 预留未来 DuckDB 集成
     
     定义数据加载器的标准接口，使未来可以无缝切换至 DuckDB 按需加载架构。
-    当前由 FastDataLoader 隐式实现，阶段2将由 DuckDBDataLoader 实现。
+    当前由 DuckDBDataLoader 实现。
     """
     
     @property
     @abstractmethod
-    def df(self) -> pl.DataFrame:
-        """返回完整 DataFrame（当前 Polars 阶段全部在内存中）"""
+    def df(self):
+        """返回数据代理对象"""
         ...
     
     @abstractmethod
@@ -579,14 +572,336 @@ class DataLoaderInterface(ABC):
     def datalength(self) -> int:
         ...
 
-class FastDataLoader:
+class LazyDataFrameProxy:
+    """Zero-memory proxy for DuckDB on-demand column access.
+
+    Mimics a DataFrame['col'] interface but stores no data.
+    Each __getitem__ queries DuckDB for a single column, returns np.ndarray.
+    
+    Memory footprint: < 1KB (column name list + dict cache pointers)
     """
-    快速数据加载器类
-    高效加载和处理大型CSV文件，支持分块读取、数据类型推断、编码检测等功能
-    专门为大数据文件优化，提供进度回调和内存管理
+    
+    def __init__(self, columns: list[str], loader):
+        self._columns = columns
+        self._loader = loader
+        self._column_cache: dict[str, np.ndarray] = {}
+    
+    def __getitem__(self, key: str) -> np.ndarray:
+        if key in self._column_cache:
+            return self._column_cache[key]
+        arr = self._loader._load_column(key)
+        self._column_cache[key] = arr
+        return arr
+    
+    def __contains__(self, key: str) -> bool:
+        return key in self._columns
+    
+    @property
+    def columns(self) -> list[str]:
+        return self._columns
+    
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self._loader.datalength, len(self._columns))
+    
+    def is_empty(self) -> bool:
+        return len(self._columns) == 0
+    
+    def select(self, cols: list[str]) -> np.ndarray:
+        """Build a 2D numpy array from the requested columns (used by DataTableDialog)."""
+        arrays = [self[c] for c in cols]
+        return np.column_stack(arrays) if arrays else np.empty((0, 0))
+    
+    def clear_cache(self):
+        self._column_cache.clear()
+
+
+def _pol2duckdb_fmt(polars_fmt: str) -> str:
+    """Convert a Polars strptime format string to DuckDB compatible."""
+    return polars_fmt.replace("%.f", ".%f")
+
+
+class DuckDBDataLoader:
+    """DuckDB-based on-demand data loader — the only loader.
+    
+    Import:   DuckDB read_csv_auto → CREATE TABLE
+    Schema:   Small Polars sample (200 rows) for type inference
+    Query:    SELECT col FROM data ORDER BY _rowid → np.ndarray
+    
+    The `df` property returns a LazyDataFrameProxy — no full DataFrame
+    is ever materialized.
     """
-    # 脏数据清单
-    _NA_VALUES = [
+    
+    def __init__(
+        self,
+        csv_path: str,
+        *,
+        max_rows_infer: int = 200,
+        chunksize: int | None = None,
+        usecols: list[str] | None = None,
+        drop_empty: bool = False,
+        downcast_float: bool = True,
+        descRows: int = 0,
+        sep: str = ",",
+        _progress: Callable | None = None,
+        do_parse_date: bool = False,
+        hasunit: bool = True,
+        encoding: str | None = None,
+    ):
+        self._path = csv_path
+        self.file_size = os.path.getsize(csv_path)
+        self._sep = sep
+        self._descrows = descRows
+        self._hasunit = hasunit
+        self._do_parse_date = do_parse_date
+        self._progress_cb = _progress
+        
+        self._var_names, self._units, self.encoding_used, self._hasunit = _load_header_units(
+            csv_path, desc_rows=descRows, usecols=usecols, sep=sep,
+            hasunit=hasunit, encoding=encoding
+        )
+        if self._progress_cb:
+            self._progress_cb(5)
+        
+        _debug_mem("after header load, before CSV import")
+        
+        self._tmpdir = tempfile.mkdtemp(prefix="csvplot_")
+        self._db_path = os.path.join(self._tmpdir, "data.db")
+        self._conn = duckdb.connect(self._db_path)
+        self._conn.execute("PRAGMA memory_limit='1GB'")
+        self._conn.execute("PRAGMA threads=2")
+        atexit.register(self._atexit_cleanup)
+        
+        skip = (2 + descRows) if self._hasunit else (1 + descRows)
+        enc_fix = (self.encoding_used or "utf-8").replace("_", "-")
+        if enc_fix.lower() not in ("utf-8", "utf-16", "latin-1", "us-ascii"):
+            enc_fix = "latin-1"
+        self._conn.execute(f"""
+            CREATE TABLE data_import AS 
+            SELECT * FROM read_csv_auto(
+                '{csv_path.replace(chr(39), chr(39)+chr(39))}',
+                skip={skip}, delim='{sep}', header=false,
+                ignore_errors=true, encoding='{enc_fix}', all_varchar=true
+            )
+        """)
+        
+        _debug_mem("after read_csv_auto")
+        
+        if self._progress_cb:
+            self._progress_cb(10)
+        
+        raw_cols = self._conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='data_import' ORDER BY ordinal_position"
+        ).fetchall()
+        raw_names = [r[0].lstrip('\ufeff') for r in raw_cols]
+        quoted_raw = [f'"{n}"' for n in raw_names]
+        quoted_var = [f'"{n}"' for n in self._var_names]
+        rename_pairs = ", ".join(f'{r} AS {v}' for r, v in zip(quoted_raw, quoted_var))
+        self._conn.execute(
+            f"CREATE TABLE data_import2 AS SELECT {rename_pairs} FROM data_import"
+        )
+        self._conn.execute("DROP TABLE data_import")
+        self._conn.execute("ALTER TABLE data_import2 RENAME TO data_import")
+        
+        _debug_mem("after rename, before schema infer")
+        
+        if self._progress_cb:
+            self._progress_cb(15)
+        
+        dtype_map, parse_dates, self._date_formats, self._sample_validity = _infer_schema_from_duckdb(
+            self._conn, self._var_names
+        )
+        
+        _debug_mem("after schema infer")
+        
+        if self._progress_cb:
+            self._progress_cb(25)
+        
+        # Convert column types in-place (avoid second CSV parse)
+        for col, dtype_str in dtype_map.items():
+            if dtype_str == "float32":
+                try:
+                    self._conn.execute(f'ALTER TABLE data_import ALTER "{col}" TYPE FLOAT')
+                except Exception:
+                    pass
+            elif dtype_str == "float64":
+                try:
+                    self._conn.execute(f'ALTER TABLE data_import ALTER "{col}" TYPE DOUBLE')
+                except Exception:
+                    pass
+        
+        if self._progress_cb:
+            self._progress_cb(45)
+        
+        # Rename to final table 'data' and add _rowid
+        quoted_var = [f'"{n}"' for n in self._var_names]
+        rename_pairs = ", ".join(f'"{r}" AS {v}' for r, v in zip(self._var_names, quoted_var))
+        # columns are already renamed in data_import from earlier step
+        self._conn.execute(
+            f"CREATE TABLE data AS "
+            f"SELECT row_number() OVER () AS _rowid, * FROM data_import"
+        )
+        self._conn.execute("DROP TABLE data_import")
+        self._conn.execute("CHECKPOINT")
+        
+        _debug_mem("after type conversion + rename, before time compute")
+        
+        if self._progress_cb:
+            self._progress_cb(55)
+        
+        self._compute_time_columns()
+        
+        _debug_mem("after time compute")
+        
+        if self._progress_cb:
+            self._progress_cb(80)
+        
+        self._build_metadata()
+        self._build_validity()
+        
+        _debug_mem("after build metadata")
+        
+        self._df_proxy = LazyDataFrameProxy(self._var_names, self)
+        
+        if self._progress_cb:
+            self._progress_cb(100)
+    
+    # _import_csv removed — CSV is now parsed only once in __init__
+    
+    def _compute_time_columns(self):
+        """Pre-compute numeric values for time-channel columns in DuckDB."""
+        self._time_alias = {}
+        for name, fmt in self._date_formats.items():
+            if name not in self._var_names:
+                continue
+            computed = f"__t_{name}"
+            safe_name = f'"{name}"'
+            safe_computed = f'"{computed}"'
+            
+            col_type = self._conn.execute(
+                f"SELECT data_type FROM information_schema.columns "
+                f"WHERE table_name='data' AND column_name='{name}'"
+            ).fetchone()
+            col_is_temporal = col_type and any(
+                t in str(col_type[0]).upper() for t in ('DATE', 'TIMESTAMP', 'TIME', 'INTERVAL')
+            )
+            col_is_time_type = col_type and 'TIME' in str(col_type[0]).upper() and 'TIMESTAMP' not in str(col_type[0]).upper()
+            
+            self._conn.execute(f'ALTER TABLE data ADD COLUMN {safe_computed} DOUBLE')
+            
+            if col_is_time_type:
+                self._conn.execute(f"""
+                    UPDATE data SET {safe_computed} =
+                        CASE WHEN {safe_name} IS NOT NULL THEN
+                            (EXTRACT(HOUR FROM {safe_name}) * 3600.0
+                           + EXTRACT(MINUTE FROM {safe_name}) * 60.0
+                           + EXTRACT(SECOND FROM {safe_name}))
+                        ELSE 0.0 END
+                """)
+            elif col_is_temporal:
+                self._conn.execute(f"""
+                    UPDATE data SET {safe_computed} =
+                        CASE WHEN {safe_name} IS NOT NULL THEN EPOCH({safe_name}) ELSE 0.0 END
+                """)
+            elif fmt.startswith("TIME:"):
+                actual = _pol2duckdb_fmt(fmt[len("TIME:"):])
+                vsafe = f'CAST({safe_name} AS VARCHAR)'
+                self._conn.execute(f"""
+                    UPDATE data SET {safe_computed} = 
+                        CASE WHEN {safe_name} IS NOT NULL AND {safe_name} != '' THEN
+                            ((EXTRACT(HOUR   FROM strptime({vsafe}, '{actual}')) * 3600.0)
+                           + (EXTRACT(MINUTE FROM strptime({vsafe}, '{actual}')) * 60.0)
+                           +  EXTRACT(SECOND FROM strptime({vsafe}, '{actual}')))
+                        ELSE 0.0 END
+                """)
+            else:
+                vsafe = f'CAST({safe_name} AS VARCHAR)'
+                duck_fmt = _pol2duckdb_fmt(fmt)
+                self._conn.execute(f"""
+                    UPDATE data SET {safe_computed} =
+                        CASE WHEN {safe_name} IS NOT NULL AND {safe_name} != '' THEN
+                            EPOCH(strptime({vsafe}, '{duck_fmt}'))
+                        ELSE 0.0 END
+                """)
+            
+            self._time_alias[name] = computed
+        
+        self._conn.execute("CHECKPOINT")
+    
+    def _build_metadata(self):
+        self._total_rows = self._conn.execute(
+            "SELECT COUNT(*) FROM data"
+        ).fetchone()[0]
+    
+    def _build_validity(self):
+        self._df_validity = {}
+        for col in self._var_names:
+            self._df_validity[col] = self._sample_validity.get(col, -1)
+    
+    def _load_column(self, var_name: str) -> np.ndarray:
+        """Query a single column from DuckDB, return np.ndarray."""
+        actual = self._time_alias.get(var_name, var_name)
+        result = self._conn.execute(
+            f'SELECT "{actual}" FROM data ORDER BY _rowid'
+        ).fetchnumpy()
+        arr = result[actual]
+        if arr.dtype == object:
+            numeric = np.empty(len(arr), dtype=np.float64)
+            numeric.fill(np.nan)
+            for i, v in enumerate(arr):
+                if v is not None and v != '':
+                    try:
+                        numeric[i] = float(v)
+                    except (ValueError, TypeError):
+                        pass
+            return numeric
+        return arr
+    
+    @property
+    def df(self) -> LazyDataFrameProxy:
+        return self._df_proxy
+    
+    @property
+    def datalength(self) -> int:
+        return self._total_rows
+    
+    @property
+    def var_names(self) -> list[str]:
+        return self._var_names
+    
+    @property
+    def units(self) -> dict[str, str]:
+        return self._units
+    
+    @property
+    def df_validity(self) -> dict[str, int]:
+        return self._df_validity
+    
+    @property
+    def time_channels_info(self) -> dict[str, str]:
+        return self._date_formats
+    
+    @property
+    def path(self) -> str:
+        return str(self._path)
+    
+    def _atexit_cleanup(self):
+        try:
+            if hasattr(self, '_conn') and self._conn:
+                self._conn.close()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_tmpdir') and self._tmpdir and os.path.isdir(self._tmpdir):
+                shutil.rmtree(self._tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+    
+    def __del__(self):
+        self._atexit_cleanup()
+
+_NA_VALUES = [
         # 空缺 / 空字符串
         "", "NULL", "None", "NA", "N/A", "n/a", "null ",
         # Excel / 统计缺失标记
@@ -599,149 +914,185 @@ class FastDataLoader:
         "data err", "* *", "----", "no value"
     ]
 
-    @staticmethod
-    def _detect_sep_from_lines(lines: list[str]) -> str | None:
-        """从已读取的行列表中检测分隔符（方差法，无 I/O）
+def _make_unique(names: list[str]) -> list[str]:
+    seen = {}
+    unique_names = []
+    for name in names:
+        if name in seen:
+            seen[name] += 1
+            new_name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 0
+            new_name = name
+        unique_names.append(new_name)
+    return unique_names
+
+
+@staticmethod
+def _detect_sep_from_lines(lines: list[str]) -> str | None:
+    """从已读取的行列表中检测分隔符（方差法，无 I/O）
+    
+    借鉴 Excel "分列"功能原理：统计候选分隔符在各行出现的次数，
+    选择出现次数最一致（方差最小）且出现次数>0的作为分隔符。
+    
+    Args:
+        lines: 已读取的非空行列表
         
-        借鉴 Excel "分列"功能原理：统计候选分隔符在各行出现的次数，
-        选择出现次数最一致（方差最小）且出现次数>0的作为分隔符。
-        
-        Args:
-            lines: 已读取的非空行列表
-            
-        Returns:
-            检测到的分隔符，无法检测时返回 None
-        """
-        candidates = [',', ';', '\t']
-        counts = {c: [] for c in candidates}
-        for line in lines:
-            for c in candidates:
-                counts[c].append(line.count(c))
-        scores = {}
+    Returns:
+        检测到的分隔符，无法检测时返回 None
+    """
+    candidates = [',', ';', '\t']
+    counts = {c: [] for c in candidates}
+    for line in lines:
         for c in candidates:
-            vals = counts[c]
-            if not vals or all(v == 0 for v in vals) or len(vals) == 0:
-                scores[c] = float('inf')
-                continue
-            mean = sum(vals) / len(vals)
-            variance = sum((v - mean) ** 2 for v in vals) / len(vals)
-            scores[c] = variance
-        best = min(scores, key=lambda c: (scores[c], {';': 1, '\t': 2}.get(c, 0)))
-        if scores[best] == float('inf'):
-            return None
-        return best
+            counts[c].append(line.count(c))
+    scores = {}
+    for c in candidates:
+        vals = counts[c]
+        if not vals or all(v == 0 for v in vals) or len(vals) == 0:
+            scores[c] = float('inf')
+            continue
+        mean = sum(vals) / len(vals)
+        variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+        scores[c] = variance
+    best = min(scores, key=lambda c: (scores[c], {';': 1, '\t': 2}.get(c, 0)))
+    if scores[best] == float('inf'):
+        return None
+    return best
 
-    @staticmethod
-    def _detect_header_from_lines(lines: list[str], sep: str) -> int:
-        """从已读取的行列表中定位标题行（非数值占比法，无 I/O）
-        
-        扫描行列表，找到第一个包含分隔符且非数值占比 > 50% 的行作为标题行。
-        
-        Args:
-            lines: 已读取的非空行列表
-            sep: 已检测到的分隔符
-            
-        Returns:
-            标题行在 lines 列表中的索引 (0-based)，未找到时返回 0
-        """
-        for idx, line in enumerate(lines):
-            if sep not in line:
-                continue
-            parts = line.split(sep)
-            if len(parts) < 2:
-                continue
-            non_numeric_count = 0
-            for cell in parts:
-                cell_stripped = cell.strip().strip('"').strip("'")
-                if not cell_stripped:
-                    continue
-                try:
-                    float(cell_stripped)
-                except (ValueError, TypeError):
-                    non_numeric_count += 1
-            total = len(parts)
-            if total > 0 and non_numeric_count / total > 0.5:
-                return idx
-        return 0
 
-    @staticmethod
-    def _detect_hasunit_from_lines(lines: list[str], sep: str, header_row: int) -> bool:
-        """从已读取的行列表中判断标题行下一行是否为单位行（无 I/O）
+@staticmethod
+def _detect_header_from_lines(lines: list[str], sep: str) -> int:
+    """从已读取的行列表中定位标题行（非数值占比法，无 I/O）
+    
+    扫描行列表，找到第一个包含分隔符且非数值占比 > 50% 的行作为标题行。
+    
+    Args:
+        lines: 已读取的非空行列表
+        sep: 已检测到的分隔符
         
-        检查 header_row+1 行，统计其中包含 _UNIT_KEYWORDS 中关键字的列比例。
-        比例超过 UNIT_KEYWORD_RATIO_THRESHOLD 时判定为单位行。
-        
-        Args:
-            lines: 已读取的非空行列表
-            sep: 分隔符
-            header_row: 标题行在 lines 中的索引
-            
-        Returns:
-            True 表示包含单位行
-        """
-        if header_row + 1 >= len(lines):
-            return False
-        parts = lines[header_row + 1].split(sep)
+    Returns:
+        标题行在 lines 列表中的索引 (0-based)，未找到时返回 0
+    """
+    for idx, line in enumerate(lines):
+        if sep not in line:
+            continue
+        parts = line.split(sep)
         if len(parts) < 2:
-            return False
-        unit_hit = 0
-        total = 0
+            continue
+        non_numeric_count = 0
         for cell in parts:
             cell_stripped = cell.strip().strip('"').strip("'")
-            cell_lower = cell_stripped.lower()
             if not cell_stripped:
                 continue
-            total += 1
-            for keyword in _UNIT_KEYWORDS:
-                if keyword.lower() in cell_lower:
-                    unit_hit += 1
-                    break
-        if total == 0:
-            return False
-        return (unit_hit / total) > UNIT_KEYWORD_RATIO_THRESHOLD
+            try:
+                float(cell_stripped)
+            except (ValueError, TypeError):
+                non_numeric_count += 1
+        total = len(parts)
+        if total > 0 and non_numeric_count / total > 0.5:
+            return idx
+    return 0
 
-    @staticmethod
-    def _auto_detect_format(file_path: str) -> FormatInfo:
-        """一次文件扫描完成编码探测 + 分隔符检测 + 标题行定位 + 单位行探测
+
+@staticmethod
+def _detect_hasunit_from_lines(lines: list[str], sep: str, header_row: int) -> bool:
+    """从已读取的行列表中判断标题行下一行是否为单位行（无 I/O）
+    
+    检查 header_row+1 行，统计其中包含 _UNIT_KEYWORDS 中关键字的列比例。
+    比例超过 UNIT_KEYWORD_RATIO_THRESHOLD 时判定为单位行。
+    
+    Args:
+        lines: 已读取的非空行列表
+        sep: 分隔符
+        header_row: 标题行在 lines 中的索引
         
-        1. 用 charset_normalizer 读取文件前 2000 字节推断编码
-        2. 根据置信度选择回退策略（高置信度精简链、低置信度完整链）
-        3. 用正确编码打开文件，一次读取前 50 行
-        4. 在同一批行数据上依次检测分隔符→标题行→单位行
+    Returns:
+        True 表示包含单位行
+    """
+    if header_row + 1 >= len(lines):
+        return False
+    parts = lines[header_row + 1].split(sep)
+    if len(parts) < 2:
+        return False
+    unit_hit = 0
+    total = 0
+    for cell in parts:
+        cell_stripped = cell.strip().strip('"').strip("'")
+        cell_lower = cell_stripped.lower()
+        if not cell_stripped:
+            continue
+        total += 1
+        for keyword in _UNIT_KEYWORDS:
+            if keyword.lower() in cell_lower:
+                unit_hit += 1
+                break
+    if total == 0:
+        return False
+    return (unit_hit / total) > UNIT_KEYWORD_RATIO_THRESHOLD
+
+
+@staticmethod
+def _auto_detect_format(file_path: str) -> FormatInfo:
+    """一次文件扫描完成编码探测 + 分隔符检测 + 标题行定位 + 单位行探测
+    
+    1. 用 charset_normalizer 读取文件前 2000 字节推断编码
+    2. 根据置信度选择回退策略（高置信度精简链、低置信度完整链）
+    3. 用正确编码打开文件，一次读取前 50 行
+    4. 在同一批行数据上依次检测分隔符→标题行→单位行
+    
+    Args:
+        file_path: 文件路径
         
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            FormatInfo(encoding, sep, header_row, hasunit)
-            
-        Raises:
-            AutoDetectError: 文件内容不足（< 2 行）无法检测
-        """
-        from charset_normalizer import from_bytes
-        from pathlib import Path
+    Returns:
+        FormatInfo(encoding, sep, header_row, hasunit)
+        
+    Raises:
+        AutoDetectError: 文件内容不足（< 2 行）无法检测
+    """
+    from charset_normalizer import from_bytes
+    from pathlib import Path
 
-        sample_size = 2000
-        with Path(file_path).open('rb') as f:
-            raw_sample = f.read(sample_size)
+    sample_size = 2000
+    with Path(file_path).open('rb') as f:
+        raw_sample = f.read(sample_size)
 
-        result = from_bytes(raw_sample).best()
-        if result and result.encoding:
-            detected_encoding = result.encoding
-            coherence = result.coherence
-        else:
-            detected_encoding = 'utf-8'
-            coherence = 0.0
+    result = from_bytes(raw_sample).best()
+    if result and result.encoding:
+        detected_encoding = result.encoding
+        coherence = result.coherence
+    else:
+        detected_encoding = 'utf-8'
+        coherence = 0.0
 
-        if coherence > 0.8:
-            encodings_to_try = list(dict.fromkeys([detected_encoding, 'utf-8']))
-        else:
-            encodings_to_try = list(dict.fromkeys(
-                [detected_encoding, 'utf-8', 'gb18030', 'cp1252', 'latin-1']
-            ))
+    if coherence > 0.8:
+        encodings_to_try = list(dict.fromkeys([detected_encoding, 'utf-8']))
+    else:
+        encodings_to_try = list(dict.fromkeys(
+            [detected_encoding, 'utf-8', 'gb18030', 'cp1252', 'latin-1']
+        ))
 
-        lines = []
-        final_encoding = None
+    lines = []
+    final_encoding = None
+    for enc in encodings_to_try:
+        try:
+            with open(file_path, 'r', encoding=enc, errors='strict') as f:
+                for _ in range(50):
+                    line = f.readline()
+                    if not line:
+                        break
+                    stripped = line.rstrip('\n\r')
+                    if stripped.strip():
+                        lines.append(stripped)
+                    if len(lines) >= 40:
+                        break
+            final_encoding = enc
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            lines = []
+            continue
+
+    if final_encoding is None:
         for enc in encodings_to_try:
             try:
                 with open(file_path, 'r', encoding=enc, errors='replace') as f:
@@ -756,525 +1107,199 @@ class FastDataLoader:
                             break
                 final_encoding = enc
                 break
-            except (UnicodeDecodeError, UnicodeError):
+            except Exception:
+                lines = []
                 continue
 
-        if final_encoding is None:
-            return FormatInfo(encoding=None, sep=None, header_row=0, hasunit=False)
+    if final_encoding is None:
+        return FormatInfo(encoding=None, sep=None, header_row=0, hasunit=False)
 
-        if len(lines) < 2:
-            raise AutoDetectError(f"文件内容不足（仅 {len(lines)} 行），无法自动检测格式: {file_path}")
+    if len(lines) < 2:
+        raise AutoDetectError(f"文件内容不足（仅 {len(lines)} 行），无法自动检测格式: {file_path}")
 
-        sep = FastDataLoader._detect_sep_from_lines(lines)
-        if sep is not None:
-            header_row = FastDataLoader._detect_header_from_lines(lines, sep)
-            hasunit = FastDataLoader._detect_hasunit_from_lines(lines, sep, header_row)
-        else:
-            header_row = 0
-            hasunit = False
+    sep = _detect_sep_from_lines(lines)
+    if sep is not None:
+        header_row = _detect_header_from_lines(lines, sep)
+        hasunit = _detect_hasunit_from_lines(lines, sep, header_row)
+    else:
+        header_row = 0
+        hasunit = False
 
-        return FormatInfo(encoding=final_encoding, sep=sep, header_row=header_row, hasunit=hasunit)
+    return FormatInfo(encoding=final_encoding, sep=sep, header_row=header_row, hasunit=hasunit)
 
-    @staticmethod
-    def auto_detect(file_path: str) -> FormatInfo:
-        """自动检测文件格式的统一入口
+
+@staticmethod
+def auto_detect(file_path: str) -> FormatInfo:
+    """自动检测文件格式的统一入口
+    
+    调用 _auto_detect_format() 完成一次文件扫描，返回 FormatInfo。
+    
+    Args:
+        file_path: 文件路径
         
-        调用 _auto_detect_format() 完成一次文件扫描，返回 FormatInfo。
+    Returns:
+        FormatInfo(encoding, sep, header_row, hasunit)
         
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            FormatInfo(encoding, sep, header_row, hasunit)
-            
-        Raises:
-            AutoDetectError: 无法自动检测文件分隔符或文件内容不足
-        """
-        fmt = FastDataLoader._auto_detect_format(file_path)
-        if fmt.sep is None:
-            raise AutoDetectError(f"无法自动检测文件分隔符: {file_path}")
-        return fmt
+    Raises:
+        AutoDetectError: 无法自动检测文件分隔符或文件内容不足
+    """
+    fmt = _auto_detect_format(file_path)
+    if fmt.sep is None:
+        raise AutoDetectError(f"无法自动检测文件分隔符: {file_path}")
+    return fmt
 
-    from typing import Callable
-    def __init__(
-        self,
-        csv_path: str ,
-        *,
-        max_rows_infer: int = 200,
-        chunksize: int | None = None,
-        usecols: list[str] | None = None,
-        drop_empty: bool = False,
-        downcast_float: bool = True,
-        descRows: int = 0,
-        sep: str = ",",
-        _progress: Callable | None = None,
-        do_parse_date: bool =False,
-        hasunit:bool = True,
-        encoding: str | None = None,
-    ):
-        """初始化快速数据加载器
-        
-        配置数据加载参数，包括文件路径、数据类型推断、分块大小等。
-        当 encoding 不为 None 时跳过编码自动检测直接使用传入编码。
-        
-        Args:
-            csv_path: CSV文件路径
-            max_rows_infer: 用于推断数据类型的最大行数
-            chunksize: 分块读取大小
-            usecols: 要读取的列名列表
-            drop_empty: 是否删除空行
-            downcast_float: 是否下转换浮点数类型
-            descRows: 描述行数量
-            sep: 分隔符
-            _progress: 进度回调函数
-            do_parse_date: 是否解析日期
-            hasunit: 是否包含单位行
-            encoding: 预检测的文件编码，为 None 时内部自动检测
-        """
-        self._path = csv_path
-        self.file_size = os.path.getsize(csv_path) 
-        self.max_rows_infer = max_rows_infer
-        self.usecols = usecols
-        self.drop_empty = drop_empty
-        self.downcast_float = downcast_float
-        self.sep = sep
-        self.descRows = descRows
-        self._progress_cb = _progress
-        self.do_parse_date=do_parse_date
-        self.hasunit=hasunit
+from typing import Callable
 
-        self._var_names, self._units, self.encoding_used, self.hasunit = self._load_header_units(
-            self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,
-            hasunit=self.hasunit, encoding=encoding
-        )
-        
-        if self._progress_cb:
-            self._progress_cb(5)
+def _load_header_units(
+    path: str,
+    desc_rows: int = 0,
+    usecols: list[str] | None = None,
+    sep: str = ",",
+    hasunit: bool = True,
+    encoding: str | None = None,
+) -> tuple[list[str], dict[str, str], str, bool]:
+    """Load CSV header and unit rows using Python csv module."""
+    import csv
+    from charset_normalizer import from_bytes
+    from pathlib import Path
 
-        # 推断 dtype
-        sample = pl.read_csv(
-            self._path,
-            skip_rows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
-            n_rows=self.max_rows_infer,
-            new_columns=self._var_names,
-            has_header=False,
-            encoding=self.encoding_used,
-            columns=self.usecols,
-            separator=self.sep,
-            null_values=self._NA_VALUES,
-            infer_schema_length=10000,
-            ignore_errors=True,
-        )
-        
-        # 推断schema（包含时间格式及基于样本的列有效性分类）
-        dtype_map, parse_dates, date_formats, downcast_ratio, validity = self._infer_schema(sample)
-        self.date_formats = date_formats
-        self._df_validity = validity
-        
-        self.sample_mem_size = sample.estimated_size()
-        if sample.height > 0:
-            self.byte_per_line = (0.6*self.sample_mem_size)/sample.height
-        else:
-            self.byte_per_line = 1.0
-        if self.byte_per_line > 0:
-            self.estimated_lines = int(self.file_size/(self.byte_per_line ))
-        else:
-            self.estimated_lines = 1
-        
-        import gc
-        del sample 
-        gc.collect()
-        if self._progress_cb:
-            self._progress_cb(15)
-            
-        # 计算 chunk 大小
-        if chunksize is None:
-            chunksize = 3600
-        
-        # 正式读取数据
-        self._df = self._read_chunks(
-            self._path,
-            dtype_map,
-            parse_dates,
-            int(chunksize),
-            sep=self.sep,
-            descRows=self.descRows,
-            hasunit=self.hasunit
-        )
-        
-        # 后处理
-        if drop_empty:
-            non_null_cols = [col for col in self._df.columns if self._df[col].null_count() < self._df.height]
-            self._df = self._df.select(non_null_cols)
-        if downcast_float:
-            self._downcast_numeric()
-        
-        self._df_validity=self._check_df_validity()
-        
-        # 强制垃圾回收
-        gc.collect()
-        
-        if self._progress_cb:
-            self._progress_cb(100)
+    nrows_needed = (2 if hasunit else 1) + desc_rows
 
-    @staticmethod
-    def _load_header_units(
-        path: str,
-        desc_rows: int = 0,
-        usecols: list[str] | None = None,
-        sep: str = ",",
-        hasunit: bool = True,
-        encoding: str | None = None,
-    ) -> tuple[list[str], dict[str, str], str, bool]:
-        """加载CSV文件的表头和单位信息
-        
-        根据传入编码或自动检测编码读取文件头部，提取变量名和单位信息。
-        当 encoding 不为 None 时跳过编码检测直接使用传入值（保留回退链兜底）。
-        单位行检测仅作为对照校验输出 debug 日志，不再覆盖传入的 hasunit。
-        
-        Args:
-            path: CSV文件路径
-            desc_rows: 描述行数量
-            usecols: 要读取的列名列表
-            sep: 分隔符
-            hasunit: 是否包含单位行
-            encoding: 预检测的文件编码，为 None 时内部自动检测
-            
-        Returns:
-            tuple: (变量名列表, {变量名: 单位}, 最终编码, 实际使用的hasunit)
-        """
-        nrows_read = 5 if hasunit else 1
+    if encoding is not None:
+        encodings_to_try = list(dict.fromkeys([encoding, 'utf-8', 'cp1252', 'latin-1']))
+    else:
+        with Path(path).open('rb') as f:
+            raw_sample = f.read(2000)
+        result = from_bytes(raw_sample).best()
+        detected_enc = result.encoding if (result and result.encoding) else 'utf-8'
+        encodings_to_try = list(dict.fromkeys([detected_enc, 'utf-8', 'cp1252', 'latin-1']))
 
-        if encoding is not None:
-            # 上游已检测编码，直接使用并追加回退链兜底
-            encodings_to_try = list(dict.fromkeys([encoding, 'utf-8', 'cp1252']))
-        else:
-            # 自行检测编码
-            from charset_normalizer import from_bytes
-            from pathlib import Path
-
-            sample_size = 2000
-
-            with Path(path).open('rb') as f:
-                raw_sample = f.read(sample_size)
-
-            result = from_bytes(raw_sample).best()
-            if result and result.encoding:
-                detected_enc = result.encoding
-            else:
-                detected_enc = 'utf-8'
-
-            encodings_to_try = list(dict.fromkeys([detected_enc, 'utf-8', 'cp1252']))
-
-        for enc in encodings_to_try:
-            try:
-                df = pl.read_csv(
-                    path,
-                    skip_rows=desc_rows,
-                    n_rows=nrows_read,
-                    has_header=False,
-                    columns=usecols,
-                    separator=sep,
-                    encoding=enc,
-                    infer_schema_length=10000,
-                    ignore_errors=True,
-                )
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            raise RuntimeError("无法以任何可用编码读取文件")
-
-        # 单位行对照校验（不覆盖传入的 hasunit，仅输出 debug 日志）
-        actual_hasunit = hasunit
-        if hasunit and df.height >= 2:
-            row2 = [str(v) if v is not None else "" for v in df.row(1)]
-
-            unit_keyword_count = 0
-            total_cols = len(row2)
-
-            for cell in row2:
-                cell_lower = str(cell).lower().strip()
-                for keyword in _UNIT_KEYWORDS:
-                    keyword_lower = keyword.lower()
-                    if keyword_lower in cell_lower:
-                        unit_keyword_count += 1
-                        break
-
-            unit_keyword_ratio = unit_keyword_count / total_cols if total_cols > 0 else 0
-
-            if unit_keyword_ratio > UNIT_KEYWORD_RATIO_THRESHOLD:
-                pass
-            else:
-                numeric_count = 0
-                valid_numeric_count = 0
-                total_cols = len(row2)
-
-                for cell in row2:
-                    cell_str = str(cell).strip()
-                    try:
-                        val = float(cell_str)
-                        numeric_count += 1
-                        if abs(val - 1.0) > 1e-9 and abs(val + 1.0) > 1e-9:
-                            valid_numeric_count += 1
-                    except (ValueError, TypeError):
+    rows = []
+    final_enc = 'latin-1'
+    for enc in encodings_to_try:
+        try:
+            with open(path, 'r', encoding=enc, errors='strict') as f:
+                reader = csv.reader(f, delimiter=sep)
+                for i, row in enumerate(reader):
+                    if i < desc_rows:
                         continue
+                    rows.append(row)
+                    if len(rows) >= nrows_needed:
+                        break
+            final_enc = enc
+            break
+        except (UnicodeDecodeError, UnicodeError, csv.Error):
+            rows = []
+            continue
+    
+    if len(rows) < nrows_needed:
+        try:
+            with open(path, 'r', encoding='latin-1', errors='replace') as f:
+                reader = csv.reader(f, delimiter=sep)
+                for i, row in enumerate(reader):
+                    if i < desc_rows:
+                        continue
+                    rows.append(row)
+                    if len(rows) >= nrows_needed:
+                        break
+            final_enc = 'latin-1'
+        except Exception:
+            pass
+    
+    if len(rows) < nrows_needed:
+        raise ValueError(f"File has fewer than required {nrows_needed} rows after desc_rows={desc_rows}")
 
-                if total_cols > 0:
-                    valid_numeric_ratio = valid_numeric_count / total_cols
-                    if valid_numeric_ratio > VALID_NUMERIC_RATIO_THRESHOLD:
-                        debug_log(
-                            "_load_header_units: 上游检测 hasunit=True，但本行单位关键字占比仅 %.1f%%、"
-                            "有效数值列比例 %.1f%%，疑似为数据行。检查文件: %s",
-                            unit_keyword_ratio * 100, valid_numeric_ratio * 100, path
-                        )
-                    else:
-                        debug_log(
-                            "_load_header_units: 上游检测 hasunit=True，但本行单位关键字占比仅 %.1f%%，"
-                            "疑似误判。检查文件: %s",
-                            unit_keyword_ratio * 100, path
-                        )
+    header_row = [str(v).lstrip('\ufeff') for v in rows[0]]
+    var_names = _make_unique(header_row)
 
-        min_required_rows = 2 if actual_hasunit else 1
-        if df.height < min_required_rows:
-            raise ValueError(f"文件至少需要{min_required_rows}行")
+    actual_hasunit = hasunit
+    if hasunit and len(rows) >= 2:
+        units = dict(zip(var_names, [str(v) if v else "" for v in rows[1]]))
+    else:
+        units = dict(zip(var_names, ['-'] * len(var_names)))
 
-        var_names = [str(v) for v in df.row(0)]
-        var_names = FastDataLoader._make_unique(var_names)
-        if actual_hasunit:
-            units = dict(zip(var_names, [str(v) if v is not None else "" for v in df.row(1)]))
-        else:
-            units = dict(zip(var_names, ['-'] * len(var_names)))
-        return var_names, units, enc, actual_hasunit
+    return var_names, units, final_enc, actual_hasunit
 
-    @staticmethod
-    def _infer_schema(sample: pl.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str], float, dict[str, int]]:
-        """推断数据类型和时间格式，同时基于样本数据分类列有效性
-        
-        优化策略：
-        1. 只对列名包含时间相关关键字的列进行时间格式推断
-        2. 使用更精简的日期格式候选列表
-        3. 对每列只采样前10行进行格式推断
-        4. 同时支持 pl.Datetime (完整日期+时间) 和 pl.Time (只有时间)
-        5. 【内存优化】在样本阶段完成列有效性分类，避免加载全量数据后逐列遍历
-        """
-        dtype_map: dict[str, str] = {}
-        parse_dates: list[str] = []
-        date_formats: dict[str, str] = {}
-        validity: dict[str, int] = {}
 
-        # 日期/时间格式候选列表（按优先级排序）
-        date_candidates = [
-            "%H:%M:%S%.f",  # 带微秒的时间格式（支持毫秒和微秒）
-            "%H:%M:%S",     # 时间格式
-            "%d/%m/%Y",     # 欧洲日期格式 (例: 18/11/2017)
-            "%Y/%m/%d",     # 日期格式 (例: 2024/10/31)
-            "%Y-%m-%d",     # ISO日期格式 (例: 2024-10-31)
-        ]
+def _infer_schema_from_duckdb(conn, var_names: list[str]) -> tuple[dict[str, str], list[str], dict[str, str], dict[str, int]]:
+    """Infer column types and validity from sample data in DuckDB.
+    
+    Since read_csv_auto uses all_varchar=true, all columns are VARCHAR.
+    We sample 200 rows per column, try numeric conversion, and classify.
+    """
+    dtype_map: dict[str, str] = {}
+    parse_dates: list[str] = []
+    date_formats: dict[str, str] = {}
+    validity: dict[str, int] = {}
+    
+    time_keywords = ['time', 'date', 'datetime', 'timestamp', 'zeit', 'tmod']
+    date_candidates = [
+        "%H:%M:%S%.f", "%H:%M:%S", "%d/%m/%Y", "%Y/%m/%d", "%Y-%m-%d",
+    ]
+    
+    for name in var_names:
+        safe_name = f'"{name}"'
+        null_check = f"{safe_name} IS NOT NULL"
         
-        # 时间列的关键字（不区分大小写）
-        time_keywords = ['time', 'date', 'datetime', 'timestamp', 'zeit', 'tmod']
+        # Sample 200 non-null rows for classification
+        sample_arr = conn.execute(
+            f'SELECT {safe_name} FROM data_import WHERE {null_check} LIMIT 200'
+        ).fetchnumpy().get(name, np.array([]))
         
-        float_cols = sample.select(pl.col(pl.Float32, pl.Float64))
-        downcast_ratio_est = float_cols.width / sample.width if sample.width > 0 else 0.000001
+        if sample_arr.size == 0:
+            dtype_map[name] = "category"
+            validity[name] = -1
+            continue
         
-        numeric_cols = [col for col in sample.columns if sample[col].dtype.is_numeric()]
-        non_numeric_cols = [col for col in sample.columns if col not in numeric_cols]
-        
-        for col in sample.columns:
-            s = sample[col]
-            if s.null_count() == s.len():
-                dtype_map[col] = "category"
-                validity[col] = -1
-                continue
-            
-            col_lower = col.lower()
-            is_time_candidate = any(keyword in col_lower for keyword in time_keywords)
-            
-            if is_time_candidate:
-                s_sample = s.head(10).drop_nulls()
-                if s_sample.len() > 0:
-                    matched = False
-                    for fmt in date_candidates:
-                        try:
-                            s_sample.str.strptime(pl.Datetime, fmt, strict=True)
-                            parse_dates.append(col)
-                            date_formats[col] = fmt
+        # Try time format detection if column name matches time keywords
+        if any(kw in name.lower() for kw in time_keywords):
+            not_empty = f"CAST({safe_name} AS VARCHAR) != ''"
+            sample_nonempty = conn.execute(
+                f'SELECT {safe_name} FROM data_import WHERE {null_check} AND {not_empty} LIMIT 10'
+            ).fetchnumpy().get(name, np.array([]))
+            if sample_nonempty.size > 0:
+                matched = False
+                for fmt in date_candidates:
+                    duck_fmt = _pol2duckdb_fmt(fmt)
+                    try:
+                        test = conn.execute(f"""
+                            SELECT strptime(CAST({safe_name} AS VARCHAR), '{duck_fmt}')
+                            FROM data_import WHERE {null_check} AND {not_empty} LIMIT 1
+                        """).fetchone()
+                        if test:
+                            if "%H" in fmt:
+                                date_formats[name] = f"TIME:{fmt}"
+                            else:
+                                date_formats[name] = fmt
+                            dtype_map[name] = "float32"
+                            validity[name] = 1
+                            parse_dates.append(name)
                             matched = True
                             break
-                        except Exception:
-                            try:
-                                s_sample.str.strptime(pl.Time, fmt, strict=True)
-                                parse_dates.append(col)
-                                date_formats[col] = f"TIME:{fmt}"
-                                matched = True
-                                break
-                            except Exception:
-                                continue
-                    if matched:
-                        validity[col] = 1
-                    elif s.dtype.is_numeric():
-                        is_safe, _ = _evaluate_float32_safety(s)
-                        dtype_map[col] = "float32" if is_safe else "float64"
-                        validity[col] = _sample_classify(s)
-                    else:
-                        dtype_map[col] = "category"
-                        validity[col] = -1
-                else:
-                    dtype_map[col] = "category"
-                    validity[col] = -1
+                    except Exception:
+                        continue
+                if matched:
+                    continue  # Already set dtype_map and validity
+        
+        # Try to convert sample to float64 for numeric classification
+        try:
+            numeric = np.asarray(sample_arr, dtype=np.float64)
+            mask = np.isfinite(numeric)
+            if mask.any():
+                is_safe, _ = _evaluate_float32_safety(numeric[mask])
+                dtype_map[name] = "float32" if is_safe else "float64"
+                validity[name] = _sample_classify(numeric[mask])
             else:
-                if s.dtype.is_numeric():
-                    is_safe, _ = _evaluate_float32_safety(s)
-                    dtype_map[col] = "float32" if is_safe else "float64"
-                    validity[col] = _sample_classify(s)
-                else:
-                    dtype_map[col] = "category"
-                    validity[col] = -1
-        
-        return dtype_map, parse_dates, date_formats, downcast_ratio_est, validity
-
-    def _read_chunks(
-        self,
-        path: str,
-        dtype_map,
-        parse_dates: list[str],
-        chunksize: int,
-        sep: None | str = ",",
-        descRows: int = 0,
-        hasunit:bool = True,
-    ) -> pl.DataFrame:
-        if not self.do_parse_date:
-            parse_dates=[]
-        
-        skip_base = (2 + descRows) if hasunit else (1 + descRows)
-        
-        # 检查是否所有列都被识别为 category，如果是说明 sample 可能没读到数据，禁用 schema_overrides
-        all_category = all(dtype == "category" for dtype in dtype_map.values())
-        if all_category:
-            schema_overrides = None
-        else:
-            schema_overrides = {}
-            for col, dtype_str in dtype_map.items():
-                if dtype_str == "float32":
-                    schema_overrides[col] = pl.Float32
-                elif dtype_str == "float64":
-                    schema_overrides[col] = pl.Float64
-                elif dtype_str == "category":
-                    schema_overrides[col] = pl.Utf8
-        
-        if self._progress_cb:
-            self._progress_cb(30)
-        
-        df = pl.read_csv(
-            path,
-            skip_rows=skip_base,
-            new_columns=self._var_names,
-            has_header=False,
-            encoding=self.encoding_used,
-            columns=self.usecols,
-            separator=sep,
-            null_values=self._NA_VALUES,
-            schema_overrides=schema_overrides,
-            truncate_ragged_lines=True,
-            infer_schema_length=10000,
-            ignore_errors=True,
-        )
-        
-        if self._progress_cb:
-            self._progress_cb(95)
-        
-        return df
-
-    def _downcast_numeric(self) -> None:
-        """
-        【内存优化】批量 with_columns，避免逐列重建 DataFrame 导致峰值内存翻倍。
-        将所有需要降级的列收集后一次性调用 with_columns。
-        """
-        float_cols = [col for col in self._df.columns if self._df[col].dtype == pl.Float64]
-        if not float_cols:
-            return
-        
-        safe_cols = []
-        unsafe_cols = []
-        for col in float_cols:
-            s = self._df[col]
-            is_safe, _ = _evaluate_float32_safety(s)
-            if is_safe:
-                safe_cols.append(col)
-            else:
-                unsafe_cols.append(col)
-        
-        if safe_cols:
-            expressions = [pl.col(c).cast(pl.Float32).alias(c) for c in safe_cols]
-            self._df = self._df.with_columns(expressions)
+                dtype_map[name] = "category"
+                validity[name] = -1
+        except (ValueError, TypeError):
+            dtype_map[name] = "category"
+            validity[name] = -1
+    
+    return dtype_map, parse_dates, date_formats, validity
 
 
-    def _check_df_validity(self) -> dict:
-        return self._df_validity
 
-    @staticmethod
-    def _make_unique(names: list[str]) -> list[str]:
-        seen = {}
-        unique_names = []
-        for name in names:
-            if name in seen:
-                seen[name] += 1
-                new_name = f"{name}_{seen[name]}"
-            else:
-                seen[name] = 0
-                new_name = name
-            unique_names.append(new_name)
-        return unique_names
-    
-    @staticmethod
-    def _classify_column(series: pl.Series, col_name: str, date_formats: dict) -> int:
-        """
-        Deprecated: 已迁移到 _infer_schema 样本阶段分类。
-        保留此方法以兼容任何外部调用。
-        """
-        if col_name in date_formats:
-            return 1
-        if not series.dtype.is_numeric():
-            return -1
-        return _sample_classify(series)
-    
-    @property
-    def df(self) -> pl.DataFrame:
-        return self._df
-
-    @property
-    def units(self) -> dict[str, str]:
-        return self._units
-    
-    @property
-    def path(self) -> str:
-        return str(self._path)
-
-    @property
-    def datalength(self) -> int:
-        return self._df.height
-
-    @property
-    def var_names(self) -> list[str]:
-        return self._df.columns
-    
-    @property
-    def row_count(self) -> int:
-        return self._df.height
-    
-    @property
-    def column_count(self) -> int:
-        return self._df.width
-    
-    @property
-    def time_channels_info(self) -> dict[str, str]:
-        return self.date_formats
-    
-    @property
-    def df_validity(self) -> dict:
-        return self._df_validity
-    
 class DropOverlay(QWidget):
     """
     拖拽覆盖层类
@@ -1329,84 +1354,55 @@ class DropOverlay(QWidget):
         )
 
 
-class PolarsTableModel(QAbstractTableModel):
+class NumPyTableModel(QAbstractTableModel):
+    """NumPy-based Qt table model for DataTableDialog.
+    
+    Backed by a 2D numpy array + column name list.
     """
-    Polars数据表格模型类
-    只读官方虚拟模型，支持千万行秒开
-    将Polars DataFrame数据适配到Qt的表格视图中，提供高效的数据访问功能
-    """
-    def __init__(self, df: pl.DataFrame, units: dict[str, str], parent=None):
+    def __init__(self, arr: np.ndarray, col_names: list[str], units: dict[str, str], parent=None):
         super().__init__(parent)
-        self._df = df
+        self._arr = arr
+        self._col_names = col_names
         self._units = units
 
     def rowCount(self, parent=QModelIndex()):
         if parent.isValid():
             return 0
-        # 使用更可靠的方式获取行数
-        try:
-            return self._df.height
-        except Exception as e:
-            try:
-                return len(self._df)
-            except Exception as e2:
-                return 0
+        return self._arr.shape[0] if self._arr.size > 0 else 0
 
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
             return 0
-        # 使用更可靠的方式获取列数
-        try:
-            return self._df.width
-        except Exception as e:
-            try:
-                return len(self._df.columns)
-            except Exception as e2:
-                return 0
+        return self._arr.shape[1] if self._arr.size > 0 else 0
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
             return None
-        
-        row = index.row()
-        col = index.column()
-        
         try:
-            # 多种方法尝试获取数据
-            value = None
-            try:
-                value = self._df.item(row, col)
-            except Exception as e:
-                try:
-                    value = self._df[row, col]
-                except Exception as e2:
-                    try:
-                        col_name = self._df.columns[col]
-                        value = self._df[col_name][row]
-                    except Exception as e3:
-                        value = None
-            
-            return str(value) if value is not None else ""
-        except Exception as e:
+            val = self._arr[index.row(), index.column()]
+            if isinstance(val, float) and np.isnan(val):
+                return ""
+            return str(val) if val is not None else ""
+        except Exception:
             return ""
 
     def headerData(self, section, orientation, role):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
-        if not self._df.columns:
-            return None
         if orientation == Qt.Orientation.Horizontal:
-            col_name = str(self._df.columns[section])
+            if section >= len(self._col_names):
+                return None
+            col_name = str(self._col_names[section])
             unit = self._units.get(col_name, '')
             return f"{col_name}\n({unit})" if unit else f"{col_name}\n()"
         return str(section + 1)
 
     def removeColumns(self, column, count, parent=QModelIndex()):
-        if column < 0 or column + count > self.columnCount():
+        if column < 0 or column + count > len(self._col_names):
             return False
         self.beginRemoveColumns(parent, column, column + count - 1)
-        cols_to_drop = self._df.columns[column:column + count]
-        self._df = self._df.drop(cols_to_drop)
+        self._arr = np.delete(self._arr, range(column, column + count), axis=1)
+        del self._col_names[column:column + count]
         self.endRemoveColumns()
         return True
     
@@ -1684,7 +1680,8 @@ class DataTableDialog(QMainWindow):
 
         main_layout.addWidget(splitter)
 
-        self._df = pl.DataFrame()
+        self._arr = np.empty((0, 0))
+        self._col_names = []
         self._df_lock = Lock()
         self.model = None
         self.units = {}
@@ -1832,7 +1829,7 @@ class DataTableDialog(QMainWindow):
     def _blink_column(self,var_name,pulse:int=800):
         if self.has_column(var_name):
             # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
-            col_idx = self._df.columns.index(var_name)  # 获取逻辑列索引
+            col_idx = self._col_names.index(var_name)  # 获取逻辑列索引
             if var_name in self.frozen_columns:
                 delegate = self.delegate_frozen
                 view = self.frozen_view
@@ -1877,8 +1874,9 @@ class DataTableDialog(QMainWindow):
         # 保存当前的垂直滚动位置
         self._saved_scroll_pos = self.main_view.verticalScrollBar().value() if self.main_view else None
         
-        # 收集要添加的series
-        series_to_add = []
+        # 收集要添加的arrays
+        arrays_to_add = []
+        names_to_add = []
         for var_name in var_names:
             # 检查变量是否已存在
             if self.has_column(var_name):
@@ -1891,20 +1889,21 @@ class DataTableDialog(QMainWindow):
                 continue
                 
             added_vars.append(var_name)
-            series_to_add.append(loader.df[var_name].alias(var_name))
+            arrays_to_add.append(loader.df[var_name])
+            names_to_add.append(var_name)
         
         # 批量添加
-        if series_to_add:
-            if self._df.is_empty():
-                # 空DataFrame，直接创建
-                self._df = pl.DataFrame(series_to_add)
+        if arrays_to_add:
+            if (self._arr.size == 0 or len(self._col_names) == 0):
+                self._arr = np.column_stack(arrays_to_add)
+                self._col_names = list(names_to_add)
             else:
-                # 批量添加列
-                self._df = self._df.with_columns(series_to_add)
+                self._arr = np.column_stack([self._arr] + arrays_to_add)
+                self._col_names.extend(names_to_add)
             
             # 更新模型
             self.units = loader.units
-            self.model = PolarsTableModel(self._df, self.units)
+            self.model = NumPyTableModel(self._arr, self._col_names, self.units)
             self.main_view.setModel(self.model)
             self.frozen_view.setModel(self.model)
             self._connect_signals()
@@ -1976,7 +1975,7 @@ class DataTableDialog(QMainWindow):
         QTimer.singleShot(100, lambda: self._blink_column(var_name,pulse=BLINK_PULSE))
 
     # 内部函数：添加变量到表格
-    def _add_variable_to_table(self, var_name: str, data: pl.Series):
+    def _add_variable_to_table(self, var_name: str, data: np.ndarray):
         """
         内部函数：将变量添加到表格的非冻结区
         
@@ -1988,12 +1987,12 @@ class DataTableDialog(QMainWindow):
             data: 变量数据序列
         """
         # 安全添加列
-        if self._df.is_empty():
+        if (self._arr.size == 0 or len(self._col_names) == 0):
             # 如果是空DataFrame，直接用这个series创建
-            self._df = pl.DataFrame({var_name: data})
+            self._arr = data.reshape(-1, 1); self._col_names = [var_name]
         else:
             # 正常添加列
-            self._df = self._df.with_columns(data.alias(var_name))
+            self._arr = np.column_stack([self._arr, data]); self._col_names.append(var_name)
         
         # 使用新函数替换循环
         loader = self._resolve_loader()
@@ -2001,7 +2000,7 @@ class DataTableDialog(QMainWindow):
         if loader:
             self.units = loader.units
             
-        self.model = PolarsTableModel(self._df, self.units)
+        self.model = NumPyTableModel(self._arr, self._col_names, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
@@ -2104,7 +2103,7 @@ class DataTableDialog(QMainWindow):
             return
 
         # 计算两侧选择与列集合
-        frozen_cols = set(self._df.columns.index(col) for col in self.frozen_columns)
+        frozen_cols = set(self._col_names.index(col) for col in self.frozen_columns)
         if view == self.main_view:
             other_view = self.frozen_view
         else:
@@ -2214,7 +2213,7 @@ class DataTableDialog(QMainWindow):
             act_copy_selected.triggered.connect(lambda: self._copy_selected_to_clipboard(ordered_cols, rows_order))
 
         act_copy_all = QAction("复制表内所有数据到剪贴板", menu)
-        enable_all = (self._df is not None and self._df.shape[0] > 0 and self._df.shape[1] > 0)
+        enable_all = (self._arr.size > 0 and self._arr.shape[0] > 0 and self._arr.shape[1] > 0)
         act_copy_all.setEnabled(enable_all)
         if enable_all:
             act_copy_all.triggered.connect(self._copy_all_to_clipboard)
@@ -2266,8 +2265,8 @@ class DataTableDialog(QMainWindow):
                 row_indexer = rows
 
             # 直接使用正确的逻辑索引提取数据
-            x_data_series = self._df[row_indexer, x_col_idx]
-            y_data_series = self._df[row_indexer, y_col_idx]
+            x_data_series = self._arr[row_indexer, x_col_idx]
+            y_data_series = self._arr[row_indexer, y_col_idx]
 
             if x_data_series.null_count() > 0 or y_data_series.null_count() > 0:
                 QMessageBox.warning(self, "绘图错误", "选中区域包含无法转换为数字的单元格。")
@@ -2294,7 +2293,7 @@ class DataTableDialog(QMainWindow):
         if not ordered_cols or not rows_order:
             return
         # 变量名与单位
-        var_names = [str(self._df.columns[c]) for c in ordered_cols]
+        var_names = [str(self._col_names[c]) for c in ordered_cols]
         units = [self.units.get(name, '') for name in var_names]
 
         # 组装数据（按行）
@@ -2305,7 +2304,7 @@ class DataTableDialog(QMainWindow):
         for r in rows_order:
             row_vals = []
             for c in ordered_cols:
-                val = self._df.item(r, c)
+                val = self._arr[r, c]
                 if val is None:
                     row_vals.append("")
                 else:
@@ -2317,15 +2316,15 @@ class DataTableDialog(QMainWindow):
 
     def _copy_all_to_clipboard(self):
         """复制表内所有数据到剪贴板，列顺序按可视顺序（先冻结区再主区）。"""
-        if self._df is None or self._df.shape[0] == 0 or self._df.shape[1] == 0:
+        if (self._arr.size == 0 or len(self._col_names) == 0) or self._arr.shape[0] == 0 or self._arr.shape[1] == 0:
             return
 
         # 计算可视列顺序：先冻结区，再主区
-        frozen_cols = set(self._df.columns.get_loc(col) for col in self.frozen_columns)
+        frozen_cols = set(self._col_names.get_loc(col) for col in self.frozen_columns)
         frozen_header = self.frozen_view.horizontalHeader()
         main_header = self.main_view.horizontalHeader()
 
-        all_cols = list(range(self._df.shape[1]))
+        all_cols = list(range(self._arr.shape[1]))
         frozen_list = [c for c in all_cols if c in frozen_cols]
         main_list = [c for c in all_cols if c not in frozen_cols]
         frozen_list.sort(key=lambda c: frozen_header.visualIndex(c))
@@ -2333,17 +2332,17 @@ class DataTableDialog(QMainWindow):
         ordered_cols = frozen_list + main_list
 
         # 变量名与单位
-        var_names = [str(self._df.columns[c]) for c in ordered_cols]
+        var_names = [str(self._col_names[c]) for c in ordered_cols]
         units = [self.units.get(name, '') for name in var_names]
 
         lines = []
         lines.append('\t'.join(var_names))
         lines.append('\t'.join(units))
 
-        for r in range(self._df.shape[0]):
+        for r in range(self._arr.shape[0]):
             row_vals = []
             for c in ordered_cols:
-                val = self._df.item(r, c)
+                val = self._arr[r, c]
                 if val is None:
                     row_vals.append("")
                 else:
@@ -2390,7 +2389,7 @@ class DataTableDialog(QMainWindow):
                 except RuntimeError:
                     # 窗口已经被删除，跳过
                     pass
-            if not (self._skip_close_confirmation) and (hasattr(self, '_df') and self._df is not None and len(self._df.columns) >= 4):
+            if not (self._skip_close_confirmation) and (hasattr(self, '_arr') and self._arr.size > 0 and len(self._col_names) >= 4):
                 reply = QMessageBox.question(self,"确认关闭","是否清除所有列表，并关闭数值变量表窗口？",
                                              QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
                 # if user did not confirm to close the window
@@ -2404,7 +2403,7 @@ class DataTableDialog(QMainWindow):
             
             # 其他清理代码保持不变...
             self.save_geom()
-            self._df = pl.DataFrame()
+            self._arr = np.empty((0, 0)); self._col_names = []
             if hasattr(self, 'main_view') and self.main_view is not None:
                 self.main_view.setModel(None)
             if hasattr(self, 'frozen_view') and self.frozen_view is not None:
@@ -2428,9 +2427,9 @@ class DataTableDialog(QMainWindow):
         self._skip_close_confirmation=status
 
     def has_column(self, var_name: str) -> bool:
-        return var_name in self._df.columns
+        return var_name in self._col_names
 
-    def add_series(self, var_name: str, data: pl.Series):
+    def add_series(self, var_name: str, data: np.ndarray):
         self._add_variable_to_table(var_name, data)
 
     def _update_views(self):
@@ -2438,7 +2437,7 @@ class DataTableDialog(QMainWindow):
             return
         frozen_count = 0
         for col in range(self.model.columnCount()):
-            var_name = self._df.columns[col]
+            var_name = self._col_names[col]
             if var_name in self.frozen_columns:
                 self.main_view.setColumnHidden(col, True)
                 self.frozen_view.setColumnHidden(col, False)
@@ -2466,7 +2465,7 @@ class DataTableDialog(QMainWindow):
         for visual_idx in range(frozen_header.count()):
             logical_idx = frozen_header.logicalIndex(visual_idx)
             if not self.frozen_view.isColumnHidden(logical_idx):
-                col_name = self._df.columns[logical_idx]
+                col_name = self._col_names[logical_idx]
                 full_order.append(col_name)
         
         # 获取非冻结区的视觉顺序
@@ -2474,7 +2473,7 @@ class DataTableDialog(QMainWindow):
         for visual_idx in range(main_header.count()):
             logical_idx = main_header.logicalIndex(visual_idx)
             if not self.main_view.isColumnHidden(logical_idx):
-                col_name = self._df.columns[logical_idx]
+                col_name = self._col_names[logical_idx]
                 full_order.append(col_name)
         
         return full_order
@@ -2513,7 +2512,7 @@ class DataTableDialog(QMainWindow):
                 current_visual_index += 1
 
     def freeze_column(self, logical_col):
-        var_name = self._df.columns[logical_col]
+        var_name = self._col_names[logical_col]
         
         if var_name not in self.frozen_columns:
             # 调整splitter大小的代码保持不变
@@ -2552,8 +2551,8 @@ class DataTableDialog(QMainWindow):
                     new_column_order.append(col)
             
             # 重新排列DataFrame
-            self._df = self._df[new_column_order]
-            self.model = PolarsTableModel(self._df, self.units)
+            self._arr = self._arr[:, new_column_order]
+            self.model = NumPyTableModel(self._arr, self._col_names, self.units)
             self.main_view.setModel(self.model)
             self.frozen_view.setModel(self.model)
             self._connect_signals()
@@ -2563,7 +2562,7 @@ class DataTableDialog(QMainWindow):
             self._restore_visual_order_after_model_change(full_visual_order, new_column_order)
 
     def unfreeze_column(self, logical_col):
-        var_name = self._df.columns[logical_col]
+        var_name = self._col_names[logical_col]
         
         if var_name in self.frozen_columns:
             # 调整splitter大小的代码保持不变
@@ -2602,8 +2601,8 @@ class DataTableDialog(QMainWindow):
                     new_column_order.append(col)
             
             # 重新排列DataFrame
-            self._df = self._df[new_column_order]
-            self.model = PolarsTableModel(self._df, self.units)
+            self._arr = self._arr[:, new_column_order]
+            self.model = NumPyTableModel(self._arr, self._col_names, self.units)
             self.main_view.setModel(self.model)
             self.frozen_view.setModel(self.model)
             self._connect_signals()
@@ -2647,7 +2646,7 @@ class DataTableDialog(QMainWindow):
         if logical_col < 0:
             return
 
-        var_name = self._df.columns[logical_col]
+        var_name = self._col_names[logical_col]
 
         menu = QMenu(self)
         act_delete = menu.addAction(f"删除列 \"{var_name}\"")
@@ -2682,18 +2681,18 @@ class DataTableDialog(QMainWindow):
         # 清空所有列
         while self.model.columnCount() > 0:
             self.model.removeColumns(0, 1)
-        self._df = pl.DataFrame()
+        self._arr = np.empty((0, 0)); self._col_names = []
         self.frozen_columns = []
         self._update_views()
 
 
     def scroll_to_column(self, var_name: str):
         """滚动到指定变量名的列（可能在冻结区或普通区），不影响垂直滚动位置"""
-        if var_name not in self._df.columns:
+        if var_name not in self._col_names:
             return False
         
         # 获取列的索引
-        col_idx = self._df.columns.index(var_name)
+        col_idx = self._col_names.index(var_name)
         
         # 确定列在哪个视图（冻结区或普通区）
         if var_name in self.frozen_columns:
@@ -2730,7 +2729,7 @@ class DataTableDialog(QMainWindow):
         return True
     
     def _remove_column(self, logical_col):
-        var_name = self._df.columns[logical_col]
+        var_name = self._col_names[logical_col]
 
         # 如果要删除的列在冻结区，则执行与解冻相同的宽度调整策略
         if var_name in self.frozen_columns:
@@ -2759,10 +2758,10 @@ class DataTableDialog(QMainWindow):
             self.frozen_columns.remove(var_name)
         
         # 从DataFrame中删除列
-        self._df = self._df.drop(var_name)
+        idx = self._col_names.index(var_name); self._arr = np.delete(self._arr, idx, axis=1); del self._col_names[idx]
 
         # 刷新模型和视图
-        self.model = PolarsTableModel(self._df, self.units)
+        self.model = NumPyTableModel(self._arr, self._col_names, self.units)
         self.main_view.setModel(self.model)
         self.frozen_view.setModel(self.model)
         self._connect_signals()
@@ -2780,13 +2779,13 @@ class DataTableDialog(QMainWindow):
         """
         try:
             # 【安全检查】确保所有必要的属性都存在且有效
-            if (not hasattr(self, '_df') or 
+            if (not hasattr(self, '_arr') or 
                 not hasattr(self, 'main_view') or
                 self.main_view is None):
                 return
             
             # 如果 _df 是空的，或者没有 model，说明还没有数据，我们应该先初始化
-            need_init = (self.model is None or self._df is None or self._df.is_empty())
+            need_init = (self.model is None or (self._arr.size == 0 or len(self._col_names) == 0) or (self._arr.size == 0 or len(self._col_names) == 0))
             
             scroll_pos = 0
             frozen_cols = []
@@ -2795,7 +2794,7 @@ class DataTableDialog(QMainWindow):
             if not need_init:
                 scroll_pos = self.main_view.verticalScrollBar().value()
                 frozen_cols = self.frozen_columns.copy() if hasattr(self, 'frozen_columns') else []
-                current_cols = list(self._df.columns)
+                current_cols = list(self._col_names)
             
             # --- BUG修复 START ---
             
@@ -2807,22 +2806,22 @@ class DataTableDialog(QMainWindow):
             
             valid_cols = [col for col in current_cols if col in loader.df.columns]
             removed = [col for col in current_cols if col not in loader.df.columns]
-            new_df = loader.df.select(valid_cols) if valid_cols else pl.DataFrame()
+            new_df = loader.df.select(valid_cols) if valid_cols else np.empty((0, 0))
 
             # 用新的、行数正确的DataFrame替换旧的
-            self._df = new_df
+            self._arr = new_df; self._col_names = valid_cols
             
             # --- BUG修复 END ---
 
             self.units = loader.units
-            self.model = PolarsTableModel(self._df, self.units)
+            self.model = NumPyTableModel(self._arr, self._col_names, self.units)
             self.main_view.setModel(self.model)
             if hasattr(self, 'frozen_view') and self.frozen_view is not None:
                 self.frozen_view.setModel(self.model)
             self._connect_signals()
             
             # 重新应用冻结列，确保它们仍然存在
-            self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
+            self.frozen_columns = [col for col in frozen_cols if col in self._col_names]
             
             self._update_views()
             QTimer.singleShot(0, lambda: self.main_view.verticalScrollBar().setValue(scroll_pos))
@@ -2831,7 +2830,7 @@ class DataTableDialog(QMainWindow):
                 msg = f"以下变量已从数据中移除：{', '.join(removed)}"
                 QMessageBox.information(self, "更新通知", msg)
             
-            if self._df.is_empty():
+            if (self._arr.size == 0 or len(self._col_names) == 0):
                 # 增加这行，避免在表格变空并关闭时弹出烦人的确认框
                 self.set_skip_close_confirmation(True)
                 self.close()
@@ -6070,67 +6069,33 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.toggle_cursor(False)
 
     def clear_value_cache(self):
-        #self._value_cache: dict[str, tuple] = {}
         pass
-    def datetime_to_unix_seconds(self, series: pl.Series) -> pl.Series:
-        """将datetime Series转换为Unix时间戳（秒，float64精度）"""
-        if "ns" in str(series.dtype):
-            return (series.cast(pl.Int64) / 10**9).cast(pl.Float64)
-        elif "us" in str(series.dtype):
-            return (series.cast(pl.Int64) / 10**6).cast(pl.Float64)
-        elif "ms" in str(series.dtype):
-            return (series.cast(pl.Int64) / 10**3).cast(pl.Float64)
-        else:
-            raise ValueError(f"Unsupported datetime dtype: {series.dtype}")
-        
-    def get_value_from_name(self,var_name)-> tuple | None:
+
+    def get_value_from_name(self, var_name) -> tuple | None:
+        """Get data for a variable. Time channels are pre-computed by DuckDB."""
         main_window = self.window()
         if var_name in main_window.value_cache:
             return main_window.value_cache[var_name]
 
         raw_values = self.data[var_name]
-        dtype = raw_values.dtype
         y_values = None
         y_format = 'number'
 
-        if dtype.is_numeric():
+        if np.issubdtype(raw_values.dtype, np.number):
             y_values = raw_values
-        elif dtype == pl.Boolean:
-            y_values = raw_values.cast(pl.Int32)
         elif var_name in self.time_channels_info:
             fmt = self.time_channels_info[var_name]
-            try:
-                if fmt.startswith("TIME:"):
-                    # 这是 time 格式，需要特殊处理
-                    actual_fmt = fmt[len("TIME:"):]
-                    times = raw_values.str.strptime(pl.Time, actual_fmt, strict=False)
-                    # 将 pl.Time 转换为从当天 00:00:00 开始的秒数
-                    # 通过提取 hour, minute, second, microsecond 来计算
-                    hours = times.dt.hour().cast(pl.Float64)
-                    minutes = times.dt.minute().cast(pl.Float64)
-                    seconds = times.dt.second().cast(pl.Float64)
-                    microseconds = times.dt.microsecond().cast(pl.Float64)
-                    y_values = hours * 3600 + minutes * 60 + seconds + microseconds / 1000000
-                    y_format = 's'
-                else:
-                    # 这是正常的 datetime 格式
-                    times = raw_values.str.strptime(pl.Datetime, fmt, strict=False)
-                    y_values = self.datetime_to_unix_seconds(times)
-                    y_format = 's' if "%H:%M:%S" in fmt else 'date'
-            except Exception:
-                return None, None
+            if "%H:%M:%S" in fmt or "TIME:" in fmt:
+                y_format = 's'
+            else:
+                y_format = 's' if "%H:%M:%S" in fmt else 'date'
+            y_values = raw_values
         else:
             try:
-                numeric_values = raw_values.cast(pl.Float64)
-            except Exception:
+                y_values = raw_values.astype(np.float64)
+            except (ValueError, TypeError):
                 return None, None
 
-            finite_mask = np.isfinite(numeric_values.to_numpy())
-            if finite_mask.any():
-                y_values = numeric_values
-            else:
-                return None, None
-        
         if y_values is None:
             return None, None
 
@@ -6366,12 +6331,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 转换为numpy数组，根据数据类型选择合适的精度
             # 时间数据（Unix时间戳）使用float64以保留毫秒精度
             # 其他数据使用float32以减少内存
-            if isinstance(y_values, pl.Series):
-                array_source = y_values.to_numpy()
-                safety_source = y_values
-            else:
-                array_source = np.asarray(y_values)
-                safety_source = array_source
+            array_source = np.asarray(y_values)
+            safety_source = array_source
 
             float32_safe, abs_max = _evaluate_float32_safety(safety_source)
             # 检查时间数据：Unix时间戳通常 > 1e8
@@ -6380,21 +6341,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             target_dtype = np.float64 if prefer_float64 else np.float32
 
             try:
-                if isinstance(y_values, pl.Series):
-                    y_array = y_values.to_numpy().astype(target_dtype)
-                else:
-                    y_array = np.asarray(array_source, dtype=target_dtype)
+                y_array = np.asarray(array_source, dtype=target_dtype)
             except (OverflowError, ValueError, TypeError):
-                if isinstance(y_values, pl.Series):
-                    y_array = y_values.to_numpy().astype(np.float64)
-                else:
-                    y_array = np.asarray(array_source, dtype=np.float64)
+                y_array = np.asarray(array_source, dtype=np.float64)
 
             if target_dtype == np.float32 and np.any(np.isinf(y_array)):
-                if isinstance(y_values, pl.Series):
-                    y_array = y_values.to_numpy().astype(np.float64)
-                else:
-                    y_array = np.asarray(array_source, dtype=np.float64)
+                y_array = np.asarray(array_source, dtype=np.float64)
 
             # 检查数据是否全为NaN
             if np.all(np.isnan(y_array)):
@@ -6540,13 +6492,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return None, None
 
         try:
-            if isinstance(values, pl.Series):
-                arr = values.cast(pl.Float64).to_numpy()
-            else:
-                arr = np.asarray(values, dtype=np.float64)
+            arr = np.asarray(values, dtype=np.float64)
         except (ValueError, TypeError):
             try:
-                arr = pl.Series(values).cast(pl.Float64).to_numpy()
+                arr = np.asarray(values, dtype=np.float64)
             except Exception:
                 return None, None
 
@@ -8768,7 +8717,7 @@ class MainWindow(QMainWindow):
         # 优先级2：自动检测
         if not config_used:
             try:
-                fmt = FastDataLoader.auto_detect(file_path)
+                fmt = auto_detect(file_path)
                 delimiter_typ = fmt.sep
                 descRows = fmt.header_row
                 hasunit = fmt.hasunit
@@ -8788,9 +8737,9 @@ class MainWindow(QMainWindow):
                 #        - QCheckBox：是否包含单位行
                 #        - QSpinBox：指定数据起始行（或通过标题行 + 单位行自动计算）
                 #        - 实时预览：切换分隔符后，自动高亮推荐标题行/单位行位置
-                #     2. ImportDialog 初始化时先调用 FastDataLoader._auto_detect_format(file_path)
+                #     2. ImportDialog 初始化时先调用 _auto_detect_format(file_path)
                 #        获取 FormatInfo 作为智能默认建议，展示给用户
-                #     3. 用户切换分隔符时，调用 FastDataLoader._detect_header_from_lines(lines, new_sep)
+                #     3. 用户切换分隔符时，调用 _detect_header_from_lines(lines, new_sep)
                 #        和 _detect_hasunit_from_lines(lines, new_sep, header_row) 实时更新推荐
                 #     4. 调用方式：dialog = ImportDialog(file_path, self)
                 #                 if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -8803,10 +8752,10 @@ class MainWindow(QMainWindow):
                 #                     return  # 用户取消
                 #   关联位置：
                 #     - FormatInfo dataclass: L215 附近
-                #     - FastDataLoader._auto_detect_format(): L660 附近
-                #     - FastDataLoader._detect_sep_from_lines(): L535 附近
-                #     - FastDataLoader._detect_header_from_lines(): L575 附近
-                #     - FastDataLoader._detect_hasunit_from_lines(): L600 附近
+                #     - _auto_detect_format(): L660 附近
+                #     - _detect_sep_from_lines(): L535 附近
+                #     - _detect_header_from_lines(): L575 附近
+                #     - _detect_hasunit_from_lines(): L600 附近
                 #     - MainWindow._load_file(): L8575 附近
                 #     - 当前 except 分支即为 ImportDialog 的触发入口
                 QMessageBox.critical(
@@ -8857,7 +8806,7 @@ class MainWindow(QMainWindow):
 
                 self._thread = DataLoadThread(file_path, descRows=descRows, sep=delimiter_typ,
                                                  hasunit=hasunit, encoding=encoding)
-                self._thread.progress.connect(self._progress.setValue)
+                self._thread.progress.connect(self._on_load_progress)
                 self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
                 self._thread.error.connect(self._on_load_error)
                 self._thread.start()
@@ -9029,15 +8978,14 @@ class MainWindow(QMainWindow):
             return False
         
         self._cleanup_old_data()
-        import gc
         gc.collect()
             
         loader = None
         status = False
         
         try:
-            loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
-                                    encoding=encoding)
+            loader = DuckDBDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
+                                      encoding=encoding)
             self.loader = loader
             self._apply_loader()
             status = True
@@ -9061,6 +9009,27 @@ class MainWindow(QMainWindow):
                 loader = None
         return status
 
+    _PROGRESS_LABELS = {
+        0:  "正在检测文件格式...",
+        5:  "正在读取标题行与单位行...",
+        10: "正在导入 CSV 数据...",
+        15: "正在整理列结构...",
+        25: "正在推断数据类型...",
+        45: "正在转换列类型...",
+        55: "正在构建数据表...",
+        60: "正在计算时间列...",
+        80: "正在构建元数据...",
+        100:"加载完成",
+    }
+
+    def _on_load_progress(self, value: int):
+        self._progress.setValue(value)
+        label = "正在读取数据..."
+        for threshold in sorted(self._PROGRESS_LABELS.keys()):
+            if value >= threshold:
+                label = self._PROGRESS_LABELS[threshold]
+        self._progress.setLabelText(label)
+
     def _on_load_done(self,loader, file_path: str):
         self._progress.close()
         debug_log("MainWindow._on_load_done apply new loader path=%s", file_path)
@@ -9068,8 +9037,6 @@ class MainWindow(QMainWindow):
             if hasattr(self.loader, '_df'):
                 del self.loader._df
             del self.loader
-        import gc
-        gc.collect()
         
         self.loader=loader
         self._apply_loader()
