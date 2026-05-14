@@ -776,6 +776,8 @@ class FastDataLoader:
         self.do_parse_date=do_parse_date
         self.hasunit=hasunit
 
+        self.time_column_name: str | None = None
+
         self._var_names, self._units, self.encoding_used, self.hasunit = self._load_header_units(
             self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,
             hasunit=self.hasunit, encoding=encoding
@@ -1185,8 +1187,30 @@ class FastDataLoader:
         return self._df.shape[0]
 
     @property
+    def default_time_values(self) -> pd.Series:
+        return pd.Series(np.arange(len(self._df)), name='index')
+
+    @property
+    def time_values(self) -> pd.Series:
+        if self.time_column_name and self.time_column_name in self._df.columns:
+            return self._df[self.time_column_name]
+        return self.default_time_values
+
+    @property
+    def time_axis_label(self) -> str:
+        if self.time_column_name:
+            unit = self._units.get(self.time_column_name, '')
+            if unit and unit != '-':
+                return f"{self.time_column_name} ({unit})"
+            return self.time_column_name
+        return "Index"
+
+    @property
     def var_names(self) -> list[str]:
-        return self._df.columns.tolist()
+        cols = self._df.columns.tolist()
+        if self.time_column_name and self.time_column_name in cols:
+            cols = [c for c in cols if c != self.time_column_name]
+        return cols
     
     @property
     def row_count(self) -> int:
@@ -1202,7 +1226,10 @@ class FastDataLoader:
     
     @property
     def df_validity(self) -> dict:
-        return self._df_validity
+        validity = dict(self._df_validity)
+        if self.time_column_name and self.time_column_name in validity:
+            del validity[self.time_column_name]
+        return validity
     
 class DropOverlay(QWidget):
     """
@@ -3852,6 +3879,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.time_channels_info = time_channels_info
         self.synchronizer = synchronizer
         self.curve = None
+        self.time_values = None
+        self.time_column_name = None
+        self.time_axis_label = "Index"
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
         
         # 多曲线支持
@@ -3985,6 +4015,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 基于点数修改曲线风格
         # 使用防抖机制来优化缩放性能
         self.view_box.sigRangeChanged.connect(self._on_range_changed)
+
+        self.update_x_axis_label()
+
+    def update_x_axis_label(self):
+        """更新 X 轴标签文本"""
+        label = self.time_axis_label if self.time_axis_label else "Index"
+        self.plot_item.getAxis('bottom').setLabel(label)
         
     def jump_to_data_impl(self, x):
         # 检查是否有数据
@@ -5993,15 +6030,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.offset = new_offset
             if self.is_multi_curve_mode:
                 for var_name, curve_info in self.curves.items():
-                    if 'curve' in curve_info and 'x_data' in curve_info:
+                    if 'curve' in curve_info and 'y_data' in curve_info:
                         curve = curve_info['curve']
-                        old_x = curve_info['x_data']
-                        if old_factor != 0:
-                            original_index = (old_x - old_offset) / old_factor
-                        else:
-                            original_index = np.arange(1, len(old_x) + 1)
-                        new_x = self.offset + self.factor * original_index
-                        curve.setData(new_x, curve_info['y_data'])
+                        y_data = curve_info['y_data']
+                        original_index_x = np.arange(1, len(y_data) + 1)
+                        new_x = self.offset + self.factor * original_index_x
+                        curve.setData(new_x, y_data)
                         curve_info['x_data'] = new_x
             else:
                 if self.original_index_x is not None:
@@ -6191,6 +6225,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
         return True, ""
 
+    def _get_x_data_for_variable(self, y_len: int) -> np.ndarray:
+        if self.time_values is not None and len(self.time_values) >= y_len:
+            x_vals = self.time_values.iloc[:y_len].to_numpy(dtype=np.float64)
+            return x_vals
+        return np.arange(1, y_len + 1, dtype=np.float32)
+
     def _prepare_plot_data(self, var_name: str) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
         """
         准备绘图数据
@@ -6247,9 +6287,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if np.all(np.isnan(y_array)):
                 return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
                 
-            # 【NumPy优化】使用float32类型的索引数组
-            x_array = np.arange(1, len(y_array) + 1, dtype=np.float32)
-            
+            # 使用统一的时间轴数据作为X轴
+            x_array = self._get_x_data_for_variable(len(y_array))
+
             return True, "", x_array, y_array, y_format
             
         except Exception as e:
@@ -6282,7 +6322,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return False
         
         try:
-            # 检查是否是多曲线模式
+            time_vals = self.time_values.to_numpy(dtype=np.float64)[:len(y_array)] if self.time_values is not None else x_array
+
             if self.is_multi_curve_mode:
                 # 多曲线模式：直接添加新曲线
                 x_values = self.offset + self.factor * x_array
@@ -8819,7 +8860,8 @@ class MainWindow(QMainWindow):
         import re
         
         # 支持的文件类型列表
-        supported_extensions = ['.csv', '.mfile', '.t00', '.t01', '.t10', '.t11', '.txt']
+        supported_extensions = ['.csv', '.mfile', '.t00', '.t01', '.t10', '.t11', '.txt',
+                                '.mf4', '.mdf', '.dat']
         
         # 首先尝试直接提取后缀（不带数字的情况）
         base_ext = os.path.splitext(file_path)[1].lower()
@@ -8857,7 +8899,7 @@ class MainWindow(QMainWindow):
                    sep: str = ',',
                    hasunit: bool = True,
                    encoding: str | None = None):
-        """小文件直接读"""
+        """小文件直接读，自动识别文件格式（CSV/MDF）"""
         debug_log("MainWindow._load_sync start path=%s descRows=%s sep=%s hasunit=%s encoding=%s",
                   file_path, descRows, sep, hasunit, encoding)
         is_valid, error_msg = self._validate_load_parameters(file_path, descRows, sep, hasunit)
@@ -8869,8 +8911,13 @@ class MainWindow(QMainWindow):
         status = False
         
         try:
-            loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
-                                    encoding=encoding)
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in ('.mf4', '.mdf', '.dat'):
+                from mdf_loader import MDFDataLoader
+                loader = MDFDataLoader(file_path)
+            else:
+                loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
+                                        encoding=encoding)
             self.loader = loader
             self._apply_loader()
             status = True
@@ -8941,6 +8988,10 @@ class MainWindow(QMainWindow):
             widget.data = self.loader.df
             widget.units = self.loader.units
             widget.time_channels_info = self.loader.time_channels_info
+            widget.time_values = self.loader.time_values
+            widget.time_column_name = self.loader.time_column_name
+            widget.time_axis_label = self.loader.time_axis_label
+            widget.update_x_axis_label()
 
         # 清除cache
   
