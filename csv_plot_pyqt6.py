@@ -30,6 +30,8 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 from threading import Lock
 DEBUG_LOG_ENABLED = False  # 临时排查日志开关
+# X轴标签显示控制
+DEFAULT_SHOW_X_AXIS_LABEL = False
 _DEBUG_LOGGER = logging.getLogger("csv_plot_debug")
 if DEBUG_LOG_ENABLED and not _DEBUG_LOGGER.handlers:
     _DEBUG_LOGGER.setLevel(logging.DEBUG)
@@ -4038,8 +4040,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def update_x_axis_label(self):
         """更新 X 轴标签文本"""
-        label = self.time_axis_label if self.time_axis_label else "Index"
-        self.plot_item.getAxis('bottom').setLabel(label)
+        axis = self.plot_item.getAxis('bottom')
+        if DEFAULT_SHOW_X_AXIS_LABEL:
+            label = self.time_axis_label if self.time_axis_label else "Index"
+            axis.setLabel(label)
+            axis.showLabel(True)
+        else:
+            axis.showLabel(False)
         
     def jump_to_data_impl(self, x):
         # 检查是否有数据
