@@ -480,23 +480,24 @@ class DataLoadThread(QThread):
                         last_logged["value"] = progress
                 self.progress.emit(progress)
 
-            # 检查文件是否仍然存在
             if not os.path.exists(self.file_path):
                 self.error.emit("文件不存在或已被删除")
                 return
 
-            # print("Calling FastDataLoader with _progress:", _progress_cb) 
-
-            # 给 FastDataLoader 打补丁：加一个回调
-            loader = FastDataLoader(
-                self.file_path,
-                descRows=self.descRows,
-                sep=self.sep,
-                hasunit=self.hasunit,
-                encoding=self.encoding,
-                chunksize=3600,          
-                _progress= _progress_cb,
-            )
+            ext = os.path.splitext(self.file_path)[1].lower()
+            if ext in ('.mf4', '.mdf', '.dat'):
+                from mdf_loader import MDFDataLoader
+                loader = MDFDataLoader(self.file_path, _progress=_progress_cb)
+            else:
+                loader = FastDataLoader(
+                    self.file_path,
+                    descRows=self.descRows,
+                    sep=self.sep,
+                    hasunit=self.hasunit,
+                    encoding=self.encoding,
+                    chunksize=3600,
+                    _progress=_progress_cb,
+                )
             debug_log("DataLoadThread.finish path=%s datalength=%s columns=%s",
                       self.file_path,
                       getattr(loader, "datalength", None),
@@ -1802,13 +1803,17 @@ class DataTableDialog(QMainWindow):
                 continue
 
             # 检查变量是否在数据中存在
-            if var_name not in loader.df.columns:
+            is_mdf_loader = hasattr(loader, 'get_series')
+            if not is_mdf_loader and var_name not in loader.df.columns:
                 invalid_vars.append(var_name)
                 continue
 
             # 添加变量
             try:
-                series = loader.df[var_name]
+                if is_mdf_loader:
+                    series = loader.get_series(var_name)
+                else:
+                    series = loader.df[var_name]
                 self._add_variable_to_table(var_name, series)
                 added_vars.append(var_name)
             except Exception as e:
@@ -1864,14 +1869,18 @@ class DataTableDialog(QMainWindow):
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
 
-        if var_name not in loader.df.columns:  # 改为 loader
+        is_mdf_loader = hasattr(loader, 'get_series')
+        if not is_mdf_loader and var_name not in loader.df.columns:  # 改为 loader
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
 
         # 保存当前的垂直滚动位置，避免添加变量后列表位置变化
         self._saved_scroll_pos = self.main_view.verticalScrollBar().value() if self.main_view else None
 
-        series = loader.df[var_name]  # 改为 loader
+        if is_mdf_loader:
+            series = loader.get_series(var_name)
+        else:
+            series = loader.df[var_name]  # 改为 loader
         self._add_variable_to_table(var_name, series)
 
         # 滚动到新添加的列
@@ -2677,8 +2686,14 @@ class DataTableDialog(QMainWindow):
         removed = []
 
         # 遍历当前表中的列
+        is_mdf_loader = hasattr(loader, 'get_series')
         for col in current_cols:
-            if col in loader.df.columns:
+            if is_mdf_loader:
+                try:
+                    new_df[col] = loader.get_series(col)
+                except KeyError:
+                    removed.append(col)
+            elif col in loader.df.columns:
                 # 从新的加载器数据中复制完整的列
                 # 这是关键修复：确保新DataFrame获得完整行数
                 new_df[col] = loader.df[col]
@@ -3387,7 +3402,10 @@ class MyTableWidget(QTableWidget):
         if not hasattr(main_window, 'loader') or main_window.loader is None:
             return
 
-        series = main_window.loader.df[var_name]
+        if hasattr(main_window.loader, 'get_series'):
+            series = main_window.loader.get_series(var_name)
+        else:
+            series = main_window.loader.df[var_name]
 
         # 弹出数值变量表
         dlg = DataTableDialog.popup(var_name, series, parent=main_window)
@@ -4047,11 +4065,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
 
         # a. 打开/激活数值变量表，并添加所有变量
+        is_mdf_loader = hasattr(main_window.loader, 'get_series')
         dlg = None
         for var_name in var_names:
-            if var_name not in main_window.loader.df.columns:
+            if is_mdf_loader:
+                try:
+                    series = main_window.loader.get_series(var_name)
+                except KeyError:
+                    continue
+            elif var_name not in main_window.loader.df.columns:
                 continue
-            dlg = DataTableDialog.popup(var_name, main_window.loader.df[var_name], parent=main_window)
+            else:
+                series = main_window.loader.df[var_name]
+            dlg = DataTableDialog.popup(var_name, series, parent=main_window)
 
         # 如果没有成功打开任何dialog，直接返回
         if dlg is None:
@@ -5970,7 +5996,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if var_name in main_window.value_cache:
             return main_window.value_cache[var_name]
 
-        raw_values = self.data[var_name]
+        if main_window and hasattr(main_window, 'loader') and main_window.loader is not None:
+            loader = main_window.loader
+            if hasattr(loader, 'get_series'):
+                raw_values = loader.get_series(var_name)
+            else:
+                raw_values = self.data[var_name]
+        else:
+            raw_values = self.data[var_name]
         dtype_kind = raw_values.dtype.kind
         y_values = None
         y_format = 'number'
@@ -6213,7 +6246,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         if not isinstance(var_name, str) or not var_name.strip():
             return False, "变量名无效"
-            
+
+        main_window = self.window()
+        if main_window and hasattr(main_window, 'loader') and main_window.loader is not None:
+            loader = main_window.loader
+            if hasattr(loader, 'get_series'):
+                return True, ""
+
         if not hasattr(self, 'data') or self.data is None:
             return False, "没有可用的数据"
             
@@ -8618,14 +8657,22 @@ class MainWindow(QMainWindow):
         
         file_ext = self._extract_file_extension(file_path)
 
+        is_mdf_file = file_ext in ('.mf4', '.mdf', '.dat')
+
         delimiter_typ = None
         descRows = None
         hasunit = None
         encoding = None
         config_used = False
 
+        if is_mdf_file:
+            delimiter_typ = ','
+            descRows = 0
+            hasunit = False
+            config_used = True
+
         # 优先级1：尝试读取 config_dict.json
-        if os.path.isfile("config_dict.json"):
+        if not is_mdf_file and os.path.isfile("config_dict.json"):
             try:
                 config_dict = self.load_dict("config_dict.json")
                 ext_dict = config_dict.get(file_ext[1:], {})

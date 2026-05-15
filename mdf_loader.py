@@ -1,39 +1,36 @@
 """
-MDF 文件加载器模块
+MDF 文件加载器模块 —— 多 Group 模式
 
-为 MDF 文件导入功能提供核心架构支持，包括：
-- GroupData: MDF 数据分组的封装数据结构
-- MDFDataLoader: MDF 文件加载器（第二阶段实现加载逻辑）
+提供 MDF（Measurement Data Format）文件的完整解析与加载功能，
+对外暴露与 FastDataLoader 对齐的属性接口，使 UI 层无需感知文件格式差异。
 
-本模块设计遵循与 FastDataLoader 一致的接口约定，确保与现有 UI 层无缝对接。
+支持格式: .mf4（MDF 4.x）、.mdf（MDF 3.x）、.dat（INCA 导出）
 
 作者: SOLO
 创建日期: 2024
 """
 
 import os
+import re
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Callable
 
 
 @dataclass
 class GroupData:
-    """MDF 数据分组
-
-    封装 MDF 文件中单个分组（channel group）的数据，
-    包含时间轴、信号数据和元信息。
+    """单个 MDF Channel Group 的完整数据封装
 
     Attributes:
-        name: 分组名称
-        time_values: 时间轴数值（相对时间，秒）
-        time_channel_name: 时间通道名称
-        signals: 信号名 -> 信号数值的映射
-        units: 信号名 -> 单位的映射
+        index: Group 编号（0-based）
+        time_values: 时间轴数组（float64），取自 master channel
+        time_channel_name: 主通道名称（如 "time", "t"）
+        signals: 信号名 → 信号值数组的映射
+        units: 信号名 → 单位的映射
     """
-    name: str
-    time_values: np.ndarray = field(default_factory=lambda: np.array([]))
+    index: int
+    time_values: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     time_channel_name: str = ""
     signals: dict[str, np.ndarray] = field(default_factory=dict)
     units: dict[str, str] = field(default_factory=dict)
@@ -49,137 +46,388 @@ class GroupData:
         return len(self.time_values)
 
     def to_dataframe(self) -> pd.DataFrame:
-        """将分组数据转换为 pandas DataFrame"""
-        data = {self.time_channel_name or "time": self.time_values}
+        """将分组数据转换为 DataFrame，index=时间值，columns=信号名"""
+        data = {}
+        if self.time_channel_name:
+            data[self.time_channel_name] = self.time_values
+        else:
+            data["time"] = self.time_values
         data.update(self.signals)
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if self.time_channel_name:
+            df.index = df[self.time_channel_name]
+            df.index.name = self.time_channel_name
+        return df
 
 
 class MDFDataLoader:
-    """MDF 文件加载器（第一阶段：架构骨架）
+    """INCA MDF/DAT 文件加载器 —— 多 Group 模式。
 
-    提供与 FastDataLoader 一致的属性接口，确保 UI 层无需感知文件格式差异。
-    第二阶段将实现完整的 MDF 文件解析和分组加载功能。
+    接口与 FastDataLoader 对齐，上层代码无需区分文件格式。
 
-    统一接口属性:
-        - var_names: 当前分组中的变量名列表
-        - units: 当前分组中变量名 -> 单位的映射
-        - df: 当前分组数据的 DataFrame
-        - df_validity: 数据有效性检查结果
-        - time_values: 当前分组的时间轴 Series
-        - time_column_name: 时间通道的名称
-        - time_axis_label: X 轴标签文本
-        - datalength: 数据长度
-        - groups: 所有分组的字典
-        - group_names: 所有分组的名称列表
+    典型用法::
 
-    MDF 特有属性:
-        - current_group_name: 当前选中分组的名称
+        loader = MDFDataLoader("measurement.dat")
+        print(loader.var_names)       # 聚合后的变量名列表
+        print(loader.group_count)     # Group 数量
+        loader.select_group(1)        # 切换 Group
+        df = loader.df                # 当前 Group DataFrame
     """
 
-    def __init__(self, path: str):
-        """初始化 MDFDataLoader
+    _ASAMMDF_IMPORT_ERROR = (
+        "asammdf 库未安装。请运行: pip install asammdf>=7.4.0"
+    )
+
+    _CONFLICT_SUFFIX_PATTERN = re.compile(r'_(G\d+)$')
+
+    def __init__(self, path: str, *, _progress: Callable[[int], None] = None):
+        """初始化 MDFDataLoader，加载并解析 MDF 文件。
 
         Args:
-            path: MDF 文件路径（.mf4 或 .dat）
+            path: MDF 文件路径（.mf4 / .mdf / .dat）
+            _progress: 可选进度回调，参数为 0-100 的整数百分比
+
+        Raises:
+            FileNotFoundError: 文件不存在
+            ValueError: 文件为空或格式不兼容
+            ImportError: asammdf 库未安装
         """
         self._path = path
-        self._groups: dict[str, GroupData] = {}
-        self._current_group_name: Optional[str] = None
+        self._progress = _progress
+        self._groups: list[GroupData] = []
+        self._current_group_index: int = 0
+        self._var_to_group: dict[str, int] = {}
+        self._aggregated_var_names: list[str] = []
+        self._aggregated_units: dict[str, str] = {}
+        self._file_size: int = 0
+
+        self._validate_file()
         self._load_groups()
+        self._build_aggregated_properties()
 
-    def _load_groups(self):
-        """加载 MDF 文件中的所有分组数据（第二阶段实现）
+        if self._groups:
+            self._current_group_index = 0
+        else:
+            raise ValueError("MDF 文件未包含任何 Channel Group")
 
-        当前为桩方法（stub），仅验证文件存在性并创建占位分组。
-        第二阶段将实现完整的 asammdf 解析逻辑。
-        """
+    def _notify_progress(self, value: int):
+        if self._progress:
+            try:
+                self._progress(value)
+            except Exception:
+                pass
+
+    def _validate_file(self):
+        """校验文件存在性、大小及格式"""
         if not os.path.exists(self._path):
             raise FileNotFoundError(f"MDF 文件不存在: {self._path}")
 
-    def select_group(self, group_name: str):
-        """切换当前激活的分组
+        file_size = os.path.getsize(self._path)
+        if file_size == 0:
+            raise ValueError("MDF 文件为空")
+        self._file_size = file_size
+
+    @staticmethod
+    def _safe_to_numpy(series: pd.Series) -> np.ndarray:
+        """安全地将 pandas Series 转换为 numpy 数组，优先使用 float64"""
+        if np.issubdtype(series.dtype, np.number):
+            return series.to_numpy(dtype=np.float64).copy()
+        try:
+            return series.to_numpy(dtype=np.float64).copy()
+        except (ValueError, TypeError):
+            return series.to_numpy(dtype=object).copy()
+
+    def _load_groups(self):
+        """使用 asammdf 解析 MDF 文件，填充 self._groups"""
+        try:
+            import asammdf
+        except ImportError:
+            raise ImportError(self._ASAMMDF_IMPORT_ERROR)
+
+        self._notify_progress(0)
+
+        try:
+            mdf = asammdf.MDF(self._path)
+        except Exception as e:
+            raise ValueError(f"无法打开 MDF 文件（文件可能已损坏或不兼容）: {e}")
+
+        self._notify_progress(5)
+
+        total_groups = len(mdf.groups)
+        if total_groups == 0:
+            raise ValueError("MDF 文件未包含任何 Channel Group")
+
+        for gi in range(total_groups):
+            try:
+                group_df = mdf.get_group(gi)
+                group_obj = mdf.groups[gi]
+
+                time_values = group_df.index.to_numpy(dtype=np.float64).copy()
+                time_channel_name = group_df.index.name or "time"
+
+                signals: dict[str, np.ndarray] = {}
+                units: dict[str, str] = {}
+
+                for col in group_df.columns:
+                    arr = self._safe_to_numpy(group_df[col])
+                    signals[col] = arr
+
+                if hasattr(group_obj, 'channels') and group_obj.channels:
+                    for ch in group_obj.channels:
+                        unit_val = None
+                        if ch.unit and ch.unit.strip():
+                            unit_val = ch.unit.strip()
+                        elif hasattr(ch, 'conversion') and ch.conversion is not None:
+                            conv_unit = getattr(ch.conversion, 'unit', None)
+                            if conv_unit and conv_unit.strip():
+                                unit_val = conv_unit.strip()
+                        if unit_val is None:
+                            unit_val = "-"
+                        is_time_channel = (
+                            ch.name == time_channel_name
+                            or ch.name == "time"
+                            and time_channel_name in ("time", "timestamps")
+                        )
+                        if ch.name in signals or is_time_channel:
+                            units[ch.name] = unit_val
+                            if is_time_channel and ch.name != time_channel_name:
+                                units[time_channel_name] = unit_val
+
+                for col in group_df.columns:
+                    if col not in units:
+                        units[col] = "-"
+
+                gd = GroupData(
+                    index=gi,
+                    time_values=time_values,
+                    time_channel_name=time_channel_name,
+                    signals=signals,
+                    units=units,
+                )
+                self._groups.append(gd)
+
+            except Exception as e:
+                raise RuntimeError(f"加载 Group {gi} 时出错: {e}")
+
+            progress = int(5 + (gi + 1) / total_groups * 90)
+            self._notify_progress(progress)
+
+        self._notify_progress(100)
+
+    def _build_aggregated_properties(self):
+        """构建跨 Group 的聚合属性列表与映射"""
+        pure_name_counts: dict[str, int] = {}
+        pure_name_groups: dict[str, list[int]] = {}
+
+        for gd in self._groups:
+            for var in gd.var_names:
+                pure_name_counts[var] = pure_name_counts.get(var, 0) + 1
+                if var not in pure_name_groups:
+                    pure_name_groups[var] = []
+                pure_name_groups[var].append(gd.index)
+
+        conflict_names = {k for k, v in pure_name_counts.items() if v > 1}
+
+        self._aggregated_var_names = []
+        self._aggregated_units = {}
+        self._var_to_group = {}
+        self._original_to_aggregated: dict[tuple[int, str], str] = {}
+
+        for gd in self._groups:
+            for var in gd.var_names:
+                if var in conflict_names:
+                    display_name = f"{var}_G{gd.index}"
+                else:
+                    display_name = var
+
+                self._aggregated_var_names.append(display_name)
+                self._aggregated_units[display_name] = gd.units.get(var, "-")
+                self._var_to_group[display_name] = gd.index
+                self._original_to_aggregated[(gd.index, var)] = display_name
+
+        self._aggregated_validity: dict[str, int] = {}
+        for display_name in self._aggregated_var_names:
+            group_index = self._var_to_group[display_name]
+            gd = self._groups[group_index]
+            pure_name = self._resolve_pure_column_name(display_name)
+            values = gd.signals.get(pure_name)
+            if values is None:
+                self._aggregated_validity[display_name] = -1
+                continue
+            self._aggregated_validity[display_name] = self._classify_validity(values)
+
+    @staticmethod
+    def _classify_validity(values: np.ndarray) -> int:
+        """对信号值进行有效性分类。
+
+        Returns:
+            1=有效, 0=常量, -1=无效
+        """
+        if values.size == 0:
+            return -1
+        if not np.issubdtype(values.dtype, np.number):
+            return 1
+        finite_mask = np.isfinite(values)
+        if not np.any(finite_mask):
+            return -1
+        finite_vals = values[finite_mask]
+        if np.allclose(finite_vals, finite_vals[0]):
+            return 0
+        return 1
+
+    def select_group(self, index: int):
+        """切换到指定 Group
 
         Args:
-            group_name: 目标分组名称
+            index: Group 索引（0-based）
 
         Raises:
-            KeyError: 分组名称不存在
+            IndexError: Group 索引超出范围
         """
-        if group_name not in self._groups:
-            raise KeyError(f"分组 '{group_name}' 不存在，可用分组: {list(self._groups.keys())}")
-        self._current_group_name = group_name
+        if index < 0 or index >= len(self._groups):
+            raise IndexError(
+                f"Group 索引 {index} 超出范围，有效范围: 0-{len(self._groups) - 1}"
+            )
+        self._current_group_index = index
+
+    def get_var_metadata(self, display_name: str) -> tuple[int, np.ndarray, str]:
+        """获取变量的元数据。
+
+        Args:
+            display_name: 显示变量名（可能含 _G{index} 冲突后缀）
+
+        Returns:
+            (group_index, time_values_array, unit_string)
+        """
+        group_index = self._var_to_group.get(display_name)
+        if group_index is None:
+            raise KeyError(f"变量 '{display_name}' 不存在")
+        gd = self._groups[group_index]
+        time_values = gd.time_values.copy()
+        unit = self._aggregated_units.get(display_name, "-")
+        return group_index, time_values, unit
+
+    @staticmethod
+    def _resolve_pure_column_name(display_name: str) -> str:
+        """去掉 _G{index} 冲突后缀，还原纯变量名
+
+        Args:
+            display_name: 可能带 _G{index} 后缀的变量名
+
+        Returns:
+            纯变量名
+        """
+        return MDFDataLoader._CONFLICT_SUFFIX_PATTERN.sub('', display_name)
 
     @property
-    def groups(self) -> dict[str, GroupData]:
-        """返回所有分组的字典 {group_name: GroupData}"""
+    def groups(self) -> list[GroupData]:
+        """所有 Group 数据列表"""
         return self._groups
 
     @property
-    def group_names(self) -> list[str]:
-        """返回所有分组的名称列表"""
-        return list(self._groups.keys())
+    def group_count(self) -> int:
+        """Group 总数"""
+        return len(self._groups)
 
     @property
-    def current_group_name(self) -> Optional[str]:
-        """返回当前选中分组的名称"""
-        return self._current_group_name
+    def current_group_index(self) -> int:
+        """当前激活的 Group 索引"""
+        return self._current_group_index
 
     @property
     def _current_group(self) -> Optional[GroupData]:
         """返回当前选中分组的 GroupData 对象"""
-        if self._current_group_name:
-            return self._groups.get(self._current_group_name)
+        if 0 <= self._current_group_index < len(self._groups):
+            return self._groups[self._current_group_index]
         return None
 
     @property
     def var_names(self) -> list[str]:
-        """返回当前分组中的变量名列表"""
-        group = self._current_group
-        if group:
-            return group.var_names
-        return []
+        """所有 Group 聚合后的显示变量名列表"""
+        return self._aggregated_var_names
 
     @property
     def units(self) -> dict[str, str]:
-        """返回当前分组中变量名 -> 单位的映射"""
-        group = self._current_group
-        if group:
-            return dict(group.units)
-        return {}
+        """变量名 → 单位的映射（聚合所有 Group）"""
+        return dict(self._aggregated_units)
 
     @property
     def df(self) -> pd.DataFrame:
-        """返回当前分组数据的 DataFrame"""
+        """当前 Group 的 DataFrame，列名使用聚合变量名"""
         group = self._current_group
         if group:
-            return group.to_dataframe()
+            df = group.to_dataframe()
+            rename_map = {}
+            for col in df.columns:
+                key = (group.index, col)
+                agg_name = self._original_to_aggregated.get(key, col)
+                if agg_name != col:
+                    rename_map[col] = agg_name
+            if rename_map:
+                df = df.rename(columns=rename_map)
+            return df
         return pd.DataFrame()
 
     @property
-    def df_validity(self) -> dict:
-        """返回数据有效性检查结果
+    def df_validity(self) -> dict[str, int]:
+        """所有 Group 聚合后的变量有效性字典（key=聚合变量名，value=1有效/0常量/-1无效）"""
+        return dict(self._aggregated_validity)
 
-        MDF 数据通常为完整的数值数据，默认全部有效（值为 1）。
+    def get_value_from_name(self, display_name: str):
+        """通过聚合变量名获取变量的 (x_data, y_data, unit)。
+
+        支持跨 Group 查找，无需手动切换 Group。
+
+        Args:
+            display_name: 聚合变量名（可能含 _G{index} 冲突后缀）
+
+        Returns:
+            (x_data: np.ndarray, y_data: np.ndarray, unit: str)
+
+        Raises:
+            KeyError: 变量不存在
         """
-        validity = {}
-        group = self._current_group
-        if group:
-            for name in group.signals:
-                validity[name] = 1
-        return validity
+        group_index, time_values, unit = self.get_var_metadata(display_name)
+        pure_name = self._resolve_pure_column_name(display_name)
+        gd = self._groups[group_index]
+        y_data = gd.signals[pure_name]
+        return time_values, y_data, unit
+
+    def get_series(self, display_name: str) -> pd.Series:
+        """通过聚合变量名获取变量的 pandas Series。
+
+        自动解析跨 Group 的变量位置。
+
+        Args:
+            display_name: 聚合变量名（可能含 _G{index} 冲突后缀）
+
+        Returns:
+            包含该变量所有值的 pd.Series
+
+        Raises:
+            KeyError: 变量不存在
+        """
+        group_index, time_values, unit = self.get_var_metadata(display_name)
+        pure_name = self._resolve_pure_column_name(display_name)
+        gd = self._groups[group_index]
+        y_data = gd.signals[pure_name]
+        return pd.Series(y_data, name=display_name)
 
     @property
     def time_values(self) -> pd.Series:
-        """返回当前分组的时间轴 Series"""
+        """当前 Group 的时间轴 Series"""
         group = self._current_group
         if group and len(group.time_values) > 0:
-            return pd.Series(group.time_values, name=group.time_channel_name or "time")
+            return pd.Series(
+                group.time_values,
+                name=group.time_channel_name or "time",
+                dtype=np.float64,
+            )
         return pd.Series(np.arange(1), name="index")
 
     @property
     def time_column_name(self) -> Optional[str]:
-        """返回时间通道的名称"""
+        """当前 Group 的主通道名称"""
         group = self._current_group
         if group:
             return group.time_channel_name or "time"
@@ -187,21 +435,50 @@ class MDFDataLoader:
 
     @property
     def time_axis_label(self) -> str:
-        """返回 X 轴标签文本"""
-        name = self.time_column_name
-        if name:
-            return f"{name} (s)"
+        """X 轴标签文本（含时间单位）"""
+        group = self._current_group
+        if group:
+            name = group.time_channel_name or "time"
+            time_unit = "-"
+            if group.time_channel_name:
+                time_unit = group.units.get(group.time_channel_name, "-")
+            if time_unit and time_unit != "-":
+                return f"{name} ({time_unit})"
+            return name
         return "Index"
 
     @property
     def datalength(self) -> int:
-        """返回当前分组的数据长度"""
+        """当前 Group 的数据行数"""
         group = self._current_group
         if group:
             return group.datalength
         return 0
 
     @property
-    def time_channels_info(self):
-        """返回时间通道信息（保持与 FastDataLoader 接口一致）"""
+    def row_count(self) -> int:
+        """当前 Group 的数据行数（与 datalength 相同）"""
+        return self.datalength
+
+    @property
+    def column_count(self) -> int:
+        """当前 Group 的变量数"""
+        group = self._current_group
+        if group:
+            return len(group.var_names)
+        return 0
+
+    @property
+    def time_channels_info(self) -> list:
+        """时间通道信息（MDF 场景下返回空列表）"""
         return []
+
+    @property
+    def path(self) -> str:
+        """文件路径"""
+        return self._path
+
+    @property
+    def file_size(self) -> int:
+        """文件大小（字节）"""
+        return self._file_size
