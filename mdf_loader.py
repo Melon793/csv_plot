@@ -482,3 +482,16 @@ class MDFDataLoader:
     def file_size(self) -> int:
         """文件大小（字节）"""
         return self._file_size
+
+    @property
+    def global_time_range(self) -> tuple[float, float]:
+        """所有 Group 时间轴的整体范围（min, max），跳过空 Group"""
+        all_mins = []
+        all_maxs = []
+        for gd in self._groups:
+            if len(gd.time_values) > 0:
+                all_mins.append(float(gd.time_values[0]))
+                all_maxs.append(float(gd.time_values[-1]))
+        if not all_mins:
+            return (0.0, 1.0)
+        return (min(all_mins), max(all_maxs))

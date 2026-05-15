@@ -4123,89 +4123,116 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 选中该单元格
         QTimer.singleShot(0, lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect))
 
-    def auto_range(self):
-        # 检查是否有数据可显示
-        if not self.curve and not self.curves:
-            return False
-            
-        # 清除X轴和Y轴的刻度
-        self.axis_x.setTicks(None)
-        self.axis_y.setTicks(None)
+    def auto_range(self, external_xmin: float | None = None, external_xmax: float | None = None):
+        main_window = self.window()
+        is_mdf = (
+            main_window is not None
+            and hasattr(main_window, 'loader')
+            and main_window.loader is not None
+            and hasattr(main_window.loader, 'get_series')
+        )
 
-        # 获取x_values
-        if self.is_multi_curve_mode and self.curves:
-            # 多曲线模式：使用第一个曲线的x_data
-            first_curve_info = next(iter(self.curves.values()))
-            if 'x_data' in first_curve_info:
-                x_values = first_curve_info['x_data']
-            else:
-                return False
-        else:
-            # 单曲线模式
-            if self.original_index_x is not None:
-                x_values = self.offset + self.factor * self.original_index_x
-            elif self.curve:
-                # 如果original_index_x为None，尝试从curve获取数据
-                x_data, _ = self.curve.getData()
-                if x_data is not None:
-                    x_values = x_data
+        has_own_data = bool(self.curve or self.curves)
+
+        # 获取 x_values（仅当有自身数据时）
+        if has_own_data:
+            self.axis_x.setTicks(None)
+            self.axis_y.setTicks(None)
+
+            if self.is_multi_curve_mode and self.curves:
+                x_arrays = self._collect_visible_curve_arrays('x_data')
+                if x_arrays:
+                    x_values = np.concatenate(x_arrays)
                 else:
-                    return False
+                    x_values = None
             else:
-                return False
-        
+                if self.original_index_x is not None:
+                    x_values = self.offset + self.factor * self.original_index_x
+                elif self.curve:
+                    x_data, _ = self.curve.getData()
+                    x_values = x_data if x_data is not None else None
+                else:
+                    x_values = None
+
+            if x_values is not None:
+                own_min_x = np.min(x_values)
+                own_max_x = np.max(x_values)
+            else:
+                own_min_x = None
+                own_max_x = None
+        else:
+            x_values = None
+            own_min_x = None
+            own_max_x = None
+
+        # 合并内部和外部范围
+        if external_xmin is not None:
+            min_x = min(own_min_x, external_xmin) if own_min_x is not None else external_xmin
+        else:
+            min_x = own_min_x
+
+        if external_xmax is not None:
+            max_x = max(own_max_x, external_xmax) if own_max_x is not None else external_xmax
+        else:
+            max_x = own_max_x
+
+        if min_x is None or max_x is None:
+            return False
+
+        if not has_own_data:
+            self.axis_x.setTicks(None)
+            self.axis_y.setTicks(None)
+
         global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM
         
         padding_xVal = DEFAULT_PADDING_VAL_X  
         padding_yVal = 0.5
-
-        # 计算X轴范围
-        min_x = np.min(x_values)
-        max_x = np.max(x_values)
         
-        # 计算Y轴范围
-        if self.is_multi_curve_mode and self.curves:
-            # 多曲线模式：计算所有可见曲线的Y轴范围
-            y_arrays = self._collect_visible_curve_arrays('y_data')
-            if y_arrays:
-                combined = np.concatenate(y_arrays)
-                if combined.size:
-                    min_y = np.nanmin(combined)
-                    max_y = np.nanmax(combined)
+        if has_own_data:
+            if self.is_multi_curve_mode and self.curves:
+                y_arrays = self._collect_visible_curve_arrays('y_data')
+                if y_arrays:
+                    combined = np.concatenate(y_arrays)
+                    if combined.size:
+                        min_y = np.nanmin(combined)
+                        max_y = np.nanmax(combined)
+                    else:
+                        min_y, max_y = 0, 1
                 else:
                     min_y, max_y = 0, 1
             else:
-                min_y, max_y = 0, 1  # 默认范围
+                if self.original_y is not None:
+                    special_limits = self.handle_single_point_limits(x_values, self.original_y)
+                    if special_limits:
+                        min_x, max_x, min_y, max_y = special_limits
+                    else:
+                        min_y = np.nanmin(self.original_y)
+                        max_y = np.nanmax(self.original_y)
+                elif self.curve:
+                    _, y_data = self.curve.getData()
+                    if y_data is not None:
+                        min_y = np.nanmin(y_data)
+                        max_y = np.nanmax(y_data)
+                    else:
+                        min_y, max_y = 0, 1
+                else:
+                    min_y, max_y = 0, 1
         else:
-            # 单曲线模式
-            if self.original_y is not None:
-                special_limits = self.handle_single_point_limits(x_values, self.original_y)
-                if special_limits:
-                    min_x, max_x, min_y, max_y = special_limits
-                else:
-                    min_y = np.nanmin(self.original_y)
-                    max_y = np.nanmax(self.original_y)
-            elif self.curve:
-                # 如果original_y为None，尝试从curve获取数据
-                _, y_data = self.curve.getData()
-                if y_data is not None:
-                    min_y = np.nanmin(y_data)
-                    max_y = np.nanmax(y_data)
-                else:
-                    min_y, max_y = 0, 1
-            else:
-                min_y, max_y = 0, 1
-        
+            min_y, max_y = 0, 1
+
         limits_xMin = min_x - padding_xVal * (max_x - min_x)
         limits_xMax = max_x + padding_xVal * (max_x - min_x)
 
-        # 新增：显式设置 XRange（与 YRange 一致，使用 padding=0.05）
-        self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)  # 重置到全范围
+        self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
         self._set_safe_y_range(min_y, max_y)
 
-        global MIN_INDEX_LENGTH 
-        minXRange_val = min(MIN_INDEX_LENGTH,len(x_values)-1 if len(x_values)>1 else 1)*self.factor
-        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
+        global MIN_INDEX_LENGTH
+        data_len = len(x_values) if x_values is not None and len(x_values) > 1 else 2
+        minXRange_val = min(MIN_INDEX_LENGTH, data_len - 1) * self.factor
+        if is_mdf:
+            self.plot_item.setLimits(minXRange=minXRange_val)
+        else:
+            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
 
         # self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
         self._set_vline_bounds([min_x, max_x])
@@ -6061,13 +6088,29 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             old_offset = self.offset
             self.factor = new_factor
             self.offset = new_offset
+
+            main_window = self.window()
+            is_mdf = (
+                main_window is not None
+                and hasattr(main_window, 'loader')
+                and main_window.loader is not None
+                and hasattr(main_window.loader, 'get_series')
+            )
+
             if self.is_multi_curve_mode:
                 for var_name, curve_info in self.curves.items():
                     if 'curve' in curve_info and 'y_data' in curve_info:
                         curve = curve_info['curve']
                         y_data = curve_info['y_data']
-                        original_index_x = np.arange(1, len(y_data) + 1)
-                        new_x = self.offset + self.factor * original_index_x
+                        if is_mdf:
+                            old_x_data = curve_info.get('x_data')
+                            if old_x_data is not None and old_factor != 0:
+                                original_time = (old_x_data - old_offset) / old_factor
+                            else:
+                                original_time = np.arange(1, len(y_data) + 1)
+                        else:
+                            original_time = np.arange(1, len(y_data) + 1)
+                        new_x = self.offset + self.factor * original_time
                         curve.setData(new_x, y_data)
                         curve_info['x_data'] = new_x
             else:
@@ -6083,10 +6126,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
             global DEFAULT_PADDING_VAL_X
             padding_xVal = DEFAULT_PADDING_VAL_X
-            index_min = 1 - padding_xVal * datalength
-            index_max = datalength + padding_xVal * datalength
-            limits_xMin = self.offset + self.factor * index_min
-            limits_xMax = self.offset + self.factor * index_max
+            if is_mdf and main_window is not None and hasattr(main_window.loader, 'global_time_range'):
+                x_min, x_max = main_window.loader.global_time_range
+                data_min_x = self.offset + self.factor * x_min
+                data_max_x = self.offset + self.factor * x_max
+            else:
+                index_min = 1 - padding_xVal * datalength
+                index_max = datalength + padding_xVal * datalength
+                data_min_x = self.offset + self.factor * index_min
+                data_max_x = self.offset + self.factor * index_max
+            limits_xMin = data_min_x - padding_xVal * (data_max_x - data_min_x)
+            limits_xMax = data_max_x + padding_xVal * (data_max_x - data_min_x)
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             self._update_vline_bounds_from_data()
             if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
@@ -6327,7 +6377,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
                 
             # 使用统一的时间轴数据作为X轴
-            x_array = self._get_x_data_for_variable(len(y_array))
+            main_window = self.window()
+            if main_window and hasattr(main_window, 'loader') and hasattr(main_window.loader, 'get_value_from_name'):
+                try:
+                    x_array, _, _ = main_window.loader.get_value_from_name(var_name)
+                    x_array = x_array[:len(y_array)]
+                except KeyError:
+                    x_array = self._get_x_data_for_variable(len(y_array))
+            else:
+                x_array = self._get_x_data_for_variable(len(y_array))
 
             return True, "", x_array, y_array, y_format
             
@@ -6361,6 +6419,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return False
         
         try:
+            main_window = self.window()
+            is_mdf = (
+                main_window is not None
+                and hasattr(main_window, 'loader')
+                and main_window.loader is not None
+                and hasattr(main_window.loader, 'get_series')
+            )
             time_vals = self.time_values.to_numpy(dtype=np.float64)[:len(y_array)] if self.time_values is not None else x_array
 
             if self.is_multi_curve_mode:
@@ -6421,33 +6486,30 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 处理单点或所有点x坐标相同的特殊情况
             special_limits = self.handle_single_point_limits(x_values, self.original_y)
             if special_limits:
-                # 单点数据：使用特殊处理的范围
-                # handle_single_point_limits已经返回了扩展后的x范围，直接使用
                 min_x, max_x, min_y, max_y = special_limits
-                # 更新y轴范围和limits
                 self._set_safe_y_range(min_y, max_y)
-                # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
-                self._set_x_limits_with_min_range(min_x, max_x)
+                if not is_mdf:
+                    self._set_x_limits_with_min_range(min_x, max_x)
             else:
-                # 正常数据：
-                # 1. 基于数据的全范围设置y轴limits（允许用户缩放到所有数据）
+                # 1. 基于数据的全范围设置y轴limits
                 data_min_y = np.nanmin(self.original_y)
                 data_max_y = np.nanmax(self.original_y)
                 self._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
                 
-                # 2. 基于当前x轴范围内的数据设置y轴viewRange（初始显示范围）
+                # 2. 基于当前x轴范围内的数据设置y轴viewRange
                 current_x_range = self.view_box.viewRange()[0]
                 x_min, x_max = current_x_range
                 min_y, max_y = self._get_y_range_in_x_window(x_values, self.original_y, x_min, x_max)
                 self._set_safe_y_range(min_y, max_y, set_limits=False)
                 
-                # 3. 更新x轴limits（允许的最大范围），确保可以平移/缩放到数据的范围
-                data_min_x = np.min(x_values)
-                data_max_x = np.max(x_values)
-                padding_x = DEFAULT_PADDING_VAL_X
-                limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                # 3. 更新x轴limits（MDF 下全局 limits 已在加载阶段设置，跳过）
+                if not is_mdf:
+                    data_min_x = np.min(x_values)
+                    data_max_x = np.max(x_values)
+                    padding_x = DEFAULT_PADDING_VAL_X
+                    limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                    limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                    self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
             # 更新光标 - 在单曲线模式下使用当前数据范围即可
             min_x, max_x = np.min(x_values), np.max(x_values)
@@ -6770,6 +6832,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 更新坐标轴范围（批量添加时跳过，避免重复更新）
             batch_adding = getattr(self, '_batch_adding', False)
             if not batch_adding:
+                main_window = self.window()
+                is_mdf = (
+                    main_window is not None
+                    and hasattr(main_window, 'loader')
+                    and main_window.loader is not None
+                    and hasattr(main_window.loader, 'get_series')
+                )
                 # 始终保持x轴范围不变，只更新y轴范围
                 # 因为所有plot的x轴都是linked的，改变x轴会影响其他plot
                 
@@ -6804,8 +6873,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         final_max_y = max(current_max_y, max_y)
                         self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
                     
-                    # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
-                    self._set_x_limits_with_min_range(min_x, max_x)
+                    if not is_mdf:
+                        self._set_x_limits_with_min_range(min_x, max_x)
                 else:
                     # 正常数据
                     current_x_range = self.view_box.viewRange()[0]
@@ -6832,17 +6901,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         # 更新y轴viewRange
                         self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
                     
-                    # 3. 更新x轴limits（允许的最大范围）以包含所有曲线的数据
-                    x_arrays = self._collect_visible_curve_arrays('x_data')
-                    if x_arrays:
-                        combined_x = np.concatenate(x_arrays)
-                        if combined_x.size:
-                            data_min_x = np.nanmin(combined_x)
-                            data_max_x = np.nanmax(combined_x)
-                            padding_x = DEFAULT_PADDING_VAL_X
-                            limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                            limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                    # 3. MDF 下全局 limits 已在加载阶段设置，跳过
+                    if not is_mdf:
+                        x_arrays = self._collect_visible_curve_arrays('x_data')
+                        if x_arrays:
+                            combined_x = np.concatenate(x_arrays)
+                            if combined_x.size:
+                                data_min_x = np.nanmin(combined_x)
+                                data_max_x = np.nanmax(combined_x)
+                                padding_x = DEFAULT_PADDING_VAL_X
+                                limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                                limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                                self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             
             # 更新cursor边界 - 使用所有曲线的x范围（而不仅仅是当前添加的变量）
             x_arrays = self._collect_visible_curve_arrays('x_data')
@@ -9707,10 +9777,40 @@ class MainWindow(QMainWindow):
     def auto_range_all_plots(self):
         if not self.loader or self.loader.datalength == 0:
             return
+
+        all_x_data: list[np.ndarray] = []
+        for container in self.plot_widgets:
+            if not container.isVisible():
+                continue
+            widget = container.plot_widget
+            if widget.is_multi_curve_mode and widget.curves:
+                x_arrays = widget._collect_visible_curve_arrays('x_data')
+                for arr in x_arrays:
+                    all_x_data.append(arr)
+            elif widget.curve and widget.y_name:
+                if widget.original_index_x is not None:
+                    all_x_data.append(
+                        widget.offset + widget.factor * widget.original_index_x
+                    )
+                else:
+                    x_data, _ = widget.curve.getData()
+                    if x_data is not None:
+                        all_x_data.append(np.asarray(x_data))
+
+        if all_x_data:
+            global_x = np.concatenate(all_x_data)
+            global_min_x = float(np.min(global_x))
+            global_max_x = float(np.max(global_x))
+        else:
+            global_min_x = None
+            global_max_x = None
+
         for container in self.plot_widgets:
             if container.isVisible():
-                widget = container.plot_widget
-                widget.auto_range()
+                container.plot_widget.auto_range(
+                    external_xmin=global_min_x,
+                    external_xmax=global_max_x,
+                )
             
     def auto_y_in_x_range(self):
         for container in self.plot_widgets:
@@ -9906,10 +10006,16 @@ class MainWindow(QMainWindow):
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
 
+            is_mdf = hasattr(self.loader, 'get_series')
+
             unique_y_names = set(all_y_names)
             if not unique_y_names:
                 debug_log("MainWindow.replots_after_loading no tracked curves, reset plots")
-                self.reset_plots_after_loading(1, self.loader.datalength, reason="no tracked curves")
+                if is_mdf:
+                    x_min, x_max = self.loader.global_time_range
+                else:
+                    x_min, x_max = 1, self.loader.datalength
+                self.reset_plots_after_loading(x_min, x_max, reason="no tracked curves")
                 return
 
             # 【NumPy优化】批量检查validity：先过滤出在var_names中的变量，然后批量检查validity
@@ -9936,17 +10042,26 @@ class MainWindow(QMainWindow):
 
             if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
                 debug_log("MainWindow.replots_after_loading reset due to low ratio %.2f", ratio)
-                self.reset_plots_after_loading(1, self.loader.datalength, reason="insufficient valid vars")
+                if is_mdf:
+                    x_min, x_max = self.loader.global_time_range
+                else:
+                    x_min, x_max = 1, self.loader.datalength
+                self.reset_plots_after_loading(x_min, x_max, reason="insufficient valid vars")
             else:
                 self.value_cache = {}
                 global DEFAULT_PADDING_VAL_X
                 for idx, container in enumerate(self.plot_widgets):
                     widget = container.plot_widget
                     
-                    # 【NumPy优化】更新 limits，使用float32数组
-                    original_index_x = np.arange(1, self.loader.datalength + 1, dtype=np.float32)
-                    min_x = widget.offset + widget.factor * np.min(original_index_x)
-                    max_x = widget.offset + widget.factor * np.max(original_index_x)
+                    # 【NumPy优化】更新 limits
+                    if is_mdf:
+                        x_min, x_max = self.loader.global_time_range
+                        min_x = widget.offset + widget.factor * x_min
+                        max_x = widget.offset + widget.factor * x_max
+                    else:
+                        original_index_x = np.arange(1, self.loader.datalength + 1, dtype=np.float32)
+                        min_x = widget.offset + widget.factor * np.min(original_index_x)
+                        max_x = widget.offset + widget.factor * np.max(original_index_x)
                     min_x, max_x = widget._get_safe_x_range(min_x, max_x)
                     limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
                     limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
@@ -9980,7 +10095,8 @@ class MainWindow(QMainWindow):
                         visibility_to_restore = {}  # 记录需要恢复的可见性状态
                         
                         for var_name, curve_info in current_curves.items():
-                            if var_name in self.loader.df.columns and self.loader.df_validity.get(var_name, -1) >= 0:
+                            var_exists = (var_name in self.loader.var_names) if is_mdf else (var_name in self.loader.df.columns)
+                            if var_exists and self.loader.df_validity.get(var_name, -1) >= 0:
                                 # 变量仍然有效，重新绘制
                                 preferred_color = curve_info.get('color')
                                 success = widget.add_variable_to_plot(
@@ -10018,14 +10134,15 @@ class MainWindow(QMainWindow):
                         y_name = widget.y_name
                         if not y_name:
                             continue
-                        if y_name in self.loader.df.columns and self.loader.df_validity.get(y_name, -1) >= 0:
+                        var_exists = (y_name in self.loader.var_names) if is_mdf else (y_name in self.loader.df.columns)
+                        if var_exists and self.loader.df_validity.get(y_name, -1) >= 0:
                             success = widget.plot_variable(y_name)
                             if not success:
                                 widget.clear_plot_item()
                                 cleared.append((idx + 1, "无效数据"))
                         else:
                             widget.clear_plot_item()
-                            reason = f"未找到变量:{y_name}" if y_name not in self.loader.df.columns else f"无效数据:{y_name}"
+                            reason = f"未找到变量:{y_name}" if not var_exists else f"无效数据:{y_name}"
                             cleared.append((idx + 1, reason))
 
             # 恢复 xRange     
