@@ -14,3 +14,8 @@ dependencies = [
     "pyqtgraph>=0.14.0",
     "ujson>=5.11.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

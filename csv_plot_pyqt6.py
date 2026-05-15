@@ -217,6 +217,32 @@ class FormatInfo:
     hasunit: bool           # 是否包含单位行
 
 
+@dataclass
+class CurveInfo:
+    """单条曲线的元数据"""
+    var_name: str
+    curve: pg.PlotDataItem
+    x_data: np.ndarray
+    y_data: np.ndarray
+    color: str = 'blue'
+    y_format: str = ''
+    visible: bool = True
+    x_min: float = 0.0
+    x_max: float = 0.0
+
+    def __post_init__(self):
+        """自动从 x_data 计算缓存的 x_min / x_max"""
+        if self.x_data is not None and len(self.x_data) > 0:
+            self.x_min = float(np.min(self.x_data))
+            self.x_max = float(np.max(self.x_data))
+
+    def update_x_range(self):
+        """当 x_data 变更后调用，同步更新缓存"""
+        if self.x_data is not None and len(self.x_data) > 0:
+            self.x_min = float(np.min(self.x_data))
+            self.x_max = float(np.max(self.x_data))
+
+
 # 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
 _UNIT_KEYWORDS = [
     'm', 's', 'g', 'A', 'K', 'mol', 'cd',
@@ -5283,10 +5309,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         arrays: list[np.ndarray] = []
         if not getattr(self, 'curves', None):
             return arrays
-        for curve_info in self.curves.values():
-            if not curve_info.get('visible', True):
+        for ci in self.curves.values():
+            if not ci.visible:
                 continue
-            data = curve_info.get(key)
+            data = getattr(ci, key, None)
             if data is None:
                 continue
             arr = np.asarray(data)
@@ -5299,11 +5325,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         pairs: list[tuple[np.ndarray, np.ndarray]] = []
         if not getattr(self, 'curves', None):
             return pairs
-        for curve_info in self.curves.values():
-            if not curve_info.get('visible', True):
+        for ci in self.curves.values():
+            if not ci.visible:
                 continue
-            x_data = curve_info.get('x_data')
-            y_data = curve_info.get('y_data')
+            x_data = ci.x_data
+            y_data = ci.y_data
             if x_data is None or y_data is None:
                 continue
             x_arr = np.asarray(x_data)
@@ -5313,7 +5339,39 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             pairs.append((x_arr, y_arr))
         return pairs
 
-    
+    def get_curve_x_limits(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
+        """
+        返回当前 plot 中曲线的 X 轴范围
+
+        Args:
+            curves_filter: "visible" — 仅可见曲线；"all" — 所有曲线（含隐藏）
+
+        Returns:
+            (min_x, max_x) 或 (None, None) 当无数据时
+        """
+        mins: list[float] = []
+        maxs: list[float] = []
+
+        if self.curves:
+            for ci in self.curves.values():
+                if curves_filter == "visible" and not ci.visible:
+                    continue
+                mins.append(ci.x_min)
+                maxs.append(ci.x_max)
+        elif self.curve and self.y_name:
+            if self.original_index_x is not None:
+                x_data = self.offset + self.factor * self.original_index_x
+            else:
+                x_data, _ = self.curve.getData()
+                if x_data is None:
+                    return (None, None)
+            mins.append(float(np.min(x_data)))
+            maxs.append(float(np.max(x_data)))
+
+        if not mins:
+            return (None, None)
+        return (min(mins), max(maxs))
+
     def _safe_clear_plot_items(self):
         """安全地清理所有plot items，避免scene不匹配问题
         
@@ -5429,15 +5487,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
             curves_to_process = []
             if self.curves:
-                for var_name, curve_info in self.curves.items():
-                    if not curve_info.get("visible", True):
+                for var_name, ci in self.curves.items():
+                    if not ci.visible:
                         continue
                     curves_to_process.append({
                         "var_name": var_name,
-                        "x_data": curve_info["x_data"],
-                        "y_data": curve_info["y_data"],
-                        "color": curve_info["color"],
-                        "y_format": curve_info.get("y_format", ""),
+                        "x_data": ci.x_data,
+                        "y_data": ci.y_data,
+                        "color": ci.color,
+                        "y_format": ci.y_format,
                         "unit": self.units.get(var_name, "")
                     })
             elif not self.is_multi_curve_mode and self.curve and self.y_name:
@@ -5791,10 +5849,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """判断当前 plot 是否有可见且有数据的曲线"""
         try:
             if self.curves:
-                for curve_info in self.curves.values():
-                    if not curve_info.get("visible", True):
+                for ci in self.curves.values():
+                    if not ci.visible:
                         continue
-                    x_data = curve_info.get("x_data")
+                    x_data = ci.x_data
                     if x_data is not None and len(x_data) > 0:
                         return True
                 return False
@@ -5817,9 +5875,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
             curves_x_data = []
             if self.is_multi_curve_mode and self.curves:
-                for _, curve_info in self.curves.items():
-                    if curve_info.get("visible", True) and "x_data" in curve_info and curve_info["x_data"] is not None:
-                        curves_x_data.append(curve_info["x_data"])
+                for _, ci in self.curves.items():
+                    if ci.visible and ci.x_data is not None:
+                        curves_x_data.append(ci.x_data)
             elif self.curve:
                 x_data, _ = self.curve.getData()
                 if x_data is not None:
@@ -5944,9 +6002,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 优先策略2：多曲线模式下，使用数据长度 + factor/offset 计算理论bounds
             if self.is_multi_curve_mode and self.curves:
                 # 获取任一curve的数据长度
-                for curve_info in self.curves.values():
-                    if 'y_data' in curve_info and curve_info['y_data'] is not None:
-                        datalength = len(curve_info['y_data'])
+                for ci in self.curves.values():
+                    if ci.y_data is not None:
+                        datalength = len(ci.y_data)
                         if datalength > 0:
                             min_x = self.offset + self.factor * 1
                             max_x = self.offset + self.factor * datalength
@@ -6105,12 +6163,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             )
 
             if self.is_multi_curve_mode:
-                for var_name, curve_info in self.curves.items():
-                    if 'curve' in curve_info and 'y_data' in curve_info:
-                        curve = curve_info['curve']
-                        y_data = curve_info['y_data']
+                for var_name, ci in self.curves.items():
+                    if ci.curve is not None and ci.y_data is not None:
+                        curve = ci.curve
+                        y_data = ci.y_data
                         if is_mdf:
-                            old_x_data = curve_info.get('x_data')
+                            old_x_data = ci.x_data
                             if old_x_data is not None and old_factor != 0:
                                 original_time = (old_x_data - old_offset) / old_factor
                             else:
@@ -6119,14 +6177,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                             original_time = np.arange(1, len(y_data) + 1)
                         new_x = self.offset + self.factor * original_time
                         curve.setData(new_x, y_data)
-                        curve_info['x_data'] = new_x
+                        ci.x_data = new_x
+                        ci.update_x_range()
             else:
                 if self.original_index_x is not None:
                     new_x = self.offset + self.factor * self.original_index_x
                     self.curve.setData(new_x, self.original_y)
             if self.is_multi_curve_mode and self.curves:
                 first_curve_info = next(iter(self.curves.values()))
-                datalength = len(first_curve_info['y_data']) if 'y_data' in first_curve_info else 0
+                datalength = len(first_curve_info.y_data) if first_curve_info.y_data is not None else 0
             elif self.original_index_x is not None:
                 datalength = len(self.original_index_x)
             else:
@@ -6234,14 +6293,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         if hasattr(current_pen, 'color'):
                             current_color = current_pen.color().name()
 
-                    self.curves[self.y_name] = {
-                        'curve': self.curve,
-                        'x_data': self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None,
-                        'y_data': self.original_y if self.original_y is not None else None,
-                        'color': current_color,
-                        'y_format': self.y_format,
-                        'visible': True
-                    }
+                    x_data_val = self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None
+
+                    self.curves[self.y_name] = CurveInfo(
+                        var_name=self.y_name,
+                        curve=self.curve,
+                        x_data=x_data_val,
+                        y_data=self.original_y if self.original_y is not None else None,
+                        color=current_color,
+                        y_format=self.y_format,
+                        visible=True
+                    )
                     self.current_color_index = 1
 
                 for var_name, x_array, y_array, y_format in variables_data:
@@ -6252,14 +6314,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
                     curve = self.plot_item.plot(x_values, y_array, pen=pen, name=var_name, skipFiniteCheck=True)
 
-                    self.curves[var_name] = {
-                        'curve': curve,
-                        'x_data': x_values,
-                        'y_data': y_array,
-                        'color': color,
-                        'y_format': y_format or '',
-                        'visible': True
-                    }
+                    self.curves[var_name] = CurveInfo(
+                        var_name=var_name,
+                        curve=curve,
+                        x_data=x_values,
+                        y_data=y_array,
+                        color=color,
+                        y_format=y_format or '',
+                        visible=True
+                    )
 
                     success_vars.append(var_name)
 
@@ -6495,8 +6558,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if special_limits:
                 min_x, max_x, min_y, max_y = special_limits
                 self._set_safe_y_range(min_y, max_y)
-                if not is_mdf:
-                    self._set_x_limits_with_min_range(min_x, max_x)
+                # if not is_mdf:
+                #     self._set_x_limits_with_min_range(min_x, max_x)
             else:
                 # 1. 基于数据的全范围设置y轴limits
                 data_min_y = np.nanmin(self.original_y)
@@ -6509,14 +6572,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 min_y, max_y = self._get_y_range_in_x_window(x_values, self.original_y, x_min, x_max)
                 self._set_safe_y_range(min_y, max_y, set_limits=False)
                 
-                # 3. 更新x轴limits（MDF 下全局 limits 已在加载阶段设置，跳过）
-                if not is_mdf:
-                    data_min_x = np.min(x_values)
-                    data_max_x = np.max(x_values)
-                    padding_x = DEFAULT_PADDING_VAL_X
-                    limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                    limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                    self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                # 3. 更新x轴limits（合并本 plot 和全局所有可见 plot 的范围）
+                # self._update_x_limits_for_plot(x_values, self.original_y, is_mdf)
             
             # 更新光标 - 在单曲线模式下使用当前数据范围即可
             min_x, max_x = np.min(x_values), np.max(x_values)
@@ -6671,10 +6728,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.original_y = None
             
             # 清除多曲线数据
-            # 先清除每个曲线的缓存数据
-            for var_name, curve_info in self.curves.items():
-                if 'curve' in curve_info:
-                    curve = curve_info['curve']
+            for var_name, ci in self.curves.items():
+                if ci.curve is not None:
+                    curve = ci.curve
                     # 清除样式缓存
                     if hasattr(curve, '_cached_pen_key'):
                         delattr(curve, '_cached_pen_key')
@@ -6759,14 +6815,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     if hasattr(current_pen, 'color'):
                         current_color = current_pen.color().name()
                 
-                self.curves[self.y_name] = {
-                    'curve': self.curve,
-                    'x_data': self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None,
-                    'y_data': self.original_y if self.original_y is not None else None,
-                    'color': current_color,
-                    'y_format': self.y_format,
-                    'visible': True
-                }
+                x_data_val_1 = self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None
+
+                self.curves[self.y_name] = CurveInfo(
+                    var_name=self.y_name,
+                    curve=self.curve,
+                    x_data=x_data_val_1,
+                    y_data=self.original_y if self.original_y is not None else None,
+                    color=current_color,
+                    y_format=self.y_format,
+                    visible=True
+                )
                 self.current_color_index = 1  # 从第二个颜色开始
                 
                 # 如果要添加的变量与已迁移的相同，直接返回
@@ -6791,14 +6850,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     if hasattr(current_pen, 'color'):
                         current_color = current_pen.color().name()
                 
-                self.curves[self.y_name] = {
-                    'curve': self.curve,
-                    'x_data': self.offset + self.factor * self.original_index_x if self.original_index_x is not None else x_values,
-                    'y_data': self.original_y if self.original_y is not None else y_values,
-                    'color': current_color,
-                    'y_format': self.y_format,
-                    'visible': True
-                }
+                x_data_val_2 = self.offset + self.factor * self.original_index_x if self.original_index_x is not None else x_values
+
+                self.curves[self.y_name] = CurveInfo(
+                    var_name=self.y_name,
+                    curve=self.curve,
+                    x_data=x_data_val_2,
+                    y_data=self.original_y if self.original_y is not None else y_values,
+                    color=current_color,
+                    y_format=self.y_format,
+                    visible=True
+                )
                 self.current_color_index = 1  # 从第二个颜色开始
             
             # 选择颜色
@@ -6824,14 +6886,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 这些设置会自动应用到所有曲线，无需OpenGL也能获得良好性能
             
             # 存储曲线信息到curves字典
-            self.curves[var_name] = {
-                'curve': curve,
-                'x_data': x_values,
-                'y_data': y_values,
-                'color': color,
-                'y_format': y_format or '',
-                'visible': True
-            }
+            self.curves[var_name] = CurveInfo(
+                var_name=var_name,
+                curve=curve,
+                x_data=x_values,
+                y_data=y_values,
+                color=color,
+                y_format=y_format or '',
+                visible=True
+            )
             
             # 更新多曲线模式
             self.update_multi_curve_mode()
@@ -6880,8 +6943,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         final_max_y = max(current_max_y, max_y)
                         self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
                     
-                    if not is_mdf:
-                        self._set_x_limits_with_min_range(min_x, max_x)
+                    # self._update_x_limits_for_plot(x_values, y_values, is_mdf)
                 else:
                     # 正常数据
                     current_x_range = self.view_box.viewRange()[0]
@@ -6908,18 +6970,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         # 更新y轴viewRange
                         self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
                     
-                    # 3. MDF 下全局 limits 已在加载阶段设置，跳过
-                    if not is_mdf:
-                        x_arrays = self._collect_visible_curve_arrays('x_data')
-                        if x_arrays:
-                            combined_x = np.concatenate(x_arrays)
-                            if combined_x.size:
-                                data_min_x = np.nanmin(combined_x)
-                                data_max_x = np.nanmax(combined_x)
-                                padding_x = DEFAULT_PADDING_VAL_X
-                                limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                                limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                                self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                    # 3. 更新x轴limits（合并本 plot 和全局所有可见 plot 的范围）
+                    # self._update_x_limits_for_plot(x_values, y_values, is_mdf)
             
             # 更新cursor边界 - 使用所有曲线的x范围（而不仅仅是当前添加的变量）
             x_arrays = self._collect_visible_curve_arrays('x_data')
@@ -6983,13 +7035,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
         # 构建图例文本（包含所有曲线，不管是否可见）
         legend_items = []
-        for var_name, curve_info in self.curves.items():
-            color = curve_info['color']
+        for var_name, ci in self.curves.items():
+            color = ci.color
             unit = self.units.get(var_name, '')
             legend_text = f"{var_name} ({unit})" if unit else var_name
             
             # 根据可见性调整显示样式
-            if curve_info['visible']:
+            if ci.visible:
                 # 可见：实心方块 + 加粗文字
                 legend_items.append(f"<span style='color: {color}; font-weight: bold;'>■</span> {legend_text}")
             else:
@@ -7018,17 +7070,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 print(f"当前y_name: {getattr(self, 'y_name', 'None')}")
             return
 
-        curve_info = self.curves[var_name]
+        ci = self.curves[var_name]
         # 切换可见性状态
-        curve_info['visible'] = not curve_info['visible']
-        new_visible = curve_info['visible']
+        ci.visible = not ci.visible
+        new_visible = ci.visible
 
         if DEBUG_LOG_ENABLED:
             print(f"切换 {var_name} 可见性: {new_visible}")
 
         # 更新曲线对象的可见性
-        if 'curve' in curve_info:
-            curve_obj = curve_info['curve']
+        if ci.curve is not None:
+            curve_obj = ci.curve
 
             try:
                 # 检查曲线对象是否仍然有效
@@ -7065,12 +7117,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """重新创建失效的曲线"""
         try:
             if var_name in self.curves:
-                curve_info = self.curves[var_name]
-                # 重新绘制曲线
+                ci = self.curves[var_name]
                 success = self.add_variable_to_plot(
                     var_name,
                     skip_existence_check=True,
-                    preferred_color=curve_info.get('color')
+                    preferred_color=ci.color
                 )
                 if success:
                     pass
@@ -7119,12 +7170,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         # 构建完整的legend HTML（与update_legend完全一致）
         legend_parts = []
-        for var_name, curve_info in curve_list:
-            color = curve_info['color']
+        for var_name, ci in curve_list:
+            color = ci.color
             unit = self.units.get(var_name, '')
             legend_text = f"{var_name} ({unit})" if unit else var_name
             
-            if curve_info['visible']:
+            if ci.visible:
                 symbol = f"<span style='color: {color}; font-weight: bold;'>■</span>"
                 legend_parts.append(f"{symbol} {legend_text}")
             else:
@@ -7247,7 +7298,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 min_x, max_x, min_y, max_y = special_limits
                 self._set_safe_y_range(min_y, max_y, set_limits=False)
                 # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
-                self._set_x_limits_with_min_range(min_x, max_x)
+                # self._set_x_limits_with_min_range(min_x, max_x)
             else:
                 # 正常数据
                 current_x_range = self.view_box.viewRange()[0]
@@ -7269,13 +7320,46 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     final_max_y = np.nanmax(all_y_in_range)
                     self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
 
-                # 3. 更新x轴limits（允许的最大范围）
-                data_min_x = np.min(x_values)
-                data_max_x = np.max(x_values)
-                padding_x = DEFAULT_PADDING_VAL_X
-                limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                # 3. 更新x轴limits — 已关闭
+                # data_min_x = np.min(x_values)
+                # data_max_x = np.max(x_values)
+                # 
+                # main_window = self.window()
+                # if main_window is not None and hasattr(main_window, 'collect_global_x_range'):
+                #     global_min, global_max = main_window.collect_global_x_range(curves_filter="all")
+                #     if global_min is not None:
+                #         data_min_x = min(data_min_x, global_min)
+                #         data_max_x = max(data_max_x, global_max)
+
+                # padding_x = DEFAULT_PADDING_VAL_X
+                # limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+                # limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+                # self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+
+    def _update_x_limits_for_plot(self, x_values: np.ndarray, y_values: np.ndarray, is_mdf: bool):
+        """
+        统一更新 X 轴 limits，合并本 plot 的可见曲线范围和全局所有可见 plot 的范围
+        """
+        x_arrays = self._collect_visible_curve_arrays('x_data')
+        if x_arrays:
+            combined_x = np.concatenate(x_arrays)
+            data_min_x = float(np.nanmin(combined_x))
+            data_max_x = float(np.nanmax(combined_x))
+        else:
+            data_min_x = float(np.min(x_values))
+            data_max_x = float(np.max(x_values))
+
+        main_window = self.window()
+        if main_window is not None and hasattr(main_window, 'collect_global_x_range'):
+            global_min, global_max = main_window.collect_global_x_range(curves_filter="all")
+            if global_min is not None:
+                data_min_x = min(data_min_x, global_min)
+                data_max_x = max(data_max_x, global_max)
+
+        padding_x = DEFAULT_PADDING_VAL_X
+        limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+        limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
@@ -7412,25 +7496,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if self.is_multi_curve_mode:
             # 多曲线模式：返回每个曲线的统计信息
             stats_list = []
-            for var_name, curve_info in self.curves.items():
-                if not curve_info.get('visible', True):
+            for var_name, ci in self.curves.items():
+                if not ci.visible:
                     continue
                 
-                if 'curve' not in curve_info:
+                if ci.curve is None:
                     continue
                 
                 # 【NumPy优化】优先使用缓存的x_data和y_data，如果没有则从curve获取
-                if 'x_data' in curve_info and 'y_data' in curve_info:
-                    # 使用缓存的x_data和y_data（更准确且更快）
-                    x_data = curve_info['x_data']
-                    y_data = curve_info['y_data']
-                elif 'y_data' in curve_info:
-                    # 只有y_data，需要重新计算x_data（向后兼容）
-                    x_data = self.offset + self.factor * np.arange(1, len(curve_info['y_data']) + 1, dtype=np.float32)
-                    y_data = curve_info['y_data']
+                if ci.x_data is not None and ci.y_data is not None:
+                    x_data = ci.x_data
+                    y_data = ci.y_data
+                elif ci.y_data is not None:
+                    x_data = self.offset + self.factor * np.arange(1, len(ci.y_data) + 1, dtype=np.float32)
+                    y_data = ci.y_data
                 else:
-                    # 从curve获取（最慢但最可靠）
-                    curve = curve_info['curve']
+                    curve = ci.curve
                     x_data, y_data = curve.getData()
                     if x_data is None or len(x_data) == 0:
                         continue
@@ -7542,12 +7623,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 优先检查curves字典（多曲线模式或从多曲线删到单曲线的情况）
             if self.curves:
                 # 有curves字典：遍历所有曲线应用样式
-                for var_name, curve_info in self.curves.items():
-                    if 'curve' not in curve_info:
+                for var_name, ci in self.curves.items():
+                    if ci.curve is None:
                         continue
 
-                    curve = curve_info['curve']
-                    color = curve_info.get('color', 'blue')
+                    curve = ci.curve
+                    color = ci.color
 
                     # 缓存pen对象：检查当前样式是否匹配，避免重复创建
                     if show_symbols:
@@ -9657,8 +9738,8 @@ class MainWindow(QMainWindow):
                 new_max_x = widget.offset + widget.factor * max_index
             elif widget.is_multi_curve_mode and widget.curves:
                 first_curve_info = next(iter(widget.curves.values()), None)
-                if first_curve_info and "y_data" in first_curve_info:
-                    data_len = len(first_curve_info["y_data"])
+                if first_curve_info is not None and first_curve_info.y_data is not None:
+                    data_len = len(first_curve_info.y_data)
                     new_min_x = widget.offset + widget.factor * 1
                     new_max_x = widget.offset + widget.factor * data_len
                 else:
@@ -9781,36 +9862,42 @@ class MainWindow(QMainWindow):
         self.saved_mark_range = None
         self.request_mark_stats_refresh(immediate=True)
 
+    def collect_global_x_range(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
+        """
+        收集所有可见 plot 中曲线的全局 X 轴范围
+
+        Args:
+            curves_filter: "visible" — 可见 plot + 可见曲线（auto_range 使用）
+                           "all"     — 可见 plot + 所有曲线（X limits 使用）
+
+        Returns:
+            (global_min_x, global_max_x) 或 (None, None)
+        """
+        all_mins: list[float] = []
+        all_maxs: list[float] = []
+
+        for container in self.plot_widgets:
+            if not container.isVisible():
+                continue
+            x_min, x_max = container.plot_widget.get_curve_x_limits(curves_filter)
+            if x_min is not None and x_max is not None:
+                all_mins.append(x_min)
+                all_maxs.append(x_max)
+
+        if not all_mins:
+            if self.loader and hasattr(self.loader, 'global_time_range'):
+                return self.loader.global_time_range
+            elif self.loader and self.loader.datalength > 0:
+                return (1.0, float(self.loader.datalength))
+            return (None, None)
+
+        return (min(all_mins), max(all_maxs))
+
     def auto_range_all_plots(self):
         if not self.loader or self.loader.datalength == 0:
             return
 
-        all_x_data: list[np.ndarray] = []
-        for container in self.plot_widgets:
-            if not container.isVisible():
-                continue
-            widget = container.plot_widget
-            if widget.is_multi_curve_mode and widget.curves:
-                x_arrays = widget._collect_visible_curve_arrays('x_data')
-                for arr in x_arrays:
-                    all_x_data.append(arr)
-            elif widget.curve and widget.y_name:
-                if widget.original_index_x is not None:
-                    all_x_data.append(
-                        widget.offset + widget.factor * widget.original_index_x
-                    )
-                else:
-                    x_data, _ = widget.curve.getData()
-                    if x_data is not None:
-                        all_x_data.append(np.asarray(x_data))
-
-        if all_x_data:
-            global_x = np.concatenate(all_x_data)
-            global_min_x = float(np.min(global_x))
-            global_max_x = float(np.max(global_x))
-        else:
-            global_min_x = None
-            global_max_x = None
+        global_min_x, global_max_x = self.collect_global_x_range(curves_filter="visible")
 
         for container in self.plot_widgets:
             if container.isVisible():
@@ -10101,11 +10188,10 @@ class MainWindow(QMainWindow):
                         curves_added = 0
                         visibility_to_restore = {}  # 记录需要恢复的可见性状态
                         
-                        for var_name, curve_info in current_curves.items():
+                        for var_name, ci in current_curves.items():
                             var_exists = (var_name in self.loader.var_names) if is_mdf else (var_name in self.loader.df.columns)
                             if var_exists and self.loader.df_validity.get(var_name, -1) >= 0:
-                                # 变量仍然有效，重新绘制
-                                preferred_color = curve_info.get('color')
+                                preferred_color = ci.color
                                 success = widget.add_variable_to_plot(
                                     var_name,
                                     skip_existence_check=True,
@@ -10113,8 +10199,7 @@ class MainWindow(QMainWindow):
                                 )
                                 if success:
                                     curves_added += 1
-                                    # 保存原来的可见性状态，稍后恢复
-                                    visibility_to_restore[var_name] = curve_info.get('visible', True)
+                                    visibility_to_restore[var_name] = ci.visible
                         
                         # 更新多曲线模式状态
                         widget.update_multi_curve_mode()
@@ -10122,11 +10207,11 @@ class MainWindow(QMainWindow):
                         # 恢复所有曲线的可见性状态（在update_multi_curve_mode之后）
                         for var_name, original_visible in visibility_to_restore.items():
                             if var_name in widget.curves:
-                                widget.curves[var_name]['visible'] = original_visible
+                                widget.curves[var_name].visible = original_visible
                                 # 更新曲线对象的可见性
-                                if 'curve' in widget.curves[var_name]:
+                                if widget.curves[var_name].curve is not None:
                                     try:
-                                        widget.curves[var_name]['curve'].setVisible(original_visible)
+                                        widget.curves[var_name].curve.setVisible(original_visible)
                                     except Exception:
                                         pass
                         
@@ -10409,12 +10494,12 @@ class PlotVariableEditorDialog(QDialog):
         
         # 显示状态复选框 - 使用QCheckBox控件
         checkbox = QCheckBox()
-        checkbox.setChecked(curve_info.get('visible', True))
+        checkbox.setChecked(curve_info.visible)
         checkbox.stateChanged.connect(lambda state, name=var_name: self._on_checkbox_changed(name, state))
         self.var_table.setCellWidget(row, 0, checkbox)
         
         # 获取可见性状态
-        is_visible = curve_info.get('visible', True)
+        is_visible = curve_info.visible
         
         # 变量名和单位
         unit = self.plot_widget.units.get(var_name, '')
@@ -10425,7 +10510,7 @@ class PlotVariableEditorDialog(QDialog):
         self.var_table.setItem(row, 1, name_item)
         
         # 颜色 - 使用QWidget显示真实颜色
-        color = curve_info.get('color', 'blue')
+        color = curve_info.color
         color_widget = QWidget()
         color_widget.setStyleSheet(f"background-color: {color}; border: 1px solid #333;")
         color_widget.setFixedSize(30, 20)
@@ -10443,10 +10528,10 @@ class PlotVariableEditorDialog(QDialog):
         
         # 更新曲线可见性
         if self.plot_widget.curves and var_name in self.plot_widget.curves:
-            self.plot_widget.curves[var_name]['visible'] = is_visible
-            curve_info = self.plot_widget.curves[var_name]
-            if 'curve' in curve_info:
-                curve_obj = curve_info['curve']
+            self.plot_widget.curves[var_name].visible = is_visible
+            ci = self.plot_widget.curves[var_name]
+            if ci.curve is not None:
+                curve_obj = ci.curve
                 curve_obj.setVisible(is_visible)
             self.plot_widget.update_legend()
         elif not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name:
@@ -10470,15 +10555,14 @@ class PlotVariableEditorDialog(QDialog):
         
         if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
             # 多曲线模式：更新curves字典中的可见性
-            self.plot_widget.curves[var_name]['visible'] = is_visible
+            self.plot_widget.curves[var_name].visible = is_visible
             
             # 更新曲线显示
-            curve_info = self.plot_widget.curves[var_name]
-            if 'curve' in curve_info:
+            ci = self.plot_widget.curves[var_name]
+            if ci.curve is not None:
                 try:
-                    # 检查曲线对象是否仍然有效
-                    if curve_info['curve'].scene() is not None:
-                        curve_info['curve'].setVisible(is_visible)
+                    if ci.curve.scene() is not None:
+                        ci.curve.setVisible(is_visible)
                     else:
                         # 曲线对象已经不在scene中，重新创建
                         self.plot_widget._recreate_curve(var_name)
@@ -10542,15 +10626,15 @@ class PlotVariableEditorDialog(QDialog):
             
             if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
                 # 多曲线模式：从curves字典中移除
-                curve_info = self.plot_widget.curves[var_name]
-                if 'curve' in curve_info and curve_info['curve'].scene() is not None:
-                    self.plot_widget.plot_item.removeItem(curve_info['curve'])
+                ci = self.plot_widget.curves[var_name]
+                if ci.curve is not None and ci.curve.scene() is not None:
+                    self.plot_widget.plot_item.removeItem(ci.curve)
                 del self.plot_widget.curves[var_name]
             elif var_name in self.plot_widget.curves:
                 # 单曲线模式但曲线在curves字典中：从curves字典中移除
-                curve_info = self.plot_widget.curves[var_name]
-                if 'curve' in curve_info and curve_info['curve'].scene() is not None:
-                    self.plot_widget.plot_item.removeItem(curve_info['curve'])
+                ci = self.plot_widget.curves[var_name]
+                if ci.curve is not None and ci.curve.scene() is not None:
+                    self.plot_widget.plot_item.removeItem(ci.curve)
                 del self.plot_widget.curves[var_name]
             elif not self.plot_widget.is_multi_curve_mode and var_name == self.plot_widget.y_name:
                 # 单曲线模式：清除整个plot
@@ -10608,9 +10692,9 @@ class PlotVariableEditorDialog(QDialog):
             # 清空所有曲线
             if self.plot_widget.is_multi_curve_mode:
                 # 多曲线模式：清空curves字典
-                for var_name, curve_info in list(self.plot_widget.curves.items()):
-                    if 'curve' in curve_info and curve_info['curve'].scene() is not None:
-                        self.plot_widget.plot_item.removeItem(curve_info['curve'])
+                for var_name, ci in list(self.plot_widget.curves.items()):
+                    if ci.curve is not None and ci.curve.scene() is not None:
+                        self.plot_widget.plot_item.removeItem(ci.curve)
                 self.plot_widget.curves.clear()
             else:
                 # 单曲线模式：清空整个plot
@@ -10656,10 +10740,10 @@ class PlotVariableEditorDialog(QDialog):
         """将指定变量的颜色更新为给定颜色"""
         updated = False
         if self.plot_widget.curves and var_name in self.plot_widget.curves:
-            curve_info = self.plot_widget.curves[var_name]
-            curve_info['color'] = color_name
-            if 'curve' in curve_info and curve_info['curve'] is not None:
-                curve_obj = curve_info['curve']
+            ci = self.plot_widget.curves[var_name]
+            ci.color = color_name
+            if ci.curve is not None:
+                curve_obj = ci.curve
                 old_pen = curve_obj.opts.get('pen')
                 width = DEFAULT_LINE_WIDTH
                 if hasattr(old_pen, 'widthF'):
