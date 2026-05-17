@@ -5401,7 +5401,7 @@ class MainWindow(QMainWindow):
         try:
             ext = os.path.splitext(file_path)[1].lower()
             if ext in ('.mf4', '.mdf', '.dat'):
-                from mdf_loader import MDFDataLoader
+                from src.data.mdf_loader import MDFDataLoader
                 loader = MDFDataLoader(file_path)
             else:
                 loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,

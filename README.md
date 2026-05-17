@@ -62,7 +62,9 @@ csv_plot/
 ├── csv_plot_pyqt6.py            # 主入口（~6600 行，3 个核心类）
 ├── pyproject.toml               # 项目依赖与构建配置
 ├── README.md
-├── mdf_loader.py                # MDF 文件加载器（MDFDataLoader）
+├── scripts/                     # 打包脚本
+│   ├── build_exe_pyinstaller
+│   └── build_exe_nuitka
 ├── assets/                      # 图标资源
 │   ├── icon.png
 │   ├── icon.ico
@@ -76,7 +78,8 @@ csv_plot/
     │   ├── types.py             # AutoDetectError / FormatInfo / CurveInfo 数据类型
     │   └── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
     ├── data/
-    │   └── loader.py            # FastDataLoader CSV 加载 + DataLoadThread 后台线程
+    │   ├── loader.py            # FastDataLoader CSV 加载 + DataLoadThread 后台线程
+    │   └── mdf_loader.py        # MDFDataLoader MDF4/DAT 加载 + 枚举通道支持
     └── ui/
         ├── drag_drop.py         # 拖放解析（parse_var_names / build_mimedata / create_pixmap）
         ├── table_dialog.py      # DataTableDialog + PandasTableModel + CustomDelegate + XYScatterPlotDialog
@@ -125,27 +128,44 @@ csv_plot/
 
 ### 打包为独立应用
 
-**PyInstaller**
+项目提供了 `scripts/` 目录下的打包脚本，可直接运行：
 
 ```bash
-# 单文件模式
-pyinstaller csv_plot_pyqt6.py --onefile --name csv_plot_pyqt6 --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "README.md;." --noconsole
+# PyInstaller（单目录模式，启动快）
+bash scripts/build_exe_pyinstaller
 
-# 单目录模式（启动更快）
-pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "README.md;." --noconsole
+# Nuitka（编译为原生可执行文件，性能更高）
+bash scripts/build_exe_nuitka
 ```
 
-**Nuitka**（更高的运行性能，更小的体积）
+**PyInstaller 手动命令**
 
 ```bash
-# 单文件模式
-nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=assets/icon.ico --enable-plugin=pyqt6 --include-data-file=assets/icon.ico=assets --include-data-file=README.md=. csv_plot_pyqt6.py
-
-# 单目录模式（编译更快，启动更快）
-nuitka --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=assets/icon.ico --enable-plugin=pyqt6 --include-data-file=assets/icon.ico=assets --include-data-file=README.md=. csv_plot_pyqt6.py
+# 单目录模式（推荐）
+pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 \
+    --icon assets/icon.ico \
+    --add-data "assets/icon.ico;assets" \
+    --add-data "assets/icon.icns;assets" \
+    --add-data "assets/icon.png;assets" \
+    --add-data "README.md;." \
+    --noconsole --clean --noconfirm
 ```
 
-> **提示**：Nuitka 会将 Python 代码编译为 C 并链接为原生可执行文件，运行时无需 Python 环境。首次编译较慢（约 5-15 分钟），建议开发调试用 PyInstaller，正式发布用 Nuitka。
+**Nuitka 手动命令**
+
+```bash
+# 单目录模式
+nuitka --standalone --output-filename=csv_plot_pyqt6 \
+    --enable-plugin=pyqt6 \
+    --windows-icon-from-ico=assets/icon.ico \
+    --include-data-file=assets/icon.ico=assets \
+    --include-data-file=assets/icon.icns=assets \
+    --include-data-file=assets/icon.png=assets \
+    --include-data-file=README.md=. \
+    csv_plot_pyqt6.py
+```
+
+> **提示**：PyInstaller 快速但体积大；Nuitka 编译为原生代码，运行性能和启动速度更优，首次编译约 5-15 分钟，建议开发调试用 PyInstaller，正式发布用 Nuitka。
 
 ## 使用指南
 
