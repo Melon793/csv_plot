@@ -28,12 +28,14 @@ class GroupData:
         time_channel_name: 主通道名称（如 "time", "t"）
         signals: 信号名 → 信号值数组的映射
         units: 信号名 → 单位的映射
+        text_labels: 枚举类型通道的映射表 {channel_name: {raw_int: text_label}}
     """
     index: int
     time_values: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     time_channel_name: str = ""
     signals: dict[str, np.ndarray] = field(default_factory=dict)
     units: dict[str, str] = field(default_factory=dict)
+    text_labels: dict[str, dict[int, str]] = field(default_factory=dict)
 
     @property
     def var_names(self) -> list[str]:
@@ -137,6 +139,80 @@ class MDFDataLoader:
         except (ValueError, TypeError):
             return series.to_numpy(dtype=object).copy()
 
+    @staticmethod
+    def _decode_bytes(value):
+        """递归解码 bytes 为 str，用于清洗 MDF 枚举标签"""
+        if isinstance(value, bytes):
+            return value.decode('utf-8', errors='replace')
+        if isinstance(value, (list, tuple)):
+            return type(value)(MDFDataLoader._decode_bytes(v) for v in value)
+        return value
+
+    @staticmethod
+    def _build_enum_maps(ch) -> tuple:
+        """从 channel 的 conversion 构建枚举映射表。
+
+        支持 asammdf 8.x (ChannelConversion with text_N) 和
+        旧版 asammdf (ValueToTextConversion with val_to_text)。
+
+        Returns:
+            (val_to_text: dict[int, str]|None, text_to_val: dict[bytes, int]|None)
+        """
+        conv = ch.conversion
+        if conv is None:
+            return None, None
+
+        ct = getattr(conv, 'conversion_type', None)
+        if ct in (9, 10, 11):
+            val_to_text: dict[int, str] = {}
+            text_to_val: dict[bytes, int] = {}
+            for i in range(256):
+                text_attr = f'text_{i}'
+                val_attr = f'param_val_{i}'
+                if not hasattr(conv, text_attr):
+                    break
+                try:
+                    text_val_raw = getattr(conv, text_attr)
+                    param_val = getattr(conv, val_attr)
+                except Exception:
+                    break
+                if text_val_raw is None or param_val is None:
+                    break
+                text_clean = text_val_raw.rstrip(b'\x00')
+                int_val = int(param_val)
+                val_to_text[int_val] = text_clean.decode('utf-8', errors='replace')
+                text_to_val[text_clean] = int_val
+            if val_to_text:
+                return val_to_text, text_to_val
+            return None, None
+
+        if hasattr(conv, 'val_to_text') and conv.val_to_text:
+            val_to_text: dict[int, str] = {}
+            text_to_val: dict[bytes, int] = {}
+            for int_key, label_val in conv.val_to_text.items():
+                decoded = MDFDataLoader._decode_bytes(label_val)
+                val_to_text[int(int_key)] = decoded
+                if isinstance(label_val, bytes):
+                    text_to_val[label_val.rstrip(b'\x00')] = int(int_key)
+                else:
+                    text_to_val[str(label_val).encode('utf-8')] = int(int_key)
+            return val_to_text, text_to_val
+
+        return None, None
+
+    @staticmethod
+    def _convert_enum_column(col_series, text_to_val: dict[bytes, int]) -> np.ndarray:
+        """将枚举列的 bytes/str 值转换为整数 numpy 数组，用于绘图。
+
+        未匹配的值映射为 -1。
+        """
+        result = np.full(len(col_series), -1.0, dtype=np.float64)
+        col_arr = col_series.values
+        for raw_key, int_val in text_to_val.items():
+            mask = (col_arr == raw_key)
+            result[mask] = float(int_val)
+        return result
+
     def _load_groups(self):
         """使用 asammdf 解析 MDF 文件，填充 self._groups"""
         try:
@@ -167,17 +243,26 @@ class MDFDataLoader:
 
                 signals: dict[str, np.ndarray] = {}
                 units: dict[str, str] = {}
+                text_labels: dict[str, dict[int, str]] = {}
 
-                for col in group_df.columns:
-                    arr = self._safe_to_numpy(group_df[col])
-                    signals[col] = arr
+                enum_channel_names: set[str] = set()
+                enum_channel_maps: dict[str, tuple[dict[int, str], dict[bytes, int]]] = {}
+                channel_obj_map: dict[str, object] = {}
 
                 if hasattr(group_obj, 'channels') and group_obj.channels:
                     for ch in group_obj.channels:
+                        channel_obj_map[ch.name] = ch
+
+                        v2t_map, t2v_map = self._build_enum_maps(ch)
+                        if v2t_map:
+                            enum_channel_names.add(ch.name)
+                            text_labels[ch.name] = v2t_map
+                            enum_channel_maps[ch.name] = (v2t_map, t2v_map)
+
                         unit_val = None
                         if ch.unit and ch.unit.strip():
                             unit_val = ch.unit.strip()
-                        elif hasattr(ch, 'conversion') and ch.conversion is not None:
+                        elif ch.conversion is not None:
                             conv_unit = getattr(ch.conversion, 'unit', None)
                             if conv_unit and conv_unit.strip():
                                 unit_val = conv_unit.strip()
@@ -188,10 +273,19 @@ class MDFDataLoader:
                             or ch.name == "time"
                             and time_channel_name in ("time", "timestamps")
                         )
-                        if ch.name in signals or is_time_channel:
+                        if ch.name in group_df.columns or is_time_channel:
                             units[ch.name] = unit_val
                             if is_time_channel and ch.name != time_channel_name:
                                 units[time_channel_name] = unit_val
+
+                for col in group_df.columns:
+                    if col in enum_channel_names:
+                        _v2t, t2v_map = enum_channel_maps[col]
+                        signals[col] = self._convert_enum_column(
+                            group_df[col], t2v_map
+                        )
+                    else:
+                        signals[col] = self._safe_to_numpy(group_df[col])
 
                 for col in group_df.columns:
                     if col not in units:
@@ -203,6 +297,7 @@ class MDFDataLoader:
                     time_channel_name=time_channel_name,
                     signals=signals,
                     units=units,
+                    text_labels=text_labels,
                 )
                 self._groups.append(gd)
 
@@ -374,7 +469,7 @@ class MDFDataLoader:
         return dict(self._aggregated_validity)
 
     def get_value_from_name(self, display_name: str):
-        """通过聚合变量名获取变量的 (x_data, y_data, unit)。
+        """通过聚合变量名获取变量的 (x_data, y_data, unit, text_labels)。
 
         支持跨 Group 查找，无需手动切换 Group。
 
@@ -382,7 +477,10 @@ class MDFDataLoader:
             display_name: 聚合变量名（可能含 _G{index} 冲突后缀）
 
         Returns:
-            (x_data: np.ndarray, y_data: np.ndarray, unit: str)
+            (x_data: np.ndarray, y_data: np.ndarray, unit: str,
+             text_labels: dict[int, str] | None)
+            text_labels 仅对枚举转换通道返回 {raw_int: text_label}，
+            普通通道返回 {}。
 
         Raises:
             KeyError: 变量不存在
@@ -391,7 +489,8 @@ class MDFDataLoader:
         pure_name = self._resolve_pure_column_name(display_name)
         gd = self._groups[group_index]
         y_data = gd.signals[pure_name]
-        return time_values, y_data, unit
+        text_map = gd.text_labels.get(pure_name, {})
+        return time_values, y_data, unit, text_map
 
     def get_series(self, display_name: str) -> pd.Series:
         """通过聚合变量名获取变量的 pandas Series。
