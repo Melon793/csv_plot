@@ -5122,7 +5122,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             idx = np.argmin(np.abs(x_data - x))
             y_val = y_data[idx]
             x_str = self._significant_decimal_format_str(value=float(x),ref=self.factor)
-            if self.y_format == 's':
+            if self.y_format == 'enum':
+                window = self.window()
+                enum_map = getattr(window, '_enum_text_maps', {}).get(self.y_name, {})
+                y_str = enum_map.get(int(y_val), str(y_val))
+                self.update_right_header(f"x={x_str}, y={y_str}")
+            elif self.y_format == 's':
                 time_str=self.sInt_to_fmtStr(y_val)
                 self.update_right_header(f"x={x_str}, y={time_str}")
             elif self.y_format == 'date':
@@ -5521,13 +5526,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 for var_name, ci in self.curves.items():
                     if not ci.visible:
                         continue
+                    window = self.window()
                     curves_to_process.append({
                         "var_name": var_name,
                         "x_data": ci.x_data,
                         "y_data": ci.y_data,
                         "color": ci.color,
                         "y_format": ci.y_format,
-                        "unit": self.units.get(var_name, "")
+                        "unit": self.units.get(var_name, ""),
+                        "enum_map": getattr(window, '_enum_text_maps', {}).get(var_name, {})
                     })
             elif not self.is_multi_curve_mode and self.curve and self.y_name:
                 x_data, y_data = self.curve.getData()
@@ -5540,13 +5547,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                                 curve_color = pen.color().name()
                     except Exception:
                         pass
+                    window = self.window()
                     curves_to_process.append({
                         "var_name": self.y_name,
                         "x_data": x_data,
                         "y_data": y_data,
                         "color": curve_color,
                         "y_format": self.y_format,
-                        "unit": self.units.get(self.y_name, "")
+                        "unit": self.units.get(self.y_name, ""),
+                        "enum_map": getattr(window, '_enum_text_maps', {}).get(self.y_name, {})
                     })
 
             for x in x_positions:
@@ -5581,7 +5590,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     if y_val < y_min or y_val > y_max:
                         continue
 
-                    if y_format == "s":
+                    if y_format == "enum":
+                        enum_map = curve_data.get("enum_map", {})
+                        y_str = enum_map.get(int(y_val), str(y_val))
+                    elif y_format == "s":
                         y_str = self.sInt_to_fmtStr(y_val)
                     elif y_format == "date":
                         y_str = self.dateInt_to_fmtStr(y_val)
@@ -6127,6 +6139,27 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 raw_values = self.data[var_name]
         else:
             raw_values = self.data[var_name]
+
+        if (
+            main_window is not None
+            and hasattr(main_window, 'loader')
+            and main_window.loader is not None
+            and hasattr(main_window.loader, 'get_value_from_name')
+            and hasattr(main_window.loader, '_groups')
+        ):
+            try:
+                _, _, _, text_map = main_window.loader.get_value_from_name(var_name)
+                if text_map:
+                    y_values = raw_values
+                    y_format = 'enum'
+                    if not hasattr(main_window, '_enum_text_maps'):
+                        main_window._enum_text_maps = {}
+                    main_window._enum_text_maps[var_name] = text_map
+                    main_window.value_cache[var_name] = (y_values, y_format)
+                    return y_values, y_format
+            except KeyError:
+                pass
+
         dtype_kind = raw_values.dtype.kind
         y_values = None
         y_format = 'number'
@@ -6486,7 +6519,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             main_window = self.window()
             if main_window and hasattr(main_window, 'loader') and hasattr(main_window.loader, 'get_value_from_name'):
                 try:
-                    x_array, _, _ = main_window.loader.get_value_from_name(var_name)
+                    x_array, _, _, _ = main_window.loader.get_value_from_name(var_name)
                     x_array = x_array[:len(y_array)]
                 except KeyError:
                     x_array = self._get_x_data_for_variable(len(y_array))
