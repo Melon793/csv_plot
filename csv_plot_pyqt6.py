@@ -1,27 +1,30 @@
 from __future__ import annotations
 import sys
 import os
-import weakref
 import subprocess
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import logging
-import faulthandler
-import signal
-import threading
-from threading import Lock
-import traceback
 from typing import Any
 
 from src.ui.drag_drop import (VAR_SEPARATOR,parse_var_names_from_mimedata,build_var_mimedata,create_drag_pixmap)
 from src.ui.widgets.custom_viewbox import CustomViewBox
-from src.core.config import (DEBUG_LOG_ENABLED,debug_log,safe_callback,_install_faulthandler,_log_uncaught_exception,_threading_exception_logger,_qt_message_handler,install_global_debug_hooks,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS,FROZEN_VIEW_WIDTH_DEFAULT,XRANGE_THRESHOLD_FOR_SYMBOLS,BLINK_PULSE,FACTOR_SCROLL_ZOOM,MIN_INDEX_LENGTH,DEFAULT_LINE_WIDTH,THICK_LINE_WIDTH,THIN_LINE_WIDTH,UI_DEBOUNCE_DELAY_MS,PLOT_ROW_MAX_DEFAULT,PLOT_COL_MAX_DEFAULT,PLOT_ROW_CURRENT_DEFAULT,PLOT_COL_CURRENT_DEFAULT,FLOAT32_SAFE_MAX,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety,DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (
+    DEBUG_LOG_ENABLED, debug_log, safe_callback, install_global_debug_hooks,
+    DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y,
+    FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS,
+    XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH,
+    DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH,
+    UI_DEBOUNCE_DELAY_MS,
+    PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT,
+    PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
+    _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL,
+)
 from src.core.types import AutoDetectError,FormatInfo,CurveInfo
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.data.loader import FastDataLoader,DataLoadThread
-from src.ui.table_dialog import DataTableDialog, PandasTableModel, CustomDelegate, DropOverlay, XYScatterPlotDialog
-from src.ui.variable_list import MyTableWidget, NoHoverDelegate
+from src.ui.table_dialog import DataTableDialog, DropOverlay
+from src.ui.variable_list import MyTableWidget
 from src.ui.mark_stats import MarkStatsWindow
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 from src.ui.dialogs.help import HelpDialog
@@ -4045,13 +4048,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 使用共用方法计算索引范围
             index_range_width, visible_points = self._calculate_visible_points(range)
 
-            # 基于索引范围宽度判断样式：阈值根据全局最大密度动态调整
+            # 基于索引范围宽度判断样式：阈值根据全局最大密度和列数动态调整
             main_window = self.window()
             density = getattr(main_window, '_global_max_density', 0.0) if main_window else 0.0
+            ncols = getattr(main_window, '_plot_col_current', 1) if main_window else 1
             if density > 0:
                 effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
             else:
                 effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS
+            effective_threshold /= max(1, ncols)
             show_symbols = index_range_width < effective_threshold
 
             # 应用样式到所有曲线
