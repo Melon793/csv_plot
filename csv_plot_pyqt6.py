@@ -3,7 +3,6 @@ import sys
 import os
 import weakref
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -11,8 +10,17 @@ import logging
 import faulthandler
 import signal
 import threading
+from threading import Lock
 import traceback
 from typing import Any
+
+from src.ui.drag_drop import (VAR_SEPARATOR,parse_var_names_from_mimedata,build_var_mimedata,create_drag_pixmap)
+from src.ui.widgets.custom_viewbox import CustomViewBox
+from src.core.config import (DEBUG_LOG_ENABLED,debug_log,safe_callback,_install_faulthandler,_log_uncaught_exception,_threading_exception_logger,_qt_message_handler,install_global_debug_hooks,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS,FROZEN_VIEW_WIDTH_DEFAULT,XRANGE_THRESHOLD_FOR_SYMBOLS,BLINK_PULSE,FACTOR_SCROLL_ZOOM,MIN_INDEX_LENGTH,DEFAULT_LINE_WIDTH,THICK_LINE_WIDTH,THIN_LINE_WIDTH,UI_DEBOUNCE_DELAY_MS,PLOT_ROW_MAX_DEFAULT,PLOT_COL_MAX_DEFAULT,PLOT_ROW_CURRENT_DEFAULT,PLOT_COL_CURRENT_DEFAULT,FLOAT32_SAFE_MAX,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety)
+from src.core.types import AutoDetectError,FormatInfo,CurveInfo
+from src.core.scheduler import UnifiedUpdateScheduler
+from src.data.loader import FastDataLoader,DataLoadThread
+from src.app.plot_context import PlotContext
 
 if sys.platform == "darwin":  # macOS
     # 屏蔽 macOS ICC 警告
@@ -30,7 +38,6 @@ from PyQt6.QtWidgets import (
     QColorDialog, QCheckBox
 )
 import pyqtgraph as pg
-from threading import Lock
 DEBUG_LOG_ENABLED = False  # 临时排查日志开关
 # X轴标签显示控制
 DEFAULT_SHOW_X_AXIS_LABEL = False
@@ -39,267 +46,7 @@ if DEBUG_LOG_ENABLED and not _DEBUG_LOGGER.handlers:
     _DEBUG_LOGGER.setLevel(logging.DEBUG)
     _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csv_plot_debug.log")
     _log_handler = logging.FileHandler(_log_path, encoding="utf-8")
-    _log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    _DEBUG_LOGGER.addHandler(_log_handler)
-else:
-    _DEBUG_LOGGER.addHandler(logging.NullHandler())
 
-_FAULTHANDLER_FILE = None
-_ORIGINAL_EXCEPTHOOK = sys.excepthook
-_ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
-_QT_MESSAGE_HANDLER_INSTALLED = False
-
-
-def debug_log(message: str, *args) -> None:
-    """简单封装，方便随处开关调试日志"""
-    if not DEBUG_LOG_ENABLED:
-        return
-    try:
-        _DEBUG_LOGGER.debug(message, *args)
-    except Exception:
-        pass
-
-
-def safe_callback(func):
-    """
-    装饰器：捕获回调中的异常，防止崩溃
-
-    【稳定性优化】用于保护关键的信号回调函数，防止因对象已销毁等原因导致的崩溃。
-    特别处理RuntimeError（C++对象已删除）和AttributeError。
-
-    【开发模式】当DEBUG_LOG_ENABLED=True时，所有异常都会被打印到控制台，便于调试。
-    """
-    from functools import wraps
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except RuntimeError as e:
-            # C++对象已删除
-            err_msg = str(e).lower()
-            if "deleted" in err_msg or "wrapped" in err_msg or "c++ object" in err_msg:
-                debug_log("%s skipped: object deleted", func.__name__)
-                return None
-            raise
-        except (AttributeError, TypeError) as e:
-            # 属性访问错误或参数类型错误（对象可能部分销毁，或信号参数不匹配）
-            if DEBUG_LOG_ENABLED:
-                # 开发模式：打印详细错误信息到控制台
-                print(f"[safe_callback] {func.__name__} error: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-            debug_log("%s error: %s", func.__name__, e)
-            return None
-        except Exception as e:
-            if DEBUG_LOG_ENABLED:
-                # 开发模式：打印详细错误信息到控制台
-                print(f"[safe_callback] {func.__name__} unexpected error: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-            debug_log("%s unexpected error: %s", func.__name__, e)
-            return None
-    return wrapper
-
-
-def _install_faulthandler() -> None:
-    """启用 faulthandler 并记录 native crash。"""
-    global _FAULTHANDLER_FILE
-    if not DEBUG_LOG_ENABLED or _FAULTHANDLER_FILE is not None:
-        return
-    try:
-        log_dir = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(log_dir, "csv_plot_faulthandler.log")
-        _FAULTHANDLER_FILE = open(path, "a", encoding="utf-8")
-        faulthandler.enable(_FAULTHANDLER_FILE, all_threads=True)
-        for sig in (signal.SIGSEGV, signal.SIGFPE, signal.SIGABRT, signal.SIGILL):
-            try:
-                faulthandler.register(sig, file=_FAULTHANDLER_FILE, all_threads=True, chain=True)
-            except (ValueError, OSError):
-                continue
-        debug_log("Faulthandler enabled at %s", path)
-    except Exception as exc:
-        debug_log("Failed to enable faulthandler: %s", exc)
-
-
-def _log_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
-    formatted = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    debug_log("Uncaught exception:\n%s", formatted)
-    if _ORIGINAL_EXCEPTHOOK:
-        _ORIGINAL_EXCEPTHOOK(exc_type, exc_value, exc_traceback)
-
-
-def _threading_exception_logger(args):
-    formatted = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
-    thread_name = getattr(args.thread, "name", "unknown")
-    debug_log("Thread %s crashed:\n%s", thread_name, formatted)
-    if _ORIGINAL_THREADING_EXCEPTHOOK:
-        _ORIGINAL_THREADING_EXCEPTHOOK(args)
-
-
-def _qt_message_handler(mode, context, message):
-    level_map = {
-        QtMsgType.QtDebugMsg: "DEBUG",
-        QtMsgType.QtInfoMsg: "INFO",
-        QtMsgType.QtWarningMsg: "WARNING",
-        QtMsgType.QtCriticalMsg: "CRITICAL",
-        QtMsgType.QtFatalMsg: "FATAL",
-    }
-    location = ""
-    if context and context.file:
-        location = f"{context.file}:{context.line}"
-    elif context and context.category:
-        location = context.category
-    debug_log("QtMsg[%s] %s %s", level_map.get(mode, str(mode)), message, location)
-
-
-def install_global_debug_hooks(app: QApplication) -> None:
-    """一次性安装崩溃/日志钩子，便于定位 native 问题。"""
-    if not DEBUG_LOG_ENABLED:
-        return
-    _install_faulthandler()
-    if sys.excepthook is not _log_uncaught_exception:
-        sys.excepthook = _log_uncaught_exception
-    if hasattr(threading, "excepthook") and threading.excepthook is not _threading_exception_logger:
-        threading.excepthook = _threading_exception_logger
-    global _QT_MESSAGE_HANDLER_INSTALLED
-    if not _QT_MESSAGE_HANDLER_INSTALLED:
-        qInstallMessageHandler(_qt_message_handler)
-        _QT_MESSAGE_HANDLER_INSTALLED = True
-    try:
-        app.aboutToQuit.connect(lambda: debug_log("QApplication.aboutToQuit emitted"))
-    except Exception as exc:
-        debug_log("Failed to connect aboutToQuit: %s", exc)
-
-
-DEFAULT_PADDING_VAL_X = 0.05 # 默认x轴padding，单位为plot宽度   
-DEFAULT_PADDING_VAL_Y = 0.1 # 默认y轴padding，单位为plot高度
-FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
-RATIO_RESET_PLOTS = 0.3 # 重置plot比例，超过此比例时，重置plot
-FROZEN_VIEW_WIDTH_DEFAULT = 180 # 冻结视图宽度，默认值为180px
-XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol
-BLINK_PULSE = 200
-FACTOR_SCROLL_ZOOM = 0.3
-MIN_INDEX_LENGTH = 3 # 每个plot，至少显示MIN_INDEX_LENGTH个点
-DEFAULT_LINE_WIDTH = 2 # 默认线宽
-THICK_LINE_WIDTH = 2 # 粗线宽
-THIN_LINE_WIDTH = 1 # 细线宽
-UI_DEBOUNCE_DELAY_MS = 50 # UI事件防抖延迟时间
-# 默认绘图布局配置
-PLOT_ROW_MAX_DEFAULT = 4
-PLOT_COL_MAX_DEFAULT = 3
-PLOT_ROW_CURRENT_DEFAULT = 3
-PLOT_COL_CURRENT_DEFAULT = 1
-
-FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
-
-# 单位行自动检测阈值
-UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判定为单位行
-VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判定为数据行
-
-# 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
-_UNIT_KEYWORDS = [
-    'm', 's', 'g', 'A', 'K', 'mol', 'cd',
-    'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar', 'm2', '/min', '/h', 'kWh', 'mm', '°CA',
-    'L', 'm3',
-    'ppm', 'ppb', '%',
-    'rpm',
-    '℃', '°F', '°C',
-    '#/',
-]
-
-
-def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
-    """
-    判断数值是否能安全表示为 float32。
-
-    参数:
-        values: pandas Series、NumPy 数组或其他可迭代的数值序列。
-
-    返回:
-        tuple[bool, float | None]: (是否安全、绝对值最大值)
-            当数据中不存在有限值时，绝对值最大值为 None。
-    """
-    if values is None:
-        return False, None
-
-    try:
-        if isinstance(values, pd.Series):
-            arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
-        else:
-            try:
-                arr = np.asarray(values, dtype=np.float64)
-            except (ValueError, TypeError, OverflowError):
-                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64)
-    except Exception:
-        return False, None
-
-    if arr.size == 0:
-        return True, 0.0
-
-    finite_mask = np.isfinite(arr)
-    if not finite_mask.any():
-        return False, None
-
-    abs_max = float(np.max(np.abs(arr[finite_mask])))
-    return abs_max <= FLOAT32_SAFE_MAX, abs_max
-
-
-class AutoDetectError(Exception):
-    """自动检测文件格式失败，需要用户手动指定分隔符/标题行/单位行"""
-    pass
-
-
-@dataclass
-class FormatInfo:
-    """文件格式自动检测结果
-    
-    包含一次文件扫描得到的全部格式信息：编码、分隔符、标题行位置、是否包含单位行。
-    供 auto_detect() 统一入口返回，也供未来的 ImportDialog 消费。
-    """
-    encoding: str | None    # 检测到的编码名称，None 表示检测失败
-    sep: str | None         # 检测到的分隔符，None 表示检测失败
-    header_row: int         # 标题行 0-based 行号
-    hasunit: bool           # 是否包含单位行
-
-
-@dataclass
-class CurveInfo:
-    """单条曲线的元数据"""
-    var_name: str
-    curve: pg.PlotDataItem
-    x_data: np.ndarray
-    y_data: np.ndarray
-    color: str = 'blue'
-    y_format: str = ''
-    visible: bool = True
-    x_min: float = 0.0
-    x_max: float = 0.0
-    point_density: float = 0.0
-
-    def __post_init__(self):
-        """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""
-        if self.x_data is not None and len(self.x_data) > 1:
-            self.x_min = float(np.min(self.x_data))
-            self.x_max = float(np.max(self.x_data))
-            span = self.x_max - self.x_min
-            self.point_density = len(self.x_data) / span if span > 0 else 0.0
-        elif self.x_data is not None and len(self.x_data) == 1:
-            self.x_min = float(self.x_data[0])
-            self.x_max = float(self.x_data[0])
-            self.point_density = 0.0
-
-    def update_x_range(self):
-        """当 x_data 变更后调用，同步更新缓存"""
-        if self.x_data is not None and len(self.x_data) > 1:
-            self.x_min = float(np.min(self.x_data))
-            self.x_max = float(np.max(self.x_data))
-            span = self.x_max - self.x_min
-            self.point_density = len(self.x_data) / span if span > 0 else 0.0
-        elif self.x_data is not None and len(self.x_data) == 1:
-            self.x_min = float(self.x_data[0])
-            self.x_max = float(self.x_data[0])
-            self.point_density = 0.0
 
 # 主界面
 # 屏幕边距系数（用于自动选择窗口大小时，窗口不超过屏幕尺寸的比例）
@@ -343,102 +90,6 @@ if sys.platform == "win32": # Windows
 elif sys.platform == "darwin":  # macOS
     ico_path = resource_path("icon.icns")  
 
-# 窗口实例相关函数
-def get_main_window() -> MainWindow | None:
-    """
-    安全地查找并返回 MainWindow 实例
-    
-    遍历所有顶级窗口控件，查找MainWindow类型的实例
-    用于在全局范围内获取主窗口引用
-    
-    Returns:
-        MainWindow | None: 找到的主窗口实例，如果未找到则返回None
-    """
-    for widget in QApplication.topLevelWidgets():
-        if isinstance(widget, MainWindow):
-            return widget
-    return None
-
-def get_main_loader() -> FastDataLoader | None:
-    """
-    安全地查找并返回 MainWindow 的 loader 实例
-    
-    通过主窗口获取数据加载器实例，用于全局数据访问
-    提供安全的数据加载器引用获取方式
-    
-    Returns:
-        FastDataLoader | None: 找到的数据加载器实例，如果未找到则返回None
-    """
-    main_window = get_main_window()
-    if main_window and hasattr(main_window, 'loader') and main_window.loader:
-        return main_window.loader
-    return None
-
-class UnifiedUpdateScheduler(QObject):
-    """
-    统一UI更新调度器，合并style/cursor/stat等更新请求，延迟200ms批量执行避免频繁刷新
-    """
-    def __init__(self, *, delay_ms: int = UI_DEBOUNCE_DELAY_MS, order: tuple[str, ...] | None = None, parent=None):
-        super().__init__(parent)
-        self._delay_ms = max(0, delay_ms)
-        self._order = list(order) if order else []
-        self._pending: list[str] = []
-        self._callbacks: dict[str, Any] = {}
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self._flush_pending)
-
-    def register(self, name: str, callback) -> None:
-        self._callbacks[name] = callback
-
-    def schedule(self, *names: str) -> None:
-        scheduled = False
-        for name in names:
-            if name not in self._callbacks:
-                continue
-            if name not in self._pending:
-                self._pending.append(name)
-            scheduled = True
-        if scheduled:
-            self._timer.start(self._delay_ms)
-
-    def cancel(self, *names: str) -> None:
-        if not names:
-            self._pending.clear()
-            self._timer.stop()
-            return
-        remaining = [name for name in self._pending if name not in names]
-        self._pending[:] = remaining
-        if not self._pending:
-            self._timer.stop()
-
-    def run_immediately(self, *names: str) -> None:
-        tasks = list(names) if names else (self._order or list(self._pending))
-        if not tasks:
-            return
-        for name in tasks:
-            if name in self._pending:
-                self._pending.remove(name)
-            self._invoke(name)
-
-    def _flush_pending(self) -> None:
-        if not self._pending:
-            return
-        pending = self._pending.copy()
-        self._pending.clear()
-        ordered = [name for name in self._order if name in pending]
-        ordered += [name for name in pending if name not in ordered]
-        for name in ordered:
-            self._invoke(name)
-
-    def _invoke(self, name: str) -> None:
-        callback = self._callbacks.get(name)
-        if not callback:
-            return
-        try:
-            callback()
-        except Exception as e:
-            print(f"UI更新调度器执行 {name} 出错: {e}")
 
 class HelpDialog(QDialog):
     """
@@ -479,795 +130,6 @@ class HelpDialog(QDialog):
 
 
 
-class DataLoadThread(QThread):
-    """
-    数据加载线程类
-    在后台线程中异步加载CSV数据文件，避免阻塞主界面
-    通过信号机制向主线程发送加载进度和结果
-    """
-    # 信号：发送进度 0-100，或直接发 DataFrame
-    progress = pyqtSignal(int)        # 百分比
-    finished = pyqtSignal(object)     # FastDataLoader 实例
-    error = pyqtSignal(str)
-
-    def __init__(self, file_path: str, parent=None, descRows: int = 0, sep: str = ',',
-                 hasunit: bool = True, encoding: str | None = None):
-        super().__init__(parent)
-        self.file_path = file_path
-        self.descRows = descRows
-        self.sep = sep
-        self.hasunit = hasunit
-        self.encoding = encoding
-    def run(self):
-        """
-        线程执行方法
-        在后台线程中执行数据加载操作，避免阻塞主界面
-        通过信号机制向主线程发送进度更新和结果
-        """
-        debug_log("DataLoadThread.start path=%s descRows=%s sep=%s hasunit=%s",
-                  self.file_path, self.descRows, self.sep, self.hasunit)
-        try:
-            last_logged = {"value": -10}
-            def _progress_cb(progress: int):
-                if DEBUG_LOG_ENABLED:
-                    prev = last_logged["value"]
-                    if progress in (0, 100) or progress - prev >= 10:
-                        debug_log("DataLoadThread.progress path=%s value=%s",
-                                  self.file_path, progress)
-                        last_logged["value"] = progress
-                self.progress.emit(progress)
-
-            if not os.path.exists(self.file_path):
-                self.error.emit("文件不存在或已被删除")
-                return
-
-            ext = os.path.splitext(self.file_path)[1].lower()
-            if ext in ('.mf4', '.mdf', '.dat'):
-                from mdf_loader import MDFDataLoader
-                loader = MDFDataLoader(self.file_path, _progress=_progress_cb)
-            else:
-                loader = FastDataLoader(
-                    self.file_path,
-                    descRows=self.descRows,
-                    sep=self.sep,
-                    hasunit=self.hasunit,
-                    encoding=self.encoding,
-                    chunksize=3600,
-                    _progress=_progress_cb,
-                )
-            debug_log("DataLoadThread.finish path=%s datalength=%s columns=%s",
-                      self.file_path,
-                      getattr(loader, "datalength", None),
-                      len(getattr(loader, "var_names", []) or []))
-            self.finished.emit(loader)
-        except MemoryError:
-            debug_log("DataLoadThread.memory_error path=%s", self.file_path)
-            self.error.emit("内存不足，无法加载此文件。请尝试加载较小的文件。")
-        except OSError as e:
-            debug_log("DataLoadThread.os_error path=%s err=%s", self.file_path, e)
-            self.error.emit(f"文件访问错误: {e}")
-        except Exception as e:
-            debug_log("DataLoadThread.exception path=%s err=%r", self.file_path, e)
-            self.error.emit(f"加载文件时发生未知错误: {str(e)}")
-
-class FastDataLoader:
-    """
-    快速数据加载器类
-    高效加载和处理大型CSV文件，支持分块读取、数据类型推断、编码检测等功能
-    专门为大数据文件优化，提供进度回调和内存管理
-    """
-    # 脏数据清单
-    _NA_VALUES = [
-        # 空缺 / 空字符串
-        "", "NULL", "None", "NA", "N/A", "n/a", "null ",
-        # Excel / 统计缺失标记
-        "#N/A", "#N/A N/A", "#NA",
-        # IEEE NaN / 非法数值
-        "NaN", "nan", "-NaN", "-nan", "1.#IND", "-1.#IND", "1.#QNAN", "-1.#QNAN",
-        # 无穷值表示
-        "Infinity", "Inf", "inf", "plus infinity", "minus infinity", "1.#INF", "-1.#INF",
-        # 其他脏数据字符串
-        "data err", "* *", "----", "no value"
-    ]
-
-    @staticmethod
-    def _detect_sep_from_lines(lines: list[str]) -> str | None:
-        """从已读取的行列表中检测分隔符（方差法，无 I/O）
-        
-        借鉴 Excel "分列"功能原理：统计候选分隔符在各行出现的次数，
-        选择出现次数最一致（方差最小）且出现次数>0的作为分隔符。
-        
-        Args:
-            lines: 已读取的非空行列表
-            
-        Returns:
-            检测到的分隔符，无法检测时返回 None
-        """
-        candidates = [',', ';', '\t']
-        counts = {c: [] for c in candidates}
-        for line in lines:
-            for c in candidates:
-                counts[c].append(line.count(c))
-        scores = {}
-        for c in candidates:
-            vals = counts[c]
-            if not vals or all(v == 0 for v in vals):
-                scores[c] = float('inf')
-                continue
-            mean = sum(vals) / len(vals)
-            variance = sum((v - mean) ** 2 for v in vals) / len(vals)
-            scores[c] = variance
-        best = min(scores, key=lambda c: (scores[c], {';': 1, '\t': 2}.get(c, 0)))
-        if scores[best] == float('inf'):
-            return None
-        return best
-
-    @staticmethod
-    def _detect_header_from_lines(lines: list[str], sep: str) -> int:
-        """从已读取的行列表中定位标题行（非数值占比法，无 I/O）
-        
-        扫描行列表，找到第一个包含分隔符且非数值占比 > 50% 的行作为标题行。
-        
-        Args:
-            lines: 已读取的非空行列表
-            sep: 已检测到的分隔符
-            
-        Returns:
-            标题行在 lines 列表中的索引 (0-based)，未找到时返回 0
-        """
-        for idx, line in enumerate(lines):
-            if sep not in line:
-                continue
-            parts = line.split(sep)
-            if len(parts) < 2:
-                continue
-            non_numeric_count = 0
-            for cell in parts:
-                cell_stripped = cell.strip().strip('"').strip("'")
-                if not cell_stripped:
-                    continue
-                try:
-                    float(cell_stripped)
-                except (ValueError, TypeError):
-                    non_numeric_count += 1
-            total = len(parts)
-            if total > 0 and non_numeric_count / total > 0.5:
-                return idx
-        return 0
-
-    @staticmethod
-    def _detect_hasunit_from_lines(lines: list[str], sep: str, header_row: int) -> bool:
-        """从已读取的行列表中判断标题行下一行是否为单位行（无 I/O）
-        
-        检查 header_row+1 行，统计其中包含 _UNIT_KEYWORDS 中关键字的列比例。
-        比例超过 UNIT_KEYWORD_RATIO_THRESHOLD 时判定为单位行。
-        
-        Args:
-            lines: 已读取的非空行列表
-            sep: 分隔符
-            header_row: 标题行在 lines 中的索引
-            
-        Returns:
-            True 表示包含单位行
-        """
-        if header_row + 1 >= len(lines):
-            return False
-        parts = lines[header_row + 1].split(sep)
-        if len(parts) < 2:
-            return False
-        unit_hit = 0
-        total = 0
-        for cell in parts:
-            cell_stripped = cell.strip().strip('"').strip("'")
-            cell_lower = cell_stripped.lower()
-            if not cell_stripped:
-                continue
-            total += 1
-            for keyword in _UNIT_KEYWORDS:
-                if keyword.lower() in cell_lower:
-                    unit_hit += 1
-                    break
-        if total == 0:
-            return False
-        return (unit_hit / total) > UNIT_KEYWORD_RATIO_THRESHOLD
-
-    @staticmethod
-    def _auto_detect_format(file_path: str) -> FormatInfo:
-        """一次文件扫描完成编码探测 + 分隔符检测 + 标题行定位 + 单位行探测
-        
-        1. 用 charset_normalizer 读取文件前 2000 字节推断编码
-        2. 根据置信度选择回退策略（高置信度精简链、低置信度完整链）
-        3. 用正确编码打开文件，一次读取前 50 行
-        4. 在同一批行数据上依次检测分隔符→标题行→单位行
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            FormatInfo(encoding, sep, header_row, hasunit)
-            
-        Raises:
-            AutoDetectError: 文件内容不足（< 2 行）无法检测
-        """
-        from charset_normalizer import from_bytes
-        from pathlib import Path
-
-        sample_size = 2000
-        with Path(file_path).open('rb') as f:
-            raw_sample = f.read(sample_size)
-
-        result = from_bytes(raw_sample).best()
-        if result and result.encoding:
-            detected_encoding = result.encoding
-            coherence = result.coherence
-        else:
-            detected_encoding = 'utf-8'
-            coherence = 0.0
-
-        if coherence > 0.8:
-            encodings_to_try = list(dict.fromkeys([detected_encoding, 'utf-8']))
-        else:
-            encodings_to_try = list(dict.fromkeys(
-                [detected_encoding, 'utf-8', 'gb18030', 'cp1252', 'latin-1']
-            ))
-
-        lines = []
-        final_encoding = None
-        for enc in encodings_to_try:
-            try:
-                with open(file_path, 'r', encoding=enc, errors='replace') as f:
-                    for _ in range(50):
-                        line = f.readline()
-                        if not line:
-                            break
-                        stripped = line.rstrip('\n\r')
-                        if stripped.strip():
-                            lines.append(stripped)
-                        if len(lines) >= 40:
-                            break
-                final_encoding = enc
-                break
-            except (UnicodeDecodeError, UnicodeError):
-                continue
-
-        if final_encoding is None:
-            return FormatInfo(encoding=None, sep=None, header_row=0, hasunit=False)
-
-        if len(lines) < 2:
-            raise AutoDetectError(f"文件内容不足（仅 {len(lines)} 行），无法自动检测格式: {file_path}")
-
-        sep = FastDataLoader._detect_sep_from_lines(lines)
-        if sep is not None:
-            header_row = FastDataLoader._detect_header_from_lines(lines, sep)
-            hasunit = FastDataLoader._detect_hasunit_from_lines(lines, sep, header_row)
-        else:
-            header_row = 0
-            hasunit = False
-
-        return FormatInfo(encoding=final_encoding, sep=sep, header_row=header_row, hasunit=hasunit)
-
-    @staticmethod
-    def auto_detect(file_path: str) -> FormatInfo:
-        """自动检测文件格式的统一入口
-        
-        调用 _auto_detect_format() 完成一次文件扫描，返回 FormatInfo。
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            FormatInfo(encoding, sep, header_row, hasunit)
-            
-        Raises:
-            AutoDetectError: 无法自动检测文件分隔符或文件内容不足
-        """
-        fmt = FastDataLoader._auto_detect_format(file_path)
-        if fmt.sep is None:
-            raise AutoDetectError(f"无法自动检测文件分隔符: {file_path}")
-        return fmt
-
-    from typing import Callable
-    def __init__(
-        self,
-        csv_path: str ,
-        *,
-        max_rows_infer: int = 200,
-        chunksize: int | None = None,
-        usecols: list[str] | None = None,
-        drop_empty: bool = False,
-        downcast_float: bool = True,
-        descRows: int = 0,
-        sep: str = ",",
-        _progress: Callable | None = None,
-        do_parse_date: bool =False,
-        hasunit:bool = True,
-        encoding: str | None = None,
-    ):
-        """初始化快速数据加载器
-        
-        配置数据加载参数，包括文件路径、数据类型推断、分块大小等。
-        当 encoding 不为 None 时跳过编码自动检测直接使用传入编码。
-        
-        Args:
-            csv_path: CSV文件路径
-            max_rows_infer: 用于推断数据类型的最大行数
-            chunksize: 分块读取大小
-            usecols: 要读取的列名列表
-            drop_empty: 是否删除空行
-            downcast_float: 是否下转换浮点数类型
-            descRows: 描述行数量
-            sep: 分隔符
-            _progress: 进度回调函数
-            do_parse_date: 是否解析日期
-            hasunit: 是否包含单位行
-            encoding: 预检测的文件编码，为 None 时内部自动检测
-        """
-        self._path = csv_path
-        self.file_size = os.path.getsize(csv_path) 
-        self.max_rows_infer = max_rows_infer
-        self.usecols = usecols
-        self.drop_empty = drop_empty
-        self.downcast_float = downcast_float
-        self.sep = sep
-        self.descRows = descRows
-        self._progress_cb = _progress
-        self.do_parse_date=do_parse_date
-        self.hasunit=hasunit
-
-        self.time_column_name: str | None = None
-
-        self._var_names, self._units, self.encoding_used, self.hasunit = self._load_header_units(
-            self._path, desc_rows=self.descRows, usecols=self.usecols, sep=self.sep,
-            hasunit=self.hasunit, encoding=encoding
-        )
-        
-        if self._progress_cb:
-            self._progress_cb(5)
-
-        # 推断 dtype
-        sample = pd.read_csv(
-            self._path,
-            skiprows=(2 + self.descRows) if self.hasunit else (1+self.descRows),
-            nrows=self.max_rows_infer,
-            names=self._var_names,
-            encoding=self.encoding_used,
-            usecols=self.usecols,
-            low_memory=False,
-            sep=self.sep,
-            na_values=self._NA_VALUES,
-            keep_default_na=True,
-        )
-        
-        # 推断schema（包含时间格式）
-        dtype_map, parse_dates, date_formats,downcast_ratio = self._infer_schema(sample)
-        self.date_formats = date_formats
-        
-        self.sample_mem_size = sample.memory_usage(deep=True).sum()
-        self.byte_per_line = (0.6*self.sample_mem_size)/sample.shape[0]
-        self.estimated_lines = int(self.file_size/(self.byte_per_line ))
-        
-        import gc
-        del sample 
-        gc.collect()
-        if self._progress_cb:
-            self._progress_cb(15)
-            
-        # 计算 chunk 大小
-        if chunksize is None:
-            chunksize = 3600
-        
-        # 正式读取数据
-        self._df = self._read_chunks(
-            self._path,
-            dtype_map,
-            parse_dates,
-            int(chunksize),
-            sep=self.sep,
-            descRows=self.descRows,
-            hasunit=self.hasunit
-        )
-        
-        # 后处理
-        if drop_empty:
-            self._df = self._df.dropna(axis=1, how="all")
-        if downcast_float:
-            self._downcast_numeric()
-        
-        self._df_validity=self._check_df_validity()
-        
-        # 强制垃圾回收
-        gc.collect()
-        
-        if self._progress_cb:
-            self._progress_cb(100)
-
-    @staticmethod
-    def _load_header_units(
-        path: str,
-        desc_rows: int = 0,
-        usecols: list[str] | None = None,
-        sep: str = ",",
-        hasunit: bool = True,
-        encoding: str | None = None,
-    ) -> tuple[list[str], dict[str, str], str, bool]:
-        """加载CSV文件的表头和单位信息
-        
-        根据传入编码或自动检测编码读取文件头部，提取变量名和单位信息。
-        当 encoding 不为 None 时跳过编码检测直接使用传入值（保留回退链兜底）。
-        单位行检测仅作为对照校验输出 debug 日志，不再覆盖传入的 hasunit。
-        
-        Args:
-            path: CSV文件路径
-            desc_rows: 描述行数量
-            usecols: 要读取的列名列表
-            sep: 分隔符
-            hasunit: 是否包含单位行
-            encoding: 预检测的文件编码，为 None 时内部自动检测
-            
-        Returns:
-            tuple: (变量名列表, {变量名: 单位}, 最终编码, 实际使用的hasunit)
-        """
-        nrows_read = 5 if hasunit else 1
-
-        if encoding is not None:
-            # 上游已检测编码，直接使用并追加回退链兜底
-            encodings_to_try = list(dict.fromkeys([encoding, 'utf-8', 'cp1252']))
-        else:
-            # 自行检测编码
-            from charset_normalizer import from_bytes
-            from pathlib import Path
-
-            sample_size = 2000
-
-            with Path(path).open('rb') as f:
-                raw_sample = f.read(sample_size)
-
-            result = from_bytes(raw_sample).best()
-            if result and result.encoding:
-                detected_enc = result.encoding
-            else:
-                detected_enc = 'utf-8'
-
-            encodings_to_try = list(dict.fromkeys([detected_enc, 'utf-8', 'cp1252']))
-
-        for enc in encodings_to_try:
-            try:
-                df = pd.read_csv(
-                    path,
-                    skiprows=desc_rows,
-                    nrows=nrows_read,
-                    header=None,
-                    usecols=usecols,
-                    sep=sep,
-                    encoding=enc,
-                    engine="python",
-                )
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            raise RuntimeError("无法以任何可用编码读取文件")
-
-        # 单位行对照校验（不覆盖传入的 hasunit，仅输出 debug 日志）
-        actual_hasunit = hasunit
-        if hasunit and df.shape[0] >= 2:
-            row2 = df.iloc[1].fillna("").astype(str).tolist()
-
-            unit_keyword_count = 0
-            total_cols = len(row2)
-
-            for cell in row2:
-                cell_lower = str(cell).lower().strip()
-                for keyword in _UNIT_KEYWORDS:
-                    keyword_lower = keyword.lower()
-                    if keyword_lower in cell_lower:
-                        unit_keyword_count += 1
-                        break
-
-            unit_keyword_ratio = unit_keyword_count / total_cols if total_cols > 0 else 0
-
-            if unit_keyword_ratio > UNIT_KEYWORD_RATIO_THRESHOLD:
-                pass
-            else:
-                numeric_count = 0
-                valid_numeric_count = 0
-                total_cols = len(row2)
-
-                for cell in row2:
-                    cell_str = str(cell).strip()
-                    try:
-                        val = float(cell_str)
-                        numeric_count += 1
-                        if abs(val - 1.0) > 1e-9 and abs(val + 1.0) > 1e-9:
-                            valid_numeric_count += 1
-                    except (ValueError, TypeError):
-                        continue
-
-                if total_cols > 0:
-                    valid_numeric_ratio = valid_numeric_count / total_cols
-                    if valid_numeric_ratio > VALID_NUMERIC_RATIO_THRESHOLD:
-                        debug_log(
-                            "_load_header_units: 上游检测 hasunit=True，但本行单位关键字占比仅 %.1f%%、"
-                            "有效数值列比例 %.1f%%，疑似为数据行。检查文件: %s",
-                            unit_keyword_ratio * 100, valid_numeric_ratio * 100, path
-                        )
-                    else:
-                        debug_log(
-                            "_load_header_units: 上游检测 hasunit=True，但本行单位关键字占比仅 %.1f%%，"
-                            "疑似误判。检查文件: %s",
-                            unit_keyword_ratio * 100, path
-                        )
-
-        min_required_rows = 2 if actual_hasunit else 1
-        if df.shape[0] < min_required_rows:
-            raise ValueError(f"文件至少需要{min_required_rows}行")
-
-        var_names = df.iloc[0].astype(str).tolist()
-        var_names = FastDataLoader._make_unique(var_names)
-        if actual_hasunit:
-            units = dict(zip(var_names, df.iloc[1].fillna("").astype(str).tolist()))
-        else:
-            units = dict(zip(var_names, ['-'] * len(var_names)))
-        return var_names, units, enc, actual_hasunit
-
-    @staticmethod
-    def _infer_schema(sample: pd.DataFrame) -> tuple[dict[str, str], list[str], dict[str, str],float]:
-        """推断数据类型和时间格式
-        
-        优化策略：
-        1. 只对列名包含时间相关关键字的列进行时间格式推断
-        2. 使用更精简的日期格式候选列表
-        3. 对每列只采样前10行进行格式推断
-        """
-        dtype_map: dict[str, str] = {}
-        parse_dates: list[str] = []
-        date_formats: dict[str, str] = {}
-
-        # 日期格式候选列表（按优先级排序）
-        date_candidates = [
-            "%H:%M:%S.%f",   # 带微秒的时间格式（支持毫秒和微秒）
-            "%H:%M:%S",      # 时间格式
-            "%d/%m/%Y",      # 欧洲日期格式 (例: 18/11/2017)
-            "%Y/%m/%d",      # 日期格式 (例: 2024/10/31)
-            "%Y-%m-%d",      # ISO日期格式 (例: 2024-10-31)
-        ]
-        
-        # 时间列的关键字（不区分大小写）
-        time_keywords = ['time', 'date', 'datetime', 'timestamp', 'zeit', 'tmod']
-        
-        float_cols = sample.select_dtypes(include=['float', 'float64','category'])
-        downcast_ratio_est = float_cols.shape[1] / sample.shape[1] if sample.shape[1] > 0 else 0.000001
-        
-        # 【NumPy优化】批量识别numeric列和非numeric列（用于后续优化）
-        numeric_cols = sample.select_dtypes(include=['float32', 'float64', 'int', 'int32', 'int64']).columns
-        non_numeric_cols = [col for col in sample.columns if col not in numeric_cols]
-        
-        for col in sample.columns:
-            s = sample[col]
-            if s.isna().all():
-                dtype_map[col] = "category"
-                continue
-            
-            # 只对列名包含时间关键字的列进行时间格式推断
-            col_lower = col.lower()
-            is_time_candidate = any(keyword in col_lower for keyword in time_keywords)
-            
-            if is_time_candidate:
-                # 采样前10行进行格式推断
-                s_sample = s.head(10).dropna()
-                if len(s_sample) > 0:
-                    for fmt in date_candidates:
-                        try:
-                            pd.to_datetime(s_sample, format=fmt, errors="raise")
-                            parse_dates.append(col)
-                            date_formats[col] = fmt
-                            break
-                        except (ValueError, TypeError):
-                            continue
-                    else:
-                        # 不是时间格式，按数值处理
-                        if pd.api.types.is_numeric_dtype(s):
-                            is_safe, _ = _evaluate_float32_safety(s)
-                            dtype_map[col] = "float32" if is_safe else "float64"
-                        else:
-                            dtype_map[col] = "category"
-                else:
-                    dtype_map[col] = "category"
-            else:
-                # 非时间列，直接判断数值类型
-                if pd.api.types.is_numeric_dtype(s):
-                    is_safe, _ = _evaluate_float32_safety(s)
-                    dtype_map[col] = "float32" if is_safe else "float64"
-                else:
-                    dtype_map[col] = "category"
-        
-        return dtype_map, parse_dates, date_formats,downcast_ratio_est
-
-    def _read_chunks(
-        self,
-        path: str,
-        dtype_map,
-        parse_dates: list[str],
-        chunksize: int,
-        sep: None | str = ",",
-        descRows: int = 0,
-        hasunit:bool = True,
-    ) -> pd.DataFrame:
-        chunks: list[pd.DataFrame] = []
-        # do not parse date
-        if not self.do_parse_date:
-            parse_dates=[]
-        total_chunks_est = max(1, self.estimated_lines // chunksize + (1 if self.estimated_lines % chunksize else 0))
-        increment = 80 / total_chunks_est
-        
-        # 使用更小的chunk size来减少内存峰值
-        optimized_chunksize = min(chunksize, 2000)  # 限制最大chunk size
-        
-        for idx,chunk in enumerate(pd.read_csv(
-            path,
-            skiprows=(2 + descRows) if hasunit else (1+descRows),
-            names=self._var_names,
-            dtype=dtype_map,
-            parse_dates=parse_dates,
-            encoding=self.encoding_used,
-            chunksize=optimized_chunksize,
-            usecols=self.usecols,
-            low_memory=False,
-            memory_map=True,
-            sep=sep,
-            na_values=self._NA_VALUES,
-            keep_default_na=True,
-            on_bad_lines='skip'
-        )):
-            #print(f"chunksize is {chunksize}, full size {self.file_size/(1024**2):2f}Mb")
-            if self._progress_cb:
-                chunk_progress = min(80, (idx + 1) * increment)
-                self._progress_cb(15 + int(chunk_progress))
-                #print (f"progress {idx} is {bytes_read}")
-            chunks.append(chunk)
-            
-            # 每处理几个chunk就进行一次垃圾回收
-            if idx % 5 == 0:
-                import gc
-                gc.collect()
-        return pd.concat(chunks, ignore_index=True)
-
-    def _downcast_numeric(self) -> None:
-        float_cols = self._df.select_dtypes(include=["float32", "float64"]).columns
-        for col in float_cols:
-            cleaned = pd.to_numeric(self._df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
-            is_safe, _ = _evaluate_float32_safety(cleaned)
-            if is_safe:
-                self._df[col] = cleaned.astype("float32")
-            else:
-                # 当 float32 会溢出时改用 float64 保留精度
-                self._df[col] = cleaned.astype("float64", copy=False)
-
-
-    def _check_df_validity(self) -> dict:
-        validity : dict = {}
-        for col in self._df.columns:
-            # 传入列名和date_formats参数
-            validity[col] = self._classify_column(self._df[col], col, self.date_formats)
-        
-        return validity
-
-    @staticmethod
-    def _make_unique(names: list[str]) -> list[str]:
-        seen = {}
-        unique_names = []
-        for name in names:
-            if name in seen:
-                seen[name] += 1
-                new_name = f"{name}_{seen[name]}"
-            else:
-                seen[name] = 0
-                new_name = name
-            unique_names.append(new_name)
-        return unique_names
-    
-    @staticmethod
-    def _classify_column(series: pd.Series, col_name: str, date_formats: dict) -> int:
-        """
-        1: （全部可转数字，且 ≥2 个不同有效值） 或 （该列是日期格式） 或 （数据长度为1，且可转换为数字）
-        0: 数据长度>=2, 且全部可转数字，且唯一有效值
-        -1: 存在非数字（不含日期格式） 或 全部 NaN
-        
-        【NumPy优化】使用NumPy直接检查唯一值，避免Pandas的循环操作
-        """
-        # 如果该列是日期格式，则直接返回1（有效）   
-        if col_name in date_formats:
-            return 1
-
-        # 1) 先尝试整列转 float，失败直接 -1
-        try:
-            numeric = pd.to_numeric(series, errors="raise").values  # 转为NumPy array
-        except (ValueError, TypeError):
-            return -1
-
-        # 2) 【NumPy优化】用NumPy过滤NaN（兼容整数类型）
-        # 先转换为浮点类型以支持NaN检查，避免整数类型的NaN检查错误
-        if numeric.dtype.kind in 'iu':  # 整数类型
-            # 整数类型没有NaN，直接使用
-            valid = numeric
-        else:
-            # 浮点类型，需要过滤NaN
-            valid = numeric[~np.isnan(numeric)]
-        
-        if len(valid) == 0:          # 全 NaN 或空数组
-            return -1
-
-        # 数据长度为1且可转数字 → 返回1
-        if len(series) == 1:
-            return 1
-
-        # 【NumPy优化】用np.unique直接计算唯一值数量，比Pandas更快
-        unique_count = np.unique(valid).size
-        if unique_count == 1:
-            return 0
-        else:
-            return 1
-    
-    @property
-    def df(self) -> pd.DataFrame:
-        return self._df
-
-    @property
-    def units(self) -> dict[str, str]:
-        return self._units
-    
-    @property
-    def path(self) -> str:
-        return str(self._path)
-
-    @property
-    def datalength(self) -> int:
-        return self._df.shape[0]
-
-    @property
-    def default_time_values(self) -> pd.Series:
-        return pd.Series(np.arange(len(self._df)), name='index')
-
-    @property
-    def time_values(self) -> pd.Series:
-        if self.time_column_name and self.time_column_name in self._df.columns:
-            return self._df[self.time_column_name]
-        return self.default_time_values
-
-    @property
-    def time_axis_label(self) -> str:
-        if self.time_column_name:
-            unit = self._units.get(self.time_column_name, '')
-            if unit and unit != '-':
-                return f"{self.time_column_name} ({unit})"
-            return self.time_column_name
-        return "Index"
-
-    @property
-    def var_names(self) -> list[str]:
-        cols = self._df.columns.tolist()
-        if self.time_column_name and self.time_column_name in cols:
-            cols = [c for c in cols if c != self.time_column_name]
-        return cols
-    
-    @property
-    def row_count(self) -> int:
-        return len(self._df)
-    
-    @property
-    def column_count(self) -> int:
-        return len(self._df.columns)
-    
-    @property
-    def time_channels_info(self) -> dict[str, str]:
-        return self.date_formats
-    
-    @property
-    def df_validity(self) -> dict:
-        validity = dict(self._df_validity)
-        if self.time_column_name and self.time_column_name in validity:
-            del validity[self.time_column_name]
-        return validity
     
 class DropOverlay(QWidget):
     """
@@ -1556,7 +418,7 @@ class DataTableDialog(QMainWindow):
         active = QApplication.activeWindow()
         if active and isinstance(active, QMainWindow) and hasattr(active, "loader"):
             return active
-        return get_main_window()
+        return None
 
     def _resolve_loader(self):
         owner = self._get_owner_window()
@@ -1710,9 +572,7 @@ class DataTableDialog(QMainWindow):
                     return True
             elif event.type() == QEvent.Type.Drop:
                 if event.mimeData().hasText():
-                    var_names_text = event.mimeData().text()
-                    # 支持多变量拖放，用;;分隔
-                    var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+                    var_names = parse_var_names_from_mimedata(event.mimeData())
                     self.parent_dialog._handle_dropped_variables(var_names)
                     event.acceptProposedAction()
                     return True
@@ -1769,9 +629,7 @@ class DataTableDialog(QMainWindow):
 
     def dropEvent(self, event):
         self._cancel_plot_drag_indicator()
-        var_names_text = event.mimeData().text()
-        # 支持多变量拖放，用;;分隔
-        var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+        var_names = parse_var_names_from_mimedata(event.mimeData())
         self._handle_dropped_variables(var_names)
         event.acceptProposedAction()
 
@@ -3263,7 +2121,8 @@ class MyTableWidget(QTableWidget):
         # 获取 MainWindow 实例
         main_window = self.window()
         if not (main_window and hasattr(main_window, 'loader')):
-            main_window = get_main_window()
+            QMessageBox.warning(self, '错误', '未找到主窗口实例')
+            return
         loader = getattr(main_window, 'loader', None)
 
         if main_window is None:
@@ -3367,12 +2226,9 @@ class MyTableWidget(QTableWidget):
             return
         
         drag = QDrag(self)
-        mime_data = QMimeData()
-        # 用分隔符连接多个变量名
-        mime_data.setText(';;'.join(var_names))
-        drag.setMimeData(mime_data)
+        drag.setMimeData(build_var_mimedata(var_names))
 
-        preview_pixmap = self._create_drag_pixmap(var_names)
+        preview_pixmap = create_drag_pixmap(var_names, self.font())
         if preview_pixmap:
             drag.setPixmap(preview_pixmap)
             hot_spot = QPoint(preview_pixmap.width() // 2, preview_pixmap.height() // 2)
@@ -3380,43 +2236,6 @@ class MyTableWidget(QTableWidget):
 
         drag.exec(Qt.DropAction.MoveAction)
 
-    def _create_drag_pixmap(self, var_names: list[str]) -> QPixmap | None:
-        """创建拖拽时显示的变量名缩略图"""
-        if not var_names:
-            return None
-
-        font = self.font()
-        metrics = QFontMetrics(font)
-        bullet_names = [f"• {name}" for name in var_names]
-        max_visible = 8
-        display_lines = bullet_names[:max_visible]
-        if len(bullet_names) > max_visible:
-            display_lines.append(f"... 共{len(var_names)}项")
-
-        text_width = max((metrics.horizontalAdvance(line) for line in display_lines), default=80)
-        margin = 12
-        line_height = metrics.lineSpacing()
-        width = max(140, text_width + margin * 2)
-        height = line_height * len(display_lines) + margin * 2
-
-        pixmap = QPixmap(width, height)
-        pixmap.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setFont(font)
-        painter.setPen(QPen(QColor("#2b6def"), 2))
-        painter.setBrush(QColor(255, 255, 255, 240))
-        painter.drawRoundedRect(QRectF(1, 1, width - 2, height - 2), 10, 10)
-        painter.setPen(QColor("#1f1f1f"))
-
-        y = margin + metrics.ascent()
-        for line in display_lines:
-            painter.drawText(QPointF(margin, y), line)
-            y += line_height
-
-        painter.end()
-        return pixmap
 
     def mouseDoubleClickEvent(self, event):
         index = self.indexAt(event.pos())
@@ -3488,389 +2307,6 @@ class MyTableWidget(QTableWidget):
             self.setItem(row, 1, unit_item)   # 第1列：单位
             self.setItem(row, 2, index_item)  # 第2列：序号
 
-
-# 新增自定义 ViewBox 类
-class CustomViewBox(pg.ViewBox):
-    """
-    自定义视图框类
-    扩展pyqtgraph的ViewBox功能，添加自定义右键菜单
-    支持跳转到数据表格、清除图表等操作
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.context_x = None  # 记录右键点击时的 x 坐标
-        self.plot_widget = None  # 将在 DraggableGraphicsLayoutWidget 中设置
-        self.is_cursor_pinned = False  # 记录cursor是否被固定
-
-    def getMenu(self, ev):
-        # 记录鼠标位置的 x 值
-        scene_pos = ev.scenePos()
-        view_pos = self.mapSceneToView(scene_pos)
-        self.context_x = view_pos.x()
-
-        # 获取默认菜单
-        menu = super().getMenu(ev)
-        if menu is None:
-            return None
-
-        # 屏蔽 "Mouse Mode"
-        for act in menu.actions():
-            if act.text() == 'Mouse Mode':
-                act.setVisible(False)
-            elif act.text() == 'Plot Options':
-                # 子菜单下屏蔽 "Transforms"（注意：实际文本为 "Transforms"）
-                submenu = act.menu()
-                if submenu:
-                    for subact in submenu.actions():
-                        if subact.text() == 'Transforms':
-                            subact.setVisible(False)
-
-        existing_texts = [act.text() for act in menu.actions()]
-
-        # 添加新 action: "Jump to Data" (检查是否已存在以避免重复)
-        if "Jump to Data" not in existing_texts:
-            jump_act = QAction("Jump to Data", menu)
-            jump_act.triggered.connect(self.trigger_jump_to_data)
-            if menu.actions():
-                menu.insertAction(menu.actions()[0], jump_act)
-            else:
-                menu.addAction(jump_act)
-        
-        # 添加"自动调节y轴"选项（第二个位置，作用于所有plot）
-        if "Autoscale in x-Range" not in existing_texts:
-            auto_y_act = QAction("Autoscale in x-Range", menu)
-            auto_y_act.triggered.connect(self.trigger_auto_y_axis)
-            # 在Jump to Data之后插入（第二个位置）
-            if len(menu.actions()) >= 1:
-                menu.insertAction(menu.actions()[1] if len(menu.actions()) > 1 else None, auto_y_act)
-            else:
-                menu.addAction(auto_y_act)
-        
-        # 添加 Pin Cursor/Free Cursor 功能 (第三个位置，在自动调节y轴之后)
-        # 检查是否有任何plot处于pin状态
-        actions_to_remove = []
-        for action in menu.actions():
-            if action.text() in ["Pin Cursor", "Free Cursor", "Cursor Mode"]:
-                actions_to_remove.append(action)
-        for action in actions_to_remove:
-            menu.removeAction(action)
-
-        cursor_enabled = False
-        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_btn'):
-            cursor_enabled = self.plot_widget.window().cursor_btn.isChecked()
-
-        cursor_menu = QMenu("Cursor Mode", menu)
-        cursor_menu.setEnabled(cursor_enabled)
-        cursor_group = QActionGroup(cursor_menu)
-        cursor_group.setExclusive(True)
-        current_mode = "1 free cursor"
-        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_mode'):
-            current_mode = self.plot_widget.window().cursor_mode
-
-        for mode_text in ["1 free cursor", "1 anchored cursor", "2 anchored cursor"]:
-            mode_act = QAction(mode_text, cursor_menu)
-            mode_act.setCheckable(True)
-            mode_act.setChecked(mode_text == current_mode)
-            mode_act.setEnabled(cursor_enabled)
-            mode_act.triggered.connect(lambda checked, m=mode_text: self.trigger_cursor_mode(m))
-            cursor_group.addAction(mode_act)
-            cursor_menu.addAction(mode_act)
-
-        if len(menu.actions()) >= 2:
-            menu.insertMenu(menu.actions()[2] if len(menu.actions()) > 2 else None, cursor_menu)
-        else:
-            menu.addMenu(cursor_menu)
-        
-        # 添加 Cursor Value 显示/隐藏选项 (第四个位置，在Pin Cursor之后)
-        # 先移除可能存在的旧菜单项
-        actions_to_remove = []
-        for action in menu.actions():
-            if action.text() in ["Show Cursor Value", "Hide Cursor Value"]:
-                actions_to_remove.append(action)
-        for action in actions_to_remove:
-            menu.removeAction(action)
-        
-        # 检查cursor是否激活
-        cursor_enabled = False
-        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_btn'):
-            cursor_enabled = self.plot_widget.window().cursor_btn.isChecked()
-        
-        # 根据当前全局状态添加正确的菜单项
-        values_hidden = False
-        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'cursor_values_hidden'):
-            values_hidden = self.plot_widget.window().cursor_values_hidden
-        
-        if values_hidden:
-            cursor_value_act = QAction("Show Cursor Value", menu)
-            cursor_value_act.triggered.connect(self.trigger_show_cursor_value)
-        else:
-            cursor_value_act = QAction("Hide Cursor Value", menu)
-            cursor_value_act.triggered.connect(self.trigger_hide_cursor_value)
-        
-        # 只有当cursor激活时才启用此菜单项
-        cursor_value_act.setEnabled(cursor_enabled)
-        
-        # 在Pin Cursor之后插入（第四个位置）
-        if len(menu.actions()) >= 3:
-            menu.insertAction(menu.actions()[3] if len(menu.actions()) > 3 else None, cursor_value_act)
-        else:
-            menu.addAction(cursor_value_act)
-
-        # Copy Name: 每次右键都更新 enable 状态（支持单曲线/多曲线）
-        copy_act = None
-        for act in menu.actions():
-            if act.text() == "Copy Name":
-                copy_act = act
-                break
-        if copy_act is None:
-            copy_act = QAction("Copy Name", menu)
-            copy_act.triggered.connect(self.trigger_copy_name)
-            menu.addAction(copy_act)
-
-        curves = getattr(self.plot_widget, 'curves', {}) if self.plot_widget else {}
-        has_single = bool(
-            self.plot_widget
-            and getattr(self.plot_widget, 'curve', None) is not None
-            and bool(getattr(self.plot_widget, 'y_name', ''))
-        )
-        has_multi = bool(curves)
-        has_data = has_single or has_multi
-        copy_act.setEnabled(has_data)
-        
-        # 添加"绘图变量编辑器"选项
-        if "Plot Variable Editor" not in existing_texts:
-            editor_act = QAction("Plot Variable Editor", menu)
-            editor_act.triggered.connect(self.trigger_variable_editor)
-            # 检查是否有数据可以编辑
-            # has_data = bool(
-            #     self.plot_widget
-            #     and (getattr(self.plot_widget, 'curve', None) is not None
-            #          or getattr(self.plot_widget, 'curves', None))
-            # )
-            # editor_act.setEnabled(has_data)
-            menu.addAction(editor_act)
-
-        # 添加 "Adjust Height" 子菜单（调整该行所有plot的高度）
-        # 先移除可能存在的旧菜单项
-        actions_to_remove = []
-        for action in menu.actions():
-            if action.text() == "Adjust Height":
-                actions_to_remove.append(action)
-        for action in actions_to_remove:
-            menu.removeAction(action)
-        
-        main_window = self.plot_widget.window() if self.plot_widget else None
-        if main_window and hasattr(main_window, 'plot_layout'):
-            row = self._get_plot_row_index()
-            adjust_height_menu = QMenu("Adjust Height", menu)
-            percentages = [25, 50, 75, 100, 125, 150, 200, 250, 300, 400]
-            current_pct = main_window.get_row_height(row)
-
-            for pct in percentages:
-                if pct == current_pct:
-                    label = f"● {pct}%"
-                else:
-                    label = f"  {pct}%"
-                act = QAction(label, adjust_height_menu)
-                act.triggered.connect(lambda checked, p=pct: self._set_row_height(p))
-                adjust_height_menu.addAction(act)
-            
-            # 添加分隔线和重置按钮
-            adjust_height_menu.addSeparator()
-            reset_act = QAction("100% to all", adjust_height_menu)
-            reset_act.triggered.connect(lambda checked: self._set_all_row_height_to_100())
-            adjust_height_menu.addAction(reset_act)
-
-            # 在 "Plot Variable Editor" 之后插入菜单
-            insert_index = None
-            for i, action in enumerate(menu.actions()):
-                if action.text() == "Plot Variable Editor":
-                    insert_index = i + 1
-                    break
-            
-            if insert_index is not None:
-                # 在指定位置插入
-                if insert_index < len(menu.actions()):
-                    menu.insertMenu(menu.actions()[insert_index], adjust_height_menu)
-                else:
-                    menu.addMenu(adjust_height_menu)
-            else:
-                menu.addMenu(adjust_height_menu)
-
-        # 将 "Clear Plot" action 添加到菜单末尾
-        if "Clear Plot" not in existing_texts:
-            menu.addSeparator()  # 在末尾添加一个分隔符
-            clear_act = QAction("Clear Plot", menu)
-            clear_act.triggered.connect(self.trigger_clear_plot)
-            menu.addAction(clear_act)  # addAction 会将按钮添加到末尾
-
-        return menu
-
-    def trigger_jump_to_data(self):
-        if self.plot_widget:
-            self.plot_widget.jump_to_data_impl(self.context_x)
-            
-    def trigger_clear_plot(self):
-        if self.plot_widget:
-            self.plot_widget.clear_plot_item()
-            if self.plot_widget.window():
-                self.plot_widget.window().request_mark_stats_refresh(immediate=True)
-
-    def _get_plot_row_index(self) -> int:
-        """获取当前plot所在的行索引"""
-        if not self.plot_widget:
-            return 0
-        main_window = self.plot_widget.window()
-        if not main_window or not hasattr(main_window, 'plot_layout'):
-            return 0
-        ncols = getattr(main_window, '_plot_col_max_default', 1)
-        for idx, container in enumerate(main_window.plot_widgets):
-            if container.plot_widget is self.plot_widget:
-                row, col = divmod(idx, ncols)
-                return row
-        return 0
-
-    def _set_row_height(self, percentage: int):
-        """设置当前plot所在行的所有plot的高度"""
-        if not self.plot_widget:
-            return
-        main_window = self.plot_widget.window()
-        if not main_window or not hasattr(main_window, 'set_row_height'):
-            return
-        row = self._get_plot_row_index()
-        main_window.set_row_height(row, percentage)
-    
-    def _set_all_row_height_to_100(self):
-        """将所有行的所有plot的高度重置为100%"""
-        if not self.plot_widget:
-            return
-        main_window = self.plot_widget.window()
-        if not main_window or not hasattr(main_window, 'set_all_row_height'):
-            return
-        main_window.set_all_row_height(100)
-
-    def trigger_pin_cursor(self):
-        """固定cursor到最近的数据点"""
-        if self.plot_widget:
-            self.plot_widget.pin_cursor(self.context_x)
-    
-    def trigger_free_cursor(self):
-        """解除cursor固定，恢复跟随鼠标"""
-        if self.plot_widget:
-            self.plot_widget.free_cursor()
-
-    def trigger_cursor_mode(self, mode: str):
-        if self.plot_widget and self.plot_widget.window():
-            self.plot_widget.window().set_cursor_mode(
-                mode,
-                source_plot=self.plot_widget,
-                context_x=self.context_x,
-            )
-
-    def trigger_copy_name(self):
-        """复制当前绘图变量名到剪贴板（无数据则不执行）"""
-        if not self.plot_widget:
-            return
-        
-        # 收集所有变量名
-        var_names = []
-        
-        # 检查是否是多曲线模式
-        if hasattr(self.plot_widget, 'is_multi_curve_mode') and self.plot_widget.is_multi_curve_mode:
-            # 多曲线模式：复制所有曲线的变量名
-            if hasattr(self.plot_widget, 'curves') and self.plot_widget.curves:
-                var_names = list(self.plot_widget.curves.keys())
-        else:
-            # 单曲线模式：复制单个变量名
-            var_name = getattr(self.plot_widget, 'y_name', '')
-            if var_name:
-                var_names = [var_name]
-        
-        if not var_names:
-            if DEBUG_LOG_ENABLED:
-                try:
-                    print(
-                        "[CopyNameDebug] trigger_copy_name no_vars",
-                        "is_multi=", bool(getattr(self.plot_widget, 'is_multi_curve_mode', False)),
-                        "y_name=", repr(getattr(self.plot_widget, 'y_name', '')),
-                        "curves_count=", len(getattr(self.plot_widget, 'curves', {}) or {}),
-                        "curve=", getattr(self.plot_widget, 'curve', None) is not None,
-                    )
-                except Exception as e:
-                    print(f"[CopyNameDebug] trigger_copy_name error: {e}")
-            return
-        
-        # 将变量名用空格分隔
-        clipboard_text = ' '.join(var_names)
-        if DEBUG_LOG_ENABLED:
-            print("[CopyNameDebug] clipboard_text", repr(clipboard_text))
-        QApplication.clipboard().setText(clipboard_text)
-    
-    def trigger_auto_y_axis(self):
-        """
-        触发自动调节y轴功能（右键菜单）
-        
-        功能：根据当前可见的x轴范围，自动调整所有plot的y轴范围，
-              使当前可见数据的y值完整显示（与顶部"自动调节y轴"按钮功能一致）
-        
-        应用范围：所有plot（不仅仅是右键点击的plot）
-        """
-        if self.plot_widget and self.plot_widget.window():
-            main_window = self.plot_widget.window()
-            # 调用主窗口的auto_y_in_x_range方法，功能和顶部按钮完全一致
-            if hasattr(main_window, 'auto_y_in_x_range'):
-                main_window.auto_y_in_x_range()
-    
-    def trigger_show_cursor_value(self):
-        """显示cursor值（包括圆圈和y值标签）- 同步所有plot
-        
-        在多plot环境中，同步所有plot的cursor显示状态。
-        如果cursor已启用，显示完整的cursor（vline + x值 + 圆圈 + y值）。
-        """
-        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
-            main_window = self.plot_widget.window()
-            # 设置全局状态：cursor值不隐藏
-            main_window.cursor_values_hidden = False
-            
-            # 检查cursor按钮状态
-            cursor_enabled = main_window.cursor_btn.isChecked() if hasattr(main_window, 'cursor_btn') else False
-            
-            # 同步所有plot的cursor显示状态
-            for container in main_window.plot_widgets:
-                if container.plot_widget and cursor_enabled:
-                    container.plot_widget.toggle_cursor(True)
-        elif self.plot_widget:
-            # 单plot模式
-            self.plot_widget.toggle_cursor(True)
-    
-    def trigger_hide_cursor_value(self):
-        """隐藏cursor值（只隐藏圆圈和y值，保留vline和x值）- 同步所有plot
-        
-        在多plot环境中，同步所有plot的cursor显示状态。
-        只隐藏y值标签和圆圈，保留垂直线和x值显示。
-        """
-        if self.plot_widget and self.plot_widget.window() and hasattr(self.plot_widget.window(), 'plot_widgets'):
-            main_window = self.plot_widget.window()
-            # 设置全局状态：cursor值隐藏
-            main_window.cursor_values_hidden = True
-            
-            # 检查cursor按钮状态
-            cursor_enabled = main_window.cursor_btn.isChecked() if hasattr(main_window, 'cursor_btn') else False
-            
-            # 同步所有plot的cursor隐藏状态
-            for container in main_window.plot_widgets:
-                if container.plot_widget and cursor_enabled:
-                    container.plot_widget.toggle_cursor(False, hide_values_only=True)
-        elif self.plot_widget:
-            # 单plot模式
-            self.plot_widget.toggle_cursor(False, hide_values_only=True)
-    
-    def trigger_variable_editor(self):
-        """打开绘图变量编辑器"""
-        if self.plot_widget:
-            dialog = PlotVariableEditorDialog(self.plot_widget, self.plot_widget.window())
-            dialog.show()
-            dialog.raise_()
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     """
@@ -4031,11 +2467,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         self.plot_item = self.addPlot(row=1, col=0, colspan=2, viewBox=CustomViewBox())
         self.view_box = self.plot_item.vb
-        self.view_box.plot_widget = self  # 设置 plot_widget 以确保 trigger_jump_to_data 能调用 jump_to_data_impl
+        self.view_box.plot_widget = self
+        self._connect_viewbox_signals()
         
         # ========== 性能优化 2: 交互状态管理 ==========
-        # 类似iOS的快照技术，在交互期间使用降级渲染
-        self._is_interacting = False  # 标记是否正在交互（拖动/缩放）
+        self._is_interacting = False
         self._interaction_timer = QTimer()
         self._interaction_timer.setSingleShot(True)
         self._interaction_timer.timeout.connect(self._end_interaction)
@@ -4604,8 +3040,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             main_window.request_mark_stats_refresh(immediate=True)
 
     def _extract_var_names_from_text(self, text: str) -> list[str]:
-
-        return [name.strip() for name in (text or '').split(';;') if name.strip()]
+        if not text:
+            return []
+        seen: set[str] = set()
+        result: list[str] = []
+        for name in text.split(VAR_SEPARATOR):
+            name = name.strip()
+            if name and name not in seen:
+                result.append(name)
+                seen.add(name)
+        return result
 
     def _should_hide_drag_indicator(self, main_window) -> bool:
         cursor_pos = QCursor.pos()
@@ -6295,9 +4739,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def dropEvent(self, event):
         self._notify_drag_indicator(hide=True)
-        var_names_text = event.mimeData().text()
-        # 支持多变量拖放，用;;分隔
-        var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+        var_names = parse_var_names_from_mimedata(event.mimeData())
         self.add_variables_to_plot(var_names)
         event.acceptProposedAction()
         if self.window():
@@ -7923,6 +6365,120 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.update_cursor_label()
 
 # ---------------- 主窗口 ----------------
+    def _refresh_cursor_geometry(self):
+        if not hasattr(self, 'vline') or not self.vline.isVisible():
+            return
+        if getattr(self, '_is_interacting', False):
+            self._pending_cursor_geometry_update = True
+            return
+        if self.show_values_only:
+            self._show_x_position_only()
+        else:
+            self.update_cursor_label()
+
+    def _connect_viewbox_signals(self):
+        vb = self.view_box
+        vb.plot_widget = self
+        vb.signals.request_jump_to_data.connect(self._on_vb_jump)
+        vb.signals.request_clear_plot.connect(self._on_vb_clear)
+        vb.signals.request_auto_y.connect(self._on_vb_auto_y)
+        vb.signals.request_set_cursor_mode.connect(self._on_vb_set_cursor_mode)
+        vb.signals.request_show_cursor_value.connect(self._on_vb_show_cursor)
+        vb.signals.request_hide_cursor_value.connect(self._on_vb_hide_cursor)
+        vb.signals.request_set_row_height.connect(self._on_vb_set_row_height)
+        vb.signals.request_set_all_row_height.connect(self._on_vb_set_all_row_height)
+        vb.signals.request_copy_name.connect(self._on_vb_copy_name)
+        vb.signals.request_variable_editor.connect(self._on_vb_var_editor)
+
+    def _on_vb_jump(self, pw, ctx_x):
+        if pw:
+            pw.jump_to_data_impl(ctx_x)
+
+    def _on_vb_clear(self, pw):
+        if pw:
+            pw.clear_plot_item()
+            if pw.window():
+                pw.window().request_mark_stats_refresh(immediate=True)
+
+    def _on_vb_auto_y(self, pw):
+        if pw and pw.window() and hasattr(pw.window(), "auto_y_in_x_range"):
+            pw.window().auto_y_in_x_range()
+
+    def _on_vb_set_cursor_mode(self, mode, pw, ctx_x):
+        if pw and pw.window() and hasattr(pw.window(), "set_cursor_mode"):
+            pw.window().set_cursor_mode(mode, source_plot=pw, context_x=ctx_x)
+
+    def _on_vb_show_cursor(self, pw):
+        if pw and pw.window() and hasattr(pw.window(), "cursor_values_hidden"):
+            pw.window().cursor_values_hidden = False
+            if pw.window().cursor_btn.isChecked():
+                for c in pw.window().plot_widgets:
+                    c.plot_widget.toggle_cursor(True)
+
+    def _on_vb_hide_cursor(self, pw):
+        if pw and pw.window() and hasattr(pw.window(), "cursor_values_hidden"):
+            pw.window().cursor_values_hidden = True
+            if pw.window().cursor_btn.isChecked():
+                for c in pw.window().plot_widgets:
+                    c.plot_widget.toggle_cursor(False, hide_values_only=True)
+
+    def _on_vb_set_row_height(self, pct, pw):
+        if pw and pw.window() and hasattr(pw.window(), "plot_widgets"):
+            w = pw.window()
+            for idx, c in enumerate(w.plot_widgets):
+                if c.plot_widget is pw:
+                    row, _ = divmod(idx, w._plot_col_max_default)
+                    w.set_row_height(row, pct)
+                    break
+
+    def _on_vb_set_all_row_height(self, pct):
+        w = self.window()
+        if w and hasattr(w, "set_all_row_height"):
+            w.set_all_row_height(pct)
+
+    def _on_vb_copy_name(self, pw):
+        if not pw:
+            return
+        var_names = []
+        if getattr(pw, "is_multi_curve_mode", False) and pw.curves:
+            var_names = list(pw.curves.keys())
+        elif getattr(pw, "y_name", ""):
+            var_names = [pw.y_name]
+        if var_names:
+            from PyQt6.QtWidgets import QApplication as _QA
+            _QA.clipboard().setText(" ".join(var_names))
+
+    def _on_vb_var_editor(self, pw):
+        if pw:
+            dialog = PlotVariableEditorDialog(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
+            dialog.show()
+            dialog.raise_()
+
+    def _start_interaction(self):
+        pass
+
+    def _end_interaction(self):
+        try:
+            self._is_interacting = False
+            self._queue_ui_refresh(immediate=True)
+            if getattr(self, '_pending_cursor_geometry_update', False):
+                self._pending_cursor_geometry_update = False
+                self._schedule_cursor_geometry_update()
+        except Exception as e:
+            print(f"结束交互出错: {e}")
+
+    def _schedule_cursor_geometry_update(self):
+        if not hasattr(self, 'vline') or not self.vline.isVisible():
+            return
+        if getattr(self, '_cursor_refresh_timer', None) is None:
+            return
+        if getattr(self, '_is_interacting', False):
+            self._pending_cursor_geometry_update = True
+            return
+        self._pending_cursor_geometry_update = False
+        self._cursor_refresh_timer.start(max(15, UI_DEBOUNCE_DELAY_MS))
+
+
 class MarkStatsWindow(QDialog):
     """
     标记统计窗口类
@@ -10038,6 +8594,7 @@ class MainWindow(QMainWindow):
         for r in range(m):
             for c in range(n):
                 plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data, self.time_channels_infos)
+                plot_widget.plot_context = PlotContext(self)
                 # 设置cursor状态，考虑全局cursor值显示状态
                 cursor_enabled = self.cursor_btn.isChecked()
                 if cursor_enabled and self.cursor_values_hidden:
@@ -10982,9 +9539,7 @@ class PlotVariableEditorDialog(QDialog):
     def dropEvent(self, event):
         """拖拽放下事件，支持单个或多个变量同时拖入"""
         if event.mimeData().hasText():
-            var_names_text = event.mimeData().text()
-            # 支持多变量拖放，用;;分隔
-            var_names = [name.strip() for name in var_names_text.split(';;') if name.strip()]
+            var_names = parse_var_names_from_mimedata(event.mimeData())
 
             if len(var_names) > 1:
                 # 多个变量：批量添加
