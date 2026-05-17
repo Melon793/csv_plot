@@ -2736,7 +2736,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         确保X轴范围非零，如果 min_x == max_x，则基于 factor 扩展。
         """
         if min_x == max_x:
-            # 在中心点两侧各扩展 0.5 * factor
             min_x_safe = min_x - 0.5 * self.factor
             max_x_safe = max_x + 0.5 * self.factor
             return min_x_safe, max_x_safe
@@ -2755,9 +2754,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             density = 0.0
 
         if density > 0:
-            return MIN_INDEX_LENGTH / density
+            result = MIN_INDEX_LENGTH / density
         else:
-            return float(MIN_INDEX_LENGTH)
+            # 单点数据时，使用较小的 minXRange，避免自动扩展范围
+            result = 1.0  # 与单点扩展范围 (0.5, 1.5) 匹配
+        
+        return result
 
     def _set_x_limits_with_min_range(self, limits_xMin: float | None, limits_xMax: float | None):
         """
@@ -8525,7 +8527,14 @@ class MainWindow(QMainWindow):
                 return (1.0, float(self.loader.datalength))
             return (None, None)
 
-        return (min(all_mins), max(all_maxs))
+        result = (min(all_mins), max(all_maxs))
+        
+        if result[0] == result[1]:
+            # 使用固定的扩展值，避免依赖可能变化的 factor
+            expand_val = 0.5  # 固定扩展 0.5
+            result = (result[0] - expand_val, result[1] + expand_val)
+        
+        return result
 
     def _compute_baseline_density(self):
         if not self.loader or self.loader.datalength == 0:
