@@ -1,8 +1,10 @@
-from __future__ import annotations 
+from __future__ import annotations
 import sys
 import os
 import weakref
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import logging
@@ -170,7 +172,6 @@ def install_global_debug_hooks(app: QApplication) -> None:
         debug_log("Failed to connect aboutToQuit: %s", exc)
 
 
-global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, XRANGE_THRESHOLD_FOR_SYMBOLS
 DEFAULT_PADDING_VAL_X = 0.05 # 默认x轴padding，单位为plot宽度   
 DEFAULT_PADDING_VAL_Y = 0.1 # 默认y轴padding，单位为plot高度
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
@@ -196,13 +197,58 @@ FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
 UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判定为单位行
 VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判定为数据行
 
+# 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
+_UNIT_KEYWORDS = [
+    'm', 's', 'g', 'A', 'K', 'mol', 'cd',
+    'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar', 'm2', '/min', '/h', 'kWh', 'mm', '°CA',
+    'L', 'm3',
+    'ppm', 'ppb', '%',
+    'rpm',
+    '℃', '°F', '°C',
+    '#/',
+]
+
+
+def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
+    """
+    判断数值是否能安全表示为 float32。
+
+    参数:
+        values: pandas Series、NumPy 数组或其他可迭代的数值序列。
+
+    返回:
+        tuple[bool, float | None]: (是否安全、绝对值最大值)
+            当数据中不存在有限值时，绝对值最大值为 None。
+    """
+    if values is None:
+        return False, None
+
+    try:
+        if isinstance(values, pd.Series):
+            arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
+        else:
+            try:
+                arr = np.asarray(values, dtype=np.float64)
+            except (ValueError, TypeError, OverflowError):
+                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64)
+    except Exception:
+        return False, None
+
+    if arr.size == 0:
+        return True, 0.0
+
+    finite_mask = np.isfinite(arr)
+    if not finite_mask.any():
+        return False, None
+
+    abs_max = float(np.max(np.abs(arr[finite_mask])))
+    return abs_max <= FLOAT32_SAFE_MAX, abs_max
+
 
 class AutoDetectError(Exception):
     """自动检测文件格式失败，需要用户手动指定分隔符/标题行/单位行"""
     pass
 
-
-from dataclasses import dataclass
 
 @dataclass
 class FormatInfo:
@@ -255,62 +301,12 @@ class CurveInfo:
             self.x_max = float(self.x_data[0])
             self.point_density = 0.0
 
-
-# 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
-_UNIT_KEYWORDS = [
-    'm', 's', 'g', 'A', 'K', 'mol', 'cd',
-    'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar', 'm2', '/min', '/h', 'kWh', 'mm', '°CA',
-    'L', 'm3',
-    'ppm', 'ppb', '%',
-    'rpm',
-    '℃', '°F', '°C',
-    '#/',
-]
-
-
-def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
-    """
-    判断数值是否能安全表示为 float32。
-
-    参数:
-        values: pandas Series、NumPy 数组或其他可迭代的数值序列。
-
-    返回:
-        tuple[bool, float | None]: (是否安全、绝对值最大值)
-            当数据中不存在有限值时，绝对值最大值为 None。
-    """
-    if values is None:
-        return False, None
-
-    try:
-        if isinstance(values, pd.Series):
-            arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
-        else:
-            try:
-                arr = np.asarray(values, dtype=np.float64)
-            except (ValueError, TypeError, OverflowError):
-                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64)
-    except Exception:
-        return False, None
-
-    if arr.size == 0:
-        return True, 0.0
-
-    finite_mask = np.isfinite(arr)
-    if not finite_mask.any():
-        return False, None
-
-    abs_max = float(np.max(np.abs(arr[finite_mask])))
-    return abs_max <= FLOAT32_SAFE_MAX, abs_max
-
 # 主界面
 # 屏幕边距系数（用于自动选择窗口大小时，窗口不超过屏幕尺寸的比例）
-global SCREEN_WITDH_MARGIN,SCREEN_HEIGHT_MARGIN
 SCREEN_WITDH_MARGIN = 0.3
 SCREEN_HEIGHT_MARGIN = 0.3
 
 # PyInstaller 解包目录
-from pathlib import Path
 def resource_path(relative_path: str) -> Path:
     """
     获取打包后的资源文件路径
@@ -2457,7 +2453,6 @@ class DataTableDialog(QMainWindow):
             frozen_width, main_width = current_sizes[0], current_sizes[1]
 
             if not self.frozen_columns:
-                global FROZEN_VIEW_WIDTH_DEFAULT
                 new_frozen_width = FROZEN_VIEW_WIDTH_DEFAULT
                 total_width = frozen_width + main_width
                 new_main_width = total_width - new_frozen_width
@@ -2507,7 +2502,6 @@ class DataTableDialog(QMainWindow):
             frozen_width, main_width = current_sizes[0], current_sizes[1]
 
             if len(self.frozen_columns) == 2:
-                global FROZEN_VIEW_WIDTH_DEFAULT
                 new_frozen_width = FROZEN_VIEW_WIDTH_DEFAULT
                 total_width = frozen_width + main_width
                 new_main_width = total_width - new_frozen_width
@@ -2875,7 +2869,6 @@ class AxisDialog(QDialog):
             else:
                 tick_count = None  # 自动
 
-            global DEFAULT_PADDING_VAL_X
             # 设置范围
             if self.axis_type == "X":
                 self.view_box.setXRange(min_val, max_val, padding=DEFAULT_PADDING_VAL_X)
@@ -4230,8 +4223,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.axis_x.setTicks(None)
             self.axis_y.setTicks(None)
 
-        global DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y, FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS, FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE, FACTOR_SCROLL_ZOOM
-        
         padding_xVal = DEFAULT_PADDING_VAL_X  
         padding_yVal = 0.5
         
@@ -4320,7 +4311,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         根据全局最大数据点密度计算最小的可缩放 X 范围 (minXRange)。
         优先从 MainWindow 读取 _global_max_density，fallback 为 MIN_INDEX_LENGTH。
         """
-        global MIN_INDEX_LENGTH
 
         main_window = self.window()
         if main_window is not None and hasattr(main_window, '_global_max_density'):
@@ -4366,7 +4356,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             max_y: Y轴最大值
             set_limits: 是否同时设置y轴limits，默认为True。当为False时只设置viewRange。
         """
-        global DEFAULT_PADDING_VAL_Y
         
         # Y 轴 limit 的内外边距 (0.5 表示上下各扩展 50%)
         padding_yVal_limit = 0.5 
@@ -4406,8 +4395,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         xMin = self.offset + self.factor * index_xMin
         xMax = self.offset + self.factor * index_xMax
-        
-        global DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y
 
         if not (np.isnan(xMax) or np.isinf(xMax)):
             xMin, xMax = self._get_safe_x_range(xMin, xMax)
@@ -4757,7 +4744,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 mouse_x = view_pos.x()
                 mouse_y = view_pos.y()
 
-                global FACTOR_SCROLL_ZOOM
                 factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
                 vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
                 ev.accept()  # 确保事件被处理
@@ -6254,7 +6240,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 datalength = len(self.original_index_x)
             else:
                 datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
-            global DEFAULT_PADDING_VAL_X
             padding_xVal = DEFAULT_PADDING_VAL_X
             if is_mdf and main_window is not None and hasattr(main_window.loader, 'global_time_range'):
                 x_min, x_max = main_window.loader.global_time_range
@@ -7469,8 +7454,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
             # 缩小X轴检测区域，只检测X轴标签区域（底部部分）
             x_axis_label_rect = QRectF(x_axis_rect_scene.left(), x_axis_rect_scene.bottom() - 30, x_axis_rect_scene.width(), 30)
-
-            global DEFAULT_PADDING_VAL_X
             
             # 优先检测X轴标签区域（最具体）
             if x_axis_label_rect.contains(scene_pos):
@@ -7837,7 +7820,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             index_range_width, visible_points = self._calculate_visible_points(range)
 
             # 基于索引范围宽度判断样式：阈值根据全局最大密度动态调整
-            global XRANGE_THRESHOLD_FOR_SYMBOLS
             main_window = self.window()
             density = getattr(main_window, '_global_max_density', 0.0) if main_window else 0.0
             if density > 0:
@@ -8184,7 +8166,6 @@ class MainWindow(QMainWindow):
         self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
 
         # 设置应用程序图标（影响Dock图标）
-        global ico_path        
         if sys.platform == "darwin":  # macOS
             if os.path.exists(ico_path):
                 app_icon = QIcon(str(ico_path))
@@ -10007,7 +9988,6 @@ class MainWindow(QMainWindow):
             self._baseline_density = 0.0
 
     def _sync_min_xrange(self):
-        global MIN_INDEX_LENGTH
 
         new_max = max(
             (container.plot_widget._max_point_density
@@ -10278,7 +10258,6 @@ class MainWindow(QMainWindow):
                 self.reset_plots_after_loading(x_min, x_max, reason="insufficient valid vars")
             else:
                 self.value_cache = {}
-                global DEFAULT_PADDING_VAL_X
                 for idx, container in enumerate(self.plot_widgets):
                     widget = container.plot_widget
                     
