@@ -125,13 +125,27 @@ csv_plot/
 
 ### 打包为独立应用
 
+**PyInstaller**
+
 ```bash
-# PyInstaller（单文件）
+# 单文件模式
 pyinstaller csv_plot_pyqt6.py --onefile --name csv_plot_pyqt6 --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "README.md;." --noconsole
 
-# PyInstaller（单目录，启动更快）
+# 单目录模式（启动更快）
 pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "README.md;." --noconsole
 ```
+
+**Nuitka**（更高的运行性能，更小的体积）
+
+```bash
+# 单文件模式
+nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=assets/icon.ico --enable-plugin=pyqt6 --include-data-file=assets/icon.ico=assets --include-data-file=README.md=. csv_plot_pyqt6.py
+
+# 单目录模式（编译更快，启动更快）
+nuitka --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=assets/icon.ico --enable-plugin=pyqt6 --include-data-file=assets/icon.ico=assets --include-data-file=README.md=. csv_plot_pyqt6.py
+```
+
+> **提示**：Nuitka 会将 Python 代码编译为 C 并链接为原生可执行文件，运行时无需 Python 环境。首次编译较慢（约 5-15 分钟），建议开发调试用 PyInstaller，正式发布用 Nuitka。
 
 ## 使用指南
 
