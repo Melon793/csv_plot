@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from typing import Any
 
-from src.ui.drag_drop import (VAR_SEPARATOR,parse_var_names_from_mimedata,build_var_mimedata,create_drag_pixmap)
+from src.ui.drag_drop import (VAR_SEPARATOR, parse_var_names_from_mimedata)
 from src.ui.widgets.custom_viewbox import CustomViewBox
 from src.core.config import (
     DEBUG_LOG_ENABLED, debug_log, safe_callback, install_global_debug_hooks,
@@ -20,18 +20,11 @@ from src.core.config import (
     PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
     _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL,
 )
-from src.core.types import AutoDetectError,FormatInfo,CurveInfo
+from src.core.types import AutoDetectError, CurveInfo
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.data.loader import FastDataLoader,DataLoadThread
 from src.ui.table_dialog import DataTableDialog, DropOverlay
 from src.ui.variable_list import MyTableWidget
-from src.ui.mark_stats import MarkStatsWindow
-from src.ui.plot_variable_editor import PlotVariableEditorDialog
-from src.ui.dialogs.help import HelpDialog
-from src.ui.dialogs.layout_input import LayoutInputDialog
-from src.ui.dialogs.axis import AxisDialog
-from src.ui.dialogs.time_correction import TimeCorrectionDialog
-
 from src.app.plot_context import PlotContext
 
 if sys.platform == "darwin":  # macOS
@@ -41,13 +34,12 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, QtMsgType, qInstallMessageHandler
-from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
+from PyQt6.QtCore import Qt, QMargins, QTimer, QEvent, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, qInstallMessageHandler
+from PyQt6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QFontDatabase, QCursor
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
-    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QTableWidget, QTableWidgetItem, QHeaderView, QRubberBand, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem, QSplitter,
-    QColorDialog, QCheckBox
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout,
+    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,
+    QMessageBox, QDialog, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QRubberBand, QSplitter,
 )
 import pyqtgraph as pg
 
@@ -866,7 +858,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 current = current.parentWidget()
 
             target_window = widget_under_cursor.window()
-            if isinstance(target_window, (DataTableDialog, PlotVariableEditorDialog)):
+            if isinstance(target_window, (DataTableDialog, _lazy_PlotVariableEditorDialog())):
                 return True
             if target_window is not main_window:
                 return True
@@ -3686,7 +3678,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
             # 优先检测X轴标签区域（最具体）
             if x_axis_label_rect.contains(scene_pos):
-                dialog = AxisDialog(self.axis_x, self.view_box, "X", self)
+                dialog = _lazy_AxisDialog()(self.axis_x, self.view_box, "X", self)
                 if dialog.exec():
                     min_val, max_val = self.view_box.viewRange()[0]
                     for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
@@ -3698,14 +3690,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 然后检测绘图区域（在检测Y轴之前）
             elif view_box_rect_scene.contains(scene_pos):
                 # 双击绘图区域（网格内部），弹出变量编辑器
-                dialog = PlotVariableEditorDialog(self, self.window())
+                dialog = _lazy_PlotVariableEditorDialog()(self, self.window())
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
                 return
             # 最后检测Y轴区域（最后兜底）
             elif y_axis_rect_scene.contains(scene_pos):
-                dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
+                dialog = _lazy_AxisDialog()(self.axis_y, self.view_box, "Y", self)
                 if dialog.exec():
                     self.plot_item.update()
                 return
@@ -4239,7 +4231,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _on_vb_var_editor(self, pw):
         if pw:
-            dialog = PlotVariableEditorDialog(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
+            dialog = _lazy_PlotVariableEditorDialog()(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
             dialog.show()
             dialog.raise_()
 
@@ -4822,7 +4814,7 @@ class MainWindow(QMainWindow):
         #print(f"actual window width = {self.width()}")
             
     def show_help(self):
-        dlg = HelpDialog(self)
+        dlg = _lazy_HelpDialog()(self)
         dlg.exec()
 
     def _get_plot_container(self, plot_widget) -> PlotContainerWidget | None:
@@ -5568,7 +5560,7 @@ class MainWindow(QMainWindow):
                     container.plot_widget.add_mark_region(min_x, max_x)
 
             # 打开统计窗口
-            self.mark_stats_window = MarkStatsWindow.get_instance(self)
+            self.mark_stats_window = _lazy_MarkStatsWindow().get_instance(self)
             geom = self.mark_stats_window.load_geom()
             if geom:
                 self.mark_stats_window.restoreGeometry(geom)
@@ -5631,7 +5623,7 @@ class MainWindow(QMainWindow):
             self.mark_stats_window.update_stats(stats_list)
 
     def open_layout_dialog(self):
-        dlg = LayoutInputDialog(max_rows=self._plot_row_max_default, 
+        dlg = _lazy_LayoutInputDialog()(max_rows=self._plot_row_max_default, 
                                 max_cols=self._plot_col_max_default, 
                                 cur_rows=self._plot_row_current,
                                 cur_cols=self._plot_col_current,
@@ -5645,7 +5637,7 @@ class MainWindow(QMainWindow):
         # 记录时间修正状态与固定cursor索引（用于稳定转换）
         self._is_time_correction_active = False
         self._time_correction_pinned_index_values = []
-        dialog = TimeCorrectionDialog(self.factor, self.offset, self)
+        dialog = _lazy_TimeCorrectionDialog()(self.factor, self.offset, self)
         if dialog.window_geometry:
             dialog.restoreGeometry(dialog.window_geometry)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -6627,6 +6619,36 @@ class MainWindow(QMainWindow):
                             widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception as e:
                     pass  # 忽略样式更新错误，不影响数据加载
+
+
+def _lazy_PlotVariableEditorDialog():
+    from src.ui.plot_variable_editor import PlotVariableEditorDialog
+    return PlotVariableEditorDialog
+
+
+def _lazy_MarkStatsWindow():
+    from src.ui.mark_stats import MarkStatsWindow
+    return MarkStatsWindow
+
+
+def _lazy_HelpDialog():
+    from src.ui.dialogs.help import HelpDialog
+    return HelpDialog
+
+
+def _lazy_LayoutInputDialog():
+    from src.ui.dialogs.layout_input import LayoutInputDialog
+    return LayoutInputDialog
+
+
+def _lazy_AxisDialog():
+    from src.ui.dialogs.axis import AxisDialog
+    return AxisDialog
+
+
+def _lazy_TimeCorrectionDialog():
+    from src.ui.dialogs.time_correction import TimeCorrectionDialog
+    return TimeCorrectionDialog
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """时间修正对话框"""
 
 from __future__ import annotations
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QDialog, QFormLayout, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, QMessageBox, QDoubleSpinBox
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QDialog, QFormLayout, QPushButton, QHBoxLayout, QDoubleSpinBox
 
 class TimeCorrectionDialog(QDialog):
     """

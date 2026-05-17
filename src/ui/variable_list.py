@@ -1,12 +1,10 @@
 """变量列表面板 —— MyTableWidget + NoHoverDelegate"""
 
 from __future__ import annotations
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMimeData, QPoint, QSize, QRect
-from PyQt6.QtGui import QDrag, QFontMetrics, QPen, QColor, QIcon, QFont, QPainter, QPixmap, QCursor, QAction
-from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QMenu, QPushButton, QAbstractItemView, QLabel, QLineEdit, QStyledItemDelegate, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView, QRubberBand)
-from src.core.config import DEBUG_LOG_ENABLED, debug_log, safe_callback
-from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata, build_var_mimedata, create_drag_pixmap
-from src.ui.table_dialog import DataTableDialog
+from PyQt6.QtCore import Qt, QTimer, QPoint, QRect
+from PyQt6.QtGui import QDrag, QPen, QColor, QPainter, QAction
+from PyQt6.QtWidgets import (QApplication, QMenu, QAbstractItemView, QStyledItemDelegate, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView)
+from src.ui.drag_drop import build_var_mimedata, create_drag_pixmap
 
 class NoHoverDelegate(QStyledItemDelegate):
     """
@@ -372,6 +370,7 @@ class MyTableWidget(QTableWidget):
             return
 
         main_window = self.window()
+        from src.ui.table_dialog import DataTableDialog
         DataTableDialog.add_variables(var_list, parent=main_window)
 
     def _add_to_blank_plot(self, var_names):
@@ -522,6 +521,7 @@ class MyTableWidget(QTableWidget):
             series = main_window.loader.df[var_name]
 
         # 弹出数值变量表
+        from src.ui.table_dialog import DataTableDialog
         dlg = DataTableDialog.popup(var_name, series, parent=main_window)
         
         # 滚动到新添加的列

@@ -3,9 +3,7 @@
 from __future__ import annotations
 from pathlib import Path
 import os, sys
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QVBoxLayout, QPushButton, QLabel, QTextEdit, QDialog
-from src.core.config import debug_log
+from PyQt6.QtWidgets import QApplication, QVBoxLayout, QPushButton, QTextEdit, QDialog
 
 
 def _resource_path(relative_path: str) -> Path:

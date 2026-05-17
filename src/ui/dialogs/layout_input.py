@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QDialog, QFormLayout, QSpinBox, QPushButton, QVBoxLayout, QHBoxLayout, QMessageBox
+from PyQt6.QtWidgets import QDialog, QFormLayout, QSpinBox, QPushButton, QHBoxLayout
 
 class LayoutInputDialog(QDialog):
     """

@@ -1,7 +1,7 @@
 """坐标轴设置对话框"""
 
 from __future__ import annotations
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QDialog, QFormLayout, QLineEdit, QPushButton, QVBoxLayout, QMessageBox, QLabel
 from src.core.config import DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y
 
