@@ -93,16 +93,20 @@ class CustomViewBox(pg.ViewBox):
         cursor_enabled = self._get_cursor_enabled()
 
         cursor_menu = QMenu("Cursor Mode", menu)
-        cursor_menu.setEnabled(cursor_enabled)
+        # Cursor Mode 菜单始终可用
+        cursor_menu.setEnabled(True)
         cursor_group = QActionGroup(cursor_menu)
         cursor_group.setExclusive(True)
         current_mode = self._get_current_cursor_mode()
 
+        # 添加三个正常模式选项
         for mode_text in ["1 free cursor", "1 anchored cursor", "2 anchored cursor"]:
             mode_act = QAction(mode_text, cursor_menu)
             mode_act.setCheckable(True)
-            mode_act.setChecked(mode_text == current_mode)
-            mode_act.setEnabled(cursor_enabled)
+            # 选中逻辑：光标开启时检查是否匹配当前模式，光标关闭时不选中
+            mode_act.setChecked(cursor_enabled and mode_text == current_mode)
+            # 所有选项始终可用
+            mode_act.setEnabled(True)
             mode_act.triggered.connect(
                 lambda checked, m=mode_text: self.signals.request_set_cursor_mode.emit(
                     m, self.plot_widget, self.context_x
@@ -110,6 +114,20 @@ class CustomViewBox(pg.ViewBox):
             )
             cursor_group.addAction(mode_act)
             cursor_menu.addAction(mode_act)
+
+        # 添加 "off" 选项
+        off_act = QAction("off", cursor_menu)
+        off_act.setCheckable(True)
+        off_act.setChecked(current_mode == "off" or not cursor_enabled)
+        # "off" 选项始终可用
+        off_act.setEnabled(True)
+        off_act.triggered.connect(
+            lambda checked: self.signals.request_set_cursor_mode.emit(
+                "off", self.plot_widget, self.context_x
+            )
+        )
+        cursor_group.addAction(off_act)
+        cursor_menu.addAction(off_act)
 
         if len(menu.actions()) >= 2:
             menu.insertMenu(
