@@ -229,18 +229,31 @@ class CurveInfo:
     visible: bool = True
     x_min: float = 0.0
     x_max: float = 0.0
+    point_density: float = 0.0
 
     def __post_init__(self):
-        """自动从 x_data 计算缓存的 x_min / x_max"""
-        if self.x_data is not None and len(self.x_data) > 0:
+        """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""
+        if self.x_data is not None and len(self.x_data) > 1:
             self.x_min = float(np.min(self.x_data))
             self.x_max = float(np.max(self.x_data))
+            span = self.x_max - self.x_min
+            self.point_density = len(self.x_data) / span if span > 0 else 0.0
+        elif self.x_data is not None and len(self.x_data) == 1:
+            self.x_min = float(self.x_data[0])
+            self.x_max = float(self.x_data[0])
+            self.point_density = 0.0
 
     def update_x_range(self):
         """当 x_data 变更后调用，同步更新缓存"""
-        if self.x_data is not None and len(self.x_data) > 0:
+        if self.x_data is not None and len(self.x_data) > 1:
             self.x_min = float(np.min(self.x_data))
             self.x_max = float(np.max(self.x_data))
+            span = self.x_max - self.x_min
+            self.point_density = len(self.x_data) / span if span > 0 else 0.0
+        elif self.x_data is not None and len(self.x_data) == 1:
+            self.x_min = float(self.x_data[0])
+            self.x_max = float(self.x_data[0])
+            self.point_density = 0.0
 
 
 # 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
@@ -3936,6 +3949,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._batch_adding = False  # 是否正在批量添加变量
         self.curve_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']  # 默认颜色列表
         self.current_color_index = 0  # 当前颜色索引
+        self._max_point_density: float = 0.0  # 当前 plot 所有 curve 的最大数据点密度
         
         self.y_name = ''
         self.y_format = ''
@@ -4259,9 +4273,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
         self._set_safe_y_range(min_y, max_y)
 
-        global MIN_INDEX_LENGTH
-        data_len = len(x_values) if x_values is not None and len(x_values) > 1 else 2
-        minXRange_val = min(MIN_INDEX_LENGTH, data_len - 1) * self.factor
+        minXRange_val = self._get_min_x_range_value()
         if is_mdf:
             self.plot_item.setLimits(minXRange=minXRange_val)
         else:
@@ -4305,19 +4317,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     
     def _get_min_x_range_value(self) -> float:
         """
-        根据数据长度计算最小的可缩放 X 范围 (minXRange)。
+        根据全局最大数据点密度计算最小的可缩放 X 范围 (minXRange)。
+        优先从 MainWindow 读取 _global_max_density，fallback 为 MIN_INDEX_LENGTH。
         """
         global MIN_INDEX_LENGTH
-        if self.data is None or self.data.empty:
-            data_len = 0
+
+        main_window = self.window()
+        if main_window is not None and hasattr(main_window, '_global_max_density'):
+            density = main_window._global_max_density
         else:
-            data_len = self.data.shape[0]
-            
-        # 计算有效的数据点最小间隔
-        effective_min_len = min(MIN_INDEX_LENGTH, data_len - 1 if data_len > 1 else 1)
-        
-        # 最小范围 = 最小间隔 * 比例因子
-        return effective_min_len * self.factor
+            density = 0.0
+
+        if density > 0:
+            return MIN_INDEX_LENGTH / density
+        else:
+            return float(MIN_INDEX_LENGTH)
 
     def _set_x_limits_with_min_range(self, limits_xMin: float | None, limits_xMax: float | None):
         """
@@ -4325,6 +4339,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         minXRange_val = self._get_min_x_range_value()
         self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
+
+    def _set_min_x_range(self, minXRange: float):
+        self.plot_item.setLimits(minXRange=minXRange)
+
+    def _recalc_max_point_density(self):
+        densities: list[float] = []
+        for ci in self.curves.values():
+            if ci.point_density > 0:
+                densities.append(ci.point_density)
+        if not densities and self.curve is not None and self.original_y is not None:
+            n = len(self.original_y)
+            if n > 1 and self.original_index_x is not None:
+                x_span = self.offset + self.factor * float(np.max(self.original_index_x)) - (
+                    self.offset + self.factor * float(np.min(self.original_index_x)))
+                if x_span > 0:
+                    densities.append(n / x_span)
+        self._max_point_density = max(densities) if densities else 0.0
 
     def _set_safe_y_range(self, min_y: float, max_y: float, set_limits: bool = True):
         """
@@ -6346,6 +6377,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 if self.vline.isVisible():
                     self.update_cursor_label()
 
+                self._recalc_max_point_density()
+                main_window = self.window()
+                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                    main_window._sync_min_xrange()
+
             if failed_vars:
                 QMessageBox.information(self, "提示", f"以下变量已在绘图中:\n" + "\n".join(failed_vars))
         else:
@@ -6581,6 +6617,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.plot_item.update()
             self._update_cursor_after_plot(min_x, max_x)
 
+            self._recalc_max_point_density()
+            main_window = self.window()
+            if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                main_window._sync_min_xrange()
+
             return True
             
         except Exception as e:
@@ -6745,10 +6786,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.curves.clear()
             self.is_multi_curve_mode = False
             self.current_color_index = 0
-            
-            # 强制垃圾回收，释放内存
+
             import gc
             gc.collect()
+
+            self._recalc_max_point_density()
+            main_window = self.window()
+            if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                main_window._sync_min_xrange()
         except Exception as e:
             print(f"清除绘图数据时出错: {e}")
 
@@ -6989,7 +7034,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 如果cursor可见，立即更新cursor标签以显示新添加的曲线
             if self.vline.isVisible():
                 self.update_cursor_label()
-            
+
+            if not batch_adding:
+                self._recalc_max_point_density()
+                main_window = self.window()
+                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                    main_window._sync_min_xrange()
+
             return True
             
         except Exception as e:
@@ -7752,9 +7803,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 使用共用方法计算索引范围
             index_range_width, visible_points = self._calculate_visible_points(range)
 
-            # 基于索引范围宽度判断样式：小于阈值显示symbol（细线+symbol），否则粗线无symbol
+            # 基于索引范围宽度判断样式：阈值根据全局最大密度动态调整
             global XRANGE_THRESHOLD_FOR_SYMBOLS
-            show_symbols = index_range_width < XRANGE_THRESHOLD_FOR_SYMBOLS
+            main_window = self.window()
+            density = getattr(main_window, '_global_max_density', 0.0) if main_window else 0.0
+            if density > 0:
+                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
+            else:
+                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS
+            show_symbols = index_range_width < effective_threshold
 
             # 应用样式到所有曲线
             self._apply_plot_style(show_symbols)
@@ -8112,6 +8169,10 @@ class MainWindow(QMainWindow):
         self.factor = self._factor_default
         self.offset = self._offset_default
         self._active_drag_container: PlotContainerWidget | None = None
+
+        # 数据点密度相关
+        self._baseline_density: float = 0.0
+        self._global_max_density: float = 0.0
 
         # try to load config json files
         _read_status = False
@@ -9198,6 +9259,9 @@ class MainWindow(QMainWindow):
             widget.time_axis_label = self.loader.time_axis_label
             widget.update_x_axis_label()
 
+        self._compute_baseline_density()
+        self._sync_min_xrange()
+
         # 清除cache
   
         self.replots_after_loading()
@@ -9214,7 +9278,7 @@ class MainWindow(QMainWindow):
                 DataTableDialog._instance.close()
 
 
-        self.filter_variables() 
+        self.filter_variables()
         if self.mark_region_btn.isChecked():
             self.request_mark_stats_refresh(immediate=True)
 
@@ -9893,6 +9957,42 @@ class MainWindow(QMainWindow):
 
         return (min(all_mins), max(all_maxs))
 
+    def _compute_baseline_density(self):
+        if not self.loader or self.loader.datalength == 0:
+            self._baseline_density = 0.0
+            return
+
+        if hasattr(self.loader, 'global_time_range'):
+            t_min, t_max = self.loader.global_time_range
+        else:
+            t_min, t_max = 1.0, float(self.loader.datalength)
+
+        span = t_max - t_min
+        if span > 0:
+            self._baseline_density = float(self.loader.datalength) / span
+        else:
+            self._baseline_density = 0.0
+
+    def _sync_min_xrange(self):
+        global MIN_INDEX_LENGTH
+
+        new_max = max(
+            (container.plot_widget._max_point_density
+             for container in self.plot_widgets
+             if container.isVisible() and container.plot_widget._max_point_density > 0),
+            default=0.0
+        )
+
+        if new_max == 0.0:
+            new_max = self._baseline_density
+
+        if new_max != self._global_max_density and new_max > 0:
+            self._global_max_density = new_max
+            min_range = MIN_INDEX_LENGTH / new_max
+            for container in self.plot_widgets:
+                if container.isVisible():
+                    container.plot_widget._set_min_x_range(min_range)
+
     def auto_range_all_plots(self):
         if not self.loader or self.loader.datalength == 0:
             return
@@ -10069,6 +10169,8 @@ class MainWindow(QMainWindow):
                     widget = container.plot_widget
                     widget.view_box.setXRange(curr_min, curr_max, padding=0)  # padding=0 以精确同步
                     widget.plot_item.update()  # 强制更新渲染
+
+        self._sync_min_xrange()
 
     def replots_after_loading(self):
         # 【安全标志】设置所有widget为更新中状态，防止信号回调访问不完整的数据
@@ -10427,11 +10529,15 @@ class PlotVariableEditorDialog(QDialog):
             except Exception as e:
                 print(f"获取曲线颜色失败: {e}")
             
-            curve_info = {
-                'color': curve_color,
-                'visible': curve_visible,
-                'y_format': self.plot_widget.y_format
-            }
+            curve_info = CurveInfo(
+                var_name=var_name,
+                curve=self.plot_widget.curve,
+                x_data=np.array([]),
+                y_data=np.array([]),
+                color=curve_color,
+                visible=curve_visible,
+                y_format=self.plot_widget.y_format,
+            )
             self._add_variable_to_table(var_name, curve_info)
         
         self.update_button_states()
@@ -10681,7 +10787,12 @@ class PlotVariableEditorDialog(QDialog):
             # 清空所有变量时完全清除对象池，避免复用异常状态的items
             self.plot_widget._clear_cursor_items(hide_only=False)
             self.plot_widget._safe_clear_plot_items()
-        
+
+        self.plot_widget._recalc_max_point_density()
+        main_window = self.plot_widget.window()
+        if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+            main_window._sync_min_xrange()
+
         self.update_button_states()
         
     def clear_all_variables(self):
