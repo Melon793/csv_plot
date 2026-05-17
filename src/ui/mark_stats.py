@@ -3,9 +3,7 @@
 from __future__ import annotations
 import numpy as np
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QPushButton, QMessageBox, QTreeWidget, QTreeWidgetItem, QHeaderView)
-from src.core.config import safe_callback
-from src.data.loader import FastDataLoader
+from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QTreeWidget, QTreeWidgetItem)
 
 class MarkStatsWindow(QDialog):
     """

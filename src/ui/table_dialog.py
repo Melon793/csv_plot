@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 import weakref
-from pathlib import Path
 from threading import Lock
 import numpy as np
 import pandas as pd
-from PyQt6.QtCore import Qt, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QItemSelectionModel, QSignalBlocker
-from PyQt6.QtGui import QFontMetrics, QPen, QColor, QAction, QIcon, QFont, QPainter
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate, QMessageBox, QDialog, QSizePolicy, QSplitter, QMenu)
-import pyqtgraph as pg
-from src.core.config import DEBUG_LOG_ENABLED, debug_log, safe_callback, FROZEN_VIEW_WIDTH_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, BLINK_PULSE
-from src.core.types import FormatInfo
-from src.data.loader import FastDataLoader
+from PyQt6.QtCore import Qt, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex
+from PyQt6.QtGui import QFontMetrics, QColor, QAction, QFont
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QAbstractItemView, QLabel, QTableView, QStyledItemDelegate, QMessageBox, QDialog, QSplitter, QMenu)
+from src.core.config import FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE
 from src.ui.drag_drop import parse_var_names_from_mimedata
 
 class DropOverlay(QWidget):
@@ -177,6 +173,8 @@ class XYScatterPlotDialog(QDialog):
 
         layout = QVBoxLayout(self)
         
+        import pyqtgraph as pg
+
         # 创建 pyqtgraph 绘图组件
         self.plot_widget = pg.PlotWidget()
         layout.addWidget(self.plot_widget)

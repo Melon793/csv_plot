@@ -4,7 +4,8 @@ import sys
 import os,logging,faulthandler,signal,threading,traceback
 from typing import Any
 import numpy as np
-import pandas as pd
+from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
+from PyQt6.QtWidgets import QApplication
 
 DEBUG_LOG_ENABLED = False  # 临时排查日志开关
 # X轴标签显示控制
@@ -197,6 +198,8 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     """
     if values is None:
         return False, None
+
+    import pandas as pd
 
     try:
         if isinstance(values, pd.Series):

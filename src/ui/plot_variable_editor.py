@@ -1,15 +1,14 @@
 """绘图变量编辑器"""
 
 from __future__ import annotations
-import sys
 import numpy as np
-from PyQt6.QtCore import Qt, QEvent
-from PyQt6.QtGui import QDrag, QColor, QFont, QFontDatabase
-from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QListWidget, QListWidgetItem, QAbstractItemView, QMessageBox, QCheckBox, QColorDialog, QTableWidget, QTableWidgetItem, QHeaderView, QWidget)
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox, QCheckBox, QColorDialog, QTableWidget, QTableWidgetItem, QHeaderView, QWidget)
 import pyqtgraph as pg
-from src.core.config import safe_callback, DEFAULT_LINE_WIDTH, install_global_debug_hooks
+from src.core.config import DEFAULT_LINE_WIDTH
 from src.core.types import CurveInfo
-from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
+from src.ui.drag_drop import parse_var_names_from_mimedata
 
 class PlotVariableEditorDialog(QDialog):
     """
@@ -665,69 +664,4 @@ class PlotVariableEditorDialog(QDialog):
         else:
             event.ignore()
         self.plot_widget._notify_drag_indicator(hide=True, source_widget=self)
-
-
-# ---------------- 主程序 ----------------
-if __name__ == "__main__":
-
-    # 启用 OpenGL (极大提升大数据的渲染性能)
-    # pyqtgraph 0.14.0 以后不需要 enableExperimental=True 了
-    # pg.setConfigOptions(useOpenGL=True) 
-    
-    # 禁用抗锯齿 (大数据量下抗锯齿非常消耗资源且视觉收益低)
-    pg.setConfigOptions(antialias=False)
-
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
-    app = QApplication(sys.argv)
-    install_global_debug_hooks(app)
-    
-    
-    if sys.platform == "win32":
-        def get_windows_chinese_font():
-            # 常见Modern UI中文字体优先级列表
-            font_priority = [
-                'Microsoft YaHei UI',  # Win10/11默认
-                'Microsoft YaHei',     # Win7/8默认
-                'SimHei',              # 传统Windows
-                'Arial Unicode MS'     # 备用
-            ]
-            
-            available_fonts = QFontDatabase.families()            
-            for font in font_priority:
-                if font in available_fonts:
-                    return QFont(font)            
-            
-            # 回退到系统默认字体
-            return QApplication.font()
-        
-        font = get_windows_chinese_font()  
-        pixel_size = 12      
-        # dpi = app.primaryScreen().logicalDotsPerInch()
-        # point_size = pixel_size * 72.0 / dpi
-        # font.setPointSizeF(point_size)
-        font.setPixelSize(pixel_size)
-        app.setFont(font)
-        # app.setStyle("Fusion")
-        
-    elif sys.platform == "darwin":
-        font = QApplication.font()
-        font.setPixelSize(13) # macOS 默认字体稍大一点可能观感更好
-        app.setFont(font)
-
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
-
-# pyinstaller
-#     - one file
-# pyinstaller csv_plot_pyqt6.py --onefile --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --noupx --clean --noconfirm
-#     - one dir
-# pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --clean --noconfirm
-
-
-# nuitka
-# nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
-# nuitka --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
 
