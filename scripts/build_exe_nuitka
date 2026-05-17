@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
+NAME="csv_plot_pyqt6"
+ENTRY="csv_plot_pyqt6.py"
+
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    PLATFORM_OPTS=(
+        "--windows-console-mode=disable"
+        "--windows-icon-from-ico=assets/icon.ico"
+    )
+else
+    PLATFORM_OPTS=(
+        "--macos-create-app-bundle"
+        "--macos-app-icon=assets/icon.icns"
+    )
+fi
+
+nuitka --standalone \
+    --output-filename="$NAME" \
+    --enable-plugin=pyqt6 \
+    --include-data-file=assets/icon.ico=assets \
+    --include-data-file=assets/icon.icns=assets \
+    --include-data-file=assets/icon.png=assets \
+    --include-data-file=README.md=. \
+    "${PLATFORM_OPTS[@]}" \
+    "$ENTRY"

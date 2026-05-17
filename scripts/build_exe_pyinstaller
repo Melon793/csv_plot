@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
+NAME="csv_plot_pyqt6"
+ENTRY="csv_plot_pyqt6.py"
+
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    ICON="assets/icon.ico"
+    ADD_DATA_SEP=";"
+    CONSOLE_OPT="--noconsole"
+else
+    ICON="assets/icon.icns"
+    ADD_DATA_SEP=":"
+    CONSOLE_OPT=""
+fi
+
+pyinstaller "$ENTRY" \
+    --onedir \
+    --name "$NAME" \
+    --icon "$ICON" \
+    --add-data "assets/icon.ico${ADD_DATA_SEP}assets" \
+    --add-data "assets/icon.icns${ADD_DATA_SEP}assets" \
+    --add-data "assets/icon.png${ADD_DATA_SEP}assets" \
+    --add-data "README.md${ADD_DATA_SEP}." \
+    $CONSOLE_OPT \
+    --clean \
+    --noconfirm
