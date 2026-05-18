@@ -1,5 +1,10 @@
 """
-CursorManager —— 光标管理混入类
+CursorManager —— 光标管理混入类 [已弃用]
+
+⚠️  警告: 此模块已弃用!
+本模块包含旧版本中使用的 CursorManager 混入类，已不再推荐使用。
+新的代码应该使用组合模式而非继承，具体请参考重构计划中的管理器实现。
+此模块仅保留用于向后兼容性，未来版本中可能会移除。
 
 封装交互状态、cursor 几何更新调度、光标标签防抖等可复用逻辑，
 同时供 DraggableGraphicsLayoutWidget 和 MainWindow 使用。
@@ -23,6 +28,15 @@ CursorManager —— 光标管理混入类
     - _queue_ui_refresh(*, style: bool, cursor: bool, stats: bool, immediate: bool)
     - _cancel_ui_refresh(*names: str)
 """
+
+import warnings
+
+warnings.warn(
+    "src.ui.cursor_manager is deprecated. Use composition pattern with "
+    "managers from src.ui.widgets module instead. See refactor plan for details.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 from PyQt6.QtCore import QTimer
 
