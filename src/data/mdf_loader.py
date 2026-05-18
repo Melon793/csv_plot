@@ -217,8 +217,8 @@ class MDFDataLoader:
         """使用 asammdf 解析 MDF 文件，填充 self._groups"""
         try:
             import asammdf
-        except ImportError:
-            raise ImportError(self._ASAMMDF_IMPORT_ERROR)
+        except ImportError as e:
+            raise ImportError(f"{self._ASAMMDF_IMPORT_ERROR}\n原始错误: {e}") from e
 
         self._notify_progress(0)
 
