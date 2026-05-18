@@ -1,45 +1,172 @@
-"""
-LayoutManager —— 布局管理与标记区域同步
-
-负责 MainWindow 的布局管理、行高控制、子图矩阵创建、
-标记区域同步以及时间修正对话框等功能。
-"""
-
+"""MainWindow 布局管理器 —— 处理布局、plot 矩阵、mark region 同步等"""
 from __future__ import annotations
-import weakref
+
+import os
+import sys
+import subprocess
+
 import numpy as np
 
-from PyQt6.QtCore import QSignalBlocker
-from PyQt6.QtWidgets import QDialog, QMessageBox
+from PyQt6.QtCore import QTimer, QEvent, QSignalBlocker
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QMessageBox, QDialog
+)
 
 from src.core.config import debug_log, UI_DEBOUNCE_DELAY_MS
+from src.ui.main_window_base_manager import MainWindowBaseManager
+from src.ui.table_dialog import DataTableDialog
 from src.ui.mark_stats import MarkStatsWindow
+from src.ui.dialogs.help import HelpDialog
 from src.ui.dialogs.layout_input import LayoutInputDialog
 from src.ui.dialogs.time_correction import TimeCorrectionDialog
 from src.ui.widgets.plot_container import PlotContainerWidget
 from src.app.plot_context import PlotContext
 
 
-class LayoutManager:
-    def __init__(self, main_window):
-        self._mw_ref = weakref.ref(main_window)
+class LayoutManager(MainWindowBaseManager):
+    """布局管理器：splitter 调节、plot 矩阵、mark region 同步、事件过滤等"""
 
-    @property
-    def _mw(self):
-        mw = self._mw_ref()
-        if mw is None:
-            raise RuntimeError("MainWindow has been garbage collected")
-        return mw
+    def _handle_close(self):
+        if DataTableDialog._instance is not None:
+            DataTableDialog._instance.set_skip_close_confirmation(True)
+        self._unregister_global_event_filter()
+
+    def _on_splitter_moved(self, pos, index):
+        self.mw.var_table_user_adjusted = True
+        self.mw._splitter_ready = True
+
+        sizes = self.mw.main_splitter.sizes()
+        if len(sizes) >= 1:
+            self.mw.var_table_default_width = sizes[0]
+
+    def _ensure_splitter_ready(self):
+        if not hasattr(self.mw, 'main_splitter'):
+            return
+        sizes = self.mw.main_splitter.sizes()
+        if len(sizes) >= 2 and all(size > 0 for size in sizes):
+            self.mw._splitter_ready = True
+        else:
+            QTimer.singleShot(50, self._ensure_splitter_ready)
+
+    def _apply_fixed_splitter_width(self):
+        self.mw._pending_splitter_adjustment = False
+        if (self.mw.var_table_user_adjusted
+                or not getattr(self.mw, '_splitter_ready', False)
+                or not hasattr(self.mw, 'main_splitter')):
+            return
+
+        sizes = self.mw.main_splitter.sizes()
+        if len(sizes) < 2:
+            return
+
+        total_width = sum(sizes)
+        if total_width <= 0 or total_width <= self.mw.var_table_default_width:
+            return
+
+        right_width = max(total_width - self.mw.var_table_default_width, 0)
+        if right_width <= 0:
+            return
+
+        self.mw.main_splitter.blockSignals(True)
+        self.mw.main_splitter.setSizes([self.mw.var_table_default_width, right_width])
+        self.mw.main_splitter.blockSignals(False)
+
+    def _handle_resize(self):
+        if (not self.mw.var_table_user_adjusted
+                and getattr(self.mw, '_splitter_ready', False)
+                and hasattr(self.mw, 'main_splitter')):
+            if not getattr(self.mw, '_pending_splitter_adjustment', False):
+                self.mw._pending_splitter_adjustment = True
+                QTimer.singleShot(0, self._apply_fixed_splitter_width)
+
+    def toggle_plot_area(self, checked):
+        if checked:
+            self.mw._saved_geometry = self.mw.saveGeometry()
+            self.mw.plot_widget.hide()
+            self.mw.toggle_plot_btn.setText("显示绘图区")
+
+            self.mw._old_max_width = self.mw.maximumWidth()
+            left_width = self.mw.left_widget.width()
+            main_margin = self.mw.centralWidget().layout().contentsMargins()
+            left_width += main_margin.left() + main_margin.right()
+            frame_width = self.mw.frameGeometry().width() - self.mw.width()
+            new_width = left_width + frame_width
+            self.mw.setFixedWidth(new_width)
+            self.mw._plot_area_visible = False
+        else:
+            self.mw.setMaximumWidth(self.mw._old_max_width)
+            self.mw.setMinimumWidth(0)
+            self.mw.plot_widget.show()
+            self.mw.toggle_plot_btn.setText("隐藏绘图区")
+            if self.mw._saved_geometry:
+                self.mw.restoreGeometry(self.mw._saved_geometry)
+            self.mw._plot_area_visible = True
+
+    def show_help(self):
+        dlg = HelpDialog(self.mw)
+        dlg.exec()
+
+    def _get_plot_container(self, plot_widget) -> PlotContainerWidget | None:
+        parent = plot_widget.parentWidget()
+        if isinstance(parent, PlotContainerWidget):
+            return parent
+        return None
+
+    def _show_drag_indicator_for_plot(self, plot_widget, var_names: list[str], text_override: str | None = None):
+        container = self._get_plot_container(plot_widget)
+        if not container:
+            return
+        if self.mw._active_drag_container and self.mw._active_drag_container is not container:
+            self.mw._active_drag_container.hide_drag_indicator()
+        container.show_drag_indicator(var_names, text_override)
+        self.mw._active_drag_container = container
+
+    def _hide_drag_indicator_for_plot(self, plot_widget):
+        container = self._get_plot_container(plot_widget)
+        if not container:
+            return
+        container.hide_drag_indicator()
+        if self.mw._active_drag_container is container:
+            self.mw._active_drag_container = None
+
+    def spawn_clone_window(self):
+        try:
+            if getattr(sys, "frozen", False):
+                args = [sys.executable]
+            else:
+                script_path = os.path.abspath(__file__)
+                args = [sys.executable, script_path]
+
+            if sys.platform == "win32":
+                subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    creationflags=(
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        | subprocess.DETACHED_PROCESS
+                        | subprocess.CREATE_NO_WINDOW
+                    ),
+                    close_fds=True,
+                )
+            else:
+                subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    start_new_session=True,
+                    close_fds=True,
+                )
+        except Exception as e:
+            QMessageBox.warning(self.mw, "错误", f"启动独立实例失败: {e}")
 
     def toggle_mark_region(self, checked):
         if checked:
-            self._mw.mark_region_btn.setText("关闭标记")
-            if len(self._mw.plot_widgets) == 0:
-                self._mw.mark_region_btn.setChecked(False)
+            self.mw.mark_region_btn.setText("关闭标记")
+            if len(self.mw.plot_widgets) == 0:
+                self.mw.mark_region_btn.setChecked(False)
                 return
-            if self._mw.saved_mark_range:
-                min_x, max_x = self._mw.saved_mark_range
-                view_min, view_max = self._mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+            if self.mw.saved_mark_range:
+                min_x, max_x = self.mw.saved_mark_range
+                view_min, view_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
                 if min_x >= view_min and max_x <= view_max:
                     pass
                 else:
@@ -47,39 +174,39 @@ class LayoutManager:
                     min_x = view_min + width / 3
                     max_x = view_min + 2 * width / 3
             else:
-                view_min, view_max = self._mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                view_min, view_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
                 width = view_max - view_min
                 min_x = view_min + width / 3
                 max_x = view_min + 2 * width / 3
 
-            for container in self._mw.plot_widgets:
+            for container in self.mw.plot_widgets:
                 if container.isVisible():
                     container.plot_widget.add_mark_region(min_x, max_x)
 
-            self._mw.mark_stats_window = MarkStatsWindow.get_instance(self._mw)
-            geom = self._mw.mark_stats_window.load_geom()
+            self.mw.mark_stats_window = MarkStatsWindow.get_instance(self.mw)
+            geom = self.mw.mark_stats_window.load_geom()
             if geom:
-                self._mw.mark_stats_window.restoreGeometry(geom)
+                self.mw.mark_stats_window.restoreGeometry(geom)
 
-            self._mw.mark_stats_window.showNormal()
+            self.mw.mark_stats_window.showNormal()
             self.request_mark_stats_refresh(immediate=True)
         else:
-            self._mw.mark_region_btn.setText("标记区域")
-            if self._mw.plot_widgets and self._mw.plot_widgets[0].plot_widget.mark_region:
-                self._mw.saved_mark_range = self._mw.plot_widgets[0].plot_widget.mark_region.getRegion()
-            for container in self._mw.plot_widgets:
+            self.mw.mark_region_btn.setText("标记区域")
+            if self.mw.plot_widgets and self.mw.plot_widgets[0].plot_widget.mark_region:
+                self.mw.saved_mark_range = self.mw.plot_widgets[0].plot_widget.mark_region.getRegion()
+            for container in self.mw.plot_widgets:
                 container.plot_widget.remove_mark_region()
-            if self._mw.mark_stats_window:
-                self._mw.mark_stats_window.save_geom()
-                self._mw.mark_stats_window.hide()
+            if self.mw.mark_stats_window:
+                self.mw.mark_stats_window.save_geom()
+                self.mw.mark_stats_window.hide()
 
     def sync_mark_regions(self, region_item):
-        if self._mw._is_syncing_mark_region:
+        if self.mw._is_syncing_mark_region:
             return
-        self._mw._is_syncing_mark_region = True
+        self.mw._is_syncing_mark_region = True
         try:
             min_x, max_x = region_item.getRegion()
-            for container in self._mw.plot_widgets:
+            for container in self.mw.plot_widgets:
                 mark = getattr(container.plot_widget, 'mark_region', None)
                 if not (container.isVisible() and mark and mark is not region_item):
                     continue
@@ -87,82 +214,82 @@ class LayoutManager:
                 mark.setRegion([min_x, max_x])
             self.request_mark_stats_refresh()
         finally:
-            self._mw._is_syncing_mark_region = False
+            self.mw._is_syncing_mark_region = False
 
     def request_mark_stats_refresh(self, *, immediate: bool = False):
-        if not getattr(self._mw, 'mark_stats_window', None):
+        if not getattr(self.mw, 'mark_stats_window', None):
             return
         if immediate:
-            if self._mw._mark_stats_timer.isActive():
-                self._mw._mark_stats_timer.stop()
-            self._mw._mark_stats_dirty = False
+            if self.mw._mark_stats_timer.isActive():
+                self.mw._mark_stats_timer.stop()
+            self.mw._mark_stats_dirty = False
             self.update_mark_stats()
             return
-        self._mw._mark_stats_dirty = True
-        self._mw._mark_stats_timer.start(UI_DEBOUNCE_DELAY_MS)
+        self.mw._mark_stats_dirty = True
+        self.mw._mark_stats_timer.start(UI_DEBOUNCE_DELAY_MS)
 
     def _flush_mark_stats_refresh(self):
-        if not self._mw._mark_stats_dirty:
+        if not self.mw._mark_stats_dirty:
             return
-        self._mw._mark_stats_dirty = False
+        self.mw._mark_stats_dirty = False
         self.update_mark_stats()
 
     def update_mark_stats(self):
-        if hasattr(self._mw, 'mark_stats_window') and self._mw.mark_stats_window:
+        if hasattr(self.mw, 'mark_stats_window') and self.mw.mark_stats_window:
             stats_list = []
-            for container in self._mw.plot_widgets:
+            for container in self.mw.plot_widgets:
                 if container.isVisible():
                     stats = container.plot_widget.get_mark_stats()
                     stats_list.append(stats)
-            self._mw.mark_stats_window.update_stats(stats_list)
+            self.mw.mark_stats_window.update_stats(stats_list)
 
     def open_layout_dialog(self):
-        dlg = LayoutInputDialog(max_rows=self._mw._plot_row_max_default,
-                                max_cols=self._mw._plot_col_max_default,
-                                cur_rows=self._mw._plot_row_current,
-                                cur_cols=self._mw._plot_col_current,
-                                parent=self._mw)
+        dlg = LayoutInputDialog(max_rows=self.mw._plot_row_max_default,
+                                max_cols=self.mw._plot_col_max_default,
+                                cur_rows=self.mw._plot_row_current,
+                                cur_cols=self.mw._plot_col_current,
+                                parent=self.mw)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             r, c = dlg.values()
             self.set_plots_visible(r, c)
             self.update_mark_regions_on_layout_change()
 
     def open_time_correction_dialog(self):
-        self._mw._is_time_correction_active = False
-        self._mw._time_correction_pinned_index_values = []
-        dialog = TimeCorrectionDialog(self._mw.factor, self._mw.offset, self._mw)
+        self.mw._is_time_correction_active = False
+        self.mw._time_correction_pinned_index_values = []
+        dialog = TimeCorrectionDialog(self.mw.factor, self.mw.offset, self.mw)
         if dialog.window_geometry:
             dialog.restoreGeometry(dialog.window_geometry)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_factor, new_offset = dialog.values()
             if new_factor <= 0:
-                QMessageBox.warning(self._mw, "错误", "Factor 必须是正数")
+                QMessageBox.warning(self.mw, "错误", "Factor 必须是正数")
                 return
-            old_factor = self._mw.factor
-            old_offset = self._mw.offset
-            self._mw.factor = new_factor
-            self._mw.offset = new_offset
-            self._mw._is_time_correction_active = True
-            self._mw._time_correction_pinned_index_values = []
+            old_factor = self.mw.factor
+            old_offset = self.mw.offset
+            self.mw.factor = new_factor
+            self.mw.offset = new_offset
+            self.mw._is_time_correction_active = True
+            self.mw._time_correction_pinned_index_values = []
             try:
-                if self._mw.cursor_btn.isChecked():
-                    mode = getattr(self._mw, "cursor_mode", "1 free cursor")
-                    if mode != "1 free cursor" and old_factor != 0 and self._mw.pinned_x_values:
-                        for x_val in self._mw.pinned_x_values:
+                if self.mw.cursor_btn.isChecked():
+                    mode = getattr(self.mw, "cursor_mode", "1 free cursor")
+                    if mode != "1 free cursor" and old_factor != 0 and self.mw.pinned_x_values:
+                        for x_val in self.mw.pinned_x_values:
                             if x_val is None or not np.isfinite(x_val):
                                 continue
                             index_pos = (x_val - old_offset) / old_factor
                             if np.isfinite(index_pos):
-                                self._mw._time_correction_pinned_index_values.append(index_pos)
+                                self.mw._time_correction_pinned_index_values.append(index_pos)
             except Exception:
-                self._mw._time_correction_pinned_index_values = []
+                self.mw._time_correction_pinned_index_values = []
 
-            if self._mw.plot_widgets:
-                curr_min, curr_max = self._mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+            if self.mw.plot_widgets:
+                curr_min, curr_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
             else:
                 curr_min, curr_max = 0, 1
 
-            for container in self._mw.plot_widgets:
+            for container in self.mw.plot_widgets:
                 container.plot_widget.update_time_correction(new_factor, new_offset)
 
             if old_factor != 0:
@@ -171,60 +298,134 @@ class LayoutManager:
                 new_min = new_offset + new_factor * index_min
                 new_max = new_offset + new_factor * index_max
             else:
-                datalength = self._mw.loader.datalength if hasattr(self._mw, 'loader') else 1
+                datalength = self.mw.loader.datalength if hasattr(self.mw, 'loader') else 1
                 new_min = new_offset + new_factor * 1
                 new_max = new_offset + new_factor * datalength
 
-            if self._mw.plot_widgets:
-                first_plot = self._mw.plot_widgets[0].plot_widget
+            if self.mw.plot_widgets:
+                first_plot = self.mw.plot_widgets[0].plot_widget
                 first_plot.view_box.enableAutoRange(x=False)
                 first_plot.view_box.setXRange(new_min, new_max, padding=0)
-                self._mw._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
+                self.mw._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
 
             self.request_mark_stats_refresh(immediate=True)
-            self._mw._is_time_correction_active = False
-            self._mw._time_correction_pinned_index_values = []
+            self.mw._is_time_correction_active = False
+            self.mw._time_correction_pinned_index_values = []
             return
-        self._mw._is_time_correction_active = False
-        self._mw._time_correction_pinned_index_values = []
+        self.mw._is_time_correction_active = False
+        self.mw._time_correction_pinned_index_values = []
 
     def update_mark_regions_on_layout_change(self):
-        if self._mw.mark_region_btn.isChecked():
-            if self._mw.plot_widgets[0] and self._mw.plot_widgets[0].plot_widget.mark_region:
-                self._mw.saved_mark_range = self._mw.plot_widgets[0].plot_widget.mark_region.getRegion()
+        if self.mw.mark_region_btn.isChecked():
+            if self.mw.plot_widgets[0] and self.mw.plot_widgets[0].plot_widget.mark_region:
+                self.mw.saved_mark_range = self.mw.plot_widgets[0].plot_widget.mark_region.getRegion()
 
-            for container in self._mw.plot_widgets:
+            for container in self.mw.plot_widgets:
                 container.plot_widget.remove_mark_region()
-            view_min, view_max = self._mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-            min_x, max_x = self._mw.saved_mark_range if self._mw.saved_mark_range else (view_min + (view_max - view_min) / 3, view_min + 2 * (view_max - view_min) / 3)
-            for container in self._mw.plot_widgets:
+            view_min, view_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+            min_x, max_x = self.mw.saved_mark_range if self.mw.saved_mark_range else (view_min + (view_max - view_min) / 3, view_min + 2 * (view_max - view_min) / 3)
+            for container in self.mw.plot_widgets:
                 if container.isVisible():
                     container.plot_widget.add_mark_region(min_x, max_x)
             self.request_mark_stats_refresh(immediate=True)
 
+    def _unregister_global_event_filter(self):
+        if not getattr(self.mw, "_drop_event_filter_registered", False):
+            return
+        app = QApplication.instance()
+        if app:
+            app.removeEventFilter(self.mw)
+        self.mw._drop_event_filter_registered = False
+
+    def _handle_event_filter(self, obj, event):
+        if not isinstance(obj, QWidget):
+            return False
+        if obj.window() is not self.mw:
+            return False
+        etype = event.type()
+        if etype == QEvent.Type.DragEnter:
+            if event.mimeData().hasUrls():
+                urls = event.mimeData().urls()
+                supported = any(
+                    u.toLocalFile().lower().endswith(
+                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
+                    )
+                    or self.mw._extract_file_extension(u.toLocalFile()) is not None
+                    for u in urls
+                )
+
+                if supported:
+                    self.show_drop_overlay()
+                    self.mw.drop_overlay.adjust_text(file_type_supported=True)
+                    event.acceptProposedAction()
+                    return True
+                else:
+                    self.show_drop_overlay()
+                    self.mw.drop_overlay.adjust_text(file_type_supported=False)
+                    event.ignore()
+                    return True
+        elif etype == QEvent.Type.DragLeave:
+            self.hide_drop_overlay()
+            return True
+        elif etype == QEvent.Type.DragMove:
+            if event.mimeData().hasUrls():
+                urls = event.mimeData().urls()
+                supported = any(
+                    u.toLocalFile().lower().endswith(
+                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
+                    )
+                    or self.mw._extract_file_extension(u.toLocalFile()) is not None
+                    for u in urls
+                )
+                if supported:
+                    event.acceptProposedAction()
+                    return True
+        elif etype == QEvent.Type.Drop:
+            self.hide_drop_overlay()
+            if event.mimeData().hasUrls():
+                urls = event.mimeData().urls()
+                for u in urls:
+                    path = u.toLocalFile()
+                    if (path.lower().endswith(('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11'))
+                            or self.mw._extract_file_extension(path) is not None):
+                        debug_log("MainWindow.eventFilter drop load path=%s", path)
+                        self.mw.load_csv_file(path)
+                        event.accept()
+                        return True
+        return False
+
+    def show_drop_overlay(self):
+        self.mw.drop_overlay.setGeometry(self.mw.centralWidget().rect())
+        self.mw.drop_overlay.raise_()
+        self.mw.drop_overlay.show()
+        self.mw.drop_overlay.activateWindow()
+
+    def hide_drop_overlay(self):
+        self.mw.drop_overlay.hide()
+
     def create_subplots_matrix(self, m: int, n: int):
         from csv_plot_pyqt6 import DraggableGraphicsLayoutWidget
 
-        for i in reversed(range(self._mw.plot_layout.count())):
-            w = self._mw.plot_layout.itemAt(i).widget()
+        for i in reversed(range(self.mw.plot_layout.count())):
+            w = self.mw.plot_layout.itemAt(i).widget()
             if w:
                 w.setParent(None)
                 w.deleteLater()
-        self._mw.plot_widgets.clear()
+        self.mw.plot_widgets.clear()
 
         first_viewbox = None
 
         for r in range(m):
             for c in range(n):
-                plot_widget = DraggableGraphicsLayoutWidget(self._mw.units, self._mw.data, self._mw.time_channels_infos)
-                plot_widget.plot_context = PlotContext(self._mw)
-                cursor_enabled = self._mw.cursor_btn.isChecked()
-                if cursor_enabled and self._mw.cursor_values_hidden:
+                plot_widget = DraggableGraphicsLayoutWidget(self.mw.units, self.mw.data, self.mw.time_channels_infos)
+                plot_widget.plot_context = PlotContext(self.mw)
+                cursor_enabled = self.mw.cursor_btn.isChecked()
+                if cursor_enabled and self.mw.cursor_values_hidden:
                     plot_widget.toggle_cursor(False, hide_values_only=True)
                 else:
                     plot_widget.toggle_cursor(cursor_enabled)
                 if cursor_enabled:
-                    plot_widget.apply_cursor_mode(self._mw.cursor_mode, self._mw.pinned_x_values)
+                    plot_widget.apply_cursor_mode(self.mw.cursor_mode, self.mw.pinned_x_values)
 
                 if c == 0 and r == 0:
                     first_viewbox = plot_widget.view_box
@@ -234,104 +435,104 @@ class LayoutManager:
                 container = PlotContainerWidget(plot_widget)
                 container.plot_widget = plot_widget
 
-                self._mw.plot_layout.addWidget(container, r, c)
-                self._mw.plot_widgets.append(container)
+                self.mw.plot_layout.addWidget(container, r, c)
+                self.mw.plot_widgets.append(container)
 
         for r in range(m):
-            percentage = self._mw.row_height_factors.get(r, 100)
+            percentage = self.mw.row_height_factors.get(r, 100)
             stretch_factor = max(1, percentage // 25)
-            self._mw.plot_layout.setRowStretch(r, stretch_factor)
+            self.mw.plot_layout.setRowStretch(r, stretch_factor)
         for c in range(n):
-            self._mw.plot_layout.setColumnStretch(c, 1)
-        if self._mw.mark_region_btn.isChecked():
+            self.mw.plot_layout.setColumnStretch(c, 1)
+        if self.mw.mark_region_btn.isChecked():
             self.toggle_mark_region(True)
 
         for r in range(m):
-            if r not in self._mw.row_height_factors:
-                self._mw.row_height_factors[r] = 100
+            if r not in self.mw.row_height_factors:
+                self.mw.row_height_factors[r] = 100
 
     def set_row_height(self, row: int, percentage: int) -> None:
-        if row < 0 or row >= self._mw._plot_row_max_default:
+        if row < 0 or row >= self.mw._plot_row_max_default:
             return
 
-        self._mw.row_height_factors[row] = percentage
+        self.mw.row_height_factors[row] = percentage
 
-        ncols = self._mw._plot_col_max_default
-        for r in range(self._mw._plot_row_max_default):
+        ncols = self.mw._plot_col_max_default
+        for r in range(self.mw._plot_row_max_default):
             visible = False
             for c in range(ncols):
                 idx = r * ncols + c
-                if idx < len(self._mw.plot_widgets) and self._mw.plot_widgets[idx].isVisible():
+                if idx < len(self.mw.plot_widgets) and self.mw.plot_widgets[idx].isVisible():
                     visible = True
                     break
 
             if visible:
-                pct = self._mw.row_height_factors.get(r, 100)
+                pct = self.mw.row_height_factors.get(r, 100)
                 stretch_factor = max(1, pct // 25)
-                self._mw.plot_layout.setRowStretch(r, stretch_factor)
+                self.mw.plot_layout.setRowStretch(r, stretch_factor)
             else:
-                self._mw.plot_layout.setRowStretch(r, 0)
+                self.mw.plot_layout.setRowStretch(r, 0)
 
-        debug_log("LayoutManager.set_row_height row=%s percentage=%s", row, percentage)
+        debug_log("MainWindow.set_row_height row=%s percentage=%s", row, percentage)
 
     def set_all_row_height(self, percentage: int) -> None:
-        for r in range(self._mw._plot_row_max_default):
-            self._mw.row_height_factors[r] = percentage
+        for r in range(self.mw._plot_row_max_default):
+            self.mw.row_height_factors[r] = percentage
 
-        ncols = self._mw._plot_col_max_default
-        for r in range(self._mw._plot_row_max_default):
+        ncols = self.mw._plot_col_max_default
+        for r in range(self.mw._plot_row_max_default):
             visible = False
             for c in range(ncols):
                 idx = r * ncols + c
-                if idx < len(self._mw.plot_widgets) and self._mw.plot_widgets[idx].isVisible():
+                if idx < len(self.mw.plot_widgets) and self.mw.plot_widgets[idx].isVisible():
                     visible = True
                     break
 
             if visible:
-                pct = self._mw.row_height_factors.get(r, 100)
+                pct = self.mw.row_height_factors.get(r, 100)
                 stretch_factor = max(1, pct // 25)
-                self._mw.plot_layout.setRowStretch(r, stretch_factor)
+                self.mw.plot_layout.setRowStretch(r, stretch_factor)
             else:
-                self._mw.plot_layout.setRowStretch(r, 0)
+                self.mw.plot_layout.setRowStretch(r, 0)
 
-        debug_log("LayoutManager.set_all_row_height percentage=%s", percentage)
+        debug_log("MainWindow.set_all_row_height percentage=%s", percentage)
 
     def get_row_height(self, row: int) -> int:
-        return self._mw.row_height_factors.get(row, 100)
+        return self.mw.row_height_factors.get(row, 100)
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
-        m, n = self._mw._plot_row_max_default, self._mw._plot_col_max_default
+        m, n = self.mw._plot_row_max_default, self.mw._plot_col_max_default
 
-        for idx, container in enumerate(self._mw.plot_widgets):
+        for idx, container in enumerate(self.mw.plot_widgets):
             r, c = divmod(idx, n)
             visible = r < row_set and c < col_set
             container.setVisible(visible)
 
             if visible:
-                self._mw.plot_layout.setColumnStretch(c, 1)
+                self.mw.plot_layout.setColumnStretch(c, 1)
             else:
-                self._mw.plot_layout.setColumnStretch(c, 0)
+                self.mw.plot_layout.setColumnStretch(c, 0)
 
         for r in range(m):
             visible = r < row_set
             if visible:
-                percentage = self._mw.row_height_factors.get(r, 100)
+                percentage = self.mw.row_height_factors.get(r, 100)
                 stretch_factor = max(1, percentage // 25)
-                self._mw.plot_layout.setRowStretch(r, stretch_factor)
+                self.mw.plot_layout.setRowStretch(r, stretch_factor)
             else:
-                self._mw.plot_layout.setRowStretch(r, 0)
+                self.mw.plot_layout.setRowStretch(r, 0)
 
-        self._mw._plot_row_current = row_set
-        self._mw._plot_col_current = col_set
+        self.mw._plot_row_current = row_set
+        self.mw._plot_col_current = col_set
         self.update_mark_regions_on_layout_change()
 
-        if self._mw.plot_widgets:
-            first_plot = self._mw.plot_widgets[0].plot_widget
+        if self.mw.plot_widgets:
+            first_plot = self.mw.plot_widgets[0].plot_widget
             curr_min, curr_max = first_plot.view_box.viewRange()[0]
-            for container in self._mw.plot_widgets:
+            for container in self.mw.plot_widgets:
                 if container.isVisible():
                     widget = container.plot_widget
                     widget.view_box.setXRange(curr_min, curr_max, padding=0)
                     widget.plot_item.update()
 
-        self._mw._sync_min_xrange()
+        self.mw._sync_min_xrange()

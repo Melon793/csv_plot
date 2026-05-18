@@ -1,56 +1,66 @@
-"""
-FileLoaderManager —— 文件加载管理类
+"""FileLoaderManager - 文件加载管理
 
-封装 MainWindow 的所有文件加载逻辑，包括：
-- 按钮点击处理
-- 文件路径验证与大小检查
-- 同步/异步文件加载
-- 重载数据
-- 加载状态管理
-- 变量过滤
+负责 MainWindow 的文件加载功能：
+- 文件对话框与路径验证
+- 同步/异步加载路由
+- 数据加载进度与状态管理
+- 加载后 UI 同步
 """
-
 from __future__ import annotations
-import weakref
 import os
 import sys
-import re
+from typing import Any
 
-from PyQt6.QtCore import Qt, QTimer, QStandardPaths, QDir
-from PyQt6.QtWidgets import (
-    QFileDialog, QMessageBox, QProgressDialog,
-)
+from PyQt6.QtCore import Qt, QStandardPaths, QTimer
+from PyQt6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 
-from src.core.config import debug_log, FILE_SIZE_LIMIT_BACKGROUND_LOADING
+from src.core.config import DEBUG_LOG_ENABLED, debug_log, FILE_SIZE_LIMIT_BACKGROUND_LOADING
 from src.core.types import AutoDetectError
-from src.data.loader import FastDataLoader, DataLoadThread
+from src.data.loader import DataLoadThread, FastDataLoader
+from src.ui.main_window_base_manager import MainWindowBaseManager
 
 
-class FileLoaderManager:
-    """文件加载管理器，负责所有数据文件加载相关的逻辑"""
-
-    def __init__(self, main_window):
-        self._mw_ref = weakref.ref(main_window)
+class FileLoaderManager(MainWindowBaseManager):
+    """负责文件加载相关功能"""
 
     @property
-    def _mw(self):
-        mw = self._mw_ref()
-        if mw is None:
-            raise RuntimeError("MainWindow has been garbage collected")
-        return mw
+    def _has_valid_loader(self) -> bool:
+        return hasattr(self.mw, 'loader') and self.mw.loader is not None
+
+    @property
+    def _has_valid_data(self) -> bool:
+        return (self._has_valid_loader and
+                hasattr(self.mw.loader, 'datalength') and
+                self.mw.loader.datalength > 0)
+
+    @property
+    def _current_data_length(self) -> int:
+        return self.mw.loader.datalength if self._has_valid_loader else 0
+
+    @staticmethod
+    def load_dict(path: str, *, default=None) -> dict:
+        import ujson as json
+        if not os.path.exists(path):
+            return {} if default is None else default
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            debug_log("load_dict JSON decode error for %s: %s", path, e)
+            raise
 
     def load_btn_click(self):
-        if getattr(self._mw, "_is_loading_new_data", False):
+        if getattr(self.mw, "_is_loading_new_data", False):
             return
 
-        self._mw.load_btn.setEnabled(False)
+        self.mw.load_btn.setEnabled(False)
 
         try:
-            initial_dir = self._get_dialog_initial_directory()
+            initial_dir = self.mw._get_dialog_initial_directory()
             file_filter = "all File (*.*);;CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11)"
 
             file_path, _ = QFileDialog.getOpenFileName(
-                self._mw,
+                self.mw,
                 "选择数据文件",
                 initial_dir,
                 file_filter
@@ -59,18 +69,18 @@ class FileLoaderManager:
             if file_path:
                 self.load_csv_file(file_path)
             else:
-                self._mw.load_btn.setEnabled(True)
+                self.mw.load_btn.setEnabled(True)
         except Exception:
-            self._mw.load_btn.setEnabled(True)
+            self.mw.load_btn.setEnabled(True)
             raise
 
     def _validate_file_path(self, file_path: str) -> bool:
         if not file_path or not isinstance(file_path, str):
-            QMessageBox.warning(self._mw, "文件错误", "请选择一个有效的文件")
+            QMessageBox.warning(self.mw, "文件错误", "请选择一个有效的文件")
             return False
 
         if not os.path.isfile(file_path):
-            QMessageBox.warning(self._mw, "文件错误", "文件不存在")
+            QMessageBox.warning(self.mw, "文件错误", "文件不存在")
             return False
 
         return True
@@ -79,11 +89,11 @@ class FileLoaderManager:
         try:
             file_size = os.path.getsize(file_path)
             if file_size == 0:
-                QMessageBox.warning(self._mw, "文件错误", "文件为空")
+                QMessageBox.warning(self.mw, "文件错误", "文件为空")
                 return False
 
             if file_size > 1024 * 1024 * 1024:
-                reply = QMessageBox.question(self._mw, "文件过大",
+                reply = QMessageBox.question(self.mw, "文件过大",
                     f"文件大小 {file_size/(1024*1024*1024):.1f}GB 较大，加载可能需要较长时间，是否继续？",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                 return reply == QMessageBox.StandardButton.Yes
@@ -91,35 +101,35 @@ class FileLoaderManager:
             return True
 
         except OSError as e:
-            QMessageBox.critical(self._mw, "文件访问错误", f"无法访问文件: {e}")
+            QMessageBox.critical(self.mw, "文件访问错误", f"无法访问文件: {e}")
             return False
 
     def _begin_data_reload(self):
-        if self._mw._is_loading_new_data:
+        if self.mw._is_loading_new_data:
             return
-        self._mw._is_loading_new_data = True
-        self._mw._data_version += 1
+        self.mw._is_loading_new_data = True
+        self.mw._data_version += 1
 
-        if hasattr(self._mw, '_crosshair_update_timer'):
-            self._mw._crosshair_update_timer.stop()
-        self._mw._pending_crosshair_x = None
+        if hasattr(self.mw, '_crosshair_update_timer'):
+            self.mw._crosshair_update_timer.stop()
+        self.mw._pending_crosshair_x = None
 
         pinned = [
-            idx for idx, container in enumerate(getattr(self._mw, "plot_widgets", []), start=1)
+            idx for idx, container in enumerate(getattr(self.mw, "plot_widgets", []), start=1)
             if getattr(container, "plot_widget", None)
             and getattr(container.plot_widget, "is_cursor_pinned", False)
         ]
-        debug_log("MainWindow.begin_data_reload pinned_plots=%s version=%s", pinned, self._mw._data_version)
+        debug_log("MainWindow.begin_data_reload pinned_plots=%s version=%s", pinned, self.mw._data_version)
         try:
-            self._mw.reset_all_pin_states()
+            self.mw.reset_all_pin_states()
         except Exception:
             pass
-        for container in getattr(self._mw, "plot_widgets", []):
+        for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
             widget._is_updating_data = True
-            widget._cached_data_version = self._mw._data_version
+            widget._cached_data_version = self.mw._data_version
             if hasattr(widget, "_cancel_ui_refresh"):
                 widget._cancel_ui_refresh()
             if hasattr(widget, '_cursor_refresh_timer'):
@@ -128,81 +138,90 @@ class FileLoaderManager:
                 widget._interaction_timer.stop()
 
     def _end_data_reload(self):
-        if not self._mw._is_loading_new_data:
+        if not self.mw._is_loading_new_data:
             return
 
-        for container in getattr(self._mw, "plot_widgets", []):
+        for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
             widget._is_updating_data = False
 
-        self._mw._is_loading_new_data = False
-        debug_log("MainWindow.end_data_reload resume_ui version=%s", self._mw._data_version)
+        self.mw._is_loading_new_data = False
+        debug_log("MainWindow.end_data_reload resume_ui version=%s", self.mw._data_version)
 
-        QTimer.singleShot(50, self._post_reload_ui_refresh)
+        QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
 
     def _post_reload_ui_refresh(self):
-        if self._mw._is_loading_new_data:
+        if self.mw._is_loading_new_data:
             return
-        for container in getattr(self._mw, "plot_widgets", []):
+        for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget and hasattr(widget, "_queue_ui_refresh"):
                 widget._queue_ui_refresh(immediate=True)
 
     def load_csv_file(self, file_path: str):
-        if getattr(self._mw, "_is_loading_new_data", False):
+        if getattr(self.mw, "_is_loading_new_data", False):
             debug_log("MainWindow.load_csv_file skipped - already loading")
-            self._mw.load_btn.setEnabled(True)
+            self.mw.load_btn.setEnabled(True)
             return
 
         debug_log("MainWindow.load_csv_file start path=%s is_loading=%s",
-                  file_path, getattr(self._mw, "_is_loading_new_data", False))
+                  file_path, getattr(self.mw, "_is_loading_new_data", False))
         if not self._validate_file_path(file_path):
-            self._mw.load_btn.setEnabled(True)
+            self.mw.load_btn.setEnabled(True)
             return
 
         if not self._check_file_size(file_path):
-            self._mw.load_btn.setEnabled(True)
+            self.mw.load_btn.setEnabled(True)
             return
 
         try:
             self._load_file(file_path)
         except MemoryError:
-            QMessageBox.critical(self._mw, "内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
+            QMessageBox.critical(self.mw, "内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
             self._cleanup_old_data()
-            self._mw.load_btn.setEnabled(True)
+            self.mw.load_btn.setEnabled(True)
         except Exception as e:
-            QMessageBox.critical(self._mw, "加载错误", f"加载文件时发生错误: {str(e)}")
+            QMessageBox.critical(self.mw, "加载错误", f"加载文件时发生错误: {str(e)}")
             self._cleanup_old_data()
-            self._mw.load_btn.setEnabled(True)
+            self.mw.load_btn.setEnabled(True)
         finally:
             if self._has_valid_loader:
                 self._post_load_actions(file_path)
-                self._mw.raise_()
-                self._mw.activateWindow()
+                self.mw.raise_()
+                self.mw.activateWindow()
+
+    def set_button_status(self, status: bool):
+        if status is not None:
+            self.mw.time_correction_btn.setEnabled(status)
+            self.mw.clear_all_plots_btn.setEnabled(status)
+            self.mw.auto_range_btn.setEnabled(status)
+            self.mw.auto_y_btn.setEnabled(status)
+            self.mw.cursor_btn.setEnabled(status)
+            self.mw.mark_region_btn.setEnabled(status)
+            self.mw.grid_layout_btn.setEnabled(status)
 
     def reload_data(self):
-        if getattr(self._mw, "_is_loading_new_data", False):
+        if getattr(self.mw, "_is_loading_new_data", False):
             return
 
         if not self._has_valid_loader:
-            QMessageBox.critical(self._mw, "错误", "没有可重新加载的数据")
+            QMessageBox.critical(self.mw, "错误", "没有可重新加载的数据")
             return
 
-        if not hasattr(self._mw.loader, 'path') or not self._mw.loader.path:
-            QMessageBox.critical(self._mw, "错误", "数据路径无效")
+        if not hasattr(self.mw.loader, 'path') or not self.mw.loader.path:
+            QMessageBox.critical(self.mw, "错误", "数据路径无效")
             return
 
-        if not os.path.isfile(self._mw.loader.path):
-            QMessageBox.critical(self._mw, "错误", "文件不存在，无法重新加载")
+        if not os.path.isfile(self.mw.loader.path):
+            QMessageBox.critical(self.mw, "错误", "文件不存在，无法重新加载")
             return
 
-        self._load_file(self._mw.loader.path, is_reload=True)
+        self._load_file(self.mw.loader.path, is_reload=True)
 
     def _load_file(self, file_path: str, is_reload: bool = False):
-        file_ext = self._extract_file_extension(file_path)
-
+        file_ext = self.mw._extract_file_extension(file_path)
         is_mdf_file = file_ext in ('.mf4', '.mdf', '.dat')
 
         delimiter_typ = None
@@ -233,7 +252,7 @@ class FileLoaderManager:
                               delimiter_typ, descRows, hasunit)
             except Exception as e:
                 QMessageBox.warning(
-                    self._mw, "配置文件错误",
+                    self.mw, "配置文件错误",
                     f"config_dict.json 读取失败，将使用自动检测方式加载文件。\n\n错误详情: {e}"
                 )
 
@@ -249,7 +268,7 @@ class FileLoaderManager:
             except AutoDetectError as e:
                 debug_log("MainWindow._load_file auto-detection failed: %s", e)
                 QMessageBox.critical(
-                    self._mw, "数据解析失败",
+                    self.mw, "数据解析失败",
                     "无法自动识别文件的标题行和分隔符。\n"
                     "请确认文件格式是否正确。\n"
                     "支持的分隔符：逗号(,)、分号(;)、制表符(Tab)"
@@ -258,7 +277,7 @@ class FileLoaderManager:
 
         if delimiter_typ is None or descRows is None or hasunit is None:
             QMessageBox.critical(
-                self._mw, "数据解析失败",
+                self.mw, "数据解析失败",
                 "无法确定文件的分隔符和标题行位置。\n"
                 "请确认文件格式是否正确。"
             )
@@ -279,56 +298,42 @@ class FileLoaderManager:
                 finally:
                     self._end_data_reload()
                 if status:
-                    self._mw.set_button_status(True)
-                    self._mw.load_btn.setEnabled(True)
+                    self.set_button_status(True)
+                    self.mw.load_btn.setEnabled(True)
                     self._post_load_actions(file_path)
                 else:
                     debug_log("MainWindow._load_file sync load failed path=%s", file_path)
-                    self._mw.load_btn.setEnabled(True)
+                    self.mw.load_btn.setEnabled(True)
             else:
                 debug_log("MainWindow._load_file spawn thread path=%s", file_path)
-                self._mw._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self._mw)
-                self._mw._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-                self._mw._progress.setAutoClose(True)
-                self._mw._progress.setCancelButton(None)
-                self._mw._progress.setMinimumDuration(0)
-                self._mw._progress.show()
+                self.mw._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self.mw)
+                self.mw._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+                self.mw._progress.setAutoClose(True)
+                self.mw._progress.setCancelButton(None)
+                self.mw._progress.setMinimumDuration(0)
+                self.mw._progress.show()
 
-                self._mw._thread = DataLoadThread(file_path, descRows=descRows, sep=delimiter_typ,
-                                                  hasunit=hasunit, encoding=encoding)
-                self._mw._thread.progress.connect(self._mw._progress.setValue)
-                self._mw._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
-                self._mw._thread.error.connect(self._on_load_error)
-                self._mw._thread.start()
+                self.mw._thread = DataLoadThread(file_path, descRows=descRows, sep=delimiter_typ,
+                                                   hasunit=hasunit, encoding=encoding)
+                self.mw._thread.progress.connect(self.mw._progress.setValue)
+                self.mw._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
+                self.mw._thread.error.connect(self._on_load_error)
+                self.mw._thread.start()
                 started_async = True
         except Exception:
             if not started_async:
                 self._end_data_reload()
             raise
 
-    @property
-    def _has_valid_loader(self) -> bool:
-        return hasattr(self._mw, 'loader') and self._mw.loader is not None
-
-    @property
-    def _has_valid_data(self) -> bool:
-        return (self._has_valid_loader and
-                hasattr(self._mw.loader, 'datalength') and
-                self._mw.loader.datalength > 0)
-
-    @property
-    def _current_data_length(self) -> int:
-        return self._mw.loader.datalength if self._has_valid_loader else 0
-
     def _cleanup_old_data(self):
         try:
             if self._has_valid_loader:
-                if hasattr(self._mw.loader, '_df'):
-                    del self._mw.loader._df
-                del self._mw.loader
-                self._mw.loader = None
+                if hasattr(self.mw.loader, '_df'):
+                    del self.mw.loader._df
+                del self.mw.loader
+                self.mw.loader = None
 
-            self._mw.clear_all_plots()
+            self.mw.clear_all_plots()
 
             import gc
             gc.collect()
@@ -339,26 +344,26 @@ class FileLoaderManager:
             print(f"清理旧数据时发生未知错误: {e}")
 
     def _post_load_actions(self, file_path: str):
-        self._mw.loaded_path = file_path
-        self._remember_last_open_dir(file_path)
+        self.mw.loaded_path = file_path
+        self.mw._remember_last_open_dir(file_path)
 
         def truncate_string(file_path, max_length=79):
             filename_length = len(os.path.basename(file_path))
             if len(file_path) <= max_length:
                 return file_path
-            return "..." + file_path[min(-filename_length-1,-(max_length-3)):]
-        self._mw.setWindowTitle(f"{self._mw.defaultTitle} ---- 数据文件: [{truncate_string(file_path)}]")
-        self._mw.set_button_status(True)
+            return "..." + file_path[min(-filename_length-1, -(max_length-3)):]
+        self.mw.setWindowTitle(f"{getattr(self.mw, 'defaultTitle', '')} ---- 数据文件: [{truncate_string(file_path)}]")
+        self.set_button_status(True)
 
     def _remember_last_open_dir(self, file_path: str):
         directory = os.path.dirname(file_path)
         if directory and os.path.isdir(directory):
-            self._mw._last_open_dir = directory
+            self.mw._last_open_dir = directory
 
     def _get_dialog_initial_directory(self) -> str:
-        if getattr(self._mw, "_last_open_dir", None) and os.path.isdir(self._mw._last_open_dir):
-            return self._mw._last_open_dir
-        return self._default_system_directory()
+        if getattr(self.mw, "_last_open_dir", None) and os.path.isdir(self.mw._last_open_dir):
+            return self.mw._last_open_dir
+        return self.mw._default_system_directory()
 
     def _default_system_directory(self) -> str:
         candidates: list[str | None] = []
@@ -373,26 +378,16 @@ class FileLoaderManager:
         candidates.extend([
             _safe_location(QStandardPaths.StandardLocation.HomeLocation),
             _safe_location(QStandardPaths.StandardLocation.DesktopLocation),
-            QDir.rootPath()
+            os.path.sep
         ])
         for path in candidates:
             if path:
                 return path
         return ""
 
-    @staticmethod
-    def load_dict(path: str, *, default=None) -> dict:
-        import ujson as json
-        if not os.path.exists(path):
-            return {} if default is None else default
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            debug_log("load_dict JSON decode error for %s: %s", path, e)
-            raise
-
     def _extract_file_extension(self, file_path: str) -> str:
+        import re
+
         supported_extensions = ['.csv', '.mfile', '.t00', '.t01', '.t10', '.t11', '.txt',
                                 '.mf4', '.mdf', '.dat']
 
@@ -401,7 +396,6 @@ class FileLoaderManager:
             return base_ext
 
         base_name = os.path.basename(file_path).lower()
-
         pattern = r'(' + '|'.join(re.escape(ext) for ext in supported_extensions) + r')\.\d+$'
         match = re.search(pattern, base_name)
 
@@ -431,7 +425,7 @@ class FileLoaderManager:
                   file_path, descRows, sep, hasunit, encoding)
         is_valid, error_msg = self._validate_load_parameters(file_path, descRows, sep, hasunit)
         if not is_valid:
-            QMessageBox.critical(self._mw, "参数错误", error_msg)
+            QMessageBox.critical(self.mw, "参数错误", error_msg)
             return False
 
         loader = None
@@ -440,25 +434,25 @@ class FileLoaderManager:
         try:
             ext = os.path.splitext(file_path)[1].lower()
             if ext in ('.mf4', '.mdf', '.dat'):
-                from mdf_loader import MDFDataLoader
+                from src.data.mdf_loader import MDFDataLoader
                 loader = MDFDataLoader(file_path)
             else:
                 loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
                                         encoding=encoding)
-            self._mw.loader = loader
-            self._apply_loader()
+            self.mw.loader = loader
+            self.mw._apply_loader()
             status = True
         except MemoryError as e:
-            QMessageBox.critical(self._mw, "内存不足", f"加载文件时内存不足: {str(e)}")
+            QMessageBox.critical(self.mw, "内存不足", f"加载文件时内存不足: {str(e)}")
             status = False
         except FileNotFoundError as e:
-            QMessageBox.critical(self._mw, "文件未找到", f"无法找到文件: {str(e)}")
+            QMessageBox.critical(self.mw, "文件未找到", f"无法找到文件: {str(e)}")
             status = False
         except PermissionError as e:
-            QMessageBox.critical(self._mw, "权限错误", f"没有文件访问权限: {str(e)}")
+            QMessageBox.critical(self.mw, "权限错误", f"没有文件访问权限: {str(e)}")
             status = False
         except Exception as e:
-            QMessageBox.critical(self._mw, "读取失败", f"加载文件时发生错误: {str(e)}")
+            QMessageBox.critical(self.mw, "读取失败", f"加载文件时发生错误: {str(e)}")
             status = False
         finally:
             debug_log("MainWindow._load_sync done path=%s status=%s rows=%s",
@@ -469,61 +463,62 @@ class FileLoaderManager:
         return status
 
     def _on_load_done(self, loader, file_path: str):
-        self._mw._progress.close()
+        self.mw._progress.close()
         debug_log("MainWindow._on_load_done apply new loader path=%s", file_path)
-        if hasattr(self._mw, 'loader') and self._mw.loader is not None:
-            if hasattr(self._mw.loader, '_df'):
-                del self._mw.loader._df
-            del self._mw.loader
+        if hasattr(self.mw, 'loader') and self.mw.loader is not None:
+            if hasattr(self.mw.loader, '_df'):
+                del self.mw.loader._df
+            del self.mw.loader
 
-        self._mw.loader = loader
-        self._apply_loader()
+        self.mw.loader = loader
+        self.mw._apply_loader()
         self._post_load_actions(file_path)
         self._end_data_reload()
-        self._mw.load_btn.setEnabled(True)
+        self.mw.load_btn.setEnabled(True)
 
     def _on_load_error(self, msg):
-        self._mw._progress.close()
+        self.mw._progress.close()
         debug_log("MainWindow._on_load_error %s", msg)
-        QMessageBox.critical(self._mw, "读取失败", msg)
+        QMessageBox.critical(self.mw, "读取失败", msg)
         self._end_data_reload()
-        self._mw.load_btn.setEnabled(True)
+        self.mw.load_btn.setEnabled(True)
 
     def _apply_loader(self):
         debug_log("MainWindow._apply_loader datalength=%s columns=%s",
-                  getattr(self._mw.loader, "datalength", None),
-                  len(getattr(self._mw.loader, "var_names", []) or []))
-        self._mw.var_names = self._mw.loader.var_names
-        self._mw.units = self._mw.loader.units
-        self._mw.time_channels_infos = self._mw.loader.time_channels_info
-        self._mw.data_validity = self._mw.loader.df_validity
-        self._mw.data = self._mw.loader.df
-        self._mw.list_widget.populate(self._mw.var_names, self._mw.units, self._mw.data_validity)
+                  getattr(self.mw.loader, "datalength", None),
+                  len(getattr(self.mw.loader, "var_names", []) or []))
+        self.mw.var_names = self.mw.loader.var_names
+        self.mw.units = self.mw.loader.units
+        self.mw.time_channels_infos = self.mw.loader.time_channels_info
+        self.mw.data_validity = self.mw.loader.df_validity
+        self.mw.data = self.mw.loader.df
+        self.mw.list_widget.populate(self.mw.var_names, self.mw.units, self.mw.data_validity)
 
-        if self._mw.placeholder_label.parent():
-            self._mw.placeholder_label.setParent(None)
+        if self.mw.placeholder_label.parent():
+            self.mw.placeholder_label.setParent(None)
 
-        if not self._mw.plot_widgets:
-            self._mw.create_subplots_matrix(self._mw._plot_row_max_default, self._mw._plot_col_max_default)
-            self._mw.set_plots_visible(self._mw._plot_row_current, self._mw._plot_col_current)
+        if not self.mw.plot_widgets:
+            self.mw.create_subplots_matrix(self.mw._plot_row_max_default, self.mw._plot_col_max_default)
+            self.mw.set_plots_visible(self.mw._plot_row_current, self.mw._plot_col_current)
 
-        for container in self._mw.plot_widgets:
+        for container in self.mw.plot_widgets:
             widget = container.plot_widget
-            widget.data = self._mw.loader.df
-            widget.units = self._mw.loader.units
-            widget.time_channels_info = self._mw.loader.time_channels_info
-            widget.time_values = self._mw.loader.time_values
-            widget.time_column_name = self._mw.loader.time_column_name
-            widget.time_axis_label = self._mw.loader.time_axis_label
+            widget.data = self.mw.loader.df
+            widget.units = self.mw.loader.units
+            widget.time_channels_info = self.mw.loader.time_channels_info
+            widget.time_values = self.mw.loader.time_values
+            widget.time_column_name = self.mw.loader.time_column_name
+            widget.time_axis_label = self.mw.loader.time_axis_label
             widget.update_x_axis_label()
 
-        self._mw._compute_baseline_density()
-        self._mw._sync_min_xrange()
+        self.mw._compute_baseline_density()
+        self.mw._sync_min_xrange()
 
-        self._mw.replots_after_loading()
+        self.mw.replots_after_loading()
+
         from src.ui.table_dialog import DataTableDialog
         if DataTableDialog._instance is not None:
-            DataTableDialog._instance.update_data(self._mw.loader)
+            DataTableDialog._instance.update_data(self.mw.loader)
             if not DataTableDialog._instance._df.empty:
                 DataTableDialog._instance.show()
                 DataTableDialog._instance.raise_()
@@ -532,30 +527,6 @@ class FileLoaderManager:
                 DataTableDialog._instance.set_skip_close_confirmation(True)
                 DataTableDialog._instance.close()
 
-        self.filter_variables()
-        if self._mw.mark_region_btn.isChecked():
-            self._mw.request_mark_stats_refresh(immediate=True)
-
-    def filter_variables(self):
-        if self._mw.var_names is None:
-            return
-        name_text = self._mw.filter_input.text().lower()
-        unit_text = self._mw.unit_filter_input.text().lower()
-        name_keywords = name_text.split() if name_text else []
-        unit_keywords = unit_text.split() if unit_text else []
-
-        filtered_names = []
-        for var in self._mw.var_names:
-            if not isinstance(var, str):
-                continue
-
-            var_lower = var.lower()
-            unit = self._mw.units.get(var, '').lower()
-
-            name_match = not name_keywords or any(kw in var_lower for kw in name_keywords)
-            unit_match = not unit_keywords or any(kw in unit for kw in unit_keywords)
-
-            if name_match and unit_match:
-                filtered_names.append(var)
-
-        self._mw.list_widget.populate(filtered_names, self._mw.units, self._mw.data_validity)
+        self.mw.filter_variables()
+        if self.mw.mark_region_btn.isChecked():
+            self.mw.request_mark_stats_refresh(immediate=True)

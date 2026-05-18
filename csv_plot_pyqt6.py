@@ -30,6 +30,10 @@ from src.ui.dialogs.axis import AxisDialog
 from src.ui.dialogs.time_correction import TimeCorrectionDialog
 
 from src.app.plot_context import PlotContext
+from src.ui.file_loader_manager import FileLoaderManager
+from src.ui.cursor_sync_manager import CursorSyncManager
+from src.ui.layout_manager import LayoutManager
+from src.ui.main_window_base_manager import MainWindowBaseManager
 
 
 if sys.platform == "darwin":  # macOS
@@ -38,6 +42,7 @@ if sys.platform == "darwin":  # macOS
         "qt6ct.debug=false; "      # 原来想关的 qt6ct 日志
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
+
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, QtMsgType, qInstallMessageHandler
 from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
@@ -4149,18 +4154,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         else:
             self.update_cursor_label()
 
-# ---------------- 主窗口 ----------------
-    def _refresh_cursor_geometry(self):
-        if not hasattr(self, 'vline') or not self.vline.isVisible():
-            return
-        if getattr(self, '_is_interacting', False):
-            self._pending_cursor_geometry_update = True
-            return
-        if self.show_values_only:
-            self._show_x_position_only()
-        else:
-            self.update_cursor_label()
-
     def _connect_viewbox_signals(self):
         vb = self.view_box
         vb.plot_widget = self
@@ -4238,30 +4231,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             dialog = PlotVariableEditorDialog(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
             dialog.show()
             dialog.raise_()
-
-    def _start_interaction(self):
-        pass
-
-    def _end_interaction(self):
-        try:
-            self._is_interacting = False
-            self._queue_ui_refresh(immediate=True)
-            if getattr(self, '_pending_cursor_geometry_update', False):
-                self._pending_cursor_geometry_update = False
-                self._schedule_cursor_geometry_update()
-        except Exception as e:
-            print(f"结束交互出错: {e}")
-
-    def _schedule_cursor_geometry_update(self):
-        if not hasattr(self, 'vline') or not self.vline.isVisible():
-            return
-        if getattr(self, '_cursor_refresh_timer', None) is None:
-            return
-        if getattr(self, '_is_interacting', False):
-            self._pending_cursor_geometry_update = True
-            return
-        self._pending_cursor_geometry_update = False
-        self._cursor_refresh_timer.start(max(15, UI_DEBOUNCE_DELAY_MS))
 
 
 class PlotContainerWidget(QWidget):
@@ -4694,695 +4663,117 @@ class MainWindow(QMainWindow):
         # 行高度百分比跟踪 {row_index: percentage}
         self.row_height_factors: dict[int, int] = {}
 
+        self.file_loader_manager = FileLoaderManager(self)
+        self.layout_manager = LayoutManager(self)
+        self.cursor_sync_manager = CursorSyncManager(self)
+
         # ---------------- 命令行直接加载文件 ----------------
         if len(sys.argv) > 1:
             file_path = sys.argv[1]
             self.load_csv_file(file_path)
 
     def closeEvent(self, event):
-        # 在主窗口关闭前，设置DataTableDialog的_skip_close_confirmation为True
-        if DataTableDialog._instance is not None:
-            DataTableDialog._instance.set_skip_close_confirmation(True)
-        self._unregister_global_event_filter()
+        self.layout_manager._handle_close()
         super().closeEvent(event)
         
     def _on_splitter_moved(self, pos, index):
-        """
-        处理分界线拖动事件
-        
-        当用户手动拖动变量表和绘图区之间的分界线时触发。
-        记录用户偏好的变量表宽度，并标记为"用户已手动调整"。
-        
-        Args:
-            pos: 分界线的新位置（像素）
-            index: 分隔符索引（对于单个分隔符，始终为0）
-        """
-        # 标记用户已手动调整（影响后续窗口缩放行为）
-        self.var_table_user_adjusted = True
-        self._splitter_ready = True
-        
-        # 记录当前的变量表宽度作为新的默认值
-        sizes = self.main_splitter.sizes()
-        if len(sizes) >= 1:
-            self.var_table_default_width = sizes[0]
+        self.layout_manager._on_splitter_moved(pos, index)
 
     def _ensure_splitter_ready(self):
-        """
-        延迟标记 splitter 尺寸已稳定，避免首个 resizeEvent 中重复 setSizes 触发布局闪烁。
-        """
-        if not hasattr(self, 'main_splitter'):
-            return
-        sizes = self.main_splitter.sizes()
-        if len(sizes) >= 2 and all(size > 0 for size in sizes):
-            self._splitter_ready = True
-        else:
-            # 尚未获得有效尺寸，延迟重试
-            QTimer.singleShot(50, self._ensure_splitter_ready)
+        self.layout_manager._ensure_splitter_ready()
 
     def _apply_fixed_splitter_width(self):
-        """
-        在事件循环空闲时执行的分隔条宽度调整，避免在 resizeEvent 内立即 setSizes 导致闪烁。
-        """
-        self._pending_splitter_adjustment = False
-        if (self.var_table_user_adjusted
-                or not getattr(self, '_splitter_ready', False)
-                or not hasattr(self, 'main_splitter')):
-            return
-
-        sizes = self.main_splitter.sizes()
-        if len(sizes) < 2:
-            return
-
-        total_width = sum(sizes)
-        if total_width <= 0 or total_width <= self.var_table_default_width:
-            return
-
-        right_width = max(total_width - self.var_table_default_width, 0)
-        if right_width <= 0:
-            return
-
-        self.main_splitter.blockSignals(True)
-        self.main_splitter.setSizes([self.var_table_default_width, right_width])
-        self.main_splitter.blockSignals(False)
+        self.layout_manager._apply_fixed_splitter_width()
     
     def resizeEvent(self, event):
-        """
-        重写窗口大小调整事件
-        
-        实现智能宽度调整策略：
-        - 未手动调整过：窗口缩放时保持变量表宽度固定，只改变绘图区宽度
-        - 已手动调整过：窗口缩放时按比例调整两侧宽度（QSplitter默认行为）
-        
-        Args:
-            event: QResizeEvent窗口调整事件
-        """
         super().resizeEvent(event)
-        
-        # 如果用户从未手动调整过分界线，延迟执行固定宽度策略
-        if (not self.var_table_user_adjusted 
-                and getattr(self, '_splitter_ready', False) 
-                and hasattr(self, 'main_splitter')):
-            if not getattr(self, '_pending_splitter_adjustment', False):
-                self._pending_splitter_adjustment = True
-                QTimer.singleShot(0, self._apply_fixed_splitter_width)
+        self.layout_manager._handle_resize(event)
 
     def toggle_plot_area(self, checked):
-        if checked:
-            self._saved_geometry = self.saveGeometry()
-            self.plot_widget.hide()
-            self.toggle_plot_btn.setText("显示绘图区")
-            
-            # 保存当前的最大宽度策略，然后设置固定宽度
-            self._old_max_width = self.maximumWidth()
-            # 计算固定宽度
-            left_width = self.left_widget.width()
-            # 加上主布局的左右边距
-            main_margin = self.centralWidget().layout().contentsMargins()
-            left_width += main_margin.left() + main_margin.right()
-            # 加上窗口框架的宽度
-            frame_width = self.frameGeometry().width() - self.width()
-            new_width = left_width + frame_width
-            self.setFixedWidth(new_width)
-            self._plot_area_visible = False
-        else:
-            # 恢复窗口大小策略
-            self.setMaximumWidth(self._old_max_width)
-            self.setMinimumWidth(0)
-            self.plot_widget.show()
-            self.toggle_plot_btn.setText("隐藏绘图区")
-            if self._saved_geometry:
-                self.restoreGeometry(self._saved_geometry)
-            self._plot_area_visible = True
-
-        #print(f"actual window width = {self.width()}")
+        self.layout_manager.toggle_plot_area()
             
     def show_help(self):
-        dlg = HelpDialog(self)
-        dlg.exec()
+        self.layout_manager.show_help()
 
     def _get_plot_container(self, plot_widget) -> PlotContainerWidget | None:
-        parent = plot_widget.parentWidget()
-        if isinstance(parent, PlotContainerWidget):
-            return parent
-        return None
+        return self.layout_manager._get_plot_container(plot_widget)
 
     def _show_drag_indicator_for_plot(self, plot_widget, var_names: list[str], text_override: str | None = None):
-        container = self._get_plot_container(plot_widget)
-        if not container:
-            return
-        if self._active_drag_container and self._active_drag_container is not container:
-            self._active_drag_container.hide_drag_indicator()
-        container.show_drag_indicator(var_names, text_override)
-        self._active_drag_container = container
+        self.layout_manager._show_drag_indicator_for_plot(plot_widget, var_names, text_override=text_override)
 
     def _hide_drag_indicator_for_plot(self, plot_widget):
-        container = self._get_plot_container(plot_widget)
-        if not container:
-            return
-        container.hide_drag_indicator()
-        if self._active_drag_container is container:
-            self._active_drag_container = None
+        self.layout_manager._hide_drag_indicator_for_plot(plot_widget)
 
     def spawn_clone_window(self):
-        try:
-            if getattr(sys, "frozen", False):
-                args = [sys.executable]
-            else:
-                script_path = os.path.abspath(__file__)
-                args = [sys.executable, script_path]
-
-            if sys.platform == "win32":
-                subprocess.Popen(
-                    args,
-                    cwd=os.getcwd(),
-                    creationflags=(
-                        subprocess.CREATE_NEW_PROCESS_GROUP
-                        | subprocess.DETACHED_PROCESS
-                        | subprocess.CREATE_NO_WINDOW
-                    ),
-                    close_fds=True,
-                )
-            else:
-                subprocess.Popen(
-                    args,
-                    cwd=os.getcwd(),
-                    start_new_session=True,
-                    close_fds=True,
-                )
-        except Exception as e:
-            QMessageBox.warning(self, "错误", f"启动独立实例失败: {e}")
+        return self.layout_manager.spawn_clone_window()
 
     def load_btn_click(self):
-        # 防护1：检查是否正在加载
-        if getattr(self, "_is_loading_new_data", False):
-            return
-        
-        # 防护2：立即禁用按钮
-        self.load_btn.setEnabled(False)
-        
-        try:
-            initial_dir = self._get_dialog_initial_directory()
-            file_filter = "all File (*.*);;CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11)"
-            
-            # 使用静态方法 getOpenFileName，这在 macOS 上更稳定
-            file_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "选择数据文件",
-                initial_dir,
-                file_filter
-            )
-            
-            if file_path:
-                self.load_csv_file(file_path)
-            else:
-                # 用户取消对话框，恢复按钮状态
-                self.load_btn.setEnabled(True)
-        except Exception:
-            # 发生异常也要恢复按钮状态
-            self.load_btn.setEnabled(True)
-            raise
+        self.file_loader_manager.load_btn_click()
 
     def _validate_file_path(self, file_path: str) -> bool:
-        """验证文件路径是否有效"""
-        if not file_path or not isinstance(file_path, str):
-            QMessageBox.warning(self, "文件错误", "请选择一个有效的文件")
-            return False
-        
-        if not os.path.isfile(file_path):
-            QMessageBox.warning(self, "文件错误", "文件不存在")
-            return False
-            
-        return True
+        return self.file_loader_manager._validate_file_path(file_path)
     
     def _check_file_size(self, file_path: str) -> bool:
-        """检查文件大小并提示用户"""
-        try:
-            file_size = os.path.getsize(file_path)
-            if file_size == 0:
-                QMessageBox.warning(self, "文件错误", "文件为空")
-                return False
-                
-            if file_size > 1024 * 1024 * 1024:  # 1GB限制
-                reply = QMessageBox.question(self, "文件过大", 
-                    f"文件大小 {file_size/(1024*1024*1024):.1f}GB 较大，加载可能需要较长时间，是否继续？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                return reply == QMessageBox.StandardButton.Yes
-                
-            return True
-            
-        except OSError as e:
-            QMessageBox.critical(self, "文件访问错误", f"无法访问文件: {e}")
-            return False
+        return self.file_loader_manager._check_file_size(file_path)
 
     def _begin_data_reload(self):
-        """
-        标记开始加载新数据
-
-        会立即清理所有Pin状态并锁定plot的cursor更新，防止旧信号在加载阶段继续触发。
-        【稳定性优化】递增版本号使旧的pending回调失效，停止所有相关timer。
-        """
-        if self._is_loading_new_data:
-            return
-        self._is_loading_new_data = True
-        self._data_version += 1  # 版本号递增，使旧回调失效
-
-        # 停止crosshair更新timer
-        if hasattr(self, '_crosshair_update_timer'):
-            self._crosshair_update_timer.stop()
-        self._pending_crosshair_x = None
-
-        pinned = [
-            idx for idx, container in enumerate(getattr(self, "plot_widgets", []), start=1)
-            if getattr(container, "plot_widget", None)
-            and getattr(container.plot_widget, "is_cursor_pinned", False)
-        ]
-        debug_log("MainWindow.begin_data_reload pinned_plots=%s version=%s", pinned, self._data_version)
-        try:
-            self.reset_all_pin_states()
-        except Exception:
-            pass
-        for container in getattr(self, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if not widget:
-                continue
-            widget._is_updating_data = True
-            widget._cached_data_version = self._data_version  # 记录当前版本
-            if hasattr(widget, "_cancel_ui_refresh"):
-                widget._cancel_ui_refresh()
-            # 停止cursor相关timer
-            if hasattr(widget, '_cursor_refresh_timer'):
-                widget._cursor_refresh_timer.stop()
-            if hasattr(widget, '_interaction_timer'):
-                widget._interaction_timer.stop()
+        self.file_loader_manager._begin_data_reload()
 
     def _end_data_reload(self):
-        """
-        标记数据加载结束
-
-        恢复cursor/样式刷新，让UI重新响应交互。
-        【稳定性优化】使用延迟刷新确保所有状态已稳定。
-        """
-        if not self._is_loading_new_data:
-            return
-
-        # 先恢复所有widget状态
-        for container in getattr(self, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if not widget:
-                continue
-            widget._is_updating_data = False
-
-        # 最后才清除加载标志
-        self._is_loading_new_data = False
-        debug_log("MainWindow.end_data_reload resume_ui version=%s", self._data_version)
-
-        # 使用延迟刷新，确保所有状态已稳定
-        QTimer.singleShot(50, self._post_reload_ui_refresh)
+        self.file_loader_manager._end_data_reload()
 
     def _post_reload_ui_refresh(self):
-        """数据加载完成后的延迟UI刷新"""
-        if self._is_loading_new_data:
-            return  # 又开始新的加载了，跳过
-        for container in getattr(self, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget and hasattr(widget, "_queue_ui_refresh"):
-                widget._queue_ui_refresh(immediate=True)
+        self.file_loader_manager._post_reload_ui_refresh()
 
     def load_csv_file(self, file_path: str):
-        """
-        加载CSV文件
-        
-        主文件加载入口，处理文件验证、大小检查和错误处理
-        协调整个数据加载流程
-        
-        Args:
-            file_path: CSV文件路径
-        """
-        # 防护：再次检查加载状态
-        if getattr(self, "_is_loading_new_data", False):
-            debug_log("MainWindow.load_csv_file skipped - already loading")
-            self.load_btn.setEnabled(True)
-            return
-            
-        debug_log("MainWindow.load_csv_file start path=%s is_loading=%s",
-                  file_path, getattr(self, "_is_loading_new_data", False))
-        if not self._validate_file_path(file_path):
-            self.load_btn.setEnabled(True)  # 恢复按钮
-            return
-            
-        if not self._check_file_size(file_path):
-            self.load_btn.setEnabled(True)  # 恢复按钮
-            return
-        
-        try:
-            self._load_file(file_path)
-        except MemoryError:
-            QMessageBox.critical(self, "内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
-            self._cleanup_old_data()
-            self.load_btn.setEnabled(True)  # 恢复按钮
-        except Exception as e:
-            QMessageBox.critical(self, "加载错误", f"加载文件时发生错误: {str(e)}")
-            self._cleanup_old_data()
-            self.load_btn.setEnabled(True)  # 恢复按钮
-        finally:
-            if self._has_valid_loader:  # 如果加载成功
-                self._post_load_actions(file_path)
-                self.raise_()  # 加载完成后前置
-                self.activateWindow()
+        self.file_loader_manager.load_csv_file(file_path)
 
     def set_button_status(self,status:bool):
-        if status is not None:
-            # load_btn 不受此方法控制，始终可用（除非在加载过程中）
-            self.time_correction_btn.setEnabled(status)
-            #self.reload_btn.setEnabled(status)
-            self.clear_all_plots_btn.setEnabled(status)
-            self.auto_range_btn.setEnabled(status)
-            self.auto_y_btn.setEnabled(status) 
-            self.cursor_btn.setEnabled(status)
-            self.mark_region_btn.setEnabled(status)
-            self.grid_layout_btn.setEnabled(status)
+        self.file_loader_manager.set_button_status(status)
 
     def reload_data(self):
-        """重新加载当前数据"""
-        # 防护：检查是否正在加载
-        if getattr(self, "_is_loading_new_data", False):
-            return
-            
-        if not self._has_valid_loader:
-            QMessageBox.critical(self, "错误", "没有可重新加载的数据")
-            return
-            
-        if not hasattr(self.loader, 'path') or not self.loader.path:
-            QMessageBox.critical(self, "错误", "数据路径无效")
-            return
-            
-        if not os.path.isfile(self.loader.path):
-            QMessageBox.critical(self, "错误", "文件不存在，无法重新加载")
-            return
-
-        self._load_file(self.loader.path, is_reload=True)
+        self.file_loader_manager.reload_data()
 
     def _load_file(self, file_path: str, is_reload: bool = False):
-        """
-        内部文件加载方法
-        
-        执行实际的文件加载操作，包括参数配置和线程启动
-        无论是重载还是加载新数据，都不立即清理plot，等新数据加载完成后再处理
-        这样可以避免UI立即清空，提供更好的用户体验
-        
-        参数优先级：config_dict.json 配置 > 自动检测 > 默认回退
-        
-        Args:
-            file_path: 文件路径
-            is_reload: 是否为重新加载
-        """
-        
-        file_ext = self._extract_file_extension(file_path)
-
-        is_mdf_file = file_ext in ('.mf4', '.mdf', '.dat')
-
-        delimiter_typ = None
-        descRows = None
-        hasunit = None
-        encoding = None
-        config_used = False
-
-        if is_mdf_file:
-            delimiter_typ = ','
-            descRows = 0
-            hasunit = False
-            config_used = True
-
-        # 优先级1：尝试读取 config_dict.json
-        if not is_mdf_file and os.path.isfile("config_dict.json"):
-            try:
-                config_dict = self.load_dict("config_dict.json")
-                ext_dict = config_dict.get(file_ext[1:], {})
-                cfg_sep = ext_dict.get('sep')
-                cfg_skip = ext_dict.get('skiprows')
-                cfg_hasunit = ext_dict.get('hasunit')
-                if cfg_sep is not None and cfg_skip is not None and cfg_hasunit is not None:
-                    delimiter_typ = cfg_sep
-                    descRows = int(cfg_skip)
-                    hasunit = bool(cfg_hasunit)
-                    config_used = True
-                    debug_log("MainWindow._load_file using config_dict.json sep=%s descRows=%s hasunit=%s",
-                              delimiter_typ, descRows, hasunit)
-            except Exception as e:
-                QMessageBox.warning(
-                    self, "配置文件错误",
-                    f"config_dict.json 读取失败，将使用自动检测方式加载文件。\n\n错误详情: {e}"
-                )
-
-        # 优先级2：自动检测
-        if not config_used:
-            try:
-                fmt = FastDataLoader.auto_detect(file_path)
-                delimiter_typ = fmt.sep
-                descRows = fmt.header_row
-                hasunit = fmt.hasunit
-                encoding = fmt.encoding
-                debug_log("MainWindow._load_file auto-detected encoding=%s sep=%s descRows=%s hasunit=%s",
-                          encoding, delimiter_typ, descRows, hasunit)
-            except AutoDetectError as e:
-                debug_log("MainWindow._load_file auto-detection failed: %s", e)
-                # TODO: 优先级 P1 — ImportDialog 交互式弹窗
-                #   功能描述：当自动检测无法确定文件格式时，弹出类似 MATLAB "Import Data" 的交互式窗口，
-                #           允许用户手动指定分隔符、标题行、单位行和数据起始行。
-                #   预期实现方式：
-                #     1. 创建 ImportDialog(QDialog) 类，包含以下 UI 元素：
-                #        - QPlainTextEdit：预览文件原始内容（前 50 行），只读
-                #        - QComboBox：选择分隔符（逗号 / 分号 / Tab / 空格 / 自定义）
-                #        - QSpinBox：指定标题行（0-based 行号）
-                #        - QCheckBox：是否包含单位行
-                #        - QSpinBox：指定数据起始行（或通过标题行 + 单位行自动计算）
-                #        - 实时预览：切换分隔符后，自动高亮推荐标题行/单位行位置
-                #     2. ImportDialog 初始化时先调用 FastDataLoader._auto_detect_format(file_path)
-                #        获取 FormatInfo 作为智能默认建议，展示给用户
-                #     3. 用户切换分隔符时，调用 FastDataLoader._detect_header_from_lines(lines, new_sep)
-                #        和 _detect_hasunit_from_lines(lines, new_sep, header_row) 实时更新推荐
-                #     4. 调用方式：dialog = ImportDialog(file_path, self)
-                #                 if dialog.exec() == QDialog.DialogCode.Accepted:
-                #                     fmt = dialog.get_result()  # 返回 FormatInfo
-                #                     delimiter_typ = fmt.sep
-                #                     descRows = fmt.header_row
-                #                     hasunit = fmt.hasunit
-                #                     encoding = fmt.encoding
-                #                 else:
-                #                     return  # 用户取消
-                #   关联位置：
-                #     - FormatInfo dataclass: L215 附近
-                #     - FastDataLoader._auto_detect_format(): L660 附近
-                #     - FastDataLoader._detect_sep_from_lines(): L535 附近
-                #     - FastDataLoader._detect_header_from_lines(): L575 附近
-                #     - FastDataLoader._detect_hasunit_from_lines(): L600 附近
-                #     - MainWindow._load_file(): L8575 附近
-                #     - 当前 except 分支即为 ImportDialog 的触发入口
-                QMessageBox.critical(
-                    self, "数据解析失败",
-                    "无法自动识别文件的标题行和分隔符。\n"
-                    "请确认文件格式是否正确。\n"
-                    "支持的分隔符：逗号(,)、分号(;)、制表符(Tab)"
-                )
-                return
-
-        if delimiter_typ is None or descRows is None or hasunit is None:
-            QMessageBox.critical(
-                self, "数据解析失败",
-                "无法确定文件的分隔符和标题行位置。\n"
-                "请确认文件格式是否正确。"
-            )
-            return
-
-        self._begin_data_reload()
-        started_async = False
-        _Threshold_Size_Mb=FILE_SIZE_LIMIT_BACKGROUND_LOADING 
-
-        # < 5 MB 直接读
-        file_size =os.path.getsize(file_path)
-        debug_log("MainWindow._load_file start path=%s size=%.2fMB reload=%s",
-                  file_path, file_size/1024/1024, is_reload)
-        try:
-            if file_size < _Threshold_Size_Mb * 1024 * 1024:
-                try:
-                    status = self._load_sync(file_path, descRows=descRows, sep=delimiter_typ,
-                                             hasunit=hasunit, encoding=encoding)
-                finally:
-                    self._end_data_reload()
-                if status:
-                    self.set_button_status(True)
-                    self.load_btn.setEnabled(True)  # 恢复导入按钮
-                    self._post_load_actions(file_path)
-                else:
-                    debug_log("MainWindow._load_file sync load failed path=%s", file_path)
-                    self.load_btn.setEnabled(True)  # 加载失败也要恢复按钮
-            else:
-                # 5 MB 以上走线程
-                debug_log("MainWindow._load_file spawn thread path=%s", file_path)
-                self._progress = QProgressDialog("正在读取数据...", "取消", 0, 100, self)
-                self._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-                self._progress.setAutoClose(True)
-                self._progress.setCancelButton(None)            # 不可取消
-                self._progress.setMinimumDuration(0)  # 立即显示，避免延迟
-                self._progress.show()
-
-                self._thread = DataLoadThread(file_path, descRows=descRows, sep=delimiter_typ,
-                                                 hasunit=hasunit, encoding=encoding)
-                self._thread.progress.connect(self._progress.setValue)
-                self._thread.finished.connect(lambda loader: self._on_load_done(loader, file_path))
-                self._thread.error.connect(self._on_load_error)
-                self._thread.start()
-                started_async = True
-        except Exception:
-            if not started_async:
-                self._end_data_reload()
-            raise
+        self.file_loader_manager._load_file(file_path, is_reload=is_reload)
 
     @property
     def _has_valid_loader(self) -> bool:
-        """检查是否有有效的loader"""
-        return hasattr(self, 'loader') and self.loader is not None
+        return self.file_loader_manager._has_valid_loader
     
     @property
     def _has_valid_data(self) -> bool:
-        """检查是否有有效的数据"""
-        return (self._has_valid_loader and 
-                hasattr(self.loader, 'datalength') and 
-                self.loader.datalength > 0)
+        return self.file_loader_manager._has_valid_data
     
     @property
     def _current_data_length(self) -> int:
-        """获取当前数据长度"""
-        return self.loader.datalength if self._has_valid_loader else 0
+        return self.file_loader_manager._current_data_length
 
     def _cleanup_old_data(self):
-        """清理旧数据以释放内存"""
-        try:
-            # 清理旧的loader数据
-            if self._has_valid_loader:
-                if hasattr(self.loader, '_df'):
-                    del self.loader._df
-                del self.loader
-                self.loader = None
-            
-            # 清理所有绘图数据
-            self.clear_all_plots()
-            
-            # 强制垃圾回收
-            import gc
-            gc.collect()
-            
-        except (AttributeError, TypeError) as e:
-            print(f"清理旧数据时出错: {e}")
-        except Exception as e:
-            print(f"清理旧数据时发生未知错误: {e}")
+        self.file_loader_manager._cleanup_old_data()
 
 
     def _post_load_actions(self, file_path: str):
-        self.loaded_path = file_path
-        self._remember_last_open_dir(file_path)
-
-        def truncate_string(file_path, max_length=79):
-            # directory = os.path.dirname(file_path)
-            filename_length = len(os.path.basename(file_path))
-            if len(file_path) <= max_length:
-                return file_path
-            return "..." + file_path[min(-filename_length-1,-(max_length-3)):]
-        self.setWindowTitle(f"{self.defaultTitle} ---- 数据文件: [{truncate_string(file_path)}]")
-        self.set_button_status(True)
+        self.file_loader_manager._post_load_actions(file_path)
 
     def _remember_last_open_dir(self, file_path: str):
-        """记录最近一次成功加载的数据所在目录"""
-        directory = os.path.dirname(file_path)
-        if directory and os.path.isdir(directory):
-            self._last_open_dir = directory
+        self.file_loader_manager._remember_last_open_dir(file_path)
 
     def _get_dialog_initial_directory(self) -> str:
-        """根据历史记录或系统默认值返回文件对话框初始目录"""
-        if getattr(self, "_last_open_dir", None) and os.path.isdir(self._last_open_dir):
-            return self._last_open_dir
-        return self._default_system_directory()
+        return self.file_loader_manager._get_dialog_initial_directory()
 
     def _default_system_directory(self) -> str:
-        """在不同平台上生成类似“我的电脑”的默认目录"""
-        candidates: list[str | None] = []
-        if sys.platform.startswith("win"):
-            # Windows 的“我的电脑”Shell 路径，Qt 可识别；如不支持将自动回退
-            candidates.append("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")
-        def _safe_location(location):
-            try:
-                return QStandardPaths.writableLocation(location)
-            except AttributeError:
-                return ""
-
-        candidates.extend([
-            _safe_location(QStandardPaths.StandardLocation.HomeLocation),
-            _safe_location(QStandardPaths.StandardLocation.DesktopLocation),
-            QDir.rootPath()
-        ])
-        for path in candidates:
-            if path:
-                return path
-        return ""
+        return self.file_loader_manager._default_system_directory()
 
     @staticmethod
     def load_dict(path: str, *, default=None) -> dict:
-        import ujson as json
-        if not os.path.exists(path):
-            return {} if default is None else default
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            debug_log("load_dict JSON decode error for %s: %s", path, e)
-            raise
+        return FileLoaderManager.load_dict(path, default=default)
         
     def _extract_file_extension(self, file_path: str) -> str:
-        """
-        智能提取文件后缀，优先检测不带数字的后缀
-        支持处理像't00.1'或't00.5'这样的带数字变体的后缀
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            提取的真实文件后缀（如'.t00'），如果无法识别则返回None
-        """
-        import re
-        
-        # 支持的文件类型列表
-        supported_extensions = ['.csv', '.mfile', '.t00', '.t01', '.t10', '.t11', '.txt',
-                                '.mf4', '.mdf', '.dat']
-        
-        # 首先尝试直接提取后缀（不带数字的情况）
-        base_ext = os.path.splitext(file_path)[1].lower()
-        if base_ext in supported_extensions:
-            return base_ext
-        
-        # 如果不带数字的后缀不匹配，尝试匹配带数字变体的后缀
-        base_name = os.path.basename(file_path).lower()
-        
-        # 定义正则表达式模式，匹配支持的后缀后跟数字变体
-        pattern = r'(' + '|'.join(re.escape(ext) for ext in supported_extensions) + r')\.\d+$'
-        match = re.search(pattern, base_name)
-        
-        if match:
-            # 返回匹配的真实后缀（不带数字部分）
-            return match.group(1)
-        
-        # 如果都不匹配，返回None
-        return None
+        return self.file_loader_manager._extract_file_extension(file_path)
     
     def _validate_load_parameters(self, file_path: str, descRows, sep, hasunit) -> tuple[bool, str]:
-        if not isinstance(file_path, str) or not file_path.strip():
-            return False, "文件路径无效"
-        if descRows is not None and (not isinstance(descRows, int) or descRows < 0):
-            return False, "描述行数必须是非负整数"
-        if sep is not None and (not isinstance(sep, str) or not sep):
-            return False, "分隔符无效"
-        if hasunit is not None and not isinstance(hasunit, bool):
-            return False, "hasunit参数必须是布尔值"
-        return True, ""
+        return self.file_loader_manager._validate_load_parameters(file_path, descRows, sep, hasunit)
 
     def _load_sync(self, 
                    file_path: str,
@@ -5390,1235 +4781,142 @@ class MainWindow(QMainWindow):
                    sep: str = ',',
                    hasunit: bool = True,
                    encoding: str | None = None):
-        """小文件直接读，自动识别文件格式（CSV/MDF）"""
-        debug_log("MainWindow._load_sync start path=%s descRows=%s sep=%s hasunit=%s encoding=%s",
-                  file_path, descRows, sep, hasunit, encoding)
-        is_valid, error_msg = self._validate_load_parameters(file_path, descRows, sep, hasunit)
-        if not is_valid:
-            QMessageBox.critical(self, "参数错误", error_msg)
-            return False
-            
-        loader = None
-        status = False
-        
-        try:
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext in ('.mf4', '.mdf', '.dat'):
-                from mdf_loader import MDFDataLoader
-                loader = MDFDataLoader(file_path)
-            else:
-                loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
-                                        encoding=encoding)
-            self.loader = loader
-            self._apply_loader()
-            status = True
-        except MemoryError as e:
-            QMessageBox.critical(self, "内存不足", f"加载文件时内存不足: {str(e)}")
-            status = False
-        except FileNotFoundError as e:
-            QMessageBox.critical(self, "文件未找到", f"无法找到文件: {str(e)}")
-            status = False
-        except PermissionError as e:
-            QMessageBox.critical(self, "权限错误", f"没有文件访问权限: {str(e)}")
-            status = False
-        except Exception as e:
-            QMessageBox.critical(self, "读取失败", f"加载文件时发生错误: {str(e)}")
-            status = False
-        finally:
-            debug_log("MainWindow._load_sync done path=%s status=%s rows=%s",
-                      file_path, status,
-                      getattr(loader, "datalength", None) if loader is not None else None)
-            if loader is not None:
-                loader = None
-        return status
+        return self.file_loader_manager._load_sync(file_path, descRows=descRows, sep=sep, hasunit=hasunit, encoding=encoding)
 
     def _on_load_done(self,loader, file_path: str):
-        self._progress.close()
-        debug_log("MainWindow._on_load_done apply new loader path=%s", file_path)
-        # 清理旧的loader数据（无论是重载还是加载新数据）
-        if hasattr(self, 'loader') and self.loader is not None:
-            if hasattr(self.loader, '_df'):
-                del self.loader._df
-            del self.loader
-        
-        self.loader=loader
-        self._apply_loader()
-        self._post_load_actions(file_path)
-        self._end_data_reload()
-        self.load_btn.setEnabled(True)  # 恢复导入按钮
+        self.file_loader_manager._on_load_done(loader, file_path)
 
     def _on_load_error(self, msg):
-        self._progress.close()
-        debug_log("MainWindow._on_load_error %s", msg)
-        QMessageBox.critical(self, "读取失败", msg)
-        self._end_data_reload()
-        self.load_btn.setEnabled(True)  # 恢复按钮状态
+        self.file_loader_manager._on_load_error(msg)
 
     def _apply_loader(self):
-        """把 loader 的内容同步到 UI"""
-        debug_log("MainWindow._apply_loader datalength=%s columns=%s",
-                  getattr(self.loader, "datalength", None),
-                  len(getattr(self.loader, "var_names", []) or []))
-        self.var_names = self.loader.var_names
-        self.units = self.loader.units
-        self.time_channels_infos = self.loader.time_channels_info
-        self.data_validity = self.loader.df_validity
-        self.data = self.loader.df  # 设置主数据
-        self.list_widget.populate(self.var_names, self.units, self.data_validity)
-
-        # 移除占位符
-        if self.placeholder_label.parent():
-            self.placeholder_label.setParent(None)
-
-        # 如果尚未创建子图矩阵，则创建
-        if not self.plot_widgets:
-            self.create_subplots_matrix(self._plot_row_max_default, self._plot_col_max_default)
-            self.set_plots_visible(self._plot_row_current, self._plot_col_current)
-
-        # 更新所有 plot_widgets 的数据
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-            widget.data = self.loader.df
-            widget.units = self.loader.units
-            widget.time_channels_info = self.loader.time_channels_info
-            widget.time_values = self.loader.time_values
-            widget.time_column_name = self.loader.time_column_name
-            widget.time_axis_label = self.loader.time_axis_label
-            widget.update_x_axis_label()
-
-        self._compute_baseline_density()
-        self._sync_min_xrange()
-
-        # 清除cache
-  
-        self.replots_after_loading()
-        # 更新数值变量表（如果存在）
-        if DataTableDialog._instance is not None:
-            DataTableDialog._instance.update_data(self.loader)
-            # 只show如果有列
-            if not DataTableDialog._instance._df.empty:
-                DataTableDialog._instance.show()  # 确保窗口显示
-                DataTableDialog._instance.raise_()
-                DataTableDialog._instance.activateWindow()
-            else:
-                DataTableDialog._instance.set_skip_close_confirmation(True)
-                DataTableDialog._instance.close()
-
-
-        self.filter_variables()
-        if self.mark_region_btn.isChecked():
-            self.request_mark_stats_refresh(immediate=True)
+        self.file_loader_manager._apply_loader()
 
     def filter_variables(self):
-        if self.var_names is None:
-            return
-        name_text = self.filter_input.text().lower()
-        unit_text = self.unit_filter_input.text().lower()
-        name_keywords = name_text.split() if name_text else []
-        unit_keywords = unit_text.split() if unit_text else []
-
-        filtered_names = []
-        for var in self.var_names:
-            # 过滤掉非字符串变量名
-            if not isinstance(var, str):
-                continue
-            
-            var_lower = var.lower()
-            unit = self.units.get(var, '').lower()
-
-            name_match = not name_keywords or any(kw in var_lower for kw in name_keywords)
-            unit_match = not unit_keywords or any(kw in unit for kw in unit_keywords)
-
-            if name_match and unit_match:
-                filtered_names.append(var)
-
-        self.list_widget.populate(filtered_names, self.units, self.data_validity)
+        self.cursor_sync_manager.filter_variables()
 
     def toggle_mark_region(self, checked):
-        if checked:
-            self.mark_region_btn.setText("关闭标记")
-            # 添加标记区域
-            if len(self.plot_widgets) == 0:
-                self.mark_region_btn.setChecked(False)
-                return
-            if self.saved_mark_range:
-                min_x, max_x = self.saved_mark_range
-                view_min, view_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-                if min_x >= view_min and max_x <= view_max:
-                    pass  # 沿用
-                else:
-                    # 新位置：中间1/3
-                    width = view_max - view_min
-                    min_x = view_min + width / 3
-                    max_x = view_min + 2 * width / 3
-            else:
-                # 默认中间1/3
-                view_min, view_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-                width = view_max - view_min
-                min_x = view_min + width / 3
-                max_x = view_min + 2 * width / 3
-
-            for container in self.plot_widgets:
-                if container.isVisible():
-                    container.plot_widget.add_mark_region(min_x, max_x)
-
-            # 打开统计窗口
-            self.mark_stats_window = MarkStatsWindow.get_instance(self)
-            geom = self.mark_stats_window.load_geom()
-            if geom:
-                self.mark_stats_window.restoreGeometry(geom)
-
-            self.mark_stats_window.showNormal()
-            self.request_mark_stats_refresh(immediate=True)
-        else:
-            self.mark_region_btn.setText("标记区域")
-            # 保存当前范围
-            if self.plot_widgets and self.plot_widgets[0].plot_widget.mark_region:
-                self.saved_mark_range = self.plot_widgets[0].plot_widget.mark_region.getRegion()
-            for container in self.plot_widgets:
-                container.plot_widget.remove_mark_region()
-            if self.mark_stats_window:
-                self.mark_stats_window.save_geom()
-                self.mark_stats_window.hide()  # Hide instead of close to preserve state
-                # Do not set to None to maintain singleton
+        self.layout_manager.toggle_mark_region()
 
     def sync_mark_regions(self, region_item):
-        if self._is_syncing_mark_region:
-            return
-        self._is_syncing_mark_region = True
-        try:
-            min_x, max_x = region_item.getRegion()
-            for container in self.plot_widgets:
-                mark = getattr(container.plot_widget, 'mark_region', None)
-                if not (container.isVisible() and mark and mark is not region_item):
-                    continue
-                blocker = QSignalBlocker(mark)
-                mark.setRegion([min_x, max_x])
-            self.request_mark_stats_refresh()
-        finally:
-            self._is_syncing_mark_region = False
+        self.layout_manager.sync_mark_regions(region_item)
 
     def request_mark_stats_refresh(self, *, immediate: bool = False):
-        if not getattr(self, 'mark_stats_window', None):
-            return
-        if immediate:
-            if self._mark_stats_timer.isActive():
-                self._mark_stats_timer.stop()
-            self._mark_stats_dirty = False
-            self.update_mark_stats()
-            return
-        self._mark_stats_dirty = True
-        self._mark_stats_timer.start(UI_DEBOUNCE_DELAY_MS)
+        self.layout_manager.request_mark_stats_refresh(immediate=immediate)
 
     def _flush_mark_stats_refresh(self):
-        if not self._mark_stats_dirty:
-            return
-        self._mark_stats_dirty = False
-        self.update_mark_stats()
+        self.layout_manager._flush_mark_stats_refresh()
 
     def update_mark_stats(self):
-        if hasattr(self, 'mark_stats_window') and self.mark_stats_window:
-            stats_list = []
-            for container in self.plot_widgets:
-                if container.isVisible():
-                    stats = container.plot_widget.get_mark_stats()
-                    stats_list.append(stats)
-            self.mark_stats_window.update_stats(stats_list)
+        self.layout_manager.update_mark_stats()
 
     def open_layout_dialog(self):
-        dlg = LayoutInputDialog(max_rows=self._plot_row_max_default, 
-                                max_cols=self._plot_col_max_default, 
-                                cur_rows=self._plot_row_current,
-                                cur_cols=self._plot_col_current,
-                                   parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            r, c = dlg.values()
-            self.set_plots_visible (r, c)
-            self.update_mark_regions_on_layout_change()
+        self.layout_manager.open_layout_dialog()
 
     def open_time_correction_dialog(self):
-        # 记录时间修正状态与固定cursor索引（用于稳定转换）
-        self._is_time_correction_active = False
-        self._time_correction_pinned_index_values = []
-        dialog = TimeCorrectionDialog(self.factor, self.offset, self)
-        if dialog.window_geometry:
-            dialog.restoreGeometry(dialog.window_geometry)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_factor, new_offset = dialog.values()
-            if new_factor <= 0:
-                QMessageBox.warning(self, "错误", "Factor 必须是正数")
-                return
-            old_factor = self.factor
-            old_offset = self.offset
-            self.factor = new_factor
-            self.offset = new_offset
-            # 时间修正开始：缓存固定cursor的索引位置
-            self._is_time_correction_active = True
-            self._time_correction_pinned_index_values = []
-            try:
-                if self.cursor_btn.isChecked():
-                    mode = getattr(self, "cursor_mode", "1 free cursor")
-                    if mode != "1 free cursor" and old_factor != 0 and self.pinned_x_values:
-                        for x_val in self.pinned_x_values:
-                            if x_val is None or not np.isfinite(x_val):
-                                continue
-                            index_pos = (x_val - old_offset) / old_factor
-                            if np.isfinite(index_pos):
-                                self._time_correction_pinned_index_values.append(index_pos)
-            except Exception:
-                self._time_correction_pinned_index_values = []
-
-            # 获取当前视图范围（假设所有视图联动，使用第一个）
-            if self.plot_widgets:
-                curr_min, curr_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-            else:
-                curr_min, curr_max = 0, 1
-
-            # 更新所有图表的数据和限制，但不设置范围
-            for container in self.plot_widgets:
-                container.plot_widget.update_time_correction(new_factor, new_offset)
-
-            # 计算新范围
-            if old_factor != 0:
-                index_min = (curr_min - old_offset) / old_factor
-                index_max = (curr_max - old_offset) / old_factor
-                new_min = new_offset + new_factor * index_min
-                new_max = new_offset + new_factor * index_max
-            else:
-                # fallback
-                datalength = self.loader.datalength if hasattr(self, 'loader') else 1
-                new_min = new_offset + new_factor * 1
-                new_max = new_offset + new_factor * datalength
-
-            # 只设置第一个图表的 X 轴范围，其他图表通过 XLink 同步
-            if self.plot_widgets:
-                first_plot = self.plot_widgets[0].plot_widget
-                first_plot.view_box.enableAutoRange(x=False)  # 禁用自动范围调整
-                first_plot.view_box.setXRange(new_min, new_max, padding=0)  # 明确设置 padding=0
-                self._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
-
-            # 更新标记统计
-            self.request_mark_stats_refresh(immediate=True)
-            # 时间修正结束：清理缓存
-            self._is_time_correction_active = False
-            self._time_correction_pinned_index_values = []
-            return
-        self._is_time_correction_active = False
-        self._time_correction_pinned_index_values = []
+        self.layout_manager.open_time_correction_dialog()
 
     def update_mark_regions_on_layout_change(self):
-        if self.mark_region_btn.isChecked():
-            # 移除旧的
-            if self.plot_widgets[0] and self.plot_widgets[0].plot_widget.mark_region:
-                self.saved_mark_range = self.plot_widgets[0].plot_widget.mark_region.getRegion()
-
-            for container in self.plot_widgets:
-                container.plot_widget.remove_mark_region()
-            # 添加新的到可见plot
-            view_min, view_max = self.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-            min_x, max_x = self.saved_mark_range if self.saved_mark_range else (view_min + (view_max - view_min) / 3, view_min + 2 * (view_max - view_min) / 3)
-            for container in self.plot_widgets:
-                if container.isVisible():
-                    container.plot_widget.add_mark_region(min_x, max_x)
-            self.request_mark_stats_refresh(immediate=True)
+        self.layout_manager.update_mark_regions_on_layout_change()
 
     def _unregister_global_event_filter(self):
-        if not getattr(self, "_drop_event_filter_registered", False):
-            return
-        app = QApplication.instance()
-        if app:
-            app.removeEventFilter(self)
-        self._drop_event_filter_registered = False
+        self.layout_manager._unregister_global_event_filter()
 
     def eventFilter(self, obj, event):
-        if not isinstance(obj, QWidget):
-            return super().eventFilter(obj, event)
-        if obj.window() is not self:
-            return super().eventFilter(obj, event)
-        etype = event.type()
-        if etype == QEvent.Type.DragEnter:
-            if event.mimeData().hasUrls():
-                urls = event.mimeData().urls()
-                supported = any(
-                    u.toLocalFile().lower().endswith(
-                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
-                    )
-                    or self._extract_file_extension(u.toLocalFile()) is not None
-                    for u in urls
-                )
-
-                if supported:
-                    self.show_drop_overlay()
-                    self.drop_overlay.adjust_text(file_type_supported=True)
-                    event.acceptProposedAction()
-                    return True
-                else:
-                    self.show_drop_overlay()
-                    self.drop_overlay.adjust_text(file_type_supported=False)
-                    event.ignore()
-                    return True
-        elif etype == QEvent.Type.DragLeave:
-            self.hide_drop_overlay()
+        handled = self.layout_manager._handle_event_filter(obj, event)
+        if handled:
             return True
-        elif etype == QEvent.Type.DragMove:
-            if event.mimeData().hasUrls():
-                urls = event.mimeData().urls()
-                supported = any(
-                    u.toLocalFile().lower().endswith(
-                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
-                    )
-                    or self._extract_file_extension(u.toLocalFile()) is not None
-                    for u in urls
-                )
-                if supported:
-                    event.acceptProposedAction()
-                    return True
-        elif etype == QEvent.Type.Drop:
-            self.hide_drop_overlay()
-            if event.mimeData().hasUrls():
-                urls = event.mimeData().urls()
-                for u in urls:
-                    path = u.toLocalFile()
-                    if (path.lower().endswith(('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11'))
-                            or self._extract_file_extension(path) is not None):
-                        debug_log("MainWindow.eventFilter drop load path=%s", path)
-                        self.load_csv_file(path)
-                        event.accept()
-                        return True
         return super().eventFilter(obj, event)
 
     def show_drop_overlay(self):
-        self.drop_overlay.setGeometry(self.centralWidget().rect())
-        self.drop_overlay.raise_()
-        self.drop_overlay.show()
-        self.drop_overlay.activateWindow()
+        self.layout_manager.show_drop_overlay()
 
     def hide_drop_overlay(self):
-        self.drop_overlay.hide()
+        self.layout_manager.hide_drop_overlay()
 
 
     def reset_plots_after_loading(self,index_xMin,index_xMax, *, reason: str | None = None):
-        # 【安全标志】设置所有widget为更新中状态
-        debug_log("MainWindow.reset_plots_after_loading reason=%s range=(%s,%s)",
-                  reason, index_xMin, index_xMax)
-        for container in self.plot_widgets:
-            container.plot_widget._is_updating_data = True
-            if hasattr(container.plot_widget, '_cancel_ui_refresh'):
-                container.plot_widget._cancel_ui_refresh()
-        
-        try:
-            for container in self.plot_widgets:
-                 # 先清空plot内容，然后重置坐标轴
-                 container.plot_widget.clear_plot_item()
-                 container.plot_widget.reset_plot(index_xMin, index_xMax)
-                 container.plot_widget.clear_value_cache()
-                 # 重置pin状态
-                 container.plot_widget.reset_pin_state()
-
-            self.cursor_mode = "1 free cursor"
-            self.pinned_x_values = []
-            self.saved_mark_range = None
-            if self.mark_stats_window:
-                self.mark_stats_window.hide()  # Hide instead of close
-                self.mark_stats_window.tree.clear()  # Clear stats to prevent duplication
-
-            if self.mark_region_btn.isChecked():
-                self.mark_region_btn.setChecked(False)
-                self.toggle_mark_region(False)
-        
-        finally:
-            # 【安全标志】恢复所有widget的正常状态
-            for container in self.plot_widgets:
-                container.plot_widget._is_updating_data = False
-            
-            # 【样式同步】恢复标志后，主动触发一次样式更新
-            for container in self.plot_widgets:
-                widget = container.plot_widget
-                try:
-                    has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
-                    if has_data:
-                        widget._queue_ui_refresh(immediate=True, stats=False)
-                except Exception:
-                    pass
+        self.cursor_sync_manager.reset_plots_after_loading()
 
 
     def _get_cursor_source_plot(self, source_plot=None):
-        if source_plot is not None and hasattr(source_plot, 'view_box'):
-            return source_plot
-        for container in getattr(self, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget is not None and container.isVisible():
-                return widget
-        for container in getattr(self, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget is not None:
-                return widget
-        return None
+        return self.cursor_sync_manager._get_cursor_source_plot(source_plot)
 
     def _get_cursor_view_range(self, source_plot=None):
-        plot = self._get_cursor_source_plot(source_plot)
-        if plot is None or not hasattr(plot, "view_box"):
-            return None, None
-        try:
-            view_min, view_max = plot.view_box.viewRange()[0]
-            return view_min, view_max
-        except Exception:
-            return None, None
+        return self.cursor_sync_manager._get_cursor_view_range(source_plot)
 
     @staticmethod
     def _clamp_value(value, min_val, max_val):
-        return max(min_val, min(max_val, value))
+        return CursorSyncManager._clamp_value(value, min_val, max_val)
 
     def _calc_second_cursor_position(self, pinned_x, view_min, view_max):
-        if view_min is None or view_max is None:
-            return pinned_x
-        if view_min > view_max:
-            view_min, view_max = view_max, view_min
-        clamped = self._clamp_value(pinned_x, view_min, view_max)
-        threshold = view_min + 0.6 * (view_max - view_min)
-        if clamped <= threshold:
-            return clamped + (view_max - clamped) / 2
-        return view_min + (clamped - view_min) / 2
+        return self.cursor_sync_manager._calc_second_cursor_position(pinned_x, view_min, view_max)
 
     def _select_farthest_cursor_index(self, context_x):
-        if not self.pinned_x_values:
-            return None
-        if context_x is None:
-            return len(self.pinned_x_values) - 1
-        distances = [abs(x - context_x) for x in self.pinned_x_values]
-        return int(np.argmax(distances))
+        return self.cursor_sync_manager._select_farthest_cursor_index(context_x)
 
     def _apply_cursor_mode_to_plots(self):
-        for container in getattr(self, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget is None:
-                continue
-            widget.apply_cursor_mode(self.cursor_mode, self.pinned_x_values)
+        return self.cursor_sync_manager._apply_cursor_mode_to_plots()
 
     def set_cursor_mode(self, mode, *, source_plot=None, context_x=None):
-        if mode == "off":
-            if self.cursor_btn.isChecked():
-                self.toggle_cursor_all(False)
-            return
-        if mode not in ("1 free cursor", "1 anchored cursor", "2 anchored cursor"):
-            return
-        if not hasattr(self, "cursor_btn") or not self.cursor_btn.isChecked():
-            self.toggle_cursor_all(True)
-
-        self.last_valid_cursor_mode = mode
-
-        prev_mode = getattr(self, "cursor_mode", "1 free cursor")
-        view_min, view_max = self._get_cursor_view_range(source_plot)
-
-        if mode == "1 free cursor":
-            self.cursor_mode = mode
-            self.pinned_x_values = []
-        elif mode == "1 anchored cursor":
-            if prev_mode == "2 anchored cursor":
-                remove_idx = self._select_farthest_cursor_index(context_x)
-                if remove_idx is not None:
-                    remaining = [x for idx, x in enumerate(self.pinned_x_values) if idx != remove_idx]
-                    self.pinned_x_values = remaining[:1]
-            if not self.pinned_x_values:
-                if source_plot is not None and hasattr(source_plot, "vline"):
-                    self.pinned_x_values = [source_plot.vline.value()]
-            self.cursor_mode = mode
-        elif mode == "2 anchored cursor":
-            if prev_mode == "1 free cursor" or not self.pinned_x_values:
-                pinned = context_x
-                if pinned is None and source_plot is not None and hasattr(source_plot, "vline"):
-                    pinned = source_plot.vline.value()
-                if pinned is not None:
-                    second = self._calc_second_cursor_position(pinned, view_min, view_max)
-                    self.pinned_x_values = [pinned, second]
-            elif prev_mode == "1 anchored cursor":
-                pinned = self.pinned_x_values[0] if self.pinned_x_values else None
-                if pinned is None and source_plot is not None and hasattr(source_plot, "vline"):
-                    pinned = source_plot.vline.value()
-                if pinned is not None:
-                    second = self._calc_second_cursor_position(pinned, view_min, view_max)
-                    self.pinned_x_values = [pinned, second]
-            else:
-                if len(self.pinned_x_values) == 1:
-                    second = self._calc_second_cursor_position(self.pinned_x_values[0], view_min, view_max)
-                    self.pinned_x_values = [self.pinned_x_values[0], second]
-            self.cursor_mode = mode
-
-        self._apply_cursor_mode_to_plots()
-        for container in getattr(self, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget is not None:
-                widget.update_cursor_label()
+        self.cursor_sync_manager.set_cursor_mode(mode, source_plot=source_plot, context_x=context_x)
 
     def set_cursor_enabled(self, enabled: bool) -> None:
-        if self.cursor_btn:
-            self.cursor_btn.setChecked(enabled)
+        return self.cursor_sync_manager.set_cursor_enabled(enabled)
 
     def is_cursor_enabled(self) -> bool:
-        if self.cursor_btn:
-            return self.cursor_btn.isChecked()
-        return False
+        return self.cursor_sync_manager.is_cursor_enabled()
 
     def toggle_cursor_all(self, checked):
-        """切换所有plot的cursor显示状态
-        
-        根据checked状态和cursor_values_hidden标志，同步所有plot的cursor显示。
-        
-        Args:
-            checked: True表示显示cursor，False表示隐藏cursor
-        """
-        debug_log("MainWindow.toggle_cursor_all start checked=%s has_plot=%s",
-                  checked, len(self.plot_widgets))
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-            # 根据全局cursor_values_hidden状态决定如何显示cursor
-            if checked and self.cursor_values_hidden:
-                # cursor启用但值被隐藏：只显示vline和x值
-                widget.toggle_cursor(False, hide_values_only=True)
-            else:
-                # cursor完全启用或禁用
-                widget.toggle_cursor(checked)
-        if checked:
-            self.cursor_mode = "1 free cursor"
-            self.pinned_x_values = []
-            self._apply_cursor_mode_to_plots()
-        else:
-            self.cursor_mode = "1 free cursor"
-            self.pinned_x_values = []
-        self.cursor_btn.setChecked(checked)
-        self.cursor_btn.setText("隐藏光标" if checked else "显示光标")
+        self.cursor_sync_manager.toggle_cursor_all(checked)
 
     def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
-        """时间修正后统一调整所有plot上的固定cursor"""
-        if not self.plot_widgets:
-            return
-
-        if getattr(self, "cursor_mode", "1 free cursor") == "1 free cursor":
-            return
-
-        # 优先使用索引值进行换算，避免display值被bounds夹住
-        pinned_indices = list(getattr(self, "_time_correction_pinned_index_values", []) or [])
-        if not pinned_indices:
-            pinned_values = list(getattr(self, "pinned_x_values", []) or [])
-            if not pinned_values:
-                return
-            if old_factor == 0:
-                return
-            for pinned_value in pinned_values:
-                if pinned_value is None or not np.isfinite(pinned_value):
-                    continue
-                index_pos = (pinned_value - old_offset) / old_factor
-                if np.isfinite(index_pos):
-                    pinned_indices.append(index_pos)
-        if not pinned_indices:
-            return
-
-        datalength = 0
-        if hasattr(self, "loader") and self.loader is not None:
-            datalength = max(int(self.loader.datalength), 0)
-        elif self.plot_widgets[0].plot_widget.original_index_x is not None:
-            datalength = len(self.plot_widgets[0].plot_widget.original_index_x)
-
-        new_display_values = []
-        for index_pos in pinned_indices:
-            if index_pos is None or not np.isfinite(index_pos):
-                continue
-            if datalength > 0:
-                index_pos = min(max(index_pos, 1), datalength)
-            new_display_x = new_offset + new_factor * index_pos
-            if np.isfinite(new_display_x):
-                new_display_values.append(new_display_x)
-
-        if not new_display_values:
-            return
-
-        self.pinned_x_values = new_display_values
-        self.pinned_index_values = list(pinned_indices)
-
-        for container in self.plot_widgets:
-            widget = container.plot_widget
-
-            if hasattr(widget, "original_index_x") and widget.original_index_x is not None and len(widget.original_index_x) > 0:
-                min_index = np.min(widget.original_index_x)
-                max_index = np.max(widget.original_index_x)
-                new_min_x = widget.offset + widget.factor * min_index
-                new_max_x = widget.offset + widget.factor * max_index
-            elif widget.is_multi_curve_mode and widget.curves:
-                first_curve_info = next(iter(widget.curves.values()), None)
-                if first_curve_info is not None and first_curve_info.y_data is not None:
-                    data_len = len(first_curve_info.y_data)
-                    new_min_x = widget.offset + widget.factor * 1
-                    new_max_x = widget.offset + widget.factor * data_len
-                else:
-                    new_min_x = widget.offset + widget.factor * 1
-                    new_max_x = widget.offset + widget.factor * datalength
-            else:
-                new_min_x = widget.offset + widget.factor * 1
-                new_max_x = widget.offset + widget.factor * datalength
-
-            if hasattr(widget, "_set_vline_bounds"):
-                widget._set_vline_bounds([new_min_x, new_max_x])
-            else:
-                widget.vline.setBounds([new_min_x, new_max_x])
-
-            widget.apply_cursor_mode(self.cursor_mode, new_display_values)
-            if hasattr(widget.view_box, "is_cursor_pinned"):
-                widget.view_box.is_cursor_pinned = True
-            if hasattr(widget, "_last_cursor_update_time"):
-                widget._last_cursor_update_time = 0
-            widget.update_cursor_label()
+        self.cursor_sync_manager._realign_pinned_cursor_after_time_correction()
 
     def sync_crosshair(self, x, sender_widget):
-        """
-        同步所有plot的crosshair位置
-
-        【稳定性优化】使用批量更新+防抖机制，减少信号风暴。
-        cursor label更新延迟执行，避免高频调用导致的性能问题。
-        """
-        if not self.cursor_btn.isChecked():
-            return
-        if getattr(self, "cursor_mode", "1 free cursor") != "1 free cursor":
-            return
-        if getattr(self, "_is_loading_new_data", False):
-            return
-        if self._is_syncing_crosshair:
-            return
-
-        # 如果发送者正在交互中，跳过
-        if sender_widget and getattr(sender_widget, '_is_interacting', False):
-            return
-
-        # 【优化】如果已经有pending的更新且x值变化很小，直接跳过
-        if self._pending_crosshair_x is not None:
-            if abs(x - self._pending_crosshair_x) < 0.0001:
-                return
-
-        self._is_syncing_crosshair = True
-        try:
-            has_pinned_plot = any(
-                c.plot_widget.is_cursor_pinned
-                for c in self.plot_widgets
-                if c.isVisible() and hasattr(c.plot_widget, 'is_cursor_pinned')
-            )
-
-            if has_pinned_plot:
-                return
-
-            # 【批量更新】先设置所有vline位置（使用SignalBlocker防止级联信号）
-            for container in self.plot_widgets:
-                if not container.isVisible():
-                    continue
-                w = container.plot_widget
-                if getattr(w, '_is_interacting', False):
-                    continue
-                if getattr(w, '_is_updating_data', False):
-                    continue
-                w.vline.setVisible(True)
-                with QSignalBlocker(w.vline):
-                    w.vline.setPos(x)
-
-            # 【防抖】延迟执行cursor label更新
-            self._pending_crosshair_x = x
-            if not self._crosshair_update_timer.isActive():
-                self._crosshair_update_timer.start(16)  # ~60fps
-
-        finally:
-            self._is_syncing_crosshair = False
+        self.cursor_sync_manager.sync_crosshair(x, sender_widget)
 
     def _flush_crosshair_updates(self):
-        """批量执行cursor label更新 - 防抖回调"""
-        if self._is_loading_new_data:
-            self._pending_crosshair_x = None
-            return
-
-        self._pending_crosshair_x = None
-
-        for container in self.plot_widgets:
-            if not container.isVisible():
-                continue
-            w = container.plot_widget
-            if getattr(w, '_is_interacting', False):
-                continue
-            if getattr(w, '_is_updating_data', False):
-                continue
-            try:
-                w.update_cursor_label()
-            except (RuntimeError, AttributeError):
-                pass  # 对象可能已被销毁
+        self.cursor_sync_manager._flush_crosshair_updates()
 
     def reset_all_pin_states(self):
-        """
-        重置所有plot的pin状态
-
-        遍历所有plot widget，将它们的cursor从固定状态重置为默认状态。
-        用于数据重载、清除图表等操作时统一重置pin状态。
-        """
-        debug_log("MainWindow.reset_all_pin_states total=%s",
-                  len(getattr(self, "plot_widgets", [])))
-        self.cursor_mode = "1 free cursor"
-        self.pinned_x_values = []
-        for container in self.plot_widgets:
-            container.plot_widget.reset_pin_state()
+        self.cursor_sync_manager.reset_all_pin_states()
 
     def clear_all_plots(self):
-        for container in self.plot_widgets:
-            widget=container.plot_widget
-            widget.clear_plot_item()
-            # 重置pin状态
-            widget.reset_pin_state()
-        self.saved_mark_range = None
-        self.request_mark_stats_refresh(immediate=True)
+        self.cursor_sync_manager.clear_all_plots()
 
     def collect_global_x_range(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
-        """
-        收集所有可见 plot 中曲线的全局 X 轴范围
-
-        Args:
-            curves_filter: "visible" — 可见 plot + 可见曲线（auto_range 使用）
-                           "all"     — 可见 plot + 所有曲线（X limits 使用）
-
-        Returns:
-            (global_min_x, global_max_x) 或 (None, None)
-        """
-        all_mins: list[float] = []
-        all_maxs: list[float] = []
-
-        for container in self.plot_widgets:
-            if not container.isVisible():
-                continue
-            x_min, x_max = container.plot_widget.get_curve_x_limits(curves_filter)
-            if x_min is not None and x_max is not None:
-                all_mins.append(x_min)
-                all_maxs.append(x_max)
-
-        if not all_mins:
-            if self.loader and hasattr(self.loader, 'global_time_range'):
-                return self.loader.global_time_range
-            elif self.loader and self.loader.datalength > 0:
-                return (1.0, float(self.loader.datalength))
-            return (None, None)
-
-        result = (min(all_mins), max(all_maxs))
-        
-        if result[0] == result[1]:
-            # 使用固定的扩展值，避免依赖可能变化的 factor
-            expand_val = 0.5  # 固定扩展 0.5
-            result = (result[0] - expand_val, result[1] + expand_val)
-        
-        return result
+        return self.cursor_sync_manager.collect_global_x_range(curves_filter)
 
     def _compute_baseline_density(self):
-        if not self.loader or self.loader.datalength == 0:
-            self._baseline_density = 0.0
-            return
-
-        if hasattr(self.loader, 'global_time_range'):
-            t_min, t_max = self.loader.global_time_range
-        else:
-            t_min, t_max = 1.0, float(self.loader.datalength)
-
-        span = t_max - t_min
-        if span > 0:
-            self._baseline_density = float(self.loader.datalength) / span
-        else:
-            self._baseline_density = 0.0
+        self.cursor_sync_manager._compute_baseline_density()
 
     def _sync_min_xrange(self):
-
-        new_max = max(
-            (container.plot_widget._max_point_density
-             for container in self.plot_widgets
-             if container.isVisible() and container.plot_widget._max_point_density > 0),
-            default=0.0
-        )
-
-        if new_max == 0.0:
-            new_max = self._baseline_density
-
-        if new_max != self._global_max_density and new_max > 0:
-            self._global_max_density = new_max
-            min_range = MIN_INDEX_LENGTH / new_max
-            for container in self.plot_widgets:
-                if container.isVisible():
-                    container.plot_widget._set_min_x_range(min_range)
+        self.cursor_sync_manager._sync_min_xrange()
 
     def auto_range_all_plots(self):
-        if not self.loader or self.loader.datalength == 0:
-            return
-
-        global_min_x, global_max_x = self.collect_global_x_range(curves_filter="visible")
-
-        for container in self.plot_widgets:
-            if container.isVisible():
-                container.plot_widget.auto_range(
-                    external_xmin=global_min_x,
-                    external_xmax=global_max_x,
-                )
+        self.cursor_sync_manager.auto_range_all_plots()
             
     def auto_y_in_x_range(self):
-        for container in self.plot_widgets:
-            widget=container.plot_widget
-            widget.auto_y_in_x_range()
+        self.cursor_sync_manager.auto_y_in_x_range()
 
     def create_subplots_matrix(self, m: int, n: int):
-        # 先全部清掉
-        for i in reversed(range(self.plot_layout.count())):
-            w = self.plot_layout.itemAt(i).widget()
-            if w:
-                w.setParent(None)
-                w.deleteLater()
-        self.plot_widgets.clear()
-
-        first_viewbox = None   # 用于 XLink
-
-        for r in range(m):
-            for c in range(n):
-                plot_widget = DraggableGraphicsLayoutWidget(self.units, self.data, self.time_channels_infos)
-                plot_widget.plot_context = PlotContext(self)
-                # 设置cursor状态，考虑全局cursor值显示状态
-                cursor_enabled = self.cursor_btn.isChecked()
-                if cursor_enabled and self.cursor_values_hidden:
-                    plot_widget.toggle_cursor(False, hide_values_only=True)
-                else:
-                    plot_widget.toggle_cursor(cursor_enabled)
-                if cursor_enabled:
-                    plot_widget.apply_cursor_mode(self.cursor_mode, self.pinned_x_values)
-
-                # XLink：让同一行的所有列都 link 到第一列
-                if c == 0 and r == 0:
-                    first_viewbox = plot_widget.view_box
-                else:
-                    plot_widget.view_box.setXLink(first_viewbox)
-
-                # 用一个 QWidget 包一层，方便隐藏
-                container = PlotContainerWidget(plot_widget)
-                container.plot_widget = plot_widget   # 保留引用，方便后面找
-                #container.setVisible(True)            # 默认全部显示
-
-                self.plot_layout.addWidget(container, r, c)
-                self.plot_widgets.append(container)   # 保存容器
-
-        # 设置行列权重（使用保存的高度因子）
-        for r in range(m):
-            percentage = self.row_height_factors.get(r, 100)
-            # 使用直接比例计算，25%=1, 50%=2, 75%=3, 100%=4, 125%=5, 150%=6, 200%=8, 250%=10, 300%=12
-            stretch_factor = max(1, percentage // 25)
-            self.plot_layout.setRowStretch(r, stretch_factor)
-        for c in range(n):
-            self.plot_layout.setColumnStretch(c, 1)
-        if self.mark_region_btn.isChecked():
-            self.toggle_mark_region(True)
-
-        # 初始化所有行的默认高度因子为100（保留已有的设置）
-        for r in range(m):
-            if r not in self.row_height_factors:
-                self.row_height_factors[r] = 100
+        self.layout_manager.create_subplots_matrix(m, n)
 
     def set_row_height(self, row: int, percentage: int) -> None:
-        """
-        设置某一行的所有plot的高度百分比（相对权重）
-
-        Args:
-            row: 行索引
-            percentage: 高度百分比 (25/50/75/100/125/150/200/250/300/400)
-        """
-        if row < 0 or row >= self._plot_row_max_default:
-            return
-
-        self.row_height_factors[row] = percentage
-
-        # 更新所有可见行的 stretch（基于相对权重）
-        ncols = self._plot_col_max_default
-        for r in range(self._plot_row_max_default):
-            visible = False
-            for c in range(ncols):
-                idx = r * ncols + c
-                if idx < len(self.plot_widgets) and self.plot_widgets[idx].isVisible():
-                    visible = True
-                    break
-            
-            if visible:
-                pct = self.row_height_factors.get(r, 100)
-                # 使用直接比例计算，25%=1, 50%=2, 75%=3, 100%=4, 125%=5, 150%=6, 200%=8, 250%=10, 300%=12
-                stretch_factor = max(1, pct // 25)
-                self.plot_layout.setRowStretch(r, stretch_factor)
-            else:
-                self.plot_layout.setRowStretch(r, 0)
-
-        debug_log("MainWindow.set_row_height row=%s percentage=%s", row, percentage)
+        self.layout_manager.set_row_height(row, percentage)
 
     def set_all_row_height(self, percentage: int) -> None:
-        """
-        将所有行的高度都设置为指定的百分比
-        
-        Args:
-            percentage: 高度百分比
-        """
-        # 遍历所有可能的行索引
-        for r in range(self._plot_row_max_default):
-            self.row_height_factors[r] = percentage
-        
-        # 更新所有可见行的 stretch（基于相对权重）
-        ncols = self._plot_col_max_default
-        for r in range(self._plot_row_max_default):
-            visible = False
-            for c in range(ncols):
-                idx = r * ncols + c
-                if idx < len(self.plot_widgets) and self.plot_widgets[idx].isVisible():
-                    visible = True
-                    break
-            
-            if visible:
-                pct = self.row_height_factors.get(r, 100)
-                stretch_factor = max(1, pct // 25)
-                self.plot_layout.setRowStretch(r, stretch_factor)
-            else:
-                self.plot_layout.setRowStretch(r, 0)
-        
-        debug_log("MainWindow.set_all_row_height percentage=%s", percentage)
+        self.layout_manager.set_all_row_height(percentage)
     
     def get_row_height(self, row: int) -> int:
-        """获取某一行的当前高度百分比"""
-        return self.row_height_factors.get(row, 100)
+        return self.layout_manager.get_row_height(row)
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
-        m, n = self._plot_row_max_default, self._plot_col_max_default
-
-        # 设置可见性和列的 stretch
-        for idx, container in enumerate(self.plot_widgets):
-            r, c = divmod(idx, n)
-            visible = r < row_set and c < col_set
-            container.setVisible(visible)
-            
-            if visible:
-                self.plot_layout.setColumnStretch(c, 1)
-            else:
-                self.plot_layout.setColumnStretch(c, 0)
-        
-        # 单独设置行的 stretch（避免同一行重复设置）
-        for r in range(m):
-            visible = r < row_set
-            if visible:
-                percentage = self.row_height_factors.get(r, 100)
-                # 使用直接比例计算，25%=1, 50%=2, 75%=3, 100%=4, 125%=5, 150%=6, 200%=8, 250%=10, 300%=12
-                stretch_factor = max(1, percentage // 25)
-                self.plot_layout.setRowStretch(r, stretch_factor)
-            else:
-                self.plot_layout.setRowStretch(r, 0)
-
-        self._plot_row_current = row_set
-        self._plot_col_current = col_set
-        self.update_mark_regions_on_layout_change()
-
-        # 新增：布局改变后，显式同步所有可见plot的XRange到第一个
-        if self.plot_widgets:
-            first_plot = self.plot_widgets[0].plot_widget
-            curr_min, curr_max = first_plot.view_box.viewRange()[0]
-            for container in self.plot_widgets:
-                if container.isVisible():
-                    widget = container.plot_widget
-                    widget.view_box.setXRange(curr_min, curr_max, padding=0)  # padding=0 以精确同步
-                    widget.plot_item.update()  # 强制更新渲染
-
-        self._sync_min_xrange()
+        self.layout_manager.set_plots_visible(row_set, col_set)
 
     def replots_after_loading(self):
-        # 【安全标志】设置所有widget为更新中状态，防止信号回调访问不完整的数据
-        for container in self.plot_widgets:
-            container.plot_widget._is_updating_data = True
-            # 停止所有pending的timer
-            if hasattr(container.plot_widget, '_cancel_ui_refresh'):
-                container.plot_widget._cancel_ui_refresh()
-        
-        try:
-            # 如果加载文件为空
-            if self.loader.datalength == 0: 
-                    return
-            
-            # 重置所有plot的pin状态
-            self.reset_all_pin_states()
-            
-            # 收集所有 y_name (包括未显示的)
-            all_y_names = []
-            for container in self.plot_widgets:
-                widget = container.plot_widget
-                # 单曲线模式：收集y_name
-                if widget.y_name:
-                    all_y_names.append(widget.y_name)
-                # 多曲线模式：收集curves字典中的所有变量名
-                if widget.is_multi_curve_mode and widget.curves:
-                    all_y_names.extend(widget.curves.keys())
-            
-            if DataTableDialog._instance is not None:
-                all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
-
-            is_mdf = hasattr(self.loader, 'get_series')
-
-            unique_y_names = set(all_y_names)
-            if not unique_y_names:
-                debug_log("MainWindow.replots_after_loading no tracked curves, reset plots")
-                if is_mdf:
-                    x_min, x_max = self.loader.global_time_range
-                else:
-                    x_min, x_max = 1, self.loader.datalength
-                self.reset_plots_after_loading(x_min, x_max, reason="no tracked curves")
-                return
-
-            # 【NumPy优化】批量检查validity：先过滤出在var_names中的变量，然后批量检查validity
-            var_names_set = set(self.loader.var_names)
-            in_var_names = [y for y in unique_y_names if y in var_names_set]
-            
-            # 批量检查validity值（validity==1表示有效）
-            if in_var_names:
-                # 将validity字典转换为批量检查：获取所有变量的validity值
-                validity_values = [self.loader.df_validity.get(y, -1) for y in in_var_names]
-                # 使用NumPy批量检查哪些validity值为0或1（即非-1，存在于df_validity中）
-                validity_array = np.array(validity_values)
-                valid_mask = validity_array != -1
-                found = [in_var_names[i] for i in np.where(valid_mask)[0]]
-            else:
-                found = []
-            
-            ratio = len(found) / len(unique_y_names) if unique_y_names else 0
-            debug_log("MainWindow.replots_after_loading reuse_ratio=%.2f tracked=%s valid=%s",
-                      ratio, len(unique_y_names), len(found))
-            
-            # 初始化cleared列表（用于记录被清除的plot）
-            cleared = []
-
-            if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
-                debug_log("MainWindow.replots_after_loading reset due to low ratio %.2f", ratio)
-                if is_mdf:
-                    x_min, x_max = self.loader.global_time_range
-                else:
-                    x_min, x_max = 1, self.loader.datalength
-                self.reset_plots_after_loading(x_min, x_max, reason="insufficient valid vars")
-            else:
-                self.value_cache = {}
-                for idx, container in enumerate(self.plot_widgets):
-                    widget = container.plot_widget
-                    
-                    # 【NumPy优化】更新 limits
-                    if is_mdf:
-                        x_min, x_max = self.loader.global_time_range
-                        min_x = widget.offset + widget.factor * x_min
-                        max_x = widget.offset + widget.factor * x_max
-                    else:
-                        original_index_x = np.arange(1, self.loader.datalength + 1, dtype=np.float32)
-                        min_x = widget.offset + widget.factor * np.min(original_index_x)
-                        max_x = widget.offset + widget.factor * np.max(original_index_x)
-                    min_x, max_x = widget._get_safe_x_range(min_x, max_x)
-                    limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                    limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                    widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-                    if hasattr(widget, '_set_vline_bounds'):
-                        widget._set_vline_bounds([min_x, max_x])
-                    else:
-                        widget.vline.setBounds([min_x, max_x])
-                    
-                    if widget.is_multi_curve_mode:
-                        # 多曲线模式：先清除所有曲线，然后重新添加有效的曲线
-                        # 保存当前曲线信息（包括可见性状态）
-                        current_curves = dict(widget.curves)
-                        
-                        # 清除所有曲线
-                        widget.curves.clear()
-                        widget.is_multi_curve_mode = False
-                        widget.current_color_index = 0
-                        
-                        # 清理图形项
-                        # 重新加载数据时完全清除对象池，避免复用异常状态的items
-                        widget._clear_cursor_items(hide_only=False)
-                        widget._safe_clear_plot_items()
-                        widget.curve = None
-                        widget.y_name = ''
-                        widget.original_index_x = None
-                        widget.original_y = None
-                        
-                        # 重新添加有效的曲线
-                        curves_added = 0
-                        visibility_to_restore = {}  # 记录需要恢复的可见性状态
-                        
-                        for var_name, ci in current_curves.items():
-                            var_exists = (var_name in self.loader.var_names) if is_mdf else (var_name in self.loader.df.columns)
-                            if var_exists and self.loader.df_validity.get(var_name, -1) >= 0:
-                                preferred_color = ci.color
-                                success = widget.add_variable_to_plot(
-                                    var_name,
-                                    skip_existence_check=True,
-                                    preferred_color=preferred_color
-                                )
-                                if success:
-                                    curves_added += 1
-                                    visibility_to_restore[var_name] = ci.visible
-                        
-                        # 更新多曲线模式状态
-                        widget.update_multi_curve_mode()
-                        
-                        # 恢复所有曲线的可见性状态（在update_multi_curve_mode之后）
-                        for var_name, original_visible in visibility_to_restore.items():
-                            if var_name in widget.curves:
-                                widget.curves[var_name].visible = original_visible
-                                # 更新曲线对象的可见性
-                                if widget.curves[var_name].curve is not None:
-                                    try:
-                                        widget.curves[var_name].curve.setVisible(original_visible)
-                                    except Exception:
-                                        pass
-                        
-                        # 更新legend显示（重要！确保legend样式与可见性状态一致）
-                        if curves_added > 0:
-                            widget.update_legend()
-                        
-                        if curves_added == 0:
-                            cleared.append((idx + 1, "所有变量无效"))
-                    else:
-                        # 单曲线模式
-                        y_name = widget.y_name
-                        if not y_name:
-                            continue
-                        var_exists = (y_name in self.loader.var_names) if is_mdf else (y_name in self.loader.df.columns)
-                        if var_exists and self.loader.df_validity.get(y_name, -1) >= 0:
-                            success = widget.plot_variable(y_name)
-                            if not success:
-                                widget.clear_plot_item()
-                                cleared.append((idx + 1, "无效数据"))
-                        else:
-                            widget.clear_plot_item()
-                            reason = f"未找到变量:{y_name}" if not var_exists else f"无效数据:{y_name}"
-                            cleared.append((idx + 1, reason))
-
-            # 恢复 xRange     
-            if self.plot_widgets:
-                first_plot = self.plot_widgets[0].plot_widget
-                curr_min, curr_max = first_plot.view_box.viewRange()[0]
-                first_plot.view_box.setXRange(curr_min, curr_max, padding=0) 
-                # first_plot.set_xrange_with_link_handling(curr_min, curr_max, padding=DEFAULT_PADDING_VAL_X) 
-            
-                # 如果有清除，弹窗
-                if cleared:
-                    msg = "以下图表被清除：\n"
-                    for plot_idx, reason in cleared:
-                        msg += f"Plot {plot_idx}: {reason}\n"
-                    QMessageBox.information(self, "更新通知", msg)
-        
-        finally:
-            # 【安全标志】恢复所有widget的正常状态
-            for container in self.plot_widgets:
-                container.plot_widget._is_updating_data = False
-            
-            # 【样式同步】恢复标志后，主动触发一次样式更新，确保所有plot样式一致
-            # 这解决了重载后样式不一致的问题（需要等用户zoom才会更新）
-            for container in self.plot_widgets:
-                widget = container.plot_widget
-                try:
-                    if hasattr(widget, 'view_box') and hasattr(widget, 'plot_item'):
-                        # 检查是否有数据（单曲线或多曲线）
-                        has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
-                        if has_data:
-                            widget._queue_ui_refresh(immediate=True, stats=False)
-                except Exception as e:
-                    pass  # 忽略样式更新错误，不影响数据加载
+        self.cursor_sync_manager.replots_after_loading()
 
 
 if __name__ == "__main__":
