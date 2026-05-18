@@ -198,7 +198,7 @@ class EventHandler:
     def _on_vb_var_editor(self, pw):
         """ViewBox 信号：打开变量编辑器"""
         if pw:
-            from src.ui.dialogs.plot_variable_editor import PlotVariableEditorDialog
+            from src.ui.plot_variable_editor import PlotVariableEditorDialog
             parent = pw.window() if pw.window() else None
             dialog = PlotVariableEditorDialog(pw, parent)
             dialog.show()

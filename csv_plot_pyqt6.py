@@ -90,10 +90,10 @@ if sys.platform == "win32": # Windows
     import ctypes
     myappid = 'mycompany.csv_plot.0.1'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    ico_path = resource_path("icon.ico")  
+    ico_path = resource_path("assets/icon.ico")  
 
 elif sys.platform == "darwin":  # macOS
-    ico_path = resource_path("icon.icns")  
+    ico_path = resource_path("assets/icon.icns")  
 
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
