@@ -1,43 +1,31 @@
 from __future__ import annotations
 import sys
 import os
-import weakref
 import subprocess
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import logging
-import faulthandler
-import signal
-import threading
-from threading import Lock
-import traceback
 from typing import Any
 
-from src.ui.drag_drop import (VAR_SEPARATOR,parse_var_names_from_mimedata,build_var_mimedata,create_drag_pixmap)
+from src.ui.drag_drop import (VAR_SEPARATOR, parse_var_names_from_mimedata)
 from src.ui.widgets.custom_viewbox import CustomViewBox
-from src.core.config import (DEBUG_LOG_ENABLED,debug_log,safe_callback,_install_faulthandler,_log_uncaught_exception,_threading_exception_logger,_qt_message_handler,install_global_debug_hooks,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS,FROZEN_VIEW_WIDTH_DEFAULT,XRANGE_THRESHOLD_FOR_SYMBOLS,BLINK_PULSE,FACTOR_SCROLL_ZOOM,MIN_INDEX_LENGTH,DEFAULT_LINE_WIDTH,THICK_LINE_WIDTH,THIN_LINE_WIDTH,UI_DEBOUNCE_DELAY_MS,PLOT_ROW_MAX_DEFAULT,PLOT_COL_MAX_DEFAULT,PLOT_ROW_CURRENT_DEFAULT,PLOT_COL_CURRENT_DEFAULT,FLOAT32_SAFE_MAX,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety,DEFAULT_SHOW_X_AXIS_LABEL)
-from src.core.types import AutoDetectError,FormatInfo,CurveInfo
+from src.core.config import (
+    DEBUG_LOG_ENABLED, debug_log, safe_callback, install_global_debug_hooks,
+    DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y,
+    FILE_SIZE_LIMIT_BACKGROUND_LOADING, RATIO_RESET_PLOTS,
+    XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH,
+    DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH,
+    UI_DEBOUNCE_DELAY_MS,
+    PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT,
+    PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
+    _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL,
+)
+from src.core.types import AutoDetectError, CurveInfo
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.data.loader import FastDataLoader,DataLoadThread
-from src.ui.table_dialog import DataTableDialog, PandasTableModel, CustomDelegate, DropOverlay, XYScatterPlotDialog
-from src.ui.variable_list import MyTableWidget, NoHoverDelegate
-from src.ui.mark_stats import MarkStatsWindow
-from src.ui.plot_variable_editor import PlotVariableEditorDialog
-from src.ui.dialogs.help import HelpDialog
-from src.ui.dialogs.layout_input import LayoutInputDialog
-from src.ui.dialogs.axis import AxisDialog
-from src.ui.dialogs.time_correction import TimeCorrectionDialog
-
+from src.ui.table_dialog import DataTableDialog, DropOverlay
+from src.ui.variable_list import MyTableWidget
 from src.app.plot_context import PlotContext
-
-if sys.platform == "darwin":
-    plugins_path = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "PyQt6" / "Qt6" / "plugins"
-    print(f"DEBUG: QT_PLUGIN_PATH set to: {plugins_path}")
-    print(f"DEBUG: Path exists? {plugins_path.exists()}")
-    print(f"DEBUG: cocoa plugin exists? {(plugins_path / 'platforms' / 'libqcocoa.dylib').exists()}")
-    os.environ["QT_PLUGIN_PATH"] = str(plugins_path)
-
 
 if sys.platform == "darwin":  # macOS
     # 屏蔽 macOS ICC 警告
@@ -46,13 +34,12 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, QtMsgType, qInstallMessageHandler
-from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
+from PyQt6.QtCore import Qt, QMargins, QTimer, QEvent, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, qInstallMessageHandler
+from PyQt6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QFontDatabase, QCursor
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
-    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QTableWidget, QTableWidgetItem, QHeaderView, QRubberBand, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem, QSplitter,
-    QColorDialog, QCheckBox
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout,
+    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit,
+    QMessageBox, QDialog, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QRubberBand, QSplitter,
 )
 import pyqtgraph as pg
 
@@ -93,10 +80,10 @@ if sys.platform == "win32": # Windows
     import ctypes
     myappid = 'mycompany.csv_plot.0.1'
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    ico_path = resource_path("icon.ico")  
+    ico_path = resource_path("assets/icon.ico")  
 
 elif sys.platform == "darwin":  # macOS
-    ico_path = resource_path("icon.icns")  
+    ico_path = resource_path("assets/icon.icns")  
 
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
@@ -871,7 +858,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 current = current.parentWidget()
 
             target_window = widget_under_cursor.window()
-            if isinstance(target_window, (DataTableDialog, PlotVariableEditorDialog)):
+            if isinstance(target_window, (DataTableDialog, _lazy_PlotVariableEditorDialog())):
                 return True
             if target_window is not main_window:
                 return True
@@ -3691,7 +3678,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
             # 优先检测X轴标签区域（最具体）
             if x_axis_label_rect.contains(scene_pos):
-                dialog = AxisDialog(self.axis_x, self.view_box, "X", self)
+                dialog = _lazy_AxisDialog()(self.axis_x, self.view_box, "X", self)
                 if dialog.exec():
                     min_val, max_val = self.view_box.viewRange()[0]
                     for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
@@ -3703,14 +3690,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 然后检测绘图区域（在检测Y轴之前）
             elif view_box_rect_scene.contains(scene_pos):
                 # 双击绘图区域（网格内部），弹出变量编辑器
-                dialog = PlotVariableEditorDialog(self, self.window())
+                dialog = _lazy_PlotVariableEditorDialog()(self, self.window())
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
                 return
             # 最后检测Y轴区域（最后兜底）
             elif y_axis_rect_scene.contains(scene_pos):
-                dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
+                dialog = _lazy_AxisDialog()(self.axis_y, self.view_box, "Y", self)
                 if dialog.exec():
                     self.plot_item.update()
                 return
@@ -4053,13 +4040,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 使用共用方法计算索引范围
             index_range_width, visible_points = self._calculate_visible_points(range)
 
-            # 基于索引范围宽度判断样式：阈值根据全局最大密度动态调整
+            # 基于索引范围宽度判断样式：阈值根据全局最大密度和列数动态调整
             main_window = self.window()
             density = getattr(main_window, '_global_max_density', 0.0) if main_window else 0.0
+            ncols = getattr(main_window, '_plot_col_current', 1) if main_window else 1
             if density > 0:
                 effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
             else:
                 effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS
+            effective_threshold /= max(1, ncols)
             show_symbols = index_range_width < effective_threshold
 
             # 应用样式到所有曲线
@@ -4242,7 +4231,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _on_vb_var_editor(self, pw):
         if pw:
-            dialog = PlotVariableEditorDialog(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
+            dialog = _lazy_PlotVariableEditorDialog()(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
             dialog.show()
             dialog.raise_()
 
@@ -4604,6 +4593,7 @@ class MainWindow(QMainWindow):
         # 全局cursor值显示状态：False表示显示所有值，True表示只显示x值
         self.cursor_values_hidden = False  # 默认显示完整cursor（包括圆圈和y值）
         self.cursor_mode = "1 free cursor"
+        self.last_valid_cursor_mode = "1 free cursor"  # 保存上一个有效的非off模式
         self.pinned_x_values = []
 
         self.mark_region_btn = QPushButton("标记区域")
@@ -4824,7 +4814,7 @@ class MainWindow(QMainWindow):
         #print(f"actual window width = {self.width()}")
             
     def show_help(self):
-        dlg = HelpDialog(self)
+        dlg = _lazy_HelpDialog()(self)
         dlg.exec()
 
     def _get_plot_container(self, plot_widget) -> PlotContainerWidget | None:
@@ -5411,7 +5401,7 @@ class MainWindow(QMainWindow):
         try:
             ext = os.path.splitext(file_path)[1].lower()
             if ext in ('.mf4', '.mdf', '.dat'):
-                from mdf_loader import MDFDataLoader
+                from src.data.mdf_loader import MDFDataLoader
                 loader = MDFDataLoader(file_path)
             else:
                 loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
@@ -5570,7 +5560,7 @@ class MainWindow(QMainWindow):
                     container.plot_widget.add_mark_region(min_x, max_x)
 
             # 打开统计窗口
-            self.mark_stats_window = MarkStatsWindow.get_instance(self)
+            self.mark_stats_window = _lazy_MarkStatsWindow().get_instance(self)
             geom = self.mark_stats_window.load_geom()
             if geom:
                 self.mark_stats_window.restoreGeometry(geom)
@@ -5633,7 +5623,7 @@ class MainWindow(QMainWindow):
             self.mark_stats_window.update_stats(stats_list)
 
     def open_layout_dialog(self):
-        dlg = LayoutInputDialog(max_rows=self._plot_row_max_default, 
+        dlg = _lazy_LayoutInputDialog()(max_rows=self._plot_row_max_default, 
                                 max_cols=self._plot_col_max_default, 
                                 cur_rows=self._plot_row_current,
                                 cur_cols=self._plot_col_current,
@@ -5647,7 +5637,7 @@ class MainWindow(QMainWindow):
         # 记录时间修正状态与固定cursor索引（用于稳定转换）
         self._is_time_correction_active = False
         self._time_correction_pinned_index_values = []
-        dialog = TimeCorrectionDialog(self.factor, self.offset, self)
+        dialog = _lazy_TimeCorrectionDialog()(self.factor, self.offset, self)
         if dialog.window_geometry:
             dialog.restoreGeometry(dialog.window_geometry)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -5903,15 +5893,21 @@ class MainWindow(QMainWindow):
             widget.apply_cursor_mode(self.cursor_mode, self.pinned_x_values)
 
     def set_cursor_mode(self, mode, *, source_plot=None, context_x=None):
+        # 处理 "off" 模式
         if mode == "off":
             if self.cursor_btn.isChecked():
                 self.toggle_cursor_all(False)
             return
+        
+        # 检查有效模式
         if mode not in ("1 free cursor", "1 anchored cursor", "2 anchored cursor"):
             return
+        
+        # 确保光标处于开启状态
         if not hasattr(self, "cursor_btn") or not self.cursor_btn.isChecked():
             self.toggle_cursor_all(True)
-
+        
+        # 保存为上一个有效模式
         self.last_valid_cursor_mode = mode
 
         prev_mode = getattr(self, "cursor_mode", "1 free cursor")
@@ -5957,15 +5953,6 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.update_cursor_label()
 
-    def set_cursor_enabled(self, enabled: bool) -> None:
-        if self.cursor_btn:
-            self.cursor_btn.setChecked(enabled)
-
-    def is_cursor_enabled(self) -> bool:
-        if self.cursor_btn:
-            return self.cursor_btn.isChecked()
-        return False
-
     def toggle_cursor_all(self, checked):
         """切换所有plot的cursor显示状态
         
@@ -5976,6 +5963,9 @@ class MainWindow(QMainWindow):
         """
         debug_log("MainWindow.toggle_cursor_all start checked=%s has_plot=%s",
                   checked, len(self.plot_widgets))
+        # 确保按钮状态同步（使用信号阻塞防止递归调用）
+        with QSignalBlocker(self.cursor_btn):
+            self.cursor_btn.setChecked(checked)
         for container in self.plot_widgets:
             widget = container.plot_widget
             # 根据全局cursor_values_hidden状态决定如何显示cursor
@@ -5986,13 +5976,16 @@ class MainWindow(QMainWindow):
                 # cursor完全启用或禁用
                 widget.toggle_cursor(checked)
         if checked:
-            self.cursor_mode = "1 free cursor"
-            self.pinned_x_values = []
+            # 恢复到上一个有效模式，或者使用默认值
+            self.cursor_mode = self.last_valid_cursor_mode
+            # 重新应用模式到plots
             self._apply_cursor_mode_to_plots()
         else:
-            self.cursor_mode = "1 free cursor"
+            # 保存当前模式到 last_valid_cursor_mode（如果当前不是 off）
+            if self.cursor_mode != "off":
+                self.last_valid_cursor_mode = self.cursor_mode
+            self.cursor_mode = "off"
             self.pinned_x_values = []
-        self.cursor_btn.setChecked(checked)
         self.cursor_btn.setText("隐藏光标" if checked else "显示光标")
 
     def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
@@ -6628,6 +6621,36 @@ class MainWindow(QMainWindow):
                     pass  # 忽略样式更新错误，不影响数据加载
 
 
+def _lazy_PlotVariableEditorDialog():
+    from src.ui.plot_variable_editor import PlotVariableEditorDialog
+    return PlotVariableEditorDialog
+
+
+def _lazy_MarkStatsWindow():
+    from src.ui.mark_stats import MarkStatsWindow
+    return MarkStatsWindow
+
+
+def _lazy_HelpDialog():
+    from src.ui.dialogs.help import HelpDialog
+    return HelpDialog
+
+
+def _lazy_LayoutInputDialog():
+    from src.ui.dialogs.layout_input import LayoutInputDialog
+    return LayoutInputDialog
+
+
+def _lazy_AxisDialog():
+    from src.ui.dialogs.axis import AxisDialog
+    return AxisDialog
+
+
+def _lazy_TimeCorrectionDialog():
+    from src.ui.dialogs.time_correction import TimeCorrectionDialog
+    return TimeCorrectionDialog
+
+
 if __name__ == "__main__":
 
     # 启用 OpenGL (极大提升大数据的渲染性能)
@@ -6682,11 +6705,11 @@ if __name__ == "__main__":
 
 # pyinstaller
 #     - one file
-# pyinstaller csv_plot_pyqt6.py --onefile --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --noupx --clean --noconfirm
+# pyinstaller csv_plot_pyqt6.py --onefile --name csv_plot_pyqt6 --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "README.md;." --noconsole --noupx --clean --noconfirm
 #     - one dir
-# pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --clean --noconfirm
+# pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "README.md;." --noconsole --clean --noconfirm
 
 
 # nuitka
-# nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
-# nuitka --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
+# nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=assets/icon.ico --enable-plugin=pyqt6 --include-data-file=assets/icon.ico=assets --include-data-file=README.md=. csv_plot_pyqt6.py
+# nuitka --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=assets/icon.ico --enable-plugin=pyqt6 --include-data-file=assets/icon.ico=assets --include-data-file=README.md=. csv_plot_pyqt6.py
