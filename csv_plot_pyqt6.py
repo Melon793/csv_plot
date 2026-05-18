@@ -33,7 +33,6 @@ from src.app.plot_context import PlotContext
 from src.ui.file_loader_manager import FileLoaderManager
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.layout_manager import LayoutManager
-from src.ui.main_window_base_manager import MainWindowBaseManager
 
 
 if sys.platform == "darwin":  # macOS
@@ -4574,8 +4573,6 @@ class MainWindow(QMainWindow):
         
         self.grid_layout_btn = QPushButton("修改布局")
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
-
-        self.set_button_status(False)
         
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
@@ -4667,6 +4664,8 @@ class MainWindow(QMainWindow):
         self.layout_manager = LayoutManager(self)
         self.cursor_sync_manager = CursorSyncManager(self)
 
+        self.set_button_status(False)
+
         # ---------------- 命令行直接加载文件 ----------------
         if len(sys.argv) > 1:
             file_path = sys.argv[1]
@@ -4690,7 +4689,7 @@ class MainWindow(QMainWindow):
         self.layout_manager._handle_resize(event)
 
     def toggle_plot_area(self, checked):
-        self.layout_manager.toggle_plot_area()
+        self.layout_manager.toggle_plot_area(checked)
             
     def show_help(self):
         self.layout_manager.show_help()
@@ -4796,7 +4795,7 @@ class MainWindow(QMainWindow):
         self.cursor_sync_manager.filter_variables()
 
     def toggle_mark_region(self, checked):
-        self.layout_manager.toggle_mark_region()
+        self.layout_manager.toggle_mark_region(checked)
 
     def sync_mark_regions(self, region_item):
         self.layout_manager.sync_mark_regions(region_item)
@@ -4836,7 +4835,7 @@ class MainWindow(QMainWindow):
 
 
     def reset_plots_after_loading(self,index_xMin,index_xMax, *, reason: str | None = None):
-        self.cursor_sync_manager.reset_plots_after_loading()
+        self.cursor_sync_manager.reset_plots_after_loading(index_xMin, index_xMax, reason=reason)
 
 
     def _get_cursor_source_plot(self, source_plot=None):
@@ -4871,7 +4870,7 @@ class MainWindow(QMainWindow):
         self.cursor_sync_manager.toggle_cursor_all(checked)
 
     def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
-        self.cursor_sync_manager._realign_pinned_cursor_after_time_correction()
+        self.cursor_sync_manager._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
 
     def sync_crosshair(self, x, sender_widget):
         self.cursor_sync_manager.sync_crosshair(x, sender_widget)
