@@ -199,7 +199,6 @@ dependencies = [
     { name = "pandas" },
     { name = "pathlib" },
     { name = "pyqt6" },
-    { name = "pyqt6-qt6" },
     { name = "pyqtgraph" },
     { name = "ujson" },
 ]
@@ -217,7 +216,6 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.2" },
     { name = "pathlib", specifier = ">=1.0.1" },
     { name = "pyqt6", specifier = ">=6.9.1,<6.11" },
-    { name = "pyqt6-qt6", specifier = ">=6.10.2,<6.11" },
     { name = "pyqtgraph", specifier = ">=0.14.0" },
     { name = "ujson", specifier = ">=5.11.0" },
 ]

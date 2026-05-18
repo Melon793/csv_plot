@@ -23,9 +23,24 @@ fi
 nuitka --standalone \
     --output-filename="$NAME" \
     --enable-plugin=pyqt6 \
-    --include-data-file=assets/icon.ico=assets \
-    --include-data-file=assets/icon.icns=assets \
-    --include-data-file=assets/icon.png=assets \
-    --include-data-file=README.md=. \
+    --enable-plugin=numpy \
+    --include-package=src \
+    --include-package=asammdf \
+    --include-module=src.data.mdf_loader \
+    --include-module=numpy \
+    --include-module=pandas \
+    --include-module=chardet \
+    --include-module=charset_normalizer \
+    --include-module=lxml \
+    --include-module=scipy \
+    --include-data-file=assets/icon.ico=assets/icon.ico \
+    --include-data-file=assets/icon.icns=assets/icon.icns \
+    --include-data-file=assets/icon.png=assets/icon.png \
+    --include-data-file=README.md=README.md \
+    --follow-imports \
+    --nofollow-import-to=nuitka \
+    --nofollow-import-to=pytest \
+    --nofollow-import-to=pyinstaller \
+    --nofollow-import-to=tkinter \
     "${PLATFORM_OPTS[@]}" \
     "$ENTRY"

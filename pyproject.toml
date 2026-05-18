@@ -11,7 +11,6 @@ dependencies = [
     "pandas>=2.3.2",
     "pathlib>=1.0.1",
     "pyqt6>=6.9.1,<6.11",
-    "pyqt6-qt6>=6.10.2,<6.11",
     "pyqtgraph>=0.14.0",
     "ujson>=5.11.0",
 ]
