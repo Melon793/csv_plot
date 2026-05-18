@@ -11,30 +11,16 @@ MultiCurveManager - 多曲线绘图管理
 """
 
 from __future__ import annotations
-from typing import Any, TYPE_CHECKING, NamedTuple
+from typing import Any, TYPE_CHECKING
 
 from src.core.config import (
     DEFAULT_LINE_WIDTH,
     DEFAULT_PADDING_VAL_Y,
 )
+from src.core.types import CurveInfo
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
-
-
-class CurveInfo(NamedTuple):
-    """曲线信息数据结构"""
-    var_name: str
-    curve: Any
-    x_data: Any
-    y_data: Any
-    color: str
-    y_format: str
-    visible: bool
-
-    def update_x_range(self):
-        """更新 x 范围信息"""
-        pass
 
 
 class MultiCurveManager:

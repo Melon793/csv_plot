@@ -86,14 +86,27 @@ csv_plot/
         ├── variable_list.py     # MyTableWidget 变量列表面板
         ├── mark_stats.py        # MarkStatsWindow 标记统计窗口
         ├── plot_variable_editor.py  # PlotVariableEditorDialog 变量编辑器
-        ├── cursor_manager.py    # 游标管理器（备用）
+        ├── main_window_base_manager.py  # MainWindow 基础管理器
+        ├── file_loader_manager.py  # 文件加载管理器
+        ├── cursor_sync_manager.py  # 游标同步管理器
+        ├── layout_manager.py    # 布局管理器
         ├── dialogs/
         │   ├── help.py          # HelpDialog 帮助文档
         │   ├── layout_input.py  # LayoutInputDialog 行列数配置
         │   ├── axis.py          # AxisDialog 坐标轴设置
         │   └── time_correction.py  # TimeCorrectionDialog 时间修正
         └── widgets/
-            └── custom_viewbox.py # 信号化 CustomViewBox（10 个信号解耦 MainWindow）
+            ├── __init__.py
+            ├── base_manager.py  # 管理器基类
+            ├── custom_viewbox.py # 信号化 CustomViewBox（10 个信号解耦 MainWindow）
+            ├── plot_container.py # PlotContainerWidget 绘图容器
+            ├── plot_ui_manager.py # PlotUIManager 绘图 UI 管理器
+            ├── plot_data_manager.py # PlotDataManager 绘图数据管理器
+            ├── axis_manager.py  # AxisManager 坐标轴管理器
+            ├── cursor_manager.py # CursorManager 游标管理器
+            ├── multi_curve_manager.py # MultiCurveManager 多曲线管理器
+            ├── mark_region_manager.py # MarkRegionManager 标记区域管理器
+            └── event_handler.py # EventHandler 事件处理器
 ```
 
 ## 快速开始

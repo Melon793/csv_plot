@@ -1,8 +1,12 @@
 """types"""
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pyqtgraph as pg
 
 class AutoDetectError(Exception):
     """自动检测文件格式失败，需要用户手动指定分隔符/标题行/单位行"""
@@ -26,7 +30,7 @@ class FormatInfo:
 class CurveInfo:
     """单条曲线的元数据"""
     var_name: str
-    curve: pg.PlotDataItem
+    curve: 'pg.PlotDataItem'
     x_data: np.ndarray
     y_data: np.ndarray
     color: str = 'blue'

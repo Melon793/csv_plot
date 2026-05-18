@@ -295,7 +295,6 @@ class FastDataLoader:
             raise AutoDetectError(f"无法自动检测文件分隔符: {file_path}")
         return fmt
 
-    from typing import Callable
     def __init__(
         self,
         csv_path: str ,
