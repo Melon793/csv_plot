@@ -71,7 +71,7 @@ class LayoutManager(MainWindowBaseManager):
         self.mw.main_splitter.setSizes([self.mw.var_table_default_width, right_width])
         self.mw.main_splitter.blockSignals(False)
 
-    def _handle_resize(self):
+    def _handle_resize(self, _event):
         if (not self.mw.var_table_user_adjusted
                 and getattr(self.mw, '_splitter_ready', False)
                 and hasattr(self.mw, 'main_splitter')):
