@@ -4,4 +4,5 @@ __pycache__/
 /.trae/
 /dist/
 .DS_Store
-
+/.*_backup/
+/test/

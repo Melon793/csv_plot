@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import QThread,pyqtSignal
 from src.core.config import DEBUG_LOG_ENABLED,debug_log,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety
+from src.core.types import FormatInfo, AutoDetectError
 
 class DataLoadThread(QThread):
     """
@@ -52,7 +53,7 @@ class DataLoadThread(QThread):
 
             ext = os.path.splitext(self.file_path)[1].lower()
             if ext in ('.mf4', '.mdf', '.dat'):
-                from mdf_loader import MDFDataLoader
+                from src.data.mdf_loader import MDFDataLoader
                 loader = MDFDataLoader(self.file_path, _progress=_progress_cb)
             else:
                 loader = FastDataLoader(
