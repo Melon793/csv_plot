@@ -28,7 +28,9 @@ class MultiCurveManager:
 
     def __init__(self, plot_data_manager: PlotDataManager):
         if plot_data_manager is None:
-            raise ValueError("MultiCurveManager requires a valid PlotDataManager instance")
+            raise ValueError(
+                "MultiCurveManager requires a valid PlotDataManager instance"
+            )
         self._data_manager = plot_data_manager
 
     @property
@@ -40,7 +42,7 @@ class MultiCurveManager:
         pw = self.pw
         curve_count = len(pw.curves)
 
-        if not hasattr(pw, '_batch_adding'):
+        if not hasattr(pw, "_batch_adding"):
             pw._batch_adding = False
 
         if not pw._batch_adding:
@@ -103,12 +105,10 @@ class MultiCurveManager:
                 pass
 
         import pyqtgraph as pg
+
         pen = pg.mkPen(color=ci.color, width=DEFAULT_LINE_WIDTH)
         curve = pw.plot_item.plot(
-            ci.x_data, ci.y_data,
-            pen=pen,
-            name=var_name,
-            skipFiniteCheck=True
+            ci.x_data, ci.y_data, pen=pen, name=var_name, skipFiniteCheck=True
         )
 
         pw.curves[var_name] = CurveInfo(
@@ -118,7 +118,7 @@ class MultiCurveManager:
             y_data=ci.y_data,
             color=ci.color,
             y_format=ci.y_format,
-            visible=ci.visible
+            visible=ci.visible,
         )
 
     def _collect_visible_curve_arrays(self, key: str) -> list:
@@ -146,9 +146,9 @@ class MultiCurveManager:
         pw = self.pw
 
         if curves_filter == "visible":
-            arrays = self._collect_visible_curve_arrays('x_data')
+            arrays = self._collect_visible_curve_arrays("x_data")
         else:
-            arrays = [getattr(ci, 'x_data') for ci in pw.curves.values()]
+            arrays = [getattr(ci, "x_data") for ci in pw.curves.values()]
 
         if not arrays:
             return None, None
@@ -156,7 +156,7 @@ class MultiCurveManager:
         all_values = []
         for arr in arrays:
             if arr is not None:
-                all_values.extend(arr.tolist() if hasattr(arr, 'tolist') else list(arr))
+                all_values.extend(arr.tolist() if hasattr(arr, "tolist") else list(arr))
 
         if not all_values:
             return None, None
@@ -178,9 +178,10 @@ class MultiCurveManager:
             if x_min is not None and x_max is not None:
                 pw.view_box.setXRange(x_min, x_max, padding=0.02)
 
-        y_arrays = self._collect_visible_curve_arrays('y_data')
+        y_arrays = self._collect_visible_curve_arrays("y_data")
         if y_arrays:
             import numpy as np
+
             combined = np.concatenate(y_arrays)
             if combined.size:
                 min_y = np.nanmin(combined)
@@ -189,7 +190,6 @@ class MultiCurveManager:
 
     def _on_legend_clicked(self, event):
         """图例点击事件"""
-        pw = self.pw
         legend_item = event.currentItem
 
         if legend_item is None:
@@ -205,6 +205,6 @@ class MultiCurveManager:
         for ci in pw.curves.values():
             if ci.curve is not None:
                 if show_symbols:
-                    ci.curve.setSymbol('o')
+                    ci.curve.setSymbol("o")
                 else:
                     ci.curve.setSymbol(None)

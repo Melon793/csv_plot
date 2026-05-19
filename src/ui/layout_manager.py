@@ -1,4 +1,5 @@
 """MainWindow 布局管理器 —— 处理布局、plot 矩阵、mark region 同步等"""
+
 from __future__ import annotations
 
 import os
@@ -8,9 +9,7 @@ import subprocess
 import numpy as np
 
 from PyQt6.QtCore import QTimer, QEvent, QSignalBlocker
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QMessageBox, QDialog
-)
+from PyQt6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
 
 from src.core.config import debug_log, UI_DEBOUNCE_DELAY_MS
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -40,7 +39,7 @@ class LayoutManager(MainWindowBaseManager):
             self.mw.var_table_default_width = sizes[0]
 
     def _ensure_splitter_ready(self):
-        if not hasattr(self.mw, 'main_splitter'):
+        if not hasattr(self.mw, "main_splitter"):
             return
         sizes = self.mw.main_splitter.sizes()
         if len(sizes) >= 2 and all(size > 0 for size in sizes):
@@ -50,9 +49,11 @@ class LayoutManager(MainWindowBaseManager):
 
     def _apply_fixed_splitter_width(self):
         self.mw._pending_splitter_adjustment = False
-        if (self.mw.var_table_user_adjusted
-                or not getattr(self.mw, '_splitter_ready', False)
-                or not hasattr(self.mw, 'main_splitter')):
+        if (
+            self.mw.var_table_user_adjusted
+            or not getattr(self.mw, "_splitter_ready", False)
+            or not hasattr(self.mw, "main_splitter")
+        ):
             return
 
         sizes = self.mw.main_splitter.sizes()
@@ -72,10 +73,12 @@ class LayoutManager(MainWindowBaseManager):
         self.mw.main_splitter.blockSignals(False)
 
     def _handle_resize(self, _event):
-        if (not self.mw.var_table_user_adjusted
-                and getattr(self.mw, '_splitter_ready', False)
-                and hasattr(self.mw, 'main_splitter')):
-            if not getattr(self.mw, '_pending_splitter_adjustment', False):
+        if (
+            not self.mw.var_table_user_adjusted
+            and getattr(self.mw, "_splitter_ready", False)
+            and hasattr(self.mw, "main_splitter")
+        ):
+            if not getattr(self.mw, "_pending_splitter_adjustment", False):
                 self.mw._pending_splitter_adjustment = True
                 QTimer.singleShot(0, self._apply_fixed_splitter_width)
 
@@ -112,11 +115,16 @@ class LayoutManager(MainWindowBaseManager):
             return parent
         return None
 
-    def _show_drag_indicator_for_plot(self, plot_widget, var_names: list[str], text_override: str | None = None):
+    def _show_drag_indicator_for_plot(
+        self, plot_widget, var_names: list[str], text_override: str | None = None
+    ):
         container = self._get_plot_container(plot_widget)
         if not container:
             return
-        if self.mw._active_drag_container and self.mw._active_drag_container is not container:
+        if (
+            self.mw._active_drag_container
+            and self.mw._active_drag_container is not container
+        ):
             self.mw._active_drag_container.hide_drag_indicator()
         container.show_drag_indicator(var_names, text_override)
         self.mw._active_drag_container = container
@@ -155,7 +163,7 @@ class LayoutManager(MainWindowBaseManager):
                     start_new_session=True,
                     close_fds=True,
                 )
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             QMessageBox.warning(self.mw, "错误", f"启动独立实例失败: {e}")
 
     def toggle_mark_region(self, checked):
@@ -166,7 +174,9 @@ class LayoutManager(MainWindowBaseManager):
                 return
             if self.mw.saved_mark_range:
                 min_x, max_x = self.mw.saved_mark_range
-                view_min, view_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                view_min, view_max = self.mw.plot_widgets[
+                    0
+                ].plot_widget.view_box.viewRange()[0]
                 if min_x >= view_min and max_x <= view_max:
                     pass
                 else:
@@ -174,7 +184,9 @@ class LayoutManager(MainWindowBaseManager):
                     min_x = view_min + width / 3
                     max_x = view_min + 2 * width / 3
             else:
-                view_min, view_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                view_min, view_max = self.mw.plot_widgets[
+                    0
+                ].plot_widget.view_box.viewRange()[0]
                 width = view_max - view_min
                 min_x = view_min + width / 3
                 max_x = view_min + 2 * width / 3
@@ -194,7 +206,9 @@ class LayoutManager(MainWindowBaseManager):
             self.mw.mark_region_btn.setText("标记区域")
             self.mw.mark_region_btn.setChecked(False)
             if self.mw.plot_widgets and self.mw.plot_widgets[0].plot_widget.mark_region:
-                self.mw.saved_mark_range = self.mw.plot_widgets[0].plot_widget.mark_region.getRegion()
+                self.mw.saved_mark_range = self.mw.plot_widgets[
+                    0
+                ].plot_widget.mark_region.getRegion()
             for container in self.mw.plot_widgets:
                 container.plot_widget.remove_mark_region()
             if self.mw.mark_stats_window:
@@ -208,17 +222,17 @@ class LayoutManager(MainWindowBaseManager):
         try:
             min_x, max_x = region_item.getRegion()
             for container in self.mw.plot_widgets:
-                mark = getattr(container.plot_widget, 'mark_region', None)
+                mark = getattr(container.plot_widget, "mark_region", None)
                 if not (container.isVisible() and mark and mark is not region_item):
                     continue
-                blocker = QSignalBlocker(mark)
+                QSignalBlocker(mark)
                 mark.setRegion([min_x, max_x])
             self.request_mark_stats_refresh()
         finally:
             self.mw._is_syncing_mark_region = False
 
     def request_mark_stats_refresh(self, *, immediate: bool = False):
-        if not getattr(self.mw, 'mark_stats_window', None):
+        if not getattr(self.mw, "mark_stats_window", None):
             return
         if immediate:
             if self.mw._mark_stats_timer.isActive():
@@ -236,7 +250,7 @@ class LayoutManager(MainWindowBaseManager):
         self.update_mark_stats()
 
     def update_mark_stats(self):
-        if hasattr(self.mw, 'mark_stats_window') and self.mw.mark_stats_window:
+        if hasattr(self.mw, "mark_stats_window") and self.mw.mark_stats_window:
             stats_list = []
             for container in self.mw.plot_widgets:
                 if container.isVisible():
@@ -245,11 +259,13 @@ class LayoutManager(MainWindowBaseManager):
             self.mw.mark_stats_window.update_stats(stats_list)
 
     def open_layout_dialog(self):
-        dlg = LayoutInputDialog(max_rows=self.mw._plot_row_max_default,
-                                max_cols=self.mw._plot_col_max_default,
-                                cur_rows=self.mw._plot_row_current,
-                                cur_cols=self.mw._plot_col_current,
-                                parent=self.mw)
+        dlg = LayoutInputDialog(
+            max_rows=self.mw._plot_row_max_default,
+            max_cols=self.mw._plot_col_max_default,
+            cur_rows=self.mw._plot_row_current,
+            cur_cols=self.mw._plot_col_current,
+            parent=self.mw,
+        )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             r, c = dlg.values()
             self.set_plots_visible(r, c)
@@ -275,18 +291,26 @@ class LayoutManager(MainWindowBaseManager):
             try:
                 if self.mw.cursor_btn.isChecked():
                     mode = getattr(self.mw, "cursor_mode", "1 free cursor")
-                    if mode != "1 free cursor" and old_factor != 0 and self.mw.pinned_x_values:
+                    if (
+                        mode != "1 free cursor"
+                        and old_factor != 0
+                        and self.mw.pinned_x_values
+                    ):
                         for x_val in self.mw.pinned_x_values:
                             if x_val is None or not np.isfinite(x_val):
                                 continue
                             index_pos = (x_val - old_offset) / old_factor
                             if np.isfinite(index_pos):
-                                self.mw._time_correction_pinned_index_values.append(index_pos)
+                                self.mw._time_correction_pinned_index_values.append(
+                                    index_pos
+                                )
             except Exception:
                 self.mw._time_correction_pinned_index_values = []
 
             if self.mw.plot_widgets:
-                curr_min, curr_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
+                curr_min, curr_max = self.mw.plot_widgets[
+                    0
+                ].plot_widget.view_box.viewRange()[0]
             else:
                 curr_min, curr_max = 0, 1
 
@@ -299,7 +323,9 @@ class LayoutManager(MainWindowBaseManager):
                 new_min = new_offset + new_factor * index_min
                 new_max = new_offset + new_factor * index_max
             else:
-                datalength = self.mw.loader.datalength if hasattr(self.mw, 'loader') else 1
+                datalength = (
+                    self.mw.loader.datalength if hasattr(self.mw, "loader") else 1
+                )
                 new_min = new_offset + new_factor * 1
                 new_max = new_offset + new_factor * datalength
 
@@ -307,7 +333,9 @@ class LayoutManager(MainWindowBaseManager):
                 first_plot = self.mw.plot_widgets[0].plot_widget
                 first_plot.view_box.enableAutoRange(x=False)
                 first_plot.view_box.setXRange(new_min, new_max, padding=0)
-                self.mw._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
+                self.mw._realign_pinned_cursor_after_time_correction(
+                    old_factor, old_offset, new_factor, new_offset
+                )
 
             self.request_mark_stats_refresh(immediate=True)
             self.mw._is_time_correction_active = False
@@ -318,13 +346,27 @@ class LayoutManager(MainWindowBaseManager):
 
     def update_mark_regions_on_layout_change(self):
         if self.mw.mark_region_btn.isChecked():
-            if self.mw.plot_widgets[0] and self.mw.plot_widgets[0].plot_widget.mark_region:
-                self.mw.saved_mark_range = self.mw.plot_widgets[0].plot_widget.mark_region.getRegion()
+            if (
+                self.mw.plot_widgets[0]
+                and self.mw.plot_widgets[0].plot_widget.mark_region
+            ):
+                self.mw.saved_mark_range = self.mw.plot_widgets[
+                    0
+                ].plot_widget.mark_region.getRegion()
 
             for container in self.mw.plot_widgets:
                 container.plot_widget.remove_mark_region()
-            view_min, view_max = self.mw.plot_widgets[0].plot_widget.view_box.viewRange()[0]
-            min_x, max_x = self.mw.saved_mark_range if self.mw.saved_mark_range else (view_min + (view_max - view_min) / 3, view_min + 2 * (view_max - view_min) / 3)
+            view_min, view_max = self.mw.plot_widgets[
+                0
+            ].plot_widget.view_box.viewRange()[0]
+            min_x, max_x = (
+                self.mw.saved_mark_range
+                if self.mw.saved_mark_range
+                else (
+                    view_min + (view_max - view_min) / 3,
+                    view_min + 2 * (view_max - view_min) / 3,
+                )
+            )
             for container in self.mw.plot_widgets:
                 if container.isVisible():
                     container.plot_widget.add_mark_region(min_x, max_x)
@@ -348,8 +390,10 @@ class LayoutManager(MainWindowBaseManager):
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
                 supported = any(
-                    u.toLocalFile().lower().endswith(
-                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
+                    u.toLocalFile()
+                    .lower()
+                    .endswith(
+                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11")
                     )
                     or self.mw._extract_file_extension(u.toLocalFile()) is not None
                     for u in urls
@@ -372,8 +416,10 @@ class LayoutManager(MainWindowBaseManager):
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
                 supported = any(
-                    u.toLocalFile().lower().endswith(
-                        ('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11')
+                    u.toLocalFile()
+                    .lower()
+                    .endswith(
+                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11")
                     )
                     or self.mw._extract_file_extension(u.toLocalFile()) is not None
                     for u in urls
@@ -387,8 +433,12 @@ class LayoutManager(MainWindowBaseManager):
                 urls = event.mimeData().urls()
                 for u in urls:
                     path = u.toLocalFile()
-                    if (path.lower().endswith(('.csv', '.txt', '.mfile', '.t00', '.t01', '.t10', '.t11'))
-                            or self.mw._extract_file_extension(path) is not None):
+                    if (
+                        path.lower().endswith(
+                            (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11")
+                        )
+                        or self.mw._extract_file_extension(path) is not None
+                    ):
                         debug_log("MainWindow.eventFilter drop load path=%s", path)
                         self.mw.load_csv_file(path)
                         event.accept()
@@ -418,7 +468,9 @@ class LayoutManager(MainWindowBaseManager):
 
         for r in range(m):
             for c in range(n):
-                plot_widget = DraggableGraphicsLayoutWidget(self.mw.units, self.mw.data, self.mw.time_channels_infos)
+                plot_widget = DraggableGraphicsLayoutWidget(
+                    self.mw.units, self.mw.data, self.mw.time_channels_infos
+                )
                 plot_widget.plot_context = PlotContext(self.mw)
                 cursor_enabled = self.mw.cursor_btn.isChecked()
                 if cursor_enabled and self.mw.cursor_values_hidden:
@@ -426,7 +478,9 @@ class LayoutManager(MainWindowBaseManager):
                 else:
                     plot_widget.toggle_cursor(cursor_enabled)
                 if cursor_enabled:
-                    plot_widget.apply_cursor_mode(self.mw.cursor_mode, self.mw.pinned_x_values)
+                    plot_widget.apply_cursor_mode(
+                        self.mw.cursor_mode, self.mw.pinned_x_values
+                    )
 
                 if c == 0 and r == 0:
                     first_viewbox = plot_widget.view_box
@@ -463,7 +517,10 @@ class LayoutManager(MainWindowBaseManager):
             visible = False
             for c in range(ncols):
                 idx = r * ncols + c
-                if idx < len(self.mw.plot_widgets) and self.mw.plot_widgets[idx].isVisible():
+                if (
+                    idx < len(self.mw.plot_widgets)
+                    and self.mw.plot_widgets[idx].isVisible()
+                ):
                     visible = True
                     break
 
@@ -485,7 +542,10 @@ class LayoutManager(MainWindowBaseManager):
             visible = False
             for c in range(ncols):
                 idx = r * ncols + c
-                if idx < len(self.mw.plot_widgets) and self.mw.plot_widgets[idx].isVisible():
+                if (
+                    idx < len(self.mw.plot_widgets)
+                    and self.mw.plot_widgets[idx].isVisible()
+                ):
                     visible = True
                     break
 

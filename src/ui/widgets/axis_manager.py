@@ -19,7 +19,6 @@ import numpy as np
 from src.core.config import (
     DEFAULT_PADDING_VAL_X,
     DEFAULT_PADDING_VAL_Y,
-    DEBUG_LOG_ENABLED,
     debug_log,
     MIN_INDEX_LENGTH,
 )
@@ -43,10 +42,11 @@ class AxisManager:
     def update_x_axis_label(self) -> None:
         """更新 X 轴标签文本"""
         pw = self.pw
-        if not hasattr(pw, 'plot_item'):
+        if not hasattr(pw, "plot_item"):
             return
-        axis = pw.plot_item.getAxis('bottom')
+        axis = pw.plot_item.getAxis("bottom")
         from src.core.config import DEFAULT_SHOW_X_AXIS_LABEL
+
         if DEFAULT_SHOW_X_AXIS_LABEL:
             label = pw.time_axis_label if pw.time_axis_label else "Index"
             axis.setLabel(label)
@@ -71,9 +71,9 @@ class AxisManager:
         pw = self.pw
         is_mdf = (
             pw.plot_context is not None
-            and hasattr(pw.plot_context, 'loader')
+            and hasattr(pw.plot_context, "loader")
             and pw.plot_context.loader is not None
-            and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
+            and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
         )
 
         has_own_data = bool(pw.curve or pw.curves)
@@ -87,7 +87,7 @@ class AxisManager:
             pw.axis_y.setTicks(None)
 
             if pw.is_multi_curve_mode and pw.curves:
-                x_arrays = pw._collect_visible_curve_arrays('x_data')
+                x_arrays = pw._collect_visible_curve_arrays("x_data")
                 if x_arrays:
                     x_values = np.concatenate(x_arrays)
             elif pw.original_index_x is not None:
@@ -104,12 +104,20 @@ class AxisManager:
             pw.axis_y.setTicks(None)
 
         if external_xmin is not None:
-            min_x = min(own_min_x, external_xmin) if own_min_x is not None else external_xmin
+            min_x = (
+                min(own_min_x, external_xmin)
+                if own_min_x is not None
+                else external_xmin
+            )
         else:
             min_x = own_min_x
 
         if external_xmax is not None:
-            max_x = max(own_max_x, external_xmax) if own_max_x is not None else external_xmax
+            max_x = (
+                max(own_max_x, external_xmax)
+                if own_max_x is not None
+                else external_xmax
+            )
         else:
             max_x = own_max_x
 
@@ -128,7 +136,9 @@ class AxisManager:
         if is_mdf:
             pw.plot_item.setLimits(minXRange=minXRange_val)
         else:
-            pw.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
+            pw.plot_item.setLimits(
+                xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val
+            )
 
         self._set_vline_bounds([min_x, max_x])
 
@@ -150,7 +160,7 @@ class AxisManager:
             return 0, 1
 
         if pw.is_multi_curve_mode and pw.curves:
-            y_arrays = pw._collect_visible_curve_arrays('y_data')
+            y_arrays = pw._collect_visible_curve_arrays("y_data")
             if y_arrays:
                 combined = np.concatenate(y_arrays)
                 if combined.size:
@@ -230,7 +240,9 @@ class AxisManager:
         优先从 plot_context 读取 _global_max_density。
         """
         pw = self.pw
-        if pw.plot_context is not None and hasattr(pw.plot_context, '_global_max_density'):
+        if pw.plot_context is not None and hasattr(
+            pw.plot_context, "_global_max_density"
+        ):
             density = pw.plot_context._global_max_density
         else:
             density = 0.0
@@ -248,7 +260,9 @@ class AxisManager:
         """统一设置 X 轴的 limits 和 minXRange"""
         pw = self.pw
         minXRange_val = self._get_min_x_range_value()
-        pw.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
+        pw.plot_item.setLimits(
+            xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val
+        )
 
     def _set_min_x_range(self, minXRange: float) -> None:
         """设置 X 轴的最小范围"""
@@ -266,7 +280,8 @@ class AxisManager:
             n = len(pw.original_y)
             if n > 1 and pw.original_index_x is not None:
                 x_span = (
-                    pw.offset + pw.factor * float(np.max(pw.original_index_x))
+                    pw.offset
+                    + pw.factor * float(np.max(pw.original_index_x))
                     - (pw.offset + pw.factor * float(np.min(pw.original_index_x)))
                 )
                 if x_span > 0:
@@ -356,7 +371,7 @@ class AxisManager:
             pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
             self._set_vline_bounds([None, None])
         except Exception as e:
-            print(f"重置绘图限制时出错: {e}")
+            debug_log("重置绘图限制时出错: %s", e)
 
     def _set_vline_bounds(self, bounds: list) -> None:
         """设置光标垂直线的边界"""

@@ -1,11 +1,17 @@
 """MainWindow 光标同步与图表同步管理器"""
+
 from __future__ import annotations
 import numpy as np
 
 from PyQt6.QtCore import QSignalBlocker
 from PyQt6.QtWidgets import QMessageBox
 
-from src.core.config import debug_log, DEFAULT_PADDING_VAL_X, RATIO_RESET_PLOTS, MIN_INDEX_LENGTH
+from src.core.config import (
+    debug_log,
+    DEFAULT_PADDING_VAL_X,
+    RATIO_RESET_PLOTS,
+    MIN_INDEX_LENGTH,
+)
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
 
@@ -26,22 +32,32 @@ class CursorSyncManager(MainWindowBaseManager):
                 continue
 
             var_lower = var.lower()
-            unit = self.mw.units.get(var, '').lower()
+            unit = self.mw.units.get(var, "").lower()
 
-            name_match = not name_keywords or any(kw in var_lower for kw in name_keywords)
+            name_match = not name_keywords or any(
+                kw in var_lower for kw in name_keywords
+            )
             unit_match = not unit_keywords or any(kw in unit for kw in unit_keywords)
 
             if name_match and unit_match:
                 filtered_names.append(var)
 
-        self.mw.list_widget.populate(filtered_names, self.mw.units, self.mw.data_validity)
+        self.mw.list_widget.populate(
+            filtered_names, self.mw.units, self.mw.data_validity
+        )
 
-    def reset_plots_after_loading(self, index_xMin, index_xMax, *, reason: str | None = None):
-        debug_log("MainWindow.reset_plots_after_loading reason=%s range=(%s,%s)",
-                  reason, index_xMin, index_xMax)
+    def reset_plots_after_loading(
+        self, index_xMin, index_xMax, *, reason: str | None = None
+    ):
+        debug_log(
+            "MainWindow.reset_plots_after_loading reason=%s range=(%s,%s)",
+            reason,
+            index_xMin,
+            index_xMax,
+        )
         for container in self.mw.plot_widgets:
             container.plot_widget._is_updating_data = True
-            if hasattr(container.plot_widget, '_cancel_ui_refresh'):
+            if hasattr(container.plot_widget, "_cancel_ui_refresh"):
                 container.plot_widget._cancel_ui_refresh()
 
         try:
@@ -69,14 +85,16 @@ class CursorSyncManager(MainWindowBaseManager):
             for container in self.mw.plot_widgets:
                 widget = container.plot_widget
                 try:
-                    has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
+                    has_data = (widget.curve is not None) or (
+                        widget.is_multi_curve_mode and widget.curves
+                    )
                     if has_data:
                         widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
                     pass
 
     def _get_cursor_source_plot(self, source_plot=None):
-        if source_plot is not None and hasattr(source_plot, 'view_box'):
+        if source_plot is not None and hasattr(source_plot, "view_box"):
             return source_plot
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
@@ -150,7 +168,11 @@ class CursorSyncManager(MainWindowBaseManager):
             if prev_mode == "2 anchored cursor":
                 remove_idx = self._select_farthest_cursor_index(context_x)
                 if remove_idx is not None:
-                    remaining = [x for idx, x in enumerate(self.mw.pinned_x_values) if idx != remove_idx]
+                    remaining = [
+                        x
+                        for idx, x in enumerate(self.mw.pinned_x_values)
+                        if idx != remove_idx
+                    ]
                     self.mw.pinned_x_values = remaining[:1]
             if not self.mw.pinned_x_values:
                 if source_plot is not None and hasattr(source_plot, "vline"):
@@ -159,21 +181,35 @@ class CursorSyncManager(MainWindowBaseManager):
         elif mode == "2 anchored cursor":
             if prev_mode == "1 free cursor" or not self.mw.pinned_x_values:
                 pinned = context_x
-                if pinned is None and source_plot is not None and hasattr(source_plot, "vline"):
+                if (
+                    pinned is None
+                    and source_plot is not None
+                    and hasattr(source_plot, "vline")
+                ):
                     pinned = source_plot.vline.value()
                 if pinned is not None:
-                    second = self._calc_second_cursor_position(pinned, view_min, view_max)
+                    second = self._calc_second_cursor_position(
+                        pinned, view_min, view_max
+                    )
                     self.mw.pinned_x_values = [pinned, second]
             elif prev_mode == "1 anchored cursor":
                 pinned = self.mw.pinned_x_values[0] if self.mw.pinned_x_values else None
-                if pinned is None and source_plot is not None and hasattr(source_plot, "vline"):
+                if (
+                    pinned is None
+                    and source_plot is not None
+                    and hasattr(source_plot, "vline")
+                ):
                     pinned = source_plot.vline.value()
                 if pinned is not None:
-                    second = self._calc_second_cursor_position(pinned, view_min, view_max)
+                    second = self._calc_second_cursor_position(
+                        pinned, view_min, view_max
+                    )
                     self.mw.pinned_x_values = [pinned, second]
             else:
                 if len(self.mw.pinned_x_values) == 1:
-                    second = self._calc_second_cursor_position(self.mw.pinned_x_values[0], view_min, view_max)
+                    second = self._calc_second_cursor_position(
+                        self.mw.pinned_x_values[0], view_min, view_max
+                    )
                     self.mw.pinned_x_values = [self.mw.pinned_x_values[0], second]
             self.mw.cursor_mode = mode
 
@@ -193,8 +229,11 @@ class CursorSyncManager(MainWindowBaseManager):
         return False
 
     def toggle_cursor_all(self, checked):
-        debug_log("MainWindow.toggle_cursor_all start checked=%s has_plot=%s",
-                  checked, len(self.mw.plot_widgets))
+        debug_log(
+            "MainWindow.toggle_cursor_all start checked=%s has_plot=%s",
+            checked,
+            len(self.mw.plot_widgets),
+        )
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             if checked and self.mw.cursor_values_hidden:
@@ -211,14 +250,18 @@ class CursorSyncManager(MainWindowBaseManager):
         self.mw.cursor_btn.setChecked(checked)
         self.mw.cursor_btn.setText("隐藏光标" if checked else "显示光标")
 
-    def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
+    def _realign_pinned_cursor_after_time_correction(
+        self, old_factor, old_offset, new_factor, new_offset
+    ):
         if not self.mw.plot_widgets:
             return
 
         if getattr(self.mw, "cursor_mode", "1 free cursor") == "1 free cursor":
             return
 
-        pinned_indices = list(getattr(self.mw, "_time_correction_pinned_index_values", []) or [])
+        pinned_indices = list(
+            getattr(self.mw, "_time_correction_pinned_index_values", []) or []
+        )
         if not pinned_indices:
             pinned_values = list(getattr(self.mw, "pinned_x_values", []) or [])
             if not pinned_values:
@@ -259,7 +302,11 @@ class CursorSyncManager(MainWindowBaseManager):
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
 
-            if hasattr(widget, "original_index_x") and widget.original_index_x is not None and len(widget.original_index_x) > 0:
+            if (
+                hasattr(widget, "original_index_x")
+                and widget.original_index_x is not None
+                and len(widget.original_index_x) > 0
+            ):
                 min_index = np.min(widget.original_index_x)
                 max_index = np.max(widget.original_index_x)
                 new_min_x = widget.offset + widget.factor * min_index
@@ -299,7 +346,7 @@ class CursorSyncManager(MainWindowBaseManager):
         if self.mw._is_syncing_crosshair:
             return
 
-        if sender_widget and getattr(sender_widget, '_is_interacting', False):
+        if sender_widget and getattr(sender_widget, "_is_interacting", False):
             return
 
         if self.mw._pending_crosshair_x is not None:
@@ -311,7 +358,7 @@ class CursorSyncManager(MainWindowBaseManager):
             has_pinned_plot = any(
                 c.plot_widget.is_cursor_pinned
                 for c in self.mw.plot_widgets
-                if c.isVisible() and hasattr(c.plot_widget, 'is_cursor_pinned')
+                if c.isVisible() and hasattr(c.plot_widget, "is_cursor_pinned")
             )
 
             if has_pinned_plot:
@@ -321,9 +368,9 @@ class CursorSyncManager(MainWindowBaseManager):
                 if not container.isVisible():
                     continue
                 w = container.plot_widget
-                if getattr(w, '_is_interacting', False):
+                if getattr(w, "_is_interacting", False):
                     continue
-                if getattr(w, '_is_updating_data', False):
+                if getattr(w, "_is_updating_data", False):
                     continue
                 w.vline.setVisible(True)
                 with QSignalBlocker(w.vline):
@@ -347,9 +394,9 @@ class CursorSyncManager(MainWindowBaseManager):
             if not container.isVisible():
                 continue
             w = container.plot_widget
-            if getattr(w, '_is_interacting', False):
+            if getattr(w, "_is_interacting", False):
                 continue
-            if getattr(w, '_is_updating_data', False):
+            if getattr(w, "_is_updating_data", False):
                 continue
             try:
                 w.update_cursor_label()
@@ -357,8 +404,10 @@ class CursorSyncManager(MainWindowBaseManager):
                 pass
 
     def reset_all_pin_states(self):
-        debug_log("MainWindow.reset_all_pin_states total=%s",
-                  len(getattr(self.mw, "plot_widgets", [])))
+        debug_log(
+            "MainWindow.reset_all_pin_states total=%s",
+            len(getattr(self.mw, "plot_widgets", [])),
+        )
         self.mw.cursor_mode = "1 free cursor"
         self.mw.pinned_x_values = []
         for container in self.mw.plot_widgets:
@@ -372,7 +421,9 @@ class CursorSyncManager(MainWindowBaseManager):
         self.mw.saved_mark_range = None
         self.mw.request_mark_stats_refresh(immediate=True)
 
-    def collect_global_x_range(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
+    def collect_global_x_range(
+        self, curves_filter: str = "visible"
+    ) -> tuple[float | None, float | None]:
         all_mins: list[float] = []
         all_maxs: list[float] = []
 
@@ -385,7 +436,7 @@ class CursorSyncManager(MainWindowBaseManager):
                 all_maxs.append(x_max)
 
         if not all_mins:
-            if self.mw.loader and hasattr(self.mw.loader, 'global_time_range'):
+            if self.mw.loader and hasattr(self.mw.loader, "global_time_range"):
                 return self.mw.loader.global_time_range
             elif self.mw.loader and self.mw.loader.datalength > 0:
                 return (1.0, float(self.mw.loader.datalength))
@@ -404,7 +455,7 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw._baseline_density = 0.0
             return
 
-        if hasattr(self.mw.loader, 'global_time_range'):
+        if hasattr(self.mw.loader, "global_time_range"):
             t_min, t_max = self.mw.loader.global_time_range
         else:
             t_min, t_max = 1.0, float(self.mw.loader.datalength)
@@ -418,10 +469,13 @@ class CursorSyncManager(MainWindowBaseManager):
     def _sync_min_xrange(self):
 
         new_max = max(
-            (container.plot_widget._max_point_density
-             for container in self.mw.plot_widgets
-             if container.isVisible() and container.plot_widget._max_point_density > 0),
-            default=0.0
+            (
+                container.plot_widget._max_point_density
+                for container in self.mw.plot_widgets
+                if container.isVisible()
+                and container.plot_widget._max_point_density > 0
+            ),
+            default=0.0,
         )
 
         if new_max == 0.0:
@@ -438,7 +492,9 @@ class CursorSyncManager(MainWindowBaseManager):
         if not self.mw.loader or self.mw.loader.datalength == 0:
             return
 
-        global_min_x, global_max_x = self.collect_global_x_range(curves_filter="visible")
+        global_min_x, global_max_x = self.collect_global_x_range(
+            curves_filter="visible"
+        )
 
         for container in self.mw.plot_widgets:
             if container.isVisible():
@@ -455,7 +511,7 @@ class CursorSyncManager(MainWindowBaseManager):
     def replots_after_loading(self):
         for container in self.mw.plot_widgets:
             container.plot_widget._is_updating_data = True
-            if hasattr(container.plot_widget, '_cancel_ui_refresh'):
+            if hasattr(container.plot_widget, "_cancel_ui_refresh"):
                 container.plot_widget._cancel_ui_refresh()
 
         try:
@@ -475,11 +531,13 @@ class CursorSyncManager(MainWindowBaseManager):
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
 
-            is_mdf = getattr(self.mw.loader, 'LOADER_TYPE', '') == 'mdf'
+            is_mdf = getattr(self.mw.loader, "LOADER_TYPE", "") == "mdf"
 
             unique_y_names = set(all_y_names)
             if not unique_y_names:
-                debug_log("MainWindow.replots_after_loading no tracked curves, reset plots")
+                debug_log(
+                    "MainWindow.replots_after_loading no tracked curves, reset plots"
+                )
                 if is_mdf:
                     x_min, x_max = self.mw.loader.global_time_range
                 else:
@@ -491,7 +549,9 @@ class CursorSyncManager(MainWindowBaseManager):
             in_var_names = [y for y in unique_y_names if y in var_names_set]
 
             if in_var_names:
-                validity_values = [self.mw.loader.df_validity.get(y, -1) for y in in_var_names]
+                validity_values = [
+                    self.mw.loader.df_validity.get(y, -1) for y in in_var_names
+                ]
                 validity_array = np.array(validity_values)
                 valid_mask = validity_array != -1
                 found = [in_var_names[i] for i in np.where(valid_mask)[0]]
@@ -499,18 +559,27 @@ class CursorSyncManager(MainWindowBaseManager):
                 found = []
 
             ratio = len(found) / len(unique_y_names) if unique_y_names else 0
-            debug_log("MainWindow.replots_after_loading reuse_ratio=%.2f tracked=%s valid=%s",
-                      ratio, len(unique_y_names), len(found))
+            debug_log(
+                "MainWindow.replots_after_loading reuse_ratio=%.2f tracked=%s valid=%s",
+                ratio,
+                len(unique_y_names),
+                len(found),
+            )
 
             cleared = []
 
             if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
-                debug_log("MainWindow.replots_after_loading reset due to low ratio %.2f", ratio)
+                debug_log(
+                    "MainWindow.replots_after_loading reset due to low ratio %.2f",
+                    ratio,
+                )
                 if is_mdf:
                     x_min, x_max = self.mw.loader.global_time_range
                 else:
                     x_min, x_max = 1, self.mw.loader.datalength
-                self.reset_plots_after_loading(x_min, x_max, reason="insufficient valid vars")
+                self.reset_plots_after_loading(
+                    x_min, x_max, reason="insufficient valid vars"
+                )
             else:
                 self.mw.value_cache = {}
                 for idx, container in enumerate(self.mw.plot_widgets):
@@ -521,14 +590,16 @@ class CursorSyncManager(MainWindowBaseManager):
                         min_x = widget.offset + widget.factor * x_min
                         max_x = widget.offset + widget.factor * x_max
                     else:
-                        original_index_x = np.arange(1, self.mw.loader.datalength + 1, dtype=np.float32)
+                        original_index_x = np.arange(
+                            1, self.mw.loader.datalength + 1, dtype=np.float32
+                        )
                         min_x = widget.offset + widget.factor * np.min(original_index_x)
                         max_x = widget.offset + widget.factor * np.max(original_index_x)
                     min_x, max_x = widget._get_safe_x_range(min_x, max_x)
                     limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
                     limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
                     widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-                    if hasattr(widget, '_set_vline_bounds'):
+                    if hasattr(widget, "_set_vline_bounds"):
                         widget._set_vline_bounds([min_x, max_x])
                     else:
                         widget.vline.setBounds([min_x, max_x])
@@ -543,7 +614,7 @@ class CursorSyncManager(MainWindowBaseManager):
                         widget._clear_cursor_items(hide_only=False)
                         widget._safe_clear_plot_items()
                         widget.curve = None
-                        widget.y_name = ''
+                        widget.y_name = ""
                         widget.original_index_x = None
                         widget.original_y = None
 
@@ -551,13 +622,20 @@ class CursorSyncManager(MainWindowBaseManager):
                         visibility_to_restore = {}
 
                         for var_name, ci in current_curves.items():
-                            var_exists = (var_name in self.mw.loader.var_names) if is_mdf else (var_name in self.mw.loader.df.columns)
-                            if var_exists and self.mw.loader.df_validity.get(var_name, -1) >= 0:
+                            var_exists = (
+                                (var_name in self.mw.loader.var_names)
+                                if is_mdf
+                                else (var_name in self.mw.loader.df.columns)
+                            )
+                            if (
+                                var_exists
+                                and self.mw.loader.df_validity.get(var_name, -1) >= 0
+                            ):
                                 preferred_color = ci.color
                                 success = widget.add_variable_to_plot(
                                     var_name,
                                     skip_existence_check=True,
-                                    preferred_color=preferred_color
+                                    preferred_color=preferred_color,
                                 )
                                 if success:
                                     curves_added += 1
@@ -570,7 +648,9 @@ class CursorSyncManager(MainWindowBaseManager):
                                 widget.curves[var_name].visible = original_visible
                                 if widget.curves[var_name].curve is not None:
                                     try:
-                                        widget.curves[var_name].curve.setVisible(original_visible)
+                                        widget.curves[var_name].curve.setVisible(
+                                            original_visible
+                                        )
                                     except Exception:
                                         pass
 
@@ -583,15 +663,26 @@ class CursorSyncManager(MainWindowBaseManager):
                         y_name = widget.y_name
                         if not y_name:
                             continue
-                        var_exists = (y_name in self.mw.loader.var_names) if is_mdf else (y_name in self.mw.loader.df.columns)
-                        if var_exists and self.mw.loader.df_validity.get(y_name, -1) >= 0:
+                        var_exists = (
+                            (y_name in self.mw.loader.var_names)
+                            if is_mdf
+                            else (y_name in self.mw.loader.df.columns)
+                        )
+                        if (
+                            var_exists
+                            and self.mw.loader.df_validity.get(y_name, -1) >= 0
+                        ):
                             success = widget.plot_variable(y_name)
                             if not success:
                                 widget.clear_plot_item()
                                 cleared.append((idx + 1, "无效数据"))
                         else:
                             widget.clear_plot_item()
-                            reason = f"未找到变量:{y_name}" if not var_exists else f"无效数据:{y_name}"
+                            reason = (
+                                f"未找到变量:{y_name}"
+                                if not var_exists
+                                else f"无效数据:{y_name}"
+                            )
                             cleared.append((idx + 1, reason))
 
             if self.mw.plot_widgets:
@@ -612,8 +703,10 @@ class CursorSyncManager(MainWindowBaseManager):
             for container in self.mw.plot_widgets:
                 widget = container.plot_widget
                 try:
-                    if hasattr(widget, 'view_box') and hasattr(widget, 'plot_item'):
-                        has_data = (widget.curve is not None) or (widget.is_multi_curve_mode and widget.curves)
+                    if hasattr(widget, "view_box") and hasattr(widget, "plot_item"):
+                        has_data = (widget.curve is not None) or (
+                            widget.is_multi_curve_mode and widget.curves
+                        )
                         if has_data:
                             widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:

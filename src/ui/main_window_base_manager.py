@@ -1,4 +1,5 @@
 """MainWindow 管理器基类"""
+
 from __future__ import annotations
 import weakref
 from typing import Any
@@ -14,5 +15,7 @@ class MainWindowBaseManager:
     def mw(self) -> Any:
         mw = self._mw_ref()
         if mw is None:
-            raise RuntimeError(f"{type(self).__name__}: MainWindow has been garbage collected")
+            raise RuntimeError(
+                f"{type(self).__name__}: MainWindow has been garbage collected"
+            )
         return mw

@@ -29,109 +29,125 @@ class CursorManager:
     """负责光标位置、标签、模式、对象池管理和 ViewBox 信号处理"""
 
     def __init__(self, multi_curve_manager: MultiCurveManager):
+        """初始化光标管理器，绑定到 MultiCurveManager 以获取依赖链"""
         if multi_curve_manager is None:
-            raise ValueError("CursorManager requires a valid MultiCurveManager instance")
+            raise ValueError(
+                "CursorManager requires a valid MultiCurveManager instance"
+            )
         self._data_manager = multi_curve_manager
 
     @property
     def pw(self) -> Any:
+        """关联的 DraggableGraphicsLayoutWidget 实例"""
         return self._data_manager.pw
 
     @property
     def _is_interacting(self) -> bool:
-        return getattr(self.pw, '_is_interacting', False)
-    
+        """用户是否正在交互（拖拽/缩放中）"""
+        return getattr(self.pw, "_is_interacting", False)
+
     @_is_interacting.setter
     def _is_interacting(self, value: bool):
         self.pw._is_interacting = value
 
     @property
     def _cursor_label_busy(self) -> bool:
-        return getattr(self.pw, '_cursor_label_busy', False)
-    
+        """光标标签是否正在更新（防抖标志）"""
+        return getattr(self.pw, "_cursor_label_busy", False)
+
     @_cursor_label_busy.setter
     def _cursor_label_busy(self, value: bool):
         self.pw._cursor_label_busy = value
 
     @property
     def _cursor_label_dirty(self) -> bool:
-        return getattr(self.pw, '_cursor_label_dirty', False)
-    
+        """光标标签数据是否过期需要刷新"""
+        return getattr(self.pw, "_cursor_label_dirty", False)
+
     @_cursor_label_dirty.setter
     def _cursor_label_dirty(self, value: bool):
         self.pw._cursor_label_dirty = value
 
     @property
     def show_values_only(self) -> bool:
-        return getattr(self.pw, 'show_values_only', False)
-    
+        """是否仅显示坐标值（隐藏曲线数值标签）"""
+        return getattr(self.pw, "show_values_only", False)
+
     @show_values_only.setter
     def show_values_only(self, value: bool):
         self.pw.show_values_only = value
 
     @property
     def last_valid_cursor_mode(self) -> str:
-        return getattr(self.pw, 'last_valid_cursor_mode', "1 free cursor")
-    
+        """上一次有效的光标模式（用于恢复）"""
+        return getattr(self.pw, "last_valid_cursor_mode", "1 free cursor")
+
     @last_valid_cursor_mode.setter
     def last_valid_cursor_mode(self, value: str):
         self.pw.last_valid_cursor_mode = value
 
     @property
     def is_cursor_pinned(self) -> bool:
-        return getattr(self.pw, 'is_cursor_pinned', False)
-    
+        """光标当前是否被固定"""
+        return getattr(self.pw, "is_cursor_pinned", False)
+
     @is_cursor_pinned.setter
     def is_cursor_pinned(self, value: bool):
         self.pw.is_cursor_pinned = value
 
     @property
     def pinned_x_value(self) -> float | None:
-        return getattr(self.pw, 'pinned_x_value', None)
-    
+        """固定光标的当前 x 值（单光标模式）"""
+        return getattr(self.pw, "pinned_x_value", None)
+
     @pinned_x_value.setter
     def pinned_x_value(self, value: float | None):
         self.pw.pinned_x_value = value
 
     @property
     def pinned_x_values(self) -> list:
-        return getattr(self.pw, 'pinned_x_values', [])
-    
+        """固定光标的 x 值列表（多光标模式）"""
+        return getattr(self.pw, "pinned_x_values", [])
+
     @pinned_x_values.setter
     def pinned_x_values(self, value: list):
         self.pw.pinned_x_values = value
 
     @property
     def pinned_index_value(self) -> float | None:
-        return getattr(self.pw, 'pinned_index_value', None)
-    
+        """固定光标对应的数据索引值（单光标模式）"""
+        return getattr(self.pw, "pinned_index_value", None)
+
     @pinned_index_value.setter
     def pinned_index_value(self, value: float | None):
         self.pw.pinned_index_value = value
 
     @property
     def pinned_index_values(self) -> list:
-        return getattr(self.pw, 'pinned_index_values', [])
-    
+        """固定光标对应的数据索引值列表（多光标模式）"""
+        return getattr(self.pw, "pinned_index_values", [])
+
     @pinned_index_values.setter
     def pinned_index_values(self, value: list):
         self.pw.pinned_index_values = value
 
     @property
     def factor(self) -> float:
-        return getattr(self.pw, 'factor', 1.0)
-    
+        """线性变换缩放因子 (x = index * factor + offset)"""
+        return getattr(self.pw, "factor", 1.0)
+
     @property
     def offset(self) -> float:
-        return getattr(self.pw, 'offset', 0.0)
+        """线性变换偏移量 (x = index * factor + offset)"""
+        return getattr(self.pw, "offset", 0.0)
 
     @property
     def y_format(self) -> str:
-        return getattr(self.pw, 'y_format', '')
-    
+        return getattr(self.pw, "y_format", "")
+
     @property
     def y_name(self) -> str:
-        return getattr(self.pw, 'y_name', '')
+        return getattr(self.pw, "y_name", "")
 
     def _get_cursor_mode(self) -> str:
         """获取当前光标模式"""
@@ -206,17 +222,26 @@ class CursorManager:
 
         if mode == "1 anchored cursor":
             self.is_cursor_pinned = True
-            self.pinned_x_values = list(pinned_x_values[:1]) if pinned_x_values else self.pinned_x_values[:1]
+            self.pinned_x_values = (
+                list(pinned_x_values[:1])
+                if pinned_x_values
+                else self.pinned_x_values[:1]
+            )
             if self.pinned_x_values:
                 self.pinned_x_value = self.pinned_x_values[0]
             if self.factor != 0 and self.pinned_x_value is not None:
-                self.pinned_index_value = (self.pinned_x_value - self.offset) / self.factor
+                self.pinned_index_value = (
+                    self.pinned_x_value - self.offset
+                ) / self.factor
             else:
                 self.pinned_index_value = None
-            self.pinned_index_values = [self.pinned_index_value] if self.pinned_index_value is not None else []
+            self.pinned_index_values = (
+                [self.pinned_index_value] if self.pinned_index_value is not None else []
+            )
             if hasattr(self.pw, "vline") and self.pinned_x_value is not None:
                 self.pw.vline.setMovable(True)
                 from PyQt6.QtCore import QSignalBlocker
+
                 with QSignalBlocker(self.pw.vline):
                     self.pw.vline.setPos(self.pinned_x_value)
             if hasattr(self.pw, "vline2"):
@@ -233,7 +258,10 @@ class CursorManager:
             elif len(self.pinned_x_values) >= 2:
                 self.pinned_x_values = list(self.pinned_x_values[:2])
             elif len(self.pinned_x_values) == 1:
-                self.pinned_x_values = [self.pinned_x_values[0], self.pinned_x_values[0]]
+                self.pinned_x_values = [
+                    self.pinned_x_values[0],
+                    self.pinned_x_values[0],
+                ]
             else:
                 view_min, view_max = self.pw.view_box.viewRange()[0]
                 if view_min is not None and view_max is not None:
@@ -253,6 +281,7 @@ class CursorManager:
                 self.pw.vline2.setMovable(True)
             if hasattr(self.pw, "vline") and self.pinned_x_values:
                 from PyQt6.QtCore import QSignalBlocker
+
                 with QSignalBlocker(self.pw.vline):
                     self.pw.vline.setPos(self.pinned_x_values[0])
             if hasattr(self.pw, "vline2") and len(self.pinned_x_values) > 1:
@@ -304,18 +333,23 @@ class CursorManager:
                 break
 
         if retry_count >= MAX_RETRIES:
-            debug_log("update_cursor_label exceeded max retries for y=%s", getattr(self.pw, "y_name", None))
+            debug_log(
+                "update_cursor_label exceeded max retries for y=%s",
+                getattr(self.pw, "y_name", None),
+            )
 
     def _is_cursor_update_locked(self) -> bool:
         """判断 cursor 相关回调是否需要被暂时禁用"""
-        if getattr(self.pw, '_is_updating_data', False) or getattr(self.pw, '_is_being_destroyed', False):
+        if getattr(self.pw, "_is_updating_data", False) or getattr(
+            self.pw, "_is_being_destroyed", False
+        ):
             return True
 
         if self.pw.plot_context:
-            if getattr(self.pw.plot_context, '_is_loading_new_data', False):
+            if getattr(self.pw.plot_context, "_is_loading_new_data", False):
                 return True
-            current_version = getattr(self.pw.plot_context, '_data_version', 0)
-            my_version = getattr(self.pw, '_cached_data_version', 0)
+            current_version = getattr(self.pw.plot_context, "_data_version", 0)
+            my_version = getattr(self.pw, "_cached_data_version", 0)
             if my_version != 0 and my_version != current_version:
                 return True
 
@@ -337,48 +371,51 @@ class CursorManager:
             x = np.clip(x, x_data.min(), x_data.max())
             idx = np.argmin(np.abs(x_data - x))
             y_val = y_data[idx]
-            x_str = self.pw._significant_decimal_format_str(value=float(x), ref=self.factor)
-            if self.y_format == 'enum':
-                enum_map = getattr(self.pw.plot_context, '_enum_text_maps', {}).get(self.y_name, {})
+            x_str = self.pw._significant_decimal_format_str(
+                value=float(x), ref=self.factor
+            )
+            if self.y_format == "enum":
+                enum_map = getattr(self.pw.plot_context, "_enum_text_maps", {}).get(
+                    self.y_name, {}
+                )
                 y_str = enum_map.get(int(y_val), str(y_val))
                 self.pw.update_right_header(f"x={x_str}, y={y_str}")
-            elif self.y_format == 's':
+            elif self.y_format == "s":
                 time_str = self.pw.sInt_to_fmtStr(y_val)
                 self.pw.update_right_header(f"x={x_str}, y={time_str}")
-            elif self.y_format == 'date':
+            elif self.y_format == "date":
                 date_str = self.pw.dateInt_to_fmtStr(y_val)
                 self.pw.update_right_header(f"x={x_str}, y={date_str}")
             else:
                 self.pw.update_right_header(f"x={x_str}, y={y_val:.5g}")
 
         except Exception as e:
-            print(f"Cursor update error: {e}")
+            debug_log("Cursor update error: %s", e)
             self.pw.update_right_header("")
 
     def _get_circle_from_pool(self, index: int):
         """从对象池获取 ScatterPlotItem"""
-        pool = self.pw._cursor_item_pool['circles']
+        pool = self.pw._cursor_item_pool["circles"]
         if index < len(pool):
             return pool[index]
 
         import pyqtgraph as pg
-        circle = pg.ScatterPlotItem(symbol='o', size=8, brush=None)
+
+        circle = pg.ScatterPlotItem(symbol="o", size=8, brush=None)
         pool.append(circle)
         return circle
 
     def _get_label_from_pool(self, index: int):
         """从对象池获取 TextItem"""
-        pool = self.pw._cursor_item_pool['labels']
+        pool = self.pw._cursor_item_pool["labels"]
         if index < len(pool):
             return pool[index]
 
         import pyqtgraph as pg
         from PyQt6.QtWidgets import QApplication
-        
+
         label = pg.TextItem(
-            color=(0, 0, 0),
-            fill=pg.mkBrush(255, 255, 255, 220),
-            anchor=(0.5, 0.5)
+            color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0.5, 0.5)
         )
         font = QApplication.font()
         font.setPixelSize(11)
@@ -394,12 +431,12 @@ class CursorManager:
 
         import pyqtgraph as pg
         from PyQt6.QtWidgets import QApplication
-        
+
         x_label = pg.TextItem(
             color=(255, 255, 255),
             fill=pg.mkBrush(64, 64, 64, 230),
             border=pg.mkPen(128, 128, 128, width=1),
-            anchor=(0.5, 0)
+            anchor=(0.5, 0),
         )
         font = QApplication.font()
         font.setPixelSize(12)
@@ -409,7 +446,9 @@ class CursorManager:
 
     def _clear_cursor_items(self, hide_only: bool = True):
         """清除或隐藏所有 cursor 可视化元素"""
-        if not hasattr(self.pw, 'multi_cursor_items') or not hasattr(self.pw, 'plot_item'):
+        if not hasattr(self.pw, "multi_cursor_items") or not hasattr(
+            self.pw, "plot_item"
+        ):
             return
 
         for item in self.pw.multi_cursor_items:
@@ -422,17 +461,17 @@ class CursorManager:
         for item in self.pw.multi_cursor_items:
             try:
                 item_type = type(item).__name__
-                if item_type == 'ScatterPlotItem':
+                if item_type == "ScatterPlotItem":
                     try:
                         item.clear()
                     except (RuntimeError, AttributeError):
                         pass
-                elif item in self.pw._cursor_item_pool.get('x_labels', []):
+                elif item in self.pw._cursor_item_pool.get("x_labels", []):
                     try:
                         item.setText("")
                     except (RuntimeError, AttributeError):
                         pass
-                elif item in self.pw._cursor_item_pool.get('labels', []):
+                elif item in self.pw._cursor_item_pool.get("labels", []):
                     try:
                         item.setText("")
                     except (RuntimeError, AttributeError):
@@ -445,18 +484,14 @@ class CursorManager:
         self.pw.multi_cursor_items.clear()
 
         if not hide_only:
-            for circle in self.pw._cursor_item_pool.get('circles', []):
+            for circle in self.pw._cursor_item_pool.get("circles", []):
                 self._queue_item_for_deletion(circle)
-            for label in self.pw._cursor_item_pool.get('labels', []):
+            for label in self.pw._cursor_item_pool.get("labels", []):
                 self._queue_item_for_deletion(label)
-            for x_label in self.pw._cursor_item_pool.get('x_labels', []):
+            for x_label in self.pw._cursor_item_pool.get("x_labels", []):
                 self._queue_item_for_deletion(x_label)
 
-            self.pw._cursor_item_pool = {
-                'circles': [],
-                'labels': [],
-                'x_labels': []
-            }
+            self.pw._cursor_item_pool = {"circles": [], "labels": [], "x_labels": []}
 
             if self.pw._pending_delete_items and not self.pw._cleanup_timer.isActive():
                 self.pw._cleanup_timer.start(100)
@@ -491,11 +526,11 @@ class CursorManager:
                 except (RuntimeError, AttributeError):
                     pass
                 try:
-                    if hasattr(item, 'deleteLater'):
+                    if hasattr(item, "deleteLater"):
                         item.deleteLater()
                 except (RuntimeError, AttributeError):
                     pass
-            except Exception as e:
+            except (RuntimeError, AttributeError) as e:
                 debug_log("_process_pending_deletes error: %s", e)
 
     def _update_multi_curve_cursor_label(self):
@@ -504,13 +539,18 @@ class CursorManager:
             return
 
         import time
+
         current_time = time.time()
 
         adaptive_throttle = 0.05
-        if hasattr(self.pw, '_adaptive_throttle_enabled') and self.pw._adaptive_throttle_enabled and hasattr(self.pw, "curves"):
+        if (
+            hasattr(self.pw, "_adaptive_throttle_enabled")
+            and self.pw._adaptive_throttle_enabled
+            and hasattr(self.pw, "curves")
+        ):
             curve_count = len(self.pw.curves) if self.pw.curves else 0
             adaptive_throttle = min(0.016 + curve_count * 0.002, 0.1)
-        elif hasattr(self.pw, '_cursor_update_throttle'):
+        elif hasattr(self.pw, "_cursor_update_throttle"):
             adaptive_throttle = self.pw._cursor_update_throttle
 
         if hasattr(self.pw, "_last_cursor_update_time"):
@@ -523,7 +563,9 @@ class CursorManager:
 
         mode = self._get_cursor_mode()
         if mode == "2 anchored cursor":
-            vline_visible = bool(self.pw.vline.isVisible() or self.pw.vline2.isVisible())
+            vline_visible = bool(
+                self.pw.vline.isVisible() or self.pw.vline2.isVisible()
+            )
         else:
             vline_visible = self.pw.vline.isVisible()
         if not vline_visible:
@@ -552,35 +594,46 @@ class CursorManager:
                 for var_name, ci in self.pw.curves.items():
                     if not ci.visible:
                         continue
-                    curves_to_process.append({
-                        "var_name": var_name,
-                        "x_data": ci.x_data,
-                        "y_data": ci.y_data,
-                        "color": ci.color,
-                        "y_format": ci.y_format,
-                        "unit": self.pw.units.get(var_name, ""),
-                        "enum_map": getattr(self.pw.plot_context, '_enum_text_maps', {}).get(var_name, {})
-                    })
+                    curves_to_process.append(
+                        {
+                            "var_name": var_name,
+                            "x_data": ci.x_data,
+                            "y_data": ci.y_data,
+                            "color": ci.color,
+                            "y_format": ci.y_format,
+                            "unit": self.pw.units.get(var_name, ""),
+                            "enum_map": getattr(
+                                self.pw.plot_context, "_enum_text_maps", {}
+                            ).get(var_name, {}),
+                        }
+                    )
             elif not self.pw.is_multi_curve_mode and self.pw.curve and self.y_name:
                 x_data, y_data = self.pw.curve.getData()
                 if x_data is not None and len(x_data) > 0:
                     curve_color = "blue"
                     try:
-                        if hasattr(self.pw.curve, "opts") and "pen" in self.pw.curve.opts:
+                        if (
+                            hasattr(self.pw.curve, "opts")
+                            and "pen" in self.pw.curve.opts
+                        ):
                             pen = self.pw.curve.opts["pen"]
                             if hasattr(pen, "color"):
                                 curve_color = pen.color().name()
                     except Exception:
                         pass
-                    curves_to_process.append({
-                        "var_name": self.y_name,
-                        "x_data": x_data,
-                        "y_data": y_data,
-                        "color": curve_color,
-                        "y_format": self.y_format,
-                        "unit": self.pw.units.get(self.y_name, ""),
-                        "enum_map": getattr(self.pw.plot_context, '_enum_text_maps', {}).get(self.y_name, {})
-                    })
+                    curves_to_process.append(
+                        {
+                            "var_name": self.y_name,
+                            "x_data": x_data,
+                            "y_data": y_data,
+                            "color": curve_color,
+                            "y_format": self.y_format,
+                            "unit": self.pw.units.get(self.y_name, ""),
+                            "enum_map": getattr(
+                                self.pw.plot_context, "_enum_text_maps", {}
+                            ).get(self.y_name, {}),
+                        }
+                    )
 
             import pyqtgraph as pg
 
@@ -626,18 +679,23 @@ class CursorManager:
                     else:
                         y_str = f"{y_val:.5g}"
 
-                    cursor_values.append({
-                        "var_name": var_name,
-                        "x_pos": x_actual,
-                        "y_pos": y_val,
-                        "y_value": y_str,
-                        "color": color
-                    })
+                    cursor_values.append(
+                        {
+                            "var_name": var_name,
+                            "x_pos": x_actual,
+                            "y_pos": y_val,
+                            "y_value": y_str,
+                            "color": color,
+                        }
+                    )
 
                     circle = self._get_circle_from_pool(len(cursor_values) - 1)
                     circle.clear()
                     circle.setData([x_actual], [y_val])
-                    if not hasattr(circle, "_cached_color") or circle._cached_color != color:
+                    if (
+                        not hasattr(circle, "_cached_color")
+                        or circle._cached_color != color
+                    ):
                         pen = pg.mkPen(color, width=1.5)
                         circle.setPen(pen)
                         circle._cached_color = color
@@ -651,12 +709,16 @@ class CursorManager:
                         self.pw.plot_item.addItem(circle, ignoreBounds=True)
                     self.pw.multi_cursor_items.append(circle)
 
-            self._position_labels_avoid_overlap(cursor_values, x_min, x_max, y_min, y_max)
+            self._position_labels_avoid_overlap(
+                cursor_values, x_min, x_max, y_min, y_max
+            )
 
             for idx, x in enumerate(x_positions):
                 if x < x_min or x > x_max:
                     continue
-                x_str = self.pw._significant_decimal_format_str(value=float(x), ref=self.factor)
+                x_str = self.pw._significant_decimal_format_str(
+                    value=float(x), ref=self.factor
+                )
                 x_info_item = self._get_x_label_from_pool(idx)
                 x_info_item.setText(x_str)
                 x_info_item.setVisible(True)
@@ -675,10 +737,17 @@ class CursorManager:
                 self.pw.multi_cursor_items.append(x_info_item)
 
         except Exception as e:
-            print(f"Multi-curve cursor update error: {e}")
+            debug_log("Multi-curve cursor update error: %s", e)
             self.pw.update_right_header("")
 
-    def _position_labels_avoid_overlap(self, cursor_values: list, x_min: float, x_max: float, y_min: float, y_max: float):
+    def _position_labels_avoid_overlap(
+        self,
+        cursor_values: list,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ):
         """优化的标签定位算法"""
         if not cursor_values:
             return
@@ -700,12 +769,11 @@ class CursorManager:
         for idx, cursor_val in enumerate(cursor_values):
             var_name = cursor_val["var_name"]
             x_pos = cursor_val["x_pos"]
-            y_pos = cursor_val["y_pos"]
             y_value = cursor_val["y_value"]
             color = cursor_val["color"]
 
             unit = ""
-            if hasattr(self.pw, 'units'):
+            if hasattr(self.pw, "units"):
                 unit = self.pw.units.get(var_name, "")
             label_text = f"{y_value}"
             if unit:
@@ -718,13 +786,23 @@ class CursorManager:
                 label.setColor(color)
                 label._cached_color = color
 
-            view_rect = self.pw.plot_item.vb.sceneBoundingRect()
-
             positions = [
-                (x_pos + gap_pixels * pixel_to_data_x, y_max - vertical_gap_pixels * pixel_to_data_y),
-                (x_pos - gap_pixels * pixel_to_data_x, y_max - vertical_gap_pixels * pixel_to_data_y),
-                (x_pos + gap_pixels * pixel_to_data_x, y_min + vertical_gap_pixels * pixel_to_data_y),
-                (x_pos - gap_pixels * pixel_to_data_x, y_min + vertical_gap_pixels * pixel_to_data_y),
+                (
+                    x_pos + gap_pixels * pixel_to_data_x,
+                    y_max - vertical_gap_pixels * pixel_to_data_y,
+                ),
+                (
+                    x_pos - gap_pixels * pixel_to_data_x,
+                    y_max - vertical_gap_pixels * pixel_to_data_y,
+                ),
+                (
+                    x_pos + gap_pixels * pixel_to_data_x,
+                    y_min + vertical_gap_pixels * pixel_to_data_y,
+                ),
+                (
+                    x_pos - gap_pixels * pixel_to_data_x,
+                    y_min + vertical_gap_pixels * pixel_to_data_y,
+                ),
             ]
 
             selected_pos = positions[0]
@@ -734,7 +812,9 @@ class CursorManager:
                     selected_pos = pos
                     break
 
-            scene_point = self.pw.plot_item.vb.mapViewToScene(pg.Point(selected_pos[0], selected_pos[1]))
+            scene_point = self.pw.plot_item.vb.mapViewToScene(
+                pg.Point(selected_pos[0], selected_pos[1])
+            )
             label.setPos(scene_point.x(), scene_point.y())
             label.setVisible(True)
             label.setZValue(1000 + idx)
@@ -754,7 +834,11 @@ class CursorManager:
                 self._clear_cursor_items()
                 self.pw.update_right_header("")
                 return
-            x_positions = x_positions if x_positions is not None else self._get_cursor_x_positions()
+            x_positions = (
+                x_positions
+                if x_positions is not None
+                else self._get_cursor_x_positions()
+            )
             if not x_positions:
                 self.pw.update_right_header("")
                 return
@@ -767,7 +851,9 @@ class CursorManager:
             for idx, x in enumerate(x_positions):
                 if x < x_min or x > x_max:
                     continue
-                x_str = self.pw._significant_decimal_format_str(value=float(x), ref=self.factor)
+                x_str = self.pw._significant_decimal_format_str(
+                    value=float(x), ref=self.factor
+                )
                 x_info_item = self._get_x_label_from_pool(idx)
                 x_info_item.setText(x_str)
                 x_info_item.setVisible(True)
@@ -790,13 +876,15 @@ class CursorManager:
 
             parts = []
             for x in x_positions:
-                x_str = self.pw._significant_decimal_format_str(value=float(x), ref=self.factor)
+                x_str = self.pw._significant_decimal_format_str(
+                    value=float(x), ref=self.factor
+                )
                 parts.append(f"x={x_str}")
             header_text = " | ".join(parts)
             self.pw.update_right_header(header_text)
 
         except Exception as e:
-            print(f"x_position_only error: {e}")
+            debug_log("x_position_only error: %s", e)
 
     def _has_visible_curve_data(self) -> bool:
         """判断当前 plot 是否有可见且有数据的曲线"""
@@ -908,39 +996,39 @@ class CursorManager:
     def _start_interaction(self):
         """开始交互"""
         try:
-            if not hasattr(self.pw, '_is_interacting'):
+            if not hasattr(self.pw, "_is_interacting"):
                 self.pw._is_interacting = False
             if not self.pw._is_interacting:
                 self.pw._is_interacting = True
-            if not hasattr(self.pw, '_cursor_refresh_timer'):
+            if not hasattr(self.pw, "_cursor_refresh_timer"):
                 return
             if self.pw._cursor_refresh_timer.isActive():
                 self.pw._cursor_refresh_timer.stop()
         except Exception as e:
-            print(f"开始交互出错: {e}")
+            debug_log("开始交互出错: %s", e)
 
     def _end_interaction(self):
         """结束交互"""
         try:
-            if hasattr(self.pw, '_is_interacting'):
+            if hasattr(self.pw, "_is_interacting"):
                 self.pw._is_interacting = False
-            if hasattr(self.pw, '_cursor_refresh_timer'):
+            if hasattr(self.pw, "_cursor_refresh_timer"):
                 self.pw._cursor_refresh_timer.start(50)
         except Exception as e:
-            print(f"结束交互出错: {e}")
+            debug_log("结束交互出错: %s", e)
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新"""
-        if not hasattr(self.pw, 'vline') or not self.pw.vline.isVisible():
+        if not hasattr(self.pw, "vline") or not self.pw.vline.isVisible():
             return
-        if getattr(self.pw, '_cursor_refresh_timer', None) is None:
+        if getattr(self.pw, "_cursor_refresh_timer", None) is None:
             return
         if not self.pw._cursor_refresh_timer.isActive():
             self.pw._cursor_refresh_timer.start(50)
 
     def _refresh_cursor_geometry(self):
         """刷新光标几何"""
-        if not hasattr(self.pw, 'vline') or not self.pw.vline.isVisible():
+        if not hasattr(self.pw, "vline") or not self.pw.vline.isVisible():
             return
         if self._is_interacting:
             return
@@ -950,7 +1038,9 @@ class CursorManager:
         """vline 位置变化时更新光标状态"""
         if self._is_cursor_update_locked():
             return
-        if self.pw.plot_context and getattr(self.pw.plot_context, "_is_time_correction_active", False):
+        if self.pw.plot_context and getattr(
+            self.pw.plot_context, "_is_time_correction_active", False
+        ):
             return
 
         line = line_obj if line_obj is not None else self.pw.vline
@@ -961,7 +1051,9 @@ class CursorManager:
                 return
             x_pos = line.value()
             if len(self.pinned_x_values) <= cursor_index:
-                self.pinned_x_values += [x_pos] * (cursor_index + 1 - len(self.pinned_x_values))
+                self.pinned_x_values += [x_pos] * (
+                    cursor_index + 1 - len(self.pinned_x_values)
+                )
             self.pinned_x_values[cursor_index] = x_pos
 
             if cursor_index == 0:
@@ -983,18 +1075,27 @@ class CursorManager:
                 for container in self.pw.plot_context.plot_widgets:
                     widget = container
                     if widget.is_cursor_pinned and widget != self.pw:
-                        target_line = widget.vline if cursor_index == 0 else getattr(widget, "vline2", None)
+                        target_line = (
+                            widget.vline
+                            if cursor_index == 0
+                            else getattr(widget, "vline2", None)
+                        )
                         if target_line is not None:
                             from PyQt6.QtCore import QSignalBlocker
+
                             with QSignalBlocker(target_line):
                                 target_line.setPos(x_pos)
                         if len(widget.pinned_x_values) <= cursor_index:
-                            widget.pinned_x_values += [x_pos] * (cursor_index + 1 - len(widget.pinned_x_values))
+                            widget.pinned_x_values += [x_pos] * (
+                                cursor_index + 1 - len(widget.pinned_x_values)
+                            )
                         widget.pinned_x_values[cursor_index] = x_pos
                         if cursor_index == 0:
                             widget.pinned_x_value = x_pos
                             if widget.factor != 0:
-                                widget.pinned_index_value = (x_pos - widget.offset) / widget.factor
+                                widget.pinned_index_value = (
+                                    x_pos - widget.offset
+                                ) / widget.factor
                             else:
                                 widget.pinned_index_value = None
                         widget.update_cursor_label()

@@ -357,7 +357,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         index = (x - self.offset) / self.factor
         index = int(round(index)) - 1  # 转换为 0-based 行索引
-        index = max(0, min(index, len(main_window.loader.df) - 1))  # 夹到有效范围
+        index = max(0, min(index, main_window.loader.datalength - 1))
 
         # 使用第一个变量来定位和选中
         first_var_name = var_names[0]
@@ -4765,16 +4765,16 @@ class MainWindow(QMainWindow):
     def _extract_file_extension(self, file_path: str) -> str:
         return self.file_loader_manager._extract_file_extension(file_path)
     
-    def _validate_load_parameters(self, file_path: str, descRows, sep, hasunit) -> tuple[bool, str]:
-        return self.file_loader_manager._validate_load_parameters(file_path, descRows, sep, hasunit)
+    def _validate_load_parameters(self, file_path: str, desc_rows, sep, has_unit) -> tuple[bool, str]:
+        return self.file_loader_manager._validate_load_parameters(file_path, desc_rows, sep, has_unit)
 
     def _load_sync(self, 
                    file_path: str,
-                   descRows: int = 0,
+                   desc_rows: int = 0,
                    sep: str = ',',
-                   hasunit: bool = True,
+                   has_unit: bool = True,
                    encoding: str | None = None):
-        return self.file_loader_manager._load_sync(file_path, descRows=descRows, sep=sep, hasunit=hasunit, encoding=encoding)
+        return self.file_loader_manager._load_sync(file_path, desc_rows=desc_rows, sep=sep, has_unit=has_unit, encoding=encoding)
 
     def _on_load_done(self,loader, file_path: str):
         self.file_loader_manager._on_load_done(loader, file_path)

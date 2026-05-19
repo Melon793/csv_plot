@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 from pathlib import Path
-import os, sys
+import os
+import sys
 from PyQt6.QtWidgets import QApplication, QVBoxLayout, QPushButton, QTextEdit, QDialog
 
 
@@ -19,6 +20,7 @@ class HelpDialog(QDialog):
     帮助对话框类
     用于显示应用程序的帮助文档，包括README.md文件内容
     """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("帮助文档")
@@ -35,7 +37,7 @@ class HelpDialog(QDialog):
         # 文本区域
         text_edit = QTextEdit(self)
         text_edit.setReadOnly(True)
-        
+
         # 加载 README.md
         readme_path = _resource_path("README.md")
         if readme_path.exists():
@@ -50,8 +52,3 @@ class HelpDialog(QDialog):
         close_btn = QPushButton("关闭", self)
         close_btn.clicked.connect(self.close)
         layout.addWidget(close_btn)
-
-
-
-    
-
