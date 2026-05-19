@@ -16,8 +16,8 @@ class MarkStatsWindow(QDialog):
     
     # 激活时不透明
     ACTIVE_OPACITY = 1.0
-    # 非激活时 80% 透明
-    INACTIVE_OPACITY = 0.8
+    # 非激活时 90% 透明
+    INACTIVE_OPACITY = 0.9
 
     @classmethod
     def get_instance(cls, parent=None):
@@ -132,5 +132,8 @@ class MarkStatsWindow(QDialog):
 
     def closeEvent(self, event):
         self.save_geom()
+        parent = self.parent()
+        if hasattr(parent, 'layout_manager'):
+            parent.layout_manager.toggle_mark_region(False)
         super().closeEvent(event)
 
