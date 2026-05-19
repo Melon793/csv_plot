@@ -14,6 +14,13 @@ from threading import Lock
 import traceback
 from typing import Any
 
+if sys.platform == "darwin":  # macOS
+    # 屏蔽 macOS ICC 警告
+    os.environ["QT_LOGGING_RULES"] = (
+        "qt6ct.debug=false; "      # 原来想关的 qt6ct 日志
+        "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
+    )
+
 from src.ui.drag_drop import (VAR_SEPARATOR,parse_var_names_from_mimedata,build_var_mimedata,create_drag_pixmap)
 from src.ui.widgets.custom_viewbox import CustomViewBox
 from src.core.config import (DEBUG_LOG_ENABLED,debug_log,safe_callback,_install_faulthandler,_log_uncaught_exception,_threading_exception_logger,_qt_message_handler,install_global_debug_hooks,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS,FROZEN_VIEW_WIDTH_DEFAULT,XRANGE_THRESHOLD_FOR_SYMBOLS,BLINK_PULSE,FACTOR_SCROLL_ZOOM,MIN_INDEX_LENGTH,DEFAULT_LINE_WIDTH,THICK_LINE_WIDTH,THIN_LINE_WIDTH,UI_DEBOUNCE_DELAY_MS,PLOT_ROW_MAX_DEFAULT,PLOT_COL_MAX_DEFAULT,PLOT_ROW_CURRENT_DEFAULT,PLOT_COL_CURRENT_DEFAULT,FLOAT32_SAFE_MAX,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety,DEFAULT_SHOW_X_AXIS_LABEL)
@@ -33,14 +40,6 @@ from src.app.plot_context import PlotContext
 from src.ui.file_loader_manager import FileLoaderManager
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.layout_manager import LayoutManager
-
-
-if sys.platform == "darwin":  # macOS
-    # 屏蔽 macOS ICC 警告
-    os.environ["QT_LOGGING_RULES"] = (
-        "qt6ct.debug=false; "      # 原来想关的 qt6ct 日志
-        "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
-    )
 
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, QtMsgType, qInstallMessageHandler
@@ -155,7 +154,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.time_channels_info = time_channels_info
         self.synchronizer = synchronizer
         self.curve = None
-        self.time_values = None
         self.time_column_name = None
         self.time_axis_label = "Index"
         #self.ci.layout.setContentsMargins(0, 0, 0, 5)
@@ -329,7 +327,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
 
         # a. 打开/激活数值变量表，并添加所有变量
-        is_mdf_loader = hasattr(main_window.loader, 'get_series')
+        is_mdf_loader = getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
         dlg = None
         for var_name in var_names:
             if is_mdf_loader:
@@ -393,7 +391,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             main_window is not None
             and hasattr(main_window, 'loader')
             and main_window.loader is not None
-            and hasattr(main_window.loader, 'get_series')
+            and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
         )
 
         has_own_data = bool(self.curve or self.curves)
@@ -2352,7 +2350,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         if main_window and hasattr(main_window, 'loader') and main_window.loader is not None:
             loader = main_window.loader
-            if hasattr(loader, 'get_series'):
+            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
                 raw_values = loader.get_series(var_name)
             else:
                 raw_values = self.data[var_name]
@@ -2364,7 +2362,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             and hasattr(main_window, 'loader')
             and main_window.loader is not None
             and hasattr(main_window.loader, 'get_value_from_name')
-            and hasattr(main_window.loader, '_groups')
+            and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
         ):
             try:
                 _, _, _, text_map = main_window.loader.get_value_from_name(var_name)
@@ -2442,7 +2440,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 main_window is not None
                 and hasattr(main_window, 'loader')
                 and main_window.loader is not None
-                and hasattr(main_window.loader, 'get_series')
+                and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
             )
 
             if self.is_multi_curve_mode:
@@ -2655,7 +2653,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         main_window = self.window()
         if main_window and hasattr(main_window, 'loader') and main_window.loader is not None:
             loader = main_window.loader
-            if hasattr(loader, 'get_series'):
+            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
                 return True, ""
 
         if not hasattr(self, 'data') or self.data is None:
@@ -2670,9 +2668,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return True, ""
 
     def _get_x_data_for_variable(self, y_len: int) -> np.ndarray:
-        if self.time_values is not None and len(self.time_values) >= y_len:
-            x_vals = self.time_values.iloc[:y_len].to_numpy(dtype=np.float64)
-            return x_vals
         return np.arange(1, y_len + 1, dtype=np.float32)
 
     def _prepare_plot_data(self, var_name: str) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
@@ -2779,9 +2774,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 main_window is not None
                 and hasattr(main_window, 'loader')
                 and main_window.loader is not None
-                and hasattr(main_window.loader, 'get_series')
+                and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
             )
-            time_vals = self.time_values.to_numpy(dtype=np.float64)[:len(y_array)] if self.time_values is not None else x_array
 
             if self.is_multi_curve_mode:
                 # 多曲线模式：直接添加新曲线
@@ -3201,7 +3195,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     main_window is not None
                     and hasattr(main_window, 'loader')
                     and main_window.loader is not None
-                    and hasattr(main_window.loader, 'get_series')
+                    and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
                 )
                 # 始终保持x轴范围不变，只更新y轴范围
                 # 因为所有plot的x轴都是linked的，改变x轴会影响其他plot

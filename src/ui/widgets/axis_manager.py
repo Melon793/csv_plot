@@ -73,7 +73,7 @@ class AxisManager:
             pw.plot_context is not None
             and hasattr(pw.plot_context, 'loader')
             and pw.plot_context.loader is not None
-            and hasattr(pw.plot_context.loader, 'get_series')
+            and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
         )
 
         has_own_data = bool(pw.curve or pw.curves)

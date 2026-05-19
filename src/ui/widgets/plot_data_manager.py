@@ -71,9 +71,8 @@ class PlotDataManager:
                 pw.plot_context is not None
                 and hasattr(pw.plot_context, 'loader')
                 and pw.plot_context.loader is not None
-                and hasattr(pw.plot_context.loader, 'get_series')
+                and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
             )
-            time_vals = pw.time_values.to_numpy(dtype=np.float64)[:len(y_array)] if pw.time_values is not None else x_array
 
             if pw.is_multi_curve_mode:
                 x_values = pw.offset + pw.factor * x_array
@@ -155,7 +154,7 @@ class PlotDataManager:
 
         if pw.plot_context and hasattr(pw.plot_context, 'loader') and pw.plot_context.loader is not None:
             loader = pw.plot_context.loader
-            if hasattr(loader, 'get_series'):
+            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
                 return True, ""
 
         if not hasattr(pw, 'data') or pw.data is None:
@@ -170,11 +169,6 @@ class PlotDataManager:
         return True, ""
 
     def _get_x_data_for_variable(self, y_len: int) -> np.ndarray:
-        """获取 X 轴数据"""
-        pw = self.pw
-        if pw.time_values is not None and len(pw.time_values) >= y_len:
-            x_vals = pw.time_values.iloc[:y_len].to_numpy(dtype=np.float64)
-            return x_vals
         return np.arange(1, y_len + 1, dtype=np.float32)
 
     def _prepare_plot_data(self, var_name: str) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
@@ -350,7 +344,7 @@ class PlotDataManager:
 
         if hasattr(pw.plot_context, 'loader') and pw.plot_context.loader is not None:
             loader = pw.plot_context.loader
-            if hasattr(loader, 'get_series'):
+            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
                 raw_values = loader.get_series(var_name)
             else:
                 raw_values = pw.data[var_name]
@@ -361,7 +355,7 @@ class PlotDataManager:
             hasattr(pw.plot_context, 'loader')
             and pw.plot_context.loader is not None
             and hasattr(pw.plot_context.loader, 'get_value_from_name')
-            and hasattr(pw.plot_context.loader, '_groups')
+            and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
         ):
             try:
                 _, _, _, text_map = pw.plot_context.loader.get_value_from_name(var_name)
@@ -438,7 +432,7 @@ class PlotDataManager:
                 pw.plot_context is not None
                 and hasattr(pw.plot_context, 'loader')
                 and pw.plot_context.loader is not None
-                and hasattr(pw.plot_context.loader, 'get_series')
+                and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
             )
 
             if pw.is_multi_curve_mode:
