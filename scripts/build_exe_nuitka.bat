@@ -8,21 +8,16 @@ echo Building %NAME%...
 echo Entry file: %ENTRY%
 
 nuitka --standalone ^
+  --zig ^
   --output-filename=%NAME% ^
   --enable-plugin=pyqt6 ^
-  --enable-plugin=numpy ^
   --include-package=src ^
-  --include-package=asammdf ^
-  --include-module=src.data.mdf_loader ^
+  --include-module=asammdf ^
   --include-module=numpy ^
   --include-module=pandas ^
-  --include-module=chardet ^
+  --include-package=chardet ^
   --include-module=charset_normalizer ^
-  --include-module=lxml ^
-  --include-module=scipy ^
-  --include-data-file=assets/icon.ico=assets/icon.ico ^
-  --include-data-file=assets/icon.icns=assets/icon.icns ^
-  --include-data-file=assets/icon.png=assets/icon.png ^
+  --include-data-dir=assets=assets ^
   --include-data-file=README.md=README.md ^
   --follow-imports ^
   --nofollow-import-to=nuitka ^
