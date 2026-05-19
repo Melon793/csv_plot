@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import numpy as np
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QTreeWidget, QTreeWidgetItem)
 
 class MarkStatsWindow(QDialog):
@@ -13,6 +13,11 @@ class MarkStatsWindow(QDialog):
     使用单例模式确保只有一个统计窗口实例
     """
     _instance = None  # Singleton instance
+    
+    # 激活时不透明
+    ACTIVE_OPACITY = 1.0
+    # 非激活时 80% 透明
+    INACTIVE_OPACITY = 0.8
 
     @classmethod
     def get_instance(cls, parent=None):
@@ -24,14 +29,13 @@ class MarkStatsWindow(QDialog):
         super().__init__(parent)
         self.window_geometry = None  # 存储几何信息
         self.setWindowTitle("标记区域统计")
-
-        # 取消关闭按钮
+        
+        # 窗口标志：Tool窗口 + 仅标题栏和关闭按钮
         self.setWindowFlags(
-            Qt.WindowType.Window |  # 基本窗口类型
-            Qt.WindowType.CustomizeWindowHint |  # 允许自定义标题栏
-            Qt.WindowType.WindowMinimizeButtonHint |  # 启用最小化按钮
-            Qt.WindowType.WindowMaximizeButtonHint    # 启用最大化按钮
-            # 注意：不包括 WindowCloseButtonHint，即禁用关闭按钮
+            Qt.WindowType.Tool |
+            Qt.WindowType.CustomizeWindowHint |
+            Qt.WindowType.WindowTitleHint |
+            Qt.WindowType.WindowCloseButtonHint
         )
 
         self.tree = QTreeWidget(self)
@@ -46,6 +50,15 @@ class MarkStatsWindow(QDialog):
             self.restoreGeometry(self.parent().mark_stats_geometry)
         else:
             self.resize(1200, 300)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.ActivationChange:
+            self.setWindowOpacity(
+                self.ACTIVE_OPACITY
+                if self.isActiveWindow()
+                else self.INACTIVE_OPACITY
+            )
+        super().changeEvent(event)
 
     def update_stats(self, stats_list):
         """更新统计信息显示
@@ -120,5 +133,4 @@ class MarkStatsWindow(QDialog):
     def closeEvent(self, event):
         self.save_geom()
         super().closeEvent(event)
-
 
