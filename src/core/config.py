@@ -1,7 +1,13 @@
 """config"""
+
 from __future__ import annotations
 import sys
-import os,logging,faulthandler,signal,threading,traceback
+import os
+import logging
+import faulthandler
+import signal
+import threading
+import traceback
 from typing import Any
 import numpy as np
 from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
@@ -13,9 +19,13 @@ DEFAULT_SHOW_X_AXIS_LABEL = False
 _DEBUG_LOGGER = logging.getLogger("csv_plot_debug")
 if DEBUG_LOG_ENABLED and not _DEBUG_LOGGER.handlers:
     _DEBUG_LOGGER.setLevel(logging.DEBUG)
-    _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csv_plot_debug.log")
+    _log_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "csv_plot_debug.log"
+    )
     _log_handler = logging.FileHandler(_log_path, encoding="utf-8")
-    _log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _log_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    )
     _DEBUG_LOGGER.addHandler(_log_handler)
 else:
     _DEBUG_LOGGER.addHandler(logging.NullHandler())
@@ -62,19 +72,32 @@ def safe_callback(func):
             # 属性访问错误或参数类型错误（对象可能部分销毁，或信号参数不匹配）
             if DEBUG_LOG_ENABLED:
                 # 开发模式：打印详细错误信息到控制台
-                print(f"[safe_callback] {func.__name__} error: {type(e).__name__}: {e}")
+                debug_log(
+                    "[safe_callback] %s error: %s: %s",
+                    func.__name__,
+                    type(e).__name__,
+                    e,
+                )
                 import traceback
+
                 traceback.print_exc()
             debug_log("%s error: %s", func.__name__, e)
             return None
         except Exception as e:
             if DEBUG_LOG_ENABLED:
                 # 开发模式：打印详细错误信息到控制台
-                print(f"[safe_callback] {func.__name__} unexpected error: {type(e).__name__}: {e}")
+                debug_log(
+                    "[safe_callback] %s unexpected error: %s: %s",
+                    func.__name__,
+                    type(e).__name__,
+                    e,
+                )
                 import traceback
+
                 traceback.print_exc()
             debug_log("%s unexpected error: %s", func.__name__, e)
             return None
+
     return wrapper
 
 
@@ -90,7 +113,9 @@ def _install_faulthandler() -> None:
         faulthandler.enable(_FAULTHANDLER_FILE, all_threads=True)
         for sig in (signal.SIGSEGV, signal.SIGFPE, signal.SIGABRT, signal.SIGILL):
             try:
-                faulthandler.register(sig, file=_FAULTHANDLER_FILE, all_threads=True, chain=True)
+                faulthandler.register(
+                    sig, file=_FAULTHANDLER_FILE, all_threads=True, chain=True
+                )
             except (ValueError, OSError):
                 continue
         debug_log("Faulthandler enabled at %s", path)
@@ -106,7 +131,9 @@ def _log_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
 
 
 def _threading_exception_logger(args):
-    formatted = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+    formatted = "".join(
+        traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+    )
     thread_name = getattr(args.thread, "name", "unknown")
     debug_log("Thread %s crashed:\n%s", thread_name, formatted)
     if _ORIGINAL_THREADING_EXCEPTHOOK:
@@ -136,7 +163,10 @@ def install_global_debug_hooks(app: QApplication) -> None:
     _install_faulthandler()
     if sys.excepthook is not _log_uncaught_exception:
         sys.excepthook = _log_uncaught_exception
-    if hasattr(threading, "excepthook") and threading.excepthook is not _threading_exception_logger:
+    if (
+        hasattr(threading, "excepthook")
+        and threading.excepthook is not _threading_exception_logger
+    ):
         threading.excepthook = _threading_exception_logger
     global _QT_MESSAGE_HANDLER_INSTALLED
     if not _QT_MESSAGE_HANDLER_INSTALLED:
@@ -148,19 +178,21 @@ def install_global_debug_hooks(app: QApplication) -> None:
         debug_log("Failed to connect aboutToQuit: %s", exc)
 
 
-DEFAULT_PADDING_VAL_X = 0.05 # 默认x轴padding，单位为plot宽度   
-DEFAULT_PADDING_VAL_Y = 0.1 # 默认y轴padding，单位为plot高度
-FILE_SIZE_LIMIT_BACKGROUND_LOADING = 2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
-RATIO_RESET_PLOTS = 0.3 # 重置plot比例，超过此比例时，重置plot
-FROZEN_VIEW_WIDTH_DEFAULT = 180 # 冻结视图宽度，默认值为180px
+DEFAULT_PADDING_VAL_X = 0.05  # 默认x轴padding，单位为plot宽度
+DEFAULT_PADDING_VAL_Y = 0.1  # 默认y轴padding，单位为plot高度
+FILE_SIZE_LIMIT_BACKGROUND_LOADING = (
+    2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
+)
+RATIO_RESET_PLOTS = 0.3  # 重置plot比例，超过此比例时，重置plot
+FROZEN_VIEW_WIDTH_DEFAULT = 180  # 冻结视图宽度，默认值为180px
 XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol
 BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
-MIN_INDEX_LENGTH = 3 # 每个plot，至少显示MIN_INDEX_LENGTH个点
-DEFAULT_LINE_WIDTH = 2 # 默认线宽
-THICK_LINE_WIDTH = 2 # 粗线宽
-THIN_LINE_WIDTH = 1 # 细线宽
-UI_DEBOUNCE_DELAY_MS = 50 # UI事件防抖延迟时间
+MIN_INDEX_LENGTH = 3  # 每个plot，至少显示MIN_INDEX_LENGTH个点
+DEFAULT_LINE_WIDTH = 2  # 默认线宽
+THICK_LINE_WIDTH = 2  # 粗线宽
+THIN_LINE_WIDTH = 1  # 细线宽
+UI_DEBOUNCE_DELAY_MS = 50  # UI事件防抖延迟时间
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3
@@ -175,13 +207,39 @@ VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判�
 
 # 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
 _UNIT_KEYWORDS = [
-    'm', 's', 'g', 'A', 'K', 'mol', 'cd',
-    'V', 'Ω', 'F', 'H', 'W', 'J', 'N', 'Nm', 'Pa', 'bar', 'm2', '/min', '/h', 'kWh', 'mm', '°CA',
-    'L', 'm3',
-    'ppm', 'ppb', '%',
-    'rpm',
-    '℃', '°F', '°C',
-    '#/',
+    "m",
+    "s",
+    "g",
+    "A",
+    "K",
+    "mol",
+    "cd",
+    "V",
+    "Ω",
+    "F",
+    "H",
+    "W",
+    "J",
+    "N",
+    "Nm",
+    "Pa",
+    "bar",
+    "m2",
+    "/min",
+    "/h",
+    "kWh",
+    "mm",
+    "°CA",
+    "L",
+    "m3",
+    "ppm",
+    "ppb",
+    "%",
+    "rpm",
+    "℃",
+    "°F",
+    "°C",
+    "#/",
 ]
 
 
@@ -208,7 +266,9 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
             try:
                 arr = np.asarray(values, dtype=np.float64)
             except (ValueError, TypeError, OverflowError):
-                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64)
+                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(
+                    dtype=np.float64
+                )
     except Exception:
         return False, None
 
@@ -221,5 +281,3 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
 
     abs_max = float(np.max(np.abs(arr[finite_mask])))
     return abs_max <= FLOAT32_SAFE_MAX, abs_max
-
-

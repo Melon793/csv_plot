@@ -49,14 +49,24 @@ class PlotServices(Protocol):
     def get_row_height(self, row: int) -> int: ...
     def set_row_height(self, row: int, percentage: int) -> None: ...
     def set_all_row_height(self, percentage: int) -> None: ...
-    def set_cursor_mode(self, mode: str, *, source_plot: Any | None = None, context_x: float | None = None) -> None: ...
+    def set_cursor_mode(
+        self,
+        mode: str,
+        *,
+        source_plot: Any | None = None,
+        context_x: float | None = None,
+    ) -> None: ...
     def sync_mark_regions(self, mark_region: Any) -> None: ...
     def _sync_min_xrange(self) -> None: ...
     def _get_plot_container(self, plot_widget: Any) -> Any: ...
-    def _show_drag_indicator_for_plot(self, plot_widget: Any, var_names: list[str], text_override: str | None = None) -> None: ...
+    def _show_drag_indicator_for_plot(
+        self, plot_widget: Any, var_names: list[str], text_override: str | None = None
+    ) -> None: ...
     def _hide_drag_indicator_for_plot(self, plot_widget: Any) -> None: ...
     def auto_y_in_x_range(self) -> None: ...
-    def collect_global_x_range(self, curves_filter: str = "visible") -> tuple[float | None, float | None]: ...
+    def collect_global_x_range(
+        self, curves_filter: str = "visible"
+    ) -> tuple[float | None, float | None]: ...
     def set_cursor_enabled(self, enabled: bool) -> None: ...
     def is_cursor_enabled(self) -> bool: ...
 
@@ -141,8 +151,12 @@ class PlotContext:
     def set_all_row_height(self, percentage: int) -> None:
         self._services.set_all_row_height(percentage)
 
-    def set_cursor_mode(self, mode: str, source_plot: Any | None = None, context_x: float | None = None) -> None:
-        self._services.set_cursor_mode(mode, source_plot=source_plot, context_x=context_x)
+    def set_cursor_mode(
+        self, mode: str, source_plot: Any | None = None, context_x: float | None = None
+    ) -> None:
+        self._services.set_cursor_mode(
+            mode, source_plot=source_plot, context_x=context_x
+        )
 
     def sync_mark_regions(self, mark_region: Any) -> None:
         self._services.sync_mark_regions(mark_region)
@@ -153,8 +167,12 @@ class PlotContext:
     def _get_plot_container(self, plot_widget: Any) -> Any:
         return self._services._get_plot_container(plot_widget)
 
-    def _show_drag_indicator_for_plot(self, plot_widget: Any, var_names: list[str], text_override: str | None = None) -> None:
-        self._services._show_drag_indicator_for_plot(plot_widget, var_names, text_override)
+    def _show_drag_indicator_for_plot(
+        self, plot_widget: Any, var_names: list[str], text_override: str | None = None
+    ) -> None:
+        self._services._show_drag_indicator_for_plot(
+            plot_widget, var_names, text_override
+        )
 
     def _hide_drag_indicator_for_plot(self, plot_widget: Any) -> None:
         self._services._hide_drag_indicator_for_plot(plot_widget)
@@ -162,7 +180,9 @@ class PlotContext:
     def auto_y_in_x_range(self) -> None:
         self._services.auto_y_in_x_range()
 
-    def collect_global_x_range(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
+    def collect_global_x_range(
+        self, curves_filter: str = "visible"
+    ) -> tuple[float | None, float | None]:
         return self._services.collect_global_x_range(curves_filter)
 
     def set_cursor_enabled(self, enabled: bool) -> None:

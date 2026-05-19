@@ -1,14 +1,23 @@
 """scheduler"""
+
 from __future__ import annotations
-from PyQt6.QtCore import QObject,QTimer
-from src.core.config import UI_DEBOUNCE_DELAY_MS
+from PyQt6.QtCore import QObject, QTimer
+from src.core.config import UI_DEBOUNCE_DELAY_MS, debug_log
 from typing import Any
+
 
 class UnifiedUpdateScheduler(QObject):
     """
     统一UI更新调度器，合并style/cursor/stat等更新请求，延迟200ms批量执行避免频繁刷新
     """
-    def __init__(self, *, delay_ms: int = UI_DEBOUNCE_DELAY_MS, order: tuple[str, ...] | None = None, parent=None):
+
+    def __init__(
+        self,
+        *,
+        delay_ms: int = UI_DEBOUNCE_DELAY_MS,
+        order: tuple[str, ...] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._delay_ms = max(0, delay_ms)
         self._order = list(order) if order else []
@@ -68,5 +77,4 @@ class UnifiedUpdateScheduler(QObject):
         try:
             callback()
         except Exception as e:
-            print(f"UI更新调度器执行 {name} 出错: {e}")
-
+            debug_log("UI更新调度器执行 %s 出错: %s", name, e)

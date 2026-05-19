@@ -16,12 +16,21 @@ from __future__ import annotations
 from typing import Any
 
 from PyQt6.QtCore import Qt, QTimer, QPoint
-from PyQt6.QtGui import QFontMetrics, QPen, QColor, QCursor
-from PyQt6.QtWidgets import QLabel, QSizePolicy, QGraphicsProxyWidget, QGraphicsLinearLayout, QGraphicsWidget, QRubberBand, QApplication
+from PyQt6.QtGui import QFontMetrics, QPen, QColor
+from PyQt6.QtWidgets import (
+    QLabel,
+    QSizePolicy,
+    QGraphicsProxyWidget,
+    QGraphicsLinearLayout,
+    QGraphicsWidget,
+    QRubberBand,
+    QApplication,
+)
 import pyqtgraph as pg
 
 from src.core.config import (
-    DEBUG_LOG_ENABLED, debug_log,
+    DEBUG_LOG_ENABLED,
+    debug_log,
     DEFAULT_SHOW_X_AXIS_LABEL,
     UI_DEBOUNCE_DELAY_MS,
 )
@@ -72,10 +81,10 @@ class PlotUIManager(BasePlotManager):
         pw.time_column_name = None
         pw.time_axis_label = "Index"
 
-        pw.y_name = ''
-        pw.y_format = ''
-        pw.x_name = ''
-        pw.x_format = ''
+        pw.y_name = ""
+        pw.y_format = ""
+        pw.x_name = ""
+        pw.x_format = ""
 
         pw.xMin: int = 0
         pw.xMax: int = 1
@@ -84,8 +93,18 @@ class PlotUIManager(BasePlotManager):
         pw.curves = {}
         pw.is_multi_curve_mode = False
         pw._batch_adding = False
-        pw.curve_colors = ['blue', 'red', 'green', 'orange', 'purple',
-                           'brown', 'pink', 'gray', 'olive', 'cyan']
+        pw.curve_colors = [
+            "blue",
+            "red",
+            "green",
+            "orange",
+            "purple",
+            "brown",
+            "pink",
+            "gray",
+            "olive",
+            "cyan",
+        ]
         pw.current_color_index = 0
         pw._max_point_density: float = 0.0
 
@@ -174,13 +193,12 @@ class PlotUIManager(BasePlotManager):
         pw.plot_item.setTitle(None)
         pw.plot_item.hideButtons()
         pw.plot_item.setClipToView(True)
-        pw.plot_item.setDownsampling(mode='peak', auto=True)
+        pw.plot_item.setDownsampling(mode="peak", auto=True)
 
-        pw.setBackground('w')
+        pw.setBackground("w")
 
-        pen = pg.mkPen('#f00', width=1)
-        pw.plot_item.getAxis('left').setGrid(255)
-        pw.plot_item.getAxis('bottom').setGrid(255)
+        pw.plot_item.getAxis("left").setGrid(255)
+        pw.plot_item.getAxis("bottom").setGrid(255)
         pw.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
         pw.view_box.sigRangeChanged.connect(pw._on_range_changed)
@@ -188,7 +206,7 @@ class PlotUIManager(BasePlotManager):
 
     def update_x_axis_label(self, pw: Any) -> None:
         """更新 X 轴标签文本"""
-        axis = pw.plot_item.getAxis('bottom')
+        axis = pw.plot_item.getAxis("bottom")
         if DEFAULT_SHOW_X_AXIS_LABEL:
             label = pw.time_axis_label if pw.time_axis_label else "Index"
             axis.setLabel(label)
@@ -202,24 +220,23 @@ class PlotUIManager(BasePlotManager):
 
     def _setup_axes(self, pw: Any) -> None:
         """配置坐标轴样式和范围"""
-        from src.ui.widgets.custom_viewbox import CustomViewBox
 
-        pw.axis_x = pw.plot_item.getAxis('bottom')
-        pw.axis_x.setTextPen('black')
-        pw.axis_x.setPen(QPen(QColor('black'), 1))
+        pw.axis_x = pw.plot_item.getAxis("bottom")
+        pw.axis_x.setTextPen("black")
+        pw.axis_x.setPen(QPen(QColor("black"), 1))
         pw.axis_x.setRange(0, 10)
 
-        pw.axis_y = pw.plot_item.getAxis('left')
+        pw.axis_y = pw.plot_item.getAxis("left")
         pw.axis_y.enableAutoSIPrefix(False)
-        pw.axis_y.setTextPen('black')
-        pw.axis_y.setPen(QPen(QColor('black'), 1))
+        pw.axis_y.setTextPen("black")
+        pw.axis_y.setPen(QPen(QColor("black"), 1))
 
-        for pos in ('top', 'right'):
+        for pos in ("top", "right"):
             ax = pw.plot_item.getAxis(pos)
             ax.setVisible(True)
             ax.setTicks([])
             ax.setStyle(showValues=False, tickLength=0)
-            ax.setPen(QPen(QColor('black'), 1))
+            ax.setPen(QPen(QColor("black"), 1))
 
         font = QApplication.font()
         fm = QFontMetrics(font)
@@ -228,11 +245,13 @@ class PlotUIManager(BasePlotManager):
         font_family = font.family()
         pixel_size = font.pixelSize() + 2
         pw.axis_y.setLabel(
-            color='black',
+            color="black",
             angle=-90,
-            **{'font-family': font_family,
-               'font-size': f'{pixel_size}px',
-               'font-weight': 'bold'},
+            **{
+                "font-family": font_family,
+                "font-size": f"{pixel_size}px",
+                "font-weight": "bold",
+            },
         )
 
     # ========================================================================
@@ -245,11 +264,13 @@ class PlotUIManager(BasePlotManager):
         import pyqtgraph as _pg
 
         pw.vline = _pg.InfiniteLine(
-            angle=90, movable=False,
+            angle=90,
+            movable=False,
             pen=_pg.mkPen((255, 0, 0, 100), width=4),
         )
         pw.vline2 = _pg.InfiniteLine(
-            angle=90, movable=False,
+            angle=90,
+            movable=False,
             pen=_pg.mkPen((255, 0, 0, 100), width=4),
         )
         pw.vline.cursor_index = 0
@@ -268,13 +289,15 @@ class PlotUIManager(BasePlotManager):
         pw.show_values_only = True
 
         pw._cursor_item_pool = {
-            'circles': [],
-            'labels': [],
-            'x_labels': [],
+            "circles": [],
+            "labels": [],
+            "x_labels": [],
         }
 
         pw.proxy = _pg.SignalProxy(
-            pw.scene().sigMouseMoved, rateLimit=20, slot=pw.mouse_moved,
+            pw.scene().sigMouseMoved,
+            rateLimit=20,
+            slot=pw.mouse_moved,
         )
         pw.vline.sigPositionChanged.connect(pw.on_vline_position_changed)
         pw.vline2.sigPositionChanged.connect(pw.on_vline_position_changed)
@@ -313,7 +336,7 @@ class PlotUIManager(BasePlotManager):
         immediate: bool = False,
     ) -> None:
         """调度 UI 更新任务（防抖 + 批量更新）"""
-        if not hasattr(pw, '_ui_refresh'):
+        if not hasattr(pw, "_ui_refresh"):
             return
         tasks: list[str] = []
         if style:
@@ -324,15 +347,18 @@ class PlotUIManager(BasePlotManager):
             tasks.append("stats")
         if not tasks:
             return
-        if DEBUG_LOG_ENABLED and (immediate or getattr(pw, '_is_updating_data', False)):
+        if DEBUG_LOG_ENABLED and (immediate or getattr(pw, "_is_updating_data", False)):
             debug_log(
                 "Plot._queue_ui_refresh y=%s tasks=%s immediate=%s updating=%s pinned=%s loading=%s",
-                getattr(pw, 'y_name', None),
+                getattr(pw, "y_name", None),
                 tasks,
                 immediate,
-                getattr(pw, '_is_updating_data', False),
-                getattr(pw, 'is_cursor_pinned', False),
-                bool(pw.plot_context and getattr(pw.plot_context, '_is_loading_new_data', False)),
+                getattr(pw, "_is_updating_data", False),
+                getattr(pw, "is_cursor_pinned", False),
+                bool(
+                    pw.plot_context
+                    and getattr(pw.plot_context, "_is_loading_new_data", False)
+                ),
             )
         if immediate:
             pw._ui_refresh.run_immediately(*tasks)
@@ -341,7 +367,7 @@ class PlotUIManager(BasePlotManager):
 
     def _cancel_ui_refresh(self, pw: Any, *tasks: str) -> None:
         """取消已调度的 UI 更新任务"""
-        if hasattr(pw, '_ui_refresh'):
+        if hasattr(pw, "_ui_refresh"):
             if tasks:
                 pw._ui_refresh.cancel(*tasks)
             else:
@@ -349,7 +375,9 @@ class PlotUIManager(BasePlotManager):
 
     def _run_style_refresh(self, pw: Any) -> None:
         """执行样式刷新"""
-        if getattr(pw, '_is_updating_data', False) or getattr(pw, '_is_being_destroyed', False):
+        if getattr(pw, "_is_updating_data", False) or getattr(
+            pw, "_is_being_destroyed", False
+        ):
             if DEBUG_LOG_ENABLED:
                 debug_log(
                     "Plot._run_style_refresh skipped y=%s updating=%s destroying=%s",
@@ -358,24 +386,30 @@ class PlotUIManager(BasePlotManager):
                     getattr(pw, "_is_being_destroyed", False),
                 )
             return
-        if hasattr(pw, 'view_box') and hasattr(pw, 'plot_item'):
+        if hasattr(pw, "view_box") and hasattr(pw, "plot_item"):
             if DEBUG_LOG_ENABLED:
-                debug_log("Plot._run_style_refresh exec y=%s", getattr(pw, "y_name", None))
+                debug_log(
+                    "Plot._run_style_refresh exec y=%s", getattr(pw, "y_name", None)
+                )
             pw.update_plot_style(pw.view_box, pw.view_box.viewRange(), None)
 
     def _run_cursor_refresh(self, pw: Any) -> None:
         """执行光标刷新"""
-        if getattr(pw, '_is_interacting', False):
+        if getattr(pw, "_is_interacting", False):
             if DEBUG_LOG_ENABLED:
-                debug_log("Plot._run_cursor_refresh skipped-interacting y=%s",
-                          getattr(pw, "y_name", None))
+                debug_log(
+                    "Plot._run_cursor_refresh skipped-interacting y=%s",
+                    getattr(pw, "y_name", None),
+                )
             return
-        if hasattr(pw, 'vline') and pw.vline.isVisible():
+        if hasattr(pw, "vline") and pw.vline.isVisible():
             try:
                 if DEBUG_LOG_ENABLED:
-                    debug_log("Plot._run_cursor_refresh exec y=%s pinned=%s",
-                              getattr(pw, "y_name", None),
-                              getattr(pw, "is_cursor_pinned", False))
+                    debug_log(
+                        "Plot._run_cursor_refresh exec y=%s pinned=%s",
+                        getattr(pw, "y_name", None),
+                        getattr(pw, "is_cursor_pinned", False),
+                    )
                 pw.update_cursor_label()
             except Exception:
                 pass

@@ -57,33 +57,36 @@ class PlotDataManager:
         is_valid, error_msg = self._validate_plot_data(var_name)
         if not is_valid:
             from PyQt6.QtWidgets import QMessageBox
+
             QMessageBox.warning(pw, "错误", error_msg)
             return False
 
-        success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(var_name)
+        success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(
+            var_name
+        )
         if not success:
             from PyQt6.QtWidgets import QMessageBox
+
             QMessageBox.warning(pw, "错误", error_msg)
             return False
 
         try:
-            is_mdf = (
-                pw.plot_context is not None
-                and hasattr(pw.plot_context, 'loader')
-                and pw.plot_context.loader is not None
-                and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
-            )
-
             if pw.is_multi_curve_mode:
                 x_values = pw.offset + pw.factor * x_array
-                return pw.add_variable_to_plot(var_name, x_values, y_array, y_format, show_duplicate_warning=show_duplicate_warning)
+                return pw.add_variable_to_plot(
+                    var_name,
+                    x_values,
+                    y_array,
+                    y_format,
+                    show_duplicate_warning=show_duplicate_warning,
+                )
 
             pw.y_format = y_format
             pw.y_name = var_name
             pw.original_index_x = np.asarray(x_array, dtype=np.float32)
             safe_for_float32, abs_max_plot = _evaluate_float32_safety(y_array)
             keep_float64 = (
-                y_format in ['s', 'date']
+                y_format in ["s", "date"]
                 or not safe_for_float32
                 or (abs_max_plot is not None and abs_max_plot > 1e8)
             )
@@ -95,12 +98,9 @@ class PlotDataManager:
             self._safe_clear_plot_items()
             pw.curves.clear()
 
-            _pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)
+            _pen = pg.mkPen(color="blue", width=DEFAULT_LINE_WIDTH)
             pw.curve = pw.plot_item.plot(
-                x_values, pw.original_y,
-                pen=_pen,
-                name=var_name,
-                skipFiniteCheck=True
+                x_values, pw.original_y, pen=_pen, name=var_name, skipFiniteCheck=True
             )
 
             pw._queue_ui_refresh()
@@ -119,7 +119,9 @@ class PlotDataManager:
 
                 current_x_range = pw.view_box.viewRange()[0]
                 x_min, x_max = current_x_range
-                min_y, max_y = self._get_y_range_in_x_window(x_values, pw.original_y, x_min, x_max)
+                min_y, max_y = self._get_y_range_in_x_window(
+                    x_values, pw.original_y, x_min, x_max
+                )
                 self._set_safe_y_range(min_y, max_y, set_limits=False)
 
             min_x, max_x = np.min(x_values), np.max(x_values)
@@ -128,13 +130,16 @@ class PlotDataManager:
             pw._update_cursor_after_plot(min_x, max_x)
 
             self._recalc_max_point_density()
-            if pw.plot_context is not None and hasattr(pw.plot_context, '_sync_min_xrange'):
+            if pw.plot_context is not None and hasattr(
+                pw.plot_context, "_sync_min_xrange"
+            ):
                 pw.plot_context._sync_min_xrange()
 
             return True
 
         except Exception as e:
             from PyQt6.QtWidgets import QMessageBox
+
             QMessageBox.critical(pw, "绘图错误", f"绘制变量时发生错误: {str(e)}")
             return False
 
@@ -152,15 +157,19 @@ class PlotDataManager:
         if not isinstance(var_name, str) or not var_name.strip():
             return False, "变量名无效"
 
-        if pw.plot_context and hasattr(pw.plot_context, 'loader') and pw.plot_context.loader is not None:
+        if (
+            pw.plot_context
+            and hasattr(pw.plot_context, "loader")
+            and pw.plot_context.loader is not None
+        ):
             loader = pw.plot_context.loader
-            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
+            if getattr(loader, "LOADER_TYPE", "") == "mdf":
                 return True, ""
 
-        if not hasattr(pw, 'data') or pw.data is None:
+        if not hasattr(pw, "data") or pw.data is None:
             return False, "没有可用的数据"
 
-        if not hasattr(pw.data, 'columns'):
+        if not hasattr(pw.data, "columns"):
             return False, "数据格式无效"
 
         if var_name not in pw.data.columns:
@@ -171,7 +180,9 @@ class PlotDataManager:
     def _get_x_data_for_variable(self, y_len: int) -> np.ndarray:
         return np.arange(1, y_len + 1, dtype=np.float32)
 
-    def _prepare_plot_data(self, var_name: str) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
+    def _prepare_plot_data(
+        self, var_name: str
+    ) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
         """准备绘图数据
 
         Args:
@@ -220,10 +231,16 @@ class PlotDataManager:
             if np.all(np.isnan(y_array)):
                 return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
 
-            if pw.plot_context and hasattr(pw.plot_context, 'loader') and hasattr(pw.plot_context.loader, 'get_value_from_name'):
+            if (
+                pw.plot_context
+                and hasattr(pw.plot_context, "loader")
+                and hasattr(pw.plot_context.loader, "get_value_from_name")
+            ):
                 try:
-                    x_array, _, _, _ = pw.plot_context.loader.get_value_from_name(var_name)
-                    x_array = x_array[:len(y_array)]
+                    x_array, _, _, _ = pw.plot_context.loader.get_value_from_name(
+                        var_name
+                    )
+                    x_array = x_array[: len(y_array)]
                 except KeyError:
                     x_array = self._get_x_data_for_variable(len(y_array))
             else:
@@ -241,12 +258,14 @@ class PlotDataManager:
 
         try:
             if isinstance(values, pd.Series):
-                arr = pd.to_numeric(values, errors='coerce').to_numpy(dtype=np.float64)
+                arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
             else:
                 arr = np.asarray(values, dtype=np.float64)
         except (ValueError, TypeError):
             try:
-                arr = pd.to_numeric(pd.Series(values), errors='coerce').to_numpy(dtype=np.float64)
+                arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(
+                    dtype=np.float64
+                )
             except Exception:
                 return None, None
 
@@ -260,7 +279,9 @@ class PlotDataManager:
         finite_values = arr[finite_mask]
         return float(np.min(finite_values)), float(np.max(finite_values))
 
-    def _get_y_range_in_x_window(self, x_values: np.ndarray, y_values: np.ndarray, x_min: float, x_max: float):
+    def _get_y_range_in_x_window(
+        self, x_values: np.ndarray, y_values: np.ndarray, x_min: float, x_max: float
+    ):
         """计算在指定x轴范围内的y值范围
 
         Args:
@@ -288,10 +309,17 @@ class PlotDataManager:
         except Exception:
             return 0.0, 1.0
 
-    def handle_single_point_limits(self, x_values: np.ndarray, y_values: np.ndarray) -> tuple | None:
+    def handle_single_point_limits(
+        self, x_values: np.ndarray, y_values: np.ndarray
+    ) -> tuple | None:
         """处理单点或所有点x坐标相同的特殊情况"""
         pw = self.pw
-        if x_values is None or len(x_values) == 0 or y_values is None or len(y_values) == 0:
+        if (
+            x_values is None
+            or len(x_values) == 0
+            or y_values is None
+            or len(y_values) == 0
+        ):
             return None
 
         unique_x = np.unique(x_values)
@@ -318,7 +346,7 @@ class PlotDataManager:
     def clear_value_cache(self):
         """清除值缓存"""
         pw = self.pw
-        if pw.plot_context and hasattr(pw.plot_context, 'value_cache'):
+        if pw.plot_context and hasattr(pw.plot_context, "value_cache"):
             pw.plot_context.value_cache.clear()
 
     def datetime_to_unix_seconds(self, series: pd.Series) -> pd.Series:
@@ -342,9 +370,9 @@ class PlotDataManager:
         if var_name in pw.plot_context.value_cache:
             return pw.plot_context.value_cache[var_name]
 
-        if hasattr(pw.plot_context, 'loader') and pw.plot_context.loader is not None:
+        if hasattr(pw.plot_context, "loader") and pw.plot_context.loader is not None:
             loader = pw.plot_context.loader
-            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
+            if getattr(loader, "LOADER_TYPE", "") == "mdf":
                 raw_values = loader.get_series(var_name)
             else:
                 raw_values = pw.data[var_name]
@@ -352,20 +380,20 @@ class PlotDataManager:
             raw_values = pw.data[var_name]
 
         if (
-            hasattr(pw.plot_context, 'loader')
+            hasattr(pw.plot_context, "loader")
             and pw.plot_context.loader is not None
-            and hasattr(pw.plot_context.loader, 'get_value_from_name')
-            and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
+            and hasattr(pw.plot_context.loader, "get_value_from_name")
+            and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
         ):
             try:
                 _, _, _, text_map = pw.plot_context.loader.get_value_from_name(var_name)
                 if text_map:
                     y_values = raw_values
-                    y_format = 'enum'
+                    y_format = "enum"
                     if pw.plot_context:
-                        if hasattr(pw.plot_context, '_enum_text_maps'):
+                        if hasattr(pw.plot_context, "_enum_text_maps"):
                             pw.plot_context._enum_text_maps[var_name] = text_map
-                        if hasattr(pw.plot_context, 'value_cache'):
+                        if hasattr(pw.plot_context, "value_cache"):
                             pw.plot_context.value_cache[var_name] = (y_values, y_format)
                     return y_values, y_format
             except KeyError:
@@ -373,7 +401,7 @@ class PlotDataManager:
 
         dtype_kind = raw_values.dtype.kind
         y_values = None
-        y_format = 'number'
+        y_format = "number"
 
         if dtype_kind in "iuf":
             y_values = raw_values
@@ -388,16 +416,16 @@ class PlotDataManager:
                     time_deltas = times - times.dt.normalize()
                     dt_values = today + time_deltas
                     y_values = self.datetime_to_unix_seconds(dt_values)
-                    y_format = 's'
+                    y_format = "s"
                 else:
-                    dt_values = pd.to_datetime(raw_values, format=fmt, errors='coerce')
+                    dt_values = pd.to_datetime(raw_values, format=fmt, errors="coerce")
                     y_values = self.datetime_to_unix_seconds(dt_values)
-                    y_format = 'date'
+                    y_format = "date"
             except (ValueError, TypeError):
                 return None, None
         else:
             try:
-                numeric_values = pd.to_numeric(raw_values, errors='coerce')
+                numeric_values = pd.to_numeric(raw_values, errors="coerce")
             except Exception:
                 numeric_values = None
 
@@ -414,7 +442,7 @@ class PlotDataManager:
             return None, None
 
         if pw.plot_context:
-            if hasattr(pw.plot_context, 'value_cache'):
+            if hasattr(pw.plot_context, "value_cache"):
                 pw.plot_context.value_cache[var_name] = (y_values, y_format)
         return y_values, y_format
 
@@ -430,9 +458,9 @@ class PlotDataManager:
 
             is_mdf = (
                 pw.plot_context is not None
-                and hasattr(pw.plot_context, 'loader')
+                and hasattr(pw.plot_context, "loader")
                 and pw.plot_context.loader is not None
-                and getattr(pw.plot_context.loader, 'LOADER_TYPE', '') == 'mdf'
+                and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
             )
 
             if pw.is_multi_curve_mode:
@@ -459,14 +487,27 @@ class PlotDataManager:
 
             if pw.is_multi_curve_mode and pw.curves:
                 first_curve_info = next(iter(pw.curves.values()))
-                datalength = len(first_curve_info.y_data) if first_curve_info.y_data is not None else 0
+                datalength = (
+                    len(first_curve_info.y_data)
+                    if first_curve_info.y_data is not None
+                    else 0
+                )
             elif pw.original_index_x is not None:
                 datalength = len(pw.original_index_x)
             else:
-                datalength = pw.plot_context.loader.datalength if hasattr(pw.plot_context, 'loader') and pw.plot_context.loader is not None else 0
+                datalength = (
+                    pw.plot_context.loader.datalength
+                    if hasattr(pw.plot_context, "loader")
+                    and pw.plot_context.loader is not None
+                    else 0
+                )
 
             padding_xVal = DEFAULT_PADDING_VAL_X
-            if is_mdf and pw.plot_context is not None and hasattr(pw.plot_context.loader, 'global_time_range'):
+            if (
+                is_mdf
+                and pw.plot_context is not None
+                and hasattr(pw.plot_context.loader, "global_time_range")
+            ):
                 x_min, x_max = pw.plot_context.loader.global_time_range
                 data_min_x = pw.offset + pw.factor * x_min
                 data_max_x = pw.offset + pw.factor * x_max
@@ -479,19 +520,23 @@ class PlotDataManager:
             limits_xMax = data_max_x + padding_xVal * (data_max_x - data_min_x)
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             self._update_vline_bounds_from_data()
-            if pw.mark_region is not None and pw.plot_context and pw is pw.plot_context.plot_widgets[0].plot_widget:
+            if (
+                pw.mark_region is not None
+                and pw.plot_context
+                and pw is pw.plot_context.plot_widgets[0].plot_widget
+            ):
                 old_min, old_max = pw.mark_region.getRegion()
                 if old_factor != 0:
                     index_min = (old_min - old_offset) / old_factor
                     index_max = (old_max - old_offset) / old_factor
                     new_min = new_offset + new_factor * index_min
                     new_max = new_offset + new_factor * index_max
-                    blocker = QSignalBlocker(pw.mark_region)
+                    QSignalBlocker(pw.mark_region)
                     pw.mark_region.setRegion([new_min, new_max])
                     pw.plot_context.sync_mark_regions(pw.mark_region)
         finally:
             if pw.plot_context is not None:
-                if not getattr(pw, '_is_being_destroyed', False):
+                if not getattr(pw, "_is_being_destroyed", False):
                     pw.plot_context.request_mark_stats_refresh()
             pw._suppress_pin_update = False
 
@@ -499,7 +544,7 @@ class PlotDataManager:
         """安全地清理所有plot items"""
         pw = self.pw
         try:
-            if not hasattr(pw, 'plot_item') or pw.plot_item is None:
+            if not hasattr(pw, "plot_item") or pw.plot_item is None:
                 return
 
             current_scene = pw.plot_item.scene()
@@ -511,22 +556,22 @@ class PlotDataManager:
                         item_scene = item.scene()
                         if item_scene == current_scene:
                             should_remove = False
-                            if hasattr(item, 'getData') and hasattr(item, 'opts'):
-                                if not hasattr(item, 'setLabel'):
+                            if hasattr(item, "getData") and hasattr(item, "opts"):
+                                if not hasattr(item, "setLabel"):
                                     should_remove = True
-                                    if hasattr(item, '_cached_pen_key'):
-                                        delattr(item, '_cached_pen_key')
-                                    if hasattr(item, '_has_symbols'):
-                                        delattr(item, '_has_symbols')
+                                    if hasattr(item, "_cached_pen_key"):
+                                        delattr(item, "_cached_pen_key")
+                                    if hasattr(item, "_has_symbols"):
+                                        delattr(item, "_has_symbols")
                                     try:
                                         item.clear()
-                                    except:
+                                    except Exception:
                                         pass
                             if should_remove:
                                 current_scene.removeItem(item)
-                    except Exception:
+                    except (RuntimeError, AttributeError):
                         pass
-        except Exception:
+        except (RuntimeError, AttributeError):
             pass
 
     def _clear_plot_data(self):
@@ -536,19 +581,19 @@ class PlotDataManager:
             pw._clear_cursor_items(hide_only=False)
             self._safe_clear_plot_items()
             pw.axis_y.setLabel(text="")
-            pw.y_name = ''
-            pw.y_format = ''
+            pw.y_name = ""
+            pw.y_format = ""
             pw.update_left_header("channel name")
             pw.update_right_header("")
 
             if pw.curve:
-                if hasattr(pw.curve, '_cached_pen_key'):
-                    delattr(pw.curve, '_cached_pen_key')
-                if hasattr(pw.curve, '_has_symbols'):
-                    delattr(pw.curve, '_has_symbols')
+                if hasattr(pw.curve, "_cached_pen_key"):
+                    delattr(pw.curve, "_cached_pen_key")
+                if hasattr(pw.curve, "_has_symbols"):
+                    delattr(pw.curve, "_has_symbols")
                 try:
                     pw.curve.clear()
-                except:
+                except Exception:
                     pass
 
             pw.curve = None
@@ -558,20 +603,19 @@ class PlotDataManager:
             for var_name, ci in pw.curves.items():
                 if ci.curve is not None:
                     curve = ci.curve
-                    if hasattr(curve, '_cached_pen_key'):
-                        delattr(curve, '_cached_pen_key')
-                    if hasattr(curve, '_has_symbols'):
-                        delattr(curve, '_has_symbols')
+                    if hasattr(curve, "_cached_pen_key"):
+                        delattr(curve, "_cached_pen_key")
+                    if hasattr(curve, "_has_symbols"):
+                        delattr(curve, "_has_symbols")
                     try:
                         curve.clear()
-                    except:
+                    except Exception:
                         pass
         except Exception:
             pass
 
     def clear_plot_item(self):
         """清除单个plot item"""
-        pw = self.pw
         self._clear_plot_data()
 
     def reset_plot(self, index_xMin: float, index_xMax: float):
@@ -598,8 +642,8 @@ class PlotDataManager:
 
         pw.xMin = xMin
         pw.xMax = xMax
-        pw.y_name = ''
-        pw.y_format = ''
+        pw.y_name = ""
+        pw.y_format = ""
         pw._clear_cursor_items(hide_only=False)
         self._safe_clear_plot_items()
         pw.axis_y.setLabel(text="")
@@ -622,7 +666,9 @@ class PlotDataManager:
         """设置安全的Y轴范围"""
         self._axis_manager._set_safe_y_range(min_y, max_y, set_limits)
 
-    def _set_x_limits_with_min_range(self, limits_xMin: float | None, limits_xMax: float | None):
+    def _set_x_limits_with_min_range(
+        self, limits_xMin: float | None, limits_xMax: float | None
+    ):
         """设置X轴限制"""
         self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 

@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QDialog, QFormLayout, QPushButton, QHBoxLayout, QDoubleSpinBox
+from PyQt6.QtWidgets import (
+    QDialog,
+    QFormLayout,
+    QPushButton,
+    QHBoxLayout,
+    QDoubleSpinBox,
+)
+
 
 class TimeCorrectionDialog(QDialog):
     """
@@ -10,6 +17,7 @@ class TimeCorrectionDialog(QDialog):
     用于校正时间序列数据的时间偏移和漂移
     提供时间同步和数据对齐功能
     """
+
     def __init__(self, cur_factor=1.0, cur_offset=0.0, parent=None):
         super().__init__(parent)
         self.window_geometry = None  # 存储几何信息
@@ -50,5 +58,3 @@ class TimeCorrectionDialog(QDialog):
     def closeEvent(self, event):
         self.parent().time_correction_geometry = self.saveGeometry()
         super().closeEvent(event)
-
-

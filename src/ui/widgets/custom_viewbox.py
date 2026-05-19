@@ -13,18 +13,22 @@ import pyqtgraph as pg
 
 class CustomViewBoxSignals(QObject):
     """CustomViewBox 发出的信号集合 —— 用于解耦与 MainWindow 的直接依赖"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-    request_jump_to_data = pyqtSignal(object, object)      # plot_widget, context_x
-    request_clear_plot = pyqtSignal(object)         # plot_widget
-    request_auto_y = pyqtSignal(object)             # plot_widget
-    request_set_cursor_mode = pyqtSignal(str, object, object)  # mode, plot_widget, context_x
-    request_show_cursor_value = pyqtSignal(object)   # plot_widget
-    request_hide_cursor_value = pyqtSignal(object)   # plot_widget
+
+    request_jump_to_data = pyqtSignal(object, object)  # plot_widget, context_x
+    request_clear_plot = pyqtSignal(object)  # plot_widget
+    request_auto_y = pyqtSignal(object)  # plot_widget
+    request_set_cursor_mode = pyqtSignal(
+        str, object, object
+    )  # mode, plot_widget, context_x
+    request_show_cursor_value = pyqtSignal(object)  # plot_widget
+    request_hide_cursor_value = pyqtSignal(object)  # plot_widget
     request_set_row_height = pyqtSignal(int, object)  # percentage, plot_widget
-    request_set_all_row_height = pyqtSignal(int)      # percentage
-    request_copy_name = pyqtSignal(object)            # plot_widget
-    request_variable_editor = pyqtSignal(object)      # plot_widget
+    request_set_all_row_height = pyqtSignal(int)  # percentage
+    request_copy_name = pyqtSignal(object)  # plot_widget
+    request_variable_editor = pyqtSignal(object)  # plot_widget
 
 
 class CustomViewBox(pg.ViewBox):
@@ -53,13 +57,13 @@ class CustomViewBox(pg.ViewBox):
             return None
 
         for act in menu.actions():
-            if act.text() == 'Mouse Mode':
+            if act.text() == "Mouse Mode":
                 act.setVisible(False)
-            elif act.text() == 'Plot Options':
+            elif act.text() == "Plot Options":
                 submenu = act.menu()
                 if submenu:
                     for subact in submenu.actions():
-                        if subact.text() == 'Transforms':
+                        if subact.text() == "Transforms":
                             subact.setVisible(False)
 
         existing_texts = [act.text() for act in menu.actions()]
@@ -246,37 +250,36 @@ class CustomViewBox(pg.ViewBox):
         self.signals.request_auto_y.emit(self.plot_widget)
 
     def _get_cursor_enabled(self) -> bool:
-        if self.plot_widget and hasattr(self.plot_widget, 'plot_context'):
+        if self.plot_widget and hasattr(self.plot_widget, "plot_context"):
             return self.plot_widget.plot_context.is_cursor_enabled()
         return False
 
     def _get_current_cursor_mode(self) -> str:
-        if self.plot_widget and hasattr(self.plot_widget, 'plot_context'):
+        if self.plot_widget and hasattr(self.plot_widget, "plot_context"):
             return self.plot_widget.plot_context.cursor_mode
         return "1 free cursor"
 
     def _get_cursor_values_hidden(self) -> bool:
-        if self.plot_widget and hasattr(self.plot_widget, 'plot_context'):
+        if self.plot_widget and hasattr(self.plot_widget, "plot_context"):
             return self.plot_widget.plot_context.cursor_values_hidden
         return False
 
     def _get_current_row_height(self, row: int) -> int:
-        if self.plot_widget and hasattr(self.plot_widget, 'plot_context'):
+        if self.plot_widget and hasattr(self.plot_widget, "plot_context"):
             return self.plot_widget.plot_context.get_row_height(row)
         return 100
 
     def _has_data(self) -> bool:
         if not self.plot_widget:
             return False
-        has_single = (
-            getattr(self.plot_widget, 'curve', None) is not None
-            and bool(getattr(self.plot_widget, 'y_name', ''))
+        has_single = getattr(self.plot_widget, "curve", None) is not None and bool(
+            getattr(self.plot_widget, "y_name", "")
         )
-        has_multi = bool(getattr(self.plot_widget, 'curves', {}))
+        has_multi = bool(getattr(self.plot_widget, "curves", {}))
         return has_single or has_multi
 
     def _get_plot_row_index(self) -> int:
-        if not self.plot_widget or not hasattr(self.plot_widget, 'plot_context'):
+        if not self.plot_widget or not hasattr(self.plot_widget, "plot_context"):
             return 0
         ctx = self.plot_widget.plot_context
         ncols = ctx._plot_col_max_default

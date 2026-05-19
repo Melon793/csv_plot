@@ -4,18 +4,22 @@ from __future__ import annotations
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QDialog, QFormLayout, QSpinBox, QPushButton, QHBoxLayout
 
+
 class LayoutInputDialog(QDialog):
     """
     布局输入对话框类
     用于设置绘图区域的网格布局参数
     允许用户配置行数和列数，并验证输入的有效性
     """
-    def __init__(self, 
-                 max_rows:int=4, 
-                 max_cols:int=2, 
-                 cur_rows:int=1, 
-                 cur_cols:int=1,
-                parent=None):
+
+    def __init__(
+        self,
+        max_rows: int = 4,
+        max_cols: int = 2,
+        cur_rows: int = 1,
+        cur_cols: int = 1,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("设置图表的行、列数")
         self.max_rows = max_rows
@@ -44,7 +48,6 @@ class LayoutInputDialog(QDialog):
         ok_btn.clicked.connect(self.accept)
         cancel_btn.clicked.connect(self.reject)
         QTimer.singleShot(0, self.row_spin.selectAll)
+
     def values(self):
         return self.row_spin.value(), self.col_spin.value()
-    
-

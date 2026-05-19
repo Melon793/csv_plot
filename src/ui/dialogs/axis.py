@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QDialog, QFormLayout, QLineEdit, QPushButton, QVBoxLayout, QMessageBox, QLabel
+from PyQt6.QtWidgets import (
+    QDialog,
+    QFormLayout,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QMessageBox,
+    QLabel,
+)
 from src.core.config import DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y
+
 
 class AxisDialog(QDialog):
     """
@@ -11,6 +20,7 @@ class AxisDialog(QDialog):
     用于配置图表的坐标轴参数，包括范围、标签、刻度等
     提供直观的图形界面来调整轴属性
     """
+
     def __init__(self, axis, view_box, axis_type: str, plot_widget, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"调整 {axis_type} 轴")
@@ -20,8 +30,12 @@ class AxisDialog(QDialog):
         self.plot_widget = plot_widget
 
         # 创建输入字段
-        self.min_input = QLineEdit(str(view_box.viewRange()[0 if axis_type == "X" else 1][0]))
-        self.max_input = QLineEdit(str(view_box.viewRange()[0 if axis_type == "X" else 1][1]))
+        self.min_input = QLineEdit(
+            str(view_box.viewRange()[0 if axis_type == "X" else 1][0])
+        )
+        self.max_input = QLineEdit(
+            str(view_box.viewRange()[0 if axis_type == "X" else 1][1])
+        )
         self.tick_count_input = QLineEdit()
         self.tick_count_input.setPlaceholderText("留空自动计算")
 
@@ -78,15 +92,19 @@ class AxisDialog(QDialog):
             # 设置固定刻度
             if tick_count:
                 step = (max_val - min_val) / (tick_count - 1)
-                ticks = [(min_val + i * step, str(round(min_val + i * step, 6)))
-                         for i in range(tick_count)]
+                ticks = [
+                    (min_val + i * step, str(round(min_val + i * step, 6)))
+                    for i in range(tick_count)
+                ]
                 self.axis.setTicks([ticks])
             else:
                 self.axis.setTicks(None)
             self.accept()
 
         except ValueError:
-            QMessageBox.warning(self, "错误", "请输入有效的数值（最小值、最大值、刻度数量）")
+            QMessageBox.warning(
+                self, "错误", "请输入有效的数值（最小值、最大值、刻度数量）"
+            )
+
 
 # ---------------- 自定义 QTableWidget ----------------
-
