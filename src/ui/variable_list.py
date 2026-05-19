@@ -83,7 +83,11 @@ class NoHoverDelegate(QStyledItemDelegate):
         
         # 获取有效性和颜色
         valid = index.data(Qt.ItemDataRole.UserRole)
-        color = self._get_validity_color(valid) if valid is not None else None
+        table_widget = self.parent()
+        if getattr(table_widget, '_all_validity_unknown', False):
+            color = None
+        else:
+            color = self._get_validity_color(valid) if valid is not None else None
         
         # 获取原始变量名（存储在UserRole+1中）
         original_name = index.data(Qt.ItemDataRole.UserRole + 1)
@@ -515,7 +519,7 @@ class MyTableWidget(QTableWidget):
         if not hasattr(main_window, 'loader') or main_window.loader is None:
             return
 
-        if hasattr(main_window.loader, 'get_series'):
+        if getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf':
             series = main_window.loader.get_series(var_name)
         else:
             series = main_window.loader.df[var_name]
@@ -548,8 +552,9 @@ class MyTableWidget(QTableWidget):
             self.original_indices[name] = idx
         sorted_valids = [valid for valid, idx, name, unit in indexed_items]
 
+        self._all_validity_unknown = all(v == -2 for v in sorted_valids)
+
         for row, (idx, name, unit, valid) in enumerate(zip(sorted_indices, sorted_names, sorted_units, sorted_valids)):
-            # 创建三列的item（不含emoji，彩色方块由delegate绘制）
             name_item = QTableWidgetItem()  # 变量名列（文本留空，由delegate绘制）
             unit_item = QTableWidgetItem(unit)  # 单位列
             index_item = QTableWidgetItem()  # 序号列

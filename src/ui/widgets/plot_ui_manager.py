@@ -69,7 +69,6 @@ class PlotUIManager(BasePlotManager):
         pw.synchronizer = synchronizer
 
         pw.curve = None
-        pw.time_values = None
         pw.time_column_name = None
         pw.time_axis_label = "Index"
 

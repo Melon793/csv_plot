@@ -475,7 +475,7 @@ class CursorSyncManager(MainWindowBaseManager):
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
 
-            is_mdf = hasattr(self.mw.loader, 'get_series')
+            is_mdf = getattr(self.mw.loader, 'LOADER_TYPE', '') == 'mdf'
 
             unique_y_names = set(all_y_names)
             if not unique_y_names:

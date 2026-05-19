@@ -53,8 +53,8 @@ class DataLoadThread(QThread):
 
             ext = os.path.splitext(self.file_path)[1].lower()
             if ext in ('.mf4', '.mdf', '.dat'):
-                from src.data.mdf_loader import MDFDataLoader
-                loader = MDFDataLoader(self.file_path, _progress=_progress_cb)
+                from src.data.mdf_lazy_loader import MDFLazyLoader
+                loader = MDFLazyLoader(self.file_path, _progress=_progress_cb)
             else:
                 loader = FastDataLoader(
                     self.file_path,
@@ -86,6 +86,9 @@ class FastDataLoader:
     高效加载和处理大型CSV文件，支持分块读取、数据类型推断、编码检测等功能
     专门为大数据文件优化，提供进度回调和内存管理
     """
+
+    LOADER_TYPE = "csv"
+
     # 脏数据清单
     _NA_VALUES = [
         # 空缺 / 空字符串
@@ -795,4 +798,25 @@ class FastDataLoader:
         if self.time_column_name and self.time_column_name in validity:
             del validity[self.time_column_name]
         return validity
+
+    @property
+    def global_time_range(self) -> tuple[float, float]:
+        return (1.0, float(len(self._df)))
+
+    @property
+    def baseline_density(self) -> float:
+        return 1.0
+
+    @property
+    def max_row_count(self) -> int:
+        return len(self._df)
+
+    def get_series(self, name: str):
+        return self._df[name]
+
+    def get_value_from_name(self, name: str):
+        index = np.arange(1, len(self._df) + 1, dtype=np.float64)
+        values = self._df[name]
+        unit = self._units.get(name, "-")
+        return index, values, unit, {}
     

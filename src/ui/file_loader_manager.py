@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 from src.core.config import DEBUG_LOG_ENABLED, debug_log, FILE_SIZE_LIMIT_BACKGROUND_LOADING
 from src.core.types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
+from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.main_window_base_manager import MainWindowBaseManager
 
 
@@ -328,8 +329,11 @@ class FileLoaderManager(MainWindowBaseManager):
     def _cleanup_old_data(self):
         try:
             if self._has_valid_loader:
-                if hasattr(self.mw.loader, '_df'):
-                    del self.mw.loader._df
+                if hasattr(self.mw.loader, 'close'):
+                    try:
+                        self.mw.loader.close()
+                    except Exception:
+                        pass
                 del self.mw.loader
                 self.mw.loader = None
 
@@ -434,8 +438,7 @@ class FileLoaderManager(MainWindowBaseManager):
         try:
             ext = os.path.splitext(file_path)[1].lower()
             if ext in ('.mf4', '.mdf', '.dat'):
-                from src.data.mdf_loader import MDFDataLoader
-                loader = MDFDataLoader(file_path)
+                loader = MDFLazyLoader(file_path)
             else:
                 loader = FastDataLoader(file_path, descRows=descRows, sep=sep, hasunit=hasunit,
                                         encoding=encoding)
@@ -466,8 +469,11 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw._progress.close()
         debug_log("MainWindow._on_load_done apply new loader path=%s", file_path)
         if hasattr(self.mw, 'loader') and self.mw.loader is not None:
-            if hasattr(self.mw.loader, '_df'):
-                del self.mw.loader._df
+            if hasattr(self.mw.loader, 'close'):
+                try:
+                    self.mw.loader.close()
+                except Exception:
+                    pass
             del self.mw.loader
 
         self.mw.loader = loader
@@ -506,7 +512,6 @@ class FileLoaderManager(MainWindowBaseManager):
             widget.data = self.mw.loader.df
             widget.units = self.mw.loader.units
             widget.time_channels_info = self.mw.loader.time_channels_info
-            widget.time_values = self.mw.loader.time_values
             widget.time_column_name = self.mw.loader.time_column_name
             widget.time_axis_label = self.mw.loader.time_axis_label
             widget.update_x_axis_label()

@@ -580,12 +580,11 @@ class DataTableDialog(QMainWindow):
                 continue
 
             # 检查变量是否在数据中存在
-            is_mdf_loader = hasattr(loader, 'get_series')
+            is_mdf_loader = getattr(loader, 'LOADER_TYPE', '') == 'mdf'
             if not is_mdf_loader and var_name not in loader.df.columns:
                 invalid_vars.append(var_name)
                 continue
 
-            # 添加变量
             try:
                 if is_mdf_loader:
                     series = loader.get_series(var_name)
@@ -646,7 +645,7 @@ class DataTableDialog(QMainWindow):
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
 
-        is_mdf_loader = hasattr(loader, 'get_series')
+        is_mdf_loader = getattr(loader, 'LOADER_TYPE', '') == 'mdf'
         if not is_mdf_loader and var_name not in loader.df.columns:  # 改为 loader
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
@@ -676,8 +675,10 @@ class DataTableDialog(QMainWindow):
             var_name: 变量名称
             data: 变量数据序列
         """
-        self._df[var_name] = data
-        # 使用新函数替换循环
+        self._df[var_name] = data.reset_index(drop=True)
+        max_len = max(len(self._df), len(data))
+        if len(self._df) < max_len:
+            self._df = self._df.reindex(range(max_len))
         loader = self._resolve_loader()
         
         if loader:
@@ -1461,11 +1462,12 @@ class DataTableDialog(QMainWindow):
         removed = []
 
         # 遍历当前表中的列
-        is_mdf_loader = hasattr(loader, 'get_series')
+        is_mdf_loader = getattr(loader, 'LOADER_TYPE', '') == 'mdf'
         for col in current_cols:
             if is_mdf_loader:
                 try:
-                    new_df[col] = loader.get_series(col)
+                    series = loader.get_series(col)
+                    new_df[col] = series.reset_index(drop=True)
                 except KeyError:
                     removed.append(col)
             elif col in loader.df.columns:
