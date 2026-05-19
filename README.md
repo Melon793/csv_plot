@@ -10,7 +10,7 @@
 - **拖拽加载**: 直接将文件拖拽到窗口中即可加载
 - **智能解析**: CSV 自动检测编码、分隔符、标题行/单位行；MDF 自动识别枚举通道
 - **大数据支持**: 后台线程加载，进度显示，支持百万级数据点
-- **数据质量指示**:
+- **数据质量指示 (mdf不支持) **:
   - 🟢 绿色：变化的有效数值
   - 🟡 黄色：无变化的有效数值（常数）
   - 🔴 红色：非有效数值
@@ -59,12 +59,14 @@
 
 ```
 csv_plot/
-├── csv_plot_pyqt6.py            # 主入口（~6600 行，3 个核心类）
+├── csv_plot_pyqt6.py            # 主入口（~5000 行，DraggablePlotWidget + MainWindow）
 ├── pyproject.toml               # 项目依赖与构建配置
 ├── README.md
 ├── scripts/                     # 打包脚本
-│   ├── build_exe_pyinstaller
-│   └── build_exe_nuitka
+│   ├── build_exe_pyinstaller    #   PyInstaller (macOS/Linux)
+│   ├── build_exe_pyinstaller.bat  # PyInstaller (Windows)
+│   ├── build_exe_nuitka         #   Nuitka (macOS/Linux)
+│   └── build_exe_nuitka.bat     #   Nuitka (Windows)
 ├── assets/                      # 图标资源
 │   ├── icon.png
 │   ├── icon.ico
@@ -79,7 +81,8 @@ csv_plot/
     │   └── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
     ├── data/
     │   ├── loader.py            # FastDataLoader CSV 加载 + DataLoadThread 后台线程
-    │   └── mdf_loader.py        # MDFDataLoader MDF4/DAT 加载 + 枚举通道支持
+    │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
+    │   └── metadata.py          # VarMetadata 数据类 + 有效性分类工具
     └── ui/
         ├── drag_drop.py         # 拖放解析（parse_var_names / build_mimedata / create_pixmap）
         ├── table_dialog.py      # DataTableDialog + PandasTableModel + CustomDelegate + XYScatterPlotDialog
@@ -151,34 +154,6 @@ bash scripts/build_exe_pyinstaller
 bash scripts/build_exe_nuitka
 ```
 
-**PyInstaller 手动命令**
-
-```bash
-# 单目录模式（推荐）
-pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 \
-    --icon assets/icon.ico \
-    --add-data "assets/icon.ico;assets" \
-    --add-data "assets/icon.icns;assets" \
-    --add-data "assets/icon.png;assets" \
-    --add-data "README.md;." \
-    --noconsole --clean --noconfirm
-```
-
-**Nuitka 手动命令**
-
-```bash
-# 单目录模式
-nuitka --standalone --output-filename=csv_plot_pyqt6 \
-    --enable-plugin=pyqt6 \
-    --windows-icon-from-ico=assets/icon.ico \
-    --include-data-file=assets/icon.ico=assets \
-    --include-data-file=assets/icon.icns=assets \
-    --include-data-file=assets/icon.png=assets \
-    --include-data-file=README.md=. \
-    csv_plot_pyqt6.py
-```
-
-> **提示**：PyInstaller 快速但体积大；Nuitka 编译为原生代码，运行性能和启动速度更优，首次编译约 5-15 分钟，建议开发调试用 PyInstaller，正式发布用 Nuitka。
 
 ## 使用指南
 
