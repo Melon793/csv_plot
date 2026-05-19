@@ -192,6 +192,7 @@ class LayoutManager(MainWindowBaseManager):
             self.request_mark_stats_refresh(immediate=True)
         else:
             self.mw.mark_region_btn.setText("标记区域")
+            self.mw.mark_region_btn.setChecked(False)
             if self.mw.plot_widgets and self.mw.plot_widgets[0].plot_widget.mark_region:
                 self.mw.saved_mark_range = self.mw.plot_widgets[0].plot_widget.mark_region.getRegion()
             for container in self.mw.plot_widgets:
