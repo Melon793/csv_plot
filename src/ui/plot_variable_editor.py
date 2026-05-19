@@ -19,9 +19,10 @@ class PlotVariableEditorDialog(QDialog):
         super().__init__(parent)
         self.plot_widget = plot_widget
         self.setWindowTitle("绘图变量编辑器")
-        self.setModal(False)  # 改为非模态，允许与主窗口交互
+        self.setWindowFlag(Qt.WindowType.Tool, True)
+        self.setModal(False)
         self.resize(600, 400)
-        self.setAcceptDrops(True)  # 启用拖拽功能
+        self.setAcceptDrops(True)
         
         # 高DPI支持 - PyQt6中不需要WA_UseHighDpiPixmaps
         # PyQt6默认支持高DPI，通过样式表控制字体大小
