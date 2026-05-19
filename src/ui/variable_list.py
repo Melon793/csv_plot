@@ -361,9 +361,9 @@ class MyTableWidget(QTableWidget):
         act_add_blank_plot.triggered.connect(lambda: self._add_to_blank_plot(selected_var_names))
         menu.addAction(act_add_blank_plot)
         
-        # c. 复制变量名（复制时也使用原始名称，不含方框标识符）
+        # c. 复制变量名（复制所有选中变量名，用空格分隔）
         act_copy = QAction("复制变量名", menu)
-        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(var_name))
+        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(" ".join(selected_var_names)))
         menu.addAction(act_copy)
         
         menu.exec(self.mapToGlobal(pos))
@@ -405,9 +405,16 @@ class MyTableWidget(QTableWidget):
 
             # 判断这个坐标是否在用户当前的(mxn)布局内
             if r < rows and c < cols:
-                # 如果在布局内，再判断是否为空白
-                if container.plot_widget.y_name == '' and container.plot_widget.curve is None:
-                    blank_plot = container.plot_widget
+                # 如果在布局内，再判断是否为空白（需同时检查单曲线和多曲线模式）
+                pw = container.plot_widget
+                is_blank = (
+                    pw.y_name == ''
+                    and pw.curve is None
+                    and not getattr(pw, 'curves', None)
+                    and not getattr(pw, 'is_multi_curve_mode', False)
+                )
+                if is_blank:
+                    blank_plot = pw
                     break  # 找到第一个可用的就退出
 
         if blank_plot is None:
