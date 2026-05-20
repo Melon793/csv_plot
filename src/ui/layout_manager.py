@@ -146,10 +146,11 @@ class LayoutManager(MainWindowBaseManager):
     def spawn_clone_window(self):
         try:
             if getattr(sys, "frozen", False):
-                args = [sys.executable]
+                args = [sys.executable, "--no-splash"]
             else:
-                script_path = os.path.abspath(__file__)
-                args = [sys.executable, script_path]
+                entry_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                entry_script = os.path.join(entry_dir, "csv_plot.py")
+                args = [sys.executable, entry_script, "--no-splash"]
 
             if sys.platform == "win32":
                 subprocess.Popen(
