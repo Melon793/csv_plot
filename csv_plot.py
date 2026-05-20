@@ -4848,8 +4848,8 @@ if __name__ == "__main__":
     # 禁用抗锯齿 (大数据量下抗锯齿非常消耗资源且视觉收益低)
     pg.setConfigOptions(antialias=False)
 
-    print(f"Qt 绑定: {pg.Qt.QT_LIB}")
-    print(f"Qt 版本: {pg.Qt.VERSION_INFO}")
+    # print(f"Qt 绑定: {pg.Qt.QT_LIB}")
+    # print(f"Qt 版本: {pg.Qt.VERSION_INFO}")
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -4879,28 +4879,36 @@ if __name__ == "__main__":
     # QSplashScreen 不算真正的窗口, 必须关闭此选项否则 exec() 立即退出
     app.setQuitOnLastWindowClosed(False)
 
-    from src.ui.splash_screen import SplashScreen
-    splash = SplashScreen()
-    splash.show()
-    app.processEvents()
+    skip_splash = "--no-splash" in sys.argv
 
-    # 延迟显示主窗口, 便于观察 splash 效果
-    # 可通过命令行参数 --splash-delay=N 控制延迟秒数 (默认 3 秒)
-
-    MIN_SPLASH_MS = 1000
-    delay_arg = next((a for a in sys.argv if a.startswith("--splash-delay=")), None)
-    splash_delay = int(delay_arg.split("=")[1]) * 1000 if delay_arg else MIN_SPLASH_MS
-
-    effective_delay = max(splash_delay, MIN_SPLASH_MS)
-
-    def _show_main():
+    if skip_splash:
         window = MainWindow()
-        splash.finish(window)
         window.show()
         app.setQuitOnLastWindowClosed(True)
         app._main_window_ref = window
+    else:
+        from src.ui.splash_screen import SplashScreen
+        splash = SplashScreen()
+        splash.show()
+        app.processEvents()
 
-    QTimer.singleShot(effective_delay, _show_main)
+        # 延迟显示主窗口, 便于观察 splash 效果
+        # 可通过命令行参数 --splash-delay=N 控制延迟秒数 (默认 1 秒)
+
+        MIN_SPLASH_MS = 1000
+        delay_arg = next((a for a in sys.argv if a.startswith("--splash-delay=")), None)
+        splash_delay = int(delay_arg.split("=")[1]) * 1000 if delay_arg else MIN_SPLASH_MS
+
+        effective_delay = max(splash_delay, MIN_SPLASH_MS)
+
+        def _show_main():
+            window = MainWindow()
+            splash.finish(window)
+            window.show()
+            app.setQuitOnLastWindowClosed(True)
+            app._main_window_ref = window
+
+        QTimer.singleShot(effective_delay, _show_main)
 
     sys.exit(app.exec())
 
