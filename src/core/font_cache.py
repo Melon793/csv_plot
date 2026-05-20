@@ -1,0 +1,75 @@
+"""
+Font cache layer —— 基于 QSettings 的字体缓存, 避免每次启动枚举系统字体
+
+在 Windows 上, QFontDatabase.families() 会枚举所有已安装字体 (~50-100ms),
+缓存后仅首次/字体变更时触发枚举。
+
+并发安全说明:
+  QSettings 是 reentrant 的, 在 QApplication 创建后的主线程中调用是安全的。
+  字体必须在 MainWindow 构造之前确定, 因此缓存必须是同步操作,
+  不能使用异步方案。本模块在 QApplication 创建之后、MainWindow 构造之前调用。
+
+缓存策略:
+  - 写入: 首次检测成功后写入 QSettings
+  - 读取: 后续启动直接从 QSettings 读取, 跳过 families() 枚举
+  - 失效: 当缓存字体名不在当前系统中时回退到重新枚举
+  - 版本: CACHE_VERSION 递增可强制全局重新枚举
+"""
+
+from __future__ import annotations
+
+CACHE_VERSION = 1
+SETTINGS_ORG = "csv_plot"
+SETTINGS_APP = "font_cache"
+
+_FONT_PRIORITY_WIN = [
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "SimHei",
+    "Arial Unicode MS",
+]
+
+
+def _detect_font_win() -> str:
+    """枚举系统字体并返回第一个匹配的中文字体名"""
+    from PySide6.QtGui import QFontDatabase
+
+    available = QFontDatabase.families()
+    for name in _FONT_PRIORITY_WIN:
+        if name in available:
+            return name
+    return ""
+
+
+def _settings():
+    from PySide6.QtCore import QSettings
+
+    return QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+
+def get_windows_chinese_font_cached() -> str:
+    """
+    返回缓存或检测到的中文字体名。
+
+    写缓存不显式返回给调用方, 仅作为副作用保存字体名。
+    下游用返回的名字创建 QFont(name, pixel_size)。
+
+    返回空字符串时调用方应回退到 QApplication.font()。
+    """
+    from PySide6.QtGui import QFontDatabase
+
+    settings = _settings()
+
+    cached_version = settings.value("cache_version", 0, type=int)
+    if cached_version == CACHE_VERSION:
+        cached_name = settings.value("font_name", "", type=str)
+        if cached_name and cached_name in QFontDatabase.families():
+            return cached_name
+
+    detected = _detect_font_win()
+    if not detected:
+        return ""
+
+    settings.setValue("cache_version", CACHE_VERSION)
+    settings.setValue("font_name", detected)
+    return detected

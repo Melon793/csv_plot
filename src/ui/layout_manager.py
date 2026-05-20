@@ -39,38 +39,44 @@ class LayoutManager(MainWindowBaseManager):
             self.mw.var_table_default_width = sizes[0]
 
     def _ensure_splitter_ready(self):
-        if not hasattr(self.mw, "main_splitter"):
+        mw = self._mw_ref()
+        if mw is None:
             return
-        sizes = self.mw.main_splitter.sizes()
+        if not hasattr(mw, "main_splitter"):
+            return
+        sizes = mw.main_splitter.sizes()
         if len(sizes) >= 2 and all(size > 0 for size in sizes):
-            self.mw._splitter_ready = True
+            mw._splitter_ready = True
         else:
             QTimer.singleShot(50, self._ensure_splitter_ready)
 
     def _apply_fixed_splitter_width(self):
-        self.mw._pending_splitter_adjustment = False
+        mw = self._mw_ref()
+        if mw is None:
+            return
+        mw._pending_splitter_adjustment = False
         if (
-            self.mw.var_table_user_adjusted
-            or not getattr(self.mw, "_splitter_ready", False)
-            or not hasattr(self.mw, "main_splitter")
+            mw.var_table_user_adjusted
+            or not getattr(mw, "_splitter_ready", False)
+            or not hasattr(mw, "main_splitter")
         ):
             return
 
-        sizes = self.mw.main_splitter.sizes()
+        sizes = mw.main_splitter.sizes()
         if len(sizes) < 2:
             return
 
         total_width = sum(sizes)
-        if total_width <= 0 or total_width <= self.mw.var_table_default_width:
+        if total_width <= 0 or total_width <= mw.var_table_default_width:
             return
 
-        right_width = max(total_width - self.mw.var_table_default_width, 0)
+        right_width = max(total_width - mw.var_table_default_width, 0)
         if right_width <= 0:
             return
 
-        self.mw.main_splitter.blockSignals(True)
-        self.mw.main_splitter.setSizes([self.mw.var_table_default_width, right_width])
-        self.mw.main_splitter.blockSignals(False)
+        mw.main_splitter.blockSignals(True)
+        mw.main_splitter.setSizes([mw.var_table_default_width, right_width])
+        mw.main_splitter.blockSignals(False)
 
     def _handle_resize(self, _event):
         if (

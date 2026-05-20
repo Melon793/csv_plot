@@ -24,16 +24,9 @@ from src.core.config import (safe_callback,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING
 from src.core.types import AutoDetectError,FormatInfo,CurveInfo
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.data.loader import FastDataLoader,DataLoadThread
-from src.ui.table_dialog import DataTableDialog, PandasTableModel, CustomDelegate, DropOverlay, XYScatterPlotDialog
+from src.ui.table_dialog import DataTableDialog, DropOverlay
 from src.ui.variable_list import MyTableWidget, NoHoverDelegate
-from src.ui.mark_stats import MarkStatsWindow
-from src.ui.plot_variable_editor import PlotVariableEditorDialog
-from src.ui.dialogs.help import HelpDialog
-from src.ui.dialogs.layout_input import LayoutInputDialog
-from src.ui.dialogs.axis import AxisDialog
-from src.ui.dialogs.time_correction import TimeCorrectionDialog
 
-from src.app.plot_context import PlotContext
 from src.ui.file_loader_manager import FileLoaderManager
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.layout_manager import LayoutManager
@@ -3591,6 +3584,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             super().mouseDoubleClickEvent(event)
             return
+        from src.ui.dialogs.axis import AxisDialog
+        from src.ui.plot_variable_editor import PlotVariableEditorDialog
         
         if event.button() == Qt.MouseButton.MiddleButton:
             self.clear_plot_item()
@@ -4152,6 +4147,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _on_vb_var_editor(self, pw):
         if pw:
+            from src.ui.plot_variable_editor import PlotVariableEditorDialog
             dialog = PlotVariableEditorDialog(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
             dialog.show()
             dialog.raise_()
@@ -4592,9 +4588,9 @@ class MainWindow(QMainWindow):
         self.set_button_status(False)
 
         # ---------------- 命令行直接加载文件 ----------------
-        if len(sys.argv) > 1:
-            file_path = sys.argv[1]
-            self.load_csv_file(file_path)
+        positional_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+        if positional_args:
+            self.load_csv_file(positional_args[0])
 
     def closeEvent(self, event):
         self.layout_manager._handle_close()
@@ -4861,39 +4857,51 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     
     if sys.platform == "win32":
-        def get_windows_chinese_font():
-            # 常见Modern UI中文字体优先级列表
-            font_priority = [
-                'Microsoft YaHei UI',  # Win10/11默认
-                'Microsoft YaHei',     # Win7/8默认
-                'SimHei',              # 传统Windows
-                'Arial Unicode MS'     # 备用
-            ]
-            
-            available_fonts = QFontDatabase.families()            
-            for font in font_priority:
-                if font in available_fonts:
-                    return QFont(font)            
-            
-            # 回退到系统默认字体
-            return QApplication.font()
-        
-        font = get_windows_chinese_font()  
-        pixel_size = 12      
-        # dpi = app.primaryScreen().logicalDotsPerInch()
-        # point_size = pixel_size * 72.0 / dpi
-        # font.setPointSizeF(point_size)
+        from src.core.font_cache import get_windows_chinese_font_cached
+        font_name = get_windows_chinese_font_cached()
+        if font_name:
+            font = QFont(font_name)
+        else:
+            font = QApplication.font()
+        pixel_size = 12
         font.setPixelSize(pixel_size)
         app.setFont(font)
-        # app.setStyle("Fusion")
         
     elif sys.platform == "darwin":
         font = QApplication.font()
         font.setPixelSize(13) # macOS 默认字体稍大一点可能观感更好
         app.setFont(font)
 
-    window = MainWindow()
-    window.show()
+    # 提前设置应用图标，让 macOS Dock 在 splash 阶段就能显示图标
+    if 'ico_path' in globals() and os.path.exists(ico_path):
+        app.setWindowIcon(QIcon(str(ico_path)))
+
+    # QSplashScreen 不算真正的窗口, 必须关闭此选项否则 exec() 立即退出
+    app.setQuitOnLastWindowClosed(False)
+
+    from src.ui.splash_screen import SplashScreen
+    splash = SplashScreen()
+    splash.show()
+    app.processEvents()
+
+    # 延迟显示主窗口, 便于观察 splash 效果
+    # 可通过命令行参数 --splash-delay=N 控制延迟秒数 (默认 3 秒)
+
+    MIN_SPLASH_MS = 1000
+    delay_arg = next((a for a in sys.argv if a.startswith("--splash-delay=")), None)
+    splash_delay = int(delay_arg.split("=")[1]) * 1000 if delay_arg else MIN_SPLASH_MS
+
+    effective_delay = max(splash_delay, MIN_SPLASH_MS)
+
+    def _show_main():
+        window = MainWindow()
+        splash.finish(window)
+        window.show()
+        app.setQuitOnLastWindowClosed(True)
+        app._main_window_ref = window
+
+    QTimer.singleShot(effective_delay, _show_main)
+
     sys.exit(app.exec())
 
 # pyinstaller
