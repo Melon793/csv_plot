@@ -13,7 +13,7 @@ EventHandler - 事件处理管理
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
-from src.core.config import safe_callback, debug_log
+from src.core.config import safe_callback
 
 if TYPE_CHECKING:
     from src.ui.widgets.mark_region_manager import MarkRegionManager
@@ -93,8 +93,8 @@ class EventHandler:
                 return
 
             self._queue_ui_refresh()
-        except Exception as e:
-            debug_log("范围变化处理出错: %s", e)
+        except Exception:
+            pass
 
     def _start_interaction(self):
         """开始交互时的处理"""
@@ -115,8 +115,8 @@ class EventHandler:
             if getattr(self.pw, "_pending_cursor_geometry_update", False):
                 self.pw._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()
-        except Exception as e:
-            debug_log("结束交互出错: %s", e)
+        except Exception:
+            pass
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新"""
@@ -204,7 +204,7 @@ class EventHandler:
         elif getattr(pw, "y_name", ""):
             var_names = [pw.y_name]
         if var_names:
-            from PyQt6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
 
             QApplication.clipboard().setText(" ".join(var_names))
 

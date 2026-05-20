@@ -4,9 +4,9 @@ from __future__ import annotations
 import weakref
 from threading import Lock
 import pandas as pd
-from PyQt6.QtCore import Qt, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex
-from PyQt6.QtGui import QFontMetrics, QColor, QAction, QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex
+from PySide6.QtGui import QFontMetrics, QColor, QAction, QFont
+from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,

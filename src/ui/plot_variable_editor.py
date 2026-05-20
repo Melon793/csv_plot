@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 import numpy as np
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 import pyqtgraph as pg
-from src.core.config import DEFAULT_LINE_WIDTH, debug_log
+from src.core.config import DEFAULT_LINE_WIDTH
 from src.core.types import CurveInfo
 from src.ui.drag_drop import parse_var_names_from_mimedata
 
@@ -39,8 +39,8 @@ class PlotVariableEditorDialog(QDialog):
         self.resize(600, 400)
         self.setAcceptDrops(True)
 
-        # 高DPI支持 - PyQt6中不需要WA_UseHighDpiPixmaps
-        # PyQt6默认支持高DPI，通过样式表控制字体大小
+        # 高DPI支持 - PySide6中不需要WA_UseHighDpiPixmaps
+        # PySide6默认支持高DPI，通过样式表控制字体大小
 
         self.setup_ui()
         self.load_current_curves()
@@ -173,8 +173,8 @@ class PlotVariableEditorDialog(QDialog):
             try:
                 if hasattr(self.plot_widget.curve, "isVisible"):
                     curve_visible = self.plot_widget.curve.isVisible()
-            except Exception as e:
-                debug_log("获取曲线可见性失败: %s", e)
+            except Exception:
+                pass
 
             # 获取曲线的实际颜色
             curve_color = "blue"
@@ -186,8 +186,8 @@ class PlotVariableEditorDialog(QDialog):
                     pen = self.plot_widget.curve.opts["pen"]
                     if hasattr(pen, "color"):
                         curve_color = pen.color().name()
-            except Exception as e:
-                debug_log("获取曲线颜色失败: %s", e)
+            except Exception:
+                pass
 
             curve_info = CurveInfo(
                 var_name=var_name,
@@ -336,14 +336,10 @@ class PlotVariableEditorDialog(QDialog):
                     else:
                         # 曲线对象已经不在scene中，重新创建
                         self.plot_widget._recreate_curve(var_name)
-                except Exception as e:
-                    debug_log(
-                        "Warning: Error toggling curve visibility for %s: %s",
-                        var_name,
-                        e,
-                    )
-                    # 尝试重新创建曲线
+                        # 尝试重新创建曲线
                     self.plot_widget._recreate_curve(var_name)
+                except Exception:
+                    pass
 
             # 更新legend
             self.plot_widget.update_legend()
@@ -356,9 +352,8 @@ class PlotVariableEditorDialog(QDialog):
                 try:
                     if self.plot_widget.curve.scene() is not None:
                         self.plot_widget.curve.setVisible(is_visible)
-                except Exception as e:
-                    debug_log("Warning: Error toggling single curve visibility: %s", e)
-
+                except Exception:
+                    pass
     def update_button_states(self):
         """更新按钮状态"""
         has_selection = len(self.var_table.selectedItems()) > 0

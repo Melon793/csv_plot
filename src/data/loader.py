@@ -7,10 +7,8 @@ from pathlib import Path
 from typing import Callable
 import numpy as np
 import pandas as pd
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 from src.core.config import (
-    DEBUG_LOG_ENABLED,
-    debug_log,
     _UNIT_KEYWORDS,
     UNIT_KEYWORD_RATIO_THRESHOLD,
     VALID_NUMERIC_RATIO_THRESHOLD,
@@ -27,9 +25,9 @@ class DataLoadThread(QThread):
     """
 
     # 信号：发送进度 0-100，或直接发 DataFrame
-    progress = pyqtSignal(int)  # 百分比
-    finished = pyqtSignal(object)  # FastDataLoader 实例
-    error = pyqtSignal(str)
+    progress = Signal(int)  # 百分比
+    finished = Signal(object)  # FastDataLoader 实例
+    error = Signal(str)
 
     def __init__(
         self,
@@ -53,26 +51,8 @@ class DataLoadThread(QThread):
         在后台线程中执行数据加载操作，避免阻塞主界面
         通过信号机制向主线程发送进度更新和结果
         """
-        debug_log(
-            "DataLoadThread.start path=%s desc_rows=%s sep=%s has_unit=%s",
-            self.file_path,
-            self.desc_rows,
-            self.sep,
-            self.has_unit,
-        )
         try:
-            last_logged = {"value": -10}
-
             def _progress_cb(progress: int):
-                if DEBUG_LOG_ENABLED:
-                    prev = last_logged["value"]
-                    if progress in (0, 100) or progress - prev >= 10:
-                        debug_log(
-                            "DataLoadThread.progress path=%s value=%s",
-                            self.file_path,
-                            progress,
-                        )
-                        last_logged["value"] = progress
                 self.progress.emit(progress)
 
             if not os.path.exists(self.file_path):
@@ -94,21 +74,12 @@ class DataLoadThread(QThread):
                     chunksize=3600,
                     _progress=_progress_cb,
                 )
-            debug_log(
-                "DataLoadThread.finish path=%s datalength=%s columns=%s",
-                self.file_path,
-                getattr(loader, "datalength", None),
-                len(getattr(loader, "var_names", []) or []),
-            )
             self.finished.emit(loader)
         except MemoryError:
-            debug_log("DataLoadThread.memory_error path=%s", self.file_path)
             self.error.emit("内存不足，无法加载此文件。请尝试加载较小的文件。")
         except OSError as e:
-            debug_log("DataLoadThread.os_error path=%s err=%s", self.file_path, e)
             self.error.emit(f"文件访问错误: {e}")
         except Exception as e:
-            debug_log("DataLoadThread.exception path=%s err=%r", self.file_path, e)
             self.error.emit(f"加载文件时发生未知错误: {str(e)}")
 
 
@@ -591,20 +562,9 @@ class FastDataLoader:
                 if total_cols > 0:
                     valid_numeric_ratio = valid_numeric_count / total_cols
                     if valid_numeric_ratio > VALID_NUMERIC_RATIO_THRESHOLD:
-                        debug_log(
-                            "_load_header_units: 上游检测 has_unit=True，但本行单位关键字占比仅 %.1f%%、"
-                            "有效数值列比例 %.1f%%，疑似为数据行。检查文件: %s",
-                            unit_keyword_ratio * 100,
-                            valid_numeric_ratio * 100,
-                            path,
-                        )
+                        pass
                     else:
-                        debug_log(
-                            "_load_header_units: 上游检测 has_unit=True，但本行单位关键字占比仅 %.1f%%，"
-                            "疑似误判。检查文件: %s",
-                            unit_keyword_ratio * 100,
-                            path,
-                        )
+                        pass
 
         min_required_rows = 2 if actual_has_unit else 1
         if df.shape[0] < min_required_rows:

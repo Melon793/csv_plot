@@ -19,7 +19,6 @@ import numpy as np
 from src.core.config import (
     DEFAULT_PADDING_VAL_X,
     DEFAULT_PADDING_VAL_Y,
-    debug_log,
     MIN_INDEX_LENGTH,
 )
 
@@ -370,8 +369,8 @@ class AxisManager:
             pw.plot_item.setLimits(yMin=None, yMax=None)
             pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
             self._set_vline_bounds([None, None])
-        except Exception as e:
-            debug_log("重置绘图限制时出错: %s", e)
+        except Exception:
+            pass
 
     def _set_vline_bounds(self, bounds: list) -> None:
         """设置光标垂直线的边界"""

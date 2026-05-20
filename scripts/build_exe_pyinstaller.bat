@@ -1,8 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set "NAME=csv_plot_pyqt6"
-set "ENTRY=csv_plot_pyqt6.py"
+set "NAME=csv_plot"
+set "ENTRY=csv_plot.py"
 set "ICON=assets/icon.ico"
 
 echo Building %NAME% with PyInstaller...
@@ -22,7 +22,7 @@ pyinstaller --noconfirm ^
   --hidden-import=src ^
   --collect-submodules numpy ^
   --collect-submodules pandas ^
-  --collect-submodules PyQt6 ^
+  --collect-submodules PySide6 ^
   --exclude-module=nuitka ^
   --exclude-module=pytest ^
   --exclude-module=pyinstaller ^

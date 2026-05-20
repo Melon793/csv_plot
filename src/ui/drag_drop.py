@@ -6,8 +6,8 @@ DragDropHandler —— 变量拖放统一工具类
 中 5+ 处重复的 split(';;') 模式。
 """
 
-from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, QPoint
+from PySide6.QtGui import (
     QFontMetrics,
     QPainter,
     QPen,
@@ -15,7 +15,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QFont,
 )
-from PyQt6.QtCore import QMimeData
+from PySide6.QtCore import QMimeData
 
 VAR_SEPARATOR = ";;"
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import sys
-from PyQt6.QtWidgets import QApplication, QVBoxLayout, QPushButton, QTextEdit, QDialog
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QPushButton, QTextEdit, QDialog
 
 
 def _resource_path(relative_path: str) -> Path:

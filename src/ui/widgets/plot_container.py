@@ -7,8 +7,8 @@ PlotContainerWidget —— 包装单个 Plot，负责显示拖拽提示
 
 from __future__ import annotations
 from typing import Any
-from PyQt6.QtWidgets import QWidget, QSizePolicy, QVBoxLayout, QLabel
-from PyQt6.QtCore import Qt, QMargins
+from PySide6.QtWidgets import QWidget, QSizePolicy, QVBoxLayout, QLabel
+from PySide6.QtCore import Qt, QMargins
 
 
 class PlotContainerWidget(QWidget):

@@ -1,9 +1,9 @@
 """变量列表面板 —— MyTableWidget + NoHoverDelegate"""
 
 from __future__ import annotations
-from PyQt6.QtCore import Qt, QTimer, QPoint, QRect
-from PyQt6.QtGui import QDrag, QPen, QColor, QAction
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, QPoint, QRect
+from PySide6.QtGui import QDrag, QPen, QColor, QAction
+from PySide6.QtWidgets import (
     QApplication,
     QMenu,
     QAbstractItemView,
@@ -36,7 +36,7 @@ class NoHoverDelegate(QStyledItemDelegate):
             option: QStyleOptionViewItem样式选项
             index: QModelIndex单元格索引
         """
-        from PyQt6.QtWidgets import QStyle
+        from PySide6.QtWidgets import QStyle
 
         # 移除悬停和焦点状态，避免出现白色块和焦点框
         option.state &= ~QStyle.StateFlag.State_MouseOver
@@ -54,7 +54,7 @@ class NoHoverDelegate(QStyledItemDelegate):
 
     def _draw_background(self, painter, option):
         """绘制单元格背景"""
-        from PyQt6.QtWidgets import QStyle
+        from PySide6.QtWidgets import QStyle
 
         painter.save()
         if option.state & QStyle.StateFlag.State_Selected:
@@ -140,7 +140,7 @@ class NoHoverDelegate(QStyledItemDelegate):
             text: 要绘制的文本
             text_rect: 文本绘制区域
         """
-        from PyQt6.QtWidgets import QStyle
+        from PySide6.QtWidgets import QStyle
 
         painter.save()
 

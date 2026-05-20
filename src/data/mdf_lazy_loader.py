@@ -257,20 +257,54 @@ class MDFLazyLoader:
         all_mins = []
         all_maxs = []
         total_samples = 0
-        for gi in sorted(self._raw_metadata.keys()):
+        total_groups = len(self._raw_metadata)
+
+        for idx, gi in enumerate(sorted(self._raw_metadata.keys())):
             if gi not in self._group_master_ci:
                 continue
+
             master_ci = self._group_master_ci[gi]
+            cg = self._mdf.groups[gi].channel_group
+            cycles = cg.cycles_nr
+
+            if cycles <= 0:
+                continue
+
             try:
-                sig = self._mdf.get(name=None, group=gi, index=master_ci)
-                ts = sig.timestamps.astype(np.float64)
-                if len(ts) > 0:
-                    all_mins.append(float(ts[0]))
-                    all_maxs.append(float(ts[-1]))
-                    total_samples = max(total_samples, len(ts))
-                    self._time_cache[gi] = ts
+                sig_first = self._mdf.get(
+                    name=None, group=gi, index=master_ci, record_count=1
+                )
+                if len(sig_first.timestamps) == 0:
+                    continue
+
+                t_min = float(sig_first.timestamps[0])
+
+                if cycles > 1:
+                    sig_last = self._mdf.get(
+                        name=None,
+                        group=gi,
+                        index=master_ci,
+                        record_offset=cycles - 1,
+                        record_count=1,
+                    )
+                    t_max = (
+                        float(sig_last.timestamps[0])
+                        if len(sig_last.timestamps) > 0
+                        else t_min
+                    )
+                else:
+                    t_max = t_min
+
+                all_mins.append(t_min)
+                all_maxs.append(t_max)
+                total_samples = max(total_samples, cycles)
+
             except Exception:
                 pass
+
+            if self._progress and total_groups > 0:
+                progress = 50 + int((idx + 1) / total_groups * 50)
+                self._notify_progress(min(progress, 99))
 
         if all_mins:
             self._cached_global_time_range = (min(all_mins), max(all_maxs))
