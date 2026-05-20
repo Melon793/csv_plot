@@ -56,7 +56,7 @@ class MDFLazyLoader:
             raise ImportError(f"{self._ASAMMDF_IMPORT_ERROR}\n原始错误: {e}") from e
 
         try:
-            self._mdf = asammdf.MDF(path, memory="low")
+            self._mdf = asammdf.MDF(path)
         except Exception as e:
             raise RuntimeError(
                 f"MDF 文件无法以惰性模式打开（文件可能已损坏或版本不兼容）: {e}"
@@ -125,13 +125,13 @@ class MDFLazyLoader:
                 raw_metadata[gi] = group_metas
                 continue
 
-            master_channel_index = getattr(group_obj, "channel_group", None)
+            master_ci = self._mdf.masters_db.get(gi)
 
             for ci, ch in enumerate(group_obj.channels):
                 ch_name = ch.name
 
                 is_master = (
-                    master_channel_index is not None and ci == master_channel_index
+                    master_ci is not None and ci == master_ci
                 ) or ch_name.lower() in mdf3_time_channels
 
                 if is_master:
