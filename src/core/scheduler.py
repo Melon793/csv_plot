@@ -1,8 +1,8 @@
 """scheduler"""
 
 from __future__ import annotations
-from PyQt6.QtCore import QObject, QTimer
-from src.core.config import UI_DEBOUNCE_DELAY_MS, debug_log
+from PySide6.QtCore import QObject, QTimer
+from src.core.config import UI_DEBOUNCE_DELAY_MS
 from typing import Any
 
 
@@ -76,5 +76,5 @@ class UnifiedUpdateScheduler(QObject):
             return
         try:
             callback()
-        except Exception as e:
-            debug_log("UI更新调度器执行 %s 出错: %s", name, e)
+        except Exception:
+            pass

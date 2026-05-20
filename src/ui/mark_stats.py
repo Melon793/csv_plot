@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 import numpy as np
-from PyQt6.QtCore import Qt, QEvent
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QVBoxLayout,

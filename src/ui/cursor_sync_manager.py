@@ -3,11 +3,10 @@
 from __future__ import annotations
 import numpy as np
 
-from PyQt6.QtCore import QSignalBlocker
-from PyQt6.QtWidgets import QMessageBox
+from PySide6.QtCore import QSignalBlocker
+from PySide6.QtWidgets import QMessageBox
 
 from src.core.config import (
-    debug_log,
     DEFAULT_PADDING_VAL_X,
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
@@ -49,12 +48,6 @@ class CursorSyncManager(MainWindowBaseManager):
     def reset_plots_after_loading(
         self, index_xMin, index_xMax, *, reason: str | None = None
     ):
-        debug_log(
-            "MainWindow.reset_plots_after_loading reason=%s range=(%s,%s)",
-            reason,
-            index_xMin,
-            index_xMax,
-        )
         for container in self.mw.plot_widgets:
             container.plot_widget._is_updating_data = True
             if hasattr(container.plot_widget, "_cancel_ui_refresh"):
@@ -229,11 +222,6 @@ class CursorSyncManager(MainWindowBaseManager):
         return False
 
     def toggle_cursor_all(self, checked):
-        debug_log(
-            "MainWindow.toggle_cursor_all start checked=%s has_plot=%s",
-            checked,
-            len(self.mw.plot_widgets),
-        )
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             if checked and self.mw.cursor_values_hidden:
@@ -404,10 +392,6 @@ class CursorSyncManager(MainWindowBaseManager):
                 pass
 
     def reset_all_pin_states(self):
-        debug_log(
-            "MainWindow.reset_all_pin_states total=%s",
-            len(getattr(self.mw, "plot_widgets", [])),
-        )
         self.mw.cursor_mode = "1 free cursor"
         self.mw.pinned_x_values = []
         for container in self.mw.plot_widgets:
@@ -535,9 +519,6 @@ class CursorSyncManager(MainWindowBaseManager):
 
             unique_y_names = set(all_y_names)
             if not unique_y_names:
-                debug_log(
-                    "MainWindow.replots_after_loading no tracked curves, reset plots"
-                )
                 if is_mdf:
                     x_min, x_max = self.mw.loader.global_time_range
                 else:
@@ -549,6 +530,13 @@ class CursorSyncManager(MainWindowBaseManager):
             in_var_names = [y for y in unique_y_names if y in var_names_set]
 
             if in_var_names:
+                # 仅排除已知无效(INVALID=-1)的变量，保留 UNKNOWN(-2) 的变量。
+                # MDF 使用懒加载(lazy loading)不会在加载时扫描全部数据，
+                # 其 df_validity 统一返回 UNKNOWN(-2)；若使用 >=0 会将所有
+                # MDF 变量误判为无效，导致重载后已绘变量被错误清除。
+                # CSV 加载器会主动扫描数据并返回 VALID(1)/CONST(0)/INVALID(-1)，
+                # 对 CSV 场景 != -1 等价于旧逻辑 >=0，行为不变。
+                # 注：后期 MDF 有效性检查将改为用户主动触发。
                 validity_values = [
                     self.mw.loader.df_validity.get(y, -1) for y in in_var_names
                 ]
@@ -559,20 +547,10 @@ class CursorSyncManager(MainWindowBaseManager):
                 found = []
 
             ratio = len(found) / len(unique_y_names) if unique_y_names else 0
-            debug_log(
-                "MainWindow.replots_after_loading reuse_ratio=%.2f tracked=%s valid=%s",
-                ratio,
-                len(unique_y_names),
-                len(found),
-            )
 
             cleared = []
 
             if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
-                debug_log(
-                    "MainWindow.replots_after_loading reset due to low ratio %.2f",
-                    ratio,
-                )
                 if is_mdf:
                     x_min, x_max = self.mw.loader.global_time_range
                 else:
@@ -629,7 +607,7 @@ class CursorSyncManager(MainWindowBaseManager):
                             )
                             if (
                                 var_exists
-                                and self.mw.loader.df_validity.get(var_name, -1) >= 0
+                                and self.mw.loader.df_validity.get(var_name, -1) != -1
                             ):
                                 preferred_color = ci.color
                                 success = widget.add_variable_to_plot(
@@ -670,7 +648,7 @@ class CursorSyncManager(MainWindowBaseManager):
                         )
                         if (
                             var_exists
-                            and self.mw.loader.df_validity.get(y_name, -1) >= 0
+                            and self.mw.loader.df_validity.get(y_name, -1) != -1
                         ):
                             success = widget.plot_variable(y_name)
                             if not success:

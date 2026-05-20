@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-NAME="csv_plot_pyqt6"
-ENTRY="csv_plot_pyqt6.py"
+NAME="csv_plot"
+ENTRY="csv_plot.py"
 
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
     ICON="assets/icon.ico"

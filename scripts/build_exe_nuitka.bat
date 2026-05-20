@@ -1,8 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set "NAME=csv_plot_pyqt6"
-set "ENTRY=csv_plot_pyqt6.py"
+set "NAME=csv_plot"
+set "ENTRY=csv_plot.py"
 
 echo Building %NAME%...
 echo Entry file: %ENTRY%
@@ -10,7 +10,7 @@ echo Entry file: %ENTRY%
 nuitka --standalone ^
   --zig ^
   --output-filename=%NAME% ^
-  --enable-plugin=pyqt6 ^
+  --enable-plugin=pyside6 ^
   --include-package=src ^
   --include-module=asammdf ^
   --include-module=numpy ^

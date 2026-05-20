@@ -80,7 +80,7 @@ class MarkRegionManager:
         """更新标记区域"""
         if self.mark_region:
             old_min, old_max = self.mark_region.getRegion()
-            from PyQt6.QtCore import QSignalBlocker
+            from PySide6.QtCore import QSignalBlocker
 
             QSignalBlocker(self.mark_region)
             self.mark_region.setRegion([old_min, old_max])

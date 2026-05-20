@@ -8,10 +8,10 @@ import subprocess
 
 import numpy as np
 
-from PyQt6.QtCore import QTimer, QEvent, QSignalBlocker
-from PyQt6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
+from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
+from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
 
-from src.core.config import debug_log, UI_DEBOUNCE_DELAY_MS
+from src.core.config import UI_DEBOUNCE_DELAY_MS
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
 from src.ui.mark_stats import MarkStatsWindow
@@ -439,7 +439,6 @@ class LayoutManager(MainWindowBaseManager):
                         )
                         or self.mw._extract_file_extension(path) is not None
                     ):
-                        debug_log("MainWindow.eventFilter drop load path=%s", path)
                         self.mw.load_csv_file(path)
                         event.accept()
                         return True
@@ -455,7 +454,7 @@ class LayoutManager(MainWindowBaseManager):
         self.mw.drop_overlay.hide()
 
     def create_subplots_matrix(self, m: int, n: int):
-        from csv_plot_pyqt6 import DraggableGraphicsLayoutWidget
+        from csv_plot import DraggableGraphicsLayoutWidget
 
         for i in reversed(range(self.mw.plot_layout.count())):
             w = self.mw.plot_layout.itemAt(i).widget()
@@ -531,8 +530,6 @@ class LayoutManager(MainWindowBaseManager):
             else:
                 self.mw.plot_layout.setRowStretch(r, 0)
 
-        debug_log("MainWindow.set_row_height row=%s percentage=%s", row, percentage)
-
     def set_all_row_height(self, percentage: int) -> None:
         for r in range(self.mw._plot_row_max_default):
             self.mw.row_height_factors[r] = percentage
@@ -555,8 +552,6 @@ class LayoutManager(MainWindowBaseManager):
                 self.mw.plot_layout.setRowStretch(r, stretch_factor)
             else:
                 self.mw.plot_layout.setRowStretch(r, 0)
-
-        debug_log("MainWindow.set_all_row_height percentage=%s", percentage)
 
     def get_row_height(self, row: int) -> int:
         return self.mw.row_height_factors.get(row, 100)

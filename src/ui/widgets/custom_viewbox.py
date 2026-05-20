@@ -5,9 +5,9 @@ CustomViewBox —— 信号化自定义 ViewBox
 替换为 PyQt 信号，由 DraggableGraphicsLayoutWidget 负责连接。
 """
 
-from PyQt6.QtCore import pyqtSignal, QObject
-from PyQt6.QtGui import QAction, QActionGroup
-from PyQt6.QtWidgets import QMenu
+from PySide6.QtCore import Signal, QObject
+from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtWidgets import QMenu
 import pyqtgraph as pg
 
 
@@ -17,18 +17,18 @@ class CustomViewBoxSignals(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-    request_jump_to_data = pyqtSignal(object, object)  # plot_widget, context_x
-    request_clear_plot = pyqtSignal(object)  # plot_widget
-    request_auto_y = pyqtSignal(object)  # plot_widget
-    request_set_cursor_mode = pyqtSignal(
+    request_jump_to_data = Signal(object, object)  # plot_widget, context_x
+    request_clear_plot = Signal(object)  # plot_widget
+    request_auto_y = Signal(object)  # plot_widget
+    request_set_cursor_mode = Signal(
         str, object, object
     )  # mode, plot_widget, context_x
-    request_show_cursor_value = pyqtSignal(object)  # plot_widget
-    request_hide_cursor_value = pyqtSignal(object)  # plot_widget
-    request_set_row_height = pyqtSignal(int, object)  # percentage, plot_widget
-    request_set_all_row_height = pyqtSignal(int)  # percentage
-    request_copy_name = pyqtSignal(object)  # plot_widget
-    request_variable_editor = pyqtSignal(object)  # plot_widget
+    request_show_cursor_value = Signal(object)  # plot_widget
+    request_hide_cursor_value = Signal(object)  # plot_widget
+    request_set_row_height = Signal(int, object)  # percentage, plot_widget
+    request_set_all_row_height = Signal(int)  # percentage
+    request_copy_name = Signal(object)  # plot_widget
+    request_variable_editor = Signal(object)  # plot_widget
 
 
 class CustomViewBox(pg.ViewBox):

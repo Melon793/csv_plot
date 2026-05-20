@@ -16,11 +16,6 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
-from src.core.config import (
-    DEBUG_LOG_ENABLED,
-    debug_log,
-)
-
 if TYPE_CHECKING:
     from src.ui.widgets.multi_curve_manager import MultiCurveManager
 
@@ -240,7 +235,7 @@ class CursorManager:
             )
             if hasattr(self.pw, "vline") and self.pinned_x_value is not None:
                 self.pw.vline.setMovable(True)
-                from PyQt6.QtCore import QSignalBlocker
+                from PySide6.QtCore import QSignalBlocker
 
                 with QSignalBlocker(self.pw.vline):
                     self.pw.vline.setPos(self.pinned_x_value)
@@ -280,7 +275,7 @@ class CursorManager:
             if hasattr(self.pw, "vline2"):
                 self.pw.vline2.setMovable(True)
             if hasattr(self.pw, "vline") and self.pinned_x_values:
-                from PyQt6.QtCore import QSignalBlocker
+                from PySide6.QtCore import QSignalBlocker
 
                 with QSignalBlocker(self.pw.vline):
                     self.pw.vline.setPos(self.pinned_x_values[0])
@@ -298,15 +293,6 @@ class CursorManager:
         retry_count = 0
 
         while retry_count < MAX_RETRIES:
-            if DEBUG_LOG_ENABLED:
-                debug_log(
-                    "Plot.update_cursor_label start y=%s locked=%s busy=%s dirty=%s retry=%s",
-                    getattr(self.pw, "y_name", None),
-                    self._is_cursor_update_locked(),
-                    self._cursor_label_busy,
-                    self._cursor_label_dirty,
-                    retry_count,
-                )
 
             if self._is_cursor_update_locked():
                 return
@@ -320,8 +306,8 @@ class CursorManager:
 
             try:
                 self._update_multi_curve_cursor_label()
-            except (RuntimeError, AttributeError) as e:
-                debug_log("update_cursor_label error: %s", e)
+            except (RuntimeError, AttributeError):
+                pass
             finally:
                 self._cursor_label_busy = False
 
@@ -333,10 +319,7 @@ class CursorManager:
                 break
 
         if retry_count >= MAX_RETRIES:
-            debug_log(
-                "update_cursor_label exceeded max retries for y=%s",
-                getattr(self.pw, "y_name", None),
-            )
+            pass
 
     def _is_cursor_update_locked(self) -> bool:
         """判断 cursor 相关回调是否需要被暂时禁用"""
@@ -389,8 +372,7 @@ class CursorManager:
             else:
                 self.pw.update_right_header(f"x={x_str}, y={y_val:.5g}")
 
-        except Exception as e:
-            debug_log("Cursor update error: %s", e)
+        except Exception:
             self.pw.update_right_header("")
 
     def _get_circle_from_pool(self, index: int):
@@ -412,7 +394,7 @@ class CursorManager:
             return pool[index]
 
         import pyqtgraph as pg
-        from PyQt6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         label = pg.TextItem(
             color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0.5, 0.5)
@@ -430,7 +412,7 @@ class CursorManager:
             return pool[index]
 
         import pyqtgraph as pg
-        from PyQt6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         x_label = pg.TextItem(
             color=(255, 255, 255),
@@ -530,8 +512,8 @@ class CursorManager:
                         item.deleteLater()
                 except (RuntimeError, AttributeError):
                     pass
-            except (RuntimeError, AttributeError) as e:
-                debug_log("_process_pending_deletes error: %s", e)
+            except (RuntimeError, AttributeError):
+                pass
 
     def _update_multi_curve_cursor_label(self):
         """更新多曲线光标标签"""
@@ -736,8 +718,7 @@ class CursorManager:
                     scene.addItem(x_info_item)
                 self.pw.multi_cursor_items.append(x_info_item)
 
-        except Exception as e:
-            debug_log("Multi-curve cursor update error: %s", e)
+        except Exception:
             self.pw.update_right_header("")
 
     def _position_labels_avoid_overlap(
@@ -883,8 +864,8 @@ class CursorManager:
             header_text = " | ".join(parts)
             self.pw.update_right_header(header_text)
 
-        except Exception as e:
-            debug_log("x_position_only error: %s", e)
+        except Exception:
+            pass
 
     def _has_visible_curve_data(self) -> bool:
         """判断当前 plot 是否有可见且有数据的曲线"""
@@ -1004,8 +985,8 @@ class CursorManager:
                 return
             if self.pw._cursor_refresh_timer.isActive():
                 self.pw._cursor_refresh_timer.stop()
-        except Exception as e:
-            debug_log("开始交互出错: %s", e)
+        except Exception:
+            pass
 
     def _end_interaction(self):
         """结束交互"""
@@ -1014,8 +995,8 @@ class CursorManager:
                 self.pw._is_interacting = False
             if hasattr(self.pw, "_cursor_refresh_timer"):
                 self.pw._cursor_refresh_timer.start(50)
-        except Exception as e:
-            debug_log("结束交互出错: %s", e)
+        except Exception:
+            pass
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新"""
@@ -1081,7 +1062,7 @@ class CursorManager:
                             else getattr(widget, "vline2", None)
                         )
                         if target_line is not None:
-                            from PyQt6.QtCore import QSignalBlocker
+                            from PySide6.QtCore import QSignalBlocker
 
                             with QSignalBlocker(target_line):
                                 target_line.setPos(x_pos)

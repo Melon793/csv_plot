@@ -11,10 +11,10 @@ from __future__ import annotations
 import os
 import sys
 
-from PyQt6.QtCore import Qt, QStandardPaths, QTimer
-from PyQt6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+from PySide6.QtCore import Qt, QStandardPaths, QTimer
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 
-from src.core.config import debug_log, FILE_SIZE_LIMIT_BACKGROUND_LOADING
+from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING
 from src.core.types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
 from src.data.mdf_lazy_loader import MDFLazyLoader
@@ -49,8 +49,7 @@ class FileLoaderManager(MainWindowBaseManager):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except json.JSONDecodeError as e:
-            debug_log("load_dict JSON decode error for %s: %s", path, e)
+        except json.JSONDecodeError:
             raise
 
     def load_btn_click(self):
@@ -126,11 +125,6 @@ class FileLoaderManager(MainWindowBaseManager):
             if getattr(container, "plot_widget", None)
             and getattr(container.plot_widget, "is_cursor_pinned", False)
         ]
-        debug_log(
-            "MainWindow.begin_data_reload pinned_plots=%s version=%s",
-            pinned,
-            self.mw._data_version,
-        )
         try:
             self.mw.reset_all_pin_states()
         except Exception:
@@ -159,9 +153,6 @@ class FileLoaderManager(MainWindowBaseManager):
             widget._is_updating_data = False
 
         self.mw._is_loading_new_data = False
-        debug_log(
-            "MainWindow.end_data_reload resume_ui version=%s", self.mw._data_version
-        )
 
         QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
 
@@ -175,15 +166,9 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def load_csv_file(self, file_path: str):
         if getattr(self.mw, "_is_loading_new_data", False):
-            debug_log("MainWindow.load_csv_file skipped - already loading")
             self.mw.load_btn.setEnabled(True)
             return
 
-        debug_log(
-            "MainWindow.load_csv_file start path=%s is_loading=%s",
-            file_path,
-            getattr(self.mw, "_is_loading_new_data", False),
-        )
         if not self._validate_file_path(file_path):
             self.mw.load_btn.setEnabled(True)
             return
@@ -270,12 +255,6 @@ class FileLoaderManager(MainWindowBaseManager):
                     desc_rows = int(cfg_skip)
                     has_unit = bool(cfg_has_unit)
                     config_used = True
-                    debug_log(
-                        "MainWindow._load_file using config_dict.json sep=%s desc_rows=%s has_unit=%s",
-                        delimiter_typ,
-                        desc_rows,
-                        has_unit,
-                    )
             except Exception as e:
                 QMessageBox.warning(
                     self.mw,
@@ -290,15 +269,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 desc_rows = fmt.header_row
                 has_unit = fmt.has_unit
                 encoding = fmt.encoding
-                debug_log(
-                    "MainWindow._load_file auto-detected encoding=%s sep=%s desc_rows=%s has_unit=%s",
-                    encoding,
-                    delimiter_typ,
-                    desc_rows,
-                    has_unit,
-                )
             except AutoDetectError as e:
-                debug_log("MainWindow._load_file auto-detection failed: %s", e)
                 QMessageBox.critical(
                     self.mw,
                     "数据解析失败",
@@ -321,12 +292,6 @@ class FileLoaderManager(MainWindowBaseManager):
         _Threshold_Size_Mb = FILE_SIZE_LIMIT_BACKGROUND_LOADING
 
         file_size = os.path.getsize(file_path)
-        debug_log(
-            "MainWindow._load_file start path=%s size=%.2fMB reload=%s",
-            file_path,
-            file_size / 1024 / 1024,
-            is_reload,
-        )
         try:
             if file_size < _Threshold_Size_Mb * 1024 * 1024:
                 try:
@@ -344,12 +309,8 @@ class FileLoaderManager(MainWindowBaseManager):
                     self.mw.load_btn.setEnabled(True)
                     self._post_load_actions(file_path)
                 else:
-                    debug_log(
-                        "MainWindow._load_file sync load failed path=%s", file_path
-                    )
                     self.mw.load_btn.setEnabled(True)
             else:
-                debug_log("MainWindow._load_file spawn thread path=%s", file_path)
                 self.mw._progress = QProgressDialog(
                     "正在读取数据...", "取消", 0, 100, self.mw
                 )
@@ -395,10 +356,10 @@ class FileLoaderManager(MainWindowBaseManager):
 
             gc.collect()
 
-        except (AttributeError, TypeError) as e:
-            debug_log("清理旧数据时出错: %s", e)
-        except Exception as e:
-            debug_log("清理旧数据时发生未知错误: %s", e)
+        except (AttributeError, TypeError):
+            pass
+        except Exception:
+            pass
 
     def _post_load_actions(self, file_path: str):
         self.mw.loaded_path = file_path
@@ -502,14 +463,6 @@ class FileLoaderManager(MainWindowBaseManager):
         has_unit: bool = True,
         encoding: str | None = None,
     ):
-        debug_log(
-            "MainWindow._load_sync start path=%s desc_rows=%s sep=%s has_unit=%s encoding=%s",
-            file_path,
-            desc_rows,
-            sep,
-            has_unit,
-            encoding,
-        )
         is_valid, error_msg = self._validate_load_parameters(
             file_path, desc_rows, sep, has_unit
         )
@@ -548,19 +501,12 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(self.mw, "读取失败", f"加载文件时发生错误: {str(e)}")
             status = False
         finally:
-            debug_log(
-                "MainWindow._load_sync done path=%s status=%s rows=%s",
-                file_path,
-                status,
-                getattr(loader, "datalength", None) if loader is not None else None,
-            )
             if loader is not None:
                 loader = None
         return status
 
     def _on_load_done(self, loader, file_path: str):
         self.mw._progress.close()
-        debug_log("MainWindow._on_load_done apply new loader path=%s", file_path)
         if hasattr(self.mw, "loader") and self.mw.loader is not None:
             if hasattr(self.mw.loader, "close"):
                 try:
@@ -577,17 +523,11 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _on_load_error(self, msg):
         self.mw._progress.close()
-        debug_log("MainWindow._on_load_error %s", msg)
         QMessageBox.critical(self.mw, "读取失败", msg)
         self._end_data_reload()
         self.mw.load_btn.setEnabled(True)
 
     def _apply_loader(self):
-        debug_log(
-            "MainWindow._apply_loader datalength=%s columns=%s",
-            getattr(self.mw.loader, "datalength", None),
-            len(getattr(self.mw.loader, "var_names", []) or []),
-        )
         self.mw.var_names = self.mw.loader.var_names
         self.mw.units = self.mw.loader.units
         self.mw.time_channels_infos = self.mw.loader.time_channels_info

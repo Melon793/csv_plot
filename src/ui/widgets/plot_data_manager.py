@@ -17,7 +17,7 @@ from typing import Any, TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtCore import QSignalBlocker
+from PySide6.QtCore import QSignalBlocker
 
 from src.core.config import (
     DEFAULT_LINE_WIDTH,
@@ -56,7 +56,7 @@ class PlotDataManager:
 
         is_valid, error_msg = self._validate_plot_data(var_name)
         if not is_valid:
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
 
             QMessageBox.warning(pw, "错误", error_msg)
             return False
@@ -65,7 +65,7 @@ class PlotDataManager:
             var_name
         )
         if not success:
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
 
             QMessageBox.warning(pw, "错误", error_msg)
             return False
@@ -138,7 +138,7 @@ class PlotDataManager:
             return True
 
         except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
 
             QMessageBox.critical(pw, "绘图错误", f"绘制变量时发生错误: {str(e)}")
             return False

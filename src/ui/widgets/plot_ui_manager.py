@@ -15,9 +15,9 @@ PlotUIManager - UI初始化与刷新协调管理器
 from __future__ import annotations
 from typing import Any
 
-from PyQt6.QtCore import Qt, QTimer, QPoint
-from PyQt6.QtGui import QFontMetrics, QPen, QColor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, QPoint
+from PySide6.QtGui import QFontMetrics, QPen, QColor
+from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
     QGraphicsProxyWidget,
@@ -29,8 +29,6 @@ from PyQt6.QtWidgets import (
 import pyqtgraph as pg
 
 from src.core.config import (
-    DEBUG_LOG_ENABLED,
-    debug_log,
     DEFAULT_SHOW_X_AXIS_LABEL,
     UI_DEBOUNCE_DELAY_MS,
 )
@@ -260,7 +258,7 @@ class PlotUIManager(BasePlotManager):
 
     def _setup_interaction(self, pw: Any) -> None:
         """配置交互元素（光标线、RubberBand、鼠标信号代理）"""
-        from PyQt6.QtCore import QTimer
+        from PySide6.QtCore import QTimer
         import pyqtgraph as _pg
 
         pw.vline = _pg.InfiniteLine(
@@ -347,19 +345,6 @@ class PlotUIManager(BasePlotManager):
             tasks.append("stats")
         if not tasks:
             return
-        if DEBUG_LOG_ENABLED and (immediate or getattr(pw, "_is_updating_data", False)):
-            debug_log(
-                "Plot._queue_ui_refresh y=%s tasks=%s immediate=%s updating=%s pinned=%s loading=%s",
-                getattr(pw, "y_name", None),
-                tasks,
-                immediate,
-                getattr(pw, "_is_updating_data", False),
-                getattr(pw, "is_cursor_pinned", False),
-                bool(
-                    pw.plot_context
-                    and getattr(pw.plot_context, "_is_loading_new_data", False)
-                ),
-            )
         if immediate:
             pw._ui_refresh.run_immediately(*tasks)
         else:
@@ -378,38 +363,16 @@ class PlotUIManager(BasePlotManager):
         if getattr(pw, "_is_updating_data", False) or getattr(
             pw, "_is_being_destroyed", False
         ):
-            if DEBUG_LOG_ENABLED:
-                debug_log(
-                    "Plot._run_style_refresh skipped y=%s updating=%s destroying=%s",
-                    getattr(pw, "y_name", None),
-                    getattr(pw, "_is_updating_data", False),
-                    getattr(pw, "_is_being_destroyed", False),
-                )
             return
         if hasattr(pw, "view_box") and hasattr(pw, "plot_item"):
-            if DEBUG_LOG_ENABLED:
-                debug_log(
-                    "Plot._run_style_refresh exec y=%s", getattr(pw, "y_name", None)
-                )
             pw.update_plot_style(pw.view_box, pw.view_box.viewRange(), None)
 
     def _run_cursor_refresh(self, pw: Any) -> None:
         """执行光标刷新"""
         if getattr(pw, "_is_interacting", False):
-            if DEBUG_LOG_ENABLED:
-                debug_log(
-                    "Plot._run_cursor_refresh skipped-interacting y=%s",
-                    getattr(pw, "y_name", None),
-                )
             return
         if hasattr(pw, "vline") and pw.vline.isVisible():
             try:
-                if DEBUG_LOG_ENABLED:
-                    debug_log(
-                        "Plot._run_cursor_refresh exec y=%s pinned=%s",
-                        getattr(pw, "y_name", None),
-                        getattr(pw, "is_cursor_pinned", False),
-                    )
                 pw.update_cursor_label()
             except Exception:
                 pass
@@ -417,6 +380,4 @@ class PlotUIManager(BasePlotManager):
     def _run_stats_refresh(self, pw: Any) -> None:
         """执行统计刷新"""
         if pw.plot_context is not None:
-            if DEBUG_LOG_ENABLED:
-                debug_log("Plot._run_stats_refresh context=%s", bool(pw.plot_context))
             pw.plot_context.request_mark_stats_refresh(immediate=True)

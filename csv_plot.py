@@ -6,12 +6,7 @@ import subprocess
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import logging
-import faulthandler
-import signal
-import threading
 from threading import Lock
-import traceback
 from typing import Any
 
 if sys.platform == "darwin":  # macOS
@@ -21,9 +16,11 @@ if sys.platform == "darwin":  # macOS
         "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
     )
 
+os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
+
 from src.ui.drag_drop import (VAR_SEPARATOR,parse_var_names_from_mimedata,build_var_mimedata,create_drag_pixmap)
 from src.ui.widgets.custom_viewbox import CustomViewBox
-from src.core.config import (DEBUG_LOG_ENABLED,debug_log,safe_callback,_install_faulthandler,_log_uncaught_exception,_threading_exception_logger,_qt_message_handler,install_global_debug_hooks,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS,FROZEN_VIEW_WIDTH_DEFAULT,XRANGE_THRESHOLD_FOR_SYMBOLS,BLINK_PULSE,FACTOR_SCROLL_ZOOM,MIN_INDEX_LENGTH,DEFAULT_LINE_WIDTH,THICK_LINE_WIDTH,THIN_LINE_WIDTH,UI_DEBOUNCE_DELAY_MS,PLOT_ROW_MAX_DEFAULT,PLOT_COL_MAX_DEFAULT,PLOT_ROW_CURRENT_DEFAULT,PLOT_COL_CURRENT_DEFAULT,FLOAT32_SAFE_MAX,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety,DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (safe_callback,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS,FROZEN_VIEW_WIDTH_DEFAULT,XRANGE_THRESHOLD_FOR_SYMBOLS,BLINK_PULSE,FACTOR_SCROLL_ZOOM,MIN_INDEX_LENGTH,DEFAULT_LINE_WIDTH,THICK_LINE_WIDTH,THIN_LINE_WIDTH,UI_DEBOUNCE_DELAY_MS,PLOT_ROW_MAX_DEFAULT,PLOT_COL_MAX_DEFAULT,PLOT_ROW_CURRENT_DEFAULT,PLOT_COL_CURRENT_DEFAULT,FLOAT32_SAFE_MAX,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety,DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.types import AutoDetectError,FormatInfo,CurveInfo
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.data.loader import FastDataLoader,DataLoadThread
@@ -42,9 +39,9 @@ from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.layout_manager import LayoutManager
 
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker, QtMsgType, qInstallMessageHandler
-from PyQt6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QThread, Signal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker
+from PySide6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
     QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
     QMessageBox, QDialog, QFormLayout, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QTableWidget, QTableWidgetItem, QHeaderView, QRubberBand, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem, QSplitter,
@@ -763,16 +760,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             tasks.append("stats")
         if not tasks:
             return
-        if DEBUG_LOG_ENABLED and (immediate or getattr(self, '_is_updating_data', False)):
-            debug_log(
-                "Plot._queue_ui_refresh y=%s tasks=%s immediate=%s updating=%s pinned=%s loading=%s",
-                getattr(self, 'y_name', None),
-                tasks,
-                immediate,
-                getattr(self, '_is_updating_data', False),
-                getattr(self, 'is_cursor_pinned', False),
-                bool(self.window() and getattr(self.window(), '_is_loading_new_data', False)),
-            )
         if immediate:
             self._ui_refresh.run_immediately(*tasks)
         else:
@@ -787,42 +774,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _run_style_refresh(self):
         if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-            if DEBUG_LOG_ENABLED:
-                debug_log(
-                    "Plot._run_style_refresh skipped y=%s updating=%s destroying=%s",
-                    getattr(self, "y_name", None),
-                    getattr(self, "_is_updating_data", False),
-                    getattr(self, "_is_being_destroyed", False),
-                )
             return
         if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
-            if DEBUG_LOG_ENABLED:
-                debug_log("Plot._run_style_refresh exec y=%s", getattr(self, "y_name", None))
             self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
 
     def _run_cursor_refresh(self):
         if getattr(self, '_is_interacting', False):
-            if DEBUG_LOG_ENABLED:
-                debug_log("Plot._run_cursor_refresh skipped-interacting y=%s", getattr(self, "y_name", None))
             return
         if hasattr(self, 'vline') and self.vline.isVisible():
             try:
-                if DEBUG_LOG_ENABLED:
-                    debug_log("Plot._run_cursor_refresh exec y=%s pinned=%s",
-                              getattr(self, "y_name", None),
-                              getattr(self, "is_cursor_pinned", False))
                 self.update_cursor_label()
             except Exception:
                 pass
 
     def _run_stats_refresh(self):
         main_window = self.window()
-        if DEBUG_LOG_ENABLED:
-            debug_log(
-                "Plot._run_stats_refresh window=%s has_mark_stats=%s",
-                bool(main_window),
-                bool(main_window and getattr(main_window, "mark_stats_window", None)),
-            )
         if main_window is not None:
             main_window.request_mark_stats_refresh(immediate=True)
 
@@ -1283,14 +1249,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         retry_count = 0
 
         while retry_count < MAX_RETRIES:
-            debug_log(
-                "Plot.update_cursor_label start y=%s locked=%s busy=%s dirty=%s retry=%s",
-                getattr(self, "y_name", None),
-                self._is_cursor_update_locked(),
-                getattr(self, "_cursor_label_busy", False),
-                getattr(self, "_cursor_label_dirty", False),
-                retry_count,
-            )
 
             if self._is_cursor_update_locked():
                 return
@@ -1307,7 +1265,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self._update_multi_curve_cursor_label()
             except (RuntimeError, AttributeError) as e:
                 # 对象可能已被销毁
-                debug_log("update_cursor_label error: %s", e)
+                pass
             finally:
                 self._cursor_label_busy = False
 
@@ -1319,8 +1277,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             else:
                 break  # 无需重试，退出
 
-        if retry_count >= MAX_RETRIES:
-            debug_log("update_cursor_label exceeded max retries for y=%s", getattr(self, "y_name", None))
     
     def _update_single_curve_cursor_label(self):
         """更新单曲线模式的光标标签"""
@@ -1556,7 +1512,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     pass
 
             except Exception as e:
-                debug_log("_process_pending_deletes error: %s", e)
+                pass
 
     def _collect_visible_curve_arrays(self, key: str) -> list[np.ndarray]:
         arrays: list[np.ndarray] = []
@@ -2032,14 +1988,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def toggle_cursor(self, show: bool, hide_values_only: bool = False):
         """切换光标显示状态"""
-        debug_log(
-            "Plot.toggle_cursor start y=%s show=%s hide_values_only=%s data_ready=%s",
-            getattr(self, "y_name", None),
-            show,
-            hide_values_only,
-            bool(self.curve or self.curves),
-        )
-
         mode = self._get_cursor_mode()
 
         if hide_values_only:
@@ -3358,19 +3306,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             var_name: 要切换可见性的变量名
         """
         if var_name not in self.curves:
-            if DEBUG_LOG_ENABLED:
-                print(f"警告：变量 {var_name} 不在curves字典中")
-                print(f"当前curves键: {list(self.curves.keys())}")
-                print(f"当前y_name: {getattr(self, 'y_name', 'None')}")
             return
 
         ci = self.curves[var_name]
         # 切换可见性状态
         ci.visible = not ci.visible
         new_visible = ci.visible
-
-        if DEBUG_LOG_ENABLED:
-            print(f"切换 {var_name} 可见性: {new_visible}")
 
         # 更新曲线对象的可见性
         if ci.curve is not None:
@@ -3380,22 +3321,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 检查曲线对象是否仍然有效
                 if curve_obj.scene() is not None:
                     curve_obj.setVisible(new_visible)
-                    if DEBUG_LOG_ENABLED:
-                        print(f"  成功设置可见性")
                 else:
-                    if DEBUG_LOG_ENABLED:
-                        print(f"  曲线不在scene中，尝试重新创建")
                     # 曲线对象已经不在scene中，重新创建
                     self._recreate_curve(var_name)
             except Exception as e:
-                if DEBUG_LOG_ENABLED:
-                    print(f"  异常: {e}，尝试重新创建")
                 # 尝试重新创建曲线
                 self._recreate_curve(var_name)
-        else:
-            if DEBUG_LOG_ENABLED:
-                print(f"  警告：curve_info中没有'curve'键")
-
         # 更新图例显示
         self.update_legend()
 
@@ -3459,8 +3390,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         
         # 使用QTextDocument + hitTest精确定位点击位置
-        from PyQt6.QtGui import QTextDocument, QTextCursor
-        from PyQt6.QtCore import QPointF
+        from PySide6.QtGui import QTextDocument, QTextCursor
+        from PySide6.QtCore import QPointF
         
         # 构建完整的legend HTML（与update_legend完全一致）
         legend_parts = []
@@ -4216,7 +4147,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         elif getattr(pw, "y_name", ""):
             var_names = [pw.y_name]
         if var_names:
-            from PyQt6.QtWidgets import QApplication as _QA
+            from PySide6.QtWidgets import QApplication as _QA
             _QA.clipboard().setText(" ".join(var_names))
 
     def _on_vb_var_editor(self, pw):
@@ -4303,7 +4234,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._drop_event_filter_registered = False
-        self.defaultTitle = "数据快速查看器(PyQt6), Alpha版本"
+        self.defaultTitle = "数据快速查看器(PySide6), Alpha版本"
 
         # 设置应用程序图标（影响Dock图标）
         if sys.platform == "darwin":  # macOS
@@ -4921,12 +4852,13 @@ if __name__ == "__main__":
     # 禁用抗锯齿 (大数据量下抗锯齿非常消耗资源且视觉收益低)
     pg.setConfigOptions(antialias=False)
 
+    print(f"Qt 绑定: {pg.Qt.QT_LIB}")
+    print(f"Qt 版本: {pg.Qt.VERSION_INFO}")
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
-    install_global_debug_hooks(app)
-    
     
     if sys.platform == "win32":
         def get_windows_chinese_font():
@@ -4966,11 +4898,11 @@ if __name__ == "__main__":
 
 # pyinstaller
 #     - one file
-# pyinstaller csv_plot_pyqt6.py --onefile --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --noupx --clean --noconfirm
+# pyinstaller csv_plot.py --onefile --name csv_plot --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --noupx --clean --noconfirm --hidden-import PySide6
 #     - one dir
-# pyinstaller csv_plot_pyqt6.py --onedir --name csv_plot_pyqt6 --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --clean --noconfirm
+# pyinstaller csv_plot.py --onedir --name csv_plot --icon icon.ico --add-data "icon.ico;." --add-data "README.md;." --noconsole --clean --noconfirm --hidden-import PySide6
 
 
 # nuitka
-# nuitka --onefile --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
-# nuitka --standalone --output-filename=csv_plot_pyqt6 --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyqt6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot_pyqt6.py
+# nuitka --onefile --standalone --output-filename=csv_plot --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyside6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot.py
+# nuitka --standalone --output-filename=csv_plot --windows-console-mode=disable --windows-icon-from-ico=icon.ico --enable-plugin=pyside6 --include-data-file=icon.ico=data --include-data-file=README.md=data csv_plot.py

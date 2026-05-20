@@ -1,6 +1,0 @@
-numpy
-pandas
-pyqt6
-pyqtgraph
-charset-normalizer
-ujson

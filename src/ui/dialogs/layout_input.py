@@ -1,8 +1,8 @@
 """布局输入对话框"""
 
 from __future__ import annotations
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QDialog, QFormLayout, QSpinBox, QPushButton, QHBoxLayout
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QDialog, QFormLayout, QSpinBox, QPushButton, QHBoxLayout
 
 
 class LayoutInputDialog(QDialog):

@@ -1,6 +1,6 @@
-# CSV Plot (PyQt6)
+# CSV Plot (PySide6)
 
-一个基于 PyQt6 + pyqtgraph 的高性能交互式数据可视化工具，支持 CSV 和 MDF（ASAM MDF4/DAT）格式文件，专为快速加载、浏览和分析时序数据而设计。支持百万级数据点的流畅绘制和多曲线模式。
+一个基于 PySide6 + pyqtgraph 的高性能交互式数据可视化工具，支持 CSV 和 MDF（ASAM MDF4/DAT）格式文件，专为快速加载、浏览和分析时序数据而设计。支持百万级数据点的流畅绘制和多曲线模式。
 
 ## 主要特性
 
@@ -59,7 +59,7 @@
 
 ```
 csv_plot/
-├── csv_plot_pyqt6.py            # 主入口（~5000 行，DraggablePlotWidget + MainWindow）
+├── csv_plot.py                  # 主入口（~5000 行，DraggablePlotWidget + MainWindow）
 ├── pyproject.toml               # 项目依赖与构建配置
 ├── README.md
 ├── scripts/                     # 打包脚本
@@ -76,7 +76,7 @@ csv_plot/
     ├── app/
     │   └── plot_context.py      # PlotContext 服务层（依赖注入）
     ├── core/
-    │   ├── config.py            # 全局常量、调试钩子、float32 安全检查
+    │   ├── config.py            # 全局常量、float32 安全检查
     │   ├── types.py             # AutoDetectError / FormatInfo / CurveInfo 数据类型
     │   └── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
     ├── data/
@@ -134,12 +134,12 @@ csv_plot/
 
    或使用 pip：
    ```bash
-   pip install pyqt6 pyqtgraph pandas numpy asammdf charset-normalizer ujson
+   pip install pyside6 pyqtgraph pandas numpy asammdf charset-normalizer ujson
    ```
 
 3. **运行程序**
    ```bash
-   uv run csv_plot_pyqt6.py
+   uv run csv_plot.py
    ```
 
 ### 打包为独立应用
@@ -153,7 +153,6 @@ bash scripts/build_exe_pyinstaller
 # Nuitka（编译为原生可执行文件，性能更高）
 bash scripts/build_exe_nuitka
 ```
-
 
 ## 使用指南
 
@@ -200,7 +199,7 @@ bash scripts/build_exe_nuitka
 
 ## 技术栈
 
-- **PyQt6** — 现代化图形界面框架
+- **PySide6** — 现代化图形界面框架（LGPL 许可）
 - **pyqtgraph** — 高性能科学绘图库
 - **pandas** — 数据分析库
 - **numpy** — 数值计算基础库
