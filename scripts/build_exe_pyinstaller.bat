@@ -1,43 +1,27 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set "NAME=csv_plot"
-set "ENTRY=csv_plot.py"
-set "ICON=assets/icon.ico"
+set "SPEC=scripts\csv_plot_pyinstaller.spec"
 
-echo Building %NAME% with PyInstaller...
-echo Entry file: %ENTRY%
-echo Icon: %ICON%
+echo =============================================
+echo  Building csv_plot with PyInstaller (optimized)
+echo =============================================
+echo Spec file: %SPEC%
+echo.
 
-pyinstaller --noconfirm ^
-  --onedir ^
-  --windowed ^
-  --name=%NAME% ^
-  --icon="%ICON%" ^
-  --add-data "assets;assets" ^
-  --add-data "README.md;." ^
-  --hidden-import=asammdf ^
-  --hidden-import=chardet ^
-  --hidden-import=charset_normalizer ^
-  --hidden-import=src ^
-  --collect-submodules numpy ^
-  --collect-submodules pandas ^
-  --collect-submodules PySide6 ^
-  --exclude-module=nuitka ^
-  --exclude-module=pytest ^
-  --exclude-module=pyinstaller ^
-  --exclude-module=tkinter ^
-  --noupx ^
-  --strip ^
-  --upx-exclude=vcruntime140.dll ^
-  --upx-exclude=python3.dll ^
-  --noupx ^
-  "%ENTRY%"
+pyinstaller --noconfirm --clean "%SPEC%"
 
 if %ERRORLEVEL% EQU 0 (
-  echo Building successfully!
-  echo Executable is in: dist\%NAME%\目录下
+  echo.
+  echo =============================================
+  echo  Build succeeded!
+  echo  Output: dist\csv_plot\
+  echo =============================================
 ) else (
-  echo Building failed!
+  echo.
+  echo =============================================
+  echo  Build failed!
+  echo =============================================
   pause
+  exit /b 1
 )

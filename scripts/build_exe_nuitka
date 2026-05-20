@@ -8,6 +8,12 @@ cd "$PROJECT_DIR"
 NAME="csv_plot"
 ENTRY="csv_plot.py"
 
+echo "========================================"
+echo " Building $NAME with Nuitka (optimized) "
+echo "========================================"
+echo "Entry: $ENTRY"
+echo
+
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
     PLATFORM_OPTS=(
         "--windows-console-mode=disable"
@@ -26,13 +32,10 @@ nuitka --standalone \
     --enable-plugin=numpy \
     --include-package=src \
     --include-package=asammdf \
-    --include-module=src.data.mdf_loader \
     --include-module=numpy \
     --include-module=pandas \
     --include-module=chardet \
     --include-module=charset_normalizer \
-    --include-module=lxml \
-    --include-module=scipy \
     --include-data-file=assets/icon.ico=assets/icon.ico \
     --include-data-file=assets/icon.icns=assets/icon.icns \
     --include-data-file=assets/icon.png=assets/icon.png \
@@ -42,5 +45,36 @@ nuitka --standalone \
     --nofollow-import-to=pytest \
     --nofollow-import-to=pyinstaller \
     --nofollow-import-to=tkinter \
+    --nofollow-import-to=unittest \
+    --nofollow-import-to=test \
+    --nofollow-import-to=distutils \
+    --nofollow-import-to=setuptools \
+    --nofollow-import-to=pip \
+    --nofollow-import-to=wheel \
+    --nofollow-import-to=scipy \
+    --nofollow-import-to=lxml \
+    --nofollow-import-to=PIL \
+    --nofollow-import-to=cv2 \
+    --nofollow-import-to=matplotlib \
+    --lto=yes \
+    --jobs=8 \
     "${PLATFORM_OPTS[@]}" \
     "$ENTRY"
+
+if [ $? -eq 0 ]; then
+    echo
+    echo "========================================"
+    echo " Build succeeded!"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo " Output: $NAME.app"
+    else
+        echo " Output: $NAME.dist/$NAME.exe"
+    fi
+    echo "========================================"
+else
+    echo
+    echo "========================================"
+    echo " Build failed!"
+    echo "========================================"
+    exit 1
+fi
