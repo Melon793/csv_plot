@@ -15,6 +15,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QShortcut,
 )
+from src.core.font_cache import get_monospace_font_cached
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -152,8 +153,12 @@ class LogViewer(QWidget):
 
         self._text_edit = QPlainTextEdit()
         self._text_edit.setReadOnly(True)
-        font = QFont("Menlo, Consolas, Courier New, monospace", 11)
-        font.setStyleHint(QFont.StyleHint.Monospace)
+        mono_font = get_monospace_font_cached()
+        if mono_font:
+            font = QFont(mono_font, 11)
+        else:
+            font = QFont("monospace", 11)
+            font.setStyleHint(QFont.StyleHint.Monospace)
         self._text_edit.setFont(font)
         self._text_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._text_edit.setMaximumBlockCount(0)
