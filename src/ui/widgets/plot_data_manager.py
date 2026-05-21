@@ -614,6 +614,9 @@ class PlotDataManager:
                         curve.clear()
                     except Exception:
                         logger.debug("清理多曲线 curve 时异常: %s", var_name)
+            
+            # 清除 vline bounds
+            self._set_vline_bounds([None, None])
         except Exception:
             logger.debug("清理绘图数据时异常", exc_info=True)
 
@@ -682,6 +685,7 @@ class PlotDataManager:
     def _update_vline_bounds_from_data(self):
         """从数据更新光标线边界"""
         pw = self.pw
+        updated = False
         if pw.is_multi_curve_mode and pw.curves:
             all_x = []
             for ci in pw.curves.values():
@@ -689,6 +693,10 @@ class PlotDataManager:
                     all_x.extend(ci.x_data)
             if all_x:
                 self._set_vline_bounds([min(all_x), max(all_x)])
+                updated = True
         elif pw.original_index_x is not None:
             x_values = pw.offset + pw.factor * pw.original_index_x
             self._set_vline_bounds([np.min(x_values), np.max(x_values)])
+            updated = True
+        if not updated:
+            self._set_vline_bounds([None, None])
