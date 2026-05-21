@@ -31,6 +31,9 @@ from src.ui.file_loader_manager import FileLoaderManager
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.layout_manager import LayoutManager
 
+from src.core.logger import LogManager, get_logger
+from src.ui.dialogs.log_window import LogWindow
+
 
 from PySide6.QtCore import Qt, QThread, Signal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker
 from PySide6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
@@ -83,6 +86,8 @@ if sys.platform == "win32": # Windows
 
 elif sys.platform == "darwin":  # macOS
     ico_path = resource_path("assets/icon.icns")  
+
+_widget_logger = get_logger("widget")
 
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
@@ -778,7 +783,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             try:
                 self.update_cursor_label()
             except Exception:
-                pass
+                _widget_logger.debug("光标刷新异常（C++对象可能已销毁）")
 
     def _run_stats_refresh(self):
         main_window = self.window()
@@ -1435,8 +1440,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     # 不在对象池中的项（理论上不应该存在）：加入待删除队列
                     self._queue_item_for_deletion(item)
             except Exception:
-                # 忽略清理过程中的错误
-                pass
+                pass  # 忽略 queue_item 清理过程中的错误
 
         # 清空当前使用列表
         self.multi_cursor_items.clear()
@@ -1616,8 +1620,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                                     # 清除曲线数据
                                     try:
                                         item.clear()
-                                    except:
-                                        pass
+                                    except Exception:
+                                        _widget_logger.debug("clear_all_plots: item.clear() 异常")
                             
                             # 注意：不在这里清理TextItem和ScatterPlotItem
                             # 这些cursor相关的items由_clear_cursor_items()管理
@@ -1630,12 +1634,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         else:
                             pass
                     except Exception as e:
-                        pass
+                        pass  # 单个 scene item 清理异常，继续处理其他
                 
             
             
         except Exception as e:
-            pass
+            _widget_logger.debug("clear_all_plots_manager 异常: %s", e)
     
     def _update_multi_curve_cursor_label(self):
         """更新多曲线光标标签（多光标模式）"""
@@ -1712,7 +1716,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                             if hasattr(pen, "color"):
                                 curve_color = pen.color().name()
                     except Exception:
-                        pass
+                        pass  # pen.color 可能不可用
                     window = self.window()
                     curves_to_process.append({
                         "var_name": self.y_name,
@@ -4433,10 +4437,17 @@ class MainWindow(QMainWindow):
         self.list_widget = MyTableWidget()
         left_layout.addWidget(self.list_widget)
 
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(2)
+        self.log_btn = QPushButton("日志")
+        self.log_btn.clicked.connect(self.show_log_window)
+        bottom_row.addWidget(self.log_btn)
+
         self.toggle_plot_btn = QPushButton("隐藏绘图区")
         self.toggle_plot_btn.setCheckable(True)
         self.toggle_plot_btn.toggled.connect(self.toggle_plot_area)
-        left_layout.addWidget(self.toggle_plot_btn)
+        bottom_row.addWidget(self.toggle_plot_btn)
+        left_layout.addLayout(bottom_row)
         left_layout.setSpacing(2)
         self.left_widget=left_widget
 
@@ -4585,7 +4596,16 @@ class MainWindow(QMainWindow):
         self.layout_manager = LayoutManager(self)
         self.cursor_sync_manager = CursorSyncManager(self)
 
+        self._log_manager = LogManager.get_instance()
+        self._logger = self._log_manager.get_logger("app.main")
+
         self.set_button_status(False)
+
+        self._logger.info(
+            "CSV Plot 启动 (Python %s, PySide6 %s)",
+            sys.version.split()[0],
+            __import__("PySide6").__version__,
+        )
 
         # ---------------- 命令行直接加载文件 ----------------
         positional_args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -4593,8 +4613,15 @@ class MainWindow(QMainWindow):
             self.load_csv_file(positional_args[0])
 
     def closeEvent(self, event):
+        self._logger.info("CSV Plot 应用程序退出")
         self.layout_manager._handle_close()
         super().closeEvent(event)
+
+    def show_log_window(self):
+        log_window = LogWindow.get_instance(self)
+        log_window.show()
+        log_window.raise_()
+        log_window.activateWindow()
         
     def _on_splitter_moved(self, pos, index):
         self.layout_manager._on_splitter_moved(pos, index)

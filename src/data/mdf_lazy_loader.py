@@ -22,6 +22,9 @@ from src.data.metadata import (
     is_enum_conversion,
     extract_enum_map,
 )
+from src.core.logger import get_logger
+
+logger = get_logger("data.mdf")
 
 
 class MDFLazyLoader:
@@ -38,6 +41,7 @@ class MDFLazyLoader:
         self._path = path
         self._progress = _progress
         self._validate_file()
+        logger.info("开始加载 MDF 文件: %s (%.1f MB)", path, self._file_size / 1024 / 1024)
 
         self._signal_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._time_cache: dict[int, np.ndarray] = {}
@@ -68,6 +72,11 @@ class MDFLazyLoader:
         self._build_aggregated_properties()
 
         self._notify_progress(100)
+        logger.info(
+            "MDF 加载完成: %d 个信号, %d 组",
+            len(self._metadata),
+            self._current_group_index + 1,
+        )
 
     def __del__(self):
         self.close()
@@ -77,7 +86,7 @@ class MDFLazyLoader:
             try:
                 self._progress(value)
             except Exception:
-                pass
+                pass  # 进度回调不应阻断主流程
 
     def _validate_file(self):
         if not os.path.exists(self._path):
@@ -300,7 +309,7 @@ class MDFLazyLoader:
                 total_samples = max(total_samples, cycles)
 
             except Exception:
-                pass
+                logger.debug("汇总信号 '%s' 时间范围时异常，跳过", sig.name if hasattr(sig, 'name') else '?')
 
             if self._progress and total_groups > 0:
                 progress = 50 + int((idx + 1) / total_groups * 50)
@@ -347,7 +356,7 @@ class MDFLazyLoader:
             try:
                 self._mdf.close()
             except Exception:
-                pass
+                logger.debug("关闭 MDF 文件时异常")
             del self._mdf
             self._mdf = None
 

@@ -5,6 +5,7 @@ import sys
 import os
 from typing import Any
 import numpy as np
+import logging
 
 DEFAULT_SHOW_X_AXIS_LABEL = False
 

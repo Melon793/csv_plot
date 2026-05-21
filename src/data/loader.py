@@ -15,6 +15,9 @@ from src.core.config import (
     _evaluate_float32_safety,
 )
 from src.core.types import FormatInfo, AutoDetectError
+from src.core.logger import get_logger
+
+logger = get_logger("data.loader")
 
 
 class DataLoadThread(QThread):
@@ -56,6 +59,7 @@ class DataLoadThread(QThread):
                 self.progress.emit(progress)
 
             if not os.path.exists(self.file_path):
+                logger.error("文件不存在: %s", self.file_path)
                 self.error.emit("文件不存在或已被删除")
                 return
 
@@ -76,10 +80,13 @@ class DataLoadThread(QThread):
                 )
             self.finished.emit(loader)
         except MemoryError:
+            logger.critical("DataLoadThread 内存不足: %s", self.file_path)
             self.error.emit("内存不足，无法加载此文件。请尝试加载较小的文件。")
         except OSError as e:
+            logger.error("DataLoadThread 文件访问错误: %s", e)
             self.error.emit(f"文件访问错误: {e}")
         except Exception as e:
+            logger.error("DataLoadThread 加载文件失败: %s", e, exc_info=True)
             self.error.emit(f"加载文件时发生未知错误: {str(e)}")
 
 
@@ -331,6 +338,10 @@ class FastDataLoader:
             AutoDetectError: 无法自动检测文件分隔符或文件内容不足
         """
         fmt = FastDataLoader._auto_detect_format(file_path)
+        logger.debug(
+            "auto_detect: enc=%s, sep=%s, header=%d, unit=%s",
+            fmt.encoding, fmt.sep, fmt.header_row, fmt.has_unit,
+        )
         if fmt.sep is None:
             raise AutoDetectError(f"无法自动检测文件分隔符: {file_path}")
         return fmt
@@ -372,6 +383,10 @@ class FastDataLoader:
         """
         self._path = csv_path
         self.file_size = os.path.getsize(csv_path)
+        logger.info(
+            "开始加载 CSV: %s (%.1f MB, sep=%s, desc=%d, has_unit=%s)",
+            csv_path, self.file_size / 1024 / 1024, sep, desc_rows, has_unit,
+        )
         self.max_rows_infer = max_rows_infer
         self.usecols = usecols
         self.drop_empty = drop_empty
@@ -455,6 +470,11 @@ class FastDataLoader:
 
         if self._progress_cb:
             self._progress_cb(100)
+
+        logger.info(
+            "CSV 加载完成: %s (%d 行, %d 列)",
+            csv_path, len(self._df), len(self._var_names),
+        )
 
     @staticmethod
     def _load_header_units(

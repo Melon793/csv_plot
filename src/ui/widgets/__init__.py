@@ -22,6 +22,7 @@ from src.ui.widgets.multi_curve_manager import MultiCurveManager
 from src.ui.widgets.cursor_manager import CursorManager
 from src.ui.widgets.mark_region_manager import MarkRegionManager
 from src.ui.widgets.event_handler import EventHandler
+from src.ui.widgets.log_viewer import LogViewer
 
 __all__ = [
     "BasePlotManager",
@@ -34,4 +35,5 @@ __all__ = [
     "EventHandler",
     "CustomViewBox",
     "PlotContainerWidget",
+    "LogViewer",
 ]
