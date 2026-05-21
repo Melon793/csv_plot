@@ -26,10 +26,6 @@ from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.table_dialog import DataTableDialog, DropOverlay
 from src.ui.variable_list import MyTableWidget
 
-from src.ui.file_loader_manager import FileLoaderManager
-from src.ui.cursor_sync_manager import CursorSyncManager
-from src.ui.layout_manager import LayoutManager
-
 from src.core.logger import LogManager, get_logger
 from src.ui.dialogs.log_window import LogWindow
 
@@ -4230,6 +4226,10 @@ class MainWindow(QMainWindow):
     """
     def __init__(self):
         super().__init__()
+        from src.ui.file_loader_manager import FileLoaderManager
+        from src.ui.cursor_sync_manager import CursorSyncManager
+        from src.ui.layout_manager import LayoutManager
+
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._drop_event_filter_registered = False
         self.defaultTitle = "数据快速查看器(PySide6), Alpha版本"
@@ -4712,6 +4712,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def load_dict(path: str, *, default=None) -> dict:
+        from src.ui.file_loader_manager import FileLoaderManager
         return FileLoaderManager.load_dict(path, default=default)
         
     def _extract_file_extension(self, file_path: str) -> str:
@@ -4792,6 +4793,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _clamp_value(value, min_val, max_val):
+        from src.ui.cursor_sync_manager import CursorSyncManager
         return CursorSyncManager._clamp_value(value, min_val, max_val)
 
     def _calc_second_cursor_position(self, pinned_x, view_min, view_max):
