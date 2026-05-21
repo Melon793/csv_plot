@@ -47,6 +47,60 @@ def _settings():
     return QSettings(SETTINGS_ORG, SETTINGS_APP)
 
 
+_MONO_FONT_PRIORITY = [
+    "SF Mono",
+    "JetBrains Mono",
+    "Fira Code",
+    "Cascadia Code",
+    "Menlo",
+    "Consolas",
+    "Monaco",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Source Code Pro",
+    "Courier New",
+]
+
+_MONO_CACHE_VERSION = 1
+
+
+def _detect_mono_font() -> str:
+    """枚举系统字体并返回第一个匹配的等宽字体名"""
+    from PySide6.QtGui import QFontDatabase
+
+    available = QFontDatabase.families()
+    for name in _MONO_FONT_PRIORITY:
+        if name in available:
+            return name
+    return ""
+
+
+def get_monospace_font_cached() -> str:
+    """
+    返回缓存或检测到的等宽字体名。
+
+    搭配 QFont(name, pixel_size) 使用。
+    返回空字符串则回退到 QFont("monospace") 默认行为。
+    """
+    from PySide6.QtGui import QFontDatabase
+
+    settings = _settings()
+
+    cached_version = settings.value("mono_cache_version", 0, type=int)
+    if cached_version == _MONO_CACHE_VERSION:
+        cached_name = settings.value("mono_font_name", "", type=str)
+        if cached_name and cached_name in QFontDatabase.families():
+            return cached_name
+
+    detected = _detect_mono_font()
+    if not detected:
+        return ""
+
+    settings.setValue("mono_cache_version", _MONO_CACHE_VERSION)
+    settings.setValue("mono_font_name", detected)
+    return detected
+
+
 def get_windows_chinese_font_cached() -> str:
     """
     返回缓存或检测到的中文字体名。
