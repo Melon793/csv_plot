@@ -77,8 +77,10 @@ csv_plot/
     │   └── plot_context.py      # PlotContext 服务层（依赖注入）
     ├── core/
     │   ├── config.py            # 全局常量、float32 安全检查
-    │   ├── types.py             # AutoDetectError / FormatInfo / CurveInfo 数据类型
-    │   └── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
+    │   ├── data_types.py        # AutoDetectError / FormatInfo / CurveInfo 数据类型
+    │   ├── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
+    │   ├── font_cache.py        # 字体缓存
+    │   └── logger.py            # Logger 日志管理器
     ├── data/
     │   ├── loader.py            # FastDataLoader CSV 加载 + DataLoadThread 后台线程
     │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
@@ -93,11 +95,13 @@ csv_plot/
         ├── file_loader_manager.py  # 文件加载管理器
         ├── cursor_sync_manager.py  # 游标同步管理器
         ├── layout_manager.py    # 布局管理器
+        ├── splash_screen.py     # SplashScreen 启动画面
         ├── dialogs/
         │   ├── help.py          # HelpDialog 帮助文档
         │   ├── layout_input.py  # LayoutInputDialog 行列数配置
         │   ├── axis.py          # AxisDialog 坐标轴设置
-        │   └── time_correction.py  # TimeCorrectionDialog 时间修正
+        │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
+        │   └── log_window.py     # LogWindowDialog 日志窗口
         └── widgets/
             ├── __init__.py
             ├── base_manager.py  # 管理器基类
@@ -109,7 +113,8 @@ csv_plot/
             ├── cursor_manager.py # CursorManager 游标管理器
             ├── multi_curve_manager.py # MultiCurveManager 多曲线管理器
             ├── mark_region_manager.py # MarkRegionManager 标记区域管理器
-            └── event_handler.py # EventHandler 事件处理器
+            ├── event_handler.py # EventHandler 事件处理器
+            └── log_viewer.py    # LogViewer 日志查看器
 ```
 
 ## 快速开始
