@@ -309,7 +309,7 @@ class MDFLazyLoader:
                 total_samples = max(total_samples, cycles)
 
             except Exception:
-                logger.debug("汇总信号 '%s' 时间范围时异常，跳过", sig.name if hasattr(sig, 'name') else '?')
+                logger.debug("汇总信号 gi=%d 时间范围时异常，跳过", gi)
 
             if self._progress and total_groups > 0:
                 progress = 50 + int((idx + 1) / total_groups * 50)

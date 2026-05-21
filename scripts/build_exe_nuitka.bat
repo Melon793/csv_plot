@@ -16,10 +16,12 @@ rem === Pandas 排除: tests / plotting ===
 nuitka --standalone ^
   --output-filename=%NAME% ^
   --enable-plugin=pyside6 ^
+  --enable-plugin=numpy ^
   --include-module=PySide6.QtOpenGL ^
   --include-module=PySide6.QtOpenGLWidgets ^
   --include-package=src ^
-  --include-module=asammdf ^
+  --include-package=asammdf ^
+  --include-package=asammdf.blocks ^
   --include-module=numpy ^
   --include-module=pandas ^
   --include-package=chardet ^

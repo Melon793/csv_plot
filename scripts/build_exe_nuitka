@@ -32,6 +32,7 @@ nuitka --standalone \
     --enable-plugin=numpy \
     --include-package=src \
     --include-package=asammdf \
+    --include-package=asammdf.blocks \
     --include-module=numpy \
     --include-module=pandas \
     --include-module=chardet \
