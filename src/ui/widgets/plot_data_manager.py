@@ -25,6 +25,9 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_Y,
     _evaluate_float32_safety,
 )
+from src.core.logger import get_logger
+
+logger = get_logger("widget.plot_data")
 
 if TYPE_CHECKING:
     from src.ui.widgets.axis_manager import AxisManager
@@ -397,7 +400,7 @@ class PlotDataManager:
                             pw.plot_context.value_cache[var_name] = (y_values, y_format)
                     return y_values, y_format
             except KeyError:
-                pass
+                pass  # var_name 无枚举映射，继续正常取值流程
 
         dtype_kind = raw_values.dtype.kind
         y_values = None
@@ -566,13 +569,13 @@ class PlotDataManager:
                                     try:
                                         item.clear()
                                     except Exception:
-                                        pass
+                                        logger.debug("清理 plot item.clear() 异常")
                             if should_remove:
                                 current_scene.removeItem(item)
                     except (RuntimeError, AttributeError):
-                        pass
+                        logger.debug("C++ 对象已销毁，跳过该 item 清理")
         except (RuntimeError, AttributeError):
-            pass
+            logger.debug("plot_item 场景已销毁，跳过批量清理")
 
     def _clear_plot_data(self):
         """清除绘图数据"""
@@ -594,7 +597,7 @@ class PlotDataManager:
                 try:
                     pw.curve.clear()
                 except Exception:
-                    pass
+                    logger.debug("清理 curve 时异常")
 
             pw.curve = None
             pw.original_index_x = None
@@ -610,9 +613,9 @@ class PlotDataManager:
                     try:
                         curve.clear()
                     except Exception:
-                        pass
+                        logger.debug("清理多曲线 curve 时异常: %s", var_name)
         except Exception:
-            pass
+            logger.debug("清理绘图数据时异常", exc_info=True)
 
     def clear_plot_item(self):
         """清除单个plot item"""

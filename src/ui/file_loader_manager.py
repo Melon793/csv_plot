@@ -19,6 +19,9 @@ from src.core.types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.main_window_base_manager import MainWindowBaseManager
+from src.core.logger import get_logger
+
+logger = get_logger("ui.file_loader")
 
 
 class FileLoaderManager(MainWindowBaseManager):
@@ -69,6 +72,7 @@ class FileLoaderManager(MainWindowBaseManager):
             if file_path:
                 self.load_csv_file(file_path)
             else:
+                logger.debug("用户取消文件选择")
                 self.mw.load_btn.setEnabled(True)
         except Exception:
             self.mw.load_btn.setEnabled(True)
@@ -128,7 +132,7 @@ class FileLoaderManager(MainWindowBaseManager):
         try:
             self.mw.reset_all_pin_states()
         except Exception:
-            pass
+            logger.debug("重置 pin 状态失败（可能数据已变更）")
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if not widget:
@@ -165,6 +169,8 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget._queue_ui_refresh(immediate=True)
 
     def load_csv_file(self, file_path: str):
+        logger.info("开始加载文件: %s", file_path)
+
         if getattr(self.mw, "_is_loading_new_data", False):
             self.mw.load_btn.setEnabled(True)
             return
@@ -206,6 +212,8 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.grid_layout_btn.setEnabled(status)
 
     def reload_data(self):
+        logger.info("重新加载数据: %s", getattr(self.mw.loader, "path", "?"))
+
         if getattr(self.mw, "_is_loading_new_data", False):
             return
 
@@ -261,6 +269,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     "配置文件错误",
                     f"config_dict.json 读取失败，将使用自动检测方式加载文件。\n\n错误详情: {e}",
                 )
+                logger.warning("config_dict.json 读取失败: %s", e)
 
         if not config_used:
             try:
@@ -269,6 +278,10 @@ class FileLoaderManager(MainWindowBaseManager):
                 desc_rows = fmt.header_row
                 has_unit = fmt.has_unit
                 encoding = fmt.encoding
+                logger.debug(
+                    "自动检测: sep=%s, header=%d, has_unit=%s, enc=%s",
+                    delimiter_typ, desc_rows, has_unit, encoding,
+                )
             except AutoDetectError as e:
                 QMessageBox.critical(
                     self.mw,
@@ -294,6 +307,7 @@ class FileLoaderManager(MainWindowBaseManager):
         file_size = os.path.getsize(file_path)
         try:
             if file_size < _Threshold_Size_Mb * 1024 * 1024:
+                logger.info("同步加载文件 (%.1f MB)", file_size / 1024 / 1024)
                 try:
                     status = self._load_sync(
                         file_path,
@@ -311,6 +325,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 else:
                     self.mw.load_btn.setEnabled(True)
             else:
+                logger.info("后台加载文件 (%.1f MB)", file_size / 1024 / 1024)
                 self.mw._progress = QProgressDialog(
                     "正在读取数据...", "取消", 0, 100, self.mw
                 )
@@ -346,7 +361,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     try:
                         self.mw.loader.close()
                     except Exception:
-                        pass
+                        logger.debug("关闭旧 loader 时发生异常")
                 del self.mw.loader
                 self.mw.loader = None
 
@@ -357,9 +372,9 @@ class FileLoaderManager(MainWindowBaseManager):
             gc.collect()
 
         except (AttributeError, TypeError):
-            pass
+            logger.debug("清理旧数据时属性/类型错误（对象可能已销毁）")
         except Exception:
-            pass
+            logger.warning("清理旧数据时发生异常", exc_info=True)
 
     def _post_load_actions(self, file_path: str):
         self.mw.loaded_path = file_path
@@ -488,17 +503,22 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.loader = loader
             self.mw._apply_loader()
             status = True
+            logger.info("文件加载完成: %s (%d 行)", file_path, loader.datalength)
         except MemoryError as e:
             QMessageBox.critical(self.mw, "内存不足", f"加载文件时内存不足: {str(e)}")
+            logger.error("内存不足: %s", e)
             status = False
         except FileNotFoundError as e:
             QMessageBox.critical(self.mw, "文件未找到", f"无法找到文件: {str(e)}")
+            logger.error("文件未找到: %s", e)
             status = False
         except PermissionError as e:
             QMessageBox.critical(self.mw, "权限错误", f"没有文件访问权限: {str(e)}")
+            logger.error("权限错误: %s", e)
             status = False
         except Exception as e:
             QMessageBox.critical(self.mw, "读取失败", f"加载文件时发生错误: {str(e)}")
+            logger.error("加载文件失败: %s", e, exc_info=True)
             status = False
         finally:
             if loader is not None:
@@ -506,13 +526,14 @@ class FileLoaderManager(MainWindowBaseManager):
         return status
 
     def _on_load_done(self, loader, file_path: str):
+        logger.info("后台加载完成: %s", file_path)
         self.mw._progress.close()
         if hasattr(self.mw, "loader") and self.mw.loader is not None:
             if hasattr(self.mw.loader, "close"):
                 try:
                     self.mw.loader.close()
                 except Exception:
-                    pass
+                    logger.debug("关闭旧 loader 时发生异常（后台加载完成回调）")
             del self.mw.loader
 
         self.mw.loader = loader
@@ -522,6 +543,7 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw.load_btn.setEnabled(True)
 
     def _on_load_error(self, msg):
+        logger.error("后台加载失败: %s", msg)
         self.mw._progress.close()
         QMessageBox.critical(self.mw, "读取失败", msg)
         self._end_data_reload()
