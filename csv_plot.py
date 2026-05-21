@@ -18,14 +18,13 @@ if sys.platform == "darwin":  # macOS
 
 os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 
-from src.ui.drag_drop import (VAR_SEPARATOR,parse_var_names_from_mimedata,build_var_mimedata,create_drag_pixmap)
+from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
 from src.ui.widgets.custom_viewbox import CustomViewBox
-from src.core.config import (safe_callback,DEFAULT_PADDING_VAL_X,DEFAULT_PADDING_VAL_Y,FILE_SIZE_LIMIT_BACKGROUND_LOADING,RATIO_RESET_PLOTS,FROZEN_VIEW_WIDTH_DEFAULT,XRANGE_THRESHOLD_FOR_SYMBOLS,BLINK_PULSE,FACTOR_SCROLL_ZOOM,MIN_INDEX_LENGTH,DEFAULT_LINE_WIDTH,THICK_LINE_WIDTH,THIN_LINE_WIDTH,UI_DEBOUNCE_DELAY_MS,PLOT_ROW_MAX_DEFAULT,PLOT_COL_MAX_DEFAULT,PLOT_ROW_CURRENT_DEFAULT,PLOT_COL_CURRENT_DEFAULT,FLOAT32_SAFE_MAX,_UNIT_KEYWORDS,UNIT_KEYWORD_RATIO_THRESHOLD,VALID_NUMERIC_RATIO_THRESHOLD,_evaluate_float32_safety,DEFAULT_SHOW_X_AXIS_LABEL)
-from src.core.data_types import AutoDetectError,FormatInfo,CurveInfo
+from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT, _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.data_types import CurveInfo
 from src.core.scheduler import UnifiedUpdateScheduler
-from src.data.loader import FastDataLoader,DataLoadThread
 from src.ui.table_dialog import DataTableDialog, DropOverlay
-from src.ui.variable_list import MyTableWidget, NoHoverDelegate
+from src.ui.variable_list import MyTableWidget
 
 from src.ui.file_loader_manager import FileLoaderManager
 from src.ui.cursor_sync_manager import CursorSyncManager
@@ -35,13 +34,12 @@ from src.core.logger import LogManager, get_logger
 from src.ui.dialogs.log_window import LogWindow
 
 
-from PySide6.QtCore import Qt, QThread, Signal, QMimeData, QMargins, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QDir, QStandardPaths, QSignalBlocker
-from PySide6.QtGui import QFontMetrics, QDrag, QPen, QColor, QAction, QActionGroup, QIcon, QFont, QFontDatabase, QPainter, QPixmap, QCursor
+from PySide6.QtCore import Qt, QMargins, QTimer, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker
+from PySide6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QCursor
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QProgressDialog, QGridLayout, QSpinBox, QMenu, QTextEdit,
-    QFileDialog, QPushButton, QAbstractItemView, QLabel, QLineEdit, QTableView, QStyledItemDelegate,
-    QMessageBox, QDialog, QFormLayout, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QTableWidget, QTableWidgetItem, QHeaderView, QRubberBand, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem, QSplitter,
-    QColorDialog, QCheckBox
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QAbstractItemView, QLabel, QLineEdit,
+    QMessageBox, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QRubberBand, QSplitter,
 )
 import pyqtgraph as pg
 

@@ -43,7 +43,7 @@ a = Analysis(
         # 本项目需要手动声明的隐藏导入
         "src",
         "src.core.config",
-        "src.core.types",
+        "src.core.data_types",
         "src.core.scheduler",
         "src.core.font_cache",
         "src.data.loader",
