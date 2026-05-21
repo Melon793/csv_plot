@@ -14,7 +14,7 @@ from src.core.config import (
     VALID_NUMERIC_RATIO_THRESHOLD,
     _evaluate_float32_safety,
 )
-from src.core.types import FormatInfo, AutoDetectError
+from src.core.data_types import FormatInfo, AutoDetectError
 from src.core.logger import get_logger
 
 logger = get_logger("data.loader")
