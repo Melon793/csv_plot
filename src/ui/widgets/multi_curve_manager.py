@@ -17,7 +17,7 @@ from src.core.config import (
     DEFAULT_LINE_WIDTH,
     DEFAULT_PADDING_VAL_Y,
 )
-from src.core.types import CurveInfo
+from src.core.data_types import CurveInfo
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager

@@ -15,7 +15,7 @@ from PySide6.QtCore import Qt, QStandardPaths, QTimer
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 
 from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING
-from src.core.types import AutoDetectError
+from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.main_window_base_manager import MainWindowBaseManager

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 from src.core.config import DEFAULT_LINE_WIDTH
-from src.core.types import CurveInfo
+from src.core.data_types import CurveInfo
 from src.ui.drag_drop import parse_var_names_from_mimedata
 
 
