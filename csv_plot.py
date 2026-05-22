@@ -34,8 +34,8 @@ from PySide6.QtCore import Qt, QMargins, QTimer, QPoint, QPointF, QSize, QRect, 
 from PySide6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QCursor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QAbstractItemView, QLabel, QLineEdit,
-    QMessageBox, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QRubberBand, QSplitter,
+    QPushButton, QToolButton, QAbstractItemView, QLabel, QLineEdit,
+    QMessageBox, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QRubberBand, QSplitter, QMenu,
 )
 import pyqtgraph as pg
 
@@ -4474,6 +4474,18 @@ class MainWindow(QMainWindow):
         self.clear_all_plots_btn = QPushButton("清除绘图")
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
+        
+        # 模板按钮（二级菜单）
+        self._template_menu_btn = QToolButton()
+        self._template_menu_btn.setText("模板")
+        self._template_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._template_menu = QMenu(self._template_menu_btn)
+        self._template_menu_act_save = self._template_menu.addAction("保存为模板")
+        self._template_menu_act_save.triggered.connect(self.save_current_as_template)
+        self._template_menu_act_mgr = self._template_menu.addAction("模板管理器")
+        self._template_menu_act_mgr.triggered.connect(self.open_template_manager)
+        self._template_menu_btn.setMenu(self._template_menu)
+        top_bar.addWidget(self._template_menu_btn)
 
         # 中键占位
         top_bar.addStretch(1)
@@ -4593,6 +4605,10 @@ class MainWindow(QMainWindow):
         self.file_loader_manager = FileLoaderManager(self)
         self.layout_manager = LayoutManager(self)
         self.cursor_sync_manager = CursorSyncManager(self)
+
+        # 初始化模板配置管理器（必须在 layout_manager 之后，避免 eventFilter 回调时 layout_manager 未初始化）
+        from src.ui.plot_config_manager import PlotConfigManager
+        self.plot_config_manager = PlotConfigManager()
 
         self._log_manager = LogManager.get_instance()
         self._logger = self._log_manager.get_logger("app.main")
@@ -4718,6 +4734,55 @@ class MainWindow(QMainWindow):
     def _extract_file_extension(self, file_path: str) -> str:
         return self.file_loader_manager._extract_file_extension(file_path)
     
+    def save_current_as_template(self):
+        """保存当前配置为模板"""
+        from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
+        config = self.plot_config_manager.export_current_config(self)
+        if not hasattr(self, "_last_template_name"):
+            self._last_template_name = ""
+            self._last_template_desc = ""
+        dialog = TemplateEditorDialog(
+            self.plot_config_manager.template_manager,
+            current_config=config,
+            initial_name=getattr(self, "_last_template_name", ""),
+            initial_desc=getattr(self, "_last_template_desc", ""),
+            parent=self,
+        )
+        dialog.template_saved.connect(self._on_template_saved)
+        dialog.exec()
+
+    def _on_template_saved(self, template_id: str):
+        """模板保存后记录名称/描述"""
+        dialog = self.sender()
+        if dialog and hasattr(dialog, "_name_edit"):
+            self._last_template_name = dialog._name_edit.text().strip()
+            self._last_template_desc = dialog._desc_edit.text().strip()
+        self._show_status_message(f"模板已保存: {template_id}")
+    
+    def open_template_manager(self):
+        """打开模板管理器"""
+        from src.ui.dialogs.template_manager_dialog import TemplateManagerDialog
+        dialog = TemplateManagerDialog(
+            self.plot_config_manager.template_manager,
+            parent=self
+        )
+        dialog.template_applied.connect(self.apply_template)
+        dialog.exec()
+    
+    def apply_template(self, template_id: str):
+        """应用指定的模板"""
+        success = self.plot_config_manager.apply_template(self, template_id)
+        if success:
+            self._show_status_message("模板已应用")
+        else:
+            self._show_status_message("应用模板失败")
+    
+    def _show_status_message(self, message: str):
+        """显示状态消息（在未来可以添加状态栏）"""
+        self._logger.info(message)
+        # 目前可以使用 QMessageBox 提示，或者之后添加状态栏
+        # QMessageBox.information(self, "信息", message)
+    
     def _validate_load_parameters(self, file_path: str, desc_rows, sep, has_unit) -> tuple[bool, str]:
         return self.file_loader_manager._validate_load_parameters(file_path, desc_rows, sep, has_unit)
 
@@ -4769,6 +4834,8 @@ class MainWindow(QMainWindow):
         self.layout_manager._unregister_global_event_filter()
 
     def eventFilter(self, obj, event):
+        if not hasattr(self, "layout_manager") or self.layout_manager is None:
+            return super().eventFilter(obj, event)
         handled = self.layout_manager._handle_event_filter(obj, event)
         if handled:
             return True

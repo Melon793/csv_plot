@@ -12,6 +12,7 @@ dependencies = [
     "pathlib>=1.0.1",
     "pyqtgraph>=0.14.0",
     "pyside6>=6.11.1",
+    "pyyaml>=6.0.0",
     "ujson>=5.11.0",
 ]
 
