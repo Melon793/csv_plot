@@ -1,18 +1,8 @@
 """帮助对话框"""
 
 from __future__ import annotations
-from pathlib import Path
-import os
-import sys
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QPushButton, QTextEdit, QDialog
-
-
-def _resource_path(relative_path: str) -> Path:
-    if hasattr(sys, "_MEIPASS"):
-        return Path(os.path.join(sys._MEIPASS, relative_path))
-    elif getattr(sys, "frozen", False):
-        return Path(os.path.dirname(sys.executable)) / relative_path
-    return Path(relative_path)
+from src.utils.paths import resource_path
 
 
 class HelpDialog(QDialog):
@@ -39,7 +29,7 @@ class HelpDialog(QDialog):
         text_edit.setReadOnly(True)
 
         # 加载 README.md
-        readme_path = _resource_path("README.md")
+        readme_path = resource_path("README.md")
         if readme_path.exists():
             with open(readme_path, "r", encoding="utf-8") as f:
                 text_edit.setMarkdown(f.read())

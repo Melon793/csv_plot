@@ -21,7 +21,7 @@ os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
 from src.ui.widgets.custom_viewbox import CustomViewBox
 from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT, _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL, RATIO_RESET_PLOTS)
-from src.core.data_types import CurveInfo
+from src.core.data_types import CurveInfo, MarkStatEntry
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.table_dialog import DataTableDialog, DropOverlay
 from src.ui.variable_list import MyTableWidget
@@ -44,32 +44,8 @@ import pyqtgraph as pg
 SCREEN_WITDH_MARGIN = 0.3
 SCREEN_HEIGHT_MARGIN = 0.3
 
-# PyInstaller 解包目录
-def resource_path(relative_path: str) -> Path:
-    """
-    获取打包后的资源文件路径
-    
-    用于处理PyInstaller打包后的资源文件路径问题
-    在开发环境中返回相对路径，在打包环境中返回临时解包路径
-    (兼容 PyInstaller/Nuitka/PyOxidizer Standalone)
-    Args:
-        relative_path: 资源文件的相对路径
-        
-    Returns:
-        Path: 正确的资源文件路径
-    """
-    if hasattr(sys, "_MEIPASS"):
-        # 模式 1: PyInstaller OneFile 模式
-        return Path(os.path.join(sys._MEIPASS, relative_path))
-    
-    elif getattr(sys, "frozen", False):
-        # 模式 2: 其他 Standalone 模式 (PyOxidizer/Nuitka)
-        # 资源文件通常位于可执行文件所在目录
-        return Path(os.path.dirname(sys.executable)) / relative_path
-        
-    else:
-        # 模式 3: 开发环境
-        return Path(relative_path)
+# PyInstaller 解包目录 — 已迁移至 src/utils/paths.py
+from src.utils.paths import resource_path
 
 # 设置应用程序和窗口图标
 if sys.platform == "win32": # Windows
@@ -1302,7 +1278,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.update_right_header(f"x={x_str}, y={y_val:.5g}")
 
         except Exception as e:
-            print(f"Cursor update error: {e}")
+            logger.error("Cursor update error: %s", e, exc_info=True)
             self.update_right_header("")
     
     def _get_circle_from_pool(self, index):
@@ -1434,7 +1410,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     # 不在对象池中的项（理论上不应该存在）：加入待删除队列
                     self._queue_item_for_deletion(item)
             except Exception:
-                pass  # 忽略 queue_item 清理过程中的错误
+                logger.debug("_queue_item_for_deletion 清理异常，跳过", exc_info=True)
 
         # 清空当前使用列表
         self.multi_cursor_items.clear()
@@ -1710,7 +1686,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                             if hasattr(pen, "color"):
                                 curve_color = pen.color().name()
                     except Exception:
-                        pass  # pen.color 可能不可用
+                        logger.debug("pen.color() 异常，使用默认颜色", exc_info=True)
                     window = self.window()
                     curves_to_process.append({
                         "var_name": self.y_name,
@@ -1813,7 +1789,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.multi_cursor_items.append(x_info_item)
 
         except Exception as e:
-            print(f"Multi-curve cursor update error: {e}")
+            logger.error("Multi-curve cursor update error: %s", e, exc_info=True)
             self.update_right_header("")
 
     def _position_labels_avoid_overlap(self, cursor_values: list[dict], x_min: float, x_max: float, y_min: float, y_max: float) -> None:
@@ -2042,7 +2018,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self.multi_cursor_items.append(x_info_item)
 
         except Exception as e:
-            print(f"x_position_only error: {e}")
+            logger.error("x_position_only error: %s", e, exc_info=True)
 
     def _has_visible_curve_data(self) -> bool:
         """判断当前 plot 是否有可见且有数据的曲线"""
@@ -2236,7 +2212,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self._set_vline_bounds([None, None])
                 return None, None
         except Exception as e:
-            print(f"Warning: Error updating vline bounds: {e}")
+            logger.warning("Error updating vline bounds: %s", e)
             self._set_vline_bounds([None, None])
             return None, None
     
@@ -2943,8 +2919,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     delattr(self.curve, '_has_symbols')
                 try:
                     self.curve.clear()
-                except:
-                    pass
+                except Exception:
+                    logger.debug("curve.clear() 异常，忽略", exc_info=True)
             
             self.curve = None
             self.original_index_x = None
@@ -2962,8 +2938,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     # 清除数据
                     try:
                         curve.clear()
-                    except:
-                        pass
+                    except Exception:
+                        logger.debug("curve.clear() 异常，忽略", exc_info=True)
             
             self.curves.clear()
             self.is_multi_curve_mode = False
@@ -3774,7 +3750,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 unit = self.units.get(var_name, '')
                 label = f"{var_name} ({unit})" if unit else var_name
                 
-                stats_list.append((x1, x2, y1, y2, dx, dy, slope, label, y_avg, y_max, y_min))
+                stats_list.append(MarkStatEntry(
+                    x1=x1, x2=x2, y1=y1, y2=y2,
+                    dx=dx, dy=dy, slope=slope,
+                    label=label, y_avg=y_avg, y_max=y_max, y_min=y_min,
+                ))
             
             return stats_list if stats_list else None
         else:

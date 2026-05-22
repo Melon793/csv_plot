@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from collections import deque
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -85,7 +86,7 @@ class LogViewer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self._all_entries: list[LogEntry] = []
+        self._all_entries: deque[LogEntry] = deque(maxlen=self.MAX_BUFFER_LINES)
         self._buffer: list[LogEntry] = []
         self._scroll_locked = True
         self._level_filter: set[int] = set()
@@ -179,9 +180,6 @@ class LogViewer(QWidget):
     def append_log(self, entry: LogEntry):
         self._buffer.append(entry)
         self._all_entries.append(entry)
-
-        if len(self._all_entries) > self.MAX_BUFFER_LINES:
-            self._all_entries = self._all_entries[-self.MAX_BUFFER_LINES:]
 
         if len(self._buffer) >= self.FLUSH_THRESHOLD:
             self._flush_buffer()

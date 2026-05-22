@@ -68,3 +68,19 @@ class CurveInfo:
             self.x_min = float(self.x_data[0])
             self.x_max = float(self.x_data[0])
             self.point_density = 0.0
+
+
+@dataclass
+class MarkStatEntry:
+    """标记区域统计条目"""
+    x1: float
+    x2: float
+    y1: float
+    y2: float
+    dx: float
+    dy: float
+    slope: float
+    label: str
+    y_avg: float
+    y_max: float
+    y_min: float
