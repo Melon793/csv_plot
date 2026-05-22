@@ -320,7 +320,6 @@ class TemplateManagerDialog(QDialog):
             try:
                 self._template_manager.delete_template(self._selected_template_id)
                 self._selected_template_id = None
-                QMessageBox.information(self, "成功", "模板已删除")
             except TemplateNotFoundError:
                 QMessageBox.warning(self, "警告", "模板不存在")
             except Exception as e:

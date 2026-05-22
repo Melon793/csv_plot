@@ -397,8 +397,8 @@ class FileLoaderManager(MainWindowBaseManager):
             current_vars = []
             if hasattr(self.mw, 'data') and self.mw.data is not None:
                 current_vars = list(self.mw.data.columns)
-            elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'df'):
-                current_vars = list(self.mw.loader.df.columns)
+            elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'var_names'):
+                current_vars = list(self.mw.loader.var_names)
             
             # 尝试自动恢复
             should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(current_vars)

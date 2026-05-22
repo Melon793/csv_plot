@@ -286,7 +286,6 @@ class TemplateEditorDialog(QDialog):
         except yaml.YAMLError as e:
             self._stats_label.setText(f"⚠️ YAML 格式错误: {str(e)}")
         except Exception as e:
-            logger.error(f"Preview update error: {e}")
             self._stats_label.setText(f"⚠️ 错误: {str(e)}")
 
     def _clear_preview(self):

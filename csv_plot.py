@@ -20,7 +20,7 @@ os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
 from src.ui.widgets.custom_viewbox import CustomViewBox
-from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT, _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT, _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL, RATIO_RESET_PLOTS)
 from src.core.data_types import CurveInfo
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.table_dialog import DataTableDialog, DropOverlay
@@ -30,8 +30,8 @@ from src.core.logger import LogManager, get_logger
 from src.ui.dialogs.log_window import LogWindow
 
 
-from PySide6.QtCore import Qt, QMargins, QTimer, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker
-from PySide6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QCursor
+from PySide6.QtCore import Qt, QMargins, QTimer, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker, QSettings
+from PySide6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QCursor, QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QToolButton, QAbstractItemView, QLabel, QLineEdit,
@@ -4475,13 +4475,15 @@ class MainWindow(QMainWindow):
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
         
-        # 模板按钮（二级菜单）
-        self._template_menu_btn = QPushButton("模板")
+        # 模板菜单（含快速加载项）
+        self._template_menu_btn = QPushButton("模板菜单")
         self._template_menu = QMenu(self._template_menu_btn)
+        self._template_menu_act_quick = None
         self._template_menu_act_save = self._template_menu.addAction("保存为模板")
         self._template_menu_act_save.triggered.connect(self.save_current_as_template)
         self._template_menu_act_mgr = self._template_menu.addAction("模板管理器")
         self._template_menu_act_mgr.triggered.connect(self.open_template_manager)
+        self._template_menu.aboutToShow.connect(self._refresh_template_menu)
         self._template_menu_btn.setMenu(self._template_menu)
         top_bar.addWidget(self._template_menu_btn)
 
@@ -4607,6 +4609,10 @@ class MainWindow(QMainWindow):
         # 初始化模板配置管理器（必须在 layout_manager 之后，避免 eventFilter 回调时 layout_manager 未初始化）
         from src.ui.plot_config_manager import PlotConfigManager
         self.plot_config_manager = PlotConfigManager()
+
+        self._template_settings = QSettings("CSVPlot", "TemplateMenu")
+        self._last_template_id = self._template_settings.value("last_template_id", None)
+        self._last_template_name = self._template_settings.value("last_template_name", None)
 
         self._log_manager = LogManager.get_instance()
         self._logger = self._log_manager.get_logger("app.main")
@@ -4755,7 +4761,38 @@ class MainWindow(QMainWindow):
         if dialog and hasattr(dialog, "_name_edit"):
             self._last_template_name = dialog._name_edit.text().strip()
             self._last_template_desc = dialog._desc_edit.text().strip()
+        self._persist_last_template(template_id, self._last_template_name)
         self._show_status_message(f"模板已保存: {template_id}")
+
+    def _persist_last_template(self, template_id: str, name: str):
+        """持久化最后使用的模板信息"""
+        self._last_template_id = template_id
+        self._last_template_name = name
+        self._template_settings.setValue("last_template_id", template_id)
+        self._template_settings.setValue("last_template_name", name)
+        self._template_settings.sync()
+
+    def _refresh_template_menu(self):
+        """菜单展开前刷新快速加载项"""
+        if self._template_menu_act_quick is not None:
+            self._template_menu.removeAction(self._template_menu_act_quick)
+            self._template_menu_act_quick = None
+
+        tid = self._last_template_id
+        name = self._last_template_name
+        if tid and name:
+            template = self.plot_config_manager.template_manager.get_template(tid)
+            if template is not None:
+                label = f"应用[{name}]模板"
+                self._template_menu_act_quick = QAction(label, self)
+                self._template_menu_act_quick.triggered.connect(self._quick_apply_template)
+                self._template_menu.insertAction(self._template_menu_act_save, self._template_menu_act_quick)
+            else:
+                self._last_template_id = None
+                self._last_template_name = None
+                self._template_settings.remove("last_template_id")
+                self._template_settings.remove("last_template_name")
+                self._template_settings.sync()
     
     def open_template_manager(self):
         """打开模板管理器"""
@@ -4769,17 +4806,88 @@ class MainWindow(QMainWindow):
     
     def apply_template(self, template_id: str):
         """应用指定的模板"""
+        template = self.plot_config_manager.template_manager.get_template(template_id)
+        if not template:
+            self._logger.error(f"模板不存在: {template_id}")
+            return
+
+        self._persist_last_template(template_id, template.metadata.name)
         success = self.plot_config_manager.apply_template(self, template_id)
         if success:
-            self._show_status_message("模板已应用")
+            self._logger.info("模板已应用")
         else:
-            self._show_status_message("应用模板失败")
-    
+            QMessageBox.warning(
+                self, "应用失败",
+                f"模板[{template.metadata.name}]应用失败，请检查数据是否已加载。"
+            )
+
+    def _quick_apply_template(self):
+        """快速应用最近模板（带匹配检查）"""
+        tid = self._last_template_id
+        name = self._last_template_name
+        if not tid or not name:
+            return
+
+        template = self.plot_config_manager.template_manager.get_template(tid)
+        if not template:
+            QMessageBox.warning(self, "模板不存在", f"模板[{name}]已被删除")
+            self._last_template_id = None
+            self._last_template_name = None
+            self._template_settings.remove("last_template_id")
+            self._template_settings.remove("last_template_name")
+            self._template_settings.sync()
+            return
+
+        if self.loader is None:
+            QMessageBox.warning(self, "无数据", "请先加载数据文件后再应用模板")
+            return
+
+        from src.core.plot_config import PlotSessionConfig
+        config = PlotSessionConfig.from_dict(template.config)
+        current_vars = list(self.loader.var_names)
+        ratio, matched, unmatched = self.plot_config_manager.check_template_match(
+            config, current_vars
+        )
+
+        if ratio >= RATIO_RESET_PLOTS:
+            success = self.plot_config_manager.apply_config(self, config)
+            if success:
+                self._logger.info(f"快速应用模板[{name}]成功，匹配度 {ratio:.0%}")
+            else:
+                QMessageBox.warning(
+                    self, "应用失败",
+                    f"模板[{name}]应用失败，请检查数据是否已加载。"
+                )
+        else:
+            self._show_match_low_dialog(name, config, ratio, matched, unmatched)
+
+    def _show_match_low_dialog(self, name: str, config, ratio: float, matched: set[str], unmatched: set[str]):
+        """匹配度过低时弹出详情对话框，允许强制执行"""
+        matched_str = ", ".join(sorted(matched)) if matched else "无"
+        unmatched_str = ", ".join(sorted(unmatched)) if unmatched else "无"
+
+        msg = (
+            f"当前数据的通道与模板[{name}]重合度为 {ratio:.0%}（需 ≥{RATIO_RESET_PLOTS:.0%}）\n\n"
+            f"✅ 匹配的变量（{len(matched)} 个）：\n{matched_str}\n\n"
+            f"❌ 缺失的变量（{len(unmatched)} 个）：\n{unmatched_str}"
+        )
+
+        box = QMessageBox(self)
+        box.setWindowTitle("匹配度不足")
+        box.setText(f"模板可能不适用于当前数据文件")
+        box.setDetailedText(msg)
+        box.setIcon(QMessageBox.Icon.Warning)
+        force_btn = box.addButton("仍然加载", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+
+        if box.clickedButton() == force_btn:
+            self.plot_config_manager.apply_config(self, config)
+            self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
+
     def _show_status_message(self, message: str):
         """显示状态消息（在未来可以添加状态栏）"""
         self._logger.info(message)
-        # 目前可以使用 QMessageBox 提示，或者之后添加状态栏
-        # QMessageBox.information(self, "信息", message)
     
     def _validate_load_parameters(self, file_path: str, desc_rows, sep, has_unit) -> tuple[bool, str]:
         return self.file_loader_manager._validate_load_parameters(file_path, desc_rows, sep, has_unit)
