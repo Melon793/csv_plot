@@ -4833,6 +4833,19 @@ class MainWindow(QMainWindow):
             return
 
         self._persist_last_template(template_id, template.metadata.name)
+
+        if self.loader is not None:
+            from src.core.plot_config import PlotSessionConfig
+            config = PlotSessionConfig.from_dict(template.config)
+            current_vars = list(self.loader.var_names)
+            ratio, matched, unmatched = self.plot_config_manager.check_template_match(
+                config, current_vars
+            )
+
+            if ratio < RATIO_RESET_PLOTS:
+                self._show_match_low_dialog(template.metadata.name, config, ratio, matched, unmatched)
+                return
+
         success = self.plot_config_manager.apply_template(self, template_id)
         if success:
             self._logger.info("模板已应用")
