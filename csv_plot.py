@@ -4610,6 +4610,15 @@ class MainWindow(QMainWindow):
         from src.ui.plot_config_manager import PlotConfigManager
         self.plot_config_manager = PlotConfigManager()
 
+        self._template_menu.addSeparator()
+        self._template_menu_act_auto_restore = self._template_menu.addAction("自动恢复")
+        self._template_menu_act_auto_restore.setCheckable(True)
+        self._template_menu_act_auto_restore.setChecked(
+            self.plot_config_manager.auto_save_manager.is_auto_save_enabled()
+        )
+        self._template_menu_act_auto_restore.triggered.connect(self._on_auto_restore_toggled)
+        self._refresh_auto_restore_indicator()
+
         self._template_settings = QSettings("CSVPlot", "TemplateMenu")
         self._last_template_id = self._template_settings.value("last_template_id", None)
         self._last_template_name = self._template_settings.value("last_template_name", None)
@@ -4632,6 +4641,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._logger.info("CSV Plot 应用程序退出")
+        self.plot_config_manager.save_auto_save(self)
         self.layout_manager._handle_close()
         super().closeEvent(event)
 
@@ -4738,6 +4748,17 @@ class MainWindow(QMainWindow):
     def _extract_file_extension(self, file_path: str) -> str:
         return self.file_loader_manager._extract_file_extension(file_path)
     
+    def _on_auto_restore_toggled(self, checked):
+        self.plot_config_manager.auto_save_manager.set_auto_save_enabled(checked)
+        self._refresh_auto_restore_indicator()
+
+    def _refresh_auto_restore_indicator(self):
+        enabled = self.plot_config_manager.auto_save_manager.is_auto_save_enabled()
+        if enabled:
+            self._template_menu_btn.setText("模板菜单 ✓")
+        else:
+            self._template_menu_btn.setText("模板菜单")
+
     def save_current_as_template(self):
         """保存当前配置为模板"""
         from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
