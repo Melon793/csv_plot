@@ -22,6 +22,7 @@ nuitka --standalone ^
   --include-package=src ^
   --include-package=asammdf ^
   --include-package=asammdf.blocks ^
+  --include-package=numexpr ^
   --include-module=numpy ^
   --include-module=pandas ^
   --include-package=chardet ^

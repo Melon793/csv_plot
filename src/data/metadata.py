@@ -59,7 +59,7 @@ def is_enum_conversion(conversion) -> bool:
     if conversion is None:
         return False
     ct = getattr(conversion, "conversion_type", None)
-    return ct in (9, 10, 11)
+    return ct in (7, 9, 10, 11)
 
 
 def extract_enum_map(conversion) -> Optional[dict[int, str]]:
