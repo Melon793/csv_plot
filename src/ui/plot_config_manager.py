@@ -210,6 +210,8 @@ class PlotConfigManager(QObject):
 
     def save_auto_save(self, main_window):
         """保存为自动恢复配置"""
+        if not self._auto_save_manager.is_auto_save_enabled():
+            return
         config = self.export_current_config(main_window)
         self._auto_save_manager.auto_save(config)
 
