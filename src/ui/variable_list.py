@@ -436,19 +436,10 @@ class MyTableWidget(QTableWidget):
             QMessageBox.warning(self, "提示", "当前布局中已无空白绘图区")
             return
 
-        # 3. 判断绘图区域整体是否被隐藏，并提示用户
         _delay = 0
         if not main_window._plot_area_visible:
-            # reply = QMessageBox.question(self, "确认", "绘图区域当前已隐藏，是否要显示它？",
-            #                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            #                              QMessageBox.StandardButton.Yes)
-            reply = QMessageBox.StandardButton.Yes
-            if reply == QMessageBox.StandardButton.Yes:
-                # 激活绘图区，同步按钮状态
-                main_window.toggle_plot_btn.setChecked(False)
-                _delay = 300
-            else:
-                return  # 用户选择不激活，则不执行后续操作
+            main_window.toggle_plot_btn.setChecked(False)
+            _delay = 300
 
         def _job():
             # 4. 将变量添加至空白图中

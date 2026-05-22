@@ -128,7 +128,7 @@ class EventHandler:
             self.pw._pending_cursor_geometry_update = True
             return
         self.pw._pending_cursor_geometry_update = False
-        self.pw._cursor_refresh_timer.start(max(15, 100))
+        self.pw._cursor_refresh_timer.start(100)
 
     def _refresh_cursor_geometry(self):
         """刷新光标几何"""
