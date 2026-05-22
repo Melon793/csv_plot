@@ -277,6 +277,8 @@ class LayoutManager(MainWindowBaseManager):
             r, c = dlg.values()
             self.set_plots_visible(r, c)
             self.update_mark_regions_on_layout_change()
+            if hasattr(self.mw, 'plot_config_manager'):
+                self.mw.plot_config_manager.save_auto_save(self.mw)
 
     def open_time_correction_dialog(self):
         self.mw._is_time_correction_active = False
