@@ -4476,9 +4476,7 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.clear_all_plots_btn)
         
         # 模板按钮（二级菜单）
-        self._template_menu_btn = QToolButton()
-        self._template_menu_btn.setText("模板")
-        self._template_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._template_menu_btn = QPushButton("模板")
         self._template_menu = QMenu(self._template_menu_btn)
         self._template_menu_act_save = self._template_menu.addAction("保存为模板")
         self._template_menu_act_save.triggered.connect(self.save_current_as_template)

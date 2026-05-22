@@ -79,7 +79,7 @@ class TemplateEditorDialog(QDialog):
         else:
             self.setWindowTitle("✏️ 新建空白模板")
 
-        self.resize(900, 700)
+        self.resize(1200, 700)
         self._setup_ui()
         self._load_initial_content()
         self._connect_signals()
@@ -130,7 +130,7 @@ class TemplateEditorDialog(QDialog):
         splitter.addWidget(preview_group)
 
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter)
 
         # 按钮栏
@@ -144,40 +144,64 @@ class TemplateEditorDialog(QDialog):
         button_layout.addWidget(self._cancel_btn)
         layout.addLayout(button_layout)
 
+    @staticmethod
+    def _generate_yaml_with_comments(config: dict) -> str:
+        """生成带中文注释的 YAML 字符串"""
+        lines = []
+        
+        # created_at
+        if "created_at" in config:
+            lines.append("# 模板创建时间")
+            lines.append(f'created_at: "{config["created_at"]}"')
+            lines.append("")
+        
+        # layout
+        lines.append("# 绘图区域布局行数/列数")
+        lines.append(f'layout_rows: {config.get("layout_rows", 1)}')
+        lines.append(f'layout_cols: {config.get("layout_cols", 1)}')
+        lines.append("")
+        
+        # time
+        lines.append("# 时间轴缩放因子、偏移量（用于调整时间轴显示比例）")
+        lines.append(f'time_factor: {config.get("time_factor", 1.0)}')
+        lines.append(f'time_offset: {config.get("time_offset", 0.0)}')
+        lines.append("")
+        
+        # plots
+        lines.append("# 各子图配置列表（按从左到右、从上到下的顺序）")
+        lines.append("plots:")
+        plots = config.get("plots", [])
+        for i, plot in enumerate(plots):
+            lines.append(f"  - # 第 {i+1} 个子图的曲线变量名列表")
+            lines.append("    curves:")
+            curves = plot.get("curves", [])
+            if curves:
+                for curve in curves:
+                    lines.append(f"      - {curve}")
+            else:
+                lines.append("      []")
+        
+        return "\n".join(lines) + "\n"
+
     def _load_initial_content(self):
         """加载初始内容"""
         if self._template:
             # 编辑现有模板
             self._name_edit.setText(self._template.metadata.name)
             self._desc_edit.setText(self._template.metadata.description)
-            yaml_str = yaml.dump(
-                self._template.config,
-                default_flow_style=False,
-                allow_unicode=True,
-                indent=2,
-            )
+            yaml_str = self._generate_yaml_with_comments(self._template.config)
             self._yaml_edit.setPlainText(yaml_str)
         elif self._current_config:
             # 从当前配置创建新模板
             self._name_edit.setText(self._initial_name)
             self._desc_edit.setText(self._initial_desc)
-            yaml_str = yaml.dump(
-                self._current_config.to_dict(),
-                default_flow_style=False,
-                allow_unicode=True,
-                indent=2,
-            )
+            yaml_str = self._generate_yaml_with_comments(self._current_config.to_dict())
             self._yaml_edit.setPlainText(yaml_str)
         else:
             # 新建空白模板
             self._name_edit.setText(self._initial_name)
             self._desc_edit.setText(self._initial_desc)
-            yaml_str = yaml.dump(
-                self.DEFAULT_TEMPLATE_CONFIG,
-                default_flow_style=False,
-                allow_unicode=True,
-                indent=2,
-            )
+            yaml_str = self._generate_yaml_with_comments(self.DEFAULT_TEMPLATE_CONFIG)
             self._yaml_edit.setPlainText(yaml_str)
 
         self._update_preview()
