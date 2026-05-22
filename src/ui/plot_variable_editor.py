@@ -21,7 +21,10 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 from src.core.config import DEFAULT_LINE_WIDTH
 from src.core.data_types import CurveInfo
+from src.core.logger import get_logger
 from src.ui.drag_drop import parse_var_names_from_mimedata
+
+logger = get_logger(__name__)
 
 
 class PlotVariableEditorDialog(QDialog):
@@ -174,7 +177,7 @@ class PlotVariableEditorDialog(QDialog):
                 if hasattr(self.plot_widget.curve, "isVisible"):
                     curve_visible = self.plot_widget.curve.isVisible()
             except Exception:
-                pass
+                logger.debug("curve.isVisible() 异常，跳过 visible 状态读取", exc_info=True)
 
             # 获取曲线的实际颜色
             curve_color = "blue"
@@ -187,7 +190,7 @@ class PlotVariableEditorDialog(QDialog):
                     if hasattr(pen, "color"):
                         curve_color = pen.color().name()
             except Exception:
-                pass
+                logger.debug("pen.color() 异常，使用默认颜色", exc_info=True)
 
             curve_info = CurveInfo(
                 var_name=var_name,
@@ -336,7 +339,7 @@ class PlotVariableEditorDialog(QDialog):
                     else:
                         self.plot_widget._recreate_curve(var_name)
                 except Exception:
-                    pass
+                    logger.debug("_recreate_curve(%s) 异常，跳过", var_name, exc_info=True)
 
             # 更新legend
             self.plot_widget.update_legend()
@@ -350,7 +353,7 @@ class PlotVariableEditorDialog(QDialog):
                     if self.plot_widget.curve.scene() is not None:
                         self.plot_widget.curve.setVisible(is_visible)
                 except Exception:
-                    pass
+                    logger.debug("curve.setVisible(%s) 异常，跳过", is_visible, exc_info=True)
     def update_button_states(self):
         """更新按钮状态"""
         has_selection = len(self.var_table.selectedItems()) > 0

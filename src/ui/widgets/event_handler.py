@@ -14,6 +14,9 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from src.core.config import safe_callback
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from src.ui.widgets.mark_region_manager import MarkRegionManager
@@ -94,7 +97,7 @@ class EventHandler:
 
             self._queue_ui_refresh()
         except Exception:
-            pass
+            logger.debug("_queue_ui_refresh() 异常，跳过", exc_info=True)
 
     def _start_interaction(self):
         """开始交互时的处理"""
@@ -105,7 +108,7 @@ class EventHandler:
                         self.pw.plot_item, "_downsample", None
                     )
         except Exception:
-            pass
+            logger.debug("cursor 交互处理异常，跳过", exc_info=True)
 
     def _end_interaction(self):
         """结束交互时的处理"""
@@ -116,7 +119,7 @@ class EventHandler:
                 self.pw._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()
         except Exception:
-            pass
+            logger.debug("cursor geometry 更新异常，跳过", exc_info=True)
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新"""

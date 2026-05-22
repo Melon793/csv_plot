@@ -1,12 +1,10 @@
  
 import math
 import sys
-from pathlib import Path
  
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF, QElapsedTimer
 from PySide6.QtGui import (
     QPainter,
-    QPixmap,
     QColor,
     QLinearGradient,
     QFont,
@@ -20,28 +18,15 @@ from PySide6.QtWidgets import QWidget
 ICON_SIZE = 115
  
  
-def resource_path(relative_path: str) -> Path:
-    if hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS) / relative_path
-    elif getattr(sys, "frozen", False):
-        return Path(sys.executable).parent / relative_path
-    else:
-        return Path(__file__).parent / relative_path
- 
- 
 class SplashScreen(QWidget):
 
     def __init__(self):
         super().__init__()
         self.width = 500
         self.height = 280
-        self.use_custom_icon = True
         self._is_shown = False
 
         self.setFixedSize(self.width, self.height)
-
-        self.icon_path = resource_path("assets/icon.png")
-        self.icon_pixmap = QPixmap(str(self.icon_path))
 
         self.elapsed_timer = QElapsedTimer()
         self.elapsed = 0
