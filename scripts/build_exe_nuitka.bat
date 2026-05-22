@@ -14,9 +14,9 @@ rem === NumPy 排除: random / f2py / ma / polynomial / linalg / fft / testing =
 rem === Pandas 排除: tests / plotting ===
 
 nuitka --standalone ^
+  --report=report.xml ^
   --output-filename=%NAME% ^
   --enable-plugin=pyside6 ^
-  --enable-plugin=numpy ^
   --include-module=PySide6.QtOpenGL ^
   --include-module=PySide6.QtOpenGLWidgets ^
   --include-package=src ^
