@@ -334,10 +334,7 @@ class PlotVariableEditorDialog(QDialog):
                     if ci.curve.scene() is not None:
                         ci.curve.setVisible(is_visible)
                     else:
-                        # 曲线对象已经不在scene中，重新创建
                         self.plot_widget._recreate_curve(var_name)
-                        # 尝试重新创建曲线
-                    self.plot_widget._recreate_curve(var_name)
                 except Exception:
                     pass
 
@@ -605,7 +602,7 @@ class PlotVariableEditorDialog(QDialog):
         # 打开颜色选择对话框
         current_color = "blue"  # 默认颜色
         if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
-            current_color = self.plot_widget.curves[var_name].get("color", "blue")
+            current_color = self.plot_widget.curves[var_name].color
 
         color = QColorDialog.getColor(QColor(current_color), self, "选择颜色")
 

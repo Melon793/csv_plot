@@ -4545,7 +4545,6 @@ class MainWindow(QMainWindow):
         # 将splitter添加到主布局
         main_layout.addWidget(self.main_splitter)
         QTimer.singleShot(0, self._ensure_splitter_ready)
-        QTimer.singleShot(0, self._ensure_splitter_ready)
 
         # ---------------- 子图 ----------------
         self.plot_widgets = []

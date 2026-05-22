@@ -220,11 +220,13 @@ class PlotConfigManager(QObject):
         should_apply, reason = self._auto_save_manager.should_apply_auto_save(
             current_vars
         )
-        if should_apply:
-            config = self._auto_save_manager.load_auto_save()
-            if config:
-                success = self.apply_config(main_window, config)
-                if success:
-                    self._auto_save_manager.config_applied.emit()
-                return success
-        return False, reason
+        if not should_apply:
+            logger.info(f"Auto-restore skipped: {reason}")
+            return False
+        config = self._auto_save_manager.load_auto_save()
+        if not config:
+            return False
+        success = self.apply_config(main_window, config)
+        if success:
+            self._auto_save_manager.config_applied.emit()
+        return success
