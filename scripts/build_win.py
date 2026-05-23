@@ -1,8 +1,10 @@
+import importlib.metadata
+import importlib.util
 import os
 import sys
 import shutil
 import subprocess
-import compileall
+import py_compile
 from pathlib import Path
 
 
@@ -29,7 +31,63 @@ def get_asammdf_path():
         sys.exit(1)
 
 
-def build_nuitka_cmd():
+PYPI_TO_IMPORT = {
+    "python-dateutil": "dateutil",
+    "typing-extensions": "typing_extensions",
+}
+
+
+def _resolve_import_name(pkg_name):
+    pkg_name = pkg_name.split("[")[0].strip()
+    if pkg_name in PYPI_TO_IMPORT:
+        return PYPI_TO_IMPORT[pkg_name]
+    try_name = pkg_name.replace("-", "_")
+    return try_name
+
+
+def discover_asammdf_deps():
+    print("[Build] 正在扫描 asammdf 的传递依赖...")
+    try:
+        raw_requires = importlib.metadata.requires("asammdf")
+    except importlib.metadata.PackageNotFoundError:
+        print("[WARN] 无法读取 asammdf 元数据，跳过传递依赖扫描。")
+        return [], set()
+
+    include_packages = []
+    include_modules = []
+    hidden_excludes = set()
+
+    for req_line in raw_requires:
+        name = req_line.partition(";")[0].strip()
+        pkg_name = name.partition(">=")[0].partition("<")[0].partition("==")[0].partition("~=")[0].strip()
+        pkg_name = pkg_name.split("[")[0].strip()
+        import_name = _resolve_import_name(pkg_name)
+
+        if pkg_name in ("chardet", "numexpr", "numpy", "pandas"):
+            continue
+
+        try:
+            spec = importlib.util.find_spec(import_name)
+            if spec is None:
+                continue
+        except (ValueError, ModuleNotFoundError):
+            continue
+
+        if spec.submodule_search_locations is not None:
+            include_packages.append(import_name)
+        else:
+            include_modules.append(import_name)
+
+        if pkg_name == "lxml":
+            hidden_excludes.add("lxml")
+
+        print(f"  [Build] 已发现传递依赖: {import_name}")
+
+    print(f"[Build] 共发现 {len(include_packages) + len(include_modules)} 个传递依赖")
+    return include_packages, include_modules, hidden_excludes
+
+
+def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
     pyside6_excludes = [
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtWebEngineCore",
@@ -77,11 +135,8 @@ def build_nuitka_cmd():
     ]
 
     numpy_excludes = [
-        "numpy.random",
         "numpy.f2py",
-        "numpy.ma",
         "numpy.polynomial",
-        "numpy.linalg",
         "numpy.fft",
         "numpy.testing",
     ]
@@ -98,16 +153,14 @@ def build_nuitka_cmd():
         "pip",
         "wheel",
         "scipy",
-        "lxml",
         "PIL",
         "cv2",
         "matplotlib",
         "pandas.tests",
-        "pandas.plotting",
         "asammdf",
     ]
 
-    cmd = ["nuitka", "--standalone"]
+    cmd = [sys.executable, "-m", "nuitka", "--standalone"]
 
     if shutil.which("gcc"):
         gcc_version = subprocess.check_output(["gcc", "-dumpversion"], text=True).strip()
@@ -117,27 +170,34 @@ def build_nuitka_cmd():
 
     cmd += [
         "--mingw64",
-        "--report", REPORT_FILE,
-        "--output-filename", OUTPUT_NAME,
-        "--enable-plugin", "pyside6",
-        "--include-module", "PySide6.QtOpenGL",
-        "--include-module", "PySide6.QtOpenGLWidgets",
-        "--include-package", "src",
-        "--include-package", "numexpr",
-        "--include-module", "numpy",
-        "--include-module", "pandas",
-        "--include-package", "chardet",
-        "--include-module", "charset_normalizer",
-        "--include-module", "ujson",
-        "--include-data-dir", f"{ASSETS_DIR}={ASSETS_DIR}",
-        "--include-data-file", f"{README_FILE}={README_FILE}",
+        f"--report={REPORT_FILE}",
+        f"--output-filename={OUTPUT_NAME}",
+        "--enable-plugin=pyside6",
+        "--include-module=PySide6.QtOpenGL",
+        "--include-module=PySide6.QtOpenGLWidgets",
+        "--include-package=src",
+        "--include-package=numexpr",
+        "--include-module=numpy",
+        "--include-module=pandas",
+        "--include-package=chardet",
+        "--include-module=charset_normalizer",
+        "--include-module=ujson",
+        f"--include-data-dir={ASSETS_DIR}={ASSETS_DIR}",
+        f"--include-data-file={README_FILE}={README_FILE}",
         "--follow-imports",
+        "--no-deployment-flag=excluded-module-usage",
         "--lto=yes",
         "--jobs=8",
-        "--windows-console-mode=disable",
-        "--windows-icon-from-ico", ICON_FILE,
-        str(ENTRY_FILE),
+        "--windows-console-mode=attach",
+        f"--windows-icon-from-ico={ICON_FILE}",
     ]
+
+    for pkg in include_packages:
+        cmd.insert(-1, f"--include-package={pkg}")
+    for mod in include_modules:
+        cmd.insert(-1, f"--include-module={mod}")
+
+    cmd.append(str(ENTRY_FILE))
 
     for mod in pyside6_excludes:
         cmd.insert(-1, f"--nofollow-import-to={mod}")
@@ -146,6 +206,8 @@ def build_nuitka_cmd():
         cmd.insert(-1, f"--nofollow-import-to={mod}")
 
     for mod in misc_excludes:
+        if mod in hidden_excludes:
+            continue
         cmd.insert(-1, f"--nofollow-import-to={mod}")
 
     return cmd
@@ -154,7 +216,9 @@ def build_nuitka_cmd():
 def build():
     os.chdir(PROJECT_ROOT)
 
-    cmd = build_nuitka_cmd()
+    include_packages, include_modules, hidden_excludes = discover_asammdf_deps()
+
+    cmd = build_nuitka_cmd(include_packages, include_modules, hidden_excludes)
 
     print("[Build] ========================================")
     print(f"[Build] 开始 Nuitka 编译: {OUTPUT_NAME}")
@@ -191,27 +255,35 @@ def build():
     shutil.copytree(asammdf_src, asammdf_dst)
     print("[Build] asammdf 复制完成")
 
-    print("[Build] 正在将 asammdf 源码编译为 .pyc 字节码...")
+    print("[Build] 正在将 asammdf 源码编译为 .pyc 字节码并清除 .py 源文件...")
     optimize = 2
-    compileall.compile_dir(
-        str(asammdf_dst),
-        maxlevels=20,
-        ddir=str(asammdf_dst),
-        force=True,
-        optimize=optimize,
-        quiet=1,
-    )
-    print("[Build] .pyc 编译完成")
+    pyc_count = 0
+    py_removed = 0
+    pycache_dirs = []
 
-    print("[Build] 正在清除 asammdf 原始 .py 源码文件...")
-    py_files_removed = 0
     for root, dirs, files in os.walk(str(asammdf_dst)):
+        for d in dirs:
+            if d == "__pycache__":
+                pycache_dirs.append(os.path.join(root, d))
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
         for f in files:
-            if f.endswith(".py"):
-                file_path = os.path.join(root, f)
-                os.remove(file_path)
-                py_files_removed += 1
-    print(f"[Build] 已清除 {py_files_removed} 个 .py 源码文件")
+            if not f.endswith(".py"):
+                continue
+            src = os.path.join(root, f)
+            dst = os.path.join(root, f + "c")
+            try:
+                py_compile.compile(src, cfile=dst, dfile=f, optimize=optimize, quiet=1)
+                pyc_count += 1
+            except py_compile.PyCompileError as e:
+                print(f"  [WARN] 编译失败, 保留源文件: {src} ({e})")
+                continue
+            os.remove(src)
+            py_removed += 1
+
+    for d in pycache_dirs:
+        shutil.rmtree(d, ignore_errors=True)
+
+    print(f"[Build] .pyc 编译与清理完成 (编译 {pyc_count} 个, 清理 {py_removed} 个 .py, 清理 {len(pycache_dirs)} 个 __pycache__)")
 
     print()
     print("[Build] ========================================")
