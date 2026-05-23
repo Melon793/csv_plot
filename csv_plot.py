@@ -5100,28 +5100,35 @@ if __name__ == "__main__":
         app.setQuitOnLastWindowClosed(True)
         app._main_window_ref = window
     else:
+        import time
+
         from src.ui.splash_screen import SplashScreen
         splash = SplashScreen()
         splash.show()
         app.processEvents()
 
-        # 延迟显示主窗口, 便于观察 splash 效果
-        # 可通过命令行参数 --splash-delay=N 控制延迟秒数 (默认 1 秒)
-
-        MIN_SPLASH_MS = 1000
+        _MIN_SPLASH_MS = 800
         delay_arg = next((a for a in sys.argv if a.startswith("--splash-delay=")), None)
-        splash_delay = int(delay_arg.split("=")[1]) * 1000 if delay_arg else MIN_SPLASH_MS
+        splash_delay = int(delay_arg.split("=")[1]) * 1000 if delay_arg else _MIN_SPLASH_MS
 
-        effective_delay = max(splash_delay, MIN_SPLASH_MS)
+        t0 = time.perf_counter()
 
-        def _show_main():
-            window = MainWindow()
+        def _do_finish(window):
             splash.finish(window)
             window.show()
             app.setQuitOnLastWindowClosed(True)
             app._main_window_ref = window
 
-        QTimer.singleShot(effective_delay, _show_main)
+        def _create_and_finish():
+            window = MainWindow()
+            elapsed = (time.perf_counter() - t0) * 1000
+            remaining = max(0, splash_delay - int(elapsed))
+            if remaining == 0:
+                _do_finish(window)
+            else:
+                QTimer.singleShot(remaining, lambda w=window: _do_finish(w))
+
+        QTimer.singleShot(0, _create_and_finish)
 
     sys.exit(app.exec())
 
