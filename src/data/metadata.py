@@ -7,7 +7,6 @@ along with classification and enumeration helpers.
 
 from dataclasses import dataclass
 from typing import Optional
-import itertools
 
 import numpy as np
 
@@ -76,7 +75,7 @@ def extract_enum_map(conversion) -> Optional[dict[int, str]]:
         if result:
             return result
 
-    for i in itertools.count():
+    for i in range(1000):
         text_attr = f"text_{i}"
         val_attr = f"param_val_{i}"
         if not hasattr(conversion, text_attr):
@@ -93,6 +92,9 @@ def extract_enum_map(conversion) -> Optional[dict[int, str]]:
             if isinstance(text_raw, bytes)
             else str(text_raw)
         )
-        result[int(param_val)] = label
+        try:
+            result[int(float(param_val))] = label
+        except (ValueError, TypeError):
+            break
 
     return result if result else None

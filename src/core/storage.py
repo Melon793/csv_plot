@@ -1,6 +1,7 @@
 """模板存储层 - 负责文件系统的读写和监控"""
 
 from __future__ import annotations
+import os
 import re
 import yaml
 import uuid
@@ -124,8 +125,10 @@ class TemplateStorage(QObject):
                         old_file.unlink()
 
             file = self._storage_path / new_filename
-            with open(file, "w", encoding="utf-8") as f:
+            tmp_file = file.with_suffix(".yaml.tmp")
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 yaml.dump(template.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
+            os.replace(tmp_file, file)
             self._cache[template.metadata.id] = template
             return True
         except Exception as e:

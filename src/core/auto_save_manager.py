@@ -1,6 +1,7 @@
 """自动保存管理器 - 处理数据加载时的配置恢复"""
 
 from __future__ import annotations
+import os
 import yaml
 from pathlib import Path
 from typing import Optional, Tuple
@@ -50,18 +51,26 @@ class AutoSaveManager(QObject):
 
     def auto_save(self, config: PlotSessionConfig):
         """自动保存当前配置"""
+        tmp_file = None
         try:
-            # 先备份现有文件
+            tmp_file = self._auto_save_file.with_suffix(".yaml.tmp")
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
+
             if self._auto_save_file.exists():
                 if self._auto_save_backup_file.exists():
                     self._auto_save_backup_file.unlink()
                 self._auto_save_file.rename(self._auto_save_backup_file)
-            # 写入新配置
-            with open(self._auto_save_file, "w", encoding="utf-8") as f:
-                yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
-            logger.debug(f"Auto-saved config successfully")
+
+            os.replace(tmp_file, self._auto_save_file)
+            logger.debug("Auto-saved config successfully")
         except Exception as e:
             logger.error(f"Failed to auto-save config: {e}")
+            if tmp_file is not None and tmp_file.exists():
+                try:
+                    tmp_file.unlink()
+                except OSError:
+                    pass
 
     def load_auto_save(self) -> Optional[PlotSessionConfig]:
         """加载自动保存的配置"""

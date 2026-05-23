@@ -6,9 +6,6 @@ os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 
 from src.utils.paths import resource_path
 
-SCREEN_WITDH_MARGIN = 0.3
-SCREEN_HEIGHT_MARGIN = 0.3
-
 if sys.platform == "win32":
     import ctypes
     myappid = 'mycompany.csv_plot.0.1'
@@ -62,7 +59,7 @@ def main():
         splash.show()
         app.processEvents()
 
-        _MIN_SPLASH_MS = 800
+        MIN_SPLASH_MS = 800
         delay_arg = next((a for a in sys.argv if a.startswith("--splash-delay=")), None)
         if delay_arg:
             parts = delay_arg.split("=", 1)
@@ -70,11 +67,11 @@ def main():
                 try:
                     splash_delay = int(parts[1]) * 1000
                 except ValueError:
-                    splash_delay = _MIN_SPLASH_MS
+                    splash_delay = MIN_SPLASH_MS
             else:
-                splash_delay = _MIN_SPLASH_MS
+                splash_delay = MIN_SPLASH_MS
         else:
-            splash_delay = _MIN_SPLASH_MS
+            splash_delay = MIN_SPLASH_MS
 
         t0 = time.perf_counter()
 
