@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QMessageBox, QSplitter, QMenu,
 )
 
-SCREEN_WITDH_MARGIN = 0.3
+SCREEN_WIDTH_MARGIN = 0.3
 SCREEN_HEIGHT_MARGIN = 0.3
 
 if sys.platform == "win32":
@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
             def best_resolution() -> tuple[int, int]:
                 desk = QApplication.primaryScreen().size()
                 for w, h in sorted(CANDIDATES, key=lambda t: t[0] * t[1], reverse=True):
-                    if w < desk.width() * (1 - SCREEN_WITDH_MARGIN) and h < desk.height() * (1 - SCREEN_HEIGHT_MARGIN):
+                    if w < desk.width() * (1 - SCREEN_WIDTH_MARGIN) and h < desk.height() * (1 - SCREEN_HEIGHT_MARGIN):
                         return w, h
                 return desk.width(), desk.height()
 

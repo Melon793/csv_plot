@@ -8,7 +8,11 @@ MainWindow 在创建子图矩阵时注入此对象。
 """
 
 from __future__ import annotations
-from typing import Protocol, Any
+from typing import Protocol, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PySide6.QtWidgets import QPushButton, QGridLayout
+    from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
 
 
 class PlotServices(Protocol):
@@ -17,11 +21,11 @@ class PlotServices(Protocol):
     @property
     def loader(self) -> Any: ...
     @property
-    def plot_widgets(self) -> list[Any]: ...
+    def plot_widgets(self) -> list[DraggableGraphicsLayoutWidget]: ...
     @property
     def cursor_mode(self) -> str: ...
     @property
-    def cursor_btn(self) -> Any: ...
+    def cursor_btn(self) -> QPushButton: ...
     @property
     def cursor_values_hidden(self) -> bool: ...
     @property
@@ -31,7 +35,7 @@ class PlotServices(Protocol):
     @property
     def _plot_col_max_default(self) -> int: ...
     @property
-    def plot_layout(self) -> Any: ...
+    def plot_layout(self) -> QGridLayout: ...
     @property
     def _is_loading_new_data(self) -> bool: ...
     @property
@@ -39,9 +43,9 @@ class PlotServices(Protocol):
     @property
     def _global_max_density(self) -> float: ...
     @property
-    def value_cache(self) -> dict: ...
+    def value_cache(self) -> dict[str, Any]: ...
     @property
-    def _enum_text_maps(self) -> dict: ...
+    def _enum_text_maps(self) -> dict[str, dict[int, str]]: ...
 
     def sync_crosshair(self, x: float, source: Any) -> None: ...
     def request_mark_stats_refresh(self, *, immediate: bool = False) -> None: ...
@@ -82,7 +86,7 @@ class PlotContext:
         return self._services.loader
 
     @property
-    def plot_widgets(self) -> list[Any]:
+    def plot_widgets(self) -> list[DraggableGraphicsLayoutWidget]:
         return self._services.plot_widgets
 
     @property
@@ -90,7 +94,7 @@ class PlotContext:
         return self._services.cursor_mode
 
     @property
-    def cursor_btn(self) -> Any:
+    def cursor_btn(self) -> QPushButton:
         return self._services.cursor_btn
 
     @property
@@ -110,7 +114,7 @@ class PlotContext:
         return self._services._plot_col_max_default
 
     @property
-    def plot_layout(self) -> Any:
+    def plot_layout(self) -> QGridLayout:
         return self._services.plot_layout
 
     @property
@@ -126,11 +130,11 @@ class PlotContext:
         return self._services._global_max_density
 
     @property
-    def value_cache(self) -> dict:
+    def value_cache(self) -> dict[str, Any]:
         return self._services.value_cache
 
     @property
-    def _enum_text_maps(self) -> dict:
+    def _enum_text_maps(self) -> dict[str, dict[int, str]]:
         return self._services._enum_text_maps
 
     def sync_crosshair(self, x: float, source: Any) -> None:
