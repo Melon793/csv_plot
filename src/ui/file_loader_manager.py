@@ -391,28 +391,37 @@ class FileLoaderManager(MainWindowBaseManager):
         )
         self.set_button_status(True)
         
-        # 尝试自动恢复配置
+        # 自动恢复：replots_after_loading 优先，auto-save 仅作降级兜底
         if hasattr(self.mw, 'plot_config_manager'):
-            # 获取当前可用的变量名列表
-            current_vars = []
-            if hasattr(self.mw, 'data') and self.mw.data is not None:
-                current_vars = list(self.mw.data.columns)
-            elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'var_names'):
-                current_vars = list(self.mw.loader.var_names)
-            
-            # 尝试自动恢复
-            should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(current_vars)
-            if should_apply:
-                success = self.mw.plot_config_manager.apply_config(
-                    self.mw, 
-                    self.mw.plot_config_manager.auto_save_manager.load_auto_save()
+            any_curve_restored = any(
+                container.isVisible() and (
+                    container.plot_widget.y_name or
+                    (container.plot_widget.is_multi_curve_mode and container.plot_widget.curves)
                 )
-                if success:
-                    logger.info(f"自动恢复配置成功: {reason}")
-                else:
-                    logger.warning(f"自动恢复配置失败")
+                for container in self.mw.plot_widgets
+            )
+
+            if any_curve_restored:
+                logger.info("replots_after_loading 已恢复曲线，跳过自动恢复")
             else:
-                logger.info(f"不应用自动保存: {reason}")
+                current_vars = []
+                if hasattr(self.mw, 'data') and self.mw.data is not None:
+                    current_vars = list(self.mw.data.columns)
+                elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'var_names'):
+                    current_vars = list(self.mw.loader.var_names)
+
+                should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(current_vars)
+                if should_apply:
+                    success = self.mw.plot_config_manager.apply_config(
+                        self.mw,
+                        self.mw.plot_config_manager.auto_save_manager.load_auto_save()
+                    )
+                    if success:
+                        logger.info(f"自动恢复配置成功: {reason}")
+                    else:
+                        logger.warning(f"自动恢复配置失败")
+                else:
+                    logger.info(f"不应用自动保存: {reason}")
 
     def _remember_last_open_dir(self, file_path: str):
         directory = os.path.dirname(file_path)
