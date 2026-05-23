@@ -4,8 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 if TYPE_CHECKING:
     import pyqtgraph as pg
 
@@ -47,6 +45,7 @@ class CurveInfo:
 
     def __post_init__(self):
         """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""
+        import numpy as np
         if self.x_data is not None and len(self.x_data) > 1:
             self.x_min = float(np.min(self.x_data))
             self.x_max = float(np.max(self.x_data))
@@ -59,6 +58,7 @@ class CurveInfo:
 
     def update_x_range(self):
         """当 x_data 变更后调用，同步更新缓存"""
+        import numpy as np
         if self.x_data is not None and len(self.x_data) > 1:
             self.x_min = float(np.min(self.x_data))
             self.x_max = float(np.max(self.x_data))

@@ -4,7 +4,6 @@ from __future__ import annotations
 import sys
 import os
 from typing import Any
-import numpy as np
 import logging
 
 DEFAULT_SHOW_X_AXIS_LABEL = False
@@ -48,7 +47,7 @@ PLOT_COL_MAX_DEFAULT = 3
 PLOT_ROW_CURRENT_DEFAULT = 3
 PLOT_COL_CURRENT_DEFAULT = 1
 
-FLOAT32_SAFE_MAX = float(np.finfo(np.float32).max)
+FLOAT32_SAFE_MAX = 3.4028234663852886e+38
 
 # 单位行自动检测阈值
 UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判定为单位行
@@ -107,6 +106,7 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     if values is None:
         return False, None
 
+    import numpy as np
     import pandas as pd
 
     try:
