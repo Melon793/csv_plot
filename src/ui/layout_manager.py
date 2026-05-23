@@ -463,7 +463,7 @@ class LayoutManager(MainWindowBaseManager):
         self.mw.drop_overlay.hide()
 
     def create_subplots_matrix(self, m: int, n: int):
-        from csv_plot import DraggableGraphicsLayoutWidget
+        from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
 
         for i in reversed(range(self.mw.plot_layout.count())):
             w = self.mw.plot_layout.itemAt(i).widget()
