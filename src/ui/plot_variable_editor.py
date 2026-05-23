@@ -1,7 +1,6 @@
 """绘图变量编辑器"""
 
 from __future__ import annotations
-import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -159,6 +158,7 @@ class PlotVariableEditorDialog(QDialog):
 
     def load_current_curves(self):
         """加载当前绘图中的曲线"""
+        import numpy as np
         # 先清空表格
         self.var_table.setRowCount(0)
 

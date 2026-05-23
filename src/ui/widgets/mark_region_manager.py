@@ -12,7 +12,7 @@ MarkRegionManager - 标记区域管理
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING, NamedTuple
 
-import numpy as np
+import pyqtgraph as pg
 
 if TYPE_CHECKING:
     from src.ui.widgets.cursor_manager import CursorManager
@@ -38,6 +38,8 @@ class MarkRegionManager:
     """负责标记区域的管理和统计计算"""
 
     def __init__(self, cursor_manager: CursorManager):
+        import numpy as np
+        globals()['np'] = np
         if cursor_manager is None:
             raise ValueError(
                 "MarkRegionManager requires a valid CursorManager instance"

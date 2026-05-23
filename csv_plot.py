@@ -4,8 +4,6 @@ import os
 import weakref
 import subprocess
 from pathlib import Path
-import numpy as np
-import pandas as pd
 from threading import Lock
 from typing import Any
 
@@ -21,6 +19,7 @@ from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, DEFAULT_PADDI
 from src.core.data_types import CurveInfo, MarkStatEntry
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.table_dialog import DataTableDialog, DropOverlay
+from src.ui.plot_variable_editor import PlotVariableEditorDialog
 from src.ui.variable_list import MyTableWidget
 
 from src.core.logger import LogManager, get_logger
@@ -64,6 +63,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     提供灵活的图表排列和交互功能
     """
     def __init__(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
+        import numpy as np
+        import pandas as pd
+        globals()['np'] = np
+        globals()['pd'] = pd
         super().__init__()
         self.factor = 1.0
         self.offset = 0.0
@@ -3805,7 +3808,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 else:
                     y_avg = y_max = y_min = np.nan
             
-            return [(x1, x2, y1, y2, dx, dy, slope, self.label_left.text(), y_avg, y_max, y_min)]
+            return [MarkStatEntry(
+                x1=x1, x2=x2, y1=y1, y2=y2,
+                dx=dx, dy=dy, slope=slope,
+                label=self.label_left.text(),
+                y_avg=y_avg, y_max=y_max, y_min=y_min,
+            )]
 
     def _apply_plot_style(self, show_symbols: bool):
         """应用绘图样式 - 基于xrange只有两种搭配：细线+symbol 或 粗线无symbol

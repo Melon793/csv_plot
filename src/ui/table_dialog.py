@@ -3,7 +3,6 @@
 from __future__ import annotations
 import weakref
 from threading import Lock
-import pandas as pd
 from PySide6.QtCore import Qt, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QFontMetrics, QColor, QAction, QFont
 from PySide6.QtWidgets import (
@@ -31,6 +30,8 @@ class DropOverlay(QWidget):
     """
 
     def __init__(self, parent=None):
+        import pandas as pd
+        globals()['pd'] = pd
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setWindowFlags(Qt.WindowType.Widget)
@@ -339,6 +340,8 @@ class DataTableDialog(QMainWindow):
         return None
 
     def __init__(self, parent=None):
+        import pandas as pd
+        globals()['pd'] = pd
         super().__init__(parent)
         self.setWindowTitle("变量数值表")
         self.window_geometry = None

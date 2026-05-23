@@ -14,7 +14,7 @@ CursorManager - 光标管理
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
-import numpy as np
+import pyqtgraph as pg
 
 if TYPE_CHECKING:
     from src.ui.widgets.multi_curve_manager import MultiCurveManager
@@ -25,6 +25,8 @@ class CursorManager:
 
     def __init__(self, multi_curve_manager: MultiCurveManager):
         """初始化光标管理器，绑定到 MultiCurveManager 以获取依赖链"""
+        import numpy as np
+        globals()['np'] = np
         if multi_curve_manager is None:
             raise ValueError(
                 "CursorManager requires a valid MultiCurveManager instance"
