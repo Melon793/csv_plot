@@ -11,10 +11,7 @@ from typing import Any
 
 if sys.platform == "darwin":  # macOS
     # 屏蔽 macOS ICC 警告
-    os.environ["QT_LOGGING_RULES"] = (
-        "qt6ct.debug=false; "      # 原来想关的 qt6ct 日志
-        "qt.gui.icc=false"         # 关闭 ICC 解析相关日志
-    )
+    pass
 
 os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 
