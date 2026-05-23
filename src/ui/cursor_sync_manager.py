@@ -210,6 +210,7 @@ class CursorSyncManager(MainWindowBaseManager):
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget is not None:
+                widget._last_cursor_update_time = 0
                 widget.update_cursor_label()
 
     def set_cursor_enabled(self, enabled: bool) -> None:
