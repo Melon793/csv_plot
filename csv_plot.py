@@ -4326,6 +4326,10 @@ class MainWindow(QMainWindow):
 
         # ---------------- 中央控件 ----------------
         central = QWidget()
+        central.setAutoFillBackground(True)
+        pal = central.palette()
+        pal.setColor(central.backgroundRole(), QColor(255, 255, 255))
+        central.setPalette(pal)
         self.setCentralWidget(central)
 
         # ========== 主布局：可调整分界线 ==========
@@ -4647,6 +4651,14 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.layout_manager._handle_resize(event)
+        if sys.platform == "win32" and self.isMaximized():
+            if not getattr(self, "_in_sync_resize", False):
+                self._in_sync_resize = True
+                try:
+                    QApplication.processEvents()
+                    self.repaint()
+                finally:
+                    self._in_sync_resize = False
 
     def toggle_plot_area(self, checked):
         self.layout_manager.toggle_plot_area(checked)
