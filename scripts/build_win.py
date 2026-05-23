@@ -176,6 +176,9 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         "--include-module=PySide6.QtOpenGL",
         "--include-module=PySide6.QtOpenGLWidgets",
         "--include-package=src",
+        "--include-module=src.ui.main_window",
+        "--include-module=src.ui.widgets.plot_widget",
+        "--include-module=src.core.curve_strategy",
         "--include-package=numexpr",
         "--include-module=numpy",
         "--include-module=pandas",
@@ -287,7 +290,7 @@ def build():
 
     print()
     print("[Build] ========================================")
-    print(f"[Build] 混合打包完成!")
+    print("[Build] 混合打包完成!")
     print(f"[Build] 输出: {dist_dir / f'{OUTPUT_NAME}.exe'}")
     print("[Build] ========================================")
 
