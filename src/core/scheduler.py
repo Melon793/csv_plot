@@ -3,7 +3,10 @@
 from __future__ import annotations
 from PySide6.QtCore import QObject, QTimer
 from src.core.config import UI_DEBOUNCE_DELAY_MS
+from src.core.logger import get_logger
 from typing import Any
+
+logger = get_logger(__name__)
 
 
 class UnifiedUpdateScheduler(QObject):
@@ -77,4 +80,4 @@ class UnifiedUpdateScheduler(QObject):
         try:
             callback()
         except Exception:
-            pass
+            logger.exception("UI callback [%s] raised an exception", name)

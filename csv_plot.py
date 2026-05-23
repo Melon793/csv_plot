@@ -64,7 +64,17 @@ def main():
 
         _MIN_SPLASH_MS = 800
         delay_arg = next((a for a in sys.argv if a.startswith("--splash-delay=")), None)
-        splash_delay = int(delay_arg.split("=")[1]) * 1000 if delay_arg else _MIN_SPLASH_MS
+        if delay_arg:
+            parts = delay_arg.split("=", 1)
+            if len(parts) > 1 and parts[1]:
+                try:
+                    splash_delay = int(parts[1]) * 1000
+                except ValueError:
+                    splash_delay = _MIN_SPLASH_MS
+            else:
+                splash_delay = _MIN_SPLASH_MS
+        else:
+            splash_delay = _MIN_SPLASH_MS
 
         t0 = time.perf_counter()
 

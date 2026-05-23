@@ -62,7 +62,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     支持图表区域的拖拽重排和动态布局调整
     提供灵活的图表排列和交互功能
     """
-    def __init__(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
+    def __init__(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
+        if time_channels_info is None:
+            time_channels_info = {}
         import numpy as np
         import pandas as pd
         globals()['np'] = np
@@ -95,7 +97,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cleanup_timer.timeout.connect(self._process_pending_deletes)
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
-    def setup_ui(self, units_dict, dataframe, time_channels_info={},synchronizer=None):
+    def setup_ui(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
+        if time_channels_info is None:
+            time_channels_info = {}
         """
         初始化UI组件和布局
         
