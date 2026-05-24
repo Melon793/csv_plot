@@ -163,6 +163,8 @@ class MainWindow(QMainWindow):
         self._mark_stats_timer.timeout.connect(self._flush_mark_stats_refresh)
         self._is_syncing_crosshair = False
         self._is_syncing_mark_region = False
+        self._last_template_name = ""
+        self._last_template_desc = ""
 
         self.value_cache = {}
 
@@ -425,7 +427,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._logger.info("CSV Plot 应用程序退出")
-        self.plot_config_manager.save_auto_save(self)
+        if self.loader is not None:
+            self.plot_config_manager.save_auto_save(self)
         self.layout_manager._handle_close()
         super().closeEvent(event)
 
@@ -553,28 +556,28 @@ class MainWindow(QMainWindow):
 
     def save_current_as_template(self):
         """保存当前配置为模板"""
+        if self.loader is None:
+            QMessageBox.information(self, "提示", "无可保存的画图配置（请先加载数据并画图）")
+            return
         from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
         config = self.plot_config_manager.export_current_config(self)
-        if not hasattr(self, "_last_template_name"):
-            self._last_template_name = ""
-            self._last_template_desc = ""
         dialog = TemplateEditorDialog(
             self.plot_config_manager.template_manager,
             current_config=config,
-            initial_name=getattr(self, "_last_template_name", ""),
-            initial_desc=getattr(self, "_last_template_desc", ""),
+            initial_name=self._last_template_name,
+            initial_desc=self._last_template_desc,
             parent=self,
         )
         dialog.template_saved.connect(self._on_template_saved)
         dialog.exec()
 
     def _on_template_saved(self, template_id: str):
-        """模板保存后记录名称/描述"""
+        from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
         dialog = self.sender()
-        if dialog and hasattr(dialog, "_name_edit"):
+        if isinstance(dialog, TemplateEditorDialog):
             self._last_template_name = dialog._name_edit.text().strip()
             self._last_template_desc = dialog._desc_edit.text().strip()
-        self._persist_last_template(template_id, self._last_template_name)
+        self._persist_last_template(template_id, self._last_template_name or "")
         self._show_status_message(f"模板已保存: {template_id}")
 
     def _persist_last_template(self, template_id: str, name: str):
@@ -589,6 +592,7 @@ class MainWindow(QMainWindow):
         """菜单展开前刷新快速加载项"""
         if self._template_menu_act_quick is not None:
             self._template_menu.removeAction(self._template_menu_act_quick)
+            self._template_menu_act_quick.deleteLater()
             self._template_menu_act_quick = None
 
         tid = self._last_template_id
@@ -618,42 +622,40 @@ class MainWindow(QMainWindow):
         dialog.exec()
     
     def apply_template(self, template_id: str):
-        """应用指定的模板"""
         template = self.plot_config_manager.template_manager.get_template(template_id)
         if not template:
             self._logger.error(f"模板不存在: {template_id}")
             return
-
         self._persist_last_template(template_id, template.metadata.name)
+        self._check_and_apply_template(template, template_id, template.metadata.name)
 
-        if self.loader is not None:
-            from src.core.plot_config import PlotSessionConfig
-            config = PlotSessionConfig.from_dict(template.config)
-            current_vars = list(self.loader.var_names)
-            ratio, matched, unmatched = self.plot_config_manager.check_template_match(
-                config, current_vars
-            )
-
-            if ratio < RATIO_RESET_PLOTS:
-                self._show_match_low_dialog(template.metadata.name, config, ratio, matched, unmatched)
-                return
-
-        success = self.plot_config_manager.apply_template(self, template_id)
-        if success:
-            self._logger.info("模板已应用")
+    def _check_and_apply_template(self, template, template_id: str, name: str):
+        from src.core.plot_config import PlotSessionConfig
+        if self.loader is None:
+            QMessageBox.warning(self, "无数据", "请先加载数据文件后再应用模板")
+            return
+        config = PlotSessionConfig.from_dict(template.config)
+        current_vars = list(self.loader.var_names)
+        ratio, matched, unmatched = self.plot_config_manager.check_template_match(
+            config, current_vars
+        )
+        if ratio >= RATIO_RESET_PLOTS:
+            success = self.plot_config_manager.apply_config(self, config)
+            if success:
+                self._logger.info(f"应用模板[{name}]成功，匹配度 {ratio:.0%}")
+            else:
+                QMessageBox.warning(
+                    self, "应用失败",
+                    f"模板[{name}]应用失败，请检查数据是否已加载。"
+                )
         else:
-            QMessageBox.warning(
-                self, "应用失败",
-                f"模板[{template.metadata.name}]应用失败，请检查数据是否已加载。"
-            )
+            self._show_match_low_dialog(name, config, ratio, matched, unmatched)
 
     def _quick_apply_template(self):
-        """快速应用最近模板（带匹配检查）"""
         tid = self._last_template_id
         name = self._last_template_name
         if not tid or not name:
             return
-
         template = self.plot_config_manager.template_manager.get_template(tid)
         if not template:
             QMessageBox.warning(self, "模板不存在", f"模板[{name}]已被删除")
@@ -663,29 +665,7 @@ class MainWindow(QMainWindow):
             self._template_settings.remove("last_template_name")
             self._template_settings.sync()
             return
-
-        if self.loader is None:
-            QMessageBox.warning(self, "无数据", "请先加载数据文件后再应用模板")
-            return
-
-        from src.core.plot_config import PlotSessionConfig
-        config = PlotSessionConfig.from_dict(template.config)
-        current_vars = list(self.loader.var_names)
-        ratio, matched, unmatched = self.plot_config_manager.check_template_match(
-            config, current_vars
-        )
-
-        if ratio >= RATIO_RESET_PLOTS:
-            success = self.plot_config_manager.apply_config(self, config)
-            if success:
-                self._logger.info(f"快速应用模板[{name}]成功，匹配度 {ratio:.0%}")
-            else:
-                QMessageBox.warning(
-                    self, "应用失败",
-                    f"模板[{name}]应用失败，请检查数据是否已加载。"
-                )
-        else:
-            self._show_match_low_dialog(name, config, ratio, matched, unmatched)
+        self._check_and_apply_template(template, tid, name)
 
     def _show_match_low_dialog(self, name: str, config, ratio: float, matched: set[str], unmatched: set[str]):
         """匹配度过低时弹出详情对话框，允许强制执行"""
@@ -708,6 +688,7 @@ class MainWindow(QMainWindow):
         box.exec()
 
         if box.clickedButton() == force_btn:
+            self._persist_last_template(self._last_template_id, name)
             self.plot_config_manager.apply_config(self, config)
             self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
 

@@ -1,13 +1,14 @@
 """模板管理器 - 提供模板的完整业务逻辑"""
 
 from __future__ import annotations
+import copy
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from PySide6.QtCore import QObject, Signal
 from src.core.storage import TemplateStorage
-from src.core.template_models import PlotTemplate, TemplateMetadata
+from src.core.template_models import PlotTemplate, TemplateMetadata, count_template_variables
 from src.core.plot_config import (
     PlotSessionConfig,
     TemplateError,
@@ -65,7 +66,7 @@ class TemplateManager(QObject):
 
             # 按变量数量筛选
             if min_variables > 0:
-                var_count = self._count_variables(template.config)
+                var_count = count_template_variables(template.config)
                 if var_count < min_variables:
                     continue
 
@@ -88,8 +89,8 @@ class TemplateManager(QObject):
         description: str = "",
         template_id: Optional[str] = None,
     ) -> PlotTemplate:
-        """保存模板"""
-        # 检查名称冲突
+        if not name or not name.strip():
+            raise TemplateValidationError("Template name cannot be empty")
         if self.exists(name, exclude_id=template_id):
             raise TemplateNameConflictError(f"Template name '{name}' already exists")
 
@@ -151,12 +152,10 @@ class TemplateManager(QObject):
         return True
 
     def duplicate_template(self, template_id: str, new_name: str) -> Optional[PlotTemplate]:
-        """复制模板"""
         template = self._storage.read_template(template_id)
         if not template:
             raise TemplateNotFoundError(f"Template {template_id} not found")
 
-        # 创建新模板，保留配置
         new_id = self._generate_template_id()
         new_metadata = TemplateMetadata(
             id=new_id,
@@ -166,7 +165,7 @@ class TemplateManager(QObject):
         )
         new_template = PlotTemplate(
             metadata=new_metadata,
-            config=template.config.copy(),
+            config=copy.deepcopy(template.config),
         )
         self._storage.write_template(new_template)
         self.template_added.emit(new_id)
@@ -177,10 +176,11 @@ class TemplateManager(QObject):
         """从外部文件导入"""
         template = self._storage.import_from_external(external_path)
         if template:
-            # 检查名称是否冲突，必要时添加后缀
             base_name = template.metadata.name
             counter = 1
             while self.exists(template.metadata.name):
+                if counter > 999:
+                    raise TemplateError("Too many name conflicts")
                 template.metadata.name = f"{base_name} ({counter})"
                 counter += 1
             self._storage.write_template(template)
@@ -207,15 +207,4 @@ class TemplateManager(QObject):
 
     @staticmethod
     def _generate_template_id() -> str:
-        """生成 8 位 UUID 作为模板 ID"""
         return uuid.uuid4().hex[:8]
-
-    @staticmethod
-    def _count_variables(config: dict) -> int:
-        """计算配置中的变量数量"""
-        var_set = set()
-        plots = config.get("plots", [])
-        for plot in plots:
-            curves = plot.get("curves", [])
-            var_set.update(curves)
-        return len(var_set)

@@ -169,27 +169,40 @@ class PlotConfigManager(QObject):
 
         return ratio, matched, unmatched
 
-    def apply_template(self, main_window, template_id: str) -> bool:
-        """应用模板"""
+    def apply_template(
+        self, main_window, template_id: str,
+        check_match: bool = False, current_vars: list[str] | None = None
+    ) -> bool:
         logger.info(f"========================================")
         logger.info(f"开始加载模板，ID: {template_id}")
         template = self._template_manager.get_template(template_id)
         if not template:
             logger.error(f"❌ 找不到模板: {template_id}")
             return False
-        
+
+        config = PlotSessionConfig.from_dict(template.config)
+
+        if check_match and current_vars is not None:
+            ratio, matched, unmatched = self.check_template_match(
+                config, current_vars
+            )
+            if ratio < RATIO_RESET_PLOTS:
+                logger.warning(
+                    f"模板[{template.metadata.name}]匹配度 {ratio:.0%} < {RATIO_RESET_PLOTS:.0%}"
+                )
+                return False
+
         logger.info(f"模板名称: {template.metadata.name}")
         logger.info(f"模板描述: {template.metadata.description or '无'}")
-        
-        config = PlotSessionConfig.from_dict(template.config)
+
         result = self.apply_config(main_window, config)
-        
+
         if result:
             logger.info(f"✅ 模板加载成功")
         else:
             logger.error(f"❌ 模板加载失败")
         logger.info(f"========================================")
-        
+
         return result
 
     def save_current_as_template(
