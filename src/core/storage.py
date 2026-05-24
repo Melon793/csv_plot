@@ -30,6 +30,7 @@ class TemplateStorage(QObject):
         self._storage_path = storage_path
         self._storage_path.mkdir(parents=True, exist_ok=True)
         self._cache: dict[str, PlotTemplate] = {}
+        self._id_to_filename: dict[str, str] = {}
         self._watcher = QFileSystemWatcher()
         self._watcher.directoryChanged.connect(self._on_directory_changed)
         self._watcher.fileChanged.connect(self._on_file_changed)
@@ -53,14 +54,11 @@ class TemplateStorage(QObject):
         return safe[:120]
 
     def _find_file_by_id(self, template_id: str) -> Optional[Path]:
-        """在目录中查找属于指定 ID 的 yaml 文件"""
-        for f in self._storage_path.glob("*.yaml"):
-            try:
-                template = self.read_template_from_file(f)
-                if template and template.metadata.id == template_id:
-                    return f
-            except Exception:
-                pass
+        filename = self._id_to_filename.get(template_id)
+        if filename:
+            f = self._storage_path / filename
+            if f.exists():
+                return f
         return None
 
     def _id_from_cached_name(self, name: str) -> Optional[str]:
@@ -71,15 +69,16 @@ class TemplateStorage(QObject):
         return None
 
     def scan_directory(self) -> list[str]:
-        """扫描目录，返回所有模板 ID"""
         template_ids = []
         self._cache.clear()
+        self._id_to_filename.clear()
         try:
             for file in self._storage_path.glob("*.yaml"):
                 try:
                     template = self.read_template_from_file(file)
                     if template:
                         self._cache[template.metadata.id] = template
+                        self._id_to_filename[template.metadata.id] = file.name
                         template_ids.append(template.metadata.id)
                 except Exception as e:
                     logger.warning(f"Failed to read template file {file}: {e}")
@@ -88,7 +87,6 @@ class TemplateStorage(QObject):
         return template_ids
 
     def read_template(self, template_id: str) -> Optional[PlotTemplate]:
-        """读取指定模板"""
         if template_id in self._cache:
             return self._cache[template_id]
         f = self._find_file_by_id(template_id)
@@ -96,6 +94,7 @@ class TemplateStorage(QObject):
             template = self.read_template_from_file(f)
             if template:
                 self._cache[template_id] = template
+                self._id_to_filename[template_id] = f.name
                 return template
         return None
 
@@ -111,10 +110,15 @@ class TemplateStorage(QObject):
         return None
 
     def write_template(self, template: PlotTemplate) -> bool:
-        """写入模板到文件（文件名 = 安全化名称.yaml）"""
         try:
             name = template.metadata.name
             new_filename = self._make_filename(name) + ".yaml"
+
+            existing_id = self._id_from_cached_name(name)
+            if existing_id and existing_id != template.metadata.id:
+                raise TemplateStorageError(
+                    f"Name '{name}' already used by template {existing_id}"
+                )
 
             if template.metadata.id in self._cache:
                 old = self._cache[template.metadata.id]
@@ -130,7 +134,10 @@ class TemplateStorage(QObject):
                 yaml.dump(template.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
             os.replace(tmp_file, file)
             self._cache[template.metadata.id] = template
+            self._id_to_filename[template.metadata.id] = new_filename
             return True
+        except TemplateStorageError:
+            raise
         except Exception as e:
             logger.error(f"Error writing template {template.metadata.id}: {e}")
             raise TemplateStorageError(f"Failed to write template: {e}")
@@ -147,6 +154,7 @@ class TemplateStorage(QObject):
                 file.unlink()
             if template_id in self._cache:
                 del self._cache[template_id]
+            self._id_to_filename.pop(template_id, None)
             return True
         except Exception as e:
             logger.error(f"Error deleting template {template_id}: {e}")
@@ -226,13 +234,21 @@ class TemplateStorage(QObject):
             template = self.read_template_from_file(file)
             if template:
                 self._cache[template.metadata.id] = template
+                self._id_to_filename[template.metadata.id] = file.name
                 self.file_changed.emit(template.metadata.id)
         else:
             for tid, tpl in list(self._cache.items()):
-                if self._make_filename(tpl.metadata.name) + ".yaml" == file.name:
-                    del self._cache[tid]
-                    self.file_changed.emit(tid)
-                    break
+                expected = self._make_filename(tpl.metadata.name) + ".yaml"
+                if expected == file.name:
+                    try:
+                        deleted = self.read_template_from_file(file)
+                    except Exception:
+                        deleted = None
+                    if deleted is None or deleted.metadata.id == tid:
+                        del self._cache[tid]
+                        self._id_to_filename.pop(tid, None)
+                        self.file_changed.emit(tid)
+                        break
         self.directory_changed.emit()
 
     def get_all_templates(self) -> list[PlotTemplate]:

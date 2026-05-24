@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QSplitter,
 )
 from src.core.template_manager import TemplateManager
-from src.core.template_models import PlotTemplate
+from src.core.template_models import PlotTemplate, count_template_variables
 from src.core.plot_config import (
     PlotSessionConfig,
     TemplateNotFoundError,
@@ -166,7 +166,7 @@ class TemplateManagerDialog(QDialog):
             name_item.setData(Qt.ItemDataRole.UserRole, template.metadata.id)
             self._table.setItem(row, 0, name_item)
 
-            var_count = self._count_variables(template.config)
+            var_count = count_template_variables(template.config)
             self._table.setItem(row, 1, QTableWidgetItem(str(var_count)))
 
             plot_count = len(template.config.get("plots", []))
@@ -339,13 +339,3 @@ class TemplateManagerDialog(QDialog):
             return
         self.template_applied.emit(self._selected_template_id)
         self.accept()
-
-    @staticmethod
-    def _count_variables(config: dict) -> int:
-        """计算配置中的变量数量"""
-        var_set = set()
-        plots = config.get("plots", [])
-        for plot in plots:
-            curves = plot.get("curves", [])
-            var_set.update(curves)
-        return len(var_set)

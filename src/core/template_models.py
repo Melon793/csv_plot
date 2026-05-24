@@ -67,8 +67,16 @@ class PlotTemplate:
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlotTemplate":
-        """从字典反序列化"""
         return cls(
             metadata=TemplateMetadata.from_dict(data["metadata"]),
             config=data["config"],
         )
+
+
+def count_template_variables(config: dict) -> int:
+    var_set = set()
+    plots = config.get("plots", []) or []
+    for plot in plots:
+        curves = (plot or {}).get("curves", []) or []
+        var_set.update(curves)
+    return len(var_set)

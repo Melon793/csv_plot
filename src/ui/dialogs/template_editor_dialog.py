@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from src.core.template_manager import TemplateManager
-from src.core.template_models import PlotTemplate, TemplateMetadata
+from src.core.template_models import PlotTemplate, TemplateMetadata, count_template_variables
 from src.core.plot_config import (
     PlotSessionConfig,
     PlotConfig,
@@ -280,7 +280,7 @@ class TemplateEditorDialog(QDialog):
                     self._preview_layout.addWidget(frame, row, col)
 
             # 更新统计
-            var_count = self._count_variables(config)
+            var_count = count_template_variables(config)
             plot_count = len(plots)
             self._stats_label.setText(
                 f"cells: {rows} × {cols} | vars: {var_count} | plots: {plot_count}"
@@ -322,7 +322,6 @@ class TemplateEditorDialog(QDialog):
             session_config = PlotSessionConfig.from_dict(config)
 
             if self._edit_template_id:
-                # 更新现有模板
                 template = self._template_manager.save_template(
                     session_config,
                     name,
@@ -330,18 +329,21 @@ class TemplateEditorDialog(QDialog):
                     self._edit_template_id,
                 )
                 QMessageBox.information(self, "成功", "模板已更新")
-                self.template_saved.emit(template.metadata.id)
-                self.accept()
+                try:
+                    self.template_saved.emit(template.metadata.id)
+                finally:
+                    self.accept()
             else:
-                # 创建新模板
                 template = self._template_manager.save_template(
                     session_config,
                     name,
                     self._desc_edit.text().strip(),
                 )
-                QMessageBox.information(self, "成功", "模板已创建")
-                self.template_saved.emit(template.metadata.id)
-                self.accept()
+                QMessageBox.information(self, "成功", "模板已保存")
+                try:
+                    self.template_saved.emit(template.metadata.id)
+                finally:
+                    self.accept()
 
         except TemplateNameConflictError:
             QMessageBox.warning(self, "警告", "模板名称已存在")
@@ -358,13 +360,3 @@ class TemplateEditorDialog(QDialog):
         self._template = None
         self.setWindowTitle("💾 另存为模板")
         self._on_save_clicked()
-
-    @staticmethod
-    def _count_variables(config: dict) -> int:
-        """计算配置中的变量数量"""
-        var_set = set()
-        plots = config.get("plots", [])
-        for plot in plots:
-            curves = plot.get("curves", [])
-            var_set.update(curves)
-        return len(var_set)
