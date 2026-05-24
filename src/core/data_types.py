@@ -45,6 +45,10 @@ class CurveInfo:
 
     def __post_init__(self):
         """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""
+        self._refresh_x_cache()
+
+    def _refresh_x_cache(self):
+        """刷新 x_min/x_max/point_density 缓存"""
         import numpy as np
         if self.x_data is not None and len(self.x_data) > 1:
             self.x_min = float(np.min(self.x_data))
@@ -58,16 +62,7 @@ class CurveInfo:
 
     def update_x_range(self):
         """当 x_data 变更后调用，同步更新缓存"""
-        import numpy as np
-        if self.x_data is not None and len(self.x_data) > 1:
-            self.x_min = float(np.min(self.x_data))
-            self.x_max = float(np.max(self.x_data))
-            span = self.x_max - self.x_min
-            self.point_density = len(self.x_data) / span if span > 0 else 0.0
-        elif self.x_data is not None and len(self.x_data) == 1:
-            self.x_min = float(self.x_data[0])
-            self.x_max = float(self.x_data[0])
-            self.point_density = 0.0
+        self._refresh_x_cache()
 
 
 @dataclass
