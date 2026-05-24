@@ -477,6 +477,8 @@ class PlotDataManager:
                             old_x_data = ci.x_data
                             if old_x_data is not None and old_factor != 0:
                                 original_time = (old_x_data - old_offset) / old_factor
+                            elif old_x_data is not None:
+                                original_time = old_x_data
                             else:
                                 original_time = np.arange(1, len(y_data) + 1)
                         else:
@@ -621,8 +623,7 @@ class PlotDataManager:
             pw.is_multi_curve_mode = False
             pw.current_color_index = 0
 
-            # 清除 vline bounds
-            self._set_vline_bounds([None, None])
+            self._set_vline_bounds([None, None])  # [None, None] 表示无边界限制
         except Exception:
             logger.debug("清理绘图数据时异常", exc_info=True)
 

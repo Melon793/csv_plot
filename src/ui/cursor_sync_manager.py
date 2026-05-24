@@ -168,8 +168,11 @@ class CursorSyncManager(MainWindowBaseManager):
                     ]
                     self.mw.pinned_x_values = remaining[:1]
             if not self.mw.pinned_x_values:
-                if source_plot is not None and hasattr(source_plot, "vline"):
-                    self.mw.pinned_x_values = [source_plot.vline.value()]
+                pinned = context_x
+                if pinned is None and source_plot is not None and hasattr(source_plot, "vline"):
+                    pinned = source_plot.vline.value()
+                if pinned is not None:
+                    self.mw.pinned_x_values = [pinned]
             self.mw.cursor_mode = mode
         elif mode == "2 anchored cursor":
             if prev_mode == "1 free cursor" or not self.mw.pinned_x_values:

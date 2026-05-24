@@ -609,7 +609,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
         self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
-        self._set_vline_bounds([None, None]) 
+        self._set_vline_bounds([None, None])  # [None, None] 表示无边界限制
 
         self.xMin = xMin
         self.xMax = xMax
