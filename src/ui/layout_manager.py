@@ -316,39 +316,45 @@ class LayoutManager(MainWindowBaseManager):
             except Exception:
                 self.mw._time_correction_pinned_index_values = []
 
-            if self.mw.plot_widgets:
-                curr_min, curr_max = self.mw.plot_widgets[
-                    0
-                ].plot_widget.view_box.viewRange()[0]
-            else:
-                curr_min, curr_max = 0, 1
+            try:
+                if self.mw.plot_widgets:
+                    curr_min, curr_max = self.mw.plot_widgets[
+                        0
+                    ].plot_widget.view_box.viewRange()[0]
+                else:
+                    curr_min, curr_max = 0, 1
 
-            for container in self.mw.plot_widgets:
-                container.plot_widget.update_time_correction(new_factor, new_offset)
+                for container in self.mw.plot_widgets:
+                    container.plot_widget.update_time_correction(
+                        new_factor, new_offset
+                    )
 
-            if old_factor != 0:
-                index_min = (curr_min - old_offset) / old_factor
-                index_max = (curr_max - old_offset) / old_factor
-                new_min = new_offset + new_factor * index_min
-                new_max = new_offset + new_factor * index_max
-            else:
-                datalength = (
-                    self.mw.loader.datalength if hasattr(self.mw, "loader") else 1
-                )
-                new_min = new_offset + new_factor * 1
-                new_max = new_offset + new_factor * datalength
+                if old_factor != 0:
+                    index_min = (curr_min - old_offset) / old_factor
+                    index_max = (curr_max - old_offset) / old_factor
+                    new_min = new_offset + new_factor * index_min
+                    new_max = new_offset + new_factor * index_max
+                else:
+                    datalength = (
+                        self.mw.loader.datalength
+                        if hasattr(self.mw, "loader")
+                        else 1
+                    )
+                    new_min = new_offset + new_factor * 1
+                    new_max = new_offset + new_factor * datalength
 
-            if self.mw.plot_widgets:
-                first_plot = self.mw.plot_widgets[0].plot_widget
-                first_plot.view_box.enableAutoRange(x=False)
-                first_plot.view_box.setXRange(new_min, new_max, padding=0)
-                self.mw._realign_pinned_cursor_after_time_correction(
-                    old_factor, old_offset, new_factor, new_offset
-                )
+                if self.mw.plot_widgets:
+                    first_plot = self.mw.plot_widgets[0].plot_widget
+                    first_plot.view_box.enableAutoRange(x=False)
+                    first_plot.view_box.setXRange(new_min, new_max, padding=0)
+                    self.mw._realign_pinned_cursor_after_time_correction(
+                        old_factor, old_offset, new_factor, new_offset
+                    )
 
-            self.request_mark_stats_refresh(immediate=True)
-            self.mw._is_time_correction_active = False
-            self.mw._time_correction_pinned_index_values = []
+                self.request_mark_stats_refresh(immediate=True)
+            finally:
+                self.mw._is_time_correction_active = False
+                self.mw._time_correction_pinned_index_values = []
             return
         self.mw._is_time_correction_active = False
         self.mw._time_correction_pinned_index_values = []

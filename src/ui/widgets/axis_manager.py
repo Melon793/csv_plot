@@ -361,7 +361,7 @@ class AxisManager:
 
         except Exception:
             self._set_safe_y_range(0, 1)
-            self._set_x_limits_with_min_range(0, 1)
+            self._set_x_limits_with_min_range(None, None)
 
     def _reset_plot_limits(self) -> None:
         """重置绘图限制"""
@@ -369,7 +369,7 @@ class AxisManager:
         try:
             pw.plot_item.setLimits(yMin=None, yMax=None)
             pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
-            self._set_vline_bounds([None, None])
+            self._set_vline_bounds([None, None])  # [None, None] 表示无边界限制
         except Exception:
             pass
 

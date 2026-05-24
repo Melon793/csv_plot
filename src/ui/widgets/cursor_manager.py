@@ -924,12 +924,12 @@ class CursorManager:
         self.pinned_x_values = []
         self.pinned_index_values = []
 
-        self.pw.vline.setMovable(False)
+        self.pw.vline.setMovable(True)
         if hasattr(self.pw, "vline2"):
             self.pw.vline2.setMovable(False)
 
         if hasattr(self.pw.view_box, "is_cursor_pinned"):
-            self.pw.view_box.is_cursor_pinned = False
+            self.pw.view_box.is_cursor_pinned = True
 
     def free_cursor(self):
         """释放固定光标"""
@@ -961,8 +961,8 @@ class CursorManager:
         if hasattr(self.pw, "vline2"):
             self.pw.vline2.setVisible(False)
 
-    def _update_vline_bounds_from_data(self):
-        """从数据更新 vline 边界"""
+    def _update_view_range_from_data(self):
+        """从数据更新视图范围"""
         x_min, x_max = self.pw.get_curve_x_limits()
         if x_min is not None and x_max is not None:
             self.pw.view_box.setXRange(x_min, x_max, padding=0.02)
