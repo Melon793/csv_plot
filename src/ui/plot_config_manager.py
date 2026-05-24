@@ -48,14 +48,9 @@ class PlotConfigManager(QObject):
             plot_widget = container.plot_widget
             if not container.isVisible():
                 continue
-            curves = []
-            if plot_widget.is_multi_curve_mode:
-                for var_name in plot_widget.curves.keys():
-                    curves.append(var_name)
-            elif plot_widget.y_name:
-                curves.append(plot_widget.y_name)
-            if curves:
-                config.plots.append(PlotConfig(curves=curves))
+            curve_names = plot_widget.curve_strategy.get_curve_names()
+            if curve_names:
+                config.plots.append(PlotConfig(curves=curve_names))
 
         return config
 

@@ -169,17 +169,20 @@ class TemplateEditorDialog(QDialog):
         
         # plots
         lines.append("# 各子图配置列表（按从左到右、从上到下的顺序）")
-        lines.append("plots:")
-        plots = config.get("plots", [])
-        for i, plot in enumerate(plots):
-            lines.append(f"  - # 第 {i+1} 个子图的曲线变量名列表")
-            lines.append("    curves:")
-            curves = plot.get("curves", [])
-            if curves:
-                for curve in curves:
-                    lines.append(f"      - {curve}")
-            else:
-                lines.append("      []")
+        plots = config.get("plots", []) or []
+        if plots:
+            lines.append("plots:")
+            for i, plot in enumerate(plots):
+                lines.append(f"  - # 第 {i+1} 个子图的曲线变量名列表")
+                lines.append("    curves:")
+                curves = plot.get("curves", []) if plot else []
+                if curves:
+                    for curve in curves:
+                        lines.append(f"      - {curve}")
+                else:
+                    lines.append("      []")
+        else:
+            lines.append("plots: []")
         
         return "\n".join(lines) + "\n"
 
@@ -230,7 +233,7 @@ class TemplateEditorDialog(QDialog):
             # 渲染网格
             rows = config.get("layout_rows", 1)
             cols = config.get("layout_cols", 1)
-            plots = config.get("plots", [])
+            plots = config.get("plots", []) or []
 
             # 清除现有预览
             self._clear_preview()

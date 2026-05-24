@@ -3115,6 +3115,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             
             # 更新多曲线模式
             self.update_multi_curve_mode()
+
+            if len(self.curves) == 1 and not self.y_name:
+                single_name = next(iter(self.curves.keys()))
+                single_ci = self.curves[single_name]
+                self.y_name = single_name
+                self.y_format = single_ci.y_format or ''
             
             # 更新坐标轴范围（批量添加时跳过，避免重复更新）
             batch_adding = getattr(self, '_batch_adding', False)
