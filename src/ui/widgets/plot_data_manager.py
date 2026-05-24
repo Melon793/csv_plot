@@ -616,7 +616,11 @@ class PlotDataManager:
                         curve.clear()
                     except Exception:
                         logger.debug("清理多曲线 curve 时异常: %s", var_name)
-            
+
+            pw.curves.clear()
+            pw.is_multi_curve_mode = False
+            pw.current_color_index = 0
+
             # 清除 vline bounds
             self._set_vline_bounds([None, None])
         except Exception:
