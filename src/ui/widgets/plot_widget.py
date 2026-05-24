@@ -35,10 +35,6 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 
-# 主界面
-# 屏幕边距系数（用于自动选择窗口大小时，窗口不超过屏幕尺寸的比例）
-SCREEN_WITDH_MARGIN = 0.3
-SCREEN_HEIGHT_MARGIN = 0.3
 
 # PyInstaller 解包目录 — 已迁移至 src/utils/paths.py
 from src.utils.paths import resource_path

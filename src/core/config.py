@@ -6,6 +6,10 @@ import os
 from typing import Any
 import logging
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 DEFAULT_SHOW_X_AXIS_LABEL = False
 
 
@@ -22,6 +26,7 @@ def safe_callback(func):
                 return None
             raise
         except Exception:
+            logger.exception("safe_callback suppressed exception in %s", func.__name__)
             return None
 
     return wrapper

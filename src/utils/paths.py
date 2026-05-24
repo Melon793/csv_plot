@@ -11,7 +11,7 @@ def resource_path(relative_path: str) -> Path:
     """
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / relative_path
-    elif getattr(sys, "frozen", False):
+    elif hasattr(sys, "frozen") and sys.frozen:
         return Path(sys.executable).parent / relative_path
     else:
-        return Path(__file__).resolve().parent.parent.parent / relative_path
+        return Path(__file__).resolve().parents[2] / relative_path

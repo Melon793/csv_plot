@@ -179,8 +179,10 @@ class TemplateStorage(QObject):
         try:
             template = self.read_template(template_id)
             if template:
-                with open(target_path, "w", encoding="utf-8") as f:
+                tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
+                with open(tmp_path, "w", encoding="utf-8") as f:
                     yaml.dump(template.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
+                os.replace(tmp_path, target_path)
                 return True
         except Exception as e:
             logger.error(f"Error exporting template {template_id} to {target_path}: {e}")
