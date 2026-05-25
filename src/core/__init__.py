@@ -1,5 +1,6 @@
 """Core module for CSV Plot"""
 
+from src.core.settings import AppSettings, ConfigKey
 from src.core.plot_config import (
     PlotSessionConfig,
     PlotConfig,
@@ -15,6 +16,8 @@ from src.core.template_manager import TemplateManager
 from src.core.auto_save_manager import AutoSaveManager
 
 __all__ = [
+    "AppSettings",
+    "ConfigKey",
     "PlotSessionConfig",
     "PlotConfig",
     "TemplateError",

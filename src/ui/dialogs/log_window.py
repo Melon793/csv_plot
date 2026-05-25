@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout
 
 from src.core.logger import LogManager
@@ -42,16 +42,18 @@ class LogWindow(QDialog):
         self._restore_geometry()
 
     def _restore_geometry(self):
-        settings = QSettings("CSVPlot", "LogWindow")
-        geometry = settings.value("geometry")
+        from src.core.settings import AppSettings
+        settings = AppSettings()
+        geometry = settings.get_log_window_geometry()
         if geometry is not None:
             self.restoreGeometry(geometry)
         else:
             self.resize(800, 500)
 
     def _save_geometry(self):
-        settings = QSettings("CSVPlot", "LogWindow")
-        settings.setValue("geometry", self.saveGeometry())
+        from src.core.settings import AppSettings
+        settings = AppSettings()
+        settings.set_log_window_geometry(self.saveGeometry())
 
     def showEvent(self, event):
         super().showEvent(event)

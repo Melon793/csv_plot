@@ -19,8 +19,6 @@ Font cache layer —— 基于 QSettings 的字体缓存, 避免每次启动枚�
 from __future__ import annotations
 
 CACHE_VERSION = 1
-SETTINGS_ORG = "csv_plot"
-SETTINGS_APP = "font_cache"
 
 _FONT_PRIORITY_WIN = [
     "Microsoft YaHei UI",
@@ -39,12 +37,6 @@ def _detect_font_win() -> str:
         if name in available:
             return name
     return ""
-
-
-def _settings():
-    from PySide6.QtCore import QSettings
-
-    return QSettings(SETTINGS_ORG, SETTINGS_APP)
 
 
 _MONO_FONT_PRIORITY = [
@@ -83,12 +75,12 @@ def get_monospace_font_cached() -> str:
     返回空字符串则回退到 QFont("monospace") 默认行为。
     """
     from PySide6.QtGui import QFontDatabase
+    from src.core.settings import AppSettings
 
-    settings = _settings()
-
-    cached_version = settings.value("mono_cache_version", 0, type=int)
+    settings = AppSettings()
+    cached_version = settings.get_mono_font_cache_version()
     if cached_version == _MONO_CACHE_VERSION:
-        cached_name = settings.value("mono_font_name", "", type=str)
+        cached_name = settings.get_mono_font_name()
         if cached_name and cached_name in QFontDatabase.families():
             return cached_name
 
@@ -96,8 +88,8 @@ def get_monospace_font_cached() -> str:
     if not detected:
         return ""
 
-    settings.setValue("mono_cache_version", _MONO_CACHE_VERSION)
-    settings.setValue("mono_font_name", detected)
+    settings.set_mono_font_cache_version(_MONO_CACHE_VERSION)
+    settings.set_mono_font_name(detected)
     return detected
 
 
@@ -111,12 +103,12 @@ def get_windows_chinese_font_cached() -> str:
     返回空字符串时调用方应回退到 QApplication.font()。
     """
     from PySide6.QtGui import QFontDatabase
+    from src.core.settings import AppSettings
 
-    settings = _settings()
-
-    cached_version = settings.value("cache_version", 0, type=int)
+    settings = AppSettings()
+    cached_version = settings.get_font_cache_version()
     if cached_version == CACHE_VERSION:
-        cached_name = settings.value("font_name", "", type=str)
+        cached_name = settings.get_font_name()
         if cached_name and cached_name in QFontDatabase.families():
             return cached_name
 
@@ -124,6 +116,6 @@ def get_windows_chinese_font_cached() -> str:
     if not detected:
         return ""
 
-    settings.setValue("cache_version", CACHE_VERSION)
-    settings.setValue("font_name", detected)
+    settings.set_font_cache_version(CACHE_VERSION)
+    settings.set_font_name(detected)
     return detected

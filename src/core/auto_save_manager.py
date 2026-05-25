@@ -5,7 +5,7 @@ import os
 import yaml
 from pathlib import Path
 from typing import Optional, Tuple
-from PySide6.QtCore import QObject, Signal, QSettings
+from PySide6.QtCore import QObject, Signal
 from src.core.plot_config import PlotSessionConfig
 from src.core.logger import get_logger
 
@@ -26,28 +26,22 @@ class AutoSaveManager(QObject):
     def __init__(self, storage_path: Optional[Path] = None):
         super().__init__()
         if storage_path is None:
-            storage_path = self._get_default_storage_path()
+            from src.core.settings import AppSettings
+            storage_path = AppSettings().config_dir
         self._storage_path = storage_path
         self._storage_path.mkdir(parents=True, exist_ok=True)
         self._auto_save_file = self._storage_path / "auto_save.yaml"
         self._auto_save_backup_file = self._storage_path / "auto_save.yaml.backup"
-        self._settings = QSettings("CSVPlot", "AutoSave")
-
-    @staticmethod
-    def _get_default_storage_path() -> Path:
-        """获取默认的存储路径"""
-        from PySide6.QtCore import QStandardPaths
-        config_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation))
-        return config_dir
 
     def is_auto_save_enabled(self) -> bool:
-        """是否启用自动保存"""
-        return self._settings.value("auto_save_enabled", True, bool)
+        from src.core.settings import AppSettings
+        return AppSettings().is_auto_save_enabled()
 
     def set_auto_save_enabled(self, enabled: bool):
-        """设置启用状态"""
-        self._settings.setValue("auto_save_enabled", enabled)
-        self._settings.sync()
+        from src.core.settings import AppSettings
+        settings = AppSettings()
+        settings.set_auto_save_enabled(enabled)
+        settings.sync()
 
     def auto_save(self, config: PlotSessionConfig):
         """自动保存当前配置"""
