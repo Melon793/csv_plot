@@ -187,6 +187,7 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         "--include-module=ujson",
         f"--include-data-dir={ASSETS_DIR}={ASSETS_DIR}",
         f"--include-data-file={README_FILE}={README_FILE}",
+        "--include-data-file=docs/help.md=docs/help.md",
         "--follow-imports",
         "--no-deployment-flag=excluded-module-usage",
         "--lto=yes",

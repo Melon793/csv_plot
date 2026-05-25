@@ -41,6 +41,7 @@ nuitka --standalone \
     --include-data-file=assets/icon.icns=assets/icon.icns \
     --include-data-file=assets/icon.png=assets/icon.png \
     --include-data-file=README.md=README.md \
+    --include-data-file=docs/help.md=docs/help.md \
     --follow-imports \
     --nofollow-import-to=nuitka \
     --nofollow-import-to=pytest \

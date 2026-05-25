@@ -8,7 +8,7 @@ from src.utils.paths import resource_path
 class HelpDialog(QDialog):
     """
     帮助对话框类
-    用于显示应用程序的帮助文档，包括README.md文件内容
+    用于显示应用程序的帮助文档内容
     """
 
     def __init__(self, parent=None):
@@ -28,13 +28,13 @@ class HelpDialog(QDialog):
         text_edit = QTextEdit(self)
         text_edit.setReadOnly(True)
 
-        # 加载 README.md
-        readme_path = resource_path("README.md")
-        if readme_path.exists():
-            with open(readme_path, "r", encoding="utf-8") as f:
+        # 加载 docs/help.md
+        help_path = resource_path("docs/help.md")
+        if help_path.exists():
+            with open(help_path, "r", encoding="utf-8") as f:
                 text_edit.setMarkdown(f.read())
         else:
-            text_edit.setPlainText("README.md 文件未找到。")
+            text_edit.setPlainText("帮助文档未找到。")
 
         layout.addWidget(text_edit)
 
