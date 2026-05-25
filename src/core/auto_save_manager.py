@@ -100,9 +100,9 @@ class AutoSaveManager(QObject):
         if not current_vars_set:
             return True, "No current variables, applying auto-saved config"
 
-        # 计算匹配度
+        # 计算匹配度：分母为配置中的变量数（与模板匹配语义一致）
         matched = len(config_vars & current_vars_set)
-        total = max(len(config_vars), len(current_vars_set))
+        total = len(config_vars)
         ratio = matched / total if total > 0 else 0.0
 
         if ratio >= self.MIN_MATCH_RATIO:
