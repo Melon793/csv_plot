@@ -13,13 +13,14 @@ from src.core.config import (  # noqa: E402
     PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
     RATIO_RESET_PLOTS,
 )
+from src.core.settings import AppSettings  # noqa: E402
 from src.ui.table_dialog import DropOverlay  # noqa: E402
 from src.ui.variable_list import MyTableWidget  # noqa: E402
 from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 
-from PySide6.QtCore import Qt, QTimer, QSettings  # noqa: E402
+from PySide6.QtCore import Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QColor, QIcon, QAction  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -141,6 +142,7 @@ class MainWindow(QMainWindow):
     def _init_data_state(self):
         self.loaded_path = ""
         self._last_open_dir: str | None = None
+        self.loader = None
         self.var_names = None
         self.units = None
         self.time_channels_infos = None
@@ -405,9 +407,9 @@ class MainWindow(QMainWindow):
         self._template_menu_act_auto_restore.triggered.connect(self._on_auto_restore_toggled)
         self._refresh_auto_restore_indicator()
 
-        self._template_settings = QSettings("CSVPlot", "TemplateMenu")
-        self._last_template_id = self._template_settings.value("last_template_id", None)
-        self._last_template_name = self._template_settings.value("last_template_name", None)
+        self._template_settings = AppSettings()
+        self._last_template_id = self._template_settings.get_last_template_id()
+        self._last_template_name = self._template_settings.get_last_template_name()
 
         self._log_manager = LogManager.get_instance()
         self._logger = self._log_manager.get_logger("app.main")
@@ -584,8 +586,8 @@ class MainWindow(QMainWindow):
         """持久化最后使用的模板信息"""
         self._last_template_id = template_id
         self._last_template_name = name
-        self._template_settings.setValue("last_template_id", template_id)
-        self._template_settings.setValue("last_template_name", name)
+        self._template_settings.set_last_template_id(template_id)
+        self._template_settings.set_last_template_name(name)
         self._template_settings.sync()
 
     def _refresh_template_menu(self):
@@ -607,8 +609,8 @@ class MainWindow(QMainWindow):
             else:
                 self._last_template_id = None
                 self._last_template_name = None
-                self._template_settings.remove("last_template_id")
-                self._template_settings.remove("last_template_name")
+                self._template_settings.set_last_template_id(None)
+                self._template_settings.set_last_template_name(None)
                 self._template_settings.sync()
     
     def open_template_manager(self):
@@ -661,8 +663,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "模板不存在", f"模板[{name}]已被删除")
             self._last_template_id = None
             self._last_template_name = None
-            self._template_settings.remove("last_template_id")
-            self._template_settings.remove("last_template_name")
+            self._template_settings.set_last_template_id(None)
+            self._template_settings.set_last_template_name(None)
             self._template_settings.sync()
             return
         self._check_and_apply_template(template, tid, name)

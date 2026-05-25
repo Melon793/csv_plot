@@ -26,7 +26,7 @@ from src.core.logger import LogManager, get_logger
 from src.ui.dialogs.log_window import LogWindow
 
 
-from PySide6.QtCore import Qt, QMargins, QTimer, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker, QSettings
+from PySide6.QtCore import Qt, QMargins, QTimer, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker
 from PySide6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QCursor, QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
