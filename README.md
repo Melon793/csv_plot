@@ -164,6 +164,9 @@ bash scripts/build_exe_pyinstaller
 
 # Nuitka（编译为原生可执行文件，性能更高）
 bash scripts/build_exe_nuitka
+
+# 打包为独立应用（Windows）
+uv run scripts/build_win.py 
 ```
 
 ## 使用指南
