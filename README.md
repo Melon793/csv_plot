@@ -62,34 +62,61 @@ csv_plot/
 ├── csv_plot.py                  # 主入口（~5000 行，DraggablePlotWidget + MainWindow）
 ├── pyproject.toml               # 项目依赖与构建配置
 ├── README.md
+├── uv.lock                      # uv 依赖锁定文件
+├── qsettings_refactor_plan.md   # QSettings 统一配置管理重构方案
 ├── scripts/                     # 打包脚本
-│   ├── build_exe_pyinstaller    #   PyInstaller (macOS/Linux)
+│   ├── build_exe_pyinstaller    # PyInstaller (macOS/Linux)
 │   ├── build_exe_pyinstaller.bat  # PyInstaller (Windows)
-│   ├── build_exe_nuitka         #   Nuitka (macOS/Linux)
-│   └── build_exe_nuitka.bat     #   Nuitka (Windows)
+│   ├── build_exe_nuitka         # Nuitka (macOS/Linux)
+│   ├── build_win.py             # Windows 打包入口
+│   └── csv_plot_pyinstaller.spec  # PyInstaller spec 文件
 ├── assets/                      # 图标资源
 │   ├── icon.png
 │   ├── icon.ico
 │   └── icon.icns
-├── data/                        # 示例数据
+├── docs/                        # 设计文档与分析报告
+│   ├── Plot模板管理器设计文档.md
+│   ├── Plot模板管理器_施工总结.md
+│   ├── 应用启动性能优化分析报告.md
+│   ├── 应用启动性能优化分析报告_v2.0.md
+│   ├── CODE_REVIEW_REPORT.md
+│   ├── STARTUP_PERFORMANCE_ANALYSIS.md
+│   ├── MDF_LOADING_NUITKA.md
+│   ├── NUITKA_MDF_LOAD_ERROR_ANALYSIS.md
+│   ├── PyQt6到PySide6迁移计划.md
+│   ├── WINDOWS_MAXIMIZE_BLACK_FRAME_ANALYSIS.md
+│   ├── plot_logic_audit_report.md
+│   ├── vline_bounds_check_report.md
+│   └── template.yaml            # 模板示例
 └── src/                         # 模块化源码
     ├── app/
     │   └── plot_context.py      # PlotContext 服务层（依赖注入）
     ├── core/
     │   ├── config.py            # 全局常量、float32 安全检查
     │   ├── data_types.py        # AutoDetectError / FormatInfo / CurveInfo 数据类型
+    │   ├── curve_strategy.py    # 曲线策略（单/多曲线模式切换）
     │   ├── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
-    │   ├── font_cache.py        # 字体缓存
-    │   └── logger.py            # Logger 日志管理器
+    │   ├── font_cache.py        # 字体缓存（基于 AppSettings）
+    │   ├── logger.py            # Logger 日志管理器
+    │   ├── settings.py          # AppSettings 统一配置管理器 + ConfigKey 枚举
+    │   ├── plot_config.py       # PlotSessionConfig / PlotConfig 配置模型
+    │   ├── template_models.py   # PlotTemplate / TemplateMetadata 模板数据模型
+    │   ├── storage.py           # TemplateStorage 模板持久化存储
+    │   ├── template_manager.py  # TemplateManager 模板 CRUD 管理
+    │   └── auto_save_manager.py # AutoSaveManager 自动保存与恢复
     ├── data/
     │   ├── loader.py            # FastDataLoader CSV 加载 + DataLoadThread 后台线程
     │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
     │   └── metadata.py          # VarMetadata 数据类 + 有效性分类工具
+    ├── utils/
+    │   └── paths.py             # resource_path 资源路径解析
     └── ui/
+        ├── main_window.py       # MainWindow 主窗口（QSettings 重构已接入 AppSettings）
         ├── drag_drop.py         # 拖放解析（parse_var_names / build_mimedata / create_pixmap）
         ├── table_dialog.py      # DataTableDialog + PandasTableModel + CustomDelegate + XYScatterPlotDialog
         ├── variable_list.py     # MyTableWidget 变量列表面板
         ├── mark_stats.py        # MarkStatsWindow 标记统计窗口
+        ├── plot_config_manager.py  # PlotConfigManager 配置协调（模板 / 自动保存入口）
         ├── plot_variable_editor.py  # PlotVariableEditorDialog 变量编辑器
         ├── main_window_base_manager.py  # MainWindow 基础管理器
         ├── file_loader_manager.py  # 文件加载管理器
@@ -101,11 +128,14 @@ csv_plot/
         │   ├── layout_input.py  # LayoutInputDialog 行列数配置
         │   ├── axis.py          # AxisDialog 坐标轴设置
         │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
-        │   └── log_window.py     # LogWindowDialog 日志窗口
+        │   ├── log_window.py    # LogWindow 日志窗口（QSettings 重构已接入 AppSettings）
+        │   ├── template_editor_dialog.py  # TemplateEditorDialog 模板编辑器
+        │   └── template_manager_dialog.py # TemplateManagerDialog 模板管理器
         └── widgets/
             ├── __init__.py
             ├── base_manager.py  # 管理器基类
             ├── custom_viewbox.py # 信号化 CustomViewBox（10 个信号解耦 MainWindow）
+            ├── plot_widget.py   # PlotWidget 主绘图组件
             ├── plot_container.py # PlotContainerWidget 绘图容器
             ├── plot_ui_manager.py # PlotUIManager 绘图 UI 管理器
             ├── plot_data_manager.py # PlotDataManager 绘图数据管理器
