@@ -38,6 +38,7 @@ a = Analysis(
         (str(PROJECT_DIR / "assets" / "icon.icns"), "assets"),
         (str(PROJECT_DIR / "assets" / "icon.png"), "assets"),
         (str(PROJECT_DIR / "README.md"), "."),
+        (str(PROJECT_DIR / "docs" / "help.md"), "docs"),
     ],
     hiddenimports=[
         # 本项目需要手动声明的隐藏导入
