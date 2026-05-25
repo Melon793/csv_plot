@@ -3,7 +3,10 @@
 /data/
 __pycache__/
 /.trae/
+/build/
 /dist/
+/*.dist/
+/*.build/
 .DS_Store
 /.*_backup/
 /tests/
