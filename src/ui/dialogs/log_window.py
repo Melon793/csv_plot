@@ -48,7 +48,7 @@ class LogWindow(QDialog):
         if geometry is not None:
             self.restoreGeometry(geometry)
         else:
-            self.resize(800, 500)
+            self.resize(800, 300)
 
     def _save_geometry(self):
         from src.core.settings import AppSettings
