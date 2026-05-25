@@ -60,34 +60,11 @@
 ```
 csv_plot/
 ├── csv_plot.py                  # 主入口（~5000 行，DraggablePlotWidget + MainWindow）
-├── pyproject.toml               # 项目依赖与构建配置
 ├── README.md
-├── uv.lock                      # uv 依赖锁定文件
-├── qsettings_refactor_plan.md   # QSettings 统一配置管理重构方案
-├── scripts/                     # 打包脚本
-│   ├── build_exe_pyinstaller    # PyInstaller (macOS/Linux)
-│   ├── build_exe_pyinstaller.bat  # PyInstaller (Windows)
-│   ├── build_exe_nuitka         # Nuitka (macOS/Linux)
-│   ├── build_win.py             # Windows 打包入口
-│   └── csv_plot_pyinstaller.spec  # PyInstaller spec 文件
 ├── assets/                      # 图标资源
 │   ├── icon.png
 │   ├── icon.ico
 │   └── icon.icns
-├── docs/                        # 设计文档与分析报告
-│   ├── Plot模板管理器设计文档.md
-│   ├── Plot模板管理器_施工总结.md
-│   ├── 应用启动性能优化分析报告.md
-│   ├── 应用启动性能优化分析报告_v2.0.md
-│   ├── CODE_REVIEW_REPORT.md
-│   ├── STARTUP_PERFORMANCE_ANALYSIS.md
-│   ├── MDF_LOADING_NUITKA.md
-│   ├── NUITKA_MDF_LOAD_ERROR_ANALYSIS.md
-│   ├── PyQt6到PySide6迁移计划.md
-│   ├── WINDOWS_MAXIMIZE_BLACK_FRAME_ANALYSIS.md
-│   ├── plot_logic_audit_report.md
-│   ├── vline_bounds_check_report.md
-│   └── template.yaml            # 模板示例
 └── src/                         # 模块化源码
     ├── app/
     │   └── plot_context.py      # PlotContext 服务层（依赖注入）
