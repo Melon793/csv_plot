@@ -191,7 +191,7 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         "--no-deployment-flag=excluded-module-usage",
         "--lto=yes",
         "--jobs=8",
-        "--windows-console-mode=attach",
+        "--windows-console-mode=disable",
         f"--windows-icon-from-ico={ICON_FILE}",
     ]
 
