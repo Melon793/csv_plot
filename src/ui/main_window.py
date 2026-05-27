@@ -174,7 +174,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central.setAutoFillBackground(True)
         pal = central.palette()
-        pal.setColor(central.backgroundRole(), QColor(255, 255, 255))
+        # pal.setColor(central.backgroundRole(), QColor(255, 255, 255))
         central.setPalette(pal)
         self.setCentralWidget(central)
 
