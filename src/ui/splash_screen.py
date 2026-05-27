@@ -21,7 +21,12 @@ ICON_SIZE = 115
 class SplashScreen(QWidget):
 
     def __init__(self):
-        super().__init__()
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Window,
+        )
         self.width = 500
         self.height = 280
         self._is_shown = False
@@ -34,11 +39,6 @@ class SplashScreen(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self._on_timer)
 
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Window
-        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
  
