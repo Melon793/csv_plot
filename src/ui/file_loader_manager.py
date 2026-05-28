@@ -55,6 +55,18 @@ class FileLoaderManager(MainWindowBaseManager):
         except json.JSONDecodeError:
             raise
 
+    @staticmethod
+    def _resolve_config_path(filename: str) -> str | None:
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            candidate = os.path.join(exe_dir, filename)
+            if os.path.isfile(candidate):
+                return candidate
+        cwd_candidate = os.path.join(os.getcwd(), filename)
+        if os.path.isfile(cwd_candidate):
+            return cwd_candidate
+        return None
+
     def load_btn_click(self):
         if getattr(self.mw, "_is_loading_new_data", False):
             return
@@ -247,29 +259,31 @@ class FileLoaderManager(MainWindowBaseManager):
             has_unit = False
             config_used = True
 
-        if not is_mdf_file and os.path.isfile("config_dict.json"):
-            try:
-                config_dict = self.load_dict("config_dict.json")
-                ext_dict = config_dict.get(file_ext[1:], {})
-                cfg_sep = ext_dict.get("sep")
-                cfg_skip = ext_dict.get("skiprows")
-                cfg_has_unit = ext_dict.get("has_unit")
-                if (
-                    cfg_sep is not None
-                    and cfg_skip is not None
-                    and cfg_has_unit is not None
-                ):
-                    delimiter_typ = cfg_sep
-                    desc_rows = int(cfg_skip)
-                    has_unit = bool(cfg_has_unit)
-                    config_used = True
-            except Exception as e:
-                QMessageBox.warning(
-                    self.mw,
-                    "配置文件错误",
-                    f"config_dict.json 读取失败，将使用自动检测方式加载文件。\n\n错误详情: {e}",
-                )
-                logger.warning("config_dict.json 读取失败: %s", e)
+        if not is_mdf_file:
+            config_path = self._resolve_config_path("config_dict.json")
+            if config_path is not None and os.path.isfile(config_path):
+                try:
+                    config_dict = self.load_dict(config_path)
+                    ext_dict = config_dict.get(file_ext[1:], {})
+                    cfg_sep = ext_dict.get("sep")
+                    cfg_skip = ext_dict.get("skiprows")
+                    cfg_has_unit = ext_dict.get("has_unit")
+                    if (
+                        cfg_sep is not None
+                        and cfg_skip is not None
+                        and cfg_has_unit is not None
+                    ):
+                        delimiter_typ = cfg_sep
+                        desc_rows = int(cfg_skip)
+                        has_unit = bool(cfg_has_unit)
+                        config_used = True
+                except Exception as e:
+                    QMessageBox.warning(
+                        self.mw,
+                        "配置文件错误",
+                        f"config_dict.json 读取失败，将使用自动检测方式加载文件。\n\n错误详情: {e}",
+                    )
+                    logger.warning("config_dict.json 读取失败: %s", e)
 
         if not config_used:
             try:
