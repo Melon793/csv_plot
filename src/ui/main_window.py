@@ -88,9 +88,11 @@ class MainWindow(QMainWindow):
     def _load_window_context(self):
         _read_status = False
         _hide_plot_area = False
-        if os.path.isfile("config_dict.json"):
+
+        config_path = self._resolve_config_path("config_dict.json")
+        if config_path is not None and os.path.isfile(config_path):
             try:
-                config_dict = self.load_dict("config_dict.json")
+                config_dict = self.load_dict(config_path)
                 layout_config_dict = config_dict.get("layout_config", {})
                 _width = int(layout_config_dict.get("window_width", 0))
                 _height = int(layout_config_dict.get("window_height", 0))
@@ -541,6 +543,11 @@ class MainWindow(QMainWindow):
     def load_dict(path: str, *, default=None) -> dict:
         from src.ui.file_loader_manager import FileLoaderManager
         return FileLoaderManager.load_dict(path, default=default)
+
+    @staticmethod
+    def _resolve_config_path(filename: str) -> str | None:
+        from src.ui.file_loader_manager import FileLoaderManager
+        return FileLoaderManager._resolve_config_path(filename)
         
     def _extract_file_extension(self, file_path: str) -> str:
         return self.file_loader_manager._extract_file_extension(file_path)
