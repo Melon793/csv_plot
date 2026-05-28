@@ -2,7 +2,7 @@
 import math
 import sys
  
-from PySide6.QtCore import Qt, QTimer, QPointF, QRectF, QElapsedTimer
+from PySide6.QtCore import Qt, QTimer, QPointF, QRectF, QElapsedTimer, QEventLoop, Signal
 from PySide6.QtGui import (
     QPainter,
     QColor,
@@ -20,6 +20,9 @@ ICON_SIZE = 115
  
 class SplashScreen(QWidget):
 
+    # 信号：通知事件循环退出
+    finished = Signal()
+
     def __init__(self):
         super().__init__(
             None,
@@ -30,6 +33,7 @@ class SplashScreen(QWidget):
         self.width = 500
         self.height = 280
         self._is_shown = False
+        self._event_loop = None
 
         self.setFixedSize(self.width, self.height)
 
@@ -63,6 +67,22 @@ class SplashScreen(QWidget):
         self._is_shown = False
         self.timer.stop()
         super().close()
+
+    def wait_for_completion(self):
+        """
+        启动嵌套事件循环，直到 finished 信号触发。
+        在这期间，Splash 动画会持续流畅运行。
+        """
+        if self._event_loop is not None:
+            return
+        self._event_loop = QEventLoop()
+        self.finished.connect(self._event_loop.quit)
+        self._event_loop.exec()
+        self._event_loop = None
+
+    def signal_finish(self):
+        """触发 finished 信号，结束 wait_for_completion"""
+        self.finished.emit()
  
     def paintEvent(self, event):
         painter = QPainter(self)
