@@ -75,23 +75,40 @@ def main():
 
         t0 = time.perf_counter()
 
-        def _do_finish(window):
+        # 保存 window 的引用
+        window_ref = [None]
+
+        def finish_splash_and_show():
+            """完成 Splash，显示主窗口"""
+            window = window_ref[0]
             splash.finish(window)
             window.show()
             app.setQuitOnLastWindowClosed(True)
             app._main_window_ref = window
 
-        def _create_and_finish():
+        def create_main_window():
+            """在后台构造 MainWindow，构造完成后调度 finish"""
             from src.ui.main_window import MainWindow
-            window = MainWindow()
+            window_ref[0] = MainWindow()
             elapsed = (time.perf_counter() - t0) * 1000
             remaining = max(0, splash_delay - int(elapsed))
-            if remaining == 0:
-                _do_finish(window)
-            else:
-                QTimer.singleShot(remaining, lambda w=window: _do_finish(w))
 
-        QTimer.singleShot(0, _create_and_finish)
+            if remaining == 0:
+                # 立即结束
+                splash.signal_finish()
+                QTimer.singleShot(0, finish_splash_and_show)
+            else:
+                # 延迟到剩余时间后结束
+                def delayed_finish():
+                    splash.signal_finish()
+                    finish_splash_and_show()
+                QTimer.singleShot(remaining, delayed_finish)
+
+        # 关键：使用 QTimer.singleShot 启动 MainWindow 构造
+        QTimer.singleShot(0, create_main_window)
+
+        # 进入嵌套事件循环，在此期间 Splash 动画持续流畅
+        splash.wait_for_completion()
 
     sys.exit(app.exec())
 
