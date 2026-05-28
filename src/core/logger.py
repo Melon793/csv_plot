@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import atexit
+import os
+import sys
 from queue import Queue
 
 from PySide6.QtCore import QObject, Signal
@@ -13,7 +15,15 @@ LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(name)-20s | %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
 LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
 LOG_FILE_BACKUP_COUNT = 3
-LOG_FILE_NAME = "csv_plot.log"
+
+
+def _get_log_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.getcwd()
+
+
+LOG_FILE_NAME = os.path.join(_get_log_dir(), "csv_plot.log")
 
 
 class QSignalLogHandler(logging.Handler, QObject):
