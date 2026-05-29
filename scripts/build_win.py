@@ -162,14 +162,21 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
 
     cmd = [sys.executable, "-m", "nuitka", "--standalone"]
 
-    if shutil.which("gcc"):
-        gcc_version = subprocess.check_output(["gcc", "-dumpversion"], text=True).strip()
-        print(f"[Build] GCC 版本: {gcc_version}")
+    py_ver = sys.version_info[:2]
+    if py_ver >= (3, 13):
+        print(f"[Build] Python {py_ver[0]}.{py_ver[1]} 检测到，Python 3.13+ 不支持 --mingw64，将使用 --clang 编译器")
+        print("[Build] 提示: Python 3.13+ 官方发行版已内置 Clang，无需额外安装")
+        cmd += ["--clang"]
     else:
-        print("[Build] 未检测到 GCC，编译可能失败。")
+        print(f"[Build] Python {py_ver[0]}.{py_ver[1]} 检测到，将使用 --mingw64 编译器")
+        if shutil.which("gcc"):
+            gcc_version = subprocess.check_output(["gcc", "-dumpversion"], text=True).strip()
+            print(f"[Build] GCC 版本: {gcc_version}")
+        else:
+            print("[Build] 未检测到 GCC，编译可能失败。")
+        cmd += ["--mingw64"]
 
     cmd += [
-        "--mingw64",
         f"--report={REPORT_FILE}",
         f"--output-filename={OUTPUT_NAME}",
         "--enable-plugin=pyside6",
