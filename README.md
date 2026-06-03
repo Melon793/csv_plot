@@ -161,15 +161,14 @@ csv_plot/
 项目提供了 `scripts/` 目录下的打包脚本，可直接运行：
 
 ```bash
-# 如果没有安装pyinstaller
-# uv add pyinstaller
 # PyInstaller（单目录模式，启动快）
+# 如果没有安装pyinstaller，先安装pyinstaller
+# uv add pyinstaller
 bash scripts/build_exe_pyinstaller
 
+# Nuitka（编译为原生可执行文件，性能更高）
 # 如果没有安装nuitka，先安装nuitka
 # uv add nuitka
-
-# Nuitka（编译为原生可执行文件，性能更高）
 bash scripts/build_exe_nuitka
 
 # 打包为独立应用（Windows）
