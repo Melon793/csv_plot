@@ -25,7 +25,7 @@ from PySide6.QtGui import QColor, QIcon, QAction  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit,
-    QMessageBox, QSplitter, QMenu,
+    QMessageBox, QSplitter, QMenu, QStyle,
 )
 
 SCREEN_WIDTH_MARGIN = 0.3
@@ -195,14 +195,14 @@ class MainWindow(QMainWindow):
         self._pending_splitter_adjustment = False
 
     def _init_left_panel(self):
-        left_widget = QWidget()
+        left_widget = QWidget(self.main_splitter)
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(5, 0, 5, 0)
 
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 0, 0, 0)
 
-        left_layout_title = QLabel("变量列表")
+        left_layout_title = QLabel("变量列表", left_widget)
         font = left_layout_title.font()
         font.setBold(True)
         left_layout_title.setFont(font)
@@ -210,25 +210,25 @@ class MainWindow(QMainWindow):
 
         title_layout.addStretch(1)
 
-        self.clone_btn = QPushButton("分身")
+        self.clone_btn = QPushButton("分身", left_widget)
         self.clone_btn.setToolTip("启动独立实例")
         self.clone_btn.clicked.connect(self.spawn_clone_window)
         title_layout.addWidget(self.clone_btn)
         self.clone_btn.setVisible(True)
 
-        self.help_btn_small = QPushButton("?")
+        self.help_btn_small = QPushButton("?", left_widget)
         self.help_btn_small.setToolTip("帮助文档")
         self.help_btn_small.clicked.connect(self.show_help)
         title_layout.addWidget(self.help_btn_small)
 
         left_layout.addLayout(title_layout)
 
-        self.filter_input = QLineEdit()
+        self.filter_input = QLineEdit(left_widget)
         self.filter_input.setPlaceholderText("输入变量名关键词（空格分隔）")
         self.filter_input.textChanged.connect(self.filter_variables)
         left_layout.addWidget(self.filter_input)
 
-        self.unit_filter_input = QLineEdit()
+        self.unit_filter_input = QLineEdit(left_widget)
         self.unit_filter_input.setPlaceholderText("输入单位关键词（空格分隔）")
         self.unit_filter_input.setContentsMargins(60, 0, 0, 0)
         self.unit_filter_input.textChanged.connect(self.filter_variables)
@@ -237,26 +237,26 @@ class MainWindow(QMainWindow):
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.load_btn = QPushButton("导入数据文件")
+        self.load_btn = QPushButton("导入数据文件", left_widget)
         self.load_btn.clicked.connect(self.load_btn_click)
 
-        self.reload_btn = QPushButton("重载")
+        self.reload_btn = QPushButton("重载", left_widget)
         self.reload_btn.clicked.connect(self.reload_data)
 
         button_layout.addWidget(self.load_btn, 4)
         button_layout.addWidget(self.reload_btn, 1)
 
         left_layout.addLayout(button_layout)
-        self.list_widget = MyTableWidget()
+        self.list_widget = MyTableWidget(left_widget)
         left_layout.addWidget(self.list_widget)
 
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(2)
-        self.log_btn = QPushButton("日志")
+        self.log_btn = QPushButton("日志", left_widget)
         self.log_btn.clicked.connect(self.show_log_window)
         bottom_row.addWidget(self.log_btn)
 
-        self.toggle_plot_btn = QPushButton("隐藏绘图区")
+        self.toggle_plot_btn = QPushButton("隐藏绘图区", left_widget)
         self.toggle_plot_btn.setCheckable(True)
         self.toggle_plot_btn.toggled.connect(self.toggle_plot_area)
         bottom_row.addWidget(self.toggle_plot_btn)
@@ -268,7 +268,7 @@ class MainWindow(QMainWindow):
         self._saved_geometry = None
 
     def _init_right_panel(self):
-        self.plot_widget = QWidget()
+        self.plot_widget = QWidget(self.main_splitter)
         root_layout = QVBoxLayout(self.plot_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
@@ -276,15 +276,15 @@ class MainWindow(QMainWindow):
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 5, 5)
 
-        self.time_correction_btn = QPushButton("时间修正")
+        self.time_correction_btn = QPushButton("时间修正", self.plot_widget)
         self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
         top_bar.addWidget(self.time_correction_btn)
 
-        self.clear_all_plots_btn = QPushButton("清除绘图")
+        self.clear_all_plots_btn = QPushButton("清除绘图", self.plot_widget)
         self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
 
-        self._template_menu_btn = QPushButton("模板菜单")
+        self._template_menu_btn = QPushButton("模板菜单", self.plot_widget)
         self._template_menu = QMenu(self._template_menu_btn)
         self._template_menu_act_quick = None
         self._template_menu_act_save = self._template_menu.addAction("保存为模板")
@@ -297,13 +297,13 @@ class MainWindow(QMainWindow):
 
         top_bar.addStretch(1)
 
-        self.auto_range_btn = QPushButton("自动缩放")
+        self.auto_range_btn = QPushButton("自动缩放", self.plot_widget)
         self.auto_range_btn.clicked.connect(self.auto_range_all_plots)
 
-        self.auto_y_btn = QPushButton("仅调节y轴")
+        self.auto_y_btn = QPushButton("仅调节y轴", self.plot_widget)
         self.auto_y_btn.clicked.connect(self.auto_y_in_x_range)
 
-        self.cursor_btn = QPushButton("显示光标")
+        self.cursor_btn = QPushButton("显示光标", self.plot_widget)
         self.cursor_btn.setCheckable(True)
         self.cursor_btn.clicked.connect(self.toggle_cursor_all)
 
@@ -311,11 +311,11 @@ class MainWindow(QMainWindow):
         self.cursor_mode = "1 free cursor"
         self.pinned_x_values = []
 
-        self.mark_region_btn = QPushButton("标记区域")
+        self.mark_region_btn = QPushButton("标记区域", self.plot_widget)
         self.mark_region_btn.setCheckable(True)
         self.mark_region_btn.clicked.connect(self.toggle_mark_region)
 
-        self.grid_layout_btn = QPushButton("修改布局")
+        self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
         self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
         top_bar.addWidget(self.grid_layout_btn)
@@ -360,27 +360,16 @@ class MainWindow(QMainWindow):
             self._drop_event_filter_registered = True
 
         if self._hide_plot_area:
-            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            self.show()
-            _geometry = self.geometry()
-
             self.toggle_plot_btn.setChecked(True)
             self.toggle_plot_btn.setText("显示绘图区")
             self._plot_area_visible = False
-
             self.plot_widget.hide()
 
-            left_width = self.left_widget.width()
             main_margin = self.centralWidget().layout().contentsMargins()
-            left_width += main_margin.left() + main_margin.right()
-            frame_width = self.frameGeometry().width() - self.width()
+            frame_width = self.style().pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth) * 2
+            left_width = self.var_table_default_width + main_margin.left() + main_margin.right()
             new_width = left_width + frame_width
-
             self.setFixedWidth(new_width)
-            self.move(_geometry.topLeft())
-            self.close()
-            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
-
             self._old_max_width = self._window_width_default
 
         self.saved_mark_range = None
