@@ -1,6 +1,7 @@
 """Logger core module - LogManager singleton with async QueueHandler/QueueListener architecture"""
 
 from __future__ import annotations
+import threading
 import logging
 import logging.handlers
 import atexit
@@ -49,17 +50,28 @@ class QSignalLogHandler(logging.Handler, QObject):
 
 class LogManager:
     _instance: LogManager | None = None
+    _lock = threading.Lock()
+    _initialized = False
+
+    def __new__(cls) -> LogManager:
+        """线程安全的单例创建（双重检查锁 DCL）"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
 
     @classmethod
     def get_instance(cls) -> LogManager:
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        return cls()  # __new__ 已保证单例
 
     def __init__(self):
-        if LogManager._instance is not None:
+        if LogManager._initialized:
             return
-        LogManager._instance = self
+        with LogManager._lock:
+            if LogManager._initialized:
+                return
+            LogManager._initialized = True
 
         self._ui_handler = QSignalLogHandler()
         self._ui_handler.setLevel(logging.INFO)
