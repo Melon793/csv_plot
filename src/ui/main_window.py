@@ -414,6 +414,8 @@ class MainWindow(QMainWindow):
         )
 
     def _handle_cli_args(self):
+        if "--clone-window" in sys.argv:
+            return
         positional_args = [a for a in sys.argv[1:] if not a.startswith("--")]
         if positional_args:
             self.load_csv_file(positional_args[0])

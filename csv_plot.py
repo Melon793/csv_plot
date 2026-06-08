@@ -45,7 +45,7 @@ def main():
         app.setWindowIcon(QIcon(str(ico_path)))
 
     app.setQuitOnLastWindowClosed(False)
-    skip_splash = "--no-splash" in sys.argv
+    skip_splash = "--no-splash" in sys.argv or "--clone-window" in sys.argv
 
     if skip_splash:
         from src.ui.main_window import MainWindow
