@@ -48,11 +48,6 @@ class CursorSyncManager(MainWindowBaseManager):
     def reset_plots_after_loading(
         self, index_xMin, index_xMax, *, reason: str | None = None
     ):
-        for container in self.mw.plot_widgets:
-            container.plot_widget._is_updating_data = True
-            if hasattr(container.plot_widget, "_cancel_ui_refresh"):
-                container.plot_widget._cancel_ui_refresh()
-
         try:
             for container in self.mw.plot_widgets:
                 container.plot_widget.clear_plot_item()
@@ -72,9 +67,6 @@ class CursorSyncManager(MainWindowBaseManager):
                 self.mw.toggle_mark_region(False)
 
         finally:
-            for container in self.mw.plot_widgets:
-                container.plot_widget._is_updating_data = False
-
             for container in self.mw.plot_widgets:
                 widget = container.plot_widget
                 try:
@@ -672,12 +664,6 @@ class CursorSyncManager(MainWindowBaseManager):
                 curr_min, curr_max = first_plot.view_box.viewRange()[0]
                 first_plot.view_box.setXRange(curr_min, curr_max, padding=0)
 
-                if cleared:
-                    msg = "以下图表被清除：\n"
-                    for plot_idx, reason in cleared:
-                        msg += f"Plot {plot_idx}: {reason}\n"
-                    QMessageBox.information(self.mw, "更新通知", msg)
-
         finally:
             for container in self.mw.plot_widgets:
                 container.plot_widget._is_updating_data = False
@@ -693,3 +679,11 @@ class CursorSyncManager(MainWindowBaseManager):
                             widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
                     pass
+
+        if cleared:
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            msg = "以下图表被清除：\n"
+            for plot_idx, reason in cleared:
+                msg += f"Plot {plot_idx}: {reason}\n"
+            QMessageBox.information(self.mw, "更新通知", msg)

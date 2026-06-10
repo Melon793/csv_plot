@@ -761,6 +761,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
 
     def _run_cursor_refresh(self):
+        if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+            return
         if getattr(self, '_is_interacting', False):
             return
         if hasattr(self, 'vline') and self.vline.isVisible():
@@ -2790,9 +2792,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._update_cursor_after_plot(min_x, max_x)
 
             self._recalc_max_point_density()
-            main_window = self.window()
-            if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                main_window._sync_min_xrange()
+            if not getattr(self, '_is_updating_data', False):
+                main_window = self.window()
+                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                    main_window._sync_min_xrange()
 
             return True
             
@@ -2959,13 +2962,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.is_multi_curve_mode = False
             self.current_color_index = 0
 
-            import gc
-            gc.collect()
-
             self._recalc_max_point_density()
-            main_window = self.window()
-            if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                main_window._sync_min_xrange()
+            if not getattr(self, '_is_updating_data', False):
+                main_window = self.window()
+                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                    main_window._sync_min_xrange()
         except Exception as e:
             print(f"清除绘图数据时出错: {e}")
 
