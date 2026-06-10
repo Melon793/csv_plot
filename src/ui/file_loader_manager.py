@@ -178,7 +178,8 @@ class FileLoaderManager(MainWindowBaseManager):
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget and hasattr(widget, "_queue_ui_refresh"):
-                widget._queue_ui_refresh(immediate=True)
+                if not getattr(widget, '_is_updating_data', False):
+                    widget._queue_ui_refresh(immediate=True)
 
     def load_csv_file(self, file_path: str):
         logger.info("开始加载文件: %s", file_path)
