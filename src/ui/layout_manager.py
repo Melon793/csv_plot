@@ -408,7 +408,7 @@ class LayoutManager(MainWindowBaseManager):
                     u.toLocalFile()
                     .lower()
                     .endswith(
-                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11")
+                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
                     )
                     or self.mw._extract_file_extension(u.toLocalFile()) is not None
                     for u in urls
@@ -434,7 +434,7 @@ class LayoutManager(MainWindowBaseManager):
                     u.toLocalFile()
                     .lower()
                     .endswith(
-                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11")
+                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
                     )
                     or self.mw._extract_file_extension(u.toLocalFile()) is not None
                     for u in urls
@@ -450,7 +450,7 @@ class LayoutManager(MainWindowBaseManager):
                     path = u.toLocalFile()
                     if (
                         path.lower().endswith(
-                            (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11")
+                            (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
                         )
                         or self.mw._extract_file_extension(path) is not None
                     ):

@@ -85,6 +85,8 @@ csv_plot/
     │   └── auto_save_manager.py # AutoSaveManager 自动保存与恢复
     ├── data/
     │   ├── loader.py            # FastDataLoader CSV 加载 + DataLoadThread 后台线程
+    │   ├── excel_loader.py      # ExcelDataLoader Excel 加载（calamine / openpyxl）
+    │   ├── base_loader.py       # BaseDataLoader 基础加载器父类
     │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
     │   └── metadata.py          # VarMetadata 数据类 + 有效性分类工具
     ├── utils/
@@ -107,6 +109,7 @@ csv_plot/
         │   ├── layout_input.py  # LayoutInputDialog 行列数配置
         │   ├── axis.py          # AxisDialog 坐标轴设置
         │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
+        │   ├── sheet_selector.py  # SheetSelectorDialog Excel 工作表选择
         │   ├── log_window.py    # LogWindow 日志窗口（QSettings 重构已接入 AppSettings）
         │   ├── template_editor_dialog.py  # TemplateEditorDialog 模板编辑器
         │   └── template_manager_dialog.py # TemplateManagerDialog 模板管理器
@@ -148,7 +151,7 @@ csv_plot/
 
    或使用 pip：
    ```bash
-   pip install pyside6 pyqtgraph pandas numpy asammdf charset-normalizer ujson
+   pip install pyside6 pyqtgraph pandas numpy asammdf charset-normalizer ujson openpyxl python-calamine pyyaml
    ```
 
 3. **运行程序**
@@ -196,8 +199,11 @@ uv run scripts/build_win.py
 - **pandas** — 数据分析库
 - **numpy** — 数值计算基础库
 - **asammdf** — ASAM MDF 文件解析
+- **openpyxl** — Excel (.xlsx) 文件读写
+- **python-calamine** — Rust 引擎 Excel 解析（比 openpyxl 快 10-20 倍）
 - **charset-normalizer** — 字符编码检测
 - **ujson** — 高性能 JSON 处理
+- **pyyaml** — YAML 配置解析
 
 ## 支持与反馈
 

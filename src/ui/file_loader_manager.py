@@ -12,7 +12,7 @@ import os
 import sys
 
 from PySide6.QtCore import Qt, QStandardPaths, QTimer
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
 
 from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING
 from src.core.data_types import AutoDetectError
@@ -75,7 +75,12 @@ class FileLoaderManager(MainWindowBaseManager):
 
         try:
             initial_dir = self.mw._get_dialog_initial_directory()
-            file_filter = "all File (*.*);;CSV File (*.csv);;m File (*.mfile);;t00 File (*.t00);;t01 File (*.t01);;t10 File (*.t10);;t11 File (*.t11)"
+            file_filter = (
+                "All Files (*.*);;"
+                "CSV/TXT Files (*.csv *.txt *.mfile *.t00 *.t01 *.t10 *.t11);;"
+                "MDF Files (*.mf4 *.mdf *.dat);;"
+                "Excel Files (*.xlsx *.xlsm)"
+            )
 
             file_path, _ = QFileDialog.getOpenFileName(
                 self.mw, "选择数据文件", initial_dir, file_filter
@@ -242,17 +247,26 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(self.mw, "错误", "文件不存在，无法重新加载")
             return
 
-        self._load_file(self.mw.loader.path, is_reload=True)
+        # 获取缓存的 sheet_name（如果当前 loader 是 ExcelDataLoader）
+        cached_sheet_name = None
+        if hasattr(self.mw.loader, '_sheet_name'):
+            cached_sheet_name = self.mw.loader._sheet_name
 
-    def _load_file(self, file_path: str, is_reload: bool = False):
+        self._load_file(self.mw.loader.path, is_reload=True,
+                        cached_sheet_name=cached_sheet_name)
+
+    def _load_file(self, file_path: str, is_reload: bool = False,
+                   cached_sheet_name: str | None = None):
         file_ext = self.mw._extract_file_extension(file_path)
         is_mdf_file = file_ext in (".mf4", ".mdf", ".dat")
+        is_excel_file = file_ext in (".xlsx", ".xlsm")
 
         delimiter_typ = None
         desc_rows = None
         has_unit = None
         encoding = None
         config_used = False
+        sheet_name: str | None = None
 
         if is_mdf_file:
             delimiter_typ = ","
@@ -260,7 +274,27 @@ class FileLoaderManager(MainWindowBaseManager):
             has_unit = False
             config_used = True
 
-        if not is_mdf_file:
+        elif is_excel_file:
+            # reload 时复用缓存的 sheet_name，避免重复弹出
+            if is_reload and cached_sheet_name:
+                sheet_name = cached_sheet_name
+            else:
+                from src.ui.dialogs.sheet_selector import SheetSelectorDialog
+                dialog = SheetSelectorDialog(file_path, self.mw)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    self.mw.load_btn.setEnabled(True)
+                    return
+                sheet_name = dialog.get_selected_sheet()
+                if not sheet_name:
+                    self.mw.load_btn.setEnabled(True)
+                    return
+
+            # Excel 不需要分隔符/编码检测
+            delimiter_typ = ","
+            desc_rows = 0
+            config_used = True
+
+        if not is_mdf_file and not is_excel_file:
             config_path = self._resolve_config_path("config_dict.json")
             if config_path is not None and os.path.isfile(config_path):
                 try:
@@ -307,7 +341,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 )
                 return
 
-        if delimiter_typ is None or desc_rows is None or has_unit is None:
+        if not is_excel_file and (delimiter_typ is None or desc_rows is None or has_unit is None):
             QMessageBox.critical(
                 self.mw,
                 "数据解析失败",
@@ -330,6 +364,8 @@ class FileLoaderManager(MainWindowBaseManager):
                         sep=delimiter_typ,
                         has_unit=has_unit,
                         encoding=encoding,
+                        sheet_name=sheet_name,
+                        is_excel=is_excel_file,
                     )
                 finally:
                     self._end_data_reload()
@@ -356,6 +392,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     sep=delimiter_typ,
                     has_unit=has_unit,
                     encoding=encoding,
+                    sheet_name=sheet_name,
                 )
                 self.mw._thread.progress.connect(self.mw._progress.setValue)
                 self.mw._thread.finished.connect(
@@ -487,6 +524,8 @@ class FileLoaderManager(MainWindowBaseManager):
             ".mf4",
             ".mdf",
             ".dat",
+            ".xlsx",
+            ".xlsm",
         ]
 
         base_ext = os.path.splitext(file_path)[1].lower()
@@ -522,15 +561,18 @@ class FileLoaderManager(MainWindowBaseManager):
         file_path: str,
         desc_rows: int = 0,
         sep: str = ",",
-        has_unit: bool = True,
+        has_unit: bool | None = True,
         encoding: str | None = None,
+        sheet_name: str | None = None,
+        is_excel: bool = False,
     ):
-        is_valid, error_msg = self._validate_load_parameters(
-            file_path, desc_rows, sep, has_unit
-        )
-        if not is_valid:
-            QMessageBox.critical(self.mw, "参数错误", error_msg)
-            return False
+        if not is_excel:
+            is_valid, error_msg = self._validate_load_parameters(
+                file_path, desc_rows, sep, has_unit
+            )
+            if not is_valid:
+                QMessageBox.critical(self.mw, "参数错误", error_msg)
+                return False
 
         loader = None
         status = False
@@ -539,6 +581,14 @@ class FileLoaderManager(MainWindowBaseManager):
             ext = os.path.splitext(file_path)[1].lower()
             if ext in (".mf4", ".mdf", ".dat"):
                 loader = MDFLazyLoader(file_path)
+            elif ext in (".xlsx", ".xlsm") or is_excel:
+                from src.data.excel_loader import ExcelDataLoader
+                loader = ExcelDataLoader(
+                    file_path,
+                    sheet_name=sheet_name or 0,
+                    desc_rows=desc_rows,
+                    has_unit=has_unit,
+                )
             else:
                 loader = FastDataLoader(
                     file_path,
@@ -597,14 +647,20 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw.load_btn.setEnabled(True)
 
     def _apply_loader(self):
+        import time as _time  # PERF_TIMER
+        _t_al = _time.time()  # PERF_TIMER
+
         self.mw.var_names = self.mw.loader.var_names
         self.mw.units = self.mw.loader.units
         self.mw.time_channels_infos = self.mw.loader.time_channels_info
         self.mw.data_validity = self.mw.loader.df_validity
         self.mw.data = self.mw.loader.df
+
+        _t0 = _time.time()  # PERF_TIMER
         self.mw.list_widget.populate(
             self.mw.var_names, self.mw.units, self.mw.data_validity
         )
+        logger.info("[PERF] list_widget.populate: %.3fs (%d vars)", _time.time() - _t0, len(self.mw.var_names))  # PERF_TIMER
 
         if self.mw.placeholder_label.parent():
             self.mw.placeholder_label.setParent(None)
@@ -617,6 +673,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw._plot_row_current, self.mw._plot_col_current
             )
 
+        _t0 = _time.time()  # PERF_TIMER
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             widget.data = self.mw.loader.df
@@ -625,11 +682,14 @@ class FileLoaderManager(MainWindowBaseManager):
             widget.time_column_name = self.mw.loader.time_column_name
             widget.time_axis_label = self.mw.loader.time_axis_label
             widget.update_x_axis_label()
+        logger.info("[PERF] widget 数据绑定: %.3fs (%d widgets)", _time.time() - _t0, len(self.mw.plot_widgets))  # PERF_TIMER
 
         self.mw._compute_baseline_density()
         self.mw._sync_min_xrange()
 
+        _t0 = _time.time()  # PERF_TIMER
         self.mw.replots_after_loading()
+        logger.info("[PERF] replots_after_loading: %.3fs", _time.time() - _t0)  # PERF_TIMER
 
         from src.ui.table_dialog import DataTableDialog
 
@@ -643,6 +703,8 @@ class FileLoaderManager(MainWindowBaseManager):
                 DataTableDialog._instance.set_skip_close_confirmation(True)
                 DataTableDialog._instance.close()
 
+        _t0 = _time.time()  # PERF_TIMER
         self.mw.filter_variables()
+        logger.info("[PERF] _apply_loader 总计: %.3fs (filter_variables: %.3fs)", _time.time() - _t_al, _time.time() - _t0)  # PERF_TIMER
         if self.mw.mark_region_btn.isChecked():
             self.mw.request_mark_stats_refresh(immediate=True)

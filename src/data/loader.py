@@ -16,6 +16,7 @@ from src.core.config import (
 )
 from src.core.data_types import FormatInfo, AutoDetectError
 from src.core.logger import get_logger
+from src.data.base_loader import BaseDataLoader
 
 logger = get_logger("data.loader")
 
@@ -38,8 +39,9 @@ class DataLoadThread(QThread):
         parent=None,
         desc_rows: int = 0,
         sep: str = ",",
-        has_unit: bool = True,
+        has_unit: bool | None = True,
         encoding: str | None = None,
+        sheet_name: str | None = None,
     ):
         super().__init__(parent)
         self.file_path = file_path
@@ -47,6 +49,7 @@ class DataLoadThread(QThread):
         self.sep = sep
         self.has_unit = has_unit
         self.encoding = encoding
+        self.sheet_name = sheet_name
 
     def run(self):
         """
@@ -64,7 +67,16 @@ class DataLoadThread(QThread):
                 return
 
             ext = os.path.splitext(self.file_path)[1].lower()
-            if ext in (".mf4", ".mdf", ".dat"):
+            if ext in (".xlsx", ".xlsm"):
+                from src.data.excel_loader import ExcelDataLoader
+                loader = ExcelDataLoader(
+                    self.file_path,
+                    sheet_name=self.sheet_name or 0,
+                    desc_rows=self.desc_rows,
+                    has_unit=self.has_unit,
+                    _progress=_progress_cb,
+                )
+            elif ext in (".mf4", ".mdf", ".dat"):
                 from src.data.mdf_lazy_loader import MDFLazyLoader
 
                 loader = MDFLazyLoader(self.file_path, _progress=_progress_cb)
@@ -90,7 +102,7 @@ class DataLoadThread(QThread):
             self.error.emit(f"加载文件时发生未知错误: {str(e)}")
 
 
-class FastDataLoader:
+class FastDataLoader(BaseDataLoader):
     """
     快速数据加载器类
     高效加载和处理大型CSV文件，支持分块读取、数据类型推断、编码检测等功能
@@ -98,44 +110,6 @@ class FastDataLoader:
     """
 
     LOADER_TYPE = "csv"
-
-    # 脏数据清单
-    _NA_VALUES = [
-        # 空缺 / 空字符串
-        "",
-        "NULL",
-        "None",
-        "NA",
-        "N/A",
-        "n/a",
-        "null ",
-        # Excel / 统计缺失标记
-        "#N/A",
-        "#N/A N/A",
-        "#NA",
-        # IEEE NaN / 非法数值
-        "NaN",
-        "nan",
-        "-NaN",
-        "-nan",
-        "1.#IND",
-        "-1.#IND",
-        "1.#QNAN",
-        "-1.#QNAN",
-        # 无穷值表示
-        "Infinity",
-        "Inf",
-        "inf",
-        "plus infinity",
-        "minus infinity",
-        "1.#INF",
-        "-1.#INF",
-        # 其他脏数据字符串
-        "data err",
-        "* *",
-        "----",
-        "no value",
-    ]
 
     @staticmethod
     def _detect_sep_from_lines(lines: list[str]) -> str | None:
@@ -381,6 +355,7 @@ class FastDataLoader:
             has_unit: 是否包含单位行
             encoding: 预检测的文件编码，为 None 时内部自动检测
         """
+        super().__init__()
         self._path = csv_path
         self.file_size = os.path.getsize(csv_path)
         logger.info(
@@ -396,8 +371,6 @@ class FastDataLoader:
         self._progress_cb = _progress
         self.do_parse_date = do_parse_date
         self.has_unit = has_unit
-
-        self.time_column_name: str | None = None
 
         self._var_names, self._units, self.encoding_used, self.has_unit = (
             self._load_header_units(
@@ -726,162 +699,3 @@ class FastDataLoader:
 
                 gc.collect()
         return pd.concat(chunks, ignore_index=True)
-
-    def _downcast_numeric(self) -> None:
-        float_cols = self._df.select_dtypes(include=["float32", "float64"]).columns
-        for col in float_cols:
-            cleaned = pd.to_numeric(self._df[col], errors="coerce").replace(
-                [np.inf, -np.inf], np.nan
-            )
-            is_safe, _ = _evaluate_float32_safety(cleaned)
-            if is_safe:
-                self._df[col] = cleaned.astype("float32")
-            else:
-                # 当 float32 会溢出时改用 float64 保留精度
-                self._df[col] = cleaned.astype("float64", copy=False)
-
-    def _check_df_validity(self) -> dict:
-        validity: dict = {}
-        for col in self._df.columns:
-            # 传入列名和date_formats参数
-            validity[col] = self._classify_column(self._df[col], col, self.date_formats)
-
-        return validity
-
-    @staticmethod
-    def _make_unique(names: list[str]) -> list[str]:
-        seen = {}
-        unique_names = []
-        for name in names:
-            if name in seen:
-                seen[name] += 1
-                new_name = f"{name}_{seen[name]}"
-            else:
-                seen[name] = 0
-                new_name = name
-            unique_names.append(new_name)
-        return unique_names
-
-    @staticmethod
-    def _classify_column(series: pd.Series, col_name: str, date_formats: dict) -> int:
-        """
-        1: （全部可转数字，且 ≥2 个不同有效值） 或 （该列是日期格式） 或 （数据长度为1，且可转换为数字）
-        0: 数据长度>=2, 且全部可转数字，且唯一有效值
-        -1: 存在非数字（不含日期格式） 或 全部 NaN
-
-        【NumPy优化】使用NumPy直接检查唯一值，避免Pandas的循环操作
-        """
-        # 如果该列是日期格式，则直接返回1（有效）
-        if col_name in date_formats:
-            return 1
-
-        # 1) 先尝试整列转 float，失败直接 -1
-        try:
-            numeric = pd.to_numeric(series, errors="raise").values  # 转为NumPy array
-        except (ValueError, TypeError):
-            return -1
-
-        # 2) 【NumPy优化】用NumPy过滤NaN（兼容整数类型）
-        # 先转换为浮点类型以支持NaN检查，避免整数类型的NaN检查错误
-        if numeric.dtype.kind in "iu":  # 整数类型
-            # 整数类型没有NaN，直接使用
-            valid = numeric
-        else:
-            # 浮点类型，需要过滤NaN
-            valid = numeric[~np.isnan(numeric)]
-
-        if len(valid) == 0:  # 全 NaN 或空数组
-            return -1
-
-        # 数据长度为1且可转数字 → 返回1
-        if len(series) == 1:
-            return 1
-
-        # 【NumPy优化】用np.unique直接计算唯一值数量，比Pandas更快
-        unique_count = np.unique(valid).size
-        if unique_count == 1:
-            return 0
-        else:
-            return 1
-
-    @property
-    def df(self) -> pd.DataFrame:
-        return self._df
-
-    @property
-    def units(self) -> dict[str, str]:
-        return self._units
-
-    @property
-    def path(self) -> str:
-        return str(self._path)
-
-    @property
-    def datalength(self) -> int:
-        return self._df.shape[0]
-
-    @property
-    def default_time_values(self) -> pd.Series:
-        return pd.Series(np.arange(1, len(self._df) + 1), name="index")
-
-    @property
-    def time_values(self) -> pd.Series:
-        if self.time_column_name and self.time_column_name in self._df.columns:
-            return self._df[self.time_column_name]
-        return self.default_time_values
-
-    @property
-    def time_axis_label(self) -> str:
-        if self.time_column_name:
-            unit = self._units.get(self.time_column_name, "")
-            if unit and unit != "-":
-                return f"{self.time_column_name} ({unit})"
-            return self.time_column_name
-        return "Index"
-
-    @property
-    def var_names(self) -> list[str]:
-        cols = self._df.columns.tolist()
-        if self.time_column_name and self.time_column_name in cols:
-            cols = [c for c in cols if c != self.time_column_name]
-        return cols
-
-    @property
-    def row_count(self) -> int:
-        return len(self._df)
-
-    @property
-    def column_count(self) -> int:
-        return len(self._df.columns)
-
-    @property
-    def time_channels_info(self) -> dict[str, str]:
-        return self.date_formats
-
-    @property
-    def df_validity(self) -> dict:
-        validity = dict(self._df_validity)
-        if self.time_column_name and self.time_column_name in validity:
-            del validity[self.time_column_name]
-        return validity
-
-    @property
-    def global_time_range(self) -> tuple[float, float]:
-        return (1.0, float(len(self._df)))
-
-    @property
-    def baseline_density(self) -> float:
-        return 1.0
-
-    @property
-    def max_row_count(self) -> int:
-        return len(self._df)
-
-    def get_series(self, name: str):
-        return self._df[name]
-
-    def get_value_from_name(self, name: str):
-        index = np.arange(1, len(self._df) + 1, dtype=np.float64)
-        values = self._df[name]
-        unit = self._units.get(name, "-")
-        return index, values, unit, {}
