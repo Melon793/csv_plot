@@ -647,20 +647,15 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw.load_btn.setEnabled(True)
 
     def _apply_loader(self):
-        import time as _time  # PERF_TIMER
-        _t_al = _time.time()  # PERF_TIMER
-
         self.mw.var_names = self.mw.loader.var_names
         self.mw.units = self.mw.loader.units
         self.mw.time_channels_infos = self.mw.loader.time_channels_info
         self.mw.data_validity = self.mw.loader.df_validity
         self.mw.data = self.mw.loader.df
 
-        _t0 = _time.time()  # PERF_TIMER
         self.mw.list_widget.populate(
             self.mw.var_names, self.mw.units, self.mw.data_validity
         )
-        logger.info("[PERF] list_widget.populate: %.3fs (%d vars)", _time.time() - _t0, len(self.mw.var_names))  # PERF_TIMER
 
         if self.mw.placeholder_label.parent():
             self.mw.placeholder_label.setParent(None)
@@ -673,7 +668,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw._plot_row_current, self.mw._plot_col_current
             )
 
-        _t0 = _time.time()  # PERF_TIMER
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             widget.data = self.mw.loader.df
@@ -682,14 +676,11 @@ class FileLoaderManager(MainWindowBaseManager):
             widget.time_column_name = self.mw.loader.time_column_name
             widget.time_axis_label = self.mw.loader.time_axis_label
             widget.update_x_axis_label()
-        logger.info("[PERF] widget 数据绑定: %.3fs (%d widgets)", _time.time() - _t0, len(self.mw.plot_widgets))  # PERF_TIMER
 
         self.mw._compute_baseline_density()
         self.mw._sync_min_xrange()
 
-        _t0 = _time.time()  # PERF_TIMER
         self.mw.replots_after_loading()
-        logger.info("[PERF] replots_after_loading: %.3fs", _time.time() - _t0)  # PERF_TIMER
 
         from src.ui.table_dialog import DataTableDialog
 
@@ -703,8 +694,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 DataTableDialog._instance.set_skip_close_confirmation(True)
                 DataTableDialog._instance.close()
 
-        _t0 = _time.time()  # PERF_TIMER
         self.mw.filter_variables()
-        logger.info("[PERF] _apply_loader 总计: %.3fs (filter_variables: %.3fs)", _time.time() - _t_al, _time.time() - _t0)  # PERF_TIMER
         if self.mw.mark_region_btn.isChecked():
             self.mw.request_mark_stats_refresh(immediate=True)
