@@ -75,9 +75,7 @@
 
 如果您在使用过程中遇到问题或有改进建议, 欢迎:
 
-- 提交 Issue: [GitHub Issues](https://github.com/Melon793/csv_plot/issues)
-- 参与讨论: [GitHub Discussions](https://github.com/Melon793/csv_plot/discussions)
-- 给项目点赞: [GitHub Star](https://github.com/Melon793/csv_plot)
+- 给项目点赞: [https://github.com/Melon793/csv_plot](https://github.com/Melon793/csv_plot)
 
 ---
 
