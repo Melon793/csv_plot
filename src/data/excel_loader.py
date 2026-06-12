@@ -1,13 +1,11 @@
 """ExcelDataLoader - Excel 数据加载器
 
-使用 openpyxl 的 iter_rows 进行真正分块读取，
-而非 pd.read_excel(chunksize) 的伪分块。
+使用 calamine (Rust) 引擎快速读取，fallback 到 openpyxl iter_rows。
 """
 
 from __future__ import annotations
 import os
 import gc
-import time  # PERF_TIMER
 from typing import Callable
 import numpy as np
 import pandas as pd
@@ -21,8 +19,7 @@ logger = get_logger("data.excel_loader")
 class ExcelDataLoader(BaseDataLoader):
     """Excel 数据加载器，继承自 BaseDataLoader。
 
-    使用 openpyxl 的 iter_rows 进行真正分块读取，
-    而非 pd.read_excel(chunksize) 的伪分块。
+    优先使用 calamine (Rust) 引擎读取，不可用时回退到优化后的 openpyxl。
     """
 
     LOADER_TYPE = "excel"
@@ -59,15 +56,12 @@ class ExcelDataLoader(BaseDataLoader):
         self.desc_rows = desc_rows
         self._progress_cb = _progress
 
-        _t_total = time.time()  # PERF_TIMER
-        logger.info("开始加载 Excel: %s (%.1f MB)", file_path, self.file_size / 1024 / 1024)  # PERF_TIMER
+        logger.info("开始加载 Excel: %s (%.1f MB)", file_path, self.file_size / 1024 / 1024)
 
-        _t0 = time.time()  # PERF_TIMER
         import openpyxl
         self._wb = openpyxl.load_workbook(
             file_path, read_only=True, data_only=True
         )
-        logger.info("[PERF] openpyxl.load_workbook: %.3fs", time.time() - _t0)  # PERF_TIMER
 
         # 解析 sheet_name（支持字符串名或索引）
         if isinstance(sheet_name, int):
@@ -80,29 +74,21 @@ class ExcelDataLoader(BaseDataLoader):
             self._progress_cb(5)
 
         # 读取表头 + 自动检测 has_unit
-        _t0 = time.time()  # PERF_TIMER
         self._var_names, self._units, self.has_unit = self._load_header_units(has_unit)
-        logger.info("[PERF] _load_header_units: %.3fs (%d 列)", time.time() - _t0, len(self._var_names))  # PERF_TIMER
 
         if self._progress_cb:
             self._progress_cb(10)
 
         # 读取数据：优先使用 calamine (Rust)，fallback 到优化后的 openpyxl
-        _t0 = time.time()  # PERF_TIMER
         self._df = self._read_data()
-        logger.info("[PERF] _read_data: %.3fs (%d 行 x %d 列)", time.time() - _t0, len(self._df), len(self._df.columns))  # PERF_TIMER
 
-        # 时间列推断（处理 openpyxl 原生 datetime 类型）
-        _t0 = time.time()  # PERF_TIMER
+        # 时间列推断
         self._infer_time_columns()
-        logger.info("[PERF] _infer_time_columns: %.3fs", time.time() - _t0)  # PERF_TIMER
 
         # 后处理：合并 downcast + validity 为单次遍历
-        _t0 = time.time()  # PERF_TIMER
         self._df_validity = self._postprocess_columns(
             downcast=downcast_float
         )
-        logger.info("[PERF] _postprocess_columns: %.3fs", time.time() - _t0)  # PERF_TIMER
 
         # 关闭 workbook 释放资源
         self._wb.close()
@@ -111,9 +97,8 @@ class ExcelDataLoader(BaseDataLoader):
             self._progress_cb(100)
 
         logger.info(
-            "Excel 加载完成: %s (sheet=%s, %d 行, %d 列) 总耗时 %.3fs",
+            "Excel 加载完成: %s (sheet=%s, %d 行, %d 列)",
             file_path, ws_name, len(self._df), len(self._var_names),
-            time.time() - _t_total,  # PERF_TIMER
         )
 
     def _load_header_units(self, has_unit_hint: bool | None):
@@ -136,7 +121,7 @@ class ExcelDataLoader(BaseDataLoader):
         ]
         var_names = self._make_unique(var_names)
 
-        # has_unit 自动检测（参考 CSV 的 _detect_has_unit_from_lines）
+        # has_unit 自动检测
         if has_unit_hint is not None:
             actual_has_unit = has_unit_hint
         elif len(rows) >= 2:
@@ -173,22 +158,14 @@ class ExcelDataLoader(BaseDataLoader):
 
     def _read_data(self) -> pd.DataFrame:
         """读取数据：优先 calamine (Rust)，不可用时回退到优化后的 openpyxl"""
-        _t0 = time.time()  # PERF_TIMER
-
-        # 尝试 calamine
         try:
-            df = self._read_with_calamine()
-            logger.info("[PERF] calamine 读取: %.3fs", time.time() - _t0)  # PERF_TIMER
-            return df
+            return self._read_with_calamine()
         except ImportError:
             logger.info("calamine 不可用，使用优化后的 openpyxl 读取")
         except Exception as e:
             logger.warning("calamine 读取失败 (%s)，fallback 到 openpyxl", e)
 
-        # fallback: 优化后的 openpyxl
-        df = self._read_chunks()
-        logger.info("[PERF] openpyxl 读取: %.3fs", time.time() - _t0)  # PERF_TIMER
-        return df
+        return self._read_chunks()
 
     def _read_with_calamine(self) -> pd.DataFrame:
         """使用 calamine (Rust) 引擎快速读取 Excel 数据。
@@ -227,22 +204,16 @@ class ExcelDataLoader(BaseDataLoader):
         return df
 
     def _read_chunks(self) -> pd.DataFrame:
-        """优化后的 openpyxl 读取：一次性 iter_rows + 内存分块。
-
-        相比之前每 chunk 调用一次 iter_rows（重复 XML 解析），
-        现在仅调用一次 iter_rows 遍历所有数据行，在内存中分块处理。
-        """
+        """优化后的 openpyxl 读取：一次性 iter_rows + 内存分块。"""
         data_start = self.desc_rows + (3 if self.has_unit else 2)  # 1-based
         max_row = self._ws.max_row or 0
         if max_row < data_start:
             return pd.DataFrame(columns=self._var_names)
 
-        # 关键优化：一次性读取所有数据行，消除重复 XML 解析
-        _t_iter = time.time()  # PERF_TIMER
+        # 一次性读取所有数据行，消除重复 XML 解析
         all_rows = list(self._ws.iter_rows(
             min_row=data_start, max_row=max_row, values_only=True
         ))
-        logger.info("[PERF] iter_rows (一次性): %.3fs (%d 行)", time.time() - _t_iter, len(all_rows))  # PERF_TIMER
 
         total_rows = len(all_rows)
         total_chunks = max(1, (total_rows + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE)
@@ -250,8 +221,6 @@ class ExcelDataLoader(BaseDataLoader):
 
         chunks: list[pd.DataFrame] = []
         datetime_cols: set[str] | None = None
-        _t_df_total = 0.0  # PERF_TIMER
-        _t_numeric_total = 0.0  # PERF_TIMER
 
         for chunk_idx in range(total_chunks):
             start = chunk_idx * self.CHUNK_SIZE
@@ -261,16 +230,13 @@ class ExcelDataLoader(BaseDataLoader):
             if not chunk_data:
                 break
 
-            _t1 = time.time()  # PERF_TIMER
             df_chunk = pd.DataFrame(chunk_data, columns=self._var_names)
-            _t_df_total += time.time() - _t1  # PERF_TIMER
 
             # 首块：检测 datetime 列
             if datetime_cols is None:
                 datetime_cols = self._detect_datetime_cols(df_chunk)
 
             # 所有数值列一次性批量转换
-            _t1 = time.time()  # PERF_TIMER
             non_dt_cols = [c for c in df_chunk.columns if c not in datetime_cols]
             if non_dt_cols:
                 df_chunk[non_dt_cols] = df_chunk[non_dt_cols].apply(
@@ -281,7 +247,6 @@ class ExcelDataLoader(BaseDataLoader):
             for col in datetime_cols:
                 if col in df_chunk.columns:
                     df_chunk[col] = pd.to_datetime(df_chunk[col], errors="coerce")
-            _t_numeric_total += time.time() - _t1  # PERF_TIMER
 
             chunks.append(df_chunk)
 
@@ -292,15 +257,10 @@ class ExcelDataLoader(BaseDataLoader):
             if chunk_idx % 3 == 0:
                 gc.collect()
 
-        logger.info("[PERF] _read_chunks 分解: DataFrame构建=%.3fs, to_numeric=%.3fs (%d chunks)", _t_df_total, _t_numeric_total, len(chunks))  # PERF_TIMER
-
         if not chunks:
             return pd.DataFrame(columns=self._var_names)
 
-        _t_concat = time.time()  # PERF_TIMER
-        result = pd.concat(chunks, ignore_index=True)
-        logger.info("[PERF] pd.concat: %.3fs", time.time() - _t_concat)  # PERF_TIMER
-        return result
+        return pd.concat(chunks, ignore_index=True)
 
     @staticmethod
     def _detect_datetime_cols(df_chunk: pd.DataFrame) -> set[str]:
@@ -317,7 +277,7 @@ class ExcelDataLoader(BaseDataLoader):
         return dt_cols
 
     def _infer_time_columns(self):
-        """推断时间列（处理 openpyxl 原生 datetime 类型）"""
+        """推断时间列"""
         import datetime as _dt
 
         time_keywords = ["time", "date", "datetime", "timestamp", "zeit", "tmod"]
@@ -338,7 +298,7 @@ class ExcelDataLoader(BaseDataLoader):
             if len(s_sample) == 0:
                 continue
 
-            # 情况1: openpyxl 已将列解析为 datetime 类型
+            # 情况1: 已解析为 datetime 类型
             if pd.api.types.is_datetime64_any_dtype(s):
                 self.date_formats[col] = "%Y-%m-%d %H:%M:%S"
                 if self.time_column_name is None:
@@ -354,7 +314,7 @@ class ExcelDataLoader(BaseDataLoader):
                     self.time_column_name = col
                 continue
 
-            # 情况3: 仍为字符串，使用格式候选列表匹配（与 CSV 一致）
+            # 情况3: 仍为字符串，使用格式候选列表匹配
             for fmt in date_candidates:
                 try:
                     pd.to_datetime(s_sample, format=fmt, errors="raise")
