@@ -102,7 +102,7 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     判断数值是否能安全表示为 float32。
 
     参数:
-        values: pandas Series、NumPy 数组或其他可迭代的数值序列。
+        values: pandas Series、NumPy 数组或其它可迭代的数值序列。
 
     返回:
         tuple[bool, float | None]: (是否安全、绝对值最大值)

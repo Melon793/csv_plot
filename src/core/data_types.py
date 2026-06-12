@@ -26,6 +26,7 @@ class FormatInfo:
     sep: str | None  # 检测到的分隔符，None 表示检测失败
     header_row: int  # 标题行 0-based 行号
     has_unit: bool  # 是否包含单位行
+    sheet_name: str | None = None  # 选中的 Sheet 名（仅 Excel 使用）
 
 
 @dataclass
