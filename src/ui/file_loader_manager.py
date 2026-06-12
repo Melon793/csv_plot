@@ -377,14 +377,6 @@ class FileLoaderManager(MainWindowBaseManager):
                     self.mw.load_btn.setEnabled(True)
             else:
                 logger.info("后台加载文件 (%.1f MB)", file_size / 1024 / 1024)
-                self.mw._progress = QProgressDialog(
-                    "正在读取数据...", "取消", 0, 100, self.mw
-                )
-                self.mw._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-                self.mw._progress.setAutoClose(True)
-                self.mw._progress.setCancelButton(None)
-                self.mw._progress.setMinimumDuration(0)
-                self.mw._progress.show()
 
                 self.mw._thread = DataLoadThread(
                     file_path,
@@ -394,7 +386,27 @@ class FileLoaderManager(MainWindowBaseManager):
                     encoding=encoding,
                     sheet_name=sheet_name,
                 )
-                self.mw._thread.progress.connect(self.mw._progress.setValue)
+
+                is_excel = file_path.lower().endswith(('.xlsx', '.xlsm'))
+                if is_excel:
+                    # Excel (calamine): 不支持进度回调，使用不确定（indeterminate）动画
+                    self.mw._progress = QProgressDialog(
+                        "正在加载 Excel 数据...", None, 0, 0, self.mw
+                    )
+                    self.mw._progress.setCancelButton(None)
+                else:
+                    # CSV / MDF 等：有分块进度回调，使用百分比进度条
+                    self.mw._progress = QProgressDialog(
+                        "正在读取数据...", "取消", 0, 100, self.mw
+                    )
+                    self.mw._progress.setCancelButton(None)
+                    self.mw._progress.setMinimumDuration(0)
+                    self.mw._thread.progress.connect(self.mw._progress.setValue)
+
+                self.mw._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+                self.mw._progress.setAutoClose(True)
+                self.mw._progress.show()
+
                 self.mw._thread.finished.connect(
                     lambda loader: self._on_load_done(loader, file_path)
                 )
