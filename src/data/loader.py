@@ -430,13 +430,8 @@ class FastDataLoader(BaseDataLoader):
             has_unit=self.has_unit,
         )
 
-        # 后处理
-        if drop_empty:
-            self._df = self._df.dropna(axis=1, how="all")
-        if downcast_float:
-            self._downcast_numeric()
-
-        self._df_validity = self._check_df_validity()
+        # 后处理：合并 downcast + validity 为单次遍历
+        self._df_validity = self._postprocess_columns(downcast=downcast_float)
 
         # 强制垃圾回收
         gc.collect()

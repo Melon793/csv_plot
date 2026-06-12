@@ -7,7 +7,7 @@ MDFLazyLoader 因惰性加载设计差异不纳入此体系。
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from src.core.config import _evaluate_float32_safety, FLOAT32_SAFE_MAX
+from src.core.config import FLOAT32_SAFE_MAX
 
 
 class BaseDataLoader:
@@ -54,46 +54,6 @@ class BaseDataLoader:
                 seen[name] = 0
                 unique_names.append(name)
         return unique_names
-
-    @staticmethod
-    def _classify_column(series: pd.Series, col_name: str, date_formats: dict) -> int:
-        """列有效性分类：1=可绘图, 0=常数列, -1=无效"""
-        if col_name in date_formats:
-            return 1
-        try:
-            numeric = pd.to_numeric(series, errors="raise").values
-        except (ValueError, TypeError):
-            return -1
-        if numeric.dtype.kind in "iu":
-            valid = numeric
-        else:
-            valid = numeric[~np.isnan(numeric)]
-        if len(valid) == 0:
-            return -1
-        if len(series) == 1:
-            return 1
-        unique_count = np.unique(valid).size
-        return 0 if unique_count == 1 else 1
-
-    def _downcast_numeric(self) -> None:
-        """下转换数值类型以节省内存"""
-        float_cols = self._df.select_dtypes(include=["float32", "float64"]).columns
-        for col in float_cols:
-            cleaned = pd.to_numeric(self._df[col], errors="coerce").replace(
-                [np.inf, -np.inf], np.nan
-            )
-            is_safe, _ = _evaluate_float32_safety(cleaned)
-            if is_safe:
-                self._df[col] = cleaned.astype("float32")
-            else:
-                self._df[col] = cleaned.astype("float64", copy=False)
-
-    def _check_df_validity(self) -> dict[str, int]:
-        """检查数据有效性"""
-        validity: dict[str, int] = {}
-        for col in self._df.columns:
-            validity[col] = self._classify_column(self._df[col], col, self.date_formats)
-        return validity
 
     def _postprocess_columns(self, downcast: bool = True) -> dict[str, int]:
         """合并 downcast + validity 检查为单次遍历，减少冗余数组创建
