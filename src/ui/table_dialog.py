@@ -1215,6 +1215,13 @@ class DataTableDialog(QMainWindow):
             geom = self.parent().data_table_geometry
             self.restoreGeometry(geom)
 
+    def clear_all_columns(self):
+        """重载数据时：清空 _df，释放持有的所有 numpy 数组。"""
+        if hasattr(self, "_df") and self._df is not None and not self._df.empty:
+            self._df = pd.DataFrame()
+        if hasattr(self, "model"):
+            self.model = None
+
     def closeEvent(self, event):
         for win in self.scatter_plot_windows[:]:
             try:

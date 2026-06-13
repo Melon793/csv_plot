@@ -24,8 +24,8 @@ class ExcelDataLoader(BaseDataLoader):
 
     LOADER_TYPE = "excel"
 
-    # 分块大小：每次读取的行数
-    CHUNK_SIZE = 2000
+    # 分块大小：openpyxl 流式读取时的批大小
+    CHUNK_SIZE = 10000
 
     def __init__(
         self,
@@ -204,63 +204,146 @@ class ExcelDataLoader(BaseDataLoader):
         return df
 
     def _read_chunks(self) -> pd.DataFrame:
-        """优化后的 openpyxl 读取：一次性 iter_rows + 内存分块。"""
+        """优化后的 openpyxl 读取：类型探测 + 预分配数组 + 按 chunk 批量转换。
+
+        内存峰值从 ~3×（all_rows list + chunks list + concat）降到 ~1×（预分配数组）。
+        """
+        import datetime as _dt
         data_start = self.desc_rows + (3 if self.has_unit else 2)  # 1-based
         max_row = self._ws.max_row or 0
-        if max_row < data_start:
+        total_rows = max_row - data_start + 1
+
+        if total_rows <= 0:
             return pd.DataFrame(columns=self._var_names)
 
-        # 一次性读取所有数据行，消除重复 XML 解析
-        all_rows = list(self._ws.iter_rows(
-            min_row=data_start, max_row=max_row, values_only=True
-        ))
+        from src.core.config import FLOAT32_REPRESENTABLE_MAX
 
-        total_rows = len(all_rows)
+        # —— 阶段 1：前 100 行做列类型探测
+        sample_size = min(100, total_rows)
+        sample_iter = self._ws.iter_rows(
+            min_row=data_start, max_row=data_start + sample_size - 1,
+            values_only=True,
+        )
+        sample_rows = [next(sample_iter) for _ in range(sample_size)]
+
+        num_cols = len(self._var_names)
+        col_dtypes: list[str] = []  # "float32" / "float64" / "datetime" / "object"
+        for c in range(num_cols):
+            col_sample = [row[c] for row in sample_rows if c < len(row) and row[c] is not None]
+            if not col_sample:
+                col_dtypes.append("float32")
+                continue
+
+            # 检查是否为 datetime 列
+            datetime_count = sum(
+                1 for val in col_sample if isinstance(val, (_dt.datetime, _dt.date))
+            )
+            if datetime_count > len(col_sample) * 0.5:
+                col_dtypes.append("datetime")
+                continue
+
+            # 判断是否为纯数值列
+            numeric_count = 0
+            max_abs = 0.0
+            for val in col_sample:
+                try:
+                    v = float(val)
+                    abs_v = abs(v)
+                    if abs_v > max_abs:
+                        max_abs = abs_v
+                    numeric_count += 1
+                except (ValueError, TypeError):
+                    break
+
+            if numeric_count == len(col_sample):
+                col_dtypes.append(
+                    "float32" if max_abs <= FLOAT32_REPRESENTABLE_MAX else "float64"
+                )
+            else:
+                col_dtypes.append("object")
+
+        # —— 阶段 2：预分配 numpy 列数组
+        arrays = []
+        for dt in col_dtypes:
+            if dt.startswith("float"):
+                arrays.append(np.full(total_rows, np.nan, dtype=dt))
+            elif dt == "datetime":
+                arrays.append(np.full(total_rows, np.datetime64("NaT"), dtype="datetime64[ns]"))
+            else:
+                arrays.append([None] * total_rows)
+
+        # —— 阶段 3：按 chunk 流式读取 + C 级批量转换 + 写入预分配数组
         total_chunks = max(1, (total_rows + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE)
         increment = 80 / total_chunks
 
-        chunks: list[pd.DataFrame] = []
-        datetime_cols: set[str] | None = None
+        row_iter = self._ws.iter_rows(
+            min_row=data_start, max_row=max_row, values_only=True,
+        )
 
+        written_rows = 0
         for chunk_idx in range(total_chunks):
-            start = chunk_idx * self.CHUNK_SIZE
-            end = min(start + self.CHUNK_SIZE, total_rows)
-            chunk_data = all_rows[start:end]
-
-            if not chunk_data:
+            chunk_size = min(self.CHUNK_SIZE, total_rows - written_rows)
+            if chunk_size <= 0:
                 break
 
-            df_chunk = pd.DataFrame(chunk_data, columns=self._var_names)
+            # 3a: 收集当前 chunk 的行（仅持有 chunk_size 行的 tuple list）
+            chunk_rows = []
+            for _ in range(chunk_size):
+                try:
+                    chunk_rows.append(next(row_iter))
+                except StopIteration:
+                    break
+            if not chunk_rows:
+                break
 
-            # 首块：检测 datetime 列
-            if datetime_cols is None:
-                datetime_cols = self._detect_datetime_cols(df_chunk)
+            actual_rows = len(chunk_rows)
+            start_row = written_rows
+            end_row = written_rows + actual_rows
 
-            # 所有数值列一次性批量转换
-            non_dt_cols = [c for c in df_chunk.columns if c not in datetime_cols]
-            if non_dt_cols:
-                df_chunk[non_dt_cols] = df_chunk[non_dt_cols].apply(
-                    pd.to_numeric, errors='coerce'
-                )
+            # 3b: 构建临时 DataFrame（仅 chunk 大小）
+            df_chunk = pd.DataFrame(chunk_rows, columns=self._var_names)
+            del chunk_rows
 
-            # datetime 列单独处理
-            for col in datetime_cols:
-                if col in df_chunk.columns:
-                    df_chunk[col] = pd.to_datetime(df_chunk[col], errors="coerce")
+            # 3c: 按列类型做批量转换并写入预分配数组
+            for c, (col_name, dt) in enumerate(zip(self._var_names, col_dtypes)):
+                if c >= len(df_chunk.columns):
+                    break
+                arr = arrays[c]
+                series = df_chunk[col_name]
 
-            chunks.append(df_chunk)
+                if dt.startswith("float"):
+                    numeric = pd.to_numeric(series, errors="coerce").to_numpy(dtype=dt, na_value=np.nan)
+                    arr[start_row:end_row] = numeric
+                elif dt == "datetime":
+                    dt_arr = pd.to_datetime(series, errors="coerce").to_numpy(dtype="datetime64[ns]")
+                    arr[start_row:end_row] = dt_arr
+                else:
+                    for i, val in enumerate(series):
+                        arr[start_row + i] = val
+
+            del df_chunk
+            written_rows = end_row
 
             if self._progress_cb:
-                chunk_progress = min(80, (chunk_idx + 1) * increment)
-                self._progress_cb(15 + int(chunk_progress))
+                self._progress_cb(15 + int(min(80, (chunk_idx + 1) * increment)))
 
-            if chunk_idx % 3 == 0:
-                gc.collect()
+        # —— 阶段 4：一次性组装 DataFrame
+        df = pd.DataFrame({
+            name: arr for name, arr in zip(self._var_names, arrays)
+        })
 
-        if not chunks:
-            return pd.DataFrame(columns=self._var_names)
+        # —— 阶段 4.5：object 列的数值兜底转换
+        obj_cols = [c for c in df.columns if df[c].dtype == object]
+        if obj_cols:
+            df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors='coerce')
 
-        return pd.concat(chunks, ignore_index=True)
+        # —— 阶段 4.6：复用 _detect_datetime_cols() 做二次确认
+        datetime_cols = self._detect_datetime_cols(df)
+        for col in datetime_cols:
+            if col in df.columns and df[col].dtype == object:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+
+        return df
 
     @staticmethod
     def _detect_datetime_cols(df_chunk: pd.DataFrame) -> set[str]:

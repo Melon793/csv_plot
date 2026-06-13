@@ -345,6 +345,11 @@ class MDFLazyLoader:
         self._signal_cache.clear()
         self._time_cache.clear()
 
+    def release_memory(self):
+        """清空 LRU 缓存（信号数据可以按需重新加载）。"""
+        self._signal_cache.clear()
+        self._time_cache.clear()
+
     def close(self):
         self._signal_cache.clear()
         self._time_cache.clear()

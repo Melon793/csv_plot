@@ -52,7 +52,7 @@ PLOT_COL_MAX_DEFAULT = 3
 PLOT_ROW_CURRENT_DEFAULT = 3
 PLOT_COL_CURRENT_DEFAULT = 1
 
-FLOAT32_SAFE_MAX = 3.4028234663852886e+38
+FLOAT32_REPRESENTABLE_MAX = 3.4028234663852886e+38
 
 # 单位行自动检测阈值
 UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判定为单位行
@@ -135,4 +135,4 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
         return False, None
 
     abs_max = float(np.max(np.abs(arr[finite_mask])))
-    return abs_max <= FLOAT32_SAFE_MAX, abs_max
+    return abs_max <= FLOAT32_REPRESENTABLE_MAX, abs_max
