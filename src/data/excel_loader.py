@@ -10,7 +10,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 from src.data.base_loader import BaseDataLoader
-from src.core.config import _UNIT_KEYWORDS, UNIT_KEYWORD_RATIO_THRESHOLD
+from src.core.config import _UNIT_KEYWORDS, UNIT_KEYWORD_RATIO_THRESHOLD, EXCEL_MAX_SCAN_ROWS
 from src.core.logger import get_logger
 
 logger = get_logger("data.excel_loader")
@@ -33,7 +33,7 @@ class ExcelDataLoader(BaseDataLoader):
         *,
         sheet_name: str | int = 0,
         downcast_float: bool = True,
-        desc_rows: int = 0,
+        desc_rows: int | None = None,
         has_unit: bool | None = None,
         _progress: Callable | None = None,
     ):
@@ -43,7 +43,7 @@ class ExcelDataLoader(BaseDataLoader):
             file_path: Excel 文件路径
             sheet_name: Sheet 名称或索引（0-based）
             downcast_float: 是否下转换浮点数类型
-            desc_rows: 描述行数量
+            desc_rows: 描述行数量，None 表示自动检测
             has_unit: 是否包含单位行，None 表示自动检测
             _progress: 进度回调函数
         """
@@ -53,7 +53,6 @@ class ExcelDataLoader(BaseDataLoader):
         self.file_size = os.path.getsize(file_path)
         self._sheet_name = sheet_name
         self.downcast_float = downcast_float
-        self.desc_rows = desc_rows
         self._progress_cb = _progress
 
         logger.info("开始加载 Excel: %s (%.1f MB)", file_path, self.file_size / 1024 / 1024)
@@ -72,6 +71,20 @@ class ExcelDataLoader(BaseDataLoader):
 
         if self._progress_cb:
             self._progress_cb(5)
+
+        # 自动检测 desc_rows
+        if desc_rows is None:
+            try:
+                self.desc_rows, has_unit = self._auto_detect_format(has_unit)
+                logger.info(
+                    "Excel auto_detect: desc_rows=%d, has_unit=%s (sheet=%s)",
+                    self.desc_rows, has_unit, ws_name,
+                )
+            except Exception as e:
+                logger.warning("Excel 自动检测失败 (%s)，使用默认值 desc_rows=0", e)
+                self.desc_rows = 0
+        else:
+            self.desc_rows = desc_rows
 
         # 读取表头 + 自动检测 has_unit
         self._var_names, self._units, self.has_unit = self._load_header_units(has_unit)
@@ -155,6 +168,72 @@ class ExcelDataLoader(BaseDataLoader):
             units = {name: "-" for name in var_names}
 
         return var_names, units, actual_has_unit
+
+    @staticmethod
+    def _detect_header_row_from_rows(rows: list[tuple]) -> int:
+        """从 Excel 行数据中定位标题行（非数值占比法 + 列数过滤）
+
+        与 CSV 的 _detect_header_from_lines 算法一致：
+        非数值单元格占比 > 50% 则判定为标题行。
+        Excel 单元格保留原生类型（str/int/float/datetime/None），
+        利用类型信息可更准确地识别标题行。
+
+        额外增加列数过滤（total_valid >= 2），避免合并单元格
+        产生的单列描述行被误判为标题行（等效于 CSV 的 len(parts) < 2 过滤）。
+
+        Args:
+            rows: openpyxl iter_rows(values_only=True) 读取的前 N 行
+
+        Returns:
+            标题行在 rows 中的 0-based 索引，未找到时返回 0
+        """
+        for idx, row in enumerate(rows):
+            str_count = 0
+            numeric_count = 0
+            for cell in row:
+                if cell is None:
+                    continue
+                if isinstance(cell, str):
+                    cell_str = cell.strip()
+                    if not cell_str:
+                        continue
+                    try:
+                        float(cell_str)
+                        numeric_count += 1
+                    except ValueError:
+                        str_count += 1
+                elif isinstance(cell, (int, float)):
+                    numeric_count += 1
+                else:
+                    str_count += 1
+
+            total_valid = str_count + numeric_count
+            if total_valid < 2:
+                continue
+            if str_count / total_valid > 0.5:
+                return idx
+        return 0
+
+    def _auto_detect_format(self, has_unit_hint: bool | None) -> tuple[int, bool | None]:
+        """自动检测 Excel 文件的描述行数（实例方法，复用已打开的 self._ws）
+
+        扫描前 EXCEL_MAX_SCAN_ROWS 行，用 _detect_header_row_from_rows
+        定位标题行位置。has_unit 不做独立检测，保持 has_unit_hint
+        原值由后续 _load_header_units 处理。
+
+        Args:
+            has_unit_hint: 外部传入的 has_unit 提示
+
+        Returns:
+            (desc_rows, has_unit_hint)
+        """
+        rows = list(
+            self._ws.iter_rows(
+                max_row=EXCEL_MAX_SCAN_ROWS, values_only=True
+            )
+        )
+        header_idx = self._detect_header_row_from_rows(rows)
+        return header_idx, has_unit_hint
 
     def _read_data(self) -> pd.DataFrame:
         """读取数据：优先 calamine (Rust)，不可用时回退到优化后的 openpyxl"""

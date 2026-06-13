@@ -287,9 +287,9 @@ class FileLoaderManager(MainWindowBaseManager):
                     self.mw.load_btn.setEnabled(True)
                     return
 
-            # Excel 不需要分隔符/编码检测
+            # Excel 不需要分隔符/编码检测，desc_rows=None 触发自动检测
             delimiter_typ = ","
-            desc_rows = 0
+            desc_rows = None
             config_used = True
 
         if not is_mdf_file and not is_excel_file:
@@ -586,7 +586,7 @@ class FileLoaderManager(MainWindowBaseManager):
     def _load_sync(
         self,
         file_path: str,
-        desc_rows: int = 0,
+        desc_rows: int | None = 0,
         sep: str = ",",
         has_unit: bool | None = True,
         encoding: str | None = None,

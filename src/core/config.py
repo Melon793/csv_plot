@@ -58,6 +58,9 @@ FLOAT32_REPRESENTABLE_MAX = 3.4028234663852886e+38
 UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判定为单位行
 VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判定为数据行
 
+# Excel 自动检测：最大扫描行数
+EXCEL_MAX_SCAN_ROWS = 30
+
 # 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
 _UNIT_KEYWORDS = [
     "m",
