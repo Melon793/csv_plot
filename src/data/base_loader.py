@@ -7,7 +7,7 @@ MDFLazyLoader 因惰性加载设计差异不纳入此体系。
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from src.core.config import FLOAT32_SAFE_MAX
+from src.core.config import FLOAT32_REPRESENTABLE_MAX
 
 
 class BaseDataLoader:
@@ -56,22 +56,16 @@ class BaseDataLoader:
         return unique_names
 
     def _postprocess_columns(self, downcast: bool = True) -> dict[str, int]:
-        """合并 downcast + validity 检查为单次遍历，减少冗余数组创建
+        """合并 downcast + validity 检查为单次遍历，减少冗余数组创建。
 
-        对每列在一次遍历中完成：
-        1. 数值类型的 inf 清理和 float32 下转换
-        2. 列有效性分类（1=可绘图, 0=常数列, -1=无效）
-
-        Args:
-            downcast: 是否执行 float64 -> float32 下转换
-
-        Returns:
-            {列名: 有效性} 字典
+        优化点：
+        1. float 列：isfinite 检测 + inf 清理 + float32 下转换合并为单次操作
+        2. 整数列：首尾比较替代 np.unique 的全量排序
+        3. 有效性判断：nanmax/nanmin 替代布尔索引拷贝
         """
         validity: dict[str, int] = {}
 
         for col in self._df.columns:
-            # 时间格式列直接标记为可绘图
             if col in self.date_formats:
                 validity[col] = 1
                 continue
@@ -79,46 +73,69 @@ class BaseDataLoader:
             series = self._df[col]
 
             if pd.api.types.is_float_dtype(series):
-                arr = series.to_numpy()
+                arr = series.to_numpy(copy=True)  # 必须可写（memory_map 产生的数组可能是只读的）
 
                 if downcast:
-                    # 一次性清理 inf -> nan
-                    has_inf = not np.all(np.isfinite(arr))
-                    if has_inf:
-                        arr = np.where(np.isfinite(arr), arr, np.nan)
-                        self._df[col] = arr
-
-                    # float32 安全检查（直接操作 numpy 数组，无冗余 pd.to_numeric）
-                    finite_vals = arr[np.isfinite(arr)]
-                    if finite_vals.size > 0:
-                        abs_max = float(np.max(np.abs(finite_vals)))
-                        if abs_max <= FLOAT32_SAFE_MAX and arr.dtype == np.float64:
-                            arr = arr.astype(np.float32)
+                    finite_mask = np.isfinite(arr)
+                    if finite_mask.all() and arr.dtype == np.float64:
+                        # 无 inf，直接判断是否能下转换
+                        max_abs = float(np.nanmax(np.abs(arr))) if arr.size > 0 else 0.0
+                        if max_abs <= FLOAT32_REPRESENTABLE_MAX:
+                            arr = arr.astype(np.float32)  # 拷贝 2（如果需要）
+                            self._df[col] = arr
+                    elif not finite_mask.all():
+                        # 有 inf，清理后判断是否下转换
+                        if arr.dtype == np.float64:
+                            finite_vals = arr[finite_mask]
+                            if finite_vals.size > 0:
+                                max_abs = float(np.max(np.abs(finite_vals)))
+                            else:
+                                max_abs = 0.0
+                            if max_abs <= FLOAT32_REPRESENTABLE_MAX:
+                                target = np.empty(arr.shape, dtype=np.float32)
+                                np.copyto(target, arr, where=finite_mask)
+                                target[~finite_mask] = np.float32(np.nan)
+                                self._df[col] = target
+                                arr = target
+                            else:
+                                arr[~finite_mask] = np.nan
+                                self._df[col] = arr
+                        else:
+                            arr[~finite_mask] = np.nan
                             self._df[col] = arr
 
-                # 有效性检查（复用已有的 arr）
-                if arr.dtype.kind == 'f':
-                    valid = arr[~np.isnan(arr)]
-                else:
-                    valid = arr
-                if valid.size == 0:
+                # 有效性判断（复用已处理的 arr，无额外分配）
+                if arr.size == 0:
                     validity[col] = -1
-                elif np.unique(valid).size == 1:
-                    validity[col] = 0
                 else:
-                    validity[col] = 1
+                    try:
+                        min_v = np.nanmin(arr)
+                        max_v = np.nanmax(arr)
+                        if np.isnan(min_v) and np.isnan(max_v):
+                            validity[col] = -1
+                        elif min_v == max_v:
+                            validity[col] = 0
+                        else:
+                            validity[col] = 1
+                    except (ValueError, TypeError):
+                        validity[col] = -1
 
             elif pd.api.types.is_integer_dtype(series):
                 arr = series.to_numpy()
                 if arr.size == 0:
                     validity[col] = -1
-                elif np.unique(arr).size == 1:
-                    validity[col] = 0
                 else:
-                    validity[col] = 1
+                    # 快速判断：首尾比较 → 若不同则一定非常量
+                    # 若相同再用 np.all 确认（避免 np.unique 的全量排序开销）
+                    if arr[0] != arr[-1]:
+                        validity[col] = 1
+                    elif np.all(arr == arr[0]):
+                        validity[col] = 0
+                    else:
+                        validity[col] = 1
 
             else:
-                # 非数值列（category/object/datetime 等）：尝试数值转换
+                # 非数值列：尝试一次性转为数值
                 try:
                     numeric = pd.to_numeric(series, errors="raise").to_numpy()
                     if numeric.dtype.kind in "iu":
@@ -135,6 +152,34 @@ class BaseDataLoader:
                     validity[col] = -1
 
         return validity
+
+    def release_memory(self):
+        """显式释放内存（供重载流程调用）。
+
+        直接将 _df 替换为空 DataFrame，让旧 DataFrame 被 Python 引用计数回收。
+        """
+        if hasattr(self, "_df") and self._df is not None:
+            self._df = pd.DataFrame()
+
+        # 清理其他可能占内存的属性
+        for attr in ("_var_names", "_units", "_df_validity"):
+            if hasattr(self, attr):
+                try:
+                    setattr(self, attr, None)
+                except Exception:
+                    pass
+
+        # Excel loader: 关闭 workbook（如果存在）
+        if hasattr(self, "_wb") and self._wb is not None:
+            try:
+                self._wb.close()
+            except Exception:
+                pass
+        if hasattr(self, "_ws"):
+            try:
+                self._ws = None
+            except Exception:
+                pass
 
     # ---- 公共属性接口 ----
     @property

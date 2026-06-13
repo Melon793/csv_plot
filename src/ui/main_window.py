@@ -514,8 +514,8 @@ class MainWindow(QMainWindow):
     def _current_data_length(self) -> int:
         return self.file_loader_manager._current_data_length
 
-    def _cleanup_old_data(self):
-        self.file_loader_manager._cleanup_old_data()
+    def _release_old_data(self):
+        self.file_loader_manager._release_old_data()
 
 
     def _post_load_actions(self, file_path: str):

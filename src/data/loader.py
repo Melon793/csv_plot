@@ -406,10 +406,6 @@ class FastDataLoader(BaseDataLoader):
         )
         self.date_formats = date_formats
 
-        self.sample_mem_size = sample.memory_usage(deep=True).sum()
-        self.byte_per_line = (0.6 * self.sample_mem_size) / sample.shape[0]
-        self.estimated_lines = int(self.file_size / (self.byte_per_line))
-
         del sample
         gc.collect()
         if self._progress_cb:
@@ -649,29 +645,28 @@ class FastDataLoader(BaseDataLoader):
         desc_rows: int = 0,
         has_unit: bool = True,
     ) -> pd.DataFrame:
-        chunks: list[pd.DataFrame] = []
-        # do not parse date
         if not self.do_parse_date:
             parse_dates = []
-        total_chunks_est = max(
-            1,
-            self.estimated_lines // chunksize
-            + (1 if self.estimated_lines % chunksize else 0),
-        )
-        increment = 80 / total_chunks_est
 
-        # 使用更小的chunk size来减少内存峰值
-        optimized_chunksize = min(chunksize, 2000)  # 限制最大chunk size
+        if self._progress_cb:
+            self._progress_cb(20)
 
-        for idx, chunk in enumerate(
-            pd.read_csv(
+        _LARGE_FILE_THRESHOLD = 2 * 1024 * 1024 * 1024  # 2GB
+        try:
+            file_size = os.path.getsize(path)
+        except OSError:
+            file_size = 0
+
+        if file_size > 0 and file_size <= _LARGE_FILE_THRESHOLD:
+            # —— 中小文件：一次性读入
+            # pandas 内部已是 C 级流式解析，Python 层 chunksize + concat 反而额外占用 ~1× 内存。
+            df = pd.read_csv(
                 path,
                 skiprows=(2 + desc_rows) if has_unit else (1 + desc_rows),
                 names=self._var_names,
                 dtype=dtype_map,
                 parse_dates=parse_dates,
                 encoding=self.encoding_used,
-                chunksize=optimized_chunksize,
                 usecols=self.usecols,
                 low_memory=False,
                 memory_map=True,
@@ -680,17 +675,40 @@ class FastDataLoader(BaseDataLoader):
                 keep_default_na=True,
                 on_bad_lines="skip",
             )
-        ):
-            # print(f"chunksize is {chunksize}, full size {self.file_size/(1024**2):2f}Mb")
+
             if self._progress_cb:
-                chunk_progress = min(80, (idx + 1) * increment)
-                self._progress_cb(15 + int(chunk_progress))
-                # print (f"progress {idx} is {bytes_read}")
+                self._progress_cb(85)
+
+            return df
+
+        # —— 超大文件（>2GB 或无法获取大小）：保留 chunksize 分批读取防止 OOM
+        chunks: list[pd.DataFrame] = []
+        for idx, chunk in enumerate(pd.read_csv(
+            path,
+            skiprows=(2 + desc_rows) if has_unit else (1 + desc_rows),
+            names=self._var_names,
+            dtype=dtype_map,
+            parse_dates=parse_dates,
+            encoding=self.encoding_used,
+            usecols=self.usecols,
+            low_memory=True,  # 超大文件分列推断，减少峰值内存
+            memory_map=True,
+            chunksize=chunksize,
+            sep=sep,
+            na_values=self._NA_VALUES,
+            keep_default_na=True,
+            on_bad_lines="skip",
+        )):
             chunks.append(chunk)
+            if self._progress_cb and file_size > 0:
+                # 粗略进度估算（基于已读 chunk 数 × chunksize / 文件大小）
+                progress = min(80, int((idx + 1) * chunksize * 100 / (file_size / 100)))
+                self._progress_cb(15 + progress)
 
-            # 每处理几个chunk就进行一次垃圾回收
-            if idx % 5 == 0:
-                import gc
+        df = pd.concat(chunks, ignore_index=True)
+        del chunks
 
-                gc.collect()
-        return pd.concat(chunks, ignore_index=True)
+        if self._progress_cb:
+            self._progress_cb(85)
+
+        return df

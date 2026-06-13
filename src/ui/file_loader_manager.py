@@ -207,17 +207,15 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(
                 self.mw, "内存不足", "文件太大，内存不足。请尝试加载较小的文件。"
             )
-            self._cleanup_old_data()
+            self._release_old_data()
             self.mw.load_btn.setEnabled(True)
         except Exception as e:
             QMessageBox.critical(self.mw, "加载错误", f"加载文件时发生错误: {str(e)}")
-            self._cleanup_old_data()
+            self._release_old_data()
             self.mw.load_btn.setEnabled(True)
         finally:
-            if self._has_valid_loader:
-                self._post_load_actions(file_path)
-                self.mw.raise_()
-                self.mw.activateWindow()
+            self.mw.raise_()
+            self.mw.activateWindow()
 
     def set_button_status(self, status: bool):
         if status is not None:
@@ -387,22 +385,13 @@ class FileLoaderManager(MainWindowBaseManager):
                     sheet_name=sheet_name,
                 )
 
-                is_excel = file_path.lower().endswith(('.xlsx', '.xlsm'))
-                if is_excel:
-                    # Excel (calamine): 不支持进度回调，使用不确定（indeterminate）动画
-                    self.mw._progress = QProgressDialog(
-                        "正在加载 Excel 数据...", None, 0, 0, self.mw
-                    )
-                    self.mw._progress.setCancelButton(None)
-                else:
-                    # CSV / MDF 等：有分块进度回调，使用百分比进度条
-                    self.mw._progress = QProgressDialog(
-                        "正在读取数据...", "取消", 0, 100, self.mw
-                    )
-                    self.mw._progress.setCancelButton(None)
-                    self.mw._progress.setMinimumDuration(0)
-                    self.mw._thread.progress.connect(self.mw._progress.setValue)
-
+                self.mw._progress = QProgressDialog(
+                    f"正在加载数据... [{os.path.basename(file_path)}]",
+                    None,
+                    0, 0,  # min == max → 自动切换为 indeterminate（来回摆动）
+                    self.mw
+                )
+                self.mw._progress.setCancelButton(None)
                 self.mw._progress.setWindowModality(Qt.WindowModality.ApplicationModal)
                 self.mw._progress.setAutoClose(True)
                 self.mw._progress.show()
@@ -418,21 +407,47 @@ class FileLoaderManager(MainWindowBaseManager):
                 self._end_data_reload()
             raise
 
-    def _cleanup_old_data(self):
+    def _release_old_data(self):
+        """显式释放所有对旧 DataFrame 的引用（仅在新 loader 成功后调用）。"""
+        import gc
+
         try:
+            # 1) 清理 plot widgets 的 data 引用
+            for container in getattr(self.mw, "plot_widgets", []):
+                widget = getattr(container, "plot_widget", None)
+                if widget is not None:
+                    widget.data = None
+
+            # 2) 清理 main window 的重复引用
+            self.mw.data = None
+            self.mw.var_names = []
+            self.mw.units = {}
+            self.mw.data_validity = {}
+
+            # 3) 清理 table dialog 的独立 _df
+            from src.ui.table_dialog import DataTableDialog
+            if DataTableDialog._instance is not None:
+                try:
+                    DataTableDialog._instance.clear_all_columns()
+                except Exception:
+                    logger.debug("清理 DataTableDialog 数据失败")
+
+            # 4) 释放旧 loader
             if self._has_valid_loader:
-                if hasattr(self.mw.loader, "close"):
+                old_loader = self.mw.loader
+                if hasattr(old_loader, "close"):
                     try:
-                        self.mw.loader.close()
+                        old_loader.close()
                     except Exception:
                         logger.debug("关闭旧 loader 时发生异常")
-                del self.mw.loader
+                if hasattr(old_loader, "release_memory"):
+                    try:
+                        old_loader.release_memory()
+                    except Exception:
+                        logger.debug("释放旧 loader 内存时发生异常")
                 self.mw.loader = None
 
-            self.mw.clear_all_plots()
-
-            import gc
-
+            # 5) 触发 GC — 把 numpy 数组真正归还给操作系统
             gc.collect()
 
         except (AttributeError, TypeError):
@@ -586,33 +601,35 @@ class FileLoaderManager(MainWindowBaseManager):
                 QMessageBox.critical(self.mw, "参数错误", error_msg)
                 return False
 
-        loader = None
+        new_loader = None
         status = False
 
         try:
             ext = os.path.splitext(file_path)[1].lower()
             if ext in (".mf4", ".mdf", ".dat"):
-                loader = MDFLazyLoader(file_path)
+                new_loader = MDFLazyLoader(file_path)
             elif ext in (".xlsx", ".xlsm") or is_excel:
                 from src.data.excel_loader import ExcelDataLoader
-                loader = ExcelDataLoader(
+                new_loader = ExcelDataLoader(
                     file_path,
                     sheet_name=sheet_name or 0,
                     desc_rows=desc_rows,
                     has_unit=has_unit,
                 )
             else:
-                loader = FastDataLoader(
+                new_loader = FastDataLoader(
                     file_path,
                     desc_rows=desc_rows,
                     sep=sep,
                     has_unit=has_unit,
                     encoding=encoding,
                 )
-            self.mw.loader = loader
+            # 新 loader 成功 → 释放旧数据 → 应用新数据
+            self._release_old_data()
+            self.mw.loader = new_loader
             self.mw._apply_loader()
             status = True
-            logger.info("文件加载完成: %s (%d 行)", file_path, loader.datalength)
+            logger.info("文件加载完成: %s (%d 行)", file_path, new_loader.datalength)
         except MemoryError as e:
             QMessageBox.critical(self.mw, "内存不足", f"加载文件时内存不足: {str(e)}")
             logger.error("内存不足: %s", e)
@@ -630,26 +647,24 @@ class FileLoaderManager(MainWindowBaseManager):
             logger.error("加载文件失败: %s", e, exc_info=True)
             status = False
         finally:
-            if loader is not None:
-                loader = None
+            new_loader = None
         return status
 
-    def _on_load_done(self, loader, file_path: str):
+    def _on_load_done(self, new_loader, file_path: str):
         logger.info("后台加载完成: %s", file_path)
         self.mw._progress.close()
-        if hasattr(self.mw, "loader") and self.mw.loader is not None:
-            if hasattr(self.mw.loader, "close"):
-                try:
-                    self.mw.loader.close()
-                except Exception:
-                    logger.debug("关闭旧 loader 时发生异常（后台加载完成回调）")
-            del self.mw.loader
 
-        self.mw.loader = loader
+        # —— 阶段 A：释放旧数据（此时新 loader 已就绪，释放是安全的）
+        self._release_old_data()
+
+        # —— 阶段 B：应用新数据
+        self.mw.loader = new_loader
         self.mw._apply_loader()
-        self._post_load_actions(file_path)
+
         self._end_data_reload()
+        self.set_button_status(True)
         self.mw.load_btn.setEnabled(True)
+        self._post_load_actions(file_path)
 
     def _on_load_error(self, msg):
         logger.error("后台加载失败: %s", msg)
