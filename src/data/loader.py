@@ -37,7 +37,7 @@ class DataLoadThread(QThread):
         self,
         file_path: str,
         parent=None,
-        desc_rows: int = 0,
+        desc_rows: int | None = 0,
         sep: str = ",",
         has_unit: bool | None = True,
         encoding: str | None = None,
