@@ -99,7 +99,7 @@ class LogManager:
         self._queue_listener.start()
 
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG)
+        root_logger.setLevel(logging.INFO)
         root_logger.addHandler(self._queue_handler)
 
         atexit.register(self._stop_listener)
