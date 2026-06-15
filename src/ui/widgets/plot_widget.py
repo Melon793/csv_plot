@@ -59,6 +59,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.original_y = None
         self.mark_region = None
         self.is_cursor_pinned = False  # 记录cursor是否被固定
+        self.last_valid_cursor_mode = "1 free cursor"
         self.pinned_x_value = None  # 记录固定的x值
         self.pinned_index_value = None  # 记录固定的索引值
         self.pinned_x_values = []
@@ -69,6 +70,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_label_busy = False
         self._cursor_label_dirty = False
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
+        self._original_downsample_ds = None
         self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
         self._drag_indicator_source = None
         self._drag_indicator_guard = QTimer(self)
