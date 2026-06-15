@@ -200,7 +200,7 @@ class PlotUIManager(BasePlotManager):
         pw.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
         pw.view_box.sigRangeChanged.connect(pw._on_range_changed)
-        pw.axis_manager.update_x_axis_label()
+        self.update_x_axis_label(pw)
 
     def update_x_axis_label(self, pw: Any) -> None:
         """更新 X 轴标签文本"""
