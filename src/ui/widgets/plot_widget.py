@@ -92,73 +92,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cleanup_timer.setSingleShot(True)
         self._cleanup_timer.timeout.connect(self._process_pending_deletes)
         self.plot_context = None  # 由 layout_manager 赋值为 PlotContext 实例
+        self._init_manager_chain()
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
             time_channels_info = {}
-        """
-        初始化UI组件和布局
-        
-        设置图形布局控件的基本配置和数据结构
-        初始化绘图相关的属性和同步器
-        
-        Args:
-            units_dict: 单位字典
-            dataframe: 数据框
-            time_channels_info: 时间通道信息
-            synchronizer: 同步器实例
-        """
-        # 设置大小策略，允许拉伸
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding
-        )
-        self.setAcceptDrops(True)
-        self.units = units_dict
-        self.data = dataframe
-        self.time_channels_info = time_channels_info
-        self.synchronizer = synchronizer
-        self.curve = None
-        self.time_column_name = None
-        self.time_axis_label = "Index"
-        #self.ci.layout.setContentsMargins(0, 0, 0, 5)
-        
-        # 多曲线支持
-        self.curves = {}  # 存储所有曲线 {var_name: curve_info}
-        self.is_multi_curve_mode = False  # 是否处于多曲线模式
-        self._batch_adding = False  # 是否正在批量添加变量
-        self.curve_colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']  # 默认颜色列表
-        self.current_color_index = 0  # 当前颜色索引
-        self._max_point_density: float = 0.0  # 当前 plot 所有 curve 的最大数据点密度
-        
-        self.y_name = ''
-        self.y_format = ''
-        self.x_name = ''
-        self.x_format = ''
-
-        self.xMin:int =0 
-        self.xMax:int =1 
-        # 添加顶部文本区域
-        self.setup_header()
-        # 主绘图区域设置
-        self.setup_plot_area()
-        # 坐标轴设置
-        self.setup_axes()
-        # 交互元素设置
-        self.setup_interaction()
-        self._init_ui_refresh_coordinator()
-
-        # 布局比例设置 (绘图区占90%)
-        self.ci.layout.setContentsMargins(0, 0, 10, 5)  # 消除所有边距
-        self.ci.layout.setSpacing(0)
-        self.ci.layout.setRowStretchFactor(1, 1)  # 主区域完全拉伸
-
-        # 初始化框选功能
-        self.rubberBand = QRubberBand(QRubberBand.Shape.Rectangle, self)
-        self.origin = QPoint()
-
-        self._init_manager_chain()
+        self._plot_ui_manager.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
 
     def _init_manager_chain(self):
         from src.ui.widgets.plot_ui_manager import PlotUIManager
@@ -185,104 +125,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return SingleCurveStrategy(self)
 
     def setup_header(self):
-        """完全修正的顶部文本区域设置方法"""
-        header = pg.GraphicsWidget()
-        layout = QGraphicsLinearLayout(Qt.Orientation.Horizontal)
-        
-
-        # 计算固定Y轴宽度
-        font = QApplication.font()
-        fm = QFontMetrics(font)
-        base_spacing=fm.horizontalAdvance("-10000.01")
-        header.setFixedHeight(fm.height() * 2) 
-
-        # 添加左边距（空项）
-        left_margin = QGraphicsWidget()        
-        layout.addItem(left_margin)
-        layout.setItemSpacing(0, base_spacing*0) 
-        
-        # 左侧文本（使用代理窗口部件）
-        self.label_left = QLabel("channel name")
-        self.label_left.setStyleSheet("""
-            color: #000;
-            font-weight: bold;
-            background-color: transparent;
-        """)
-        self.label_left.setSizePolicy(QSizePolicy.Policy.Minimum,
-                                      QSizePolicy.Policy.Preferred)
-        self.label_left.setTextFormat(Qt.TextFormat.RichText)  # 支持HTML格式
-        self.label_left.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)  # 支持交互
-        self.label_left.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)  # 禁用右键菜单
-        self.label_left.mousePressEvent = self._on_legend_clicked  # 绑定点击事件
-        #self.label_left.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
-        proxy_left = QGraphicsProxyWidget()
-        proxy_left.setWidget(self.label_left)
-
-        # 只添加左侧文本到布局
-        layout.addItem(proxy_left)
-        layout.setStretchFactor(proxy_left, 1)
-        layout.setAlignment(proxy_left, Qt.AlignmentFlag.AlignBottom| Qt.AlignmentFlag.AlignLeft)
-
-        #layout.setAlignment(Qt.AlignmentFlag.AlignBottom)
-
-        header.setLayout(layout)
-        #header.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        self.addItem(header, row=0, col=0, colspan=2)
+        """配置顶部 header → 委托到 PlotUIManager"""
+        self._plot_ui_manager._setup_header(self)
 
     def setup_plot_area(self):
-        """
-        配置绘图区域基本属性
-        
-        创建和配置主要的绘图区域
-        设置视图框、坐标轴和基本绘图属性
-        
-        性能优化（基于iOS/Android浏览器缩放优化经验）：
-        1. 智能降采样（peak模式保留峰值）
-        2. 视图裁剪（只渲染可见区域）
-        3. 交互期间性能降级（类似iOS快照技术）
-        4. 智能防抖延迟（根据数据量动态调整）
-        """
-        self.plot_item = self.addPlot(row=1, col=0, colspan=2, viewBox=CustomViewBox())
-        self.view_box = self.plot_item.vb
-        self.view_box.plot_widget = self
-        self._connect_viewbox_signals()
-        
-        # ========== 性能优化 2: 交互状态管理 ==========
-        self._is_interacting = False
-        self._interaction_timer = QTimer()
-        self._interaction_timer.setSingleShot(True)
-        self._interaction_timer.timeout.connect(self._end_interaction)
-        
-        # ========== 性能优化 3.1: 同步缩放标志 ==========
-        # 防止XLink同步时递归更新导致的性能问题
-        self._is_syncing_range = False  # 标记是否正在同步范围（避免递归更新）
-        
-        # 移除 self._customize_plot_menu()，因为现在用 CustomViewBox 实现菜单定制
-        
-        self.view_box.setAutoVisible(x=False, y=True)  # 自动适应可视区域
-        self.plot_item.setTitle(None)
-        self.plot_item.hideButtons()
-        
-        # ========== 性能优化 3: 视图裁剪和降采样 ==========
-        # 类似网页的懒加载和虚拟化技术
-        self.plot_item.setClipToView(True)  # 只渲染可见区域
-        # 使用peak模式保留峰值，自动降采样支持百万级数据点
-        # 当auto=True时，pyqtgraph会根据可见区域自动计算合适的降采样因子
-        # 无需指定ds参数，auto模式会自动处理
-        self.plot_item.setDownsampling(mode='peak', auto=True)
-        
-        self.setBackground('w')
-
-        pen = pg.mkPen('#f00',width=1)
-        self.plot_item.getAxis('left').setGrid(255) 
-        self.plot_item.getAxis('bottom').setGrid(255) 
-        self.plot_item.showGrid(x=True, y=True, alpha=0.1)
-
-        # 基于点数修改曲线风格
-        # 使用防抖机制来优化缩放性能
-        self.view_box.sigRangeChanged.connect(self._on_range_changed)
-
-        self.update_x_axis_label()
+        """配置绘图区域 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._setup_plot_area(self)
 
     def update_x_axis_label(self):
         """更新 X 轴标签文本 → 委托到 AxisManager（初始化阶段 fallback 到内联实现）"""
@@ -415,151 +263,36 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
 
     def setup_axes(self):
-        """配置坐标轴样式和范围"""
-        # X轴配置
-        self.axis_x = self.plot_item.getAxis('bottom')
-        self.axis_x.setTextPen('black')
-        self.axis_x.setPen(QPen(QColor('black'), 1))
-        self.axis_x.setRange(0, 10)
-        
-        # Y轴配置
-        self.axis_y = self.plot_item.getAxis('left')
-        self.axis_y.enableAutoSIPrefix(False)
-        self.axis_y.setTextPen('black')
-        self.axis_y.setPen(QPen(QColor('black'), 1))
-        
-
-        # 其他边框配置
-        for pos in ('top', 'right'):
-            ax = self.plot_item.getAxis(pos)
-            ax.setVisible(True)
-            ax.setTicks([])
-            ax.setStyle(showValues=False, tickLength=0)
-            ax.setPen(QPen(QColor('black'), 1))
-        
-        # 计算固定Y轴宽度
-        font = QApplication.font()
-        fm = QFontMetrics(font)
-        self.axis_y.setWidth(fm.horizontalAdvance("-10000.01") )
-
-        # 基于应用程序基础字体大小，增加2像素作为标签字体大小
-        font_family = font.family() 
-        # 使用 font.pixelSize() 保证跨平台一致性，并略微增大
-        pixel_size = font.pixelSize() + 2
-
-        # Y轴标签
-        # self.axis_y.setLabel(
-        #     color='black',
-        #     angle=-90,
-        #     **{'font-family': 'Arial', 'font-size': '12pt', 'font-weight': 'bold'}
-        # )
-        self.axis_y.setLabel(
-            color='black',
-            angle=-90,
-            # 修正：使用像素大小 'px' 代替点大小 'pt'，并使用系统字体
-            **{'font-family': font_family, 'font-size': f'{pixel_size}px', 'font-weight': 'bold'}
-        )
+        """配置坐标轴样式 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._setup_axes(self)
 
     def setup_interaction(self):
-        """配置交互元素"""
-        # 光标线
-        self.vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((255, 0, 0, 100), width=4) )
-        self.vline2 = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((255, 0, 0, 100), width=4) )
-        self.vline.cursor_index = 0
-        self.vline2.cursor_index = 1
-        self.vline2.setZValue(100)
-        self.vline.setZValue(100) 
-        self.cursor_label = pg.TextItem("", anchor=(1, 1), color="red")
-        self.plot_item.addItem(self.vline, ignoreBounds=True)
-        self.plot_item.addItem(self.vline2, ignoreBounds=True)
-        self.plot_item.addItem(self.cursor_label, ignoreBounds=True)
-        self.vline.setVisible(False)
-        self.vline2.setVisible(False)
-        self.cursor_label.setVisible(False)
-        
-        # 多曲线cursor元素
-        self.multi_cursor_items = []  # 存储多曲线cursor的可视化元素
-        self.show_values_only = True  # 是否只显示x值（不显示圆圈和y值）
-        
-        # 【内存优化】对象池 - 复用ScatterPlotItem和TextItem，避免重复创建
-        self._cursor_item_pool = {
-            'circles': [],  # ScatterPlotItem对象池
-            'labels': [],   # TextItem对象池（y值标签）
-            'x_labels': []
-        }
-        
-        # 信号连接
-        # 【性能优化】控制cursor更新频率，减少CPU占用
-        # 多曲线时降低频率可显著提升响应速度
-        self.proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=20, slot=self.mouse_moved)
-        self.vline.sigPositionChanged.connect(self.on_vline_position_changed)
-        self.vline2.sigPositionChanged.connect(self.on_vline_position_changed)
-        self.setAntialiasing(False)
-        
-        # 【性能优化】cursor更新节流控制
-        self._last_cursor_update_time = 0
-        self._cursor_update_throttle = 0.016  # 基础节流：16ms（约60fps）
-        self._adaptive_throttle_enabled = True  # 启用自适应节流
-        self._cursor_refresh_timer = QTimer(self)
-        self._cursor_refresh_timer.setSingleShot(True)
-        self._cursor_refresh_timer.timeout.connect(self._refresh_cursor_geometry)
-        self._pending_cursor_geometry_update = False
+        """配置交互元素 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._setup_interaction(self)
 
     def _init_ui_refresh_coordinator(self):
-        self._ui_refresh = UnifiedUpdateScheduler(
-            delay_ms=UI_DEBOUNCE_DELAY_MS,
-            order=("style", "cursor", "stats"),
-            parent=self
-        )
-        self._ui_refresh.register("style", self._run_style_refresh)
-        self._ui_refresh.register("cursor", self._run_cursor_refresh)
-        self._ui_refresh.register("stats", self._run_stats_refresh)
+        """初始化 UI 刷新调度器 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._init_ui_refresh_coordinator(self)
 
     def _queue_ui_refresh(self, *, style=True, cursor=True, stats=True, immediate=False):
-        if not hasattr(self, '_ui_refresh'):
-            return
-        tasks: list[str] = []
-        if style:
-            tasks.append("style")
-        if cursor:
-            tasks.append("cursor")
-        if stats:
-            tasks.append("stats")
-        if not tasks:
-            return
-        if immediate:
-            self._ui_refresh.run_immediately(*tasks)
-        else:
-            self._ui_refresh.schedule(*tasks)
+        """调度 UI 更新 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._queue_ui_refresh(self, style=style, cursor=cursor, stats=stats, immediate=immediate)
 
     def _cancel_ui_refresh(self, *tasks):
-        if hasattr(self, '_ui_refresh'):
-            if tasks:
-                self._ui_refresh.cancel(*tasks)
-            else:
-                self._ui_refresh.cancel()
+        """取消 UI 刷新 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._cancel_ui_refresh(self, *tasks)
 
     def _run_style_refresh(self):
-        if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-            return
-        if hasattr(self, 'view_box') and hasattr(self, 'plot_item'):
-            self.update_plot_style(self.view_box, self.view_box.viewRange(), None)
+        """执行样式刷新 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._run_style_refresh(self)
 
     def _run_cursor_refresh(self):
-        if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-            return
-        if getattr(self, '_is_interacting', False):
-            return
-        if hasattr(self, 'vline') and self.vline.isVisible():
-            try:
-                self.update_cursor_label()
-            except Exception:
-                _widget_logger.debug("光标刷新异常（C++对象可能已销毁）")
+        """执行光标刷新 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._run_cursor_refresh(self)
 
     def _run_stats_refresh(self):
-        main_window = self.window()
-        if main_window is not None:
-            main_window.request_mark_stats_refresh(immediate=True)
+        """执行统计刷新 → 委托到 PlotUIManager"""
+        self._plot_ui_manager._run_stats_refresh(self)
 
     def _extract_var_names_from_text(self, text: str) -> list[str]:
         if not text:
@@ -1749,168 +1482,57 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     @safe_callback
     def _on_range_changed(self, view_box, range, changed=None):
-        """ViewBox范围变化回调处理"""
-        try:
-            if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-                self._cancel_ui_refresh()
-                return
-
-            if getattr(self, '_is_syncing_range', False):
-                return
-
-            if not self._is_interacting:
-                self._is_interacting = True
-                self._start_interaction()
-
-            if hasattr(self, '_interaction_timer'):
-                self._interaction_timer.stop()
-                self._interaction_timer.start(UI_DEBOUNCE_DELAY_MS)
-
-            if self._is_interacting:
-                self._cancel_ui_refresh('style', 'cursor')
-                return
-
-            self._queue_ui_refresh()
-        except Exception as e:
-            print(f"范围变化处理出错: {e}")
+        """ViewBox范围变化回调 → 委托到 EventHandler"""
+        self._event_handler._on_range_changed(view_box, range, changed)
 
     def _start_interaction(self):
-        """开始交互时的优化处理
-        
-        类似iOS的快照策略：在交互期间临时降低渲染质量
-        """
-        try:
-            # 【性能优化】交互期间临时提高降采样阈值，减少渲染的点数
-            # 这样可以显著提升缩放时的流畅度
-            if hasattr(self, 'plot_item'):
-                # 保存原始降采样设置
-                if not hasattr(self, '_original_downsample_ds'):
-                    # 获取当前降采样设置（如果有）
-                    self._original_downsample_ds = getattr(self.plot_item, '_downsample', None)
-                
-                # 临时提高降采样阈值：交互期间使用更激进的降采样
-                # 通过设置更大的ds值来减少渲染的点数
-                # 注意：pyqtgraph的auto模式会自动处理，这里主要是确保降采样更激进
-                # 实际上，pyqtgraph的auto模式已经会根据可见区域自动调整
-                # 但我们可以通过临时禁用某些昂贵的操作来提升性能
-                pass  # pyqtgraph的auto模式已经足够智能，无需手动调整
-            
-            # 【性能优化】交互期间禁用样式更新（已在update_plot_style中实现）
-            # 这样可以避免在缩放时遍历所有曲线并更新样式
-        except Exception as e:
-            print(f"开始交互优化时出错: {e}")
-    
+        """开始交互优化 → 委托到 EventHandler"""
+        self._event_handler._start_interaction()
+
     def _end_interaction(self):
-        """结束交互时的处理"""
-        try:
-            self._is_interacting = False
-            self._queue_ui_refresh(immediate=True)
-            if getattr(self, '_pending_cursor_geometry_update', False):
-                self._pending_cursor_geometry_update = False
-                self._schedule_cursor_geometry_update()
-        except Exception as e:
-            print(f"结束交互出错: {e}")
+        """结束交互处理 → 委托到 EventHandler"""
+        self._event_handler._end_interaction()
 
     def _schedule_cursor_geometry_update(self):
-        if not hasattr(self, 'vline') or not self.vline.isVisible():
-            return
-        if getattr(self, '_cursor_refresh_timer', None) is None:
-            return
-        if getattr(self, '_is_interacting', False):
-            self._pending_cursor_geometry_update = True
-            return
-        self._pending_cursor_geometry_update = False
-        # 重启单次定时器，合并短时间内的多次请求
-        self._cursor_refresh_timer.start(max(15, UI_DEBOUNCE_DELAY_MS ))
+        """调度光标几何更新 → 委托到 EventHandler"""
+        self._event_handler._schedule_cursor_geometry_update()
 
     def _refresh_cursor_geometry(self):
-        if not hasattr(self, 'vline') or not self.vline.isVisible():
-            return
-        if getattr(self, '_is_interacting', False):
-            self._pending_cursor_geometry_update = True
-            return
-        if self.show_values_only:
-            self._show_x_position_only()
-        else:
-            self.update_cursor_label()
+        """刷新光标几何 → 委托到 EventHandler"""
+        self._event_handler._refresh_cursor_geometry()
 
     def _connect_viewbox_signals(self):
-        vb = self.view_box
-        vb.plot_widget = self
-        vb.signals.request_jump_to_data.connect(self._on_vb_jump)
-        vb.signals.request_clear_plot.connect(self._on_vb_clear)
-        vb.signals.request_auto_y.connect(self._on_vb_auto_y)
-        vb.signals.request_set_cursor_mode.connect(self._on_vb_set_cursor_mode)
-        vb.signals.request_show_cursor_value.connect(self._on_vb_show_cursor)
-        vb.signals.request_hide_cursor_value.connect(self._on_vb_hide_cursor)
-        vb.signals.request_set_row_height.connect(self._on_vb_set_row_height)
-        vb.signals.request_set_all_row_height.connect(self._on_vb_set_all_row_height)
-        vb.signals.request_copy_name.connect(self._on_vb_copy_name)
-        vb.signals.request_variable_editor.connect(self._on_vb_var_editor)
+        """连接 ViewBox 信号 → 委托到 EventHandler"""
+        self._event_handler._connect_viewbox_signals()
 
     def _on_vb_jump(self, pw, ctx_x):
-        if pw:
-            pw.jump_to_data_impl(ctx_x)
+        self._event_handler._on_vb_jump(pw, ctx_x)
 
     def _on_vb_clear(self, pw):
-        if pw:
-            pw.clear_plot_item()
-            if pw.window():
-                pw.window().request_mark_stats_refresh(immediate=True)
+        self._event_handler._on_vb_clear(pw)
 
     def _on_vb_auto_y(self, pw):
-        if pw and pw.window() and hasattr(pw.window(), "auto_y_in_x_range"):
-            pw.window().auto_y_in_x_range()
+        self._event_handler._on_vb_auto_y(pw)
 
     def _on_vb_set_cursor_mode(self, mode, pw, ctx_x):
-        if pw and pw.window() and hasattr(pw.window(), "set_cursor_mode"):
-            pw.window().set_cursor_mode(mode, source_plot=pw, context_x=ctx_x)
+        self._event_handler._on_vb_set_cursor_mode(mode, pw, ctx_x)
 
     def _on_vb_show_cursor(self, pw):
-        if pw and pw.window() and hasattr(pw.window(), "cursor_values_hidden"):
-            pw.window().cursor_values_hidden = False
-            if pw.window().cursor_btn.isChecked():
-                for c in pw.window().plot_widgets:
-                    c.plot_widget.toggle_cursor(True)
+        self._event_handler._on_vb_show_cursor(pw)
 
     def _on_vb_hide_cursor(self, pw):
-        if pw and pw.window() and hasattr(pw.window(), "cursor_values_hidden"):
-            pw.window().cursor_values_hidden = True
-            if pw.window().cursor_btn.isChecked():
-                for c in pw.window().plot_widgets:
-                    c.plot_widget.toggle_cursor(False, hide_values_only=True)
+        self._event_handler._on_vb_hide_cursor(pw)
 
     def _on_vb_set_row_height(self, pct, pw):
-        if pw and pw.window() and hasattr(pw.window(), "plot_widgets"):
-            w = pw.window()
-            for idx, c in enumerate(w.plot_widgets):
-                if c.plot_widget is pw:
-                    row, _ = divmod(idx, w._plot_col_max_default)
-                    w.set_row_height(row, pct)
-                    break
+        self._event_handler._on_vb_set_row_height(pct, pw)
 
     def _on_vb_set_all_row_height(self, pct):
-        w = self.window()
-        if w and hasattr(w, "set_all_row_height"):
-            w.set_all_row_height(pct)
+        self._event_handler._on_vb_set_all_row_height(pct)
 
     def _on_vb_copy_name(self, pw):
-        if not pw:
-            return
-        var_names = []
-        if getattr(pw, "is_multi_curve_mode", False) and pw.curves:
-            var_names = list(pw.curves.keys())
-        elif getattr(pw, "y_name", ""):
-            var_names = [pw.y_name]
-        if var_names:
-            from PySide6.QtWidgets import QApplication as _QA
-            _QA.clipboard().setText(" ".join(var_names))
+        self._event_handler._on_vb_copy_name(pw)
 
     def _on_vb_var_editor(self, pw):
-        if pw:
-            from src.ui.plot_variable_editor import PlotVariableEditorDialog
-            dialog = PlotVariableEditorDialog(pw, pw.window() if pw.window() and hasattr(pw.window(), "loader") else None)
-            dialog.show()
-            dialog.raise_()
+        self._event_handler._on_vb_var_editor(pw)
 
 
