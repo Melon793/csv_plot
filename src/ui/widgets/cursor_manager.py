@@ -882,22 +882,22 @@ class CursorManager:
                              min(y_max - label_height_data * 0.5, label_y))
 
             # 边缘避让逻辑：防止标签在边缘抖动
-            edge_margin_strict = label_height_data * 1.5
+            edge_margin_strict = label_height_data * 0.25
             y_center = (y_min + y_max) / 2
-            y_quarter_upper = y_min + (y_max - y_min) * 0.25
-            y_quarter_lower = y_max - (y_max - y_min) * 0.25
+            # y_quarter_upper = y_min + (y_max - y_min) * 0.25
+            # y_quarter_lower = y_max - (y_max - y_min) * 0.25
 
             data_point_near_bottom = (y_pos - y_min) < edge_margin_strict
             data_point_near_top = (y_max - y_pos) < edge_margin_strict
 
             if data_point_near_bottom:
-                label_y = max(y_quarter_upper, label_y)
+                # label_y = max(y_quarter_upper, label_y)
                 label_y = min(label_y, y_center)
             elif data_point_near_top:
-                label_y = min(y_quarter_lower, label_y)
+                # label_y = min(y_quarter_lower, label_y)
                 label_y = max(label_y, y_center)
             else:
-                edge_margin_soft = label_height_data * 2.0
+                edge_margin_soft = label_height_data * 0.5
                 if label_y - y_min < edge_margin_soft:
                     label_y = y_min + edge_margin_soft
                 elif y_max - label_y < edge_margin_soft:
