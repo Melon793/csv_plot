@@ -179,12 +179,12 @@ class PlotUIManager(BasePlotManager):
         pw.plot_item = pw.addPlot(row=1, col=0, colspan=2, viewBox=CustomViewBox())
         pw.view_box = pw.plot_item.vb
         pw.view_box.plot_widget = pw
-        pw._event_handler._connect_viewbox_signals()
+        pw._connect_viewbox_signals()
 
         pw._is_interacting = False
         pw._interaction_timer = QTimer()
         pw._interaction_timer.setSingleShot(True)
-        pw._interaction_timer.timeout.connect(pw._event_handler._end_interaction)
+        pw._interaction_timer.timeout.connect(pw._end_interaction)
         pw._is_syncing_range = False
 
         pw.view_box.setAutoVisible(x=False, y=True)
@@ -199,7 +199,7 @@ class PlotUIManager(BasePlotManager):
         pw.plot_item.getAxis("bottom").setGrid(255)
         pw.plot_item.showGrid(x=True, y=True, alpha=0.1)
 
-        pw.view_box.sigRangeChanged.connect(pw._event_handler._on_range_changed)
+        pw.view_box.sigRangeChanged.connect(pw._on_range_changed)
         pw.axis_manager.update_x_axis_label()
 
     def update_x_axis_label(self, pw: Any) -> None:
@@ -306,7 +306,7 @@ class PlotUIManager(BasePlotManager):
         pw._adaptive_throttle_enabled = True
         pw._cursor_refresh_timer = QTimer(pw)
         pw._cursor_refresh_timer.setSingleShot(True)
-        pw._cursor_refresh_timer.timeout.connect(pw._event_handler._refresh_cursor_geometry)
+        pw._cursor_refresh_timer.timeout.connect(pw._refresh_cursor_geometry)
         pw._pending_cursor_geometry_update = False
 
     # ========================================================================
