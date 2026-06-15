@@ -20,30 +20,19 @@ class CursorSyncManager(MainWindowBaseManager):
     def filter_variables(self):
         if self.mw.var_names is None:
             return
+
         name_text = self.mw.filter_input.text().lower()
         unit_text = self.mw.unit_filter_input.text().lower()
         name_keywords = name_text.split() if name_text else []
         unit_keywords = unit_text.split() if unit_text else []
 
-        filtered_names = []
-        for var in self.mw.var_names:
-            if not isinstance(var, str):
-                continue
+        # 无过滤条件：显示全部行
+        if not name_keywords and not unit_keywords:
+            self.mw.list_widget.show_all_rows()
+            return
 
-            var_lower = var.lower()
-            unit = self.mw.units.get(var, "").lower()
-
-            name_match = not name_keywords or any(
-                kw in var_lower for kw in name_keywords
-            )
-            unit_match = not unit_keywords or any(kw in unit for kw in unit_keywords)
-
-            if name_match and unit_match:
-                filtered_names.append(var)
-
-        self.mw.list_widget.populate(
-            filtered_names, self.mw.units, self.mw.data_validity
-        )
+        # 有关键词：通过隐藏行来过滤
+        self.mw.list_widget.hide_non_matching(name_keywords, unit_keywords, self.mw.units)
 
     def reset_plots_after_loading(
         self, index_xMin, index_xMax, *, reason: str | None = None
