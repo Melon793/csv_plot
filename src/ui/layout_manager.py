@@ -87,6 +87,63 @@ class LayoutManager(MainWindowBaseManager):
             if not getattr(self.mw, "_pending_splitter_adjustment", False):
                 self.mw._pending_splitter_adjustment = True
                 QTimer.singleShot(0, self._apply_fixed_splitter_width)
+        # 窗口 resize（含最大化/还原）后，显式同步所有联动 ViewBox 的 x 范围。
+        # pyqtgraph 的 setXLink 仅在源 ViewBox 的 range 发生变化时才同步，
+        # 而 resize 时源 ViewBox 的 range 可能不变（仅像素尺寸变化），
+        # 导致被联动的 ViewBox 不同步，出现 x 轴不一致的问题。
+        # 使用去抖标志避免快速连续 resize 时 timer 堆积。
+        if not getattr(self.mw, "_pending_xlink_sync", False):
+            self.mw._pending_xlink_sync = True
+            QTimer.singleShot(50, self._sync_linked_x_ranges)
+
+    def _sync_linked_x_ranges(self):
+        """显式同步所有联动 ViewBox 的 x 范围到第一个 plot"""
+        self.mw._pending_xlink_sync = False
+        if not self.mw.plot_widgets:
+            return
+        first_container = self.mw.plot_widgets[0]
+        if not first_container or not hasattr(first_container, "plot_widget"):
+            return
+        first_pw = first_container.plot_widget
+        if not hasattr(first_pw, "view_box"):
+            return
+
+        first_vb = first_pw.view_box
+        try:
+            x_range = first_vb.viewRange()[0]
+        except Exception:
+            return
+
+        xmin, xmax = x_range
+        if xmin is None or xmax is None:
+            return
+        if abs(xmin - xmax) < 1e-12:
+            return
+
+        for container in self.mw.plot_widgets[1:]:
+            if not container or not hasattr(container, "plot_widget"):
+                continue
+            pw = container.plot_widget
+            if not hasattr(pw, "view_box"):
+                continue
+            vb = pw.view_box
+            try:
+                cur_range = vb.viewRange()[0]
+                if abs(cur_range[0] - xmin) < 1e-12 and abs(cur_range[1] - xmax) < 1e-12:
+                    continue  # 已同步，跳过
+            except Exception:
+                continue
+            # 临时断开联动，设置范围后再恢复，避免触发递归信号
+            linked = vb.linkedView(0)
+            if linked is not None:
+                vb.setXLink(None)
+            # 被 setXLink 联动的 ViewBox 不应独立 auto-range
+            # （否则会在源范围变化时弹回自身数据范围，与联动语义冲突），
+            # 此处显式禁用以确保联动行为正确。
+            vb.enableAutoRange(x=False)
+            vb.setXRange(xmin, xmax, padding=0)
+            if linked is not None:
+                vb.setXLink(linked)
 
     def toggle_plot_area(self, checked):
         if checked:
