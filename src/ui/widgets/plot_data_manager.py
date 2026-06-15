@@ -135,10 +135,12 @@ class PlotDataManager:
             pw._update_cursor_after_plot(min_x, max_x)
 
             self._recalc_max_point_density()
-            if pw.plot_context is not None and hasattr(
-                pw.plot_context, "_sync_min_xrange"
-            ):
-                pw.plot_context._sync_min_xrange()
+            if not getattr(pw, "_is_updating_data", False):
+                main_window = pw.window()
+                if main_window is not None and hasattr(
+                    main_window, "_sync_min_xrange"
+                ):
+                    main_window._sync_min_xrange()
 
             return True
 
@@ -317,8 +319,17 @@ class PlotDataManager:
     def handle_single_point_limits(
         self, x_values: np.ndarray, y_values: np.ndarray
     ) -> tuple | None:
-        """处理单点或所有点x坐标相同的特殊情况"""
+        """处理单点或所有点x坐标相同的特殊情况，避免x轴范围为0
+
+        Args:
+            x_values: x坐标数组
+            y_values: y坐标数组
+
+        Returns:
+            tuple: (min_x, max_x, min_y, max_y) 或 None（正常情况不需要特殊处理）
+        """
         pw = self.pw
+
         if (
             x_values is None
             or len(x_values) == 0
@@ -327,26 +338,27 @@ class PlotDataManager:
         ):
             return None
 
-        unique_x = np.unique(x_values)
-        if len(unique_x) <= 1:
-            x_min = np.min(x_values)
-            x_max = np.max(x_values)
-            y_min = np.nanmin(y_values)
-            y_max = np.nanmax(y_values)
-
-            if y_min == y_max:
-                y_range_half = 0.5
-                y_min -= y_range_half
-                y_max += y_range_half
-
-            if x_min == x_max:
-                x_range_half = 0.5 * pw.factor if pw.factor != 0 else 0.5
-                x_min -= x_range_half
-                x_max += x_range_half
-
-            return (x_min, x_max, y_min, y_max)
-
-        return None
+        if len(x_values) == 1:
+            x = x_values[0]
+            min_x, max_x = self._get_safe_x_range(x, x)
+            if len(y_values) == 1:
+                y = y_values[0]
+                min_y = y - 0.5 if y != 0 else -0.5
+                max_y = y + 0.5 if y != 0 else 0.5
+            else:
+                min_y = np.nanmin(y_values)
+                max_y = np.nanmax(y_values)
+            return min_x, max_x, min_y, max_y
+        else:
+            unique_x = set(x_values)
+            if len(unique_x) == 1:
+                x = list(unique_x)[0]
+                min_x, max_x = self._get_safe_x_range(x, x)
+                min_y = np.nanmin(y_values)
+                max_y = np.nanmax(y_values)
+                return min_x, max_x, min_y, max_y
+            else:
+                return None
 
     def clear_value_cache(self):
         """清除值缓存"""
@@ -623,12 +635,19 @@ class PlotDataManager:
             pw.is_multi_curve_mode = False
             pw.current_color_index = 0
 
-            self._set_vline_bounds([None, None])  # [None, None] 表示无边界限制
+            self._recalc_max_point_density()
+            if not getattr(pw, "_is_updating_data", False):
+                main_window = pw.window()
+                if main_window is not None and hasattr(main_window, "_sync_min_xrange"):
+                    main_window._sync_min_xrange()
+
+            self._set_vline_bounds([None, None])
         except Exception:
             logger.debug("清理绘图数据时异常", exc_info=True)
 
     def clear_plot_item(self):
-        """清除单个plot item"""
+        """清除绘图项"""
+        self._axis_manager._reset_plot_limits()
         self._clear_plot_data()
 
     def reset_plot(self, index_xMin: float, index_xMax: float):
