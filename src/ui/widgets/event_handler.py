@@ -63,7 +63,11 @@ class EventHandler:
 
     @property
     def _is_interacting(self) -> bool:
-        """用户是否正在交互（拖拽/缩放中）"""
+        """用户是否正在交互（拖拽/缩放中）
+
+        状态所有者：widget（self.pw._is_interacting）。
+        所有 Manager 通过 self.pw 读写，不独立存储。
+        """
         return getattr(self.pw, "_is_interacting", False)
 
     @_is_interacting.setter
@@ -94,8 +98,8 @@ class EventHandler:
                 return
 
             self._queue_ui_refresh()
-        except Exception as e:
-            print(f"范围变化处理出错: {e}")
+        except Exception:
+            logger.warning("范围变化处理出错", exc_info=True)
 
     def _start_interaction(self):
         """开始交互时的优化处理
@@ -120,8 +124,8 @@ class EventHandler:
             
             # 【性能优化】交互期间禁用样式更新（已在update_plot_style中实现）
             # 这样可以避免在缩放时遍历所有曲线并更新样式
-        except Exception as e:
-            print(f"开始交互优化时出错: {e}")
+        except Exception:
+            logger.warning("开始交互优化时出错", exc_info=True)
 
     def _end_interaction(self):
         """结束交互时的处理"""
@@ -131,8 +135,8 @@ class EventHandler:
             if getattr(self.pw, '_pending_cursor_geometry_update', False):
                 self.pw._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()
-        except Exception as e:
-            print(f"结束交互出错: {e}")
+        except Exception:
+            logger.warning("结束交互出错", exc_info=True)
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新"""
