@@ -20,6 +20,7 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_Y,
     MIN_INDEX_LENGTH,
 )
+import numpy as np
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_ui_manager import PlotUIManager
@@ -380,3 +381,27 @@ class AxisManager:
             pw.vline.setBounds(bounds)
         if hasattr(pw, "vline2"):
             pw.vline2.setBounds(bounds)
+
+    def _update_x_limits_for_plot(self, x_values: np.ndarray, y_values: np.ndarray, is_mdf: bool):
+        """统一更新 X 轴 limits，合并本 plot 的可见曲线范围和全局所有可见 plot 的范围"""
+        pw = self.pw
+        x_arrays = pw._collect_visible_curve_arrays('x_data')
+        if x_arrays:
+            combined_x = np.concatenate(x_arrays)
+            data_min_x = float(np.nanmin(combined_x))
+            data_max_x = float(np.nanmax(combined_x))
+        else:
+            data_min_x = float(np.min(x_values))
+            data_max_x = float(np.max(x_values))
+
+        main_window = pw.window()
+        if main_window is not None and hasattr(main_window, 'collect_global_x_range'):
+            global_min, global_max = main_window.collect_global_x_range(curves_filter="all")
+            if global_min is not None:
+                data_min_x = min(data_min_x, global_min)
+                data_max_x = max(data_max_x, global_max)
+
+        padding_x = DEFAULT_PADDING_VAL_X
+        limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
+        limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
+        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)

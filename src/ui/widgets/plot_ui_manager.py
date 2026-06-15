@@ -31,6 +31,7 @@ import pyqtgraph as pg
 from src.core.config import (
     DEFAULT_SHOW_X_AXIS_LABEL,
     UI_DEBOUNCE_DELAY_MS,
+    XRANGE_THRESHOLD_FOR_SYMBOLS,
 )
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.widgets.base_manager import BasePlotManager
@@ -360,12 +361,61 @@ class PlotUIManager(BasePlotManager):
 
     def _run_style_refresh(self, pw: Any) -> None:
         """执行样式刷新"""
-        if getattr(pw, "_is_updating_data", False) or getattr(
-            pw, "_is_being_destroyed", False
+        if (
+            getattr(pw, "_is_updating_data", False)
+            or getattr(pw, "_is_being_destroyed", False)
         ):
             return
         if hasattr(pw, "view_box") and hasattr(pw, "plot_item"):
-            pw.update_plot_style(pw.view_box, pw.view_box.viewRange(), None)
+            self.update_plot_style(pw, pw.view_box, pw.view_box.viewRange(), None)
+
+    def _calculate_visible_points(self, pw: Any, range) -> tuple:
+        """计算当前可见范围的点数估算"""
+        x_min, x_max = range[0]
+        x_range_width = x_max - x_min
+
+        if hasattr(pw, 'factor') and pw.factor != 0:
+            index_range_width = x_range_width / abs(pw.factor)
+        else:
+            index_range_width = x_range_width
+
+        if hasattr(pw, 'is_multi_curve_mode') and pw.is_multi_curve_mode:
+            curve_count = len(pw.curves) if hasattr(pw, 'curves') and pw.curves else 0
+        else:
+            curve_count = 1 if hasattr(pw, 'curve') and pw.curve is not None else 0
+
+        curve_count = max(curve_count, 1)
+        visible_points = index_range_width * curve_count
+
+        return index_range_width, visible_points
+
+    def update_plot_style(self, pw: Any, view_box, range, rect=None):
+        """更新绘图样式 - 基于xRange宽度判断细线+symbol或粗线无symbol"""
+        try:
+            if getattr(pw, '_is_updating_data', False) or getattr(pw, '_is_being_destroyed', False):
+                return
+
+            if not hasattr(pw, 'factor') or not hasattr(pw, 'plot_item'):
+                return
+
+            is_interacting = getattr(pw, '_is_interacting', False)
+            if is_interacting:
+                return
+
+            index_range_width, visible_points = self._calculate_visible_points(pw, range)
+
+            main_window = pw.window()
+            density = getattr(main_window, '_global_max_density', 0.0) if main_window else 0.0
+            if density > 0:
+                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
+            else:
+                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS
+            show_symbols = index_range_width < effective_threshold
+
+            pw._apply_plot_style(show_symbols)
+
+        except Exception as e:
+            print(f"更新绘图样式时出错: {e}")
 
     def _run_cursor_refresh(self, pw: Any) -> None:
         """执行光标刷新"""

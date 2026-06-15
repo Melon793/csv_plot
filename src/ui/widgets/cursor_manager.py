@@ -1207,3 +1207,52 @@ class CursorManager:
         if pw != self.pw:
             return
         self.toggle_cursor(False)
+
+    def _update_vline_bounds_from_data(self):
+        """根据当前绘制的数据更新vline bounds"""
+        pw = self.pw
+        try:
+            if hasattr(pw, 'original_index_x') and pw.original_index_x is not None and len(pw.original_index_x) > 0:
+                min_index = np.min(pw.original_index_x)
+                max_index = np.max(pw.original_index_x)
+                min_x = pw.offset + pw.factor * min_index
+                max_x = pw.offset + pw.factor * max_index
+                pw._set_vline_bounds([min_x, max_x])
+                return min_x, max_x
+
+            if pw.is_multi_curve_mode and pw.curves:
+                for ci in pw.curves.values():
+                    if ci.y_data is not None:
+                        datalength = len(ci.y_data)
+                        if datalength > 0:
+                            min_x = pw.offset + pw.factor * 1
+                            max_x = pw.offset + pw.factor * datalength
+                            pw._set_vline_bounds([min_x, max_x])
+                            return min_x, max_x
+                        break
+
+            if pw.is_multi_curve_mode and pw.curves:
+                x_arrays = pw._collect_visible_curve_arrays('x_data')
+                if x_arrays:
+                    combined = np.concatenate(x_arrays)
+                    min_x, max_x = np.nanmin(combined), np.nanmax(combined)
+                    pw._set_vline_bounds([min_x, max_x])
+                    return min_x, max_x
+
+            if pw.curve is not None:
+                x_data, _ = pw.curve.getData()
+                if x_data is not None and len(x_data) > 0:
+                    min_x, max_x = np.min(x_data), np.max(x_data)
+                    pw._set_vline_bounds([min_x, max_x])
+                    return min_x, max_x
+
+            if hasattr(pw, 'xMin') and hasattr(pw, 'xMax'):
+                pw._set_vline_bounds([pw.xMin, pw.xMax])
+                return pw.xMin, pw.xMax
+            else:
+                pw._set_vline_bounds([None, None])
+                return None, None
+        except Exception as e:
+            print(f"Error updating vline bounds: {e}")
+            pw._set_vline_bounds([None, None])
+            return None, None

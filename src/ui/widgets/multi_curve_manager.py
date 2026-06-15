@@ -13,6 +13,12 @@ MultiCurveManager - 多曲线绘图管理
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
+import pyqtgraph as pg
+from PySide6.QtWidgets import QMessageBox
+from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
+from src.core.data_types import CurveInfo
+
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
 
@@ -383,12 +389,342 @@ class MultiCurveManager:
         self.toggle_curve_visibility_by_name(target_name)
 
     def _apply_plot_style(self, show_symbols: bool = False):
-        """应用绘图样式"""
+        """应用绘图样式 - 细线+symbol 或 粗线无symbol（含内存优化pen缓存）"""
         pw = self.pw
+        try:
+            if pw.curves:
+                for var_name, ci in pw.curves.items():
+                    if ci.curve is None:
+                        continue
 
-        for ci in pw.curves.values():
-            if ci.curve is not None:
+                    curve = ci.curve
+                    color = ci.color
+
+                    if show_symbols:
+                        cache_key = f'thin_{color}'
+                        if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                            pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                            curve.setPen(pen)
+                            curve._cached_pen_key = cache_key
+
+                        if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
+                            curve.setSymbol('s')
+                            curve.setSymbolSize(3)
+                            curve.setSymbolPen(color)
+                            curve.setSymbolBrush(color)
+                            curve._has_symbols = True
+                    else:
+                        cache_key = f'thick_{color}'
+                        if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                            pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                            curve.setPen(pen)
+                            curve._cached_pen_key = cache_key
+
+                        if not hasattr(curve, '_has_symbols') or curve._has_symbols:
+                            curve.setSymbol(None)
+                            curve._has_symbols = False
+            elif pw.curve:
+                current_pen = pw.curve.opts.get('pen', pg.mkPen('blue'))
+                color = current_pen.color().name() if hasattr(current_pen, 'color') else 'blue'
+
                 if show_symbols:
-                    ci.curve.setSymbol("o")
+                    cache_key = f'thin_{color}'
+                    if not hasattr(pw.curve, '_cached_pen_key') or pw.curve._cached_pen_key != cache_key:
+                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                        pw.curve.setPen(pen)
+                        pw.curve._cached_pen_key = cache_key
+
+                    if not hasattr(pw.curve, '_has_symbols') or not pw.curve._has_symbols:
+                        pw.curve.setSymbol('s')
+                        pw.curve.setSymbolSize(3)
+                        pw.curve.setSymbolPen(color)
+                        pw.curve.setSymbolBrush(color)
+                        pw.curve._has_symbols = True
                 else:
-                    ci.curve.setSymbol(None)
+                    cache_key = f'thick_{color}'
+                    if not hasattr(pw.curve, '_cached_pen_key') or pw.curve._cached_pen_key != cache_key:
+                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                        pw.curve.setPen(pen)
+                        pw.curve._cached_pen_key = cache_key
+
+                    if not hasattr(pw.curve, '_has_symbols') or pw.curve._has_symbols:
+                        pw.curve.setSymbol(None)
+                        pw.curve._has_symbols = False
+        except Exception as e:
+            print(f"应用绘图样式时出错: {e}")
+
+    def add_variables_to_plot(self, var_names: list[str]):
+        """批量添加变量到当前绘图区"""
+        names = [name.strip() for name in (var_names or []) if isinstance(name, str) and name.strip()]
+        if not names:
+            return
+
+        if len(names) > 1:
+            pw = self.pw
+            failed_vars = []
+            success_vars = []
+            variables_data = []
+
+            for var_name in names:
+                is_valid, _ = pw._validate_plot_data(var_name)
+                if not is_valid:
+                    failed_vars.append(var_name)
+                    continue
+
+                success, _, x_array, y_array, y_format = pw._prepare_plot_data(var_name)
+                if not success:
+                    failed_vars.append(var_name)
+                    continue
+
+                if (pw.is_multi_curve_mode and var_name in pw.curves) or \
+                   (not pw.is_multi_curve_mode and var_name == pw.y_name):
+                    failed_vars.append(var_name)
+                    continue
+
+                variables_data.append((var_name, x_array, y_array, y_format))
+
+            pw._batch_adding = True
+
+            if variables_data:
+                if not pw.is_multi_curve_mode and pw.curve and pw.y_name:
+                    current_color = 'blue'
+                    if hasattr(pw.curve, 'opts') and 'pen' in pw.curve.opts:
+                        current_pen = pw.curve.opts['pen']
+                        if hasattr(current_pen, 'color'):
+                            current_color = current_pen.color().name()
+
+                    x_data_val = pw.offset + pw.factor * pw.original_index_x if pw.original_index_x is not None else None
+
+                    pw.curves[pw.y_name] = CurveInfo(
+                        var_name=pw.y_name,
+                        curve=pw.curve,
+                        x_data=x_data_val,
+                        y_data=pw.original_y if pw.original_y is not None else None,
+                        color=current_color,
+                        y_format=pw.y_format,
+                        visible=True
+                    )
+                    pw.current_color_index = 1
+
+                for var_name, x_array, y_array, y_format in variables_data:
+                    x_values = pw.offset + pw.factor * x_array
+                    color = pw.curve_colors[pw.current_color_index % len(pw.curve_colors)]
+                    pw.current_color_index += 1
+
+                    pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                    curve = pw.plot_item.plot(x_values, y_array, pen=pen, name=var_name, skipFiniteCheck=True)
+
+                    pw.curves[var_name] = CurveInfo(
+                        var_name=var_name,
+                        curve=curve,
+                        x_data=x_values,
+                        y_data=y_array,
+                        color=color,
+                        y_format=y_format or '',
+                        visible=True
+                    )
+
+                    success_vars.append(var_name)
+
+                pw.is_multi_curve_mode = len(pw.curves) > 1
+
+            pw._batch_adding = False
+
+            if success_vars:
+                if pw.is_multi_curve_mode:
+                    self.update_legend()
+
+                self._update_axes_for_multi_curve(update_x_range=False)
+
+                x_arrays = pw._collect_visible_curve_arrays('x_data')
+                if x_arrays:
+                    combined = np.concatenate(x_arrays)
+                    min_x, max_x = np.nanmin(combined), np.nanmax(combined)
+                    pw._set_vline_bounds([min_x, max_x])
+                    pw._update_cursor_after_plot(min_x, max_x)
+
+                if pw.vline.isVisible():
+                    pw.update_cursor_label()
+
+                pw._recalc_max_point_density()
+                main_window = pw.window()
+                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                    main_window._sync_min_xrange()
+
+            if failed_vars:
+                QMessageBox.information(pw, "提示", f"以下变量已在绘图中:\n" + "\n".join(failed_vars))
+        else:
+            self.pw.plot_variable(names[0])
+
+    def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
+                             y_format: str = None, skip_existence_check: bool = False,
+                             show_duplicate_warning: bool = True, preferred_color: str | None = None) -> bool:
+        """添加变量到多曲线绘图"""
+        pw = self.pw
+        try:
+            if x_values is None or y_values is None:
+                success, error_msg, x_array, y_array, y_format = pw._prepare_plot_data(var_name)
+                if not success:
+                    QMessageBox.warning(pw, "错误", error_msg)
+                    return False
+                x_values = pw.offset + pw.factor * x_array
+                y_values = y_array
+
+            if not skip_existence_check:
+                if (pw.is_multi_curve_mode and var_name in pw.curves) or \
+                   (not pw.is_multi_curve_mode and var_name == pw.y_name):
+                    if show_duplicate_warning:
+                        QMessageBox.information(pw, "提示", f"变量 {var_name} 已在绘图中")
+                    return False
+
+            if pw.is_multi_curve_mode and len(pw.curves) == 0 and pw.curve and pw.y_name:
+                current_color = 'blue'
+                if hasattr(pw.curve, 'opts') and 'pen' in pw.curve.opts:
+                    current_pen = pw.curve.opts['pen']
+                    if hasattr(current_pen, 'color'):
+                        current_color = current_pen.color().name()
+
+                x_data_val_1 = pw.offset + pw.factor * pw.original_index_x if pw.original_index_x is not None else None
+
+                pw.curves[pw.y_name] = CurveInfo(
+                    var_name=pw.y_name,
+                    curve=pw.curve,
+                    x_data=x_data_val_1,
+                    y_data=pw.original_y if pw.original_y is not None else None,
+                    color=current_color,
+                    y_format=pw.y_format,
+                    visible=True
+                )
+                pw.current_color_index = 1
+
+                if var_name == pw.y_name and not skip_existence_check:
+                    if show_duplicate_warning:
+                        QMessageBox.information(pw, "提示", f"变量 {var_name} 已在绘图中")
+                    return False
+
+            if not pw.is_multi_curve_mode and pw.curve and pw.y_name:
+                if var_name == pw.y_name and not skip_existence_check:
+                    if show_duplicate_warning:
+                        QMessageBox.information(pw, "提示", f"变量 {var_name} 已在绘图中")
+                    return False
+
+                current_color = 'blue'
+                if hasattr(pw.curve, 'opts') and 'pen' in pw.curve.opts:
+                    current_pen = pw.curve.opts['pen']
+                    if hasattr(current_pen, 'color'):
+                        current_color = current_pen.color().name()
+
+                x_data_val_2 = pw.offset + pw.factor * pw.original_index_x if pw.original_index_x is not None else x_values
+
+                pw.curves[pw.y_name] = CurveInfo(
+                    var_name=pw.y_name,
+                    curve=pw.curve,
+                    x_data=x_data_val_2,
+                    y_data=pw.original_y if pw.original_y is not None else y_values,
+                    color=current_color,
+                    y_format=pw.y_format,
+                    visible=True
+                )
+                pw.current_color_index = 1
+
+            default_color = pw.curve_colors[pw.current_color_index % len(pw.curve_colors)]
+            pw.current_color_index += 1
+            color = preferred_color or default_color
+
+            pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            curve = pw.plot_item.plot(
+                x_values, y_values,
+                pen=pen,
+                name=var_name,
+                skipFiniteCheck=True
+            )
+
+            pw.curves[var_name] = CurveInfo(
+                var_name=var_name,
+                curve=curve,
+                x_data=x_values,
+                y_data=y_values,
+                color=color,
+                y_format=y_format or '',
+                visible=True
+            )
+
+            self.update_multi_curve_mode()
+
+            if len(pw.curves) == 1 and not pw.y_name:
+                single_name = next(iter(pw.curves.keys()))
+                single_ci = pw.curves[single_name]
+                pw.y_name = single_name
+                pw.y_format = single_ci.y_format or ''
+
+            batch_adding = getattr(pw, '_batch_adding', False)
+            if not batch_adding:
+                main_window = pw.window()
+                is_mdf = (
+                    main_window is not None
+                    and hasattr(main_window, 'loader')
+                    and main_window.loader is not None
+                    and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
+                )
+
+                y_arrays = pw._collect_visible_curve_arrays('y_data')
+                if y_arrays:
+                    combined_y = np.concatenate(y_arrays)
+                    if combined_y.size:
+                        all_data_min_y = np.nanmin(combined_y)
+                        all_data_max_y = np.nanmax(combined_y)
+                        pw._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
+
+                special_limits = pw.handle_single_point_limits(x_values, y_values)
+                if special_limits:
+                    min_x, max_x, min_y, max_y = special_limits
+                    has_other_curves = len(pw.curves) > 1
+
+                    if not has_other_curves:
+                        pw._set_safe_y_range(min_y, max_y, set_limits=False)
+                    else:
+                        current_y_range = pw.view_box.viewRange()[1]
+                        current_min_y, current_max_y = current_y_range
+                        final_min_y = min(current_min_y, min_y)
+                        final_max_y = max(current_max_y, max_y)
+                        pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                else:
+                    current_x_range = pw.view_box.viewRange()[0]
+                    x_min, x_max = current_x_range
+
+                    new_min_y, new_max_y = pw._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
+                    has_other_curves = len(pw.curves) > 1
+
+                    if not has_other_curves:
+                        pw._set_safe_y_range(new_min_y, new_max_y, set_limits=False)
+                    else:
+                        current_y_range = pw.view_box.viewRange()[1]
+                        current_min_y, current_max_y = current_y_range
+                        final_min_y = min(current_min_y, new_min_y)
+                        final_max_y = max(current_max_y, new_max_y)
+                        pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+
+            x_arrays = pw._collect_visible_curve_arrays('x_data')
+            if x_arrays:
+                combined_x = np.concatenate(x_arrays)
+                min_x, max_x = np.nanmin(combined_x), np.nanmax(combined_x)
+            else:
+                min_x, max_x = np.min(x_values), np.max(x_values)
+            pw._set_vline_bounds([min_x, max_x])
+
+            pw._update_cursor_after_plot(min_x, max_x)
+
+            if pw.vline.isVisible():
+                pw.update_cursor_label()
+
+            if not batch_adding:
+                pw._recalc_max_point_density()
+                main_window = pw.window()
+                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
+                    main_window._sync_min_xrange()
+
+            return True
+
+        except Exception as e:
+            QMessageBox.critical(pw, "绘图错误", f"添加变量时发生错误: {str(e)}")
+            return False
