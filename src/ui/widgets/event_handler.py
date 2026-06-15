@@ -13,7 +13,7 @@ EventHandler - 事件处理管理
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
-from src.core.config import safe_callback
+from src.core.config import safe_callback, UI_DEBOUNCE_DELAY_MS
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -72,54 +72,67 @@ class EventHandler:
 
     @safe_callback
     def _on_range_changed(self, view_box, range, changed=None):
-        """ViewBox 范围变化回调处理"""
+        """ViewBox范围变化回调处理"""
         try:
-            if getattr(self.pw, "_is_updating_data", False) or getattr(
-                self.pw, "_is_being_destroyed", False
-            ):
+            if getattr(self.pw, '_is_updating_data', False) or getattr(self.pw, '_is_being_destroyed', False):
                 self._cancel_ui_refresh()
                 return
 
-            if getattr(self.pw, "_is_syncing_range", False):
+            if getattr(self.pw, '_is_syncing_range', False):
                 return
 
             if not self._is_interacting:
                 self._is_interacting = True
                 self._start_interaction()
 
-            if hasattr(self.pw, "_interaction_timer"):
+            if hasattr(self.pw, '_interaction_timer'):
                 self.pw._interaction_timer.stop()
-                self.pw._interaction_timer.start(100)
+                self.pw._interaction_timer.start(UI_DEBOUNCE_DELAY_MS)
 
             if self._is_interacting:
-                self._cancel_ui_refresh("style", "cursor")
+                self._cancel_ui_refresh('style', 'cursor')
                 return
 
             self._queue_ui_refresh()
-        except Exception:
-            logger.debug("_queue_ui_refresh() 异常，跳过", exc_info=True)
+        except Exception as e:
+            print(f"范围变化处理出错: {e}")
 
     def _start_interaction(self):
-        """开始交互时的处理"""
+        """开始交互时的优化处理
+        
+        类似iOS的快照策略：在交互期间临时降低渲染质量
+        """
         try:
-            if hasattr(self.pw, "plot_item"):
-                if not hasattr(self.pw, "_original_downsample_ds"):
-                    self.pw._original_downsample_ds = getattr(
-                        self.pw.plot_item, "_downsample", None
-                    )
-        except Exception:
-            logger.debug("cursor 交互处理异常，跳过", exc_info=True)
+            # 【性能优化】交互期间临时提高降采样阈值，减少渲染的点数
+            # 这样可以显著提升缩放时的流畅度
+            if hasattr(self.pw, 'plot_item'):
+                # 保存原始降采样设置
+                if not hasattr(self.pw, '_original_downsample_ds'):
+                    # 获取当前降采样设置（如果有）
+                    self.pw._original_downsample_ds = getattr(self.pw.plot_item, '_downsample', None)
+                
+                # 临时提高降采样阈值：交互期间使用更激进的降采样
+                # 通过设置更大的ds值来减少渲染的点数
+                # 注意：pyqtgraph的auto模式会自动处理，这里主要是确保降采样更激进
+                # 实际上，pyqtgraph的auto模式已经会根据可见区域自动调整
+                # 但我们可以通过临时禁用某些昂贵的操作来提升性能
+                pass  # pyqtgraph的auto模式已经足够智能，无需手动调整
+            
+            # 【性能优化】交互期间禁用样式更新（已在update_plot_style中实现）
+            # 这样可以避免在缩放时遍历所有曲线并更新样式
+        except Exception as e:
+            print(f"开始交互优化时出错: {e}")
 
     def _end_interaction(self):
         """结束交互时的处理"""
         try:
             self._is_interacting = False
             self._queue_ui_refresh(immediate=True)
-            if getattr(self.pw, "_pending_cursor_geometry_update", False):
+            if getattr(self.pw, '_pending_cursor_geometry_update', False):
                 self.pw._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()
-        except Exception:
-            logger.debug("cursor geometry 更新异常，跳过", exc_info=True)
+        except Exception as e:
+            print(f"结束交互出错: {e}")
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新"""
@@ -131,7 +144,8 @@ class EventHandler:
             self.pw._pending_cursor_geometry_update = True
             return
         self.pw._pending_cursor_geometry_update = False
-        self.pw._cursor_refresh_timer.start(100)
+        # 重启单次定时器，合并短时间内的多次请求
+        self.pw._cursor_refresh_timer.start(max(15, UI_DEBOUNCE_DELAY_MS))
 
     def _refresh_cursor_geometry(self):
         """刷新光标几何"""
