@@ -790,6 +790,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 DataTableDialog._instance.set_skip_close_confirmation(True)
                 DataTableDialog._instance.close()
 
-        self.mw.filter_variables()
+        if self.mw.filter_input.text() or self.mw.unit_filter_input.text():
+            self.mw._do_filter_variables()
         if self.mw.mark_region_btn.isChecked():
             self.mw.request_mark_stats_refresh(immediate=True)

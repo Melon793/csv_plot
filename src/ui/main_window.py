@@ -158,6 +158,10 @@ class MainWindow(QMainWindow):
         self._crosshair_update_timer.setSingleShot(True)
         self._crosshair_update_timer.timeout.connect(self._flush_crosshair_updates)
 
+        self._filter_debounce_timer = QTimer(self)
+        self._filter_debounce_timer.setSingleShot(True)
+        self._filter_debounce_timer.timeout.connect(self._do_filter_variables)
+
         self.data_table_geometry = None
         self.mark_stats_geometry = None
         self.time_correction_geometry = None
@@ -717,6 +721,11 @@ class MainWindow(QMainWindow):
         self.file_loader_manager._apply_loader()
 
     def filter_variables(self):
+        """防抖过滤：用户停止输入 180ms 后才真正执行"""
+        self._filter_debounce_timer.stop()
+        self._filter_debounce_timer.start(180)
+
+    def _do_filter_variables(self):
         self.cursor_sync_manager.filter_variables()
 
     def toggle_mark_region(self, checked):
