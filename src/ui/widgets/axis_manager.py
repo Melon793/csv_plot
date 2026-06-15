@@ -30,8 +30,6 @@ class AxisManager:
     """负责坐标轴范围、边界、标签管理"""
 
     def __init__(self, plot_ui_manager: PlotUIManager):
-        import numpy as np
-        globals()['np'] = np
         if plot_ui_manager is None:
             raise ValueError("AxisManager requires a valid PlotUIManager instance")
         self._ui_manager = plot_ui_manager

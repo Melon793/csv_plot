@@ -116,25 +116,25 @@ class PlotDataManager:
             special_limits = self.handle_single_point_limits(x_values, pw.original_y)
             if special_limits:
                 min_x, max_x, min_y, max_y = special_limits
-                self._set_safe_y_range(min_y, max_y)
+                self._axis_manager._set_safe_y_range(min_y, max_y)
             else:
                 data_min_y = np.nanmin(pw.original_y)
                 data_max_y = np.nanmax(pw.original_y)
-                self._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
+                self._axis_manager._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
 
                 current_x_range = pw.view_box.viewRange()[0]
                 x_min, x_max = current_x_range
                 min_y, max_y = self._get_y_range_in_x_window(
                     x_values, pw.original_y, x_min, x_max
                 )
-                self._set_safe_y_range(min_y, max_y, set_limits=False)
+                self._axis_manager._set_safe_y_range(min_y, max_y, set_limits=False)
 
             min_x, max_x = np.min(x_values), np.max(x_values)
-            self._set_vline_bounds([min_x, max_x])
+            self._axis_manager._set_vline_bounds([min_x, max_x])
             pw.plot_item.update()
             pw._update_cursor_after_plot(min_x, max_x)
 
-            self._recalc_max_point_density()
+            self._axis_manager._recalc_max_point_density()
             if not getattr(pw, "_is_updating_data", False):
                 main_window = pw.window()
                 if main_window is not None and hasattr(
@@ -340,7 +340,7 @@ class PlotDataManager:
 
         if len(x_values) == 1:
             x = x_values[0]
-            min_x, max_x = self._get_safe_x_range(x, x)
+            min_x, max_x = self._axis_manager._get_safe_x_range(x, x)
             if len(y_values) == 1:
                 y = y_values[0]
                 min_y = y - 0.5 if y != 0 else -0.5
@@ -353,7 +353,7 @@ class PlotDataManager:
             unique_x = set(x_values)
             if len(unique_x) == 1:
                 x = list(unique_x)[0]
-                min_x, max_x = self._get_safe_x_range(x, x)
+                min_x, max_x = self._axis_manager._get_safe_x_range(x, x)
                 min_y = np.nanmin(y_values)
                 max_y = np.nanmax(y_values)
                 return min_x, max_x, min_y, max_y
@@ -537,7 +537,7 @@ class PlotDataManager:
                 data_max_x = pw.offset + pw.factor * index_max
             limits_xMin = data_min_x - padding_xVal * (data_max_x - data_min_x)
             limits_xMax = data_max_x + padding_xVal * (data_max_x - data_min_x)
-            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             self._update_vline_bounds_from_data()
             if (
                 pw.mark_region is not None
@@ -635,13 +635,13 @@ class PlotDataManager:
             pw.is_multi_curve_mode = False
             pw.current_color_index = 0
 
-            self._recalc_max_point_density()
+            self._axis_manager._recalc_max_point_density()
             if not getattr(pw, "_is_updating_data", False):
                 main_window = pw.window()
                 if main_window is not None and hasattr(main_window, "_sync_min_xrange"):
                     main_window._sync_min_xrange()
 
-            self._set_vline_bounds([None, None])
+            self._axis_manager._set_vline_bounds([None, None])
         except Exception:
             logger.debug("清理绘图数据时异常", exc_info=True)
 
@@ -661,16 +661,16 @@ class PlotDataManager:
         xMax = pw.offset + pw.factor * index_xMax
 
         if not (np.isnan(xMax) or np.isinf(xMax)):
-            xMin, xMax = self._get_safe_x_range(xMin, xMax)
+            xMin, xMax = self._axis_manager._get_safe_x_range(xMin, xMax)
 
             pw.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
             padding_xVal = DEFAULT_PADDING_VAL_X
             limits_xMin = xMin - padding_xVal * (xMax - xMin)
             limits_xMax = xMax + padding_xVal * (xMax - xMin)
-            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
         pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
-        self._set_vline_bounds([None, None])
+        self._axis_manager._set_vline_bounds([None, None])
 
         pw.xMin = xMin
         pw.xMax = xMax
@@ -686,28 +686,6 @@ class PlotDataManager:
         pw.original_index_x = None
         pw.original_y = None
 
-    def _recalc_max_point_density(self):
-        """重新计算最大点密度"""
-        self._axis_manager._recalc_max_point_density()
-
-    def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
-        """获取安全的X轴范围"""
-        return self._axis_manager._get_safe_x_range(min_x, max_x)
-
-    def _set_safe_y_range(self, min_y: float, max_y: float, set_limits: bool = True):
-        """设置安全的Y轴范围"""
-        self._axis_manager._set_safe_y_range(min_y, max_y, set_limits)
-
-    def _set_x_limits_with_min_range(
-        self, limits_xMin: float | None, limits_xMax: float | None
-    ):
-        """设置X轴限制"""
-        self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-
-    def _set_vline_bounds(self, bounds: list):
-        """设置光标线边界"""
-        self._axis_manager._set_vline_bounds(bounds)
-
     def _update_vline_bounds_from_data(self):
         """从数据更新光标线边界"""
         pw = self.pw
@@ -718,11 +696,11 @@ class PlotDataManager:
                 if ci.x_data is not None:
                     all_x.extend(ci.x_data)
             if all_x:
-                self._set_vline_bounds([min(all_x), max(all_x)])
+                self._axis_manager._set_vline_bounds([min(all_x), max(all_x)])
                 updated = True
         elif pw.original_index_x is not None:
             x_values = pw.offset + pw.factor * pw.original_index_x
-            self._set_vline_bounds([np.min(x_values), np.max(x_values)])
+            self._axis_manager._set_vline_bounds([np.min(x_values), np.max(x_values)])
             updated = True
         if not updated:
-            self._set_vline_bounds([None, None])
+            self._axis_manager._set_vline_bounds([None, None])

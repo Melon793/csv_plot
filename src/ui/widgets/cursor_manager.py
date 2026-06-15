@@ -42,7 +42,11 @@ class CursorManager:
 
     @property
     def _is_interacting(self) -> bool:
-        """用户是否正在交互（拖拽/缩放中）"""
+        """用户是否正在交互（拖拽/缩放中）
+
+        状态所有者：widget（self.pw._is_interacting）。
+        所有 Manager 通过 self.pw 读写，不独立存储。
+        """
         return getattr(self.pw, "_is_interacting", False)
 
     @_is_interacting.setter
@@ -1074,47 +1078,6 @@ class CursorManager:
             pw._set_vline_bounds([None, None])
             pw.toggle_cursor(False)
 
-    def _start_interaction(self):
-        """[DEPRECATED] 开始交互 — 已由 EventHandler 接管"""
-        try:
-            if not hasattr(self.pw, "_is_interacting"):
-                self.pw._is_interacting = False
-            if not self.pw._is_interacting:
-                self.pw._is_interacting = True
-            if not hasattr(self.pw, "_cursor_refresh_timer"):
-                return
-            if self.pw._cursor_refresh_timer.isActive():
-                self.pw._cursor_refresh_timer.stop()
-        except Exception:
-            pass
-
-    def _end_interaction(self):
-        """[DEPRECATED] 结束交互 — 已由 EventHandler 接管"""
-        try:
-            if hasattr(self.pw, "_is_interacting"):
-                self.pw._is_interacting = False
-            if hasattr(self.pw, "_cursor_refresh_timer"):
-                self.pw._cursor_refresh_timer.start(50)
-        except Exception:
-            pass
-
-    def _schedule_cursor_geometry_update(self):
-        """[DEPRECATED] 调度光标几何更新 — 已由 EventHandler 接管"""
-        if not hasattr(self.pw, "vline") or not self.pw.vline.isVisible():
-            return
-        if getattr(self.pw, "_cursor_refresh_timer", None) is None:
-            return
-        if not self.pw._cursor_refresh_timer.isActive():
-            self.pw._cursor_refresh_timer.start(50)
-
-    def _refresh_cursor_geometry(self):
-        """[DEPRECATED] 刷新光标几何 — 已由 EventHandler 接管"""
-        if not hasattr(self.pw, "vline") or not self.pw.vline.isVisible():
-            return
-        if self._is_interacting:
-            return
-        self.update_cursor_label()
-
     def on_vline_position_changed(self, line_obj=None):
         """vline 位置变化时更新光标状态"""
         if self._is_cursor_update_locked():
@@ -1187,26 +1150,6 @@ class CursorManager:
                 self._show_x_position_only()
             else:
                 self.update_cursor_label()
-
-    def _on_vb_set_cursor_mode(self, mode: str, pw, ctx_x: float):
-        """[DEPRECATED] ViewBox 信号：设置光标模式 — 已由 EventHandler 接管"""
-        if pw != self.pw:
-            return
-        if self.pw.plot_context:
-            self.pw.plot_context.cursor_mode = mode
-        self.apply_cursor_mode(mode)
-
-    def _on_vb_show_cursor(self, pw):
-        """[DEPRECATED] ViewBox 信号：显示光标 — 已由 EventHandler 接管"""
-        if pw != self.pw:
-            return
-        self.toggle_cursor(True)
-
-    def _on_vb_hide_cursor(self, pw):
-        """[DEPRECATED] ViewBox 信号：隐藏光标 — 已由 EventHandler 接管"""
-        if pw != self.pw:
-            return
-        self.toggle_cursor(False)
 
     def _update_vline_bounds_from_data(self):
         """根据当前绘制的数据更新vline bounds"""
