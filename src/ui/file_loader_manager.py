@@ -135,6 +135,11 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw._is_loading_new_data = True
         self.mw._data_version += 1
 
+        # 使之前的任何待定 safety timer 失效，防止跨 reload 污染锁状态
+        self._safety_unlock_version = -1
+
+        logger.info("[cursor-crash-fix] begin_data_reload version=%s", self.mw._data_version)
+
         if hasattr(self.mw, "_crosshair_update_timer"):
             self.mw._crosshair_update_timer.stop()
         self.mw._pending_crosshair_x = None
@@ -154,7 +159,9 @@ class FileLoaderManager(MainWindowBaseManager):
             if not widget:
                 continue
             widget._is_updating_data = True
-            widget._cached_data_version = self.mw._data_version
+            widget._cached_data_version = 0  # 设为0跳过版本比对，由 _is_updating_data 和 _is_loading_new_data 提供锁定
+            # 暂停视图更新，防止 scene 中间状态触发 paint event 导致 SIGSEGV
+            widget.setUpdatesEnabled(False)
             if hasattr(widget, "_cancel_ui_refresh"):
                 widget._cancel_ui_refresh()
             if hasattr(widget, "_cursor_refresh_timer"):
@@ -166,37 +173,42 @@ class FileLoaderManager(MainWindowBaseManager):
         if not self.mw._is_loading_new_data:
             return
 
-        for container in getattr(self.mw, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if not widget:
-                continue
-            widget._is_updating_data = False
+        # 不在此时清除任何锁（_is_updating_data / _is_loading_new_data）
+        # 所有锁的清除统一延迟到 _restore_cursor_state_after_reload() 中执行，
+        # 避免 cursor 恢复之前出现无保护时间窗口导致 SIGSEGV
 
-        self.mw._is_loading_new_data = False
+        # 安全性兜底：如果 _restore_cursor_state_after_reload 因极端情况未执行，
+        # 3 秒后强制解锁。使用版本号防止跨 reload 污染。
+        self._safety_unlock_version = self.mw._data_version
+        QTimer.singleShot(3000, self._safety_force_unlock)
 
-        # 修复1：延迟到下一事件循环恢复 cursor 状态，确保 scene 已稳定
         QTimer.singleShot(0, self._restore_cursor_state_after_reload)
 
     def _restore_cursor_state_after_reload(self):
         """延迟恢复 cursor 状态（在 UI 稳定后调用）"""
-        if self.mw._is_loading_new_data:
-            return
         if getattr(self.mw, "_is_being_destroyed", False):
+            self._force_unlock_all()
             return
 
         saved_cursor_mode = getattr(self.mw, "_saved_cursor_mode", None)
         saved_pinned_x_values = getattr(self.mw, "_saved_pinned_x_values", [])
 
-        if not saved_cursor_mode or saved_cursor_mode == "1 free cursor" or not saved_pinned_x_values:
-            # 防抖：阻止 reload 过渡期内的中间 cursor label 更新，只在 _post_reload_ui_refresh 中渲染一次
-            for container in getattr(self.mw, "plot_widgets", []):
-                widget = getattr(container, "plot_widget", None)
-                if widget and hasattr(widget, "_last_cursor_update_time"):
-                    widget._last_cursor_update_time = time.time()
-            QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
-            return
+        is_free_cursor = (
+            not saved_cursor_mode
+            or saved_cursor_mode == "1 free cursor"
+            or not saved_pinned_x_values
+        )
 
         try:
+            if is_free_cursor:
+                # 防抖：阻止 reload 过渡期内的中间 cursor label 更新，
+                # 只在 _post_reload_ui_refresh 中渲染一次
+                for container in getattr(self.mw, "plot_widgets", []):
+                    widget = getattr(container, "plot_widget", None)
+                    if widget and hasattr(widget, "_last_cursor_update_time"):
+                        widget._last_cursor_update_time = time.time()
+                return
+
             self.mw.cursor_mode = saved_cursor_mode
             self.mw.pinned_x_values = list(saved_pinned_x_values)
 
@@ -254,7 +266,43 @@ class FileLoaderManager(MainWindowBaseManager):
         except Exception:
             logger.debug("恢复 pin 状态失败", exc_info=True)
         finally:
+            # 无论成功、失败还是 free cursor 模式，统一清除所有锁并更新版本号
+            self.mw._is_loading_new_data = False
+            self._safety_unlock_version = -1  # 正常路径清除，safety timer 将自动跳过
+            logger.info("[cursor-crash-fix] restore_cursor done, clearing all locks version=%s",
+                        self.mw._data_version)
+            for container in getattr(self.mw, "plot_widgets", []):
+                widget = getattr(container, "plot_widget", None)
+                if widget:
+                    widget._is_updating_data = False
+                    widget._cached_data_version = self.mw._data_version
+                    # 恢复视图更新
+                    widget.setUpdatesEnabled(True)
             QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
+
+    def _safety_force_unlock(self):
+        """版本感知的安全解锁：仅当版本匹配时才执行解锁，防止跨 reload 污染"""
+        current_version = getattr(self.mw, "_data_version", 0)
+        safety_version = getattr(self, "_safety_unlock_version", -1)
+        if safety_version != current_version:
+            logger.info("[cursor-crash-fix] safety_force_unlock SKIPPED: "
+                        "safety_version=%s != current_version=%s (newer reload started)",
+                        safety_version, current_version)
+            return
+        self._force_unlock_all()
+
+    def _force_unlock_all(self):
+        """紧急解锁：确保所有退出路径都不会留下死锁"""
+        self.mw._is_loading_new_data = False
+        self._safety_unlock_version = -1
+        logger.warning("[cursor-crash-fix] force_unlock_all: 强制清除了所有锁 version=%s",
+                       self.mw._data_version)
+        for container in getattr(self.mw, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if widget:
+                widget._is_updating_data = False
+                widget._cached_data_version = self.mw._data_version
+                widget.setUpdatesEnabled(True)
 
     def _post_reload_ui_refresh(self):
         if self.mw._is_loading_new_data:
