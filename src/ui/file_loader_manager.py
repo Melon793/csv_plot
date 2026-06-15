@@ -10,6 +10,7 @@
 from __future__ import annotations
 import os
 import sys
+import time
 
 from PySide6.QtCore import Qt, QStandardPaths, QTimer
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
@@ -187,6 +188,11 @@ class FileLoaderManager(MainWindowBaseManager):
         saved_pinned_x_values = getattr(self.mw, "_saved_pinned_x_values", [])
 
         if not saved_cursor_mode or saved_cursor_mode == "1 free cursor" or not saved_pinned_x_values:
+            # 防抖：阻止 reload 过渡期内的中间 cursor label 更新，只在 _post_reload_ui_refresh 中渲染一次
+            for container in getattr(self.mw, "plot_widgets", []):
+                widget = getattr(container, "plot_widget", None)
+                if widget and hasattr(widget, "_last_cursor_update_time"):
+                    widget._last_cursor_update_time = time.time()
             QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
             return
 
@@ -240,14 +246,11 @@ class FileLoaderManager(MainWindowBaseManager):
                 if hasattr(widget.view_box, "is_cursor_pinned"):
                     widget.view_box.is_cursor_pinned = True
 
+                # 防抖：设置 throttle 时间戳，阻止 reload 过渡期内的中间 cursor label 更新。
+                # pin 状态已恢复、vline 可见性已设置，label 渲染留给 _post_reload_ui_refresh 统一处理。
                 if hasattr(widget, "_last_cursor_update_time"):
-                    widget._last_cursor_update_time = 0
+                    widget._last_cursor_update_time = time.time()
 
-            for widget in widgets_list:
-                try:
-                    widget.update_cursor_label()
-                except (RuntimeError, AttributeError):
-                    pass
         except Exception:
             logger.debug("恢复 pin 状态失败", exc_info=True)
         finally:
@@ -260,6 +263,9 @@ class FileLoaderManager(MainWindowBaseManager):
             widget = getattr(container, "plot_widget", None)
             if widget and hasattr(widget, "_queue_ui_refresh"):
                 if not getattr(widget, '_is_updating_data', False):
+                    # 清除 throttle，确保本次 final render 不被防抖逻辑阻塞
+                    if hasattr(widget, "_last_cursor_update_time"):
+                        widget._last_cursor_update_time = 0
                     widget._queue_ui_refresh(immediate=True)
 
     def load_csv_file(self, file_path: str):
