@@ -1,6 +1,6 @@
 # 重构计划：激活 Manager 层，消除 plot\_widget.py 重复代码
 
-> **版本**: v8.0 (2026-06-15)
+> **版本**: v10.0 (2026-06-15)
 > **v1.0**: 初始计划
 > **v2.0**: 新增代码审查报告（第六节），修正委托目标错误，补充遗漏方法清单
 > **v3.0**: 第一阶段（AxisManager）完成，新增执行记录（第七节）
@@ -10,6 +10,8 @@
 > **v7.0**: v6.0 代码审查 + `_on_legend_clicked` fallback 修复，commit `de108c4`
 > **v7.1**: Step 7 (MarkRegionManager) 完成，commit `efb16fa`
 > **v8.0**: Steps 1-3 (EventHandler + PlotUIManager + 初始化管线) 完成，commit `876f1cc` → **全部 7/7 Manager 已激活**
+> **v9.0**: import 清理 + 初始化修复 + 6 个重逻辑方法委托，commit `a478070`
+> **v10.0**: on_vline_position_changed + 格式化助手 → CursorManager，commit `a010f96`
 
 ---
 
@@ -17,12 +19,13 @@
 
 重构已完成！全部 7 个 Manager 已激活。
 
-`DraggableGraphicsLayoutWidget` (plot\_widget.py) 从原始 ~4100+ 行减少到当前 1538 行。
+`DraggableGraphicsLayoutWidget` (plot\_widget.py) 从原始 ~4100+ 行减少到当前 **886 行**（-78%）。
 
 * 所有 7 个 Manager 均已通过 `_init_manager_chain()` 创建
 * `_init_manager_chain()` 已在 `__init__` 中的 `setup_ui()` 之前调用
-* UI 初始化信号（sigRangeChanged、timer）通过 EventHandler 路由
-* 所有 Manager 方法通过 widget 委托层调用
+* UI 初始化信号（sigRangeChanged、timer）通过 widget 方法路由 → EventHandler
+* ~105 个 widget 方法变为对 Manager 的单行委托调用
+* 重逻辑方法（add_variable_to_plot, update_plot_style, etc.）已全部迁移到对应 Manager
 
 ***
 
@@ -903,20 +906,20 @@ logger.info("[CursorManager] toggle_cursor: show=%s, mode=%s, pinned_x_values=%s
 
 | Manager | 状态 |
 |---|---|
-| AxisManager | ✅ 已激活 (v3.0) |
-| CursorManager | ✅ 已激活 (v4.0) |
+| AxisManager | ✅ 已激活 (v3.0, 新增 `_update_x_limits_for_plot`) |
+| CursorManager | ✅ 已激活 (v4.0, 新增 `_update_vline_bounds_from_data`, `on_vline_position_changed`, `sInt_to_fmtStr`, `dateInt_to_fmtStr`, `_significant_decimal_format_str`) |
 | PlotDataManager | ✅ 已激活 (v6.0) |
-| MultiCurveManager | ✅ 已激活 (v6.0) |
+| MultiCurveManager | ✅ 已激活 (v6.0, 新增 `add_variable_to_plot`, `add_variables_to_plot`, 完整 `_apply_plot_style`) |
 | MarkRegionManager | ✅ 已激活 (v7.1) |
 | EventHandler | ✅ 已激活 (v8.0) |
-| PlotUIManager | ✅ 已激活 (v8.0) |
+| PlotUIManager | ✅ 已激活 (v8.0, 新增 `update_plot_style`, `_calculate_visible_points`) |
 
 **全部 7/7 Manager 已激活！**
 
 ### 下一步
 
-- 用户功能测试验证
-- 清理 plot_widget.py 中不再需要的 import
+- 继续委托更多重逻辑方法到 Manager
+- 清理可进一步优化的 widget 层代码
 
 ## 第十节：v7.0 代码审查与修复记录
 
@@ -1114,4 +1117,121 @@ v6.0 实现缺少此 fallback，导致边缘点击无响应。v7.0 已修复。
 | Steps 1-3 (Event + UI + Init) | v8.0 | EventHandler + PlotUIManager | 27 | 1538 |
 
 **总委托: ~95 个方法到 7 个 Manager，widget 从 ~4100+ → 1538 行**
+
+## 第十三节：v8.1 初始化修复与 Import 清理
+
+**执行日期**: 2026-06-15
+
+### commits
+- `7eebb90`: PlotUIManager 信号连接改用 widget 级方法（避免 `_event_handler` 初始化时序问题）
+- `ac817db`: `resizeEvent` / `_schedule_cursor_geometry_update` 加 `hasattr` 守卫（`super().__init__` 触发 resizeEvent 时序问题）
+
+### 修复的 Bug
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| `'DraggableGraphicsLayoutWidget' object has no attribute '_event_handler'` | `super().__init__()` → `resizeEvent` → `_schedule_cursor_geometry_update()` → `self._event_handler` 在 `_init_manager_chain()` 之前访问 | 加 `hasattr(self, '_event_handler')` 守卫 |
+| `pw.axis_manager.update_x_axis_label()` 找不到属性 | widget 只有 `_axis_manager`（私有），无 `axis_manager`（公开） | 改为 `self.update_x_axis_label(pw)` (PlotUIManager 自有方法) |
+
+### Import 清理
+
+移除 30+ 个跟随方法移出后不再使用的 import：
+
+| 类别 | 移除项 |
+|------|--------|
+| `src.core.config` | `DEFAULT_PADDING_VAL_Y`, `MIN_INDEX_LENGTH`, `PLOT_COL_MAX_DEFAULT`, `PLOT_COL_CURRENT_DEFAULT`, `_evaluate_float32_safety`, `RATIO_RESET_PLOTS` |
+| `src.core.data_types` | `MarkStatEntry` |
+| src 模块 | `UnifiedUpdateScheduler`, `DropOverlay`, `MyTableWidget`, `LogManager`, `LogWindow`, `CustomViewBox` |
+| 标准库 | `weakref`, `subprocess`, `Path`, `Lock` |
+| QtCore | `QMargins`, `QPointF` |
+| QtGui | `QFontMetrics`, `QPen`, `QColor`, `QIcon`, `QFont`, `QAction` |
+| QtWidgets | `QMainWindow`, `QWidget`, `QVBoxLayout`, `QHBoxLayout`, `QGridLayout`, `QPushButton`, `QToolButton`, `QLabel`, `QLineEdit`, `QSizePolicy`, `QGraphicsLinearLayout`, `QGraphicsProxyWidget`, `QGraphicsWidget`, `QRubberBand`, `QSplitter`, `QMenu` |
+| 变量 | `_widget_logger` |
+
+**plot_widget.py: 1541 → 1528 行** (-13)
+
+## 第十四节：v9.0 执行记录（6 个重逻辑方法委托）
+
+**执行日期**: 2026-06-15
+**Commit**: `a478070`
+
+### 委托方法清单
+
+| widget 方法 | → Manager | 行数变化 |
+|---|---|---|
+| `_update_x_limits_for_plot` | **AxisManager** | 22 行 → 1 行委托 |
+| `add_variable_to_plot` | **MultiCurveManager** | 251 行 → 5 行委托 |
+| `add_variables_to_plot` | **MultiCurveManager** | 104 行 → 2 行委托 |
+| `_update_vline_bounds_from_data` | **CursorManager** | 60 行 → 2 行委托 |
+| `_apply_plot_style` (完整版) | **MultiCurveManager** | 78 行 → 2 行委托 |
+| `update_plot_style` + `_calculate_visible_points` | **PlotUIManager** | 114 行 → 4 行委托 |
+
+### 关键变更
+
+| Manager | 新增方法 | 新增行数 |
+|---------|---------|---------|
+| AxisManager | `_update_x_limits_for_plot` (新增) + `import numpy` | +25 |
+| MultiCurveManager | `add_variables_to_plot` + `add_variable_to_plot` + 完整版 `_apply_plot_style` | +336 |
+| CursorManager | `_update_vline_bounds_from_data` (新增) | +49 |
+| PlotUIManager | `update_plot_style` + `_calculate_visible_points` (新增) | +50 |
+| plot_widget.py | 委托层简化为单行调用 | -557 |
+
+### 文件规模
+
+| 文件 | 行数 |
+|------|------|
+| **plot_widget.py** | **971** |
+| multi_curve_manager.py | 730 |
+| cursor_manager.py | 1258 |
+| axis_manager.py | 407 |
+| plot_ui_manager.py | 434 |
+| plot_data_manager.py | 728 |
+| event_handler.py | 261 |
+| mark_region_manager.py | 226 |
+| **合计** | **5015** |
+
+### 重构总量汇总（最终）
+
+| 阶段 | 版本 | 变更 | widget 行数 |
+|------|------|------|-------------|
+| 重构前 | — | — | ~4100+ |
+| Step 4 | v4.0 | CursorManager 激活 | ~3300 |
+| Step 5 | v5.0 | AxisManager + PlotData | ~2800 |
+| Step 6 | v6.0 | PlotData + MultiCurve | 2061 |
+| Step 7 | v7.1 | MarkRegionManager | 1916 |
+| Steps 1-3 | v8.0 | EventHandler + PlotUIManager + 初始化 | 1538 |
+| Import 清理 | v8.1 | import 清理 + init 修复 | 1528 |
+| 重逻辑委托 | **v9.0** | 6 个重逻辑方法 → Manager | **971** |
+| 格式化委托 | **v10.0** | on_vline_position_changed + 格式化助手 → CursorManager | **886** |
+
+**总计: ~110 个方法委托到 7 个 Manager，widget 从 ~4100+ → 886 行（-78%）**
+
+## 第十五节：v10.0 执行记录（on_vline_position_changed + 格式化助手）
+
+**执行日期**: 2026-06-15
+**Commit**: `a010f96`
+
+### 委托方法清单
+
+| widget 方法 | → Manager | 行数变化 |
+|---|---|---|
+| `on_vline_position_changed` | **CursorManager**（复用已有方法） | 57 行 → 1 行委托 |
+| `sInt_to_fmtStr` | **CursorManager** | 8 行 → 1 行委托 |
+| `dateInt_to_fmtStr` | **CursorManager** | 10 行 → 1 行委托 |
+| `_significant_decimal_format_str` | **CursorManager** | 22 行 → 1 行委托 |
+
+### 关键修复
+
+| 项目 | 说明 |
+|------|------|
+| CursorManager 已有 `on_vline_position_changed` | v4.0 已创建但信号连到 widget 方法，现通过 widget 委托激活 |
+| 格式化方法调用方更新 | `self.pw.sInt_to_fmtStr()` → `self.sInt_to_fmtStr()` (CursorManager 内) |
+| 移除 `QSignalBlocker` import | widget 不再直接使用 |
+
+### 文件规模
+
+| 文件 | 行数 |
+|------|------|
+| **plot_widget.py** | **886** |
+| cursor_manager.py | 1312 |
 
