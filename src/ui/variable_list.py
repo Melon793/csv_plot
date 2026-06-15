@@ -176,6 +176,8 @@ class MyTableWidget(QTableWidget):
         self.setHorizontalHeaderLabels(["变量名", "单位", "序号"])
         self.original_indices = {}  # 存储原始索引
         self._column_sort_order = {}  # 记录每列的当前排序状态：{column_index: order}
+        self._row_var_names = []   # 当前每行对应的变量名（行号 → 变量名）
+        self._is_full_table = False  # 是否已填充全量表
 
         # 设置自定义委托，从绘制层面彻底禁用悬停和焦点效果
         self.setItemDelegate(NoHoverDelegate(self))
@@ -341,6 +343,11 @@ class MyTableWidget(QTableWidget):
 
         # 更新排序指示器
         self.horizontalHeader().setSortIndicator(column, order)
+
+        self._row_var_names = [
+            self.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            for row in range(self.rowCount())
+        ]
 
     def _show_context_menu(self, pos):
         index = self.indexAt(pos)
@@ -600,3 +607,40 @@ class MyTableWidget(QTableWidget):
             self.setItem(row, 0, name_item)  # 第0列：变量名
             self.setItem(row, 1, unit_item)  # 第1列：单位
             self.setItem(row, 2, index_item)  # 第2列：序号
+
+        self._row_var_names = sorted_names
+        self._is_full_table = True
+
+    def hide_non_matching(self, name_keywords, unit_keywords, units):
+        """通过 setRowHidden 过滤行，不重建任何 QTableWidgetItem"""
+        if not self._is_full_table:
+            return False
+
+        self.setUpdatesEnabled(False)
+        try:
+            for row, name in enumerate(self._row_var_names):
+                if name_keywords:
+                    if not any(kw in name.lower() for kw in name_keywords):
+                        self.setRowHidden(row, True)
+                        continue
+                if unit_keywords:
+                    unit = units.get(name, "").lower()
+                    if not any(kw in unit for kw in unit_keywords):
+                        self.setRowHidden(row, True)
+                        continue
+                self.setRowHidden(row, False)
+        finally:
+            self.setUpdatesEnabled(True)
+        return True
+
+    def show_all_rows(self):
+        """取消所有行隐藏，恢复全量表显示"""
+        if not self._is_full_table:
+            return False
+        self.setUpdatesEnabled(False)
+        try:
+            for row in range(self.rowCount()):
+                self.setRowHidden(row, False)
+        finally:
+            self.setUpdatesEnabled(True)
+        return True
