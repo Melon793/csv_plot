@@ -12,18 +12,37 @@ CursorManager - 光标管理
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 import pyqtgraph as pg
 from PySide6.QtGui import QFontMetrics
-from PySide6.QtCore import QPointF, QSignalBlocker
+from PySide6.QtCore import QPointF, QSignalBlocker, Qt
 
 if TYPE_CHECKING:
     from src.ui.widgets.multi_curve_manager import MultiCurveManager
 
 
+@dataclass
+class LabelLayout:
+    """标签布局结果数据结构（Phase 2 输出，纯数据，不操作 UI）"""
+    layout_x: float   # 标签的 scene x 坐标
+    layout_y: float   # 标签的 scene y 坐标
+    index: int        # cursor_values 中的原始索引
+    x_pos: float      # 数据交点 x 坐标
+    y_pos: float      # 数据交点 y 坐标
+    y_value: str      # 标签文本
+    color: str        # 标签颜色
+
+
 class CursorManager:
     """负责光标位置、标签、模式、对象池管理和 ViewBox 信号处理"""
+
+    # 标签间距参数（像素），新旧算法共用
+    LABEL_GAP_TO_CURSOR = 10       # 标签左边缘到光标的水平间距
+    LABEL_COL_GAP = 15            # 多列时列与列之间的间距
+    LABEL_VERTICAL_GAP = 4        # 同一列内标签之间的垂直间距
+    LABEL_Y_OFFSET = 10           # 标签底部到交点的垂直距离（向上偏移）
 
     def __init__(self, multi_curve_manager: MultiCurveManager):
         """初始化光标管理器，绑定到 MultiCurveManager 以获取依赖链"""
@@ -34,6 +53,13 @@ class CursorManager:
                 "CursorManager requires a valid MultiCurveManager instance"
             )
         self._data_manager = multi_curve_manager
+
+        # 新标签布局算法的状态
+        self._use_new_label_layout = True   # Feature flag，默认使用旧算法
+        self._prev_layout: list[LabelLayout] = []  # 上一帧的布局结果
+        self._column_count: int = 1          # 当前列数
+        self._column_hysteresis_counter: int = 0  # 列数切换滞回计数器
+        self._prev_cursor_scene_pos: QPointF | None = None  # 上一帧光标 scene 位置
 
     @property
     def pw(self) -> Any:
@@ -405,7 +431,7 @@ class CursorManager:
         from PySide6.QtWidgets import QApplication
 
         label = pg.TextItem(
-            color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0.5, 0.5)
+            color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0, 0.5)
         )
         font = QApplication.font()
         font.setPixelSize(11)
@@ -753,6 +779,20 @@ class CursorManager:
         y_min: float,
         y_max: float,
     ):
+        """标签定位算法入口，通过 feature flag 分发到新旧算法"""
+        if getattr(self, '_use_new_label_layout', False):
+            self._position_labels_new(cursor_values, x_min, x_max, y_min, y_max)
+        else:
+            self._position_labels_legacy(cursor_values, x_min, x_max, y_min, y_max)
+
+    def _position_labels_legacy(
+        self,
+        cursor_values: list,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ):
         """优化的标签定位算法，使用对角线位置避免遮挡曲线。
 
         使用4个候选位置策略（右上、左上、右下、左下）依次尝试，
@@ -786,8 +826,8 @@ class CursorManager:
         pixel_to_data_y = y_range / view_height_pixels
 
         # 设置固定的屏幕像素偏移
-        gap_pixels = 5  # 文本框左边缘距离cursor的水平像素间隔
-        vertical_gap_pixels = 10  # 垂直像素间隔
+        gap_pixels = self.LABEL_GAP_TO_CURSOR  # 文本框左边缘距离cursor的水平像素间隔
+        vertical_gap_pixels = self.LABEL_Y_OFFSET  # 垂直像素间隔（标签底部到交点的距离）
 
         # 获取TextItem的字体来动态计算标签尺寸（缓存font_metrics避免重复创建）
         if not hasattr(self, '_cached_font_metrics'):
@@ -827,9 +867,9 @@ class CursorManager:
             cursor_scene_x = cursor_scene_pos.x()
             cursor_scene_y = cursor_scene_pos.y()
 
-            # 计算文本框中心的偏移（TextItem的anchor=(0.5, 0.5)）
-            offset_x_right = gap_pixels + label_width_pixels / 2
-            offset_x_left = -(gap_pixels + label_width_pixels / 2)
+            # 计算文本框偏移（TextItem的anchor=(0, 0.5)，位置为左边缘）
+            offset_x_right = gap_pixels
+            offset_x_left = -(gap_pixels + label_width_pixels)
             offset_y_up = -(vertical_gap_pixels + label_height_pixels / 2)
             offset_y_down = vertical_gap_pixels + label_height_pixels / 2
 
@@ -852,9 +892,9 @@ class CursorManager:
                 candidate_x = candidate_data_pos.x()
                 candidate_y = candidate_data_pos.y()
 
-                # 检查是否在数据范围内
-                left_ok = candidate_x - label_width_data * 0.5 >= x_min
-                right_ok = candidate_x + label_width_data * 0.5 <= x_max
+                # 检查是否在数据范围内（anchor=(0,0.5)，candidate_x 是左边缘）
+                left_ok = candidate_x >= x_min
+                right_ok = candidate_x + label_width_data <= x_max
                 bottom_ok = candidate_y - label_height_data * 0.5 >= y_min
                 top_ok = candidate_y + label_height_data * 0.5 <= y_max
 
@@ -876,8 +916,7 @@ class CursorManager:
                 label_x = label_data_pos.x()
                 label_y = label_data_pos.y()
 
-                label_x = max(x_min + label_width_data * 0.5,
-                             min(x_max - label_width_data * 0.5, label_x))
+                label_x = max(x_min, min(x_max - label_width_data, label_x))
                 label_y = max(y_min + label_height_data * 0.5,
                              min(y_max - label_height_data * 0.5, label_y))
 
@@ -914,6 +953,442 @@ class CursorManager:
                 pw.plot_item.addItem(text_item, ignoreBounds=True)
 
             pw.multi_cursor_items.append(text_item)
+
+    # ========================================================================
+    # 新标签布局算法 (Phase 1 → Phase 2 → Phase 3)
+    # ========================================================================
+
+    def _position_labels_new(
+        self,
+        cursor_values: list,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ):
+        """新标签定位算法：全局排布 + 多列自适应
+
+        Phase 1: 数据过滤 → Phase 2: 布局计算 → Phase 3: 渲染
+        """
+        if not cursor_values:
+            return
+
+        pw = self.pw
+        view_box = pw.plot_item.getViewBox()
+        view_width_pixels = max(1, view_box.width())
+        view_height_pixels = max(1, view_box.height())
+
+        x_range = x_max - x_min
+        y_range = y_max - y_min
+        pixel_to_data_x = x_range / view_width_pixels
+        pixel_to_data_y = y_range / view_height_pixels
+
+        # 缓存 font metrics
+        if not hasattr(self, '_cached_font_metrics'):
+            sample_text_item = self._get_label_from_pool(0)
+            text_font = sample_text_item.textItem.font()
+            self._cached_font_metrics = QFontMetrics(text_font)
+            self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
+
+        font_metrics = self._cached_font_metrics
+        label_height_pixels = self._cached_label_height_pixels
+        label_height_data = label_height_pixels * pixel_to_data_y
+
+        # --- Phase 1: 数据过滤 ---
+        visible_labels = self._filter_labels_phase1(
+            cursor_values, x_min, x_max, y_min, y_max,
+            label_height_data, font_metrics,
+        )
+        if not visible_labels:
+            return
+
+        # --- Phase 2: 布局计算 ---
+        # 获取光标 scene 位置（用于列方向判定和速度计算）
+        cursor_scene_pos = None
+        if cursor_values:
+            first_val = cursor_values[0]
+            cursor_scene_pos = view_box.mapViewToScene(
+                QPointF(first_val['x_pos'], first_val['y_pos'])
+            )
+
+        layouts = self._compute_label_layout(
+            visible_labels, cursor_scene_pos, view_box,
+            x_min, x_max, y_min, y_max,
+            label_height_pixels, font_metrics,
+        )
+
+        # --- Phase 3: 渲染 ---
+        self._render_label_layout(layouts)
+
+    def _filter_labels_phase1(
+        self,
+        cursor_values: list,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        label_height_data: float,
+        font_metrics,
+    ) -> list:
+        """Phase 1: 在上游过滤基础上增加边界余量二次过滤
+
+        返回按 y_pos 降序排列的可见标签列表（高 y 值在上，保留原始索引）。
+        """
+        margin = label_height_data * 0.5
+
+        visible = [
+            {**v, '_orig_idx': idx}
+            for idx, v in enumerate(cursor_values)
+            if y_min + margin < v['y_pos'] < y_max - margin
+            and x_min < v['x_pos'] < x_max
+        ]
+
+        # 隐藏被过滤掉的标签
+        visible_indices = {item['_orig_idx'] for item in visible}
+        for idx in range(len(cursor_values)):
+            if idx not in visible_indices:
+                text_item = self._get_label_from_pool(idx)
+                text_item.setVisible(False)
+
+        # 按 y 降序排列（高 y 值在上），与 scene 坐标系方向一致
+        visible.sort(key=lambda v: v['y_pos'], reverse=True)
+        return visible
+
+    def _compute_label_layout(
+        self,
+        visible_labels: list,
+        cursor_scene_pos,
+        view_box,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        label_height_pixels: float,
+        font_metrics,
+    ) -> list[LabelLayout]:
+        """Phase 2: 计算所有标签的布局位置（纯数学，不操作 UI）"""
+        if not visible_labels:
+            return []
+
+        # 计算标签宽度
+        max_label_width_pixels = 200  # 最大标签宽度（像素）
+        label_widths_pixels = []
+        for item in visible_labels:
+            text_width = font_metrics.horizontalAdvance(item['y_value'])
+            w = min(text_width + 12, max_label_width_pixels)
+            label_widths_pixels.append(w)
+
+        max_label_width_px = max(label_widths_pixels)
+
+        # 获取 y 轴占用宽度
+        y_axis_width = 0
+        left_axis = self.pw.plot_item.getAxis('left')
+        if left_axis:
+            y_axis_width = left_axis.width()
+
+        view_width_pixels = max(1, view_box.width())
+        view_height_pixels = max(1, view_box.height())
+
+        # Scene 坐标边界
+        x_min_scene = view_box.mapViewToScene(QPointF(x_min, 0)).x() + y_axis_width
+        x_max_scene = view_box.mapViewToScene(QPointF(x_max, 0)).x()
+        y_min_scene = view_box.mapViewToScene(QPointF(0, y_min)).y()
+        y_max_scene = view_box.mapViewToScene(QPointF(0, y_max)).y()
+
+        # 注意：scene y 坐标通常与数据 y 坐标方向相反（scene 中上方为负或小值）
+        # 确保 y_min_scene < y_max_scene（从上到下）
+        if y_min_scene > y_max_scene:
+            y_min_scene, y_max_scene = y_max_scene, y_min_scene
+        scene_height = y_max_scene - y_min_scene
+
+        # 间距参数（像素），统一由类常量管理
+        gap_pixels = self.LABEL_GAP_TO_CURSOR       # 标签到光标水平间距
+        col_gap_pixels = self.LABEL_COL_GAP         # 列间距
+        vertical_gap_pixels = self.LABEL_VERTICAL_GAP  # 列内标签垂直间距
+
+        gap_to_cursor = gap_pixels
+        label_height_total = label_height_pixels + vertical_gap_pixels
+
+        # 计算列容量
+        margin_pixels_scene = label_height_pixels * 0.5
+        available_height = scene_height - 2 * margin_pixels_scene
+        per_column_capacity = max(1, int(available_height / label_height_total))
+
+        # 列数计算（带滞回）
+        n_labels = len(visible_labels)
+        new_column_count = max(1, int(np.ceil(n_labels / per_column_capacity)))
+        column_count = self._apply_column_hysteresis(new_column_count)
+
+        # 总标签高度超 plot 高度时的极限保护：缩小字体
+        if per_column_capacity < 1:
+            # 窗口极小，隐藏所有标签
+            for item in visible_labels:
+                text_item = self._get_label_from_pool(item['_orig_idx'])
+                text_item.setVisible(False)
+            return []
+
+        # 计算列放置方向
+        cursor_scene_x = cursor_scene_pos.x() if cursor_scene_pos else 0
+        right_available = x_max_scene - cursor_scene_x - gap_to_cursor
+        left_available = cursor_scene_x - gap_to_cursor - x_min_scene
+
+        # 分配列到两侧
+        column_sides = self._compute_column_positions(
+            column_count, right_available, left_available,
+            max_label_width_px, col_gap_pixels,
+        )
+        # column_sides: list of ('right', col_idx) or ('left', col_idx)
+
+        # 分配标签到各列（均匀分配）
+        labels_per_column = self._distribute_labels(visible_labels, column_count)
+
+        # 计算每列的场景 x 坐标（anchor=(0,0.5)，cx 即标签左边缘）
+        column_scene_x = []
+        for side, col_idx in column_sides:
+            offset = gap_to_cursor + col_idx * (max_label_width_px + col_gap_pixels)
+            if side == 'right':
+                cx = cursor_scene_x + offset
+            else:
+                cx = cursor_scene_x - offset - max_label_width_px
+            column_scene_x.append(cx)
+
+        # 列内垂直堆叠
+        column_scene_y_min = y_min_scene + margin_pixels_scene
+        column_scene_y_max = y_max_scene - margin_pixels_scene
+
+        all_layouts: list[LabelLayout] = []
+
+        for col_idx, col_labels in enumerate(labels_per_column):
+            if not col_labels:
+                continue
+
+            col_layouts = self._layout_column(
+                col_labels, column_scene_x[col_idx],
+                column_scene_y_min, column_scene_y_max,
+                label_height_pixels, vertical_gap_pixels,
+            )
+            all_layouts.extend(col_layouts)
+
+        return all_layouts
+
+    def _apply_column_hysteresis(self, new_column_count: int) -> int:
+        """列数切换滞回：连续 3 次调用才切换，防止临界抖动"""
+        HYSTERESIS_THRESHOLD = 3
+        if new_column_count != self._column_count:
+            self._column_hysteresis_counter += 1
+            if self._column_hysteresis_counter >= HYSTERESIS_THRESHOLD:
+                self._column_count = new_column_count
+                self._column_hysteresis_counter = 0
+        else:
+            self._column_hysteresis_counter = 0
+        return self._column_count
+
+    def _compute_column_positions(
+        self,
+        column_count: int,
+        right_available: float,
+        left_available: float,
+        max_label_width: float,
+        col_gap: float,
+    ) -> list:
+        """决定每列的放置方向（右侧优先，空间不足时启用左侧）
+
+        返回 list of (side, col_idx)
+        """
+        sides = []
+        col_width = max_label_width + col_gap
+        right_cols_possible = max(0, int(right_available / col_width)) if right_available > col_width else 0
+        left_cols_possible = max(0, int(left_available / col_width)) if left_available > col_width else 0
+
+        # 优先填充右侧
+        right_used = min(column_count, right_cols_possible)
+        for i in range(right_used):
+            sides.append(('right', i))
+
+        # 剩余列放左侧
+        remaining = column_count - right_used
+        left_used = min(remaining, left_cols_possible)
+        for i in range(left_used):
+            sides.append(('left', i))
+
+        # 如果列数超出可用空间，全部压缩到右侧
+        if len(sides) < column_count:
+            for i in range(len(sides), column_count):
+                sides.append(('right', i - right_used))
+
+        return sides
+
+    def _distribute_labels(
+        self, visible_labels: list, column_count: int
+    ) -> list[list]:
+        """将标签均匀分配到各列"""
+        n = len(visible_labels)
+        if n == 0:
+            return [[] for _ in range(column_count)]
+
+        base = n // column_count
+        remainder = n % column_count
+
+        result = []
+        start = 0
+        for col in range(column_count):
+            size = base + (1 if col < remainder else 0)
+            result.append(visible_labels[start:start + size])
+            start += size
+        return result
+
+    def _layout_column(
+        self,
+        labels: list,
+        col_scene_x: float,
+        col_y_min: float,
+        col_y_max: float,
+        label_height_pixels: float,
+        gap_pixels: float,
+    ) -> list[LabelLayout]:
+        """列内垂直堆叠：自适应权重的约束垂直堆叠"""
+        n = len(labels)
+        if n == 0:
+            return []
+
+        half_height = label_height_pixels / 2
+        view_box = self.pw.plot_item.getViewBox()
+
+        # 单标签：放在交点上方（统一向上偏移 LABEL_Y_OFFSET）
+        if n == 1:
+            label = labels[0]
+            scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
+            target_y = scene_pos.y() - self.LABEL_Y_OFFSET  # 向上偏移
+            target_y = max(col_y_min + half_height,
+                           min(col_y_max - half_height, target_y))
+            return [LabelLayout(
+                layout_x=col_scene_x, layout_y=target_y,
+                index=label['_orig_idx'],
+                x_pos=label['x_pos'], y_pos=label['y_pos'],
+                y_value=label['y_value'], color=label['color'],
+            )]
+
+        # 多标签：自适应权重堆叠
+        ideal_spacing = (col_y_max - col_y_min) / n
+        total_height = label_height_pixels + gap_pixels
+        results: list[LabelLayout] = []
+
+        # 虚拟"上一个标签底部"：从列顶部开始，保证第一个标签也有最小位置约束
+        prev_bottom = col_y_min + half_height
+
+        for i, label in enumerate(labels):
+            scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
+            # 所有标签统一向上偏移 LABEL_Y_OFFSET，保持间距一致
+            ideal_y = scene_pos.y() - self.LABEL_Y_OFFSET
+            uniform_y = col_y_min + ideal_spacing * (i + 0.5)  # 均匀分布
+
+            # 自适应权重：密集区域偏向均匀分布，稀疏区域偏向交点位置
+            local_density = self._count_nearby(labels, label['y_pos'],
+                                                radius=label_height_pixels * 3)
+            w_ideal = max(0.2, 1.0 - local_density * 0.15)
+            target_y = w_ideal * ideal_y + (1 - w_ideal) * uniform_y
+
+            # 动态最大偏移量
+            max_offset = label_height_pixels * (1.5 + n * 0.1)
+            max_offset = min(max_offset, label_height_pixels * 4)
+            target_y = max(ideal_y - max_offset, min(ideal_y + max_offset, target_y))
+
+            # 与上一个标签防重叠（包括第一个标签与列顶部的约束）
+            target_y = max(target_y, prev_bottom + gap_pixels + half_height)
+
+            # 边界 clamp
+            target_y = max(col_y_min + half_height,
+                           min(col_y_max - half_height, target_y))
+
+            results.append(LabelLayout(
+                layout_x=col_scene_x, layout_y=target_y,
+                index=label['_orig_idx'],
+                x_pos=label['x_pos'], y_pos=label['y_pos'],
+                y_value=label['y_value'], color=label['color'],
+            ))
+
+            # 更新 prev_bottom 供下一个标签使用
+            prev_bottom = target_y + half_height
+
+        # Pass 2: 正向扫描，修正边界 clamp 导致的重叠（自顶向下）
+        for i in range(1, len(results)):
+            prev_bottom = results[i - 1].layout_y + half_height
+            curr_top = results[i].layout_y - half_height
+            if curr_top < prev_bottom + gap_pixels:
+                results[i].layout_y = prev_bottom + gap_pixels + half_height
+                # 检查是否超出底部边界
+                results[i].layout_y = min(results[i].layout_y,
+                                           col_y_max - half_height)
+
+        # Pass 3: 反向扫描，修正被推挤后产生的新重叠（自底向上）
+        for i in range(len(results) - 2, -1, -1):
+            next_top = results[i + 1].layout_y - half_height
+            curr_bottom = results[i].layout_y + half_height
+            if curr_bottom > next_top - gap_pixels:
+                results[i].layout_y = next_top - gap_pixels - half_height
+                # 检查是否超出顶部边界，超出则截断
+                results[i].layout_y = max(results[i].layout_y,
+                                           col_y_min + half_height)
+
+        return results
+
+    def _count_nearby(self, labels: list, y_pos: float, radius: float) -> int:
+        """计算 y_pos 附近 radius 范围内的标签数量"""
+        return sum(1 for l in labels if abs(l['y_pos'] - y_pos) <= radius)
+
+    def _render_label_layout(self, layouts: list[LabelLayout]):
+        """Phase 3: 按计算结果渲染标签"""
+        pw = self.pw
+        plot_scene = pw.plot_item.scene()
+        view_box = pw.plot_item.getViewBox()
+
+        MAX_LABEL_WIDTH_PIXELS = 200  # 最大标签宽度
+        if not hasattr(self, '_cached_font_metrics'):
+            sample_text_item = self._get_label_from_pool(0)
+            text_font = sample_text_item.textItem.font()
+            self._cached_font_metrics = QFontMetrics(text_font)
+
+        font_metrics = self._cached_font_metrics
+
+        for layout in layouts:
+            text_item = self._get_label_from_pool(layout.index)
+
+            # 标签文本截断（防止过长文本导致列宽计算失准）
+            display_text = layout.y_value
+            text_width = font_metrics.horizontalAdvance(display_text) + 12
+            if text_width > MAX_LABEL_WIDTH_PIXELS:
+                display_text = font_metrics.elidedText(
+                    display_text, Qt.ElideRight, MAX_LABEL_WIDTH_PIXELS - 12
+                )
+                text_width = MAX_LABEL_WIDTH_PIXELS
+
+            text_item.setText(display_text)
+
+            # 边框颜色
+            if (not hasattr(text_item, '_cached_border_color')
+                    or text_item._cached_border_color != layout.color):
+                border_pen = pg.mkPen(layout.color, width=1.5)
+                text_item.border = border_pen
+                text_item._cached_border_color = layout.color
+
+            text_item.setVisible(True)
+
+            # 将 scene 坐标转回数据坐标（TextItem 添加到 plot_item 时使用数据坐标）
+            data_pos = view_box.mapSceneToView(
+                QPointF(layout.layout_x, layout.layout_y)
+            )
+            text_item.setPos(data_pos.x(), data_pos.y())
+            text_item.setZValue(201)
+
+            text_scene = text_item.scene()
+            if text_scene != plot_scene:
+                if text_scene is not None:
+                    text_scene.removeItem(text_item)
+                pw.plot_item.addItem(text_item, ignoreBounds=True)
+
+            pw.multi_cursor_items.append(text_item)
+
+    # ========================================================================
 
     def _show_x_position_only(self, x_positions=None):
         """仅显示 x 位置标签（隐藏光标数值），同时在图上绘制 x_label 元素"""
