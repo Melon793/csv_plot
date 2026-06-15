@@ -409,42 +409,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """设置 Y 轴的 viewRange 和 limits → 委托到 AxisManager"""
         self._axis_manager._set_safe_y_range(min_y, max_y, set_limits)
 
-    def reset_plot(self,index_xMin,index_xMax):
-
-        self.plot_item.setLimits(xMin=None, xMax=None)  # 解除X轴限制
-        self.plot_item.setLimits(yMin=None, yMax=None)  # 解除Y轴限制
-        
-        xMin = self.offset + self.factor * index_xMin
-        xMax = self.offset + self.factor * index_xMax
-
-        if not (np.isnan(xMax) or np.isinf(xMax)):
-            xMin, xMax = self._get_safe_x_range(xMin, xMax)
-
-            self.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
-            padding_xVal=DEFAULT_PADDING_VAL_X
-            limits_xMin = xMin - padding_xVal * (xMax - xMin)
-            limits_xMax = xMax + padding_xVal * (xMax - xMin)
-            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-
-        self.view_box.setYRange(0,1,padding=DEFAULT_PADDING_VAL_Y) 
-        self._set_vline_bounds([None, None])  # [None, None] 表示无边界限制
-
-        self.xMin = xMin
-        self.xMax = xMax
-        self.y_name = ''
-        self.y_format = ''
-        #self.plot_item.update()
-        # 先清除cursor items（包括scene中的items）
-        # 重置plot时完全清除对象池，避免复用异常状态的items
-        self._clear_cursor_items(hide_only=False)
-        self._safe_clear_plot_items() 
-        self.axis_y.setLabel(text="")
-        self.update_left_header("channel name")
-        self.update_right_header("")
-
-        self.curve = None
-        self.original_index_x = None
-        self.original_y = None
+    def reset_plot(self, index_xMin, index_xMax):
+        """重置绘图 → 委托到 PlotDataManager"""
+        self._plot_data_manager.reset_plot(index_xMin, index_xMax)
 
 
     def setup_axes(self):
@@ -695,40 +662,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
 
     def handle_single_point_limits(self, x_values, y_values):
-        """处理单点或所有点x坐标相同的特殊情况，避免x轴范围为0
-        
-        Args:
-            x_values: x坐标数组
-            y_values: y坐标数组
-            
-        Returns:
-            tuple: (min_x, max_x, min_y, max_y) 或 None（正常情况不需要特殊处理）
-        """
-        if len(x_values) == 1:
-            # 单点情况：扩展x轴范围
-            x = x_values[0]
-            min_x, max_x = self._get_safe_x_range(x, x)
-            if len(y_values) == 1:
-                y = y_values[0]
-                min_y = y - 0.5 if y != 0 else -0.5
-                max_y = y + 0.5 if y != 0 else 0.5
-            else:
-                min_y = np.nanmin(y_values)
-                max_y = np.nanmax(y_values)
-            return min_x, max_x, min_y, max_y
-        else:
-            # 检查是否所有x值都相同（多点但x坐标相同的情况）
-            unique_x = set(x_values)
-            if len(unique_x) == 1:
-                # 所有点的x坐标相同，扩展x轴范围
-                x = list(unique_x)[0]
-                min_x, max_x = self._get_safe_x_range(x, x)
-                min_y = np.nanmin(y_values)
-                max_y = np.nanmax(y_values)
-                return min_x, max_x, min_y, max_y
-            else:
-                # 正常情况：有多个不同的x值
-                return None
+        """处理单点或所有点x坐标相同的特殊情况 → 委托到 PlotDataManager"""
+        return self._plot_data_manager.handle_single_point_limits(x_values, y_values)
         
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
@@ -943,134 +878,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_manager._process_pending_deletes()
 
     def _collect_visible_curve_arrays(self, key: str) -> list[np.ndarray]:
-        arrays: list[np.ndarray] = []
-        if not getattr(self, 'curves', None):
-            return arrays
-        for ci in self.curves.values():
-            if not ci.visible:
-                continue
-            data = getattr(ci, key, None)
-            if data is None:
-                continue
-            arr = np.asarray(data)
-            if arr.size == 0:
-                continue
-            arrays.append(arr)
-        return arrays
+        """收集可见曲线的数据数组 → 委托到 MultiCurveManager"""
+        return self._multi_curve_manager._collect_visible_curve_arrays(key)
 
     def _collect_visible_curve_pairs(self) -> list[tuple[np.ndarray, np.ndarray]]:
-        pairs: list[tuple[np.ndarray, np.ndarray]] = []
-        if not getattr(self, 'curves', None):
-            return pairs
-        for ci in self.curves.values():
-            if not ci.visible:
-                continue
-            x_data = ci.x_data
-            y_data = ci.y_data
-            if x_data is None or y_data is None:
-                continue
-            x_arr = np.asarray(x_data)
-            y_arr = np.asarray(y_data)
-            if x_arr.size == 0 or y_arr.size == 0:
-                continue
-            pairs.append((x_arr, y_arr))
-        return pairs
+        """收集可见曲线的 x-y 数据对 → 委托到 MultiCurveManager"""
+        return self._multi_curve_manager._collect_visible_curve_pairs()
 
     def get_curve_x_limits(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
-        """
-        返回当前 plot 中曲线的 X 轴范围
-
-        Args:
-            curves_filter: "visible" — 仅可见曲线；"all" — 所有曲线（含隐藏）
-
-        Returns:
-            (min_x, max_x) 或 (None, None) 当无数据时
-        """
-        mins: list[float] = []
-        maxs: list[float] = []
-
-        if self.curves:
-            for ci in self.curves.values():
-                if curves_filter == "visible" and not ci.visible:
-                    continue
-                mins.append(ci.x_min)
-                maxs.append(ci.x_max)
-        elif self.curve and self.y_name:
-            if self.original_index_x is not None:
-                x_data = self.offset + self.factor * self.original_index_x
-            else:
-                x_data, _ = self.curve.getData()
-                if x_data is None:
-                    return (None, None)
-            mins.append(float(np.min(x_data)))
-            maxs.append(float(np.max(x_data)))
-
-        if not mins:
-            return (None, None)
-        return (min(mins), max(maxs))
+        """获取曲线 X 轴限制 → 委托到 MultiCurveManager"""
+        return self._multi_curve_manager.get_curve_x_limits(curves_filter)
 
     def _safe_clear_plot_items(self):
-        """安全地清理所有plot items，避免scene不匹配问题
-        
-        【内存优化】清除曲线时释放其数据和样式缓存
-        """
-        try:
-            # 【安全检查】确保plot_item存在且有效
-            if not hasattr(self, 'plot_item') or self.plot_item is None:
-                return
-            
-            current_scene = self.plot_item.scene()
-            
-            if current_scene is not None:
-                # 获取所有items
-                all_items = current_scene.items()
-                
-                # 手动清理所有items，避免使用clearPlots()
-                items_removed = 0
-                for i, item in enumerate(all_items):
-                    try:
-                        # 检查item是否仍然有效
-                        item_scene = item.scene()
-                        if item_scene == current_scene:
-                            # 只移除数据曲线，不移除cursor相关items（由_clear_cursor_items管理）
-                            should_remove = False
-                            item_type = type(item).__name__
-                            
-                            # 检查是否是数据曲线（PlotDataItem）
-                            if hasattr(item, 'getData') and hasattr(item, 'opts'):
-                                # 确保不是坐标轴
-                                if not hasattr(item, 'setLabel'):
-                                    should_remove = True
-                                    
-                                    # 清除曲线的缓存数据，释放内存
-                                    if hasattr(item, '_cached_pen_key'):
-                                        delattr(item, '_cached_pen_key')
-                                    if hasattr(item, '_has_symbols'):
-                                        delattr(item, '_has_symbols')
-                                    
-                                    # 清除曲线数据
-                                    try:
-                                        item.clear()
-                                    except Exception:
-                                        _widget_logger.debug("clear_all_plots: item.clear() 异常")
-                            
-                            # 注意：不在这里清理TextItem和ScatterPlotItem
-                            # 这些cursor相关的items由_clear_cursor_items()管理
-                            
-                            if should_remove:
-                                current_scene.removeItem(item)
-                                items_removed += 1
-                            else:
-                                pass
-                        else:
-                            pass
-                    except Exception as e:
-                        pass  # 单个 scene item 清理异常，继续处理其他
-                
-            
-            
-        except Exception as e:
-            _widget_logger.debug("clear_all_plots_manager 异常: %s", e)
+        """安全地清理所有plot items → 委托到 PlotDataManager"""
+        self._plot_data_manager._safe_clear_plot_items()
     
     def _update_multi_curve_cursor_label(self):
         """更新多曲线光标标签 → 委托到 CursorManager"""
@@ -1168,176 +989,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_manager._update_cursor_after_plot(min_x_bound, max_x_bound)
 
     def clear_value_cache(self):
-        #self._value_cache: dict[str, tuple] = {}
-        pass
+        """清除值缓存 → 委托到 PlotDataManager"""
+        self._plot_data_manager.clear_value_cache()
+
     def datetime_to_unix_seconds(self, series: pd.Series) -> pd.Series:
-        """将datetime Series转换为Unix时间戳（秒，float64精度）"""
-        if "ns" in str(series.dtype):
-            return (series.astype("int64") / 10**9).astype("float64")
-        elif "us" in str(series.dtype):
-            return (series.astype("int64") / 10**6).astype("float64")
-        elif "ms" in str(series.dtype):
-            return (series.astype("int64") / 10**3).astype("float64")
-        else:
-            raise ValueError(f"Unsupported datetime dtype: {series.dtype}")
+        """将datetime Series转换为Unix时间戳 → 委托到 PlotDataManager"""
+        return self._plot_data_manager.datetime_to_unix_seconds(series)
         
-    def get_value_from_name(self,var_name)-> tuple | None:
-        main_window = self.window()
-        if var_name in main_window.value_cache:
-            return main_window.value_cache[var_name]
-
-        if main_window and hasattr(main_window, 'loader') and main_window.loader is not None:
-            loader = main_window.loader
-            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
-                raw_values = loader.get_series(var_name)
-            else:
-                raw_values = self.data[var_name]
-        else:
-            raw_values = self.data[var_name]
-
-        if (
-            main_window is not None
-            and hasattr(main_window, 'loader')
-            and main_window.loader is not None
-            and hasattr(main_window.loader, 'get_value_from_name')
-            and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
-        ):
-            try:
-                _, _, _, text_map = main_window.loader.get_value_from_name(var_name)
-                if text_map:
-                    y_values = raw_values
-                    y_format = 'enum'
-                    if not hasattr(main_window, '_enum_text_maps'):
-                        main_window._enum_text_maps = {}
-                    main_window._enum_text_maps[var_name] = text_map
-                    main_window.value_cache[var_name] = (y_values, y_format)
-                    return y_values, y_format
-            except KeyError:
-                pass
-
-        dtype_kind = raw_values.dtype.kind
-        y_values = None
-        y_format = 'number'
-
-        if dtype_kind in "iuf":
-            y_values = raw_values
-        elif dtype_kind == "b":
-            y_values = raw_values.astype(np.int32)
-        elif var_name in self.time_channels_info:
-            fmt = self.time_channels_info[var_name]
-            try:
-                if "%H:%M:%S" in fmt:
-                    # 时间格式：提取时间部分并转换为Unix时间戳
-                    times = pd.to_datetime(raw_values, format=fmt, errors="coerce")
-                    today = pd.Timestamp.today().normalize()
-                    # 提取从午夜开始的时间差（保留毫秒/微秒精度）
-                    time_deltas = times - times.dt.normalize()
-                    dt_values = today + time_deltas
-                    y_values = self.datetime_to_unix_seconds(dt_values)
-                    y_format = 's'
-                else:
-                    # 日期格式：直接转换为Unix时间戳
-                    dt_values = pd.to_datetime(raw_values, format=fmt, errors='coerce')
-                    y_values = self.datetime_to_unix_seconds(dt_values)
-                    y_format = 'date'
-            except (ValueError, TypeError):
-                # 无法解析时间格式
-                return None, None
-        else:
-            # 非时间通道：尝试将object等类型转换为数字，只要存在至少一个有效值就接受
-            try:
-                numeric_values = pd.to_numeric(raw_values, errors='coerce')
-            except Exception:
-                numeric_values = None
-
-            if numeric_values is not None:
-                finite_mask = np.isfinite(numeric_values.to_numpy(dtype=np.float64))
-                if finite_mask.any():
-                    y_values = numeric_values
-                else:
-                    return None, None
-            else:
-                return None, None
-        
-        if y_values is None:
-            return None, None
-
-        main_window.value_cache[var_name] = (y_values, y_format)
-        return y_values, y_format
+    def get_value_from_name(self, var_name) -> tuple | None:
+        """根据变量名获取值和格式 → 委托到 PlotDataManager"""
+        return self._plot_data_manager.get_value_from_name(var_name)
     
     def update_time_correction(self, new_factor, new_offset):
-        self._suppress_pin_update = True
-        try:
-            old_factor = self.factor
-            old_offset = self.offset
-            self.factor = new_factor
-            self.offset = new_offset
-
-            main_window = self.window()
-            is_mdf = (
-                main_window is not None
-                and hasattr(main_window, 'loader')
-                and main_window.loader is not None
-                and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
-            )
-
-            if self.is_multi_curve_mode:
-                for var_name, ci in self.curves.items():
-                    if ci.curve is not None and ci.y_data is not None:
-                        curve = ci.curve
-                        y_data = ci.y_data
-                        if is_mdf:
-                            old_x_data = ci.x_data
-                            if old_x_data is not None and old_factor != 0:
-                                original_time = (old_x_data - old_offset) / old_factor
-                            else:
-                                original_time = np.arange(1, len(y_data) + 1)
-                        else:
-                            original_time = np.arange(1, len(y_data) + 1)
-                        new_x = self.offset + self.factor * original_time
-                        curve.setData(new_x, y_data)
-                        ci.x_data = new_x
-                        ci.update_x_range()
-            else:
-                if self.original_index_x is not None:
-                    new_x = self.offset + self.factor * self.original_index_x
-                    self.curve.setData(new_x, self.original_y)
-            if self.is_multi_curve_mode and self.curves:
-                first_curve_info = next(iter(self.curves.values()))
-                datalength = len(first_curve_info.y_data) if first_curve_info.y_data is not None else 0
-            elif self.original_index_x is not None:
-                datalength = len(self.original_index_x)
-            else:
-                datalength = self.window().loader.datalength if hasattr(self.window(), 'loader') else 0
-            padding_xVal = DEFAULT_PADDING_VAL_X
-            if is_mdf and main_window is not None and hasattr(main_window.loader, 'global_time_range'):
-                x_min, x_max = main_window.loader.global_time_range
-                data_min_x = self.offset + self.factor * x_min
-                data_max_x = self.offset + self.factor * x_max
-            else:
-                index_min = 1 - padding_xVal * datalength
-                index_max = datalength + padding_xVal * datalength
-                data_min_x = self.offset + self.factor * index_min
-                data_max_x = self.offset + self.factor * index_max
-            limits_xMin = data_min_x - padding_xVal * (data_max_x - data_min_x)
-            limits_xMax = data_max_x + padding_xVal * (data_max_x - data_min_x)
-            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-            self._update_vline_bounds_from_data()
-            if self.mark_region is not None and self is self.window().plot_widgets[0].plot_widget:
-                old_min, old_max = self.mark_region.getRegion()
-                if old_factor != 0:
-                    index_min = (old_min - old_offset) / old_factor
-                    index_max = (old_max - old_offset) / old_factor
-                    new_min = new_offset + new_factor * index_min
-                    new_max = new_offset + new_factor * index_max
-                    blocker = QSignalBlocker(self.mark_region)
-                    self.mark_region.setRegion([new_min, new_max])
-                    self.window().sync_mark_regions(self.mark_region)
-        finally:
-            if hasattr(self, 'window') and self.window() is not None:
-                if not getattr(self, '_is_being_destroyed', False):
-                    self.window().request_mark_stats_refresh()
-            self._suppress_pin_update = False
+        """更新时间修正参数 → 委托到 PlotDataManager"""
+        self._plot_data_manager.update_time_correction(new_factor, new_offset)
 
     # ---------------- 拖拽相关 ----------------
     def dragEnterEvent(self, event):
@@ -1473,302 +1138,27 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.plot_variable(names[0])
 
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
-        """
-        验证绘图数据的有效性
-        
-        检查变量名和数据源的有效性
-        确保数据可以安全地用于绘图
-        
-        Args:
-            var_name: 要验证的变量名称
-            
-        Returns:
-            tuple: (是否有效, 错误信息)
-        """
-        if not isinstance(var_name, str) or not var_name.strip():
-            return False, "变量名无效"
-
-        main_window = self.window()
-        if main_window and hasattr(main_window, 'loader') and main_window.loader is not None:
-            loader = main_window.loader
-            if getattr(loader, 'LOADER_TYPE', '') == 'mdf':
-                return True, ""
-
-        if not hasattr(self, 'data') or self.data is None:
-            return False, "没有可用的数据"
-            
-        if not hasattr(self.data, 'columns'):
-            return False, "数据格式无效"
-            
-        if var_name not in self.data.columns:
-            return False, f"变量 {var_name} 不存在"
-            
-        return True, ""
+        """验证绘图数据的有效性 → 委托到 PlotDataManager"""
+        return self._plot_data_manager._validate_plot_data(var_name)
 
     def _get_x_data_for_variable(self, y_len: int) -> np.ndarray:
         return np.arange(1, y_len + 1, dtype=np.float32)
 
     def _prepare_plot_data(self, var_name: str) -> tuple[bool, str, np.ndarray, np.ndarray, str]:
-        """
-        准备绘图数据
-        
-        从数据源中提取指定变量的数据，进行格式化和预处理
-        生成用于绘图的x和y数组
-        
-        Args:
-            var_name: 变量名称
-            
-        Returns:
-            tuple: (是否成功, 错误信息, x数组, y数组, y格式)
-        """
-        try:
-            y_values, y_format = self.get_value_from_name(var_name=var_name)
-            
-            if y_values is None or len(y_values) == 0:
-                return False, f"变量 {var_name} 没有有效数据", None, None, ""
-            
-            # 转换为numpy数组，根据数据类型选择合适的精度
-            # 时间数据（Unix时间戳）使用float64以保留毫秒精度
-            # 其他数据使用float32以减少内存
-            if isinstance(y_values, pd.Series):
-                array_source = y_values.to_numpy()
-                safety_source = y_values
-            else:
-                array_source = np.asarray(y_values)
-                safety_source = array_source
-
-            float32_safe, abs_max = _evaluate_float32_safety(safety_source)
-            # 检查时间数据：Unix时间戳通常 > 1e8
-            is_time_data = bool(abs_max is not None and abs_max > 1e8)
-            prefer_float64 = is_time_data or not float32_safe
-            target_dtype = np.float64 if prefer_float64 else np.float32
-
-            try:
-                if isinstance(y_values, pd.Series):
-                    y_array = y_values.to_numpy(dtype=target_dtype)
-                else:
-                    y_array = np.asarray(array_source, dtype=target_dtype)
-            except (OverflowError, ValueError, TypeError):
-                if isinstance(y_values, pd.Series):
-                    y_array = y_values.to_numpy(dtype=np.float64)
-                else:
-                    y_array = np.asarray(array_source, dtype=np.float64)
-
-            if target_dtype == np.float32 and np.any(np.isinf(y_array)):
-                if isinstance(y_values, pd.Series):
-                    y_array = y_values.to_numpy(dtype=np.float64)
-                else:
-                    y_array = np.asarray(array_source, dtype=np.float64)
-
-            # 检查数据是否全为NaN
-            if np.all(np.isnan(y_array)):
-                return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
-                
-            # 使用统一的时间轴数据作为X轴
-            main_window = self.window()
-            if main_window and hasattr(main_window, 'loader') and hasattr(main_window.loader, 'get_value_from_name'):
-                try:
-                    x_array, _, _, _ = main_window.loader.get_value_from_name(var_name)
-                    x_array = x_array[:len(y_array)]
-                except KeyError:
-                    x_array = self._get_x_data_for_variable(len(y_array))
-            else:
-                x_array = self._get_x_data_for_variable(len(y_array))
-
-            return True, "", x_array, y_array, y_format
-            
-        except Exception as e:
-            return False, f"处理数据时出错: {str(e)}", None, None, ""
+        """准备绘图数据 → 委托到 PlotDataManager"""
+        return self._plot_data_manager._prepare_plot_data(var_name)
 
     def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
-        """
-        绘制变量到图表
-        
-        将指定的数据变量绘制到当前图表中
-        包括数据验证、格式化和图形渲染
-        
-        Args:
-            var_name: 要绘制的变量名称
-            show_duplicate_warning: 是否显示重复变量警告
-            
-        Returns:
-            bool: 绘制是否成功
-        """
-        # 验证输入
-        is_valid, error_msg = self._validate_plot_data(var_name)
-        if not is_valid:
-            QMessageBox.warning(self, "错误", error_msg)
-            return False
-        
-        # 准备数据
-        success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(var_name)
-        if not success:
-            QMessageBox.warning(self, "错误", error_msg)
-            return False
-        
-        try:
-            main_window = self.window()
-            is_mdf = (
-                main_window is not None
-                and hasattr(main_window, 'loader')
-                and main_window.loader is not None
-                and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
-            )
-
-            if self.is_multi_curve_mode:
-                # 多曲线模式：直接添加新曲线
-                x_values = self.offset + self.factor * x_array
-                return self.add_variable_to_plot(var_name, x_values, y_array, y_format, show_duplicate_warning=show_duplicate_warning)
-            
-            # 单曲线模式：设置绘图数据
-            self.y_format = y_format
-            self.y_name = var_name
-            # x_array是索引数组，使用float32足够
-            self.original_index_x = np.asarray(x_array, dtype=np.float32)
-            safe_for_float32, abs_max_plot = _evaluate_float32_safety(y_array)
-            keep_float64 = (
-                y_format in ['s', 'date']
-                or not safe_for_float32
-                or (abs_max_plot is not None and abs_max_plot > 1e8)
-            )
-            target_y_dtype = np.float64 if keep_float64 else np.float32
-            self.original_y = np.asarray(y_array, dtype=target_y_dtype)
-            x_values = self.offset + self.factor * self.original_index_x
-            
-            # 单曲线模式：清除旧图并绘制新图
-            # 先清除cursor items（包括scene中的items）
-            # 绘制新变量时完全清除对象池，避免复用异常状态的items
-            self._clear_cursor_items(hide_only=False)
-            
-            # 手动清理所有图形项，避免PyQtGraph的clearPlots scene不匹配问题
-            self._safe_clear_plot_items()
-            self.curves.clear()  # 清空多曲线数据
-            
-            # ========== 性能优化：创建单曲线 ==========
-            _pen = pg.mkPen(color='blue', width=DEFAULT_LINE_WIDTH)
-            self.curve = self.plot_item.plot(
-                x_values, self.original_y, 
-                pen=_pen, 
-                name=var_name,
-                skipFiniteCheck=True
-            )
-            
-            # 性能优化说明：
-            # - 自动降采样：plot_item.setDownsampling(mode='peak', auto=True) 已配置
-            # - 视图裁剪：plot_item.setClipToView(True) 已配置
-            # - 智能防抖：根据数据量动态调整延迟
-            # 这些设置会自动应用到曲线，无需OpenGL也能获得良好性能
-            
-            # 延迟更新样式（带安全检查）
-            self._queue_ui_refresh()
-
-            # 更新标题
-            full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
-            self.update_left_header(full_title)
-            
-            # 设置坐标轴范围
-            # 始终保持x轴范围不变，只更新y轴范围
-            # 因为所有plot的x轴都是linked的，改变x轴会影响其他plot
-            
-            # 处理单点或所有点x坐标相同的特殊情况
-            special_limits = self.handle_single_point_limits(x_values, self.original_y)
-            if special_limits:
-                min_x, max_x, min_y, max_y = special_limits
-                self._set_safe_y_range(min_y, max_y)
-                # if not is_mdf:
-                #     self._set_x_limits_with_min_range(min_x, max_x)
-            else:
-                # 1. 基于数据的全范围设置y轴limits
-                data_min_y = np.nanmin(self.original_y)
-                data_max_y = np.nanmax(self.original_y)
-                self._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
-                
-                # 2. 基于当前x轴范围内的数据设置y轴viewRange
-                current_x_range = self.view_box.viewRange()[0]
-                x_min, x_max = current_x_range
-                min_y, max_y = self._get_y_range_in_x_window(x_values, self.original_y, x_min, x_max)
-                self._set_safe_y_range(min_y, max_y, set_limits=False)
-                
-                # 3. 更新x轴limits（合并本 plot 和全局所有可见 plot 的范围）
-                # self._update_x_limits_for_plot(x_values, self.original_y, is_mdf)
-            
-            # 更新光标 - 在单曲线模式下使用当前数据范围即可
-            min_x, max_x = np.min(x_values), np.max(x_values)
-            self._set_vline_bounds([min_x, max_x])
-            self.plot_item.update()
-            self._update_cursor_after_plot(min_x, max_x)
-
-            self._recalc_max_point_density()
-            if not getattr(self, '_is_updating_data', False):
-                main_window = self.window()
-                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                    main_window._sync_min_xrange()
-
-            return True
-            
-        except Exception as e:
-            QMessageBox.critical(self, "绘图错误", f"绘制变量时发生错误: {str(e)}")
-            return False
+        """绘制变量到图表 → 委托到 PlotDataManager"""
+        return self._plot_data_manager.plot_variable(var_name, show_duplicate_warning)
 
     def _compute_valid_min_max(self, values) -> tuple[float | None, float | None]:
-        """Safely compute min/max ignoring NaN/INF values."""
-        if values is None:
-            return None, None
-
-        try:
-            if isinstance(values, pd.Series):
-                arr = pd.to_numeric(values, errors='coerce').to_numpy(dtype=np.float64)
-            else:
-                arr = np.asarray(values, dtype=np.float64)
-        except (ValueError, TypeError):
-            try:
-                arr = pd.to_numeric(pd.Series(values), errors='coerce').to_numpy(dtype=np.float64)
-            except Exception:
-                return None, None
-
-        if arr.size == 0:
-            return None, None
-
-        finite_mask = np.isfinite(arr)
-        if not finite_mask.any():
-            return None, None
-
-        finite_values = arr[finite_mask]
-        return float(np.min(finite_values)), float(np.max(finite_values))
+        """Safely compute min/max ignoring NaN/INF values → 委托到 PlotDataManager"""
+        return self._plot_data_manager._compute_valid_min_max(values)
 
     def _get_y_range_in_x_window(self, x_values: np.ndarray, y_values: np.ndarray, x_min: float, x_max: float):
-        """计算在指定x轴范围内的y值范围
-        
-        Args:
-            x_values: X轴数据数组
-            y_values: Y轴数据数组
-            x_min: X轴范围最小值
-            x_max: X轴范围最大值
-            
-        Returns:
-            tuple: (min_y, max_y) 在x范围内的y值最小值和最大值
-        """
-        try:
-            # 找到在x范围内的数据点
-            mask = (x_values >= x_min) & (x_values <= x_max)
-            if not np.any(mask):
-                # 如果没有数据点在范围内，返回全部数据的范围
-                bounds = self._compute_valid_min_max(y_values)
-            else:
-                y_in_range = y_values[mask]
-                bounds = self._compute_valid_min_max(y_in_range)
-                if bounds[0] is None or bounds[1] is None:
-                    bounds = self._compute_valid_min_max(y_values)
-
-            if bounds[0] is None or bounds[1] is None:
-                return 0.0, 1.0
-            return bounds
-        except Exception:
-            # 出错时返回全部数据范围
-            bounds = self._compute_valid_min_max(y_values)
-            if bounds[0] is None or bounds[1] is None:
-                return 0.0, 1.0
-            return bounds
+        """计算在指定x轴范围内的y值范围 → 委托到 PlotDataManager"""
+        return self._plot_data_manager._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
     
     def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray, update_x_range: bool = True):
         """设置绘图坐标轴 → 委托到 AxisManager"""
@@ -1779,67 +1169,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._axis_manager._reset_plot_limits()
 
     def _clear_plot_data(self):
-        """清除绘图数据"""
-        try:
-            # 先清除cursor items（包括scene中的items）
-            # 重要：清除plot时需要完全清除对象池（hide_only=False）
-            # 这样可以避免对象池中的items处于异常状态（scene=None但PyQtGraph仍认为它属于PlotItem）
-            self._clear_cursor_items(hide_only=False)
-            
-            # 清除所有plot items
-            self._safe_clear_plot_items()
-            self.axis_y.setLabel(text="")
-            self.y_name = ''
-            self.y_format = ''
-            self.update_left_header("channel name")
-            self.update_right_header("")
-            
-            # 清除单曲线的缓存数据
-            if self.curve:
-                if hasattr(self.curve, '_cached_pen_key'):
-                    delattr(self.curve, '_cached_pen_key')
-                if hasattr(self.curve, '_has_symbols'):
-                    delattr(self.curve, '_has_symbols')
-                try:
-                    self.curve.clear()
-                except Exception:
-                    logger.debug("curve.clear() 异常，忽略", exc_info=True)
-            
-            self.curve = None
-            self.original_index_x = None
-            self.original_y = None
-            
-            # 清除多曲线数据
-            for var_name, ci in self.curves.items():
-                if ci.curve is not None:
-                    curve = ci.curve
-                    # 清除样式缓存
-                    if hasattr(curve, '_cached_pen_key'):
-                        delattr(curve, '_cached_pen_key')
-                    if hasattr(curve, '_has_symbols'):
-                        delattr(curve, '_has_symbols')
-                    # 清除数据
-                    try:
-                        curve.clear()
-                    except Exception:
-                        logger.debug("curve.clear() 异常，忽略", exc_info=True)
-            
-            self.curves.clear()
-            self.is_multi_curve_mode = False
-            self.current_color_index = 0
-
-            self._recalc_max_point_density()
-            if not getattr(self, '_is_updating_data', False):
-                main_window = self.window()
-                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                    main_window._sync_min_xrange()
-        except Exception as e:
-            print(f"清除绘图数据时出错: {e}")
+        """清除绘图数据 → 委托到 PlotDataManager"""
+        self._plot_data_manager._clear_plot_data()
 
     def clear_plot_item(self):
-        """清除绘图项"""
-        self._reset_plot_limits()
-        self._clear_plot_data()
+        """清除绘图项 → 委托到 PlotDataManager"""
+        self._plot_data_manager.clear_plot_item()
         
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
@@ -2093,327 +1428,28 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return False
     
     def update_multi_curve_mode(self):
-        """更新多曲线模式状态"""
-        curve_count = len(self.curves)
-        
-        # 如果正在批量添加，不要自动切换模式
-        if not hasattr(self, '_batch_adding'):
-            self._batch_adding = False
-            
-        if not self._batch_adding:
-            self.is_multi_curve_mode = curve_count > 1
-        
-        if self.is_multi_curve_mode:
-            # 多曲线模式：显示legend
-            self.update_legend()
-        else:
-            # 单曲线模式：显示传统标题
-            if curve_count == 1:
-                var_name = list(self.curves.keys())[0]
-                full_title = f"{var_name} ({self.units.get(var_name, '')})".strip()
-                self.update_left_header(full_title)
-            else:
-                self.update_left_header("channel name")
-                self.update_right_header("")
-    
+        """更新多曲线模式状态 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager.update_multi_curve_mode()
+
     def update_legend(self):
-        """更新图例显示
-        
-        在多曲线模式下，在左上角显示所有曲线的图例。
-        图例样式：
-        - 可见曲线：实心方块(■) + 曲线颜色 + 变量名(单位)
-        - 隐藏曲线：空心方块(□) + 半透明颜色 + 灰色文字
-        
-        点击图例中的曲线名可以切换该曲线的显示/隐藏状态。
-        """
-        if not self.is_multi_curve_mode:
-            return
-            
-        # 构建图例文本（包含所有曲线，不管是否可见）
-        legend_items = []
-        for var_name, ci in self.curves.items():
-            color = ci.color
-            unit = self.units.get(var_name, '')
-            legend_text = f"{var_name} ({unit})" if unit else var_name
-            
-            # 根据可见性调整显示样式
-            if ci.visible:
-                # 可见：实心方块 + 加粗文字
-                legend_items.append(f"<span style='color: {color}; font-weight: bold;'>■</span> {legend_text}")
-            else:
-                # 隐藏：空心方块 + 灰色文字
-                legend_items.append(f"<span style='color: {color}; opacity: 0.5;'>□</span> <span style='color: gray;'>{legend_text}</span>")
-        
-        if legend_items:
-            legend_text = " | ".join(legend_items)
-            self.update_left_header(legend_text)
-        else:
-            self.update_left_header("channel name")
+        """更新图例显示 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager.update_legend()
     
     def toggle_curve_visibility_by_name(self, var_name):
-        """通过变量名切换曲线可见性
+        """通过变量名切换曲线可见性 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager.toggle_curve_visibility_by_name(var_name)
 
-        点击图例中的曲线名时调用，切换该曲线的显示/隐藏状态。
-        如果曲线对象失效（不在scene中），会尝试重新创建。
-
-        Args:
-            var_name: 要切换可见性的变量名
-        """
-        if var_name not in self.curves:
-            return
-
-        ci = self.curves[var_name]
-        # 切换可见性状态
-        ci.visible = not ci.visible
-        new_visible = ci.visible
-
-        # 更新曲线对象的可见性
-        if ci.curve is not None:
-            curve_obj = ci.curve
-
-            try:
-                # 检查曲线对象是否仍然有效
-                if curve_obj.scene() is not None:
-                    curve_obj.setVisible(new_visible)
-                else:
-                    # 曲线对象已经不在scene中，重新创建
-                    self._recreate_curve(var_name)
-            except Exception as e:
-                # 尝试重新创建曲线
-                self._recreate_curve(var_name)
-        # 更新图例显示
-        self.update_legend()
-
-        # 更新 Y轴范围以适应所有可见曲线
-        # 当切换曲线可见性时，需要重新计算y轴范围，确保所有可见曲线都能完整显示
-        if self.is_multi_curve_mode:
-            self._update_axes_for_multi_curve(update_x_range=False)
-        # 更新cursor显示（如果cursor可见）
-        if self.vline.isVisible():
-            self.update_cursor_label()
-    
     def _recreate_curve(self, var_name):
-        """重新创建失效的曲线"""
-        try:
-            if var_name in self.curves:
-                ci = self.curves[var_name]
-                success = self.add_variable_to_plot(
-                    var_name,
-                    skip_existence_check=True,
-                    preferred_color=ci.color
-                )
-                if success:
-                    pass
-                else:
-                    pass
-            else:
-                pass
-        except Exception as e:
-            pass
+        """重新创建失效的曲线 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._recreate_curve(var_name)
     
     def _on_legend_clicked(self, event):
-        """Legend点击事件处理
-        
-        使用QTextDocument进行精确的hitTest，定位用户点击的是哪条曲线，
-        然后切换该曲线的显示/隐藏状态。
-        
-        处理流程：
-        1. 将legend HTML文本解析为QTextDocument
-        2. 使用hitTest找到点击位置对应的文本位置
-        3. 根据文本位置确定对应的曲线索引
-        4. 调用toggle_curve_visibility_by_name切换曲线可见性
-        
-        Args:
-            event: 鼠标点击事件
-        """
-        if not self.is_multi_curve_mode:
-            return
-        
-        # 获取点击位置
-        pos = event.pos()
-        click_x = pos.x()
-        
-        # 改进的点击检测：基于实际legend文本内容进行更精确的匹配
-        if not self.curves:
-            return
-            
-        # 获取当前曲线列表（按legend显示顺序）
-        curve_list = list(self.curves.items())
-        
-        if not curve_list:
-            return
-        
-        # 使用QTextDocument + hitTest精确定位点击位置
-        from PySide6.QtGui import QTextDocument, QTextCursor
-        from PySide6.QtCore import QPointF
-        
-        # 构建完整的legend HTML（与update_legend完全一致）
-        legend_parts = []
-        for var_name, ci in curve_list:
-            color = ci.color
-            unit = self.units.get(var_name, '')
-            legend_text = f"{var_name} ({unit})" if unit else var_name
-            
-            if ci.visible:
-                symbol = f"<span style='color: {color}; font-weight: bold;'>■</span>"
-                legend_parts.append(f"{symbol} {legend_text}")
-            else:
-                # 隐藏时：空心方格 + 灰色文字（与update_legend一致）
-                symbol = f"<span style='color: {color}; opacity: 0.5;'>□</span>"
-                legend_parts.append(f"{symbol} <span style='color: gray;'>{legend_text}</span>")
-        
-        full_html = " | ".join(legend_parts)
-        
-        # 创建QTextDocument来进行hitTest
-        doc = QTextDocument()
-        doc.setDocumentMargin(0)
-        doc.setDefaultFont(self.label_left.font())
-        doc.setHtml(full_html)
-        
-        # 使用hitTest找到点击位置对应的字符位置
-        layout = doc.documentLayout()
-        hit_pos = layout.hitTest(QPointF(click_x, pos.y()), Qt.HitTestAccuracy.ExactHit)
-        
-        # 计算每个legend部分在HTML中的字符位置范围
-        clicked_index = -1
-        char_pos = 0
-        item_ranges = []
-        
-        for i, part in enumerate(legend_parts):
-            if i > 0:
-                # 加上分隔符" | "的长度（注意：纯文本长度，不是HTML长度）
-                char_pos += 3  # " | " = 3个字符
-            
-            part_start = char_pos
-            # 计算这个part的纯文本长度（去除HTML标签）
-            part_doc = QTextDocument()
-            part_doc.setHtml(part)
-            part_text_length = len(part_doc.toPlainText())
-            part_end = part_start + part_text_length
-            
-            item_ranges.append({
-                'index': i,
-                'start': part_start,
-                'end': part_end,
-                'var_name': curve_list[i][0]
-            })
-            
-            if hit_pos >= part_start and hit_pos < part_end:
-                clicked_index = i
-                break
-            
-            char_pos = part_end
-        
-        # 如果hitTest没有精确匹配（点击在分隔符区域或文本范围外），找距离最近的item
-        if clicked_index == -1:
-            # 如果hitTest失败（返回-1），说明点击在文本范围外
-            if hit_pos < 0:
-                # 根据实际点击像素位置判断：左侧选第一个，右侧选最后一个
-                total_text_width = doc.size().width()
-                if click_x < total_text_width / 2:
-                    clicked_index = 0
-                else:
-                    clicked_index = len(curve_list) - 1
-            else:
-                # 计算到每个item的距离，选择最近的
-                min_distance = float('inf')
-                for item in item_ranges:
-                    if hit_pos < item['start']:
-                        distance = item['start'] - hit_pos
-                    elif hit_pos >= item['end']:
-                        distance = hit_pos - item['end']
-                    else:
-                        distance = 0
-                    
-                    if distance < min_distance:
-                        min_distance = distance
-                        clicked_index = item['index']
-        
-        # 确保索引在有效范围内
-        clicked_index = max(0, min(clicked_index, len(curve_list) - 1))
-        
-        # 切换对应曲线的可见性
-        var_name = curve_list[clicked_index][0]
-        self.toggle_curve_visibility_by_name(var_name)
+        """Legend点击事件处理 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._on_legend_clicked(event)
     
     def _update_axes_for_multi_curve(self, update_x_range: bool = False):
-        """为多曲线更新坐标轴范围
-        
-        计算所有可见曲线的数据范围，并更新坐标轴显示范围。
-        只考虑visible=True的曲线，忽略隐藏的曲线。
-        
-        Args:
-            update_x_range: 是否更新X轴范围。默认为False，保持当前x轴范围不变。
-                           当为True时（通常是第一次添加曲线或批量添加完成），会设置x轴范围为数据的全范围。
-        """
-        if not self.curves:
-            return
-
-        pairs = self._collect_visible_curve_pairs()
-        if not pairs:
-            return
-        x_values = np.concatenate([p[0] for p in pairs])
-        y_values = np.concatenate([p[1] for p in pairs])
-        if x_values.size == 0 or y_values.size == 0:
-            return
-
-        if update_x_range:
-            # 更新x和y轴范围（第一次添加曲线或批量添加完成）
-            self._setup_plot_axes(x_values, y_values, update_x_range=True)
-        else:
-            # 保持x轴范围不变，只更新y轴范围
-
-            # 1. 先基于所有数据的全范围设置y轴limits
-            all_data_min_y = np.nanmin(y_values)
-            all_data_max_y = np.nanmax(y_values)
-            self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
-
-            # 2. 再根据当前x范围设置y轴viewRange
-            # 检查是否是单点数据
-            special_limits = self.handle_single_point_limits(x_values, y_values)
-            if special_limits:
-                # 单点数据：使用特殊处理
-                # handle_single_point_limits已经返回了扩展后的x范围，直接使用
-                min_x, max_x, min_y, max_y = special_limits
-                self._set_safe_y_range(min_y, max_y, set_limits=False)
-                # 更新x轴limits（不再额外扩展，因为handle_single_point_limits已经扩展过了）
-                # self._set_x_limits_with_min_range(min_x, max_x)
-            else:
-                # 正常数据
-                current_x_range = self.view_box.viewRange()[0]
-                x_min, x_max = current_x_range
-
-                # 计算所有曲线在当前x轴范围内的y值范围
-                all_y_in_range = []
-                for x_arr, y_arr in pairs:
-                    min_y, max_y = self._get_y_range_in_x_window(
-                        x_arr,
-                        y_arr,
-                        x_min,
-                        x_max
-                    )
-                    all_y_in_range.extend([min_y, max_y])
-
-                if all_y_in_range:
-                    final_min_y = np.nanmin(all_y_in_range)
-                    final_max_y = np.nanmax(all_y_in_range)
-                    self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
-
-                # 3. 更新x轴limits — 已关闭
-                # data_min_x = np.min(x_values)
-                # data_max_x = np.max(x_values)
-                # 
-                # main_window = self.window()
-                # if main_window is not None and hasattr(main_window, 'collect_global_x_range'):
-                #     global_min, global_max = main_window.collect_global_x_range(curves_filter="all")
-                #     if global_min is not None:
-                #         data_min_x = min(data_min_x, global_min)
-                #         data_max_x = max(data_max_x, global_max)
-
-                # padding_x = DEFAULT_PADDING_VAL_X
-                # limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-                # limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-                # self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+        """为多曲线更新坐标轴范围 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._update_axes_for_multi_curve(update_x_range)
 
     def _update_x_limits_for_plot(self, x_values: np.ndarray, y_values: np.ndarray, is_mdf: bool):
         """
@@ -2542,165 +1578,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             super().mouseReleaseEvent(event)
     
     def add_mark_region(self, min_x, max_x):
-        self.mark_region = pg.LinearRegionItem([min_x, max_x], movable=True)
-        #self.mark_region.setBrush(pg.mkBrush(181,196,177, 80))
-        for line in self.mark_region.lines:
-            line.setHoverPen(pg.mkPen(color='r', width=10)) 
-            
-        self.plot_item.addItem(self.mark_region)
-        self.mark_region.sigRegionChanged.connect(self.window().sync_mark_regions)
+        """添加标记区域 → 委托到 MarkRegionManager"""
+        self._mark_region_manager.add_mark_region(min_x, max_x)
 
     def remove_mark_region(self):
-        if self.mark_region and self.mark_region.scene() is not None:
-            self.plot_item.removeItem(self.mark_region)
-        self.mark_region = None
+        """移除标记区域 → 委托到 MarkRegionManager"""
+        self._mark_region_manager.remove_mark_region()
 
     def update_mark_region(self):
-        if self.mark_region:
-            old_min, old_max = self.mark_region.getRegion()
-            # 更新基于新factor/offset，但由于x是scaled的，不需要额外缩放
-            blocker = QSignalBlocker(self.mark_region)
-            self.mark_region.setRegion([old_min, old_max])  # 实际不需要变，因为x已scale
+        """更新标记区域 → 委托到 MarkRegionManager"""
+        self._mark_region_manager.update_mark_region()
 
     def get_mark_stats(self):
-        """获取标记区域的统计信息
-        
-        【NumPy优化】使用NumPy掩码数组批量计算统计值，避免循环过滤
-        """
-        if not self.mark_region:
-            return None
-        
-        min_x, max_x = self.mark_region.getRegion()
-        
-        if self.is_multi_curve_mode:
-            # 多曲线模式：返回每个曲线的统计信息
-            stats_list = []
-            for var_name, ci in self.curves.items():
-                if not ci.visible:
-                    continue
-                
-                if ci.curve is None:
-                    continue
-                
-                # 【NumPy优化】优先使用缓存的x_data和y_data，如果没有则从curve获取
-                if ci.x_data is not None and ci.y_data is not None:
-                    x_data = ci.x_data
-                    y_data = ci.y_data
-                elif ci.y_data is not None:
-                    x_data = self.offset + self.factor * np.arange(1, len(ci.y_data) + 1, dtype=np.float32)
-                    y_data = ci.y_data
-                else:
-                    curve = ci.curve
-                    x_data, y_data = curve.getData()
-                    if x_data is None or len(x_data) == 0:
-                        continue
-                
-                # 确保是NumPy数组（保持原有精度，不强制转换）
-                x_data = np.asarray(x_data)
-                y_data = np.asarray(y_data)
-                # 如果是整数类型且幅值适合，则转换为float32以减少内存
-                if x_data.dtype.kind in 'iu':
-                    safe_x, _ = _evaluate_float32_safety(x_data)
-                    x_dtype = np.float32 if safe_x else np.float64
-                    x_data = x_data.astype(x_dtype)
-                if y_data.dtype.kind in 'iu':
-                    safe_y, _ = _evaluate_float32_safety(y_data)
-                    y_dtype = np.float32 if safe_y else np.float64
-                    y_data = y_data.astype(y_dtype)
-                
-                # 计算边界点
-                idx_left = np.argmin(np.abs(x_data - min_x))
-                idx_right = np.argmin(np.abs(x_data - max_x))
-                x1 = x_data[idx_left]
-                y1 = y_data[idx_left]
-                x2 = x_data[idx_right]
-                y2 = y_data[idx_right]
-                dx = x2 - x1
-                dy = y2 - y1
-                slope = float('inf') if dx == 0 else dy / dx
-                
-                # 【NumPy优化】使用掩码数组批量计算统计值
-                mask = (x_data >= min_x) & (x_data <= max_x)
-                if not np.any(mask):
-                    y_avg = y_max = y_min = np.nan
-                else:
-                    y_masked = y_data[mask]
-                    valid_y = y_masked[~np.isnan(y_masked)]
-                    if len(valid_y) > 0:
-                        y_avg = np.mean(valid_y)
-                        y_max = np.max(valid_y)
-                        y_min = np.min(valid_y)
-                    else:
-                        y_avg = y_max = y_min = np.nan
-                
-                # 添加变量名到标签
-                unit = self.units.get(var_name, '')
-                label = f"{var_name} ({unit})" if unit else var_name
-                
-                stats_list.append(MarkStatEntry(
-                    x1=x1, x2=x2, y1=y1, y2=y2,
-                    dx=dx, dy=dy, slope=slope,
-                    label=label, y_avg=y_avg, y_max=y_max, y_min=y_min,
-                ))
-            
-            return stats_list if stats_list else None
-        else:
-            # 单曲线模式：优先使用original_index_x和original_y
-            if not self.curve:
-                return None
-            
-            # 【NumPy优化】优先使用original_index_x和original_y
-            if hasattr(self, 'original_index_x') and hasattr(self, 'original_y') and self.original_index_x is not None:
-                x_data = self.offset + self.factor * self.original_index_x
-                y_data = self.original_y
-            else:
-                x_data, y_data = self.curve.getData()
-                if x_data is None or len(x_data) == 0:
-                    return None
-            
-            # 确保是NumPy数组（保持原有精度，不强制转换）
-            x_data = np.asarray(x_data)
-            y_data = np.asarray(y_data)
-            # 如果是整数类型且幅值适合，则转换为float32以减少内存
-            if x_data.dtype.kind in 'iu':
-                safe_x, _ = _evaluate_float32_safety(x_data)
-                x_dtype = np.float32 if safe_x else np.float64
-                x_data = x_data.astype(x_dtype)
-            if y_data.dtype.kind in 'iu':
-                safe_y, _ = _evaluate_float32_safety(y_data)
-                y_dtype = np.float32 if safe_y else np.float64
-                y_data = y_data.astype(y_dtype)
-            
-            idx_left = np.argmin(np.abs(x_data - min_x))
-            idx_right = np.argmin(np.abs(x_data - max_x))
-            x1 = x_data[idx_left]
-            y1 = y_data[idx_left]
-            x2 = x_data[idx_right]
-            y2 = y_data[idx_right]
-            dx = x2 - x1
-            dy = y2 - y1
-            slope = float('inf') if dx == 0 else dy / dx
-            
-            # 【NumPy优化】使用掩码数组批量计算统计值
-            mask = (x_data >= min_x) & (x_data <= max_x)
-            if not np.any(mask):
-                y_avg = y_max = y_min = np.nan
-            else:
-                y_masked = y_data[mask]
-                valid_y = y_masked[~np.isnan(y_masked)]
-                if len(valid_y) > 0:
-                    y_avg = np.mean(valid_y)
-                    y_max = np.max(valid_y)
-                    y_min = np.min(valid_y)
-                else:
-                    y_avg = y_max = y_min = np.nan
-            
-            return [MarkStatEntry(
-                x1=x1, x2=x2, y1=y1, y2=y2,
-                dx=dx, dy=dy, slope=slope,
-                label=self.label_left.text(),
-                y_avg=y_avg, y_max=y_max, y_min=y_min,
-            )]
+        """获取标记区域统计 → 委托到 MarkRegionManager"""
+        return self._mark_region_manager.get_mark_stats()
 
     def _apply_plot_style(self, show_symbols: bool):
         """应用绘图样式 - 基于xrange只有两种搭配：细线+symbol 或 粗线无symbol
