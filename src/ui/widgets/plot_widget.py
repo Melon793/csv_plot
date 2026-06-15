@@ -1,10 +1,6 @@
 from __future__ import annotations
 import sys
 import os
-import weakref
-import subprocess
-from pathlib import Path
-from threading import Lock
 from typing import Any
 
 if sys.platform == "darwin":  # macOS
@@ -14,24 +10,17 @@ if sys.platform == "darwin":  # macOS
 os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
-from src.ui.widgets.custom_viewbox import CustomViewBox
-from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, MIN_INDEX_LENGTH, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT, _evaluate_float32_safety, DEFAULT_SHOW_X_AXIS_LABEL, RATIO_RESET_PLOTS)
-from src.core.data_types import CurveInfo, MarkStatEntry
-from src.core.scheduler import UnifiedUpdateScheduler
-from src.ui.table_dialog import DataTableDialog, DropOverlay
+from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.data_types import CurveInfo
+from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
-from src.ui.variable_list import MyTableWidget
-
-from src.core.logger import LogManager, get_logger
-from src.ui.dialogs.log_window import LogWindow
 
 
-from PySide6.QtCore import Qt, QMargins, QTimer, QPoint, QPointF, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker
-from PySide6.QtGui import QFontMetrics, QPen, QColor, QIcon, QFont, QCursor, QAction
+from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QToolButton, QAbstractItemView, QLabel, QLineEdit,
-    QMessageBox, QSizePolicy, QGraphicsLinearLayout, QGraphicsProxyWidget, QGraphicsWidget, QRubberBand, QSplitter, QMenu,
+    QApplication, QAbstractItemView,
+    QMessageBox,
 )
 import pyqtgraph as pg
 
@@ -48,8 +37,6 @@ if sys.platform == "win32": # Windows
 
 elif sys.platform == "darwin":  # macOS
     ico_path = resource_path("assets/icon.icns")  
-
-_widget_logger = get_logger("widget")
 
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
@@ -660,63 +647,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_manager.reset_pin_state()
 
     def _update_vline_bounds_from_data(self):
-        """根据当前绘制的数据更新vline bounds
-
-        这个函数计算当前所有可见曲线的x范围，并更新vline的移动边界。
-        优先使用理论值（基于original_index_x + factor/offset）计算bounds，
-        避免因异步更新导致的bounds不一致问题。
-        """
-        try:
-            # 优先策略1：单曲线模式下，使用 original_index_x + factor/offset 计算理论bounds
-            if hasattr(self, 'original_index_x') and self.original_index_x is not None and len(self.original_index_x) > 0:
-                min_index = np.min(self.original_index_x)
-                max_index = np.max(self.original_index_x)
-                min_x = self.offset + self.factor * min_index
-                max_x = self.offset + self.factor * max_index
-                self._set_vline_bounds([min_x, max_x])
-                return min_x, max_x
-
-            # 优先策略2：多曲线模式下，使用数据长度 + factor/offset 计算理论bounds
-            if self.is_multi_curve_mode and self.curves:
-                # 获取任一curve的数据长度
-                for ci in self.curves.values():
-                    if ci.y_data is not None:
-                        datalength = len(ci.y_data)
-                        if datalength > 0:
-                            min_x = self.offset + self.factor * 1
-                            max_x = self.offset + self.factor * datalength
-                            self._set_vline_bounds([min_x, max_x])
-                            return min_x, max_x
-                        break
-
-            # Fallback策略1：从实际curve数据读取（多曲线模式）
-            if self.is_multi_curve_mode and self.curves:
-                x_arrays = self._collect_visible_curve_arrays('x_data')
-                if x_arrays:
-                    combined = np.concatenate(x_arrays)
-                    min_x, max_x = np.nanmin(combined), np.nanmax(combined)
-                    self._set_vline_bounds([min_x, max_x])
-                    return min_x, max_x
-
-            # Fallback策略2：从实际curve数据读取（单曲线模式）
-            if self.curve is not None:
-                x_data, _ = self.curve.getData()
-                if x_data is not None and len(x_data) > 0:
-                    min_x, max_x = np.min(x_data), np.max(x_data)
-                    self._set_vline_bounds([min_x, max_x])
-                    return min_x, max_x
-
-            # Fallback策略3：使用xMin/xMax
-            if hasattr(self, 'xMin') and hasattr(self, 'xMax'):
-                self._set_vline_bounds([self.xMin, self.xMax])
-                return self.xMin, self.xMax
-            else:
-                self._set_vline_bounds([None, None])
-                return None, None
-        except Exception as e:
-            logger.warning("Error updating vline bounds: %s", e)
-            self._set_vline_bounds([None, None])
-            return None, None
+        """根据当前绘制的数据更新vline bounds → 委托到 CursorManager"""
+        return self._cursor_manager._update_vline_bounds_from_data()
     
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
         """绘图后更新光标边界和可见性 → 委托到 CursorManager"""
@@ -770,106 +702,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.window().request_mark_stats_refresh()
 
     def add_variables_to_plot(self, var_names: list[str]):
-        """批量添加变量到当前绘图区，供拖拽或右键操作复用"""
-        names = [name.strip() for name in (var_names or []) if isinstance(name, str) and name.strip()]
-        if not names:
-            return
-
-        if len(names) > 1:
-            failed_vars = []
-            success_vars = []
-            variables_data = []
-
-            for var_name in names:
-                is_valid, _ = self._validate_plot_data(var_name)
-                if not is_valid:
-                    failed_vars.append(var_name)
-                    continue
-
-                success, _, x_array, y_array, y_format = self._prepare_plot_data(var_name)
-                if not success:
-                    failed_vars.append(var_name)
-                    continue
-
-                if (self.is_multi_curve_mode and var_name in self.curves) or \
-                   (not self.is_multi_curve_mode and var_name == self.y_name):
-                    failed_vars.append(var_name)
-                    continue
-
-                variables_data.append((var_name, x_array, y_array, y_format))
-
-            self._batch_adding = True
-
-            if variables_data:
-                if not self.is_multi_curve_mode and self.curve and self.y_name:
-                    current_color = 'blue'
-                    if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
-                        current_pen = self.curve.opts['pen']
-                        if hasattr(current_pen, 'color'):
-                            current_color = current_pen.color().name()
-
-                    x_data_val = self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None
-
-                    self.curves[self.y_name] = CurveInfo(
-                        var_name=self.y_name,
-                        curve=self.curve,
-                        x_data=x_data_val,
-                        y_data=self.original_y if self.original_y is not None else None,
-                        color=current_color,
-                        y_format=self.y_format,
-                        visible=True
-                    )
-                    self.current_color_index = 1
-
-                for var_name, x_array, y_array, y_format in variables_data:
-                    x_values = self.offset + self.factor * x_array
-                    color = self.curve_colors[self.current_color_index % len(self.curve_colors)]
-                    self.current_color_index += 1
-
-                    pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-                    curve = self.plot_item.plot(x_values, y_array, pen=pen, name=var_name, skipFiniteCheck=True)
-
-                    self.curves[var_name] = CurveInfo(
-                        var_name=var_name,
-                        curve=curve,
-                        x_data=x_values,
-                        y_data=y_array,
-                        color=color,
-                        y_format=y_format or '',
-                        visible=True
-                    )
-
-                    success_vars.append(var_name)
-
-                self.is_multi_curve_mode = len(self.curves) > 1
-
-            self._batch_adding = False
-
-            if success_vars:
-                if self.is_multi_curve_mode:
-                    self.update_legend()
-
-                self._update_axes_for_multi_curve(update_x_range=False)
-
-                x_arrays = self._collect_visible_curve_arrays('x_data')
-                if x_arrays:
-                    combined = np.concatenate(x_arrays)
-                    min_x, max_x = np.nanmin(combined), np.nanmax(combined)
-                    self._set_vline_bounds([min_x, max_x])
-                    self._update_cursor_after_plot(min_x, max_x)
-
-                if self.vline.isVisible():
-                    self.update_cursor_label()
-
-                self._recalc_max_point_density()
-                main_window = self.window()
-                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                    main_window._sync_min_xrange()
-
-            if failed_vars:
-                QMessageBox.information(self, "提示", f"以下变量已在绘图中:\n" + "\n".join(failed_vars))
-        else:
-            self.plot_variable(names[0])
+        """批量添加变量到当前绘图区 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager.add_variables_to_plot(var_names)
 
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
         """验证绘图数据的有效性 → 委托到 PlotDataManager"""
@@ -913,253 +747,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
                              show_duplicate_warning: bool = True, preferred_color: str | None = None) -> bool:
-        """添加变量到多曲线绘图
-        
-        这是多曲线绘图的核心方法，支持以下功能：
-        1. 自动处理单曲线到多曲线模式的转换
-        2. 防止重复添加相同变量
-        3. 支持批量添加模式（抑制中间坐标轴更新）
-        4. 自动颜色分配和曲线样式优化
-        
-        工作流程：
-        - 检查变量是否已存在（可选）
-        - 如果是从单曲线模式转换，将现有单曲线迁移到curves字典
-        - 创建新曲线并设置性能优化选项
-        - 更新坐标轴范围（非批量模式）
-        - 更新cursor显示
-        
-        Args:
-            var_name: 变量名称
-            x_values: X轴数据（可选，如果为None则从dataframe准备）
-            y_values: Y轴数据（可选，如果为None则从dataframe准备）
-            y_format: Y轴格式（可选，如's'时间格式、'date'日期格式等）
-            skip_existence_check: 是否跳过存在性检查（内部使用）
-            show_duplicate_warning: 是否显示重复变量警告（批量添加时设为False）
-            preferred_color: 恢复曲线时指定的颜色（可选）
-            
-        Returns:
-            bool: 添加是否成功。失败原因可能是：变量已存在、数据无效等
-        """
-        try:
-            # 如果数据未提供，则准备数据
-            if x_values is None or y_values is None:
-                success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(var_name)
-                if not success:
-                    QMessageBox.warning(self, "错误", error_msg)
-                    return False
-                x_values = self.offset + self.factor * x_array
-                y_values = y_array
-            
-            # 检查变量是否已存在（除非跳过检查）
-            if not skip_existence_check:
-                if (self.is_multi_curve_mode and var_name in self.curves) or \
-                   (not self.is_multi_curve_mode and var_name == self.y_name):
-                    if show_duplicate_warning:
-                        QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
-                    return False
-            
-            # 特殊情况：多曲线模式但curves为空，需要迁移单曲线
-            # 说明正在从单曲线过渡到多曲线，需要先将self.curve迁移到curves字典
-            if self.is_multi_curve_mode and len(self.curves) == 0 and self.curve and self.y_name:
-                # 将当前单曲线添加到curves字典
-                current_color = 'blue'
-                if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
-                    current_pen = self.curve.opts['pen']
-                    if hasattr(current_pen, 'color'):
-                        current_color = current_pen.color().name()
-                
-                x_data_val_1 = self.offset + self.factor * self.original_index_x if self.original_index_x is not None else None
-
-                self.curves[self.y_name] = CurveInfo(
-                    var_name=self.y_name,
-                    curve=self.curve,
-                    x_data=x_data_val_1,
-                    y_data=self.original_y if self.original_y is not None else None,
-                    color=current_color,
-                    y_format=self.y_format,
-                    visible=True
-                )
-                self.current_color_index = 1  # 从第二个颜色开始
-                
-                # 如果要添加的变量与已迁移的相同，直接返回
-                if var_name == self.y_name and not skip_existence_check:
-                    if show_duplicate_warning:
-                        QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
-                    return False
-            
-            # 如果当前是单曲线模式，需要先转换到多曲线模式
-            if not self.is_multi_curve_mode and self.curve and self.y_name:
-                # 检查要添加的变量是否与当前单曲线相同
-                if var_name == self.y_name and not skip_existence_check:
-                    # 相同变量，不需要转换模式，直接返回
-                    if show_duplicate_warning:
-                        QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
-                    return False
-                
-                # 将当前单曲线添加到curves字典
-                current_color = 'blue'  # 默认颜色
-                if hasattr(self.curve, 'opts') and 'pen' in self.curve.opts:
-                    current_pen = self.curve.opts['pen']
-                    if hasattr(current_pen, 'color'):
-                        current_color = current_pen.color().name()
-                
-                x_data_val_2 = self.offset + self.factor * self.original_index_x if self.original_index_x is not None else x_values
-
-                self.curves[self.y_name] = CurveInfo(
-                    var_name=self.y_name,
-                    curve=self.curve,
-                    x_data=x_data_val_2,
-                    y_data=self.original_y if self.original_y is not None else y_values,
-                    color=current_color,
-                    y_format=self.y_format,
-                    visible=True
-                )
-                self.current_color_index = 1  # 从第二个颜色开始
-            
-            # 选择颜色
-            default_color = self.curve_colors[self.current_color_index % len(self.curve_colors)]
-            self.current_color_index += 1
-            color = preferred_color or default_color
-            
-            # ========== 性能优化：创建曲线并配置渲染选项 ==========
-            pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-
-            # 创建曲线（保持简单参数以确保兼容性）
-            curve = self.plot_item.plot(
-                x_values, y_values, 
-                pen=pen, 
-                name=var_name,
-                skipFiniteCheck=True
-            )
-            
-            # 性能优化说明：
-            # - 自动降采样：plot_item.setDownsampling(mode='peak', auto=True) 已在setup_plot_area中配置
-            # - 视图裁剪：plot_item.setClipToView(True) 已在setup_plot_area中配置
-            # - 智能防抖：根据数据量和曲线数动态调整延迟
-            # 这些设置会自动应用到所有曲线，无需OpenGL也能获得良好性能
-            
-            # 存储曲线信息到curves字典
-            self.curves[var_name] = CurveInfo(
-                var_name=var_name,
-                curve=curve,
-                x_data=x_values,
-                y_data=y_values,
-                color=color,
-                y_format=y_format or '',
-                visible=True
-            )
-            
-            # 更新多曲线模式
-            self.update_multi_curve_mode()
-
-            if len(self.curves) == 1 and not self.y_name:
-                single_name = next(iter(self.curves.keys()))
-                single_ci = self.curves[single_name]
-                self.y_name = single_name
-                self.y_format = single_ci.y_format or ''
-            
-            # 更新坐标轴范围（批量添加时跳过，避免重复更新）
-            batch_adding = getattr(self, '_batch_adding', False)
-            if not batch_adding:
-                main_window = self.window()
-                is_mdf = (
-                    main_window is not None
-                    and hasattr(main_window, 'loader')
-                    and main_window.loader is not None
-                    and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
-                )
-                # 始终保持x轴范围不变，只更新y轴范围
-                # 因为所有plot的x轴都是linked的，改变x轴会影响其他plot
-                
-                # 1. 先计算所有曲线的全范围y值，用于设置y轴limits
-                y_arrays = self._collect_visible_curve_arrays('y_data')
-                if y_arrays:
-                    combined_y = np.concatenate(y_arrays)
-                    if combined_y.size:
-                        all_data_min_y = np.nanmin(combined_y)
-                        all_data_max_y = np.nanmax(combined_y)
-                        # 设置y轴limits为所有数据的范围
-                        self._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
-
-                # 2. 再根据当前x范围设置y轴viewRange
-                # 检查是否是单点数据
-                special_limits = self.handle_single_point_limits(x_values, y_values)
-                if special_limits:
-                    # 单点数据：使用特殊处理
-                    min_x, max_x, min_y, max_y = special_limits
-                    
-                    # 检查是否是第一个曲线
-                    has_other_curves = len(self.curves) > 1
-                    
-                    if not has_other_curves:
-                        # 第一次添加曲线：直接设置y轴viewRange
-                        self._set_safe_y_range(min_y, max_y, set_limits=False)
-                    else:
-                        # 已有曲线：根据新曲线扩展y轴viewRange
-                        current_y_range = self.view_box.viewRange()[1]
-                        current_min_y, current_max_y = current_y_range
-                        final_min_y = min(current_min_y, min_y)
-                        final_max_y = max(current_max_y, max_y)
-                        self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
-                    
-                    # self._update_x_limits_for_plot(x_values, y_values, is_mdf)
-                else:
-                    # 正常数据
-                    current_x_range = self.view_box.viewRange()[0]
-                    x_min, x_max = current_x_range
-                    
-                    # 计算新曲线在当前x轴范围内的y值范围
-                    new_min_y, new_max_y = self._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
-                    
-                    # 检查是否是第一个曲线
-                    has_other_curves = len(self.curves) > 1
-                    
-                    if not has_other_curves:
-                        # 第一次添加曲线：直接设置y轴viewRange为新曲线在当前x范围内的范围
-                        self._set_safe_y_range(new_min_y, new_max_y, set_limits=False)
-                    else:
-                        # 已有曲线：根据新曲线扩展y轴viewRange
-                        current_y_range = self.view_box.viewRange()[1]
-                        current_min_y, current_max_y = current_y_range
-                        
-                        # 扩展y轴viewRange（只考虑新曲线的min/max）
-                        final_min_y = min(current_min_y, new_min_y)
-                        final_max_y = max(current_max_y, new_max_y)
-                        
-                        # 更新y轴viewRange
-                        self._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
-                    
-                    # 3. 更新x轴limits（合并本 plot 和全局所有可见 plot 的范围）
-                    # self._update_x_limits_for_plot(x_values, y_values, is_mdf)
-            
-            # 更新cursor边界 - 使用所有曲线的x范围（而不仅仅是当前添加的变量）
-            x_arrays = self._collect_visible_curve_arrays('x_data')
-            if x_arrays:
-                combined_x = np.concatenate(x_arrays)
-                min_x, max_x = np.nanmin(combined_x), np.nanmax(combined_x)
-            else:
-                # 如果没有其他曲线，使用当前变量的范围
-                min_x, max_x = np.min(x_values), np.max(x_values)
-            self._set_vline_bounds([min_x, max_x])
-            
-            # 应用全局cursor值显示状态
-            self._update_cursor_after_plot(min_x, max_x)
-            
-            # 如果cursor可见，立即更新cursor标签以显示新添加的曲线
-            if self.vline.isVisible():
-                self.update_cursor_label()
-
-            if not batch_adding:
-                self._recalc_max_point_density()
-                main_window = self.window()
-                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                    main_window._sync_min_xrange()
-
-            return True
-            
-        except Exception as e:
-            QMessageBox.critical(self, "绘图错误", f"添加变量时发生错误: {str(e)}")
-            return False
+        """添加变量到多曲线绘图 → 委托到 MultiCurveManager"""
+        return self._multi_curve_manager.add_variable_to_plot(
+            var_name, x_values, y_values, y_format,
+            skip_existence_check, show_duplicate_warning, preferred_color
+        )
     
     def update_multi_curve_mode(self):
         """更新多曲线模式状态 → 委托到 MultiCurveManager"""
@@ -1186,29 +778,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._multi_curve_manager._update_axes_for_multi_curve(update_x_range)
 
     def _update_x_limits_for_plot(self, x_values: np.ndarray, y_values: np.ndarray, is_mdf: bool):
-        """
-        统一更新 X 轴 limits，合并本 plot 的可见曲线范围和全局所有可见 plot 的范围
-        """
-        x_arrays = self._collect_visible_curve_arrays('x_data')
-        if x_arrays:
-            combined_x = np.concatenate(x_arrays)
-            data_min_x = float(np.nanmin(combined_x))
-            data_max_x = float(np.nanmax(combined_x))
-        else:
-            data_min_x = float(np.min(x_values))
-            data_max_x = float(np.max(x_values))
-
-        main_window = self.window()
-        if main_window is not None and hasattr(main_window, 'collect_global_x_range'):
-            global_min, global_max = main_window.collect_global_x_range(curves_filter="all")
-            if global_min is not None:
-                data_min_x = min(data_min_x, global_min)
-                data_max_x = max(data_max_x, global_max)
-
-        padding_x = DEFAULT_PADDING_VAL_X
-        limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-        limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+        """统一更新 X 轴 limits → 委托到 AxisManager"""
+        self._axis_manager._update_x_limits_for_plot(x_values, y_values, is_mdf)
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
@@ -1328,157 +899,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return self._mark_region_manager.get_mark_stats()
 
     def _apply_plot_style(self, show_symbols: bool):
-        """应用绘图样式 - 基于xrange只有两种搭配：细线+symbol 或 粗线无symbol
-
-        【内存优化】缓存pen对象，避免zoom时重复创建导致内存泄漏
-        """
-        try:
-            # 优先检查curves字典（多曲线模式或从多曲线删到单曲线的情况）
-            if self.curves:
-                # 有curves字典：遍历所有曲线应用样式
-                for var_name, ci in self.curves.items():
-                    if ci.curve is None:
-                        continue
-
-                    curve = ci.curve
-                    color = ci.color
-
-                    # 缓存pen对象：检查当前样式是否匹配，避免重复创建
-                    if show_symbols:
-                        # xrange小：细线 + 符号
-                        cache_key = f'thin_{color}'
-                        if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                            pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
-                            curve.setPen(pen)
-                            curve._cached_pen_key = cache_key
-
-                        if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
-                            curve.setSymbol('s')
-                            curve.setSymbolSize(3)
-                            curve.setSymbolPen(color)
-                            curve.setSymbolBrush(color)
-                            curve._has_symbols = True
-                    else:
-                        # xrange大：粗线无符号
-                        cache_key = f'thick_{color}'
-                        if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                            pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                            curve.setPen(pen)
-                            curve._cached_pen_key = cache_key
-
-                        if not hasattr(curve, '_has_symbols') or curve._has_symbols:
-                            curve.setSymbol(None)
-                            curve._has_symbols = False
-            elif self.curve:
-                # 没有curves字典但有单曲线：使用self.curve
-                # 获取当前曲线的颜色
-                current_pen = self.curve.opts.get('pen', pg.mkPen('blue'))
-                color = current_pen.color().name() if hasattr(current_pen, 'color') else 'blue'
-
-                # 缓存pen对象：检查当前样式是否匹配，避免重复创建
-                if show_symbols:
-                    # xrange小：细线 + 符号
-                    cache_key = f'thin_{color}'
-                    if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
-                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
-                        self.curve.setPen(pen)
-                        self.curve._cached_pen_key = cache_key
-
-                    if not hasattr(self.curve, '_has_symbols') or not self.curve._has_symbols:
-                        self.curve.setSymbol('s')
-                        self.curve.setSymbolSize(3)
-                        self.curve.setSymbolPen(color)
-                        self.curve.setSymbolBrush(color)
-                        self.curve._has_symbols = True
-                else:
-                    # xrange大：粗线无符号
-                    cache_key = f'thick_{color}'
-                    if not hasattr(self.curve, '_cached_pen_key') or self.curve._cached_pen_key != cache_key:
-                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                        self.curve.setPen(pen)
-                        self.curve._cached_pen_key = cache_key
-
-                    if not hasattr(self.curve, '_has_symbols') or self.curve._has_symbols:
-                        self.curve.setSymbol(None)
-                        self.curve._has_symbols = False
-        except Exception as e:
-            print(f"应用绘图样式时出错: {e}")
+        """应用绘图样式 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._apply_plot_style(show_symbols)
 
     def _calculate_visible_points(self, range):
-        """计算当前可见范围的点数估算
-        
-        Args:
-            range: 视图范围 [[x_min, x_max], [y_min, y_max]]
-            
-        Returns:
-            tuple: (index_range_width, visible_points)
-                - index_range_width: 索引范围宽度（考虑factor）
-                - visible_points: 可见点数估算（考虑曲线数量）
-        """
-        # 获取当前视图的xRange
-        x_min, x_max = range[0]
-        x_range_width = x_max - x_min
-        
-        # 考虑factor的影响 - 将xRange转换为索引范围
-        # x = offset + factor * index，所以 index_range = x_range / factor
-        if hasattr(self, 'factor') and self.factor != 0:
-            index_range_width = x_range_width / abs(self.factor)
-        else:
-            index_range_width = x_range_width
-        
-        # 计算曲线数量（考虑单曲线和多曲线两种模式）
-        if hasattr(self, 'is_multi_curve_mode') and self.is_multi_curve_mode:
-            # 多曲线模式：使用 self.curves 字典的长度
-            curve_count = len(self.curves) if hasattr(self, 'curves') and self.curves else 0
-        else:
-            # 单曲线模式：检查是否有曲线
-            curve_count = 1 if hasattr(self, 'curve') and self.curve is not None else 0
-        
-        # 至少按1条曲线计算（避免除0或无意义的计算）
-        curve_count = max(curve_count, 1)
-        
-        # 计算可见点数：索引范围 × 曲线数量
-        visible_points = index_range_width * curve_count
-        
-        return index_range_width, visible_points
-    
+        """计算当前可见范围的点数估算 → 委托到 PlotUIManager"""
+        return self._plot_ui_manager._calculate_visible_points(self, range)
+
     def update_plot_style(self, view_box, range, rect=None):
-        """更新绘图样式 - 基于xRange宽度判断，只有两种搭配：细线+symbol 或 粗线无symbol
-        
-        【性能优化】交互期间降低样式更新频率，支持百万级数据点流畅绘制
-        """
-        try:
-            # 【安全检查】如果正在更新数据或对象被销毁，跳过样式更新
-            if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-                return
-            
-            # 【安全检查】确保关键对象存在
-            if not hasattr(self, 'factor') or not hasattr(self, 'plot_item'):
-                return
-            
-            # 【性能优化】交互期间：完全跳过样式更新，避免遍历所有曲线导致卡顿
-            # 样式更新只在交互结束后执行一次，保证缩放时的流畅性
-            is_interacting = getattr(self, '_is_interacting', False)
-            if is_interacting:
-                return  # 交互期间完全跳过样式更新，避免卡顿
-
-            # 使用共用方法计算索引范围
-            index_range_width, visible_points = self._calculate_visible_points(range)
-
-            # 基于索引范围宽度判断样式：阈值根据全局最大密度动态调整
-            main_window = self.window()
-            density = getattr(main_window, '_global_max_density', 0.0) if main_window else 0.0
-            if density > 0:
-                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
-            else:
-                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS
-            show_symbols = index_range_width < effective_threshold
-
-            # 应用样式到所有曲线
-            self._apply_plot_style(show_symbols)
-            
-        except Exception as e:
-            print(f"更新绘图样式时出错: {e}")
+        """更新绘图样式 → 委托到 PlotUIManager"""
+        self._plot_ui_manager.update_plot_style(self, view_box, range, rect)
 
 
     @safe_callback
