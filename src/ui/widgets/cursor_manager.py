@@ -474,17 +474,33 @@ class CursorManager:
         self.pw.multi_cursor_items.clear()
 
         if not hide_only:
-            for circle in self.pw._cursor_item_pool.get("circles", []):
-                self._queue_item_for_deletion(circle)
-            for label in self.pw._cursor_item_pool.get("labels", []):
-                self._queue_item_for_deletion(label)
-            for x_label in self.pw._cursor_item_pool.get("x_labels", []):
-                self._queue_item_for_deletion(x_label)
+            # 修复2：立即从 scene 移除旧 cursor items，避免延迟清理窗口内的状态不一致
+            old_circles = list(self.pw._cursor_item_pool.get("circles", []))
+            old_labels = list(self.pw._cursor_item_pool.get("labels", []))
+            old_x_labels = list(self.pw._cursor_item_pool.get("x_labels", []))
 
             self.pw._cursor_item_pool = {"circles": [], "labels": [], "x_labels": []}
 
-            if self.pw._pending_delete_items and not self.pw._cleanup_timer.isActive():
-                self.pw._cleanup_timer.start(100)
+            scene = None
+            if hasattr(self.pw, 'plot_item') and self.pw.plot_item is not None:
+                scene = self.pw.plot_item.scene()
+
+            for item in (old_circles + old_labels + old_x_labels):
+                if item is None:
+                    continue
+                try:
+                    item.setVisible(False)
+                except (RuntimeError, AttributeError):
+                    pass
+                try:
+                    if scene is not None and item.scene() == scene:
+                        scene.removeItem(item)
+                except (RuntimeError, AttributeError):
+                    pass
+                try:
+                    item.deleteLater()
+                except (RuntimeError, AttributeError):
+                    pass
 
     def _queue_item_for_deletion(self, item):
         """将 item 加入待删除队列"""
