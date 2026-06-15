@@ -1117,7 +1117,7 @@ class CursorManager:
 
             if self.pw.plot_context:
                 for container in self.pw.plot_context.plot_widgets:
-                    widget = container
+                    widget = container.plot_widget
                     if widget.is_cursor_pinned and widget != self.pw:
                         target_line = (
                             widget.vline

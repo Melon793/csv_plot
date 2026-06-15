@@ -252,7 +252,7 @@ class MultiCurveManager:
         else:
             all_data_min_y = np.nanmin(y_values)
             all_data_max_y = np.nanmax(y_values)
-            self._data_manager._set_safe_y_range(
+            self.pw._set_safe_y_range(
                 all_data_min_y, all_data_max_y, set_limits=True
             )
 
@@ -261,7 +261,7 @@ class MultiCurveManager:
             )
             if special_limits:
                 min_x, max_x, min_y, max_y = special_limits
-                self._data_manager._set_safe_y_range(min_y, max_y, set_limits=False)
+                self.pw._set_safe_y_range(min_y, max_y, set_limits=False)
             else:
                 current_x_range = pw.view_box.viewRange()[0]
                 x_min, x_max = current_x_range
@@ -276,7 +276,7 @@ class MultiCurveManager:
                 if all_y_in_range:
                     final_min_y = np.nanmin(all_y_in_range)
                     final_max_y = np.nanmax(all_y_in_range)
-                    self._data_manager._set_safe_y_range(
+                    self.pw._set_safe_y_range(
                         final_min_y, final_max_y, set_limits=False
                     )
 
