@@ -122,6 +122,10 @@ class PlotContext:
         return self._services._is_loading_new_data
 
     @property
+    def _data_version(self) -> int:
+        return self._services._data_version
+
+    @property
     def _is_time_correction_active(self) -> bool:
         return self._services._is_time_correction_active
 

@@ -138,14 +138,12 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw._crosshair_update_timer.stop()
         self.mw._pending_crosshair_x = None
 
-        pinned = [
-            idx
-            for idx, container in enumerate(
-                getattr(self.mw, "plot_widgets", []), start=1
-            )
-            if getattr(container, "plot_widget", None)
-            and getattr(container.plot_widget, "is_cursor_pinned", False)
-        ]
+        # 保存 pinned cursor 状态以便重载后恢复
+        pinned_x_values = list(getattr(self.mw, "pinned_x_values", []))
+        cursor_mode = getattr(self.mw, "cursor_mode", "1 free cursor")
+        self.mw._saved_pinned_x_values = pinned_x_values
+        self.mw._saved_cursor_mode = cursor_mode
+
         try:
             self.mw.reset_all_pin_states()
         except Exception:
@@ -174,6 +172,77 @@ class FileLoaderManager(MainWindowBaseManager):
             widget._is_updating_data = False
 
         self.mw._is_loading_new_data = False
+
+        # 恢复 pinned cursor 状态
+        saved_cursor_mode = getattr(self.mw, "_saved_cursor_mode", None)
+        saved_pinned_x_values = getattr(self.mw, "_saved_pinned_x_values", [])
+        if saved_cursor_mode and saved_cursor_mode != "1 free cursor" and saved_pinned_x_values:
+            try:
+                self.mw.cursor_mode = saved_cursor_mode
+                self.mw.pinned_x_values = list(saved_pinned_x_values)
+
+                # 恢复所有 widget 的 cursor 状态
+                widgets_list = []
+                for container in getattr(self.mw, "plot_widgets", []):
+                    widget = getattr(container, "plot_widget", None)
+                    if widget:
+                        widgets_list.append(widget)
+
+                # 直接设置 widget 的属性（而不是通过 apply_cursor_mode）
+                # 因为 apply_cursor_mode 是 CursorManager 的方法，设置的是 CursorManager 的属性
+                # 而 on_vline_position_changed 是 widget 的方法，检查的是 widget 的属性
+                for widget in widgets_list:
+                    widget.is_cursor_pinned = True
+                    widget.pinned_x_values = list(saved_pinned_x_values)
+                    if saved_pinned_x_values:
+                        widget.pinned_x_value = saved_pinned_x_values[0]
+                        widget.pinned_index_value = (saved_pinned_x_values[0] - widget.offset) / widget.factor if widget.factor != 0 else None
+                    widget.pinned_index_values = []
+                    for x_val in saved_pinned_x_values:
+                        if widget.factor != 0:
+                            widget.pinned_index_values.append((x_val - widget.offset) / widget.factor)
+
+                    # 设置 vline 位置和可移动状态
+                    if hasattr(widget, "vline"):
+                        widget.vline.setMovable(True)
+                        if saved_pinned_x_values:
+                            from PySide6.QtCore import QSignalBlocker
+                            with QSignalBlocker(widget.vline):
+                                widget.vline.setPos(saved_pinned_x_values[0])
+                    if hasattr(widget, "vline2"):
+                        widget.vline2.setMovable(True)
+                        if len(saved_pinned_x_values) > 1:
+                            from PySide6.QtCore import QSignalBlocker
+                            with QSignalBlocker(widget.vline2):
+                                widget.vline2.setPos(saved_pinned_x_values[1])
+
+                    # 修复 Bug 1 & 3：按模式恢复 vline/vline2 可见性
+                    if saved_cursor_mode == "2 anchored cursor":
+                        if hasattr(widget, "vline"):
+                            widget.vline.setVisible(True)
+                        if hasattr(widget, "vline2"):
+                            widget.vline2.setVisible(True)
+                    elif saved_cursor_mode == "1 anchored cursor":
+                        if hasattr(widget, "vline"):
+                            widget.vline.setVisible(True)
+                        if hasattr(widget, "vline2"):
+                            widget.vline2.setVisible(False)
+
+                    # 修复 Bug 2：恢复 view_box 的 pinned 状态
+                    if hasattr(widget.view_box, "is_cursor_pinned"):
+                        widget.view_box.is_cursor_pinned = True
+
+                    if hasattr(widget, "_last_cursor_update_time"):
+                        widget._last_cursor_update_time = 0
+
+                # 所有 widget 更新光标标签
+                for widget in widgets_list:
+                    try:
+                        widget.update_cursor_label()
+                    except (RuntimeError, AttributeError):
+                        pass
+            except Exception:
+                logger.debug("恢复 pin 状态失败", exc_info=True)
 
         QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
 

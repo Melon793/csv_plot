@@ -15,6 +15,8 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 import pyqtgraph as pg
+from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import QPointF
 
 if TYPE_CHECKING:
     from src.ui.widgets.multi_curve_manager import MultiCurveManager
@@ -731,84 +733,167 @@ class CursorManager:
         y_min: float,
         y_max: float,
     ):
-        """优化的标签定位算法"""
+        """优化的标签定位算法，使用对角线位置避免遮挡曲线。
+
+        使用4个候选位置策略（右上、左上、右下、左下）依次尝试，
+        选择第一个在边界内的位置。如果都超出边界，则约束在右上位置。
+
+        【内存优化】使用对象池复用TextItem，避免频繁创建销毁
+
+        Args:
+            cursor_values: 光标值列表，每个元素为包含var_name, x_pos, y_pos, y_value, color的字典
+            x_min: 视图x轴最小值（数据坐标）
+            x_max: 视图x轴最大值（数据坐标）
+            y_min: 视图y轴最小值（数据坐标）
+            y_max: 视图y轴最大值（数据坐标）
+        """
         if not cursor_values:
             return
 
-        import pyqtgraph as pg
+        pw = self.pw
 
+        # 计算视图范围，用于边界检查
         x_range = x_max - x_min
         y_range = y_max - y_min
-        view_box = self.pw.plot_item.getViewBox()
-        view_width_pixels = max(1, view_box.width())
+
+        # 获取实际视图尺寸
+        view_box = pw.plot_item.getViewBox()
+        view_width_pixels = max(1, view_box.width())  # 防止除零
         view_height_pixels = max(1, view_box.height())
 
+        # 预计算转换比例（像素 -> 数据坐标）
         pixel_to_data_x = x_range / view_width_pixels
         pixel_to_data_y = y_range / view_height_pixels
 
-        gap_pixels = 5
-        vertical_gap_pixels = 10
+        # 设置固定的屏幕像素偏移
+        gap_pixels = 5  # 文本框左边缘距离cursor的水平像素间隔
+        vertical_gap_pixels = 10  # 垂直像素间隔
 
-        for idx, cursor_val in enumerate(cursor_values):
-            var_name = cursor_val["var_name"]
-            x_pos = cursor_val["x_pos"]
-            y_value = cursor_val["y_value"]
-            color = cursor_val["color"]
+        # 获取TextItem的字体来动态计算标签尺寸（缓存font_metrics避免重复创建）
+        if not hasattr(self, '_cached_font_metrics'):
+            sample_text_item = self._get_label_from_pool(0)
+            text_font = sample_text_item.textItem.font()
+            self._cached_font_metrics = QFontMetrics(text_font)
+            self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
 
-            unit = ""
-            if hasattr(self.pw, "units"):
-                unit = self.pw.units.get(var_name, "")
-            label_text = f"{y_value}"
-            if unit:
-                label_text += f" {unit}"
+        font_metrics = self._cached_font_metrics
+        label_height_pixels = self._cached_label_height_pixels
+        label_height_data = label_height_pixels * pixel_to_data_y  # 在循环外计算
 
-            label = self._get_label_from_pool(idx)
-            label.setText(label_text)
+        for idx, item in enumerate(cursor_values):
+            x_pos = item['x_pos']
+            y_pos = item['y_pos']
+            y_value = item['y_value']
+            color = item['color']
 
-            if not hasattr(label, "_cached_color") or label._cached_color != color:
-                label.setColor(color)
-                label._cached_color = color
+            # 从对象池获取TextItem并更新其属性
+            text_item = self._get_label_from_pool(idx)
+            text_item.setText(y_value)
 
-            positions = [
-                (
-                    x_pos + gap_pixels * pixel_to_data_x,
-                    y_max - vertical_gap_pixels * pixel_to_data_y,
-                ),
-                (
-                    x_pos - gap_pixels * pixel_to_data_x,
-                    y_max - vertical_gap_pixels * pixel_to_data_y,
-                ),
-                (
-                    x_pos + gap_pixels * pixel_to_data_x,
-                    y_min + vertical_gap_pixels * pixel_to_data_y,
-                ),
-                (
-                    x_pos - gap_pixels * pixel_to_data_x,
-                    y_min + vertical_gap_pixels * pixel_to_data_y,
-                ),
+            # 复用pen对象或只在颜色变化时创建
+            if not hasattr(text_item, '_cached_border_color') or text_item._cached_border_color != color:
+                border_pen = pg.mkPen(color, width=1.5)
+                text_item.border = border_pen
+                text_item._cached_border_color = color
+            text_item.setVisible(True)
+
+            # 根据实际文本内容动态计算标签宽度
+            text_width = font_metrics.horizontalAdvance(y_value)
+            label_width_pixels = text_width + 12
+            label_width_data = label_width_pixels * pixel_to_data_x  # 在循环内计算宽度（动态的）
+
+            # 将数据坐标转换为场景坐标（屏幕像素）
+            cursor_scene_pos = view_box.mapViewToScene(QPointF(x_pos, y_pos))
+            cursor_scene_x = cursor_scene_pos.x()
+            cursor_scene_y = cursor_scene_pos.y()
+
+            # 计算文本框中心的偏移（TextItem的anchor=(0.5, 0.5)）
+            offset_x_right = gap_pixels + label_width_pixels / 2
+            offset_x_left = -(gap_pixels + label_width_pixels / 2)
+            offset_y_up = -(vertical_gap_pixels + label_height_pixels / 2)
+            offset_y_down = vertical_gap_pixels + label_height_pixels / 2
+
+            # 尝试4个候选位置（右上、左上、右下、左下）
+            strategies = [
+                (offset_x_right, offset_y_up, "右上"),
+                (offset_x_left, offset_y_up, "左上"),
+                (offset_x_right, offset_y_down, "右下"),
+                (offset_x_left, offset_y_down, "左下"),
             ]
 
-            selected_pos = positions[0]
-            for pos in positions:
-                candidate_x, candidate_y = pos
-                if x_min <= candidate_x <= x_max and y_min <= candidate_y <= y_max:
-                    selected_pos = pos
+            label_scene_x, label_scene_y = None, None
+
+            for strategy_idx, (dx_pixels, dy_pixels, name) in enumerate(strategies):
+                candidate_scene_x = cursor_scene_x + dx_pixels
+                candidate_scene_y = cursor_scene_y + dy_pixels
+
+                # 转换回数据坐标检查边界
+                candidate_data_pos = view_box.mapSceneToView(QPointF(candidate_scene_x, candidate_scene_y))
+                candidate_x = candidate_data_pos.x()
+                candidate_y = candidate_data_pos.y()
+
+                # 检查是否在数据范围内
+                left_ok = candidate_x - label_width_data * 0.5 >= x_min
+                right_ok = candidate_x + label_width_data * 0.5 <= x_max
+                bottom_ok = candidate_y - label_height_data * 0.5 >= y_min
+                top_ok = candidate_y + label_height_data * 0.5 <= y_max
+
+                in_bounds = left_ok and right_ok and bottom_ok and top_ok
+
+                if in_bounds:
+                    label_scene_x = candidate_scene_x
+                    label_scene_y = candidate_scene_y
+                    label_x = candidate_x
+                    label_y = candidate_y
                     break
 
-            scene_point = self.pw.plot_item.vb.mapViewToScene(
-                pg.Point(selected_pos[0], selected_pos[1])
-            )
-            label.setPos(scene_point.x(), scene_point.y())
-            label.setVisible(True)
-            label.setZValue(1000 + idx)
+            # 如果所有策略都超界，默认使用右上并约束在边界内
+            if label_scene_x is None:
+                label_scene_x = cursor_scene_x + offset_x_right
+                label_scene_y = cursor_scene_y + offset_y_up
 
-            scene = self.pw.plot_item.scene()
-            label_scene = label.scene()
-            if label_scene != scene:
-                if label_scene is not None:
-                    label_scene.removeItem(label)
-                scene.addItem(label)
-            self.pw.multi_cursor_items.append(label)
+                label_data_pos = view_box.mapSceneToView(QPointF(label_scene_x, label_scene_y))
+                label_x = label_data_pos.x()
+                label_y = label_data_pos.y()
+
+                label_x = max(x_min + label_width_data * 0.5,
+                             min(x_max - label_width_data * 0.5, label_x))
+                label_y = max(y_min + label_height_data * 0.5,
+                             min(y_max - label_height_data * 0.5, label_y))
+
+            # 边缘避让逻辑：防止标签在边缘抖动
+            edge_margin_strict = label_height_data * 1.5
+            y_center = (y_min + y_max) / 2
+            y_quarter_upper = y_min + (y_max - y_min) * 0.25
+            y_quarter_lower = y_max - (y_max - y_min) * 0.25
+
+            data_point_near_bottom = (y_pos - y_min) < edge_margin_strict
+            data_point_near_top = (y_max - y_pos) < edge_margin_strict
+
+            if data_point_near_bottom:
+                label_y = max(y_quarter_upper, label_y)
+                label_y = min(label_y, y_center)
+            elif data_point_near_top:
+                label_y = min(y_quarter_lower, label_y)
+                label_y = max(label_y, y_center)
+            else:
+                edge_margin_soft = label_height_data * 2.0
+                if label_y - y_min < edge_margin_soft:
+                    label_y = y_min + edge_margin_soft
+                elif y_max - label_y < edge_margin_soft:
+                    label_y = y_max - edge_margin_soft
+
+            text_item.setPos(label_x, label_y)
+            text_item.setZValue(201)
+
+            text_scene = text_item.scene()
+            plot_scene = pw.plot_item.scene()
+            if text_scene != plot_scene:
+                if text_scene is not None:
+                    text_scene.removeItem(text_item)
+                pw.plot_item.addItem(text_item, ignoreBounds=True)
+
+            pw.multi_cursor_items.append(text_item)
 
     def _show_x_position_only(self, x_positions=None):
         """仅显示 x 位置标签（隐藏光标数值），同时在图上绘制 x_label 元素"""
@@ -968,16 +1053,29 @@ class CursorManager:
             self.pw.view_box.setXRange(x_min, x_max, padding=0.02)
 
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
-        """绘图后更新光标"""
-        if self.is_cursor_pinned and self.pinned_x_value is not None:
-            if self.pinned_x_value < min_x_bound or self.pinned_x_value > max_x_bound:
-                self.pinned_x_value = (min_x_bound + max_x_bound) / 2
-                self.pw.vline.setPos(self.pinned_x_value)
-                if hasattr(self.pw, "vline2") and len(self.pinned_x_values) > 1:
-                    self.pw.vline2.setPos(self.pinned_x_values[1])
+        """绘图后更新光标边界和可见性"""
+        pw = self.pw
+        main_window = pw.window()
+        if main_window and hasattr(main_window, 'cursor_btn'):
+            # 设置 cursor 的移动边界
+            pw._set_vline_bounds([min_x_bound, max_x_bound])
+            cursor_enabled = main_window.cursor_btn.isChecked()
+            cursor_values_hidden = getattr(main_window, 'cursor_values_hidden', False)
+
+            # 根据全局 cursor 状态决定显示模式
+            if cursor_enabled and cursor_values_hidden:
+                # cursor 启用但只显示 vline 和 x 值
+                pw.toggle_cursor(False, hide_values_only=True)
+            else:
+                # cursor 完全启用或禁用
+                pw.toggle_cursor(cursor_enabled)
+        else:
+            # 无主窗口或 cursor 按钮，禁用 cursor
+            pw._set_vline_bounds([None, None])
+            pw.toggle_cursor(False)
 
     def _start_interaction(self):
-        """开始交互"""
+        """[DEPRECATED] 开始交互 — 已由 EventHandler 接管"""
         try:
             if not hasattr(self.pw, "_is_interacting"):
                 self.pw._is_interacting = False
@@ -991,7 +1089,7 @@ class CursorManager:
             pass
 
     def _end_interaction(self):
-        """结束交互"""
+        """[DEPRECATED] 结束交互 — 已由 EventHandler 接管"""
         try:
             if hasattr(self.pw, "_is_interacting"):
                 self.pw._is_interacting = False
@@ -1001,7 +1099,7 @@ class CursorManager:
             pass
 
     def _schedule_cursor_geometry_update(self):
-        """调度光标几何更新"""
+        """[DEPRECATED] 调度光标几何更新 — 已由 EventHandler 接管"""
         if not hasattr(self.pw, "vline") or not self.pw.vline.isVisible():
             return
         if getattr(self.pw, "_cursor_refresh_timer", None) is None:
@@ -1010,7 +1108,7 @@ class CursorManager:
             self.pw._cursor_refresh_timer.start(50)
 
     def _refresh_cursor_geometry(self):
-        """刷新光标几何"""
+        """[DEPRECATED] 刷新光标几何 — 已由 EventHandler 接管"""
         if not hasattr(self.pw, "vline") or not self.pw.vline.isVisible():
             return
         if self._is_interacting:
@@ -1091,7 +1189,7 @@ class CursorManager:
                 self.update_cursor_label()
 
     def _on_vb_set_cursor_mode(self, mode: str, pw, ctx_x: float):
-        """ViewBox 信号：设置光标模式"""
+        """[DEPRECATED] ViewBox 信号：设置光标模式 — 已由 EventHandler 接管"""
         if pw != self.pw:
             return
         if self.pw.plot_context:
@@ -1099,13 +1197,13 @@ class CursorManager:
         self.apply_cursor_mode(mode)
 
     def _on_vb_show_cursor(self, pw):
-        """ViewBox 信号：显示光标"""
+        """[DEPRECATED] ViewBox 信号：显示光标 — 已由 EventHandler 接管"""
         if pw != self.pw:
             return
         self.toggle_cursor(True)
 
     def _on_vb_hide_cursor(self, pw):
-        """ViewBox 信号：隐藏光标"""
+        """[DEPRECATED] ViewBox 信号：隐藏光标 — 已由 EventHandler 接管"""
         if pw != self.pw:
             return
         self.toggle_cursor(False)

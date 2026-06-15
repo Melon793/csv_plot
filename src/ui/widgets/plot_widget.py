@@ -91,6 +91,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cleanup_timer = QTimer(self)
         self._cleanup_timer.setSingleShot(True)
         self._cleanup_timer.timeout.connect(self._process_pending_deletes)
+        self.plot_context = None  # 由 layout_manager 赋值为 PlotContext 实例
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
         
     def setup_ui(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
@@ -182,7 +183,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if self.is_multi_curve_mode and self.curves:
             return MultiCurveStrategy(self)
         return SingleCurveStrategy(self)
-
 
     def setup_header(self):
         """完全修正的顶部文本区域设置方法"""
@@ -285,14 +285,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.update_x_axis_label()
 
     def update_x_axis_label(self):
-        """更新 X 轴标签文本"""
-        axis = self.plot_item.getAxis('bottom')
-        if DEFAULT_SHOW_X_AXIS_LABEL:
-            label = self.time_axis_label if self.time_axis_label else "Index"
-            axis.setLabel(label)
-            axis.showLabel(True)
-        else:
-            axis.showLabel(False)
+        """更新 X 轴标签文本 → 委托到 AxisManager（初始化阶段 fallback 到内联实现）"""
+        if not hasattr(self, '_axis_manager'):
+            axis = self.plot_item.getAxis('bottom')
+            if DEFAULT_SHOW_X_AXIS_LABEL:
+                label = self.time_axis_label if self.time_axis_label else "Index"
+                axis.setLabel(label)
+                axis.showLabel(True)
+            else:
+                axis.showLabel(False)
+            return
+        self._axis_manager.update_x_axis_label()
         
     def jump_to_data_impl(self, x):
         strategy = self.curve_strategy
@@ -365,126 +368,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         QTimer.singleShot(0, lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect))
 
     def auto_range(self, external_xmin: float | None = None, external_xmax: float | None = None):
-        main_window = self.window()
-        is_mdf = (
-            main_window is not None
-            and hasattr(main_window, 'loader')
-            and main_window.loader is not None
-            and getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
-        )
-
-        has_own_data = bool(self.curve or self.curves)
-
-        # 获取 x_values（仅当有自身数据时）
-        if has_own_data:
-            self.axis_x.setTicks(None)
-            self.axis_y.setTicks(None)
-
-            if self.is_multi_curve_mode and self.curves:
-                x_arrays = self._collect_visible_curve_arrays('x_data')
-                if x_arrays:
-                    x_values = np.concatenate(x_arrays)
-                else:
-                    x_values = None
-            else:
-                if self.original_index_x is not None:
-                    x_values = self.offset + self.factor * self.original_index_x
-                elif self.curve:
-                    x_data, _ = self.curve.getData()
-                    x_values = x_data if x_data is not None else None
-                else:
-                    x_values = None
-
-            if x_values is not None:
-                own_min_x = np.min(x_values)
-                own_max_x = np.max(x_values)
-            else:
-                own_min_x = None
-                own_max_x = None
-        else:
-            x_values = None
-            own_min_x = None
-            own_max_x = None
-
-        # 合并内部和外部范围
-        if external_xmin is not None:
-            min_x = min(own_min_x, external_xmin) if own_min_x is not None else external_xmin
-        else:
-            min_x = own_min_x
-
-        if external_xmax is not None:
-            max_x = max(own_max_x, external_xmax) if own_max_x is not None else external_xmax
-        else:
-            max_x = own_max_x
-
-        if min_x is None or max_x is None:
-            return False
-
-        if not has_own_data:
-            self.axis_x.setTicks(None)
-            self.axis_y.setTicks(None)
-
-        padding_xVal = DEFAULT_PADDING_VAL_X  
-        padding_yVal = 0.5
-        
-        if has_own_data:
-            if self.is_multi_curve_mode and self.curves:
-                y_arrays = self._collect_visible_curve_arrays('y_data')
-                if y_arrays:
-                    combined = np.concatenate(y_arrays)
-                    if combined.size:
-                        min_y = np.nanmin(combined)
-                        max_y = np.nanmax(combined)
-                    else:
-                        min_y, max_y = 0, 1
-                else:
-                    min_y, max_y = 0, 1
-            else:
-                if self.original_y is not None:
-                    special_limits = self.handle_single_point_limits(x_values, self.original_y)
-                    if special_limits:
-                        min_x, max_x, min_y, max_y = special_limits
-                    else:
-                        min_y = np.nanmin(self.original_y)
-                        max_y = np.nanmax(self.original_y)
-                elif self.curve:
-                    _, y_data = self.curve.getData()
-                    if y_data is not None:
-                        min_y = np.nanmin(y_data)
-                        max_y = np.nanmax(y_data)
-                    else:
-                        min_y, max_y = 0, 1
-                else:
-                    min_y, max_y = 0, 1
-        else:
-            min_y, max_y = 0, 1
-
-        limits_xMin = min_x - padding_xVal * (max_x - min_x)
-        limits_xMax = max_x + padding_xVal * (max_x - min_x)
-
-        self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
-        self._set_safe_y_range(min_y, max_y)
-
-        minXRange_val = self._get_min_x_range_value()
-        if is_mdf:
-            self.plot_item.setLimits(minXRange=minXRange_val)
-        else:
-            self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
-
-        # self.window().sync_all_x_limits(limits_xMin, limits_xMax, min(3,len(x_values))*self.factor)
-        self._set_vline_bounds([min_x, max_x])
-
-        # 在设置完新范围后，立即直接调用样式更新函数。
-        self._queue_ui_refresh(immediate=True)
-        self.plot_item.update()
-        self._update_cursor_after_plot(min_x, max_x)
-
-        return True
+        """自动调整视图范围 → 委托到 AxisManager"""
+        return self._axis_manager.auto_range(external_xmin, external_xmax)
 
     def auto_y_in_x_range(self):
-        vb=self.view_box
-        vb.enableAutoRange(axis=vb.YAxis, enable=True)
-        vb.plot_widget.axis_y.setTicks(None)
+        """在当前 X 范围内自动调整 Y 轴 → 委托到 AxisManager"""
+        self._axis_manager.auto_y_in_x_range()
 
     def update_left_header(self, left_text=None):
         """更新顶部文本内容"""
@@ -497,99 +386,28 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         pass
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
-        """
-        确保X轴范围非零，如果 min_x == max_x，则基于 factor 扩展。
-        """
-        if min_x == max_x:
-            min_x_safe = min_x - 0.5 * self.factor
-            max_x_safe = max_x + 0.5 * self.factor
-            return min_x_safe, max_x_safe
-        return min_x, max_x
-    
+        """确保 X 轴范围非零 → 委托到 AxisManager"""
+        return self._axis_manager._get_safe_x_range(min_x, max_x)
+
     def _get_min_x_range_value(self) -> float:
-        """
-        根据全局最大数据点密度计算最小的可缩放 X 范围 (minXRange)。
-        优先从 MainWindow 读取 _global_max_density，fallback 为 MIN_INDEX_LENGTH。
-        """
-
-        main_window = self.window()
-        if main_window is not None and hasattr(main_window, '_global_max_density'):
-            density = main_window._global_max_density
-        else:
-            density = 0.0
-
-        if density > 0:
-            result = MIN_INDEX_LENGTH / density
-        else:
-            # 单点数据时，使用较小的 minXRange，避免自动扩展范围
-            result = 1.0  # 与单点扩展范围 (0.5, 1.5) 匹配
-        
-        return result
+        """计算最小的可缩放 X 范围 → 委托到 AxisManager"""
+        return self._axis_manager._get_min_x_range_value()
 
     def _set_x_limits_with_min_range(self, limits_xMin: float | None, limits_xMax: float | None):
-        """
-        统一设置 X 轴的 limits 和 minXRange。
-        """
-        minXRange_val = self._get_min_x_range_value()
-        self.plot_item.setLimits(xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val)
+        """统一设置 X 轴的 limits 和 minXRange → 委托到 AxisManager"""
+        self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
 
     def _set_min_x_range(self, minXRange: float):
-        self.plot_item.setLimits(minXRange=minXRange)
+        """设置 X 轴的最小范围 → 委托到 AxisManager"""
+        self._axis_manager._set_min_x_range(minXRange)
 
     def _recalc_max_point_density(self):
-        densities: list[float] = []
-        for ci in self.curves.values():
-            if ci.point_density > 0:
-                densities.append(ci.point_density)
-        if not densities and self.curve is not None and self.original_y is not None:
-            n = len(self.original_y)
-            if n > 1 and self.original_index_x is not None:
-                x_span = self.offset + self.factor * float(np.max(self.original_index_x)) - (
-                    self.offset + self.factor * float(np.min(self.original_index_x)))
-                if x_span > 0:
-                    densities.append(n / x_span)
-        self._max_point_density = max(densities) if densities else 0.0
+        """重新计算最大数据点密度 → 委托到 AxisManager"""
+        self._axis_manager._recalc_max_point_density()
 
     def _set_safe_y_range(self, min_y: float, max_y: float, set_limits: bool = True):
-        """
-        设置 Y 轴的 viewRange 和 limits，自动处理 NaN 或恒定值。
-        
-        Args:
-            min_y: Y轴最小值
-            max_y: Y轴最大值
-            set_limits: 是否同时设置y轴limits，默认为True。当为False时只设置viewRange。
-        """
-        
-        # Y 轴 limit 的内外边距 (0.5 表示上下各扩展 50%)
-        padding_yVal_limit = 0.5 
-
-        if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
-            # 如果是 NaN 或恒定值
-            y_center = min_y if not np.isnan(min_y) else 0
-            # 保证最小范围为 1.0，或者为中心值的 20%
-            y_range_half = (1.0 if y_center == 0 else abs(y_center) * 0.2)
-            
-            y_min_view = y_center - y_range_half
-            y_max_view = y_center + y_range_half
-            
-            # Limits 也使用这个扩展后的范围
-            y_min_limit = y_min_view
-            y_max_limit = y_max_view
-        else:
-            # 如果是正常范围
-            y_min_view = min_y
-            y_max_view = max_y
-            
-            # Limits 应用 50% 的外边距
-            y_range = max_y - min_y
-            y_min_limit = min_y - padding_yVal_limit * y_range
-            y_max_limit = max_y + padding_yVal_limit * y_range
-
-        # 只在需要时设置limits
-        if set_limits:
-            self.plot_item.setLimits(yMin=y_min_limit, yMax=y_max_limit)
-        # ViewRange 使用 PADDING_Y (默认0.1) 的内边距
-        self.view_box.setYRange(y_min_view, y_max_view, padding=DEFAULT_PADDING_VAL_Y)
+        """设置 Y 轴的 viewRange 和 limits → 委托到 AxisManager"""
+        self._axis_manager._set_safe_y_range(min_y, max_y, set_limits)
 
     def reset_plot(self,index_xMin,index_xMax):
 
@@ -957,29 +775,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             #print(f"mouse in pos {mousePoint.x()}")
 
     def _is_cursor_update_locked(self) -> bool:
-        """
-        判断cursor相关回调是否需要被暂时禁用
-
-        当plot正在更新数据或主窗口处于新数据加载流程中时，所有cursor相关的信号都会跳过，
-        以避免访问不完整的数据结构。
-        【稳定性优化】添加版本号检查，确保数据一致性。
-        """
-        if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
-            return True
-
-        window = self.window()
-        if window:
-            # 检查是否正在加载新数据
-            if getattr(window, '_is_loading_new_data', False):
-                return True
-
-            # 【版本号检查】确保数据版本一致
-            current_version = getattr(window, '_data_version', 0)
-            my_version = getattr(self, '_cached_data_version', 0)
-            if my_version != 0 and my_version != current_version:
-                return True  # 版本不匹配，说明正在加载中
-
-        return False
+        """判断 cursor 更新是否被锁定 → 委托到 CursorManager"""
+        return self._cursor_manager._is_cursor_update_locked()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1089,413 +886,61 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     
 
 
-    def set_xrange_with_link_handling(self, xmin, xmax,padding:float = 0):
-        plot=self.plot_item
-        # 1. 记录当前联动对象
-        linked = plot.getViewBox().linkedView(0)
-        
-        # 2. 临时断开联动
-        if linked is not None:
-            plot.setXLink(None)
-        
-        # 3. 安全设置范围
-        plot.getViewBox().enableAutoRange(x=False)
-        plot.setXRange(xmin, xmax, padding=max(0,padding))
-        
-        # 4. 恢复联动
-        if linked is not None:
-            plot.setXLink(linked)
+    def set_xrange_with_link_handling(self, xmin, xmax, padding: float = 0):
+        """设置 X 轴范围并处理联动 → 委托到 AxisManager"""
+        self._axis_manager.set_xrange_with_link_handling(xmin, xmax, padding)
 
     def _get_cursor_mode(self):
-        window = self.window()
-        if window and hasattr(window, "cursor_mode"):
-            return window.cursor_mode
-        return "1 free cursor"
+        """获取光标模式 → 委托到 CursorManager"""
+        return self._cursor_manager._get_cursor_mode()
 
     def _get_cursor_x_positions(self):
-        mode = self._get_cursor_mode()
-        if mode == "2 anchored cursor":
-            if self.pinned_x_values and len(self.pinned_x_values) >= 2:
-                return list(self.pinned_x_values[:2])
-            positions = []
-            if hasattr(self, "vline") and self.vline.isVisible():
-                positions.append(self.vline.value())
-            if hasattr(self, "vline2") and self.vline2.isVisible():
-                positions.append(self.vline2.value())
-            return positions
-        if mode == "1 anchored cursor":
-            if self.pinned_x_values:
-                return [self.pinned_x_values[0]]
-            if self.pinned_x_value is not None:
-                return [self.pinned_x_value]
-        if hasattr(self, "vline"):
-            return [self.vline.value()]
-        return []
+        """获取光标 X 位置列表 → 委托到 CursorManager"""
+        return self._cursor_manager._get_cursor_x_positions()
 
     def _set_vline_visibility_for_mode(self, visible: bool, mode: str):
-        if not hasattr(self, "vline"):
-            return
-        if mode == "2 anchored cursor":
-            self.vline.setVisible(visible)
-            if hasattr(self, "vline2"):
-                self.vline2.setVisible(visible)
-        else:
-            self.vline.setVisible(visible)
-            if hasattr(self, "vline2"):
-                self.vline2.setVisible(False)
+        """设置 vline 可见性 → 委托到 CursorManager"""
+        self._cursor_manager._set_vline_visibility_for_mode(visible, mode)
 
     def _set_vline_bounds(self, bounds):
-        if hasattr(self, "vline"):
-            self.vline.setBounds(bounds)
-        if hasattr(self, "vline2"):
-            self.vline2.setBounds(bounds)
+        """设置光标线边界 → 委托到 AxisManager"""
+        self._axis_manager._set_vline_bounds(bounds)
 
     def apply_cursor_mode(self, mode, pinned_x_values):
-        if mode == "1 free cursor":
-            self.is_cursor_pinned = False
-            self.pinned_x_value = None
-            self.pinned_index_value = None
-            self.pinned_x_values = []
-            self.pinned_index_values = []
-            if hasattr(self, "vline"):
-                self.vline.setMovable(False)
-            if hasattr(self, "vline2"):
-                self.vline2.setMovable(False)
-            if hasattr(self.view_box, "is_cursor_pinned"):
-                self.view_box.is_cursor_pinned = False
-            self._set_vline_visibility_for_mode(True, mode)
-            return
-
-        if mode == "1 anchored cursor":
-            self.is_cursor_pinned = True
-            self.pinned_x_values = list(pinned_x_values[:1]) if pinned_x_values else self.pinned_x_values[:1]
-            if self.pinned_x_values:
-                self.pinned_x_value = self.pinned_x_values[0]
-            if self.factor != 0 and self.pinned_x_value is not None:
-                self.pinned_index_value = (self.pinned_x_value - self.offset) / self.factor
-            else:
-                self.pinned_index_value = None
-            self.pinned_index_values = [self.pinned_index_value] if self.pinned_index_value is not None else []
-            if hasattr(self, "vline") and self.pinned_x_value is not None:
-                self.vline.setMovable(True)
-                with QSignalBlocker(self.vline):
-                    self.vline.setPos(self.pinned_x_value)
-            if hasattr(self, "vline2"):
-                self.vline2.setMovable(False)
-            if hasattr(self.view_box, "is_cursor_pinned"):
-                self.view_box.is_cursor_pinned = True
-            self._set_vline_visibility_for_mode(True, mode)
-            return
-
-        if mode == "2 anchored cursor":
-            self.is_cursor_pinned = True
-            if pinned_x_values and len(pinned_x_values) >= 2:
-                self.pinned_x_values = list(pinned_x_values[:2])
-            elif len(self.pinned_x_values) >= 2:
-                self.pinned_x_values = list(self.pinned_x_values[:2])
-            elif len(self.pinned_x_values) == 1:
-                self.pinned_x_values = [self.pinned_x_values[0], self.pinned_x_values[0]]
-            else:
-                view_min, view_max = self.view_box.viewRange()[0]
-                if view_min is not None and view_max is not None:
-                    x1 = view_min + (view_max - view_min) / 3
-                    x2 = view_min + 2 * (view_max - view_min) / 3
-                    self.pinned_x_values = [x1, x2]
-                else:
-                    self.pinned_x_values = [0.0, 0.0]
-            self.pinned_x_value = self.pinned_x_values[0]
-            self.pinned_index_values = []
-            for x_val in self.pinned_x_values:
-                if self.factor != 0:
-                    self.pinned_index_values.append((x_val - self.offset) / self.factor)
-            if hasattr(self, "vline"):
-                self.vline.setMovable(True)
-            if hasattr(self, "vline2"):
-                self.vline2.setMovable(True)
-            if hasattr(self, "vline") and self.pinned_x_values:
-                with QSignalBlocker(self.vline):
-                    self.vline.setPos(self.pinned_x_values[0])
-            if hasattr(self, "vline2") and len(self.pinned_x_values) > 1:
-                with QSignalBlocker(self.vline2):
-                    self.vline2.setPos(self.pinned_x_values[1])
-            if hasattr(self.view_box, "is_cursor_pinned"):
-                self.view_box.is_cursor_pinned = True
-            self._set_vline_visibility_for_mode(True, mode)
-            return
+        """应用光标模式 → 委托到 CursorManager"""
+        self._cursor_manager.apply_cursor_mode(mode, pinned_x_values)
 
     def update_cursor_label(self):
-        """
-        更新光标标签位置和内容
+        """更新光标标签 → 委托到 CursorManager"""
+        self._cursor_manager.update_cursor_label()
 
-        【稳定性优化】使用循环替代递归，限制最大重试次数，防止栈溢出。
-        """
-        MAX_RETRIES = 3  # 最大重试次数
-        retry_count = 0
-
-        while retry_count < MAX_RETRIES:
-
-            if self._is_cursor_update_locked():
-                return
-
-            if self._cursor_label_busy:
-                self._cursor_label_dirty = True
-                return
-
-            self._cursor_label_busy = True
-            self._cursor_label_dirty = False  # 进入时清除dirty
-
-            try:
-                # 统一使用多曲线样式的cursor显示
-                self._update_multi_curve_cursor_label()
-            except (RuntimeError, AttributeError) as e:
-                # 对象可能已被销毁
-                pass
-            finally:
-                self._cursor_label_busy = False
-
-            # 检查是否需要重试
-            if self._cursor_label_dirty:
-                self._cursor_label_dirty = False
-                retry_count += 1
-                continue  # 循环重试，而非递归
-            else:
-                break  # 无需重试，退出
-
-    
     def _update_single_curve_cursor_label(self):
-        """更新单曲线模式的光标标签"""
-        if len(self.plot_item.listDataItems()) == 0:
-            self.update_right_header("")
-            return
-        
-        try:
-            x = self.vline.value()           
-            curve = self.plot_item.listDataItems()[0]
-            x_data, y_data = curve.getData()
-            if x_data is None or len(x_data) == 0:
-                self.update_right_header("")
-                return
-            x = np.clip(x, x_data.min(), x_data.max())
-            idx = np.argmin(np.abs(x_data - x))
-            y_val = y_data[idx]
-            x_str = self._significant_decimal_format_str(value=float(x),ref=self.factor)
-            if self.y_format == 'enum':
-                window = self.window()
-                enum_map = getattr(window, '_enum_text_maps', {}).get(self.y_name, {})
-                y_str = enum_map.get(int(y_val), str(y_val))
-                self.update_right_header(f"x={x_str}, y={y_str}")
-            elif self.y_format == 's':
-                time_str=self.sInt_to_fmtStr(y_val)
-                self.update_right_header(f"x={x_str}, y={time_str}")
-            elif self.y_format == 'date':
-                date_str=self.dateInt_to_fmtStr(y_val)
-                self.update_right_header(f"x={x_str}, y={date_str}")
-            else:
-                self.update_right_header(f"x={x_str}, y={y_val:.5g}")
-
-        except Exception as e:
-            logger.error("Cursor update error: %s", e, exc_info=True)
-            self.update_right_header("")
+        """更新单曲线光标标签 → 委托到 CursorManager"""
+        self._cursor_manager._update_single_curve_cursor_label()
     
     def _get_circle_from_pool(self, index):
-        """从对象池获取ScatterPlotItem，如果不存在则创建
-        
-        使用对象池复用ScatterPlotItem，避免重复创建导致内存泄漏。
-        每个索引位置对应一个ScatterPlotItem实例，用于在cursor交点处显示圆圈标记。
-        
-        Args:
-            index: 对象池索引位置
-            
-        Returns:
-            ScatterPlotItem: 从池中获取或新创建的圆圈标记对象
-        """
-        pool = self._cursor_item_pool['circles']
-        
-        # 如果池中已有该索引的对象，直接复用
-        if index < len(pool):
-            return pool[index]
-        
-        # 否则创建新对象并加入池
-        circle = pg.ScatterPlotItem(
-            symbol='o',
-            size=8,
-            brush=None
-        )
-        pool.append(circle)
-        return circle
-    
+        """从对象池获取 ScatterPlotItem → 委托到 CursorManager"""
+        return self._cursor_manager._get_circle_from_pool(index)
+
     def _get_label_from_pool(self, index):
-        """从对象池获取TextItem，如果不存在则创建
-        
-        使用对象池复用TextItem，避免重复创建导致内存泄漏。
-        每个索引位置对应一个TextItem实例，用于显示cursor交点处的y值标签。
-        
-        Args:
-            index: 对象池索引位置
-            
-        Returns:
-            TextItem: 从池中获取或新创建的文本标签对象
-        """
-        pool = self._cursor_item_pool['labels']
-        
-        # 如果池中已有该索引的对象，直接复用
-        if index < len(pool):
-            return pool[index]
-        
-        # 否则创建新对象并加入池
-        label = pg.TextItem(
-            color=(0, 0, 0),
-            fill=pg.mkBrush(255, 255, 255, 220),
-            anchor=(0.5, 0.5)
-        )
-        # label.setFont(QFont('Arial', 8))
+        """从对象池获取 TextItem → 委托到 CursorManager"""
+        return self._cursor_manager._get_label_from_pool(index)
 
-        font = QApplication.font()  # 获取App的默认字体
-        font.setPixelSize(11)     # 设置一个跨平台一致的逻辑像素大小 (11px)
-        label.setFont(font)
-
-        pool.append(label)
-        return label
-    
     def _get_x_label_from_pool(self, index: int):
-        """获取 X 轴标签 TextItem（用于光标显示）"""
-        pool = self._cursor_item_pool["x_labels"]
-        if index < len(pool):
-            return pool[index]
-
-        x_label = pg.TextItem(
-            color=(255, 255, 255),
-            fill=pg.mkBrush(64, 64, 64, 230),
-            border=pg.mkPen(128, 128, 128, width=1),
-            anchor=(0.5, 0)
-        )
-
-        font = QApplication.font()
-        font.setPixelSize(12)
-        x_label.setFont(font)
-
-        pool.append(x_label)
-        return x_label
+        """获取 X 轴标签 TextItem → 委托到 CursorManager"""
+        return self._cursor_manager._get_x_label_from_pool(index)
 
     def _clear_cursor_items(self, hide_only=True):
-        """清除或隐藏所有cursor可视化元素
-
-        默认模式下只隐藏元素（供下次复用），完全清除模式下才会删除对象。
-        这种策略通过对象池复用机制避免频繁创建/销毁对象导致的内存泄漏。
-        【稳定性优化】使用延迟删除队列，避免deleteLater与即时访问冲突。
-
-        Args:
-            hide_only: 如果为True，只隐藏所有元素（默认，用于复用）
-                      如果为False，完全删除所有元素和对象池（用于切换数据文件等场景）
-        """
-        # 【安全检查】确保关键对象存在
-        if not hasattr(self, 'multi_cursor_items') or not hasattr(self, 'plot_item'):
-            return
-
-        # 【修复QPainter错误】先隐藏所有item，避免清理过程中触发绘制
-        for item in self.multi_cursor_items:
-            try:
-                if item is not None:
-                    item.setVisible(False)
-            except (RuntimeError, AttributeError):
-                pass  # 对象可能已被销毁
-
-        # 分类处理：对象池中的元素清除数据，非池对象删除
-        for item in self.multi_cursor_items:
-            try:
-                item_type = type(item).__name__
-                if item_type == 'ScatterPlotItem':
-                    # 对象池中的圆圈标记：清除数据
-                    try:
-                        item.clear()  # 清除ScatterPlotItem的数据，释放内存
-                    except (RuntimeError, AttributeError):
-                        pass
-                elif item in self._cursor_item_pool.get('x_labels', []):
-                    # X轴标签：清空文本
-                    try:
-                        item.setText("")  # 清空文本，释放字符串占用的内存
-                    except (RuntimeError, AttributeError):
-                        pass
-                elif item in self._cursor_item_pool.get('labels', []):
-                    # 对象池中的y值标签：清空文本
-                    try:
-                        item.setText("")  # 清空文本，释放字符串占用的内存
-                    except (RuntimeError, AttributeError):
-                        pass
-                else:
-                    # 不在对象池中的项（理论上不应该存在）：加入待删除队列
-                    self._queue_item_for_deletion(item)
-            except Exception:
-                logger.debug("_queue_item_for_deletion 清理异常，跳过", exc_info=True)
-
-        # 清空当前使用列表
-        self.multi_cursor_items.clear()
-
-        if not hide_only:
-            # 完全清除模式（仅在真正需要清理时使用，如切换数据文件）
-            # 将对象池中的对象加入待删除队列
-            for circle in self._cursor_item_pool.get('circles', []):
-                self._queue_item_for_deletion(circle)
-
-            for label in self._cursor_item_pool.get('labels', []):
-                self._queue_item_for_deletion(label)
-
-            for x_label in self._cursor_item_pool.get('x_labels', []):
-                self._queue_item_for_deletion(x_label)
-
-            # 重置对象池
-            self._cursor_item_pool = {
-                'circles': [],
-                'labels': [],
-                'x_labels': []
-            }
-
-            # 延迟执行实际删除（等待当前事件循环完成）
-            if self._pending_delete_items and not self._cleanup_timer.isActive():
-                self._cleanup_timer.start(100)  # 100ms后执行
+        """清除或隐藏所有 cursor 可视化元素 → 委托到 CursorManager"""
+        self._cursor_manager._clear_cursor_items(hide_only)
 
     def _queue_item_for_deletion(self, item):
-        """将item加入待删除队列"""
-        if item is not None and item not in self._pending_delete_items:
-            try:
-                item.setVisible(False)
-            except (RuntimeError, AttributeError):
-                pass
-            self._pending_delete_items.append(item)
+        """将 item 加入待删除队列 → 委托到 CursorManager"""
+        self._cursor_manager._queue_item_for_deletion(item)
 
     def _process_pending_deletes(self):
-        """安全地处理待删除队列 - 延迟删除回调"""
-        if self._is_updating_data or self._is_being_destroyed:
-            # 数据正在更新，延迟处理
-            if self._pending_delete_items:
-                self._cleanup_timer.start(100)
-            return
-
-        items_to_delete = self._pending_delete_items.copy()
-        self._pending_delete_items.clear()
-
-        for item in items_to_delete:
-            try:
-                if item is None:
-                    continue
-
-                # 安全地从scene移除
-                try:
-                    scene = item.scene()
-                    if scene is not None:
-                        scene.removeItem(item)
-                except (RuntimeError, AttributeError):
-                    pass  # scene可能已被销毁
-
-                # 安全地删除
-                try:
-                    if hasattr(item, 'deleteLater'):
-                        item.deleteLater()
-                except (RuntimeError, AttributeError):
-                    pass
-
-            except Exception as e:
-                pass
+        """处理待删除队列 → 委托到 CursorManager"""
+        self._cursor_manager._process_pending_deletes()
 
     def _collect_visible_curve_arrays(self, key: str) -> list[np.ndarray]:
         arrays: list[np.ndarray] = []
@@ -1628,550 +1073,36 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             _widget_logger.debug("clear_all_plots_manager 异常: %s", e)
     
     def _update_multi_curve_cursor_label(self):
-        """更新多曲线光标标签（多光标模式）"""
-        if getattr(self, "_is_interacting", False):
-            return
-
-        import time
-        current_time = time.time()
-
-        if self._adaptive_throttle_enabled and hasattr(self, "curves"):
-            curve_count = len(self.curves)
-            adaptive_throttle = min(0.016 + curve_count * 0.002, 0.1)
-        else:
-            adaptive_throttle = self._cursor_update_throttle
-
-        if hasattr(self, "_last_cursor_update_time"):
-            time_since_last = current_time - self._last_cursor_update_time
-            if time_since_last < adaptive_throttle:
-                return
-        self._last_cursor_update_time = current_time
-
-        self._clear_cursor_items()
-
-        mode = self._get_cursor_mode()
-        if mode == "2 anchored cursor":
-            vline_visible = bool(self.vline.isVisible() or self.vline2.isVisible())
-        else:
-            vline_visible = self.vline.isVisible()
-        if not vline_visible:
-            self.update_right_header("")
-            return
-
-        has_attr = hasattr(self, "show_values_only")
-        show_values_only = self.show_values_only if has_attr else False
-        if has_attr and show_values_only:
-            self._show_x_position_only()
-            return
-
-        if not self.curves and not self.curve:
-            self.update_right_header("")
-            return
-
-        x_positions = self._get_cursor_x_positions()
-        if not x_positions:
-            self.update_right_header("")
-            return
-
-        try:
-            cursor_values = []
-            (x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
-
-            curves_to_process = []
-            if self.curves:
-                for var_name, ci in self.curves.items():
-                    if not ci.visible:
-                        continue
-                    window = self.window()
-                    curves_to_process.append({
-                        "var_name": var_name,
-                        "x_data": ci.x_data,
-                        "y_data": ci.y_data,
-                        "color": ci.color,
-                        "y_format": ci.y_format,
-                        "unit": self.units.get(var_name, ""),
-                        "enum_map": getattr(window, '_enum_text_maps', {}).get(var_name, {})
-                    })
-            elif not self.is_multi_curve_mode and self.curve and self.y_name:
-                x_data, y_data = self.curve.getData()
-                if x_data is not None and len(x_data) > 0:
-                    curve_color = "blue"
-                    try:
-                        if hasattr(self.curve, "opts") and "pen" in self.curve.opts:
-                            pen = self.curve.opts["pen"]
-                            if hasattr(pen, "color"):
-                                curve_color = pen.color().name()
-                    except Exception:
-                        logger.debug("pen.color() 异常，使用默认颜色", exc_info=True)
-                    window = self.window()
-                    curves_to_process.append({
-                        "var_name": self.y_name,
-                        "x_data": x_data,
-                        "y_data": y_data,
-                        "color": curve_color,
-                        "y_format": self.y_format,
-                        "unit": self.units.get(self.y_name, ""),
-                        "enum_map": getattr(window, '_enum_text_maps', {}).get(self.y_name, {})
-                    })
-
-            for x in x_positions:
-                if x < x_min or x > x_max:
-                    continue
-                for curve_data in curves_to_process:
-                    var_name = curve_data["var_name"]
-                    x_data = curve_data["x_data"]
-                    y_data = curve_data["y_data"]
-                    color = curve_data["color"]
-                    y_format = curve_data["y_format"]
-
-                    if x_data is None or len(x_data) == 0:
-                        continue
-                    if x < x_data.min() or x > x_data.max():
-                        continue
-
-                    try:
-                        idx = np.searchsorted(x_data, x, side="left")
-                        if idx >= len(x_data):
-                            idx = len(x_data) - 1
-                        elif idx > 0:
-                            if abs(x_data[idx - 1] - x) < abs(x_data[idx] - x):
-                                idx = idx - 1
-                    except (ValueError, TypeError):
-                        idx = np.argmin(np.abs(x_data - x))
-
-                    y_val = y_data[idx]
-                    x_actual = x_data[idx]
-                    if np.isnan(x_actual) or np.isnan(y_val):
-                        continue
-                    if y_val < y_min or y_val > y_max:
-                        continue
-
-                    if y_format == "enum":
-                        enum_map = curve_data.get("enum_map", {})
-                        y_str = enum_map.get(int(y_val), str(y_val))
-                    elif y_format == "s":
-                        y_str = self.sInt_to_fmtStr(y_val)
-                    elif y_format == "date":
-                        y_str = self.dateInt_to_fmtStr(y_val)
-                    else:
-                        y_str = f"{y_val:.5g}"
-
-                    cursor_values.append({
-                        "var_name": var_name,
-                        "x_pos": x_actual,
-                        "y_pos": y_val,
-                        "y_value": y_str,
-                        "color": color
-                    })
-
-                    circle = self._get_circle_from_pool(len(cursor_values) - 1)
-                    circle.clear()
-                    circle.setData([x_actual], [y_val])
-                    if not hasattr(circle, "_cached_color") or circle._cached_color != color:
-                        pen = pg.mkPen(color, width=1.5)
-                        circle.setPen(pen)
-                        circle._cached_color = color
-                    circle.setVisible(True)
-                    circle.setZValue(200)
-                    circle_scene = circle.scene()
-                    plot_scene = self.plot_item.scene()
-                    if circle_scene != plot_scene:
-                        if circle_scene is not None:
-                            circle_scene.removeItem(circle)
-                        self.plot_item.addItem(circle, ignoreBounds=True)
-                    self.multi_cursor_items.append(circle)
-
-            self._position_labels_avoid_overlap(cursor_values, x_min, x_max, y_min, y_max)
-
-            for idx, x in enumerate(x_positions):
-                if x < x_min or x > x_max:
-                    continue
-                x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
-                x_info_item = self._get_x_label_from_pool(idx)
-                x_info_item.setText(x_str)
-                x_info_item.setVisible(True)
-                view_rect = self.plot_item.vb.sceneBoundingRect()
-                scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
-                scene_x = scene_point.x()
-                scene_y = view_rect.bottom()
-                x_info_item.setPos(scene_x, scene_y)
-                x_info_item.setZValue(100000)
-                scene = self.plot_item.scene()
-                x_scene = x_info_item.scene()
-                if x_scene != scene:
-                    if x_scene is not None:
-                        x_scene.removeItem(x_info_item)
-                    scene.addItem(x_info_item)
-                self.multi_cursor_items.append(x_info_item)
-
-        except Exception as e:
-            logger.error("Multi-curve cursor update error: %s", e, exc_info=True)
-            self.update_right_header("")
+        """更新多曲线光标标签 → 委托到 CursorManager"""
+        self._cursor_manager._update_multi_curve_cursor_label()
 
     def _position_labels_avoid_overlap(self, cursor_values: list[dict], x_min: float, x_max: float, y_min: float, y_max: float) -> None:
-        """优化的标签定位算法，使用对角线位置避免遮挡曲线。
-        
-        使用4个候选位置策略（右上、左上、右下、左下）依次尝试，
-        选择第一个在边界内的位置。如果都超出边界，则约束在右上位置。
-        
-        【内存优化】使用对象池复用TextItem，避免频繁创建销毁
-        
-        Args:
-            cursor_values: 光标值列表，每个元素为包含var_name, x_pos, y_pos, y_value, color的字典
-            x_min: 视图x轴最小值（数据坐标）
-            x_max: 视图x轴最大值（数据坐标）
-            y_min: 视图y轴最小值（数据坐标）
-            y_max: 视图y轴最大值（数据坐标）
-        """
-        if not cursor_values:
-            return
-        
-        # 计算视图范围，用于边界检查
-        x_range = x_max - x_min
-        y_range = y_max - y_min
-        
-        # 获取实际视图尺寸
-        view_box = self.plot_item.getViewBox()
-        view_width_pixels = max(1, view_box.width())  # 防止除零
-        view_height_pixels = max(1, view_box.height())
-        
-        # 预计算转换比例（像素 -> 数据坐标）
-        pixel_to_data_x = x_range / view_width_pixels
-        pixel_to_data_y = y_range / view_height_pixels
-        
-        # 设置固定的屏幕像素偏移
-        gap_pixels = 5  # 文本框左边缘距离cursor的水平像素间隔
-        vertical_gap_pixels = 10  # 垂直像素间隔
-        
-        # 获取TextItem的字体来动态计算标签尺寸（缓存font_metrics避免重复创建）
-        if not hasattr(self, '_cached_font_metrics'):
-            sample_text_item = self._get_label_from_pool(0)
-            text_font = sample_text_item.textItem.font()
-            self._cached_font_metrics = QFontMetrics(text_font)
-            self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
-        
-        font_metrics = self._cached_font_metrics
-        label_height_pixels = self._cached_label_height_pixels
-        label_height_data = label_height_pixels * pixel_to_data_y  # 在循环外计算
-        
-        for idx, item in enumerate(cursor_values):
-            x_pos = item['x_pos']
-            y_pos = item['y_pos']
-            y_value = item['y_value']
-            color = item['color']
-            
-            # 从对象池获取TextItem并更新其属性
-            text_item = self._get_label_from_pool(idx)
-            text_item.setText(y_value)
-            
-            # 复用pen对象或只在颜色变化时创建
-            if not hasattr(text_item, '_cached_border_color') or text_item._cached_border_color != color:
-                border_pen = pg.mkPen(color, width=1.5)
-                text_item.border = border_pen
-                text_item._cached_border_color = color
-            text_item.setVisible(True)
-            
-            # 根据实际文本内容动态计算标签宽度
-            text_width = font_metrics.horizontalAdvance(y_value)
-            label_width_pixels = text_width + 12
-            label_width_data = label_width_pixels * pixel_to_data_x  # 在循环内计算宽度（动态的）
-            
-            # 将数据坐标转换为场景坐标（屏幕像素）
-            cursor_scene_pos = view_box.mapViewToScene(QPointF(x_pos, y_pos))
-            cursor_scene_x = cursor_scene_pos.x()
-            cursor_scene_y = cursor_scene_pos.y()
-            
-            # 计算文本框中心的偏移（TextItem的anchor=(0.5, 0.5)）
-            offset_x_right = gap_pixels + label_width_pixels / 2
-            offset_x_left = -(gap_pixels + label_width_pixels / 2)
-            offset_y_up = -(vertical_gap_pixels + label_height_pixels / 2)
-            offset_y_down = vertical_gap_pixels + label_height_pixels / 2
-            
-            # 尝试4个候选位置（右上、左上、右下、左下）
-            strategies = [
-                (offset_x_right, offset_y_up, "右上"),
-                (offset_x_left, offset_y_up, "左上"),
-                (offset_x_right, offset_y_down, "右下"),
-                (offset_x_left, offset_y_down, "左下"),
-            ]
-            
-            label_scene_x, label_scene_y = None, None
-            
-            for strategy_idx, (dx_pixels, dy_pixels, name) in enumerate(strategies):
-                candidate_scene_x = cursor_scene_x + dx_pixels
-                candidate_scene_y = cursor_scene_y + dy_pixels
-                
-                # 转换回数据坐标检查边界
-                candidate_data_pos = view_box.mapSceneToView(QPointF(candidate_scene_x, candidate_scene_y))
-                candidate_x = candidate_data_pos.x()
-                candidate_y = candidate_data_pos.y()
-                
-                # 检查是否在数据范围内
-                left_ok = candidate_x - label_width_data * 0.5 >= x_min
-                right_ok = candidate_x + label_width_data * 0.5 <= x_max
-                bottom_ok = candidate_y - label_height_data * 0.5 >= y_min
-                top_ok = candidate_y + label_height_data * 0.5 <= y_max
-                
-                in_bounds = left_ok and right_ok and bottom_ok and top_ok
-                
-                if in_bounds:
-                    label_scene_x = candidate_scene_x
-                    label_scene_y = candidate_scene_y
-                    label_x = candidate_x
-                    label_y = candidate_y
-                    break
-            
-            # 如果所有策略都超界，默认使用右上并约束在边界内
-            if label_scene_x is None:
-                label_scene_x = cursor_scene_x + offset_x_right
-                label_scene_y = cursor_scene_y + offset_y_up
-                
-                label_data_pos = view_box.mapSceneToView(QPointF(label_scene_x, label_scene_y))
-                label_x = label_data_pos.x()
-                label_y = label_data_pos.y()
-                
-                label_x = max(x_min + label_width_data * 0.5, 
-                             min(x_max - label_width_data * 0.5, label_x))
-                label_y = max(y_min + label_height_data * 0.5, 
-                             min(y_max - label_height_data * 0.5, label_y))
-            
-            # 边缘避让逻辑：防止标签在边缘抖动
-            edge_margin_strict = label_height_data * 1.5
-            y_center = (y_min + y_max) / 2
-            y_quarter_upper = y_min + (y_max - y_min) * 0.25
-            y_quarter_lower = y_max - (y_max - y_min) * 0.25
-            
-            data_point_near_bottom = (y_pos - y_min) < edge_margin_strict
-            data_point_near_top = (y_max - y_pos) < edge_margin_strict
-            
-            if data_point_near_bottom:
-                label_y = max(y_quarter_upper, label_y)
-                label_y = min(label_y, y_center)
-            elif data_point_near_top:
-                label_y = min(y_quarter_lower, label_y)
-                label_y = max(label_y, y_center)
-            else:
-                edge_margin_soft = label_height_data * 2.0
-                if label_y - y_min < edge_margin_soft:
-                    label_y = y_min + edge_margin_soft
-                elif y_max - label_y < edge_margin_soft:
-                    label_y = y_max - edge_margin_soft
-            
-            text_item.setPos(label_x, label_y)
-            text_item.setZValue(201)
-            
-            text_scene = text_item.scene()
-            plot_scene = self.plot_item.scene()
-            if text_scene != plot_scene:
-                if text_scene is not None:
-                    text_scene.removeItem(text_item)
-                self.plot_item.addItem(text_item, ignoreBounds=True)
-            
-            self.multi_cursor_items.append(text_item)
+        """标签定位算法 → 委托到 CursorManager"""
+        self._cursor_manager._position_labels_avoid_overlap(cursor_values, x_min, x_max, y_min, y_max)
 
     def toggle_cursor(self, show: bool, hide_values_only: bool = False):
-        """切换光标显示状态"""
-        mode = self._get_cursor_mode()
-
-        if hide_values_only:
-            self._set_vline_visibility_for_mode(True, mode)
-            self.cursor_label.setVisible(False)
-            self.show_values_only = True
-            self._clear_cursor_items()
-            self._show_x_position_only()
-        else:
-            self._set_vline_visibility_for_mode(show, mode)
-            self.cursor_label.setVisible(show)
-            self.show_values_only = not show
-
-            if not show:
-                self._clear_cursor_items()
-                self.update_right_header("")
-                self.is_cursor_pinned = False
-                self.pinned_x_value = None
-                self.pinned_index_value = None
-                self.pinned_x_values = []
-                self.pinned_index_values = []
-            else:
-                self.update_cursor_label()
+        """切换光标显示状态 → 委托到 CursorManager"""
+        self._cursor_manager.toggle_cursor(show, hide_values_only)
 
     def _show_x_position_only(self, x_positions=None):
-        """仅显示 x 位置标签（隐藏光标数值）"""
-        try:
-            if not self._has_visible_curve_data():
-                self._clear_cursor_items()
-                self.update_right_header("")
-                return
-            x_positions = x_positions if x_positions is not None else self._get_cursor_x_positions()
-            if not x_positions:
-                return
-
-            (x_min, x_max), (y_min, y_max) = self.view_box.viewRange()
-            self._clear_cursor_items()
-
-            for idx, x in enumerate(x_positions):
-                if x < x_min or x > x_max:
-                    continue
-                x_str = self._significant_decimal_format_str(value=float(x), ref=self.factor)
-                x_info_item = self._get_x_label_from_pool(idx)
-                x_info_item.setText(x_str)
-                x_info_item.setVisible(True)
-
-                view_rect = self.plot_item.vb.sceneBoundingRect()
-                scene_point = self.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
-                scene_x = scene_point.x()
-                scene_y = view_rect.bottom()
-                x_info_item.setPos(scene_x, scene_y)
-                x_info_item.setZValue(100000)
-
-                scene = self.plot_item.scene()
-                x_scene = x_info_item.scene()
-                if x_scene != scene:
-                    if x_scene is not None:
-                        x_scene.removeItem(x_info_item)
-                    scene.addItem(x_info_item)
-
-                self.multi_cursor_items.append(x_info_item)
-
-        except Exception as e:
-            logger.error("x_position_only error: %s", e, exc_info=True)
+        """仅显示 x 位置标签 → 委托到 CursorManager"""
+        self._cursor_manager._show_x_position_only(x_positions)
 
     def _has_visible_curve_data(self) -> bool:
-        """判断当前 plot 是否有可见且有数据的曲线"""
-        try:
-            if self.curves:
-                for ci in self.curves.values():
-                    if not ci.visible:
-                        continue
-                    x_data = ci.x_data
-                    if x_data is not None and len(x_data) > 0:
-                        return True
-                return False
-            if self.curve:
-                x_data, _ = self.curve.getData()
-                return x_data is not None and len(x_data) > 0
-            return False
-        except Exception:
-            return False
+        """判断当前 plot 是否有可见且有数据的曲线 → 委托到 CursorManager"""
+        return self._cursor_manager._has_visible_curve_data()
 
     def pin_cursor(self, x_value):
-        """将光标固定到最近的 x 并同步到所有 plot"""
-        if getattr(self, "_is_pinning_cursor", False):
-            return
-        self._is_pinning_cursor = True
-        try:
-            if not self.window() or not hasattr(self.window(), "cursor_btn") or not self.window().cursor_btn.isChecked():
-                self.window().cursor_btn.setChecked(True)
-                self.window().toggle_cursor_all(True)
-
-            curves_x_data = []
-            if self.is_multi_curve_mode and self.curves:
-                for _, ci in self.curves.items():
-                    if ci.visible and ci.x_data is not None:
-                        curves_x_data.append(ci.x_data)
-            elif self.curve:
-                x_data, _ = self.curve.getData()
-                if x_data is not None:
-                    curves_x_data.append(x_data)
-
-            if not curves_x_data:
-                return
-
-            globally_closest_x = None
-            min_distance = float("inf")
-            for x_data in curves_x_data:
-                if x_data is None or len(x_data) == 0:
-                    continue
-                try:
-                    idx = np.searchsorted(x_data, x_value, side="left")
-                    if idx > 0 and idx < len(x_data):
-                        dist_left = abs(x_data[idx - 1] - x_value)
-                        dist_right = abs(x_data[idx] - x_value)
-                        if dist_left < dist_right:
-                            idx = idx - 1
-                    elif idx == len(x_data):
-                        idx = len(x_data) - 1
-                except (ValueError, TypeError):
-                    idx = np.argmin(np.abs(x_data - x_value))
-                nearest_x_in_curve = x_data[idx]
-                distance = abs(nearest_x_in_curve - x_value)
-                if distance < min_distance:
-                    min_distance = distance
-                    globally_closest_x = nearest_x_in_curve
-
-            if globally_closest_x is not None:
-                display_x = globally_closest_x
-                if self.window() and hasattr(self.window(), "plot_widgets"):
-                    main_window = self.window()
-                    if hasattr(main_window, "cursor_mode"):
-                        main_window.cursor_mode = "1 anchored cursor"
-                    if hasattr(main_window, "pinned_x_values"):
-                        main_window.pinned_x_values = [display_x]
-                    widgets_to_update = []
-                    for container in main_window.plot_widgets:
-                        widget = container.plot_widget
-                        widget.apply_cursor_mode("1 anchored cursor", [display_x])
-                        if hasattr(widget, "_last_cursor_update_time"):
-                            widget._last_cursor_update_time = 0
-                        if hasattr(widget.view_box, "is_cursor_pinned"):
-                            widget.view_box.is_cursor_pinned = True
-                        widgets_to_update.append(widget)
-
-                    def _delayed_label_update(widgets=widgets_to_update):
-                        for widget in widgets:
-                            if not getattr(widget, "_is_being_destroyed", False):
-                                try:
-                                    widget.update_cursor_label()
-                                except (RuntimeError, AttributeError):
-                                    pass
-
-                    QTimer.singleShot(0, _delayed_label_update)
-        finally:
-            self._is_pinning_cursor = False
+        """将光标固定到最近的 x 并同步到所有 plot → 委托到 CursorManager"""
+        self._cursor_manager.pin_cursor(x_value)
 
     def free_cursor(self):
-        """释放光标固定并恢复自由移动"""
-        self.is_cursor_pinned = False
-        self.pinned_x_value = None
-        self.pinned_index_value = None
-        self.pinned_x_values = []
-        self.pinned_index_values = []
-
-        if hasattr(self, "vline"):
-            self.vline.setMovable(False)
-        if hasattr(self, "vline2"):
-            self.vline2.setMovable(False)
-
-        if hasattr(self.view_box, "is_cursor_pinned"):
-            self.view_box.is_cursor_pinned = False
-
-        if self.window() and hasattr(self.window(), "plot_widgets"):
-            main_window = self.window()
-            if hasattr(main_window, "cursor_mode"):
-                main_window.cursor_mode = "1 free cursor"
-            if hasattr(main_window, "pinned_x_values"):
-                main_window.pinned_x_values = []
-            for container in main_window.plot_widgets:
-                widget = container.plot_widget
-                widget.apply_cursor_mode("1 free cursor", [])
-                if hasattr(widget.view_box, "is_cursor_pinned"):
-                    widget.view_box.is_cursor_pinned = False
+        """释放光标固定并恢复自由移动 → 委托到 CursorManager"""
+        self._cursor_manager.free_cursor()
 
     def reset_pin_state(self):
-        """重置 pin 状态"""
-        self.is_cursor_pinned = False
-        self.pinned_x_value = None
-        self.pinned_index_value = None
-        self.pinned_x_values = []
-        self.pinned_index_values = []
-        if hasattr(self, "vline"):
-            self.vline.setMovable(False)
-        if hasattr(self, "vline2"):
-            self.vline2.setMovable(False)
-        if hasattr(self, "vline2"):
-            self.vline2.setVisible(False)
-        if hasattr(self.view_box, "is_cursor_pinned"):
-            self.view_box.is_cursor_pinned = False
+        """重置 pin 状态 → 委托到 CursorManager"""
+        self._cursor_manager.reset_pin_state()
 
     def _update_vline_bounds_from_data(self):
         """根据当前绘制的数据更新vline bounds
@@ -2233,32 +1164,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return None, None
     
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
-        """在绘图或自动缩放后，更新光标线的边界和可见性
-        
-        根据数据范围更新cursor的移动边界，并根据主窗口的cursor状态决定显示模式。
-        
-        Args:
-            min_x_bound: cursor允许的最小x值
-            max_x_bound: cursor允许的最大x值
-        """
-        main_window = self.window()
-        if main_window and hasattr(main_window, 'cursor_btn'):
-            # 设置cursor的移动边界
-            self._set_vline_bounds([min_x_bound, max_x_bound])
-            cursor_enabled = main_window.cursor_btn.isChecked()
-            cursor_values_hidden = getattr(main_window, 'cursor_values_hidden', False)
-            
-            # 根据全局cursor状态决定显示模式
-            if cursor_enabled and cursor_values_hidden:
-                # cursor启用但只显示vline和x值
-                self.toggle_cursor(False, hide_values_only=True)
-            else:
-                # cursor完全启用或禁用
-                self.toggle_cursor(cursor_enabled)
-        else:
-            # 无主窗口或cursor按钮，禁用cursor
-            self._set_vline_bounds([None, None])
-            self.toggle_cursor(False)
+        """绘图后更新光标边界和可见性 → 委托到 CursorManager"""
+        self._cursor_manager._update_cursor_after_plot(min_x_bound, max_x_bound)
 
     def clear_value_cache(self):
         #self._value_cache: dict[str, tuple] = {}
@@ -2864,53 +1771,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return bounds
     
     def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray, update_x_range: bool = True):
-        """设置绘图坐标轴
-        
-        根据数据范围设置X和Y轴的显示范围和限制范围。
-        对于单点或所有点x坐标相同的特殊情况，会自动扩展x轴范围。
-        
-        Args:
-            x_values: X轴数据数组
-            y_values: Y轴数据数组
-            update_x_range: 是否更新X轴范围，默认为True
-        """
-        try:
-            # 处理特殊情况（单点或所有点x坐标相同）
-            special_limits = self.handle_single_point_limits(x_values, y_values)
-            if special_limits:
-                min_x, max_x, min_y, max_y = special_limits
-            else:
-                min_x = np.min(x_values)
-                max_x = np.max(x_values)
-                min_y = np.nanmin(y_values)
-                max_y = np.nanmax(y_values)
-                
-            # 计算X轴的限制范围（允许的最大范围）
-            padding_x = DEFAULT_PADDING_VAL_X
-            limits_xMin = min_x - padding_x * (max_x - min_x)
-            limits_xMax = max_x + padding_x * (max_x - min_x)
-            
-            # 只在update_x_range为True时设置X轴的viewRange（显示范围）
-            if update_x_range:
-                self.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
-            
-            # 设置Y轴范围和X轴limits
-            self._set_safe_y_range(min_y, max_y)
-            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-            
-        except Exception as e:
-            # 出错时使用默认范围
-            self._set_safe_y_range(0, 1)
-            self._set_x_limits_with_min_range(0, 1)
+        """设置绘图坐标轴 → 委托到 AxisManager"""
+        self._axis_manager._setup_plot_axes(x_values, y_values, update_x_range)
 
     def _reset_plot_limits(self):
-        """重置绘图限制"""
-        try:
-            self.plot_item.setLimits(yMin=None, yMax=None)
-            self.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
-            self._set_vline_bounds([None, None])
-        except Exception as e:
-            print(f"重置绘图限制时出错: {e}")
+        """重置绘图限制 → 委托到 AxisManager"""
+        self._axis_manager._reset_plot_limits()
 
     def _clear_plot_data(self):
         """清除绘图数据"""
