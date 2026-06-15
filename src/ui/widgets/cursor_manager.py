@@ -370,6 +370,16 @@ class CursorManager:
             if my_version != 0 and my_version != current_version:
                 return True
 
+        # 安全网：vline bounds 为 [None, None] 时禁止 cursor 更新，
+        # 防止 vline 处于无效状态（如 reload 中间态）时触发 cursor 回调导致 SIGSEGV
+        if hasattr(self.pw, "vline"):
+            try:
+                bounds = self.pw.vline.bounds
+                if bounds == [None, None] or bounds == (None, None):
+                    return True
+            except (RuntimeError, AttributeError):
+                return True
+
         return False
 
     def _update_single_curve_cursor_label(self):
@@ -500,7 +510,12 @@ class CursorManager:
         self.pw.multi_cursor_items.clear()
 
         if not hide_only:
-            # 修复2：立即从 scene 移除旧 cursor items，避免延迟清理窗口内的状态不一致
+            # 先将上一轮 trash 清空（上一轮的 item 已安全，可以释放）
+            if hasattr(self.pw, '_cursor_trash_bin'):
+                self.pw._cursor_trash_bin.clear()
+            else:
+                self.pw._cursor_trash_bin = []
+
             old_circles = list(self.pw._cursor_item_pool.get("circles", []))
             old_labels = list(self.pw._cursor_item_pool.get("labels", []))
             old_x_labels = list(self.pw._cursor_item_pool.get("x_labels", []))
@@ -523,10 +538,10 @@ class CursorManager:
                         scene.removeItem(item)
                 except (RuntimeError, AttributeError):
                     pass
-                try:
-                    item.deleteLater()
-                except (RuntimeError, AttributeError):
-                    pass
+                # 移入 trash bin 保持引用，延迟到下一次 _clear_cursor_items 时释放。
+                # scene.removeItem 已从场景移除，paint event 不会访问该 item。
+                # trash bin 在下一轮清理时清空，确保至少经历一个完整事件循环。
+                self.pw._cursor_trash_bin.append(item)
 
     def _queue_item_for_deletion(self, item):
         """将 item 加入待删除队列"""
@@ -922,7 +937,7 @@ class CursorManager:
                              min(y_max - label_height_data * 0.5, label_y))
 
             # 边缘避让逻辑：防止标签在边缘抖动
-            edge_margin_strict = label_height_data * 0.25
+            edge_margin_strict = label_height_data * 0.1
             y_center = (y_min + y_max) / 2
             # y_quarter_upper = y_min + (y_max - y_min) * 0.25
             # y_quarter_lower = y_max - (y_max - y_min) * 0.25
@@ -937,7 +952,7 @@ class CursorManager:
                 # label_y = min(y_quarter_lower, label_y)
                 label_y = max(label_y, y_center)
             else:
-                edge_margin_soft = label_height_data * 0.5
+                edge_margin_soft = label_height_data * 0.25
                 if label_y - y_min < edge_margin_soft:
                     label_y = y_min + edge_margin_soft
                 elif y_max - label_y < edge_margin_soft:
@@ -1564,12 +1579,15 @@ class CursorManager:
         self.pinned_x_values = []
         self.pinned_index_values = []
 
+        # 使用 QSignalBlocker 阻断 setMovable(False) 期间的 sigPositionChanged 信号，
+        # 避免 handle items 销毁时意外触发 on_vline_position_changed 回调导致 SIGSEGV
         if hasattr(self.pw, "vline"):
-            self.pw.vline.setMovable(False)
+            with QSignalBlocker(self.pw.vline):
+                self.pw.vline.setMovable(False)
         if hasattr(self.pw, "vline2"):
-            self.pw.vline2.setMovable(False)
-        if hasattr(self.pw, "vline2"):
-            self.pw.vline2.setVisible(False)
+            with QSignalBlocker(self.pw.vline2):
+                self.pw.vline2.setMovable(False)
+                self.pw.vline2.setVisible(False)
 
     def _update_view_range_from_data(self):
         """从数据更新视图范围"""
