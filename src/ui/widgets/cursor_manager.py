@@ -669,7 +669,7 @@ class CursorManager:
 
             import pyqtgraph as pg
 
-            for x in x_positions:
+            for cursor_id, x in enumerate(x_positions):
                 if x < x_min or x > x_max:
                     continue
                 for curve_data in curves_to_process:
@@ -718,6 +718,7 @@ class CursorManager:
                             "y_pos": y_val,
                             "y_value": y_str,
                             "color": color,
+                            "cursor_id": cursor_id,  # 标识属于哪个 cursor
                         }
                     )
 
@@ -969,6 +970,8 @@ class CursorManager:
         """新标签定位算法：全局排布 + 多列自适应
 
         Phase 1: 数据过滤 → Phase 2: 布局计算 → Phase 3: 渲染
+
+        支持多 cursor 模式：按 cursor_id 分组，每个 cursor 的标签独立布局。
         """
         if not cursor_values:
             return
@@ -994,31 +997,52 @@ class CursorManager:
         label_height_pixels = self._cached_label_height_pixels
         label_height_data = label_height_pixels * pixel_to_data_y
 
-        # --- Phase 1: 数据过滤 ---
-        visible_labels = self._filter_labels_phase1(
-            cursor_values, x_min, x_max, y_min, y_max,
-            label_height_data, font_metrics,
-        )
-        if not visible_labels:
-            return
+        # 按 cursor_id 分组（保留原始索引）
+        cursor_groups = {}
+        for orig_idx, item in enumerate(cursor_values):
+            cid = item.get('cursor_id', 0)
+            if cid not in cursor_groups:
+                cursor_groups[cid] = []
+            cursor_groups[cid].append({**item, '_orig_idx': orig_idx})
 
-        # --- Phase 2: 布局计算 ---
-        # 获取光标 scene 位置（用于列方向判定和速度计算）
-        cursor_scene_pos = None
-        if cursor_values:
-            first_val = cursor_values[0]
+        # 对每个 cursor 独立处理
+        all_layouts = []
+        all_filtered_out_indices = set()
+        for cid, group_values in sorted(cursor_groups.items()):
+            # --- Phase 1: 数据过滤 ---
+            visible_labels, filtered_out_indices = self._filter_labels_phase1(
+                group_values, x_min, x_max, y_min, y_max,
+                label_height_data, font_metrics,
+            )
+            all_filtered_out_indices.update(filtered_out_indices)
+            if not visible_labels:
+                continue
+
+            # --- Phase 2: 布局计算 ---
+            # 获取该 cursor 的 scene 位置
             cursor_scene_pos = view_box.mapViewToScene(
-                QPointF(first_val['x_pos'], first_val['y_pos'])
+                QPointF(group_values[0]['x_pos'], group_values[0]['y_pos'])
             )
 
-        layouts = self._compute_label_layout(
-            visible_labels, cursor_scene_pos, view_box,
-            x_min, x_max, y_min, y_max,
-            label_height_pixels, font_metrics,
-        )
+            layouts, layout_hide_indices = self._compute_label_layout(
+                visible_labels, cursor_scene_pos, view_box,
+                x_min, x_max, y_min, y_max,
+                label_height_pixels, font_metrics,
+            )
+            all_layouts.extend(layouts)
+            all_filtered_out_indices.update(layout_hide_indices)
 
         # --- Phase 3: 渲染 ---
-        self._render_label_layout(layouts)
+        self._render_label_layout(all_layouts)
+
+        # --- Phase 4: 统一隐藏未使用的标签 ---
+        # 在所有 cursor group 处理完毕后，隐藏被过滤掉的标签。
+        # 排除已被本次渲染使用的 pool index，避免误隐藏其他 cursor 的标签。
+        used_indices = {layout.index for layout in all_layouts}
+        indices_to_hide = all_filtered_out_indices - used_indices
+        for idx in indices_to_hide:
+            text_item = self._get_label_from_pool(idx)
+            text_item.setVisible(False)
 
     def _filter_labels_phase1(
         self,
@@ -1029,30 +1053,34 @@ class CursorManager:
         y_max: float,
         label_height_data: float,
         font_metrics,
-    ) -> list:
+    ) -> tuple:
         """Phase 1: 在上游过滤基础上增加边界余量二次过滤
 
-        返回按 y_pos 降序排列的可见标签列表（高 y 值在上，保留原始索引）。
+        返回 (visible_labels, filtered_out_indices)。
+        visible_labels: 按 y_pos 降序排列的可见标签列表（高 y 值在上，保留原始索引）。
+        filtered_out_indices: 被过滤掉的标签 pool index 集合（延迟到所有 cursor group
+        处理完毕后统一隐藏，避免多 cursor 共享 pool 时相互干扰）。
+        注意：cursor_values 中的 item 应已包含 '_orig_idx' 字段。
         """
         margin = label_height_data * 0.5
 
         visible = [
-            {**v, '_orig_idx': idx}
-            for idx, v in enumerate(cursor_values)
+            v for v in cursor_values
             if y_min + margin < v['y_pos'] < y_max - margin
             and x_min < v['x_pos'] < x_max
         ]
 
-        # 隐藏被过滤掉的标签
+        # 收集被过滤掉的 pool index（不立即隐藏，由调用方统一处理）
         visible_indices = {item['_orig_idx'] for item in visible}
-        for idx in range(len(cursor_values)):
-            if idx not in visible_indices:
-                text_item = self._get_label_from_pool(idx)
-                text_item.setVisible(False)
+        filtered_out_indices = {
+            item['_orig_idx']
+            for item in cursor_values
+            if item['_orig_idx'] not in visible_indices
+        }
 
         # 按 y 降序排列（高 y 值在上），与 scene 坐标系方向一致
         visible.sort(key=lambda v: v['y_pos'], reverse=True)
-        return visible
+        return visible, filtered_out_indices
 
     def _compute_label_layout(
         self,
@@ -1065,10 +1093,14 @@ class CursorManager:
         y_max: float,
         label_height_pixels: float,
         font_metrics,
-    ) -> list[LabelLayout]:
-        """Phase 2: 计算所有标签的布局位置（纯数学，不操作 UI）"""
+    ) -> tuple:
+        """Phase 2: 计算所有标签的布局位置（纯数学，不操作 UI）
+
+        返回 (layouts, hide_indices)。
+        hide_indices: 因窗口极小无法放置而需要隐藏的标签 pool index 集合。
+        """
         if not visible_labels:
-            return []
+            return [], set()
 
         # 计算标签宽度
         max_label_width_pixels = 200  # 最大标签宽度（像素）
@@ -1119,13 +1151,11 @@ class CursorManager:
         new_column_count = max(1, int(np.ceil(n_labels / per_column_capacity)))
         column_count = self._apply_column_hysteresis(new_column_count)
 
-        # 总标签高度超 plot 高度时的极限保护：缩小字体
+        # 总标签高度超 plot 高度时的极限保护
         if per_column_capacity < 1:
-            # 窗口极小，隐藏所有标签
-            for item in visible_labels:
-                text_item = self._get_label_from_pool(item['_orig_idx'])
-                text_item.setVisible(False)
-            return []
+            # 窗口极小，返回所有标签的 pool index 供调用方统一隐藏
+            hide_indices = {item['_orig_idx'] for item in visible_labels}
+            return [], hide_indices
 
         # 计算列放置方向
         cursor_scene_x = cursor_scene_pos.x() if cursor_scene_pos else 0
@@ -1169,7 +1199,7 @@ class CursorManager:
             )
             all_layouts.extend(col_layouts)
 
-        return all_layouts
+        return all_layouts, set()
 
     def _apply_column_hysteresis(self, new_column_count: int) -> int:
         """列数切换滞回：连续 3 次调用才切换，防止临界抖动"""
