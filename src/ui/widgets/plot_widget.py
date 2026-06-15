@@ -448,7 +448,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._schedule_cursor_geometry_update()
+        if hasattr(self, '_event_handler'):
+            self._schedule_cursor_geometry_update()
 
     @safe_callback
     def on_vline_position_changed(self, line_obj=None):
@@ -1495,6 +1496,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新 → 委托到 EventHandler"""
+        if not hasattr(self, '_event_handler'):
+            return
         self._event_handler._schedule_cursor_geometry_update()
 
     def _refresh_cursor_geometry(self):
