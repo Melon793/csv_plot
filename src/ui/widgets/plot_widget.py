@@ -16,7 +16,7 @@ from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, QSignalBlocker
+from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView,
@@ -440,105 +440,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     @safe_callback
     def on_vline_position_changed(self, line_obj=None):
-        """vline 位置变化时更新光标状态"""
-        if self._is_cursor_update_locked():
-            return
-        # 时间修正期间禁止写回，避免固定值被边界夹住后污染
-        if self.window() and getattr(self.window(), "_is_time_correction_active", False):
-            return
-
-        line = line_obj if line_obj is not None else self.vline
-        cursor_index = getattr(line, "cursor_index", 0)
-
-        if self.is_cursor_pinned:
-            if getattr(self, "_suppress_pin_update", False):
-                return
-            x_pos = line.value()
-            if len(self.pinned_x_values) <= cursor_index:
-                self.pinned_x_values += [x_pos] * (cursor_index + 1 - len(self.pinned_x_values))
-            self.pinned_x_values[cursor_index] = x_pos
-
-            if cursor_index == 0:
-                self.pinned_x_value = x_pos
-                if self.factor != 0:
-                    self.pinned_index_value = (x_pos - self.offset) / self.factor
-                else:
-                    self.pinned_index_value = None
-
-            self.pinned_index_values = []
-            for x_val in self.pinned_x_values:
-                if self.factor != 0:
-                    self.pinned_index_values.append((x_val - self.offset) / self.factor)
-
-            if self.window() and hasattr(self.window(), "pinned_x_values"):
-                self.window().pinned_x_values = list(self.pinned_x_values)
-
-            if self.window() and hasattr(self.window(), "plot_widgets"):
-                for container in self.window().plot_widgets:
-                    widget = container.plot_widget
-                    if widget.is_cursor_pinned and widget != self:
-                        target_line = widget.vline if cursor_index == 0 else getattr(widget, "vline2", None)
-                        if target_line is not None:
-                            with QSignalBlocker(target_line):
-                                target_line.setPos(x_pos)
-                        if len(widget.pinned_x_values) <= cursor_index:
-                            widget.pinned_x_values += [x_pos] * (cursor_index + 1 - len(widget.pinned_x_values))
-                        widget.pinned_x_values[cursor_index] = x_pos
-                        if cursor_index == 0:
-                            widget.pinned_x_value = x_pos
-                            if widget.factor != 0:
-                                widget.pinned_index_value = (x_pos - widget.offset) / widget.factor
-                            else:
-                                widget.pinned_index_value = None
-                        widget.update_cursor_label()
-
-            self.update_cursor_label()
-        else:
-            if self.show_values_only:
-                self._show_x_position_only()
-            else:
-                self.update_cursor_label()
+        """vline 位置变化时更新光标状态 → 委托到 CursorManager"""
+        self._cursor_manager.on_vline_position_changed(line_obj)
 
     def sInt_to_fmtStr(self, value: int):
-        """将秒数转换为时间字符串 HH:MM:SS.SS - 优化版避免内存泄漏"""
-        # 【优化】直接计算而不创建pandas对象，避免内存累积
-        total = value % (24*3600)  # 一天内的秒数
-        hh = int(total // 3600)
-        mm = int((total % 3600) // 60)
-        ss = total % 60
-        return f"{hh:02d}:{mm:02d}:{ss:05.2f}"
+        """将秒数转换为时间字符串 → 委托到 CursorManager"""
+        return self._cursor_manager.sInt_to_fmtStr(value)
     
     def dateInt_to_fmtStr(self, value: int):
-        """将时间戳转换为日期字符串 - 优化版避免内存泄漏"""
-        # 【优化】直接使用datetime而不创建pandas Series，避免内存累积
-        from datetime import datetime
-        try:
-            dt = datetime.fromtimestamp(value)
-            return dt.strftime('%Y/%m/%d')
-        except:
-            return str(value)
+        """将时间戳转换为日期字符串 → 委托到 CursorManager"""
+        return self._cursor_manager.dateInt_to_fmtStr(value)
     
-    def _significant_decimal_format_str(self,value: float, ref: float, max_dp:int | None = None) -> str:
-        """
-        根据 ref 的“显示精度”自动决定 value 的字符串格式。
-        """
-        # check length
-        s = format(ref, 'f').rstrip('0').rstrip('.')
-        if '.' not in s:
-            dp = 0
-        else:
-            dp = len(s.split('.')[1])
-
-        if max_dp is None or max_dp < 0:
-            pass
-        else:
-            dp = min(max_dp,dp)
-
-        if dp == 0:                       # ref 本身按整数显示
-            return str(int(round(value)))
-        
-        fmt = f'{{:.{dp}f}}'              # 例如保留 2 位 -> "{:.2f}"
-        return fmt.format(value).rstrip('0').rstrip('.')  # 去掉无意义的 0
+    def _significant_decimal_format_str(self, value: float, ref: float, max_dp: int | None = None) -> str:
+        """根据 ref 的显示精度自动决定 value 的字符串格式 → 委托到 CursorManager"""
+        return self._cursor_manager._significant_decimal_format_str(value, ref, max_dp)
     
 
 

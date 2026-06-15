@@ -16,7 +16,7 @@ from typing import Any, TYPE_CHECKING
 
 import pyqtgraph as pg
 from PySide6.QtGui import QFontMetrics
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, QSignalBlocker
 
 if TYPE_CHECKING:
     from src.ui.widgets.multi_curve_manager import MultiCurveManager
@@ -358,7 +358,7 @@ class CursorManager:
             x = np.clip(x, x_data.min(), x_data.max())
             idx = np.argmin(np.abs(x_data - x))
             y_val = y_data[idx]
-            x_str = self.pw._significant_decimal_format_str(
+            x_str = self._significant_decimal_format_str(
                 value=float(x), ref=self.factor
             )
             if self.y_format == "enum":
@@ -368,10 +368,10 @@ class CursorManager:
                 y_str = enum_map.get(int(y_val), str(y_val))
                 self.pw.update_right_header(f"x={x_str}, y={y_str}")
             elif self.y_format == "s":
-                time_str = self.pw.sInt_to_fmtStr(y_val)
+                time_str = self.sInt_to_fmtStr(y_val)
                 self.pw.update_right_header(f"x={x_str}, y={time_str}")
             elif self.y_format == "date":
-                date_str = self.pw.dateInt_to_fmtStr(y_val)
+                date_str = self.dateInt_to_fmtStr(y_val)
                 self.pw.update_right_header(f"x={x_str}, y={date_str}")
             else:
                 self.pw.update_right_header(f"x={x_str}, y={y_val:.5g}")
@@ -659,9 +659,9 @@ class CursorManager:
                         enum_map = curve_data.get("enum_map", {})
                         y_str = enum_map.get(int(y_val), str(y_val))
                     elif y_format == "s":
-                        y_str = self.pw.sInt_to_fmtStr(y_val)
+                        y_str = self.sInt_to_fmtStr(y_val)
                     elif y_format == "date":
-                        y_str = self.pw.dateInt_to_fmtStr(y_val)
+                        y_str = self.dateInt_to_fmtStr(y_val)
                     else:
                         y_str = f"{y_val:.5g}"
 
@@ -702,7 +702,7 @@ class CursorManager:
             for idx, x in enumerate(x_positions):
                 if x < x_min or x > x_max:
                     continue
-                x_str = self.pw._significant_decimal_format_str(
+                x_str = self._significant_decimal_format_str(
                     value=float(x), ref=self.factor
                 )
                 x_info_item = self._get_x_label_from_pool(idx)
@@ -919,7 +919,7 @@ class CursorManager:
             for idx, x in enumerate(x_positions):
                 if x < x_min or x > x_max:
                     continue
-                x_str = self.pw._significant_decimal_format_str(
+                x_str = self._significant_decimal_format_str(
                     value=float(x), ref=self.factor
                 )
                 x_info_item = self._get_x_label_from_pool(idx)
@@ -944,7 +944,7 @@ class CursorManager:
 
             parts = []
             for x in x_positions:
-                x_str = self.pw._significant_decimal_format_str(
+                x_str = self._significant_decimal_format_str(
                     value=float(x), ref=self.factor
                 )
                 parts.append(f"x={x_str}")
@@ -1256,3 +1256,39 @@ class CursorManager:
             print(f"Error updating vline bounds: {e}")
             pw._set_vline_bounds([None, None])
             return None, None
+
+    # ── 格式化工助方法 ──
+
+    def sInt_to_fmtStr(self, value: int) -> str:
+        """将秒数转换为时间字符串 HH:MM:SS.SS"""
+        total = value % (24 * 3600)
+        hh = int(total // 3600)
+        mm = int((total % 3600) // 60)
+        ss = total % 60
+        return f"{hh:02d}:{mm:02d}:{ss:05.2f}"
+
+    def dateInt_to_fmtStr(self, value: int) -> str:
+        """将时间戳转换为日期字符串"""
+        from datetime import datetime
+        try:
+            dt = datetime.fromtimestamp(value)
+            return dt.strftime('%Y/%m/%d')
+        except Exception:
+            return str(value)
+
+    def _significant_decimal_format_str(self, value: float, ref: float, max_dp: int | None = None) -> str:
+        """根据 ref 的显示精度自动决定 value 的字符串格式"""
+        s = format(ref, 'f').rstrip('0').rstrip('.')
+        if '.' not in s:
+            dp = 0
+        else:
+            dp = len(s.split('.')[1])
+
+        if max_dp is not None and max_dp >= 0:
+            dp = min(max_dp, dp)
+
+        if dp == 0:
+            return str(int(round(value)))
+
+        fmt = f'{{:.{dp}f}}'
+        return fmt.format(value).rstrip('0').rstrip('.')
