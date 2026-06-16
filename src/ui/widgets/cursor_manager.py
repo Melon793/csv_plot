@@ -1157,7 +1157,7 @@ class CursorManager:
         label_height_total = label_height_pixels + vertical_gap_pixels
 
         # 计算列容量
-        margin_pixels_scene = label_height_pixels * 0.5
+        margin_pixels_scene = label_height_pixels * 0.1
         available_height = scene_height - 2 * margin_pixels_scene
         per_column_capacity = max(1, int(available_height / label_height_total))
 
@@ -1334,8 +1334,8 @@ class CursorManager:
             target_y = w_ideal * ideal_y + (1 - w_ideal) * uniform_y
 
             # 动态最大偏移量
-            max_offset = label_height_pixels * (1.5 + n * 0.1)
-            max_offset = min(max_offset, label_height_pixels * 4)
+            max_offset = label_height_pixels * (0.5 + n * 0.1)
+            max_offset = min(max_offset, label_height_pixels * 2)
             target_y = max(ideal_y - max_offset, min(ideal_y + max_offset, target_y))
 
             # 与上一个标签防重叠（包括第一个标签与列顶部的约束）
