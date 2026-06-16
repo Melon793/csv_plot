@@ -138,8 +138,6 @@ class FileLoaderManager(MainWindowBaseManager):
         # 使之前的任何待定 safety timer 失效，防止跨 reload 污染锁状态
         self._safety_unlock_version = -1
 
-        logger.info("[cursor-crash-fix] begin_data_reload version=%s", self.mw._data_version)
-
         if hasattr(self.mw, "_crosshair_update_timer"):
             self.mw._crosshair_update_timer.stop()
         self.mw._pending_crosshair_x = None
@@ -172,9 +170,6 @@ class FileLoaderManager(MainWindowBaseManager):
     def _end_data_reload(self):
         if not self.mw._is_loading_new_data:
             return
-
-        logger.debug("[cursor-crash-fix] _end_data_reload: scheduling restore, version=%s",
-                     self.mw._data_version)
 
         # 不在此时清除任何锁（_is_updating_data / _is_loading_new_data）
         # 所有锁的清除统一延迟到 _restore_cursor_state_after_reload() 中执行，
@@ -272,16 +267,12 @@ class FileLoaderManager(MainWindowBaseManager):
             # 无论成功、失败还是 free cursor 模式，统一清除所有锁并更新版本号
             self.mw._is_loading_new_data = False
             self._safety_unlock_version = -1  # 正常路径清除，safety timer 将自动跳过
-            logger.info("[cursor-crash-fix] restore_cursor done, clearing all locks version=%s",
-                        self.mw._data_version)
             for container in getattr(self.mw, "plot_widgets", []):
                 widget = getattr(container, "plot_widget", None)
                 if widget:
                     widget._is_updating_data = False
                     widget._cached_data_version = self.mw._data_version
                     # 恢复视图更新
-                    logger.debug("[cursor-crash-fix] re-enabling paint on widget, version=%s",
-                                 self.mw._data_version)
                     widget.setUpdatesEnabled(True)
             QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
 
@@ -290,9 +281,6 @@ class FileLoaderManager(MainWindowBaseManager):
         current_version = getattr(self.mw, "_data_version", 0)
         safety_version = getattr(self, "_safety_unlock_version", -1)
         if safety_version != current_version:
-            logger.info("[cursor-crash-fix] safety_force_unlock SKIPPED: "
-                        "safety_version=%s != current_version=%s (newer reload started)",
-                        safety_version, current_version)
             return
         self._force_unlock_all()
 
@@ -300,8 +288,6 @@ class FileLoaderManager(MainWindowBaseManager):
         """紧急解锁：确保所有退出路径都不会留下死锁"""
         self.mw._is_loading_new_data = False
         self._safety_unlock_version = -1
-        logger.warning("[cursor-crash-fix] force_unlock_all: 强制清除了所有锁 version=%s",
-                       self.mw._data_version)
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget:
@@ -548,8 +534,6 @@ class FileLoaderManager(MainWindowBaseManager):
     def _release_old_data(self):
         """显式释放所有对旧 DataFrame 的引用（仅在新 loader 成功后调用）。"""
         import gc
-
-        logger.debug("[cursor-crash-fix] _release_old_data: releasing old data references")
 
         try:
             # 1) 清理 plot widgets 的 data 引用
