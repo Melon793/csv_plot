@@ -395,15 +395,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         导致 QGraphicsView 在 scene items 被销毁/重建期间尝试绘制。
         """
         if getattr(self, '_is_updating_data', False):
-            from src.core.logger import get_logger
-            get_logger("ui.plot_widget").debug(
-                "[cursor-crash-fix] paintEvent SKIPPED: _is_updating_data=True")
             return  # 数据重载中，跳过绘制
         main_window = self.window()
         if main_window and getattr(main_window, '_is_loading_new_data', False):
-            from src.core.logger import get_logger
-            get_logger("ui.plot_widget").debug(
-                "[cursor-crash-fix] paintEvent SKIPPED: _is_loading_new_data=True on main_window")
             return  # 整个窗口正在重载数据，跳过绘制
         try:
             super().paintEvent(event)
