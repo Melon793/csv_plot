@@ -173,6 +173,9 @@ class FileLoaderManager(MainWindowBaseManager):
         if not self.mw._is_loading_new_data:
             return
 
+        logger.debug("[cursor-crash-fix] _end_data_reload: scheduling restore, version=%s",
+                     self.mw._data_version)
+
         # 不在此时清除任何锁（_is_updating_data / _is_loading_new_data）
         # 所有锁的清除统一延迟到 _restore_cursor_state_after_reload() 中执行，
         # 避免 cursor 恢复之前出现无保护时间窗口导致 SIGSEGV
@@ -277,6 +280,8 @@ class FileLoaderManager(MainWindowBaseManager):
                     widget._is_updating_data = False
                     widget._cached_data_version = self.mw._data_version
                     # 恢复视图更新
+                    logger.debug("[cursor-crash-fix] re-enabling paint on widget, version=%s",
+                                 self.mw._data_version)
                     widget.setUpdatesEnabled(True)
             QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
 
@@ -303,6 +308,9 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget._is_updating_data = False
                 widget._cached_data_version = self.mw._data_version
                 widget.setUpdatesEnabled(True)
+                # 紧急解锁后触发一次完整刷新，防止 paintEvent 跳过导致白屏
+                if hasattr(widget, "_queue_ui_refresh"):
+                    widget._queue_ui_refresh(immediate=True)
 
     def _post_reload_ui_refresh(self):
         if self.mw._is_loading_new_data:
@@ -540,6 +548,8 @@ class FileLoaderManager(MainWindowBaseManager):
     def _release_old_data(self):
         """显式释放所有对旧 DataFrame 的引用（仅在新 loader 成功后调用）。"""
         import gc
+
+        logger.debug("[cursor-crash-fix] _release_old_data: releasing old data references")
 
         try:
             # 1) 清理 plot widgets 的 data 引用

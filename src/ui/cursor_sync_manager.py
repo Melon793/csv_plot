@@ -670,8 +670,11 @@ class CursorSyncManager(MainWindowBaseManager):
                     pass
 
         if cleared:
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
+            # 安全防护：数据重载期间严禁调用 processEvents()，
+            # 否则会泵出 paint 事件导致 QGraphicsView 在 items 重建期间崩溃 (SIGSEGV)
+            if not getattr(self.mw, '_is_loading_new_data', False):
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
             msg = "以下图表被清除：\n"
             for plot_idx, reason in cleared:
                 msg += f"Plot {plot_idx}: {reason}\n"
