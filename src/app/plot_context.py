@@ -28,6 +28,8 @@ class PlotServices(Protocol):
     def cursor_btn(self) -> QPushButton: ...
     @property
     def cursor_values_hidden(self) -> bool: ...
+    @cursor_values_hidden.setter
+    def cursor_values_hidden(self, value: bool): ...
     @property
     def pinned_x_values(self) -> list[float]: ...
     @pinned_x_values.setter
@@ -100,6 +102,10 @@ class PlotContext:
     @property
     def cursor_values_hidden(self) -> bool:
         return self._services.cursor_values_hidden
+
+    @cursor_values_hidden.setter
+    def cursor_values_hidden(self, value: bool):
+        self._services.cursor_values_hidden = value
 
     @property
     def pinned_x_values(self) -> list[float]:
