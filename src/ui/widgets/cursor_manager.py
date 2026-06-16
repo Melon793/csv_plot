@@ -633,8 +633,12 @@ class CursorManager:
             return
 
         try:
+            pw = self.pw
+            view_box = pw.view_box
+            plot_scene = pw.plot_item.scene()
+
             cursor_values = []
-            (x_min, x_max), (y_min, y_max) = self.pw.view_box.viewRange()
+            (x_min, x_max), (y_min, y_max) = view_box.viewRange()
 
             curves_to_process = []
             if self.pw.curves:
@@ -685,8 +689,12 @@ class CursorManager:
             import pyqtgraph as pg
 
             for cursor_id, x in enumerate(x_positions):
-                if x < x_min or x > x_max:
-                    continue
+                # anchored cursor 的 x 位置是用户固定的，不应因 view range
+                # 变化而被过滤（例如添加 item 后触发的 auto-range 会改变 view）。
+                # 数据范围的有效性已由下方的 x_data.min()/max() 检查保证。
+                if mode not in ("1 anchored cursor", "2 anchored cursor"):
+                    if x < x_min or x > x_max:
+                        continue
                 for curve_data in curves_to_process:
                     var_name = curve_data["var_name"]
                     x_data = curve_data["x_data"]
@@ -738,6 +746,13 @@ class CursorManager:
                     )
 
                     circle = self._get_circle_from_pool(len(cursor_values) - 1)
+                    # 先确保 circle 在正确的 scene 里，再设置属性
+                    # （Qt 的 prepareGeometryChange 需要 item 在 scene 中才能正确通知 view）
+                    circle_scene = circle.scene()
+                    if circle_scene != plot_scene:
+                        if circle_scene is not None:
+                            circle_scene.removeItem(circle)
+                        pw.plot_item.addItem(circle, ignoreBounds=True)
                     circle.clear()
                     circle.setData([x_actual], [y_val])
                     if (
@@ -749,40 +764,43 @@ class CursorManager:
                         circle._cached_color = color
                     circle.setVisible(True)
                     circle.setZValue(200)
-                    circle_scene = circle.scene()
-                    plot_scene = self.pw.plot_item.scene()
-                    if circle_scene != plot_scene:
-                        if circle_scene is not None:
-                            circle_scene.removeItem(circle)
-                        self.pw.plot_item.addItem(circle, ignoreBounds=True)
-                    self.pw.multi_cursor_items.append(circle)
+                    pw.multi_cursor_items.append(circle)
 
             self._position_labels_avoid_overlap(
                 cursor_values, x_min, x_max, y_min, y_max
             )
 
             for idx, x in enumerate(x_positions):
-                if x < x_min or x > x_max:
-                    continue
+                # anchored cursor 的 x 位置是用户固定的，不因为 view range 变化而被过滤
+                if mode not in ("1 anchored cursor", "2 anchored cursor"):
+                    if x < x_min or x > x_max:
+                        continue
                 x_str = self._significant_decimal_format_str(
                     value=float(x), ref=self.factor
                 )
                 x_info_item = self._get_x_label_from_pool(idx)
+                # 先加入 scene，再设置属性（Qt 规范顺序）
+                x_scene = x_info_item.scene()
+                if x_scene != plot_scene:
+                    if x_scene is not None:
+                        x_scene.removeItem(x_info_item)
+                    plot_scene.addItem(x_info_item)
                 x_info_item.setText(x_str)
                 x_info_item.setVisible(True)
-                view_rect = self.pw.plot_item.vb.sceneBoundingRect()
-                scene_point = self.pw.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
+                view_rect = pw.plot_item.vb.sceneBoundingRect()
+                scene_point = pw.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
                 scene_x = scene_point.x()
                 scene_y = view_rect.bottom()
                 x_info_item.setPos(scene_x, scene_y)
                 x_info_item.setZValue(100000)
-                scene = self.pw.plot_item.scene()
-                x_scene = x_info_item.scene()
-                if x_scene != scene:
-                    if x_scene is not None:
-                        x_scene.removeItem(x_info_item)
-                    scene.addItem(x_info_item)
-                self.pw.multi_cursor_items.append(x_info_item)
+                pw.multi_cursor_items.append(x_info_item)
+
+            # 所有 cursor 可视化元素（labels + circles + x-labels）设置完毕后，
+            # 强制触发 ViewBox 重绘。Qt GraphicsView 框架在某些情况下不会
+            # 自动调度 paint event（尤其在 reload/批量创建 item 后），
+            # 导致部分 TextItem / ScatterPlotItem 不可见，
+            # 直到用户交互（拖动 cursor / 缩放）才恢复。
+            view_box.update()
 
         except Exception:
             self.pw.update_right_header("")
@@ -1397,6 +1415,12 @@ class CursorManager:
 
         for layout in layouts:
             text_item = self._get_label_from_pool(layout.index)
+            # 先加入 scene，再设置属性（Qt 规范：prepareGeometryChange 需要 item 在 scene 中）
+            text_scene = text_item.scene()
+            if text_scene != plot_scene:
+                if text_scene is not None:
+                    text_scene.removeItem(text_item)
+                pw.plot_item.addItem(text_item, ignoreBounds=True)
 
             # 标签文本截断（防止过长文本导致列宽计算失准）
             display_text = layout.y_value
@@ -1424,13 +1448,6 @@ class CursorManager:
             )
             text_item.setPos(data_pos.x(), data_pos.y())
             text_item.setZValue(201)
-
-            text_scene = text_item.scene()
-            if text_scene != plot_scene:
-                if text_scene is not None:
-                    text_scene.removeItem(text_item)
-                pw.plot_item.addItem(text_item, ignoreBounds=True)
-
             pw.multi_cursor_items.append(text_item)
 
     # ========================================================================
@@ -1451,36 +1468,42 @@ class CursorManager:
                 self.pw.update_right_header("")
                 return
 
-            (x_min, x_max), (y_min, y_max) = self.pw.view_box.viewRange()
+            pw = self.pw
+            view_box = pw.view_box
+            plot_scene = pw.plot_item.scene()
+
+            (x_min, x_max), (y_min, y_max) = view_box.viewRange()
             self._clear_cursor_items()
 
             import pyqtgraph as pg
 
+            show_x_mode = self._get_cursor_mode()
             for idx, x in enumerate(x_positions):
-                if x < x_min or x > x_max:
-                    continue
+                # anchored cursor 的 x 位置是用户固定的，不因为 view range 变化而被过滤
+                if show_x_mode not in ("1 anchored cursor", "2 anchored cursor"):
+                    if x < x_min or x > x_max:
+                        continue
                 x_str = self._significant_decimal_format_str(
                     value=float(x), ref=self.factor
                 )
                 x_info_item = self._get_x_label_from_pool(idx)
+                # 先加入 scene，再设置属性（Qt 规范顺序）
+                x_scene = x_info_item.scene()
+                if x_scene != plot_scene:
+                    if x_scene is not None:
+                        x_scene.removeItem(x_info_item)
+                    plot_scene.addItem(x_info_item)
                 x_info_item.setText(x_str)
                 x_info_item.setVisible(True)
 
-                view_rect = self.pw.plot_item.vb.sceneBoundingRect()
-                scene_point = self.pw.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
+                view_rect = pw.plot_item.vb.sceneBoundingRect()
+                scene_point = pw.plot_item.vb.mapViewToScene(pg.Point(x, y_min))
                 scene_x = scene_point.x()
                 scene_y = view_rect.bottom()
                 x_info_item.setPos(scene_x, scene_y)
                 x_info_item.setZValue(100000)
 
-                scene = self.pw.plot_item.scene()
-                x_scene = x_info_item.scene()
-                if x_scene != scene:
-                    if x_scene is not None:
-                        x_scene.removeItem(x_info_item)
-                    scene.addItem(x_info_item)
-
-                self.pw.multi_cursor_items.append(x_info_item)
+                pw.multi_cursor_items.append(x_info_item)
 
             parts = []
             for x in x_positions:
@@ -1490,6 +1513,10 @@ class CursorManager:
                 parts.append(f"x={x_str}")
             header_text = " | ".join(parts)
             self.pw.update_right_header(header_text)
+
+            # 所有 cursor 可视化元素设置完毕后，
+            # 强制触发 ViewBox 重绘，避免部分 item 不可见
+            view_box.update()
 
         except Exception:
             pass
