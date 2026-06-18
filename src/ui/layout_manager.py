@@ -233,6 +233,7 @@ class LayoutManager(MainWindowBaseManager):
     def toggle_mark_region(self, checked):
         if checked:
             self.mw.mark_region_btn.setText("关闭标记")
+            self.mw.mark_region_btn.setChecked(True)
             if len(self.mw.plot_widgets) == 0:
                 self.mw.mark_region_btn.setChecked(False)
                 return
