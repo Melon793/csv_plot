@@ -21,7 +21,7 @@ from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 
 from PySide6.QtCore import Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QColor, QIcon, QAction  # noqa: E402
+from PySide6.QtGui import QColor, QIcon, QAction, QShortcut, QKeySequence  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit,
@@ -309,6 +309,7 @@ class MainWindow(QMainWindow):
 
         self.cursor_btn = QPushButton("显示光标", self.plot_widget)
         self.cursor_btn.setCheckable(True)
+        self.cursor_btn.setToolTip("切换光标显示 (Ctrl+R)")
         self.cursor_btn.clicked.connect(self.toggle_cursor_all)
 
         self.cursor_values_hidden = False
@@ -380,6 +381,9 @@ class MainWindow(QMainWindow):
         self.mark_stats_window = None
 
         self.row_height_factors: dict[int, int] = {}
+
+        self._cursor_shortcut = QShortcut(QKeySequence("Ctrl+R"), self.plot_widget)
+        self._cursor_shortcut.activated.connect(self._on_cursor_shortcut)
 
     def _init_managers(self):
         from src.ui.file_loader_manager import FileLoaderManager
@@ -805,6 +809,13 @@ class MainWindow(QMainWindow):
 
     def toggle_cursor_all(self, checked):
         self.cursor_sync_manager.toggle_cursor_all(checked)
+
+    def _on_cursor_shortcut(self):
+        """Ctrl+R 快捷键：切换光标显示状态"""
+        if not self.plot_widgets:
+            return
+        new_state = not self.cursor_btn.isChecked()
+        self.toggle_cursor_all(new_state)
 
     def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
         self.cursor_sync_manager._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)

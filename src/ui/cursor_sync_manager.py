@@ -207,6 +207,8 @@ class CursorSyncManager(MainWindowBaseManager):
         return False
 
     def toggle_cursor_all(self, checked):
+        if not self.mw.plot_widgets:
+            return
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             if checked and self.mw.cursor_values_hidden:
