@@ -444,6 +444,10 @@ class PlotVariableEditorDialog(QDialog):
         # 更新vline bounds以反映移除变量后的数据范围
         self.plot_widget._update_vline_bounds_from_data()
 
+        # 刷新 cursor 标签以反映曲线删除
+        if self.plot_widget.vline.isVisible():
+            self.plot_widget.update_cursor_label()
+
         # 如果删除了所有曲线，确保完全清理
         if not self.plot_widget.curves:
             # 清理所有可能的残留
