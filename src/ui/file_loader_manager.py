@@ -301,7 +301,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 if widget:
                     widget._is_updating_data = False
                     widget._cached_data_version = self.mw._data_version
-                    widget.setUpdatesEnabled(True)
             QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
 
     def _safety_force_unlock(self):
@@ -338,12 +337,13 @@ class FileLoaderManager(MainWindowBaseManager):
             return
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
-            if widget and hasattr(widget, "_queue_ui_refresh"):
-                if not getattr(widget, '_is_updating_data', False):
-                    # 清除 throttle，确保本次 final render 不被防抖逻辑阻塞
-                    if hasattr(widget, "_last_cursor_update_time"):
-                        widget._last_cursor_update_time = 0
-                    widget._queue_ui_refresh(immediate=True)
+            if widget:
+                widget.setUpdatesEnabled(True)
+                if hasattr(widget, "_queue_ui_refresh"):
+                    if not getattr(widget, '_is_updating_data', False):
+                        if hasattr(widget, "_last_cursor_update_time"):
+                            widget._last_cursor_update_time = 0
+                        widget._queue_ui_refresh(immediate=True)
 
     def load_csv_file(self, file_path: str):
         logger.info("开始加载文件: %s", file_path)
