@@ -494,7 +494,8 @@ class FileLoaderManager(MainWindowBaseManager):
                 if status:
                     self.set_button_status(True)
                     self.mw.load_btn.setEnabled(True)
-                    self._post_load_actions(file_path)
+                    # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
+                    QTimer.singleShot(0, lambda: self._post_load_actions(file_path))
                 else:
                     self.mw.load_btn.setEnabled(True)
             else:
@@ -788,7 +789,8 @@ class FileLoaderManager(MainWindowBaseManager):
         self._end_data_reload()
         self.set_button_status(True)
         self.mw.load_btn.setEnabled(True)
-        self._post_load_actions(file_path)
+        # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
+        QTimer.singleShot(0, lambda: self._post_load_actions(file_path))
 
     def _on_load_error(self, msg):
         logger.error("后台加载失败: %s", msg)
