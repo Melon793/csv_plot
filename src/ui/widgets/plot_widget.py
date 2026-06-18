@@ -68,7 +68,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._is_being_destroyed = False  # 标志：对象正在被销毁
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self._cursor_label_busy = False
-        self._cursor_label_dirty = False
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
         self._original_downsample_ds = None
         self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
