@@ -388,20 +388,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
     def paintEvent(self, event):
         """重写 paintEvent：数据重载期间跳过绘制，防止 SIGSEGV。
-        
+
         虽然 _begin_data_reload 会调用 setUpdatesEnabled(False)，
         但 QWidgetRepaintManager::sync() 可能绕过该标志强制刷新，
         导致 QGraphicsView 在 scene items 被销毁/重建期间尝试绘制。
         """
         if getattr(self, '_is_updating_data', False):
-            return  # 数据重载中，跳过绘制
+            return
         main_window = self.window()
         if main_window and getattr(main_window, '_is_loading_new_data', False):
-            return  # 整个窗口正在重载数据，跳过绘制
+            return
+        if hasattr(self, 'plot_item') and self.plot_item is not None:
+            try:
+                if self.plot_item.scene() is None:
+                    return
+            except RuntimeError:
+                return
         try:
             super().paintEvent(event)
         except Exception:
-            # 即使 pyqtgraph 内部抛出异常也不崩溃
             pass
 
     def wheelEvent(self, ev):

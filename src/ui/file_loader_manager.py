@@ -156,6 +156,11 @@ class FileLoaderManager(MainWindowBaseManager):
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
+            if hasattr(widget, "_safe_clear_plot_items"):
+                try:
+                    widget._safe_clear_plot_items()
+                except Exception:
+                    pass
             widget._is_updating_data = True
             widget._cached_data_version = 0  # 设为0跳过版本比对，由 _is_updating_data 和 _is_loading_new_data 提供锁定
             # 暂停视图更新，防止 scene 中间状态触发 paint event 导致 SIGSEGV
@@ -227,31 +232,56 @@ class FileLoaderManager(MainWindowBaseManager):
                     if widget.factor != 0:
                         widget.pinned_index_values.append((x_val - widget.offset) / widget.factor)
 
-                # 修复3：先 setPos 再 setMovable，避免 handle item 基于无效位置初始化
                 if hasattr(widget, "vline"):
-                    if saved_pinned_x_values:
-                        from PySide6.QtCore import QSignalBlocker
-                        with QSignalBlocker(widget.vline):
-                            widget.vline.setPos(saved_pinned_x_values[0])
-                    widget.vline.setMovable(True)
+                    try:
+                        vline = widget.vline
+                        if vline is not None and vline.scene() is not None:
+                            if saved_pinned_x_values:
+                                from PySide6.QtCore import QSignalBlocker
+                                with QSignalBlocker(vline):
+                                    vline.setPos(saved_pinned_x_values[0])
+                            vline.setMovable(True)
+                    except RuntimeError:
+                        logger.debug("vline C++ 对象已销毁，跳过恢复")
 
                 if hasattr(widget, "vline2"):
-                    if len(saved_pinned_x_values) > 1:
-                        with QSignalBlocker(widget.vline2):
-                            widget.vline2.setPos(saved_pinned_x_values[1])
-                    widget.vline2.setMovable(True)
+                    try:
+                        vline2 = widget.vline2
+                        if vline2 is not None and vline2.scene() is not None:
+                            if len(saved_pinned_x_values) > 1:
+                                from PySide6.QtCore import QSignalBlocker
+                                with QSignalBlocker(vline2):
+                                    vline2.setPos(saved_pinned_x_values[1])
+                            vline2.setMovable(True)
+                    except RuntimeError:
+                        logger.debug("vline2 C++ 对象已销毁，跳过恢复")
 
-                # 按模式恢复 vline/vline2 可见性
                 if saved_cursor_mode == "2 anchored cursor":
                     if hasattr(widget, "vline"):
-                        widget.vline.setVisible(True)
+                        try:
+                            if widget.vline is not None and widget.vline.scene() is not None:
+                                widget.vline.setVisible(True)
+                        except RuntimeError:
+                            pass
                     if hasattr(widget, "vline2"):
-                        widget.vline2.setVisible(True)
+                        try:
+                            if widget.vline2 is not None and widget.vline2.scene() is not None:
+                                widget.vline2.setVisible(True)
+                        except RuntimeError:
+                            pass
                 elif saved_cursor_mode == "1 anchored cursor":
                     if hasattr(widget, "vline"):
-                        widget.vline.setVisible(True)
+                        try:
+                            if widget.vline is not None and widget.vline.scene() is not None:
+                                widget.vline.setVisible(True)
+                        except RuntimeError:
+                            pass
                     if hasattr(widget, "vline2"):
-                        widget.vline2.setVisible(False)
+                        try:
+                            if widget.vline2 is not None and widget.vline2.scene() is not None:
+                                widget.vline2.setVisible(False)
+                        except RuntimeError:
+                            pass
 
                 if hasattr(widget.view_box, "is_cursor_pinned"):
                     widget.view_box.is_cursor_pinned = True
@@ -264,15 +294,13 @@ class FileLoaderManager(MainWindowBaseManager):
         except Exception:
             logger.debug("恢复 pin 状态失败", exc_info=True)
         finally:
-            # 无论成功、失败还是 free cursor 模式，统一清除所有锁并更新版本号
             self.mw._is_loading_new_data = False
-            self._safety_unlock_version = -1  # 正常路径清除，safety timer 将自动跳过
+            self._safety_unlock_version = -1
             for container in getattr(self.mw, "plot_widgets", []):
                 widget = getattr(container, "plot_widget", None)
                 if widget:
                     widget._is_updating_data = False
                     widget._cached_data_version = self.mw._data_version
-                    # 恢复视图更新
                     widget.setUpdatesEnabled(True)
             QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
 
@@ -286,6 +314,13 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _force_unlock_all(self):
         """紧急解锁：确保所有退出路径都不会留下死锁"""
+        for container in getattr(self.mw, "plot_widgets", []):
+            widget = getattr(container, "plot_widget", None)
+            if widget and hasattr(widget, "_safe_clear_plot_items"):
+                try:
+                    widget._safe_clear_plot_items()
+                except Exception:
+                    pass
         self.mw._is_loading_new_data = False
         self._safety_unlock_version = -1
         for container in getattr(self.mw, "plot_widgets", []):
@@ -521,8 +556,9 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw._progress.setAutoClose(True)
                 self.mw._progress.show()
 
+                _load_version = self.mw._data_version
                 self.mw._thread.finished.connect(
-                    lambda loader: self._on_load_done(loader, file_path)
+                    lambda loader: self._on_load_done(loader, file_path, _load_version)
                 )
                 self.mw._thread.error.connect(self._on_load_error)
                 self.mw._thread.start()
@@ -775,7 +811,15 @@ class FileLoaderManager(MainWindowBaseManager):
             new_loader = None
         return status
 
-    def _on_load_done(self, new_loader, file_path: str):
+    def _on_load_done(self, new_loader, file_path: str, load_version: int = -1):
+        if load_version >= 0 and load_version != self.mw._data_version:
+            logger.warning(
+                "数据版本不匹配，丢弃过期加载结果 (expected=%d, got=%d)",
+                self.mw._data_version, load_version,
+            )
+            if hasattr(new_loader, "release_memory"):
+                new_loader.release_memory()
+            return
         logger.info("后台加载完成: %s", file_path)
         self.mw._progress.close()
 
