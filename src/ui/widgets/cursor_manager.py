@@ -89,15 +89,6 @@ class CursorManager:
         self.pw._cursor_label_busy = value
 
     @property
-    def _cursor_label_dirty(self) -> bool:
-        """光标标签数据是否过期需要刷新"""
-        return getattr(self.pw, "_cursor_label_dirty", False)
-
-    @_cursor_label_dirty.setter
-    def _cursor_label_dirty(self, value: bool):
-        self.pw._cursor_label_dirty = value
-
-    @property
     def show_values_only(self) -> bool:
         """是否仅显示坐标值（隐藏曲线数值标签）"""
         return getattr(self.pw, "show_values_only", False)
@@ -323,37 +314,19 @@ class CursorManager:
 
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
-        MAX_RETRIES = 3
-        retry_count = 0
+        if self._is_cursor_update_locked():
+            return
 
-        while retry_count < MAX_RETRIES:
+        if self._cursor_label_busy:
+            return
 
-            if self._is_cursor_update_locked():
-                return
-
-            if self._cursor_label_busy:
-                self._cursor_label_dirty = True
-                return
-
-            self._cursor_label_busy = True
-            self._cursor_label_dirty = False
-
-            try:
-                self._update_multi_curve_cursor_label()
-            except (RuntimeError, AttributeError):
-                pass
-            finally:
-                self._cursor_label_busy = False
-
-            if self._cursor_label_dirty:
-                self._cursor_label_dirty = False
-                retry_count += 1
-                continue
-            else:
-                break
-
-        if retry_count >= MAX_RETRIES:
+        self._cursor_label_busy = True
+        try:
+            self._update_multi_curve_cursor_label()
+        except (RuntimeError, AttributeError):
             pass
+        finally:
+            self._cursor_label_busy = False
 
     def _is_cursor_update_locked(self) -> bool:
         """判断 cursor 相关回调是否需要被暂时禁用"""
@@ -487,6 +460,10 @@ class CursorManager:
             except (RuntimeError, AttributeError):
                 pass
 
+        # 预构建 O(1) 查找集合，避免 list 的 O(n) 线性搜索
+        x_labels_set = set(self.pw._cursor_item_pool.get("x_labels", []))
+        labels_set = set(self.pw._cursor_item_pool.get("labels", []))
+
         for item in self.pw.multi_cursor_items:
             try:
                 item_type = type(item).__name__
@@ -495,12 +472,12 @@ class CursorManager:
                         item.clear()
                     except (RuntimeError, AttributeError):
                         pass
-                elif item in self.pw._cursor_item_pool.get("x_labels", []):
+                elif item in x_labels_set:
                     try:
                         item.setText("")
                     except (RuntimeError, AttributeError):
                         pass
-                elif item in self.pw._cursor_item_pool.get("labels", []):
+                elif item in labels_set:
                     try:
                         item.setText("")
                     except (RuntimeError, AttributeError):
@@ -1079,7 +1056,10 @@ class CursorManager:
         used_indices = {layout.index for layout in all_layouts}
         indices_to_hide = all_filtered_out_indices - used_indices
 
+        pool_labels = self.pw._cursor_item_pool.get("labels", [])
         for idx in indices_to_hide:
+            if idx >= len(pool_labels):
+                continue
             text_item = self._get_label_from_pool(idx)
             text_item.setVisible(False)
 
