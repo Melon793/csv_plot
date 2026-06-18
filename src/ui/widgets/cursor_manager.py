@@ -427,9 +427,10 @@ class CursorManager:
 
         import pyqtgraph as pg
 
-        circle = pg.ScatterPlotItem(symbol="o", size=8, brush=None)
-        pool.append(circle)
-        return circle
+        while len(pool) <= index:
+            circle = pg.ScatterPlotItem(symbol="o", size=8, brush=None)
+            pool.append(circle)
+        return pool[index]
 
     def _get_label_from_pool(self, index: int):
         """从对象池获取 TextItem"""
@@ -440,14 +441,15 @@ class CursorManager:
         import pyqtgraph as pg
         from PySide6.QtWidgets import QApplication
 
-        label = pg.TextItem(
-            color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0, 0.5)
-        )
-        font = QApplication.font()
-        font.setPixelSize(11)
-        label.setFont(font)
-        pool.append(label)
-        return label
+        while len(pool) <= index:
+            label = pg.TextItem(
+                color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0, 0.5)
+            )
+            font = QApplication.font()
+            font.setPixelSize(11)
+            label.setFont(font)
+            pool.append(label)
+        return pool[index]
 
     def _get_x_label_from_pool(self, index: int):
         """获取 X 轴标签 TextItem"""
@@ -458,17 +460,18 @@ class CursorManager:
         import pyqtgraph as pg
         from PySide6.QtWidgets import QApplication
 
-        x_label = pg.TextItem(
-            color=(255, 255, 255),
-            fill=pg.mkBrush(64, 64, 64, 230),
-            border=pg.mkPen(128, 128, 128, width=1),
-            anchor=(0.5, 0),
-        )
-        font = QApplication.font()
-        font.setPixelSize(12)
-        x_label.setFont(font)
-        pool.append(x_label)
-        return x_label
+        while len(pool) <= index:
+            x_label = pg.TextItem(
+                color=(255, 255, 255),
+                fill=pg.mkBrush(64, 64, 64, 230),
+                border=pg.mkPen(128, 128, 128, width=1),
+                anchor=(0.5, 0),
+            )
+            font = QApplication.font()
+            font.setPixelSize(12)
+            x_label.setFont(font)
+            pool.append(x_label)
+        return pool[index]
 
     def _clear_cursor_items(self, hide_only: bool = True):
         """清除或隐藏所有 cursor 可视化元素"""
@@ -542,6 +545,7 @@ class CursorManager:
                 # scene.removeItem 已从场景移除，paint event 不会访问该 item。
                 # trash bin 在下一轮清理时清空，确保至少经历一个完整事件循环。
                 self.pw._cursor_trash_bin.append(item)
+
 
     def _queue_item_for_deletion(self, item):
         """将 item 加入待删除队列"""
@@ -800,6 +804,7 @@ class CursorManager:
             # 自动调度 paint event（尤其在 reload/批量创建 item 后），
             # 导致部分 TextItem / ScatterPlotItem 不可见，
             # 直到用户交互（拖动 cursor / 缩放）才恢复。
+
             view_box.update()
 
         except Exception:
@@ -1073,6 +1078,7 @@ class CursorManager:
         # 排除已被本次渲染使用的 pool index，避免误隐藏其他 cursor 的标签。
         used_indices = {layout.index for layout in all_layouts}
         indices_to_hide = all_filtered_out_indices - used_indices
+
         for idx in indices_to_hide:
             text_item = self._get_label_from_pool(idx)
             text_item.setVisible(False)
