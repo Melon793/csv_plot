@@ -302,9 +302,11 @@ class MainWindow(QMainWindow):
         top_bar.addStretch(1)
 
         self.auto_range_btn = QPushButton("自动缩放", self.plot_widget)
+        self.auto_range_btn.setToolTip("自动缩放XY轴 (Ctrl+Shift+Y)")
         self.auto_range_btn.clicked.connect(self.auto_range_all_plots)
 
         self.auto_y_btn = QPushButton("仅调节y轴", self.plot_widget)
+        self.auto_y_btn.setToolTip("自动调节Y轴范围 (Ctrl+Y)")
         self.auto_y_btn.clicked.connect(self.auto_y_in_x_range)
 
         self.cursor_btn = QPushButton("显示光标", self.plot_widget)
@@ -318,6 +320,7 @@ class MainWindow(QMainWindow):
 
         self.mark_region_btn = QPushButton("标记区域", self.plot_widget)
         self.mark_region_btn.setCheckable(True)
+        self.mark_region_btn.setToolTip("切换标记区域 (Ctrl+T)")
         self.mark_region_btn.clicked.connect(self.toggle_mark_region)
 
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
@@ -384,6 +387,15 @@ class MainWindow(QMainWindow):
 
         self._cursor_shortcut = QShortcut(QKeySequence("Ctrl+R"), self.plot_widget)
         self._cursor_shortcut.activated.connect(self._on_cursor_shortcut)
+
+        self._auto_y_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self.plot_widget)
+        self._auto_y_shortcut.activated.connect(self._on_auto_y_shortcut)
+
+        self._auto_range_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Y"), self.plot_widget)
+        self._auto_range_shortcut.activated.connect(self._on_auto_range_shortcut)
+
+        self._mark_region_shortcut = QShortcut(QKeySequence("Ctrl+T"), self.plot_widget)
+        self._mark_region_shortcut.activated.connect(self._on_mark_region_shortcut)
 
     def _init_managers(self):
         from src.ui.file_loader_manager import FileLoaderManager
@@ -816,6 +828,25 @@ class MainWindow(QMainWindow):
             return
         new_state = not self.cursor_btn.isChecked()
         self.toggle_cursor_all(new_state)
+
+    def _on_auto_y_shortcut(self):
+        """Ctrl+Y 快捷键：自动调节Y轴范围"""
+        if not self.plot_widgets:
+            return
+        self.auto_y_in_x_range()
+
+    def _on_auto_range_shortcut(self):
+        """Ctrl+Shift+Y 快捷键：自动缩放XY轴"""
+        if not self.plot_widgets:
+            return
+        self.auto_range_all_plots()
+
+    def _on_mark_region_shortcut(self):
+        """Ctrl+T 快捷键：切换标记区域"""
+        if not self.plot_widgets:
+            return
+        new_state = not self.mark_region_btn.isChecked()
+        self.toggle_mark_region(new_state)
 
     def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
         self.cursor_sync_manager._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
