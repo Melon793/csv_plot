@@ -136,9 +136,9 @@ class PlotDataManager:
             if not getattr(pw, "_is_updating_data", False):
                 main_window = pw.window()
                 if main_window is not None and hasattr(
-                    main_window, "_sync_min_xrange"
+                    main_window, "cursor_sync_manager"
                 ):
-                    main_window._sync_min_xrange()
+                    main_window.cursor_sync_manager._sync_min_xrange()
 
             return True
 
@@ -636,8 +636,8 @@ class PlotDataManager:
             self._axis_manager._recalc_max_point_density()
             if not getattr(pw, "_is_updating_data", False):
                 main_window = pw.window()
-                if main_window is not None and hasattr(main_window, "_sync_min_xrange"):
-                    main_window._sync_min_xrange()
+                if main_window is not None and hasattr(main_window, "cursor_sync_manager"):
+                    main_window.cursor_sync_manager._sync_min_xrange()
 
             self._axis_manager._set_vline_bounds([None, None])
         except Exception:

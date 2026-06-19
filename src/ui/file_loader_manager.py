@@ -149,7 +149,7 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw._saved_cursor_mode = cursor_mode
 
         try:
-            self.mw.reset_all_pin_states()
+            self.mw.cursor_sync_manager.reset_all_pin_states()
         except Exception:
             logger.debug("重置 pin 状态失败（可能数据已变更）")
         for container in getattr(self.mw, "plot_widgets", []):
@@ -788,7 +788,7 @@ class FileLoaderManager(MainWindowBaseManager):
             # 新 loader 成功 → 释放旧数据 → 应用新数据
             self._release_old_data()
             self.mw.loader = new_loader
-            self.mw._apply_loader()
+            self._apply_loader()
             status = True
             logger.info("文件加载完成: %s (%d 行)", file_path, new_loader.datalength)
         except MemoryError as e:
@@ -828,7 +828,7 @@ class FileLoaderManager(MainWindowBaseManager):
 
         # —— 阶段 B：应用新数据
         self.mw.loader = new_loader
-        self.mw._apply_loader()
+        self._apply_loader()
 
         self._end_data_reload()
         self.set_button_status(True)
@@ -858,10 +858,10 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.placeholder_label.setParent(None)
 
         if not self.mw.plot_widgets:
-            self.mw.create_subplots_matrix(
+            self.mw.layout_manager.create_subplots_matrix(
                 self.mw._plot_row_max_default, self.mw._plot_col_max_default
             )
-            self.mw.set_plots_visible(
+            self.mw.layout_manager.set_plots_visible(
                 self.mw._plot_row_current, self.mw._plot_col_current
             )
 
@@ -874,10 +874,10 @@ class FileLoaderManager(MainWindowBaseManager):
             widget.time_axis_label = self.mw.loader.time_axis_label
             widget.update_x_axis_label()
 
-        self.mw._compute_baseline_density()
-        self.mw._sync_min_xrange()
+        self.mw.cursor_sync_manager._compute_baseline_density()
+        self.mw.cursor_sync_manager._sync_min_xrange()
 
-        self.mw.replots_after_loading()
+        self.mw.cursor_sync_manager.replots_after_loading()
 
         from src.ui.table_dialog import DataTableDialog
 
@@ -892,6 +892,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 DataTableDialog._instance.close()
 
         if self.mw.filter_input.text() or self.mw.unit_filter_input.text():
-            self.mw._do_filter_variables()
+            self.mw.cursor_sync_manager.filter_variables()
         if self.mw.mark_region_btn.isChecked():
-            self.mw.request_mark_stats_refresh(immediate=True)
+            self.mw.layout_manager.request_mark_stats_refresh(immediate=True)

@@ -390,7 +390,7 @@ class CursorSyncManager(MainWindowBaseManager):
             widget.clear_plot_item()
             widget.reset_pin_state()
         self.mw.saved_mark_range = None
-        self.mw.request_mark_stats_refresh(immediate=True)
+        self.mw.layout_manager.request_mark_stats_refresh(immediate=True)
 
     def collect_global_x_range(
         self, curves_filter: str = "visible"

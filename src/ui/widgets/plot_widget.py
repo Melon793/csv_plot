@@ -431,8 +431,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             pass
         else:
             # 正常跟随鼠标模式
-            if hasattr(self.window(), 'sync_crosshair'):
-                self.window().sync_crosshair(mousePoint.x(), self)
+            if hasattr(self.window(), 'cursor_sync_manager'):
+                self.window().cursor_sync_manager.sync_crosshair(mousePoint.x(), self)
             #print(f"mouse in pos {mousePoint.x()}")
 
     def _is_cursor_update_locked(self) -> bool:
@@ -620,7 +620,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.add_variables_to_plot(var_names)
         event.acceptProposedAction()
         if self.window():
-            self.window().request_mark_stats_refresh()
+            self.window().layout_manager.request_mark_stats_refresh()
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区 → 委托到 MultiCurveManager"""
@@ -712,7 +712,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         
         if event.button() == Qt.MouseButton.MiddleButton:
             self.clear_plot_item()
-            self.window().request_mark_stats_refresh(immediate=True)
+            self.window().layout_manager.request_mark_stats_refresh(immediate=True)
             return
 
         if event.button() == Qt.MouseButton.LeftButton:

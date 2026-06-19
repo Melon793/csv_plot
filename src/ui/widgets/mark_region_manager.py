@@ -47,7 +47,7 @@ class MarkRegionManager:
 
         self.pw.plot_item.addItem(self.pw.mark_region)
         self.pw.mark_region.sigRegionChanged.connect(
-            self.pw.window().sync_mark_regions
+            self.pw.window().layout_manager.sync_mark_regions
         )
 
     def remove_mark_region(self):

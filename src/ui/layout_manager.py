@@ -664,4 +664,4 @@ class LayoutManager(MainWindowBaseManager):
                     widget.view_box.setXRange(curr_min, curr_max, padding=0)
                     widget.plot_item.update()
 
-        self.mw._sync_min_xrange()
+        self.mw.cursor_sync_manager._sync_min_xrange()

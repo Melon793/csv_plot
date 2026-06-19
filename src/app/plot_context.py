@@ -148,19 +148,19 @@ class PlotContext:
         return self._services._enum_text_maps
 
     def sync_crosshair(self, x: float, source: Any) -> None:
-        self._services.sync_crosshair(x, source)
+        self._services.cursor_sync_manager.sync_crosshair(x, source)
 
     def request_mark_stats_refresh(self, *, immediate: bool = False) -> None:
-        self._services.request_mark_stats_refresh(immediate=immediate)
+        self._services.layout_manager.request_mark_stats_refresh(immediate=immediate)
 
     def toggle_cursor_all(self, enabled: bool) -> None:
-        self._services.toggle_cursor_all(enabled)
+        self._services.cursor_sync_manager.toggle_cursor_all(enabled)
 
     def get_row_height(self, row: int) -> int:
-        return self._services.get_row_height(row)
+        return self._services.layout_manager.get_row_height(row)
 
     def set_row_height(self, row: int, percentage: int) -> None:
-        self._services.set_row_height(row, percentage)
+        self._services.layout_manager.set_row_height(row, percentage)
 
     def set_all_row_height(self, percentage: int) -> None:
         self._services.layout_manager.set_all_row_height(percentage)

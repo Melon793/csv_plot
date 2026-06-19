@@ -551,8 +551,8 @@ class MultiCurveManager:
 
                 pw._recalc_max_point_density()
                 main_window = pw.window()
-                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                    main_window._sync_min_xrange()
+                if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
+                    main_window.cursor_sync_manager._sync_min_xrange()
 
             if failed_vars:
                 QMessageBox.information(pw, "提示", f"以下变量已在绘图中:\n" + "\n".join(failed_vars))
@@ -723,8 +723,8 @@ class MultiCurveManager:
             if not batch_adding:
                 pw._recalc_max_point_density()
                 main_window = pw.window()
-                if main_window is not None and hasattr(main_window, '_sync_min_xrange'):
-                    main_window._sync_min_xrange()
+                if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
+                    main_window.cursor_sync_manager._sync_min_xrange()
 
             return True
 

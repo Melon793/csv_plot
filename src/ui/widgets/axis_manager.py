@@ -393,8 +393,8 @@ class AxisManager:
             data_max_x = float(np.max(x_values))
 
         main_window = pw.window()
-        if main_window is not None and hasattr(main_window, 'collect_global_x_range'):
-            global_min, global_max = main_window.collect_global_x_range(curves_filter="all")
+        if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
+            global_min, global_max = main_window.cursor_sync_manager.collect_global_x_range(curves_filter="all")
             if global_min is not None:
                 data_min_x = min(data_min_x, global_min)
                 data_max_x = max(data_max_x, global_max)
