@@ -230,7 +230,6 @@ class MainWindow(QMainWindow):
         button_layout.setContentsMargins(0, 0, 0, 0)
 
         self.load_btn = QPushButton("导入数据文件", left_widget)
-        self.load_btn.clicked.connect(self.load_btn_click)
 
         self.reload_btn = QPushButton("重载", left_widget)
         self.reload_btn.clicked.connect(self.reload_data)
@@ -271,7 +270,6 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.time_correction_btn)
 
         self.clear_all_plots_btn = QPushButton("清除绘图", self.plot_widget)
-        self.clear_all_plots_btn.clicked.connect(self.clear_all_plots)
         top_bar.addWidget(self.clear_all_plots_btn)
 
         self._template_menu_btn = QPushButton("模板菜单", self.plot_widget)
@@ -289,16 +287,13 @@ class MainWindow(QMainWindow):
 
         self.auto_range_btn = QPushButton("自动缩放", self.plot_widget)
         self.auto_range_btn.setToolTip("自动缩放XY轴 (Ctrl+Shift+Y)")
-        self.auto_range_btn.clicked.connect(self.auto_range_all_plots)
 
         self.auto_y_btn = QPushButton("仅调节y轴", self.plot_widget)
         self.auto_y_btn.setToolTip("自动调节Y轴范围 (Ctrl+Y)")
-        self.auto_y_btn.clicked.connect(self.auto_y_in_x_range)
 
         self.cursor_btn = QPushButton("显示光标", self.plot_widget)
         self.cursor_btn.setCheckable(True)
         self.cursor_btn.setToolTip("切换光标显示 (Ctrl+R)")
-        self.cursor_btn.clicked.connect(self.toggle_cursor_all)
 
         self.cursor_values_hidden = False
         self.cursor_mode = "1 free cursor"
@@ -307,7 +302,6 @@ class MainWindow(QMainWindow):
         self.mark_region_btn = QPushButton("标记区域", self.plot_widget)
         self.mark_region_btn.setCheckable(True)
         self.mark_region_btn.setToolTip("切换标记区域 (Ctrl+T)")
-        self.mark_region_btn.clicked.connect(self.toggle_mark_region)
 
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
 
@@ -418,6 +412,12 @@ class MainWindow(QMainWindow):
         self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
         self.time_correction_btn.clicked.connect(self.layout_manager.open_time_correction_dialog)
         self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
+        self.load_btn.clicked.connect(self.file_loader_manager.load_btn_click)
+        self.clear_all_plots_btn.clicked.connect(self.cursor_sync_manager.clear_all_plots)
+        self.auto_range_btn.clicked.connect(self.cursor_sync_manager.auto_range_all_plots)
+        self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
+        self.cursor_btn.clicked.connect(self.cursor_sync_manager.toggle_cursor_all)
+        self.mark_region_btn.clicked.connect(self.layout_manager.toggle_mark_region)
 
         self._logger.info(
             "CSV Plot 启动 (Python %s, PySide6 %s)",
@@ -466,9 +466,6 @@ class MainWindow(QMainWindow):
                 finally:
                     self._in_sync_resize = False
 
-    def load_btn_click(self):
-        self.file_loader_manager.load_btn_click()
-
     def _begin_data_reload(self):
         self.file_loader_manager._begin_data_reload()
 
@@ -489,10 +486,6 @@ class MainWindow(QMainWindow):
 
     def _load_file(self, file_path: str, is_reload: bool = False):
         self.file_loader_manager._load_file(file_path, is_reload=is_reload)
-
-    def _release_old_data(self):
-        self.file_loader_manager._release_old_data()
-
 
     def _post_load_actions(self, file_path: str):
         self.file_loader_manager._post_load_actions(file_path)
@@ -690,9 +683,6 @@ class MainWindow(QMainWindow):
     def _do_filter_variables(self):
         self.cursor_sync_manager.filter_variables()
 
-    def toggle_mark_region(self, checked):
-        self.layout_manager.toggle_mark_region(checked)
-
     def sync_mark_regions(self, region_item):
         self.layout_manager.sync_mark_regions(region_item)
 
@@ -723,9 +713,6 @@ class MainWindow(QMainWindow):
         self.cursor_sync_manager.reset_plots_after_loading(index_xMin, index_xMax, reason=reason)
 
 
-    def _get_cursor_source_plot(self, source_plot=None):
-        return self.cursor_sync_manager._get_cursor_source_plot(source_plot)
-
     def _get_cursor_view_range(self, source_plot=None):
         return self.cursor_sync_manager._get_cursor_view_range(source_plot)
 
@@ -747,34 +734,31 @@ class MainWindow(QMainWindow):
     def is_cursor_enabled(self) -> bool:
         return self.cursor_sync_manager.is_cursor_enabled()
 
-    def toggle_cursor_all(self, checked):
-        self.cursor_sync_manager.toggle_cursor_all(checked)
-
     def _on_cursor_shortcut(self):
         """Ctrl+R 快捷键：切换光标显示状态"""
         if not self.plot_widgets:
             return
         new_state = not self.cursor_btn.isChecked()
-        self.toggle_cursor_all(new_state)
+        self.cursor_sync_manager.toggle_cursor_all(new_state)
 
     def _on_auto_y_shortcut(self):
         """Ctrl+Y 快捷键：自动调节Y轴范围"""
         if not self.plot_widgets:
             return
-        self.auto_y_in_x_range()
+        self.cursor_sync_manager.auto_y_in_x_range()
 
     def _on_auto_range_shortcut(self):
         """Ctrl+Shift+Y 快捷键：自动缩放XY轴"""
         if not self.plot_widgets:
             return
-        self.auto_range_all_plots()
+        self.cursor_sync_manager.auto_range_all_plots()
 
     def _on_mark_region_shortcut(self):
         """Ctrl+T 快捷键：切换标记区域"""
         if not self.plot_widgets:
             return
         new_state = not self.mark_region_btn.isChecked()
-        self.toggle_mark_region(new_state)
+        self.layout_manager.toggle_mark_region(new_state)
 
     def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
         self.cursor_sync_manager._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
@@ -788,9 +772,6 @@ class MainWindow(QMainWindow):
     def reset_all_pin_states(self):
         self.cursor_sync_manager.reset_all_pin_states()
 
-    def clear_all_plots(self):
-        self.cursor_sync_manager.clear_all_plots()
-
     def collect_global_x_range(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
         return self.cursor_sync_manager.collect_global_x_range(curves_filter)
 
@@ -799,12 +780,6 @@ class MainWindow(QMainWindow):
 
     def _sync_min_xrange(self):
         self.cursor_sync_manager._sync_min_xrange()
-
-    def auto_range_all_plots(self):
-        self.cursor_sync_manager.auto_range_all_plots()
-            
-    def auto_y_in_x_range(self):
-        self.cursor_sync_manager.auto_y_in_x_range()
 
     def create_subplots_matrix(self, m: int, n: int):
         self.layout_manager.create_subplots_matrix(m, n)
