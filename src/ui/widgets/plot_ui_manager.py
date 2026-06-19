@@ -434,4 +434,4 @@ class PlotUIManager(BasePlotManager):
         """执行统计刷新"""
         main_window = pw.window()
         if main_window is not None:
-            main_window.request_mark_stats_refresh(immediate=True)
+            main_window.layout_manager.request_mark_stats_refresh(immediate=True)

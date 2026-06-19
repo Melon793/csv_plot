@@ -451,7 +451,7 @@ class MyTableWidget(QTableWidget):
         def _job():
             # 4. 将变量添加至空白图中
             blank_plot.add_variables_to_plot(var_list)
-            main_window.request_mark_stats_refresh()
+            main_window.layout_manager.request_mark_stats_refresh()
 
         QTimer.singleShot(_delay, _job)
 

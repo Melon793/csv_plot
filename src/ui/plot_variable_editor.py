@@ -470,8 +470,8 @@ class PlotVariableEditorDialog(QDialog):
 
         self.plot_widget._recalc_max_point_density()
         main_window = self.plot_widget.window()
-        if main_window is not None and hasattr(main_window, "_sync_min_xrange"):
-            main_window._sync_min_xrange()
+        if main_window is not None and hasattr(main_window, "cursor_sync_manager"):
+            main_window.cursor_sync_manager._sync_min_xrange()
 
         self.update_button_states()
 

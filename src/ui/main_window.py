@@ -146,11 +146,9 @@ class MainWindow(QMainWindow):
         self._pending_crosshair_x = None
         self._crosshair_update_timer = QTimer(self)
         self._crosshair_update_timer.setSingleShot(True)
-        self._crosshair_update_timer.timeout.connect(self._flush_crosshair_updates)
 
         self._filter_debounce_timer = QTimer(self)
         self._filter_debounce_timer.setSingleShot(True)
-        self._filter_debounce_timer.timeout.connect(self._do_filter_variables)
 
         self.data_table_geometry = None
         self.mark_stats_geometry = None
@@ -158,7 +156,6 @@ class MainWindow(QMainWindow):
         self._mark_stats_dirty = False
         self._mark_stats_timer = QTimer(self)
         self._mark_stats_timer.setSingleShot(True)
-        self._mark_stats_timer.timeout.connect(self._flush_mark_stats_refresh)
         self._is_syncing_crosshair = False
         self._is_syncing_mark_region = False
         self._last_template_name = ""
@@ -418,6 +415,9 @@ class MainWindow(QMainWindow):
         self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
         self.cursor_btn.clicked.connect(self.cursor_sync_manager.toggle_cursor_all)
         self.mark_region_btn.clicked.connect(self.layout_manager.toggle_mark_region)
+        self._crosshair_update_timer.timeout.connect(self.cursor_sync_manager._flush_crosshair_updates)
+        self._filter_debounce_timer.timeout.connect(self.cursor_sync_manager.filter_variables)
+        self._mark_stats_timer.timeout.connect(self.layout_manager._flush_mark_stats_refresh)
 
         self._logger.info(
             "CSV Plot 启动 (Python %s, PySide6 %s)",
@@ -619,34 +619,10 @@ class MainWindow(QMainWindow):
         """显示状态消息（在未来可以添加状态栏）"""
         self._logger.info(message)
     
-    def _apply_loader(self):
-        self.file_loader_manager._apply_loader()
-
     def filter_variables(self):
         """防抖过滤：用户停止输入 180ms 后才真正执行"""
         self._filter_debounce_timer.stop()
         self._filter_debounce_timer.start(180)
-
-    def _do_filter_variables(self):
-        self.cursor_sync_manager.filter_variables()
-
-    def sync_mark_regions(self, region_item):
-        self.layout_manager.sync_mark_regions(region_item)
-
-    def request_mark_stats_refresh(self, *, immediate: bool = False):
-        self.layout_manager.request_mark_stats_refresh(immediate=immediate)
-
-    def _flush_mark_stats_refresh(self):
-        self.layout_manager._flush_mark_stats_refresh()
-
-    def update_mark_stats(self):
-        self.layout_manager.update_mark_stats()
-
-    def update_mark_regions_on_layout_change(self):
-        self.layout_manager.update_mark_regions_on_layout_change()
-
-    def _unregister_global_event_filter(self):
-        self.layout_manager._unregister_global_event_filter()
 
     def eventFilter(self, obj, event):
         if not hasattr(self, "layout_manager") or self.layout_manager is None:
@@ -655,10 +631,6 @@ class MainWindow(QMainWindow):
         if handled:
             return True
         return super().eventFilter(obj, event)
-
-    def reset_plots_after_loading(self,index_xMin,index_xMax, *, reason: str | None = None):
-        self.cursor_sync_manager.reset_plots_after_loading(index_xMin, index_xMax, reason=reason)
-
 
     def _on_cursor_shortcut(self):
         """Ctrl+R 快捷键：切换光标显示状态"""
@@ -686,40 +658,6 @@ class MainWindow(QMainWindow):
         new_state = not self.mark_region_btn.isChecked()
         self.layout_manager.toggle_mark_region(new_state)
 
-    def sync_crosshair(self, x, sender_widget):
-        self.cursor_sync_manager.sync_crosshair(x, sender_widget)
 
-    def _flush_crosshair_updates(self):
-        self.cursor_sync_manager._flush_crosshair_updates()
-
-    def reset_all_pin_states(self):
-        self.cursor_sync_manager.reset_all_pin_states()
-
-    def collect_global_x_range(self, curves_filter: str = "visible") -> tuple[float | None, float | None]:
-        return self.cursor_sync_manager.collect_global_x_range(curves_filter)
-
-    def _compute_baseline_density(self):
-        self.cursor_sync_manager._compute_baseline_density()
-
-    def _sync_min_xrange(self):
-        self.cursor_sync_manager._sync_min_xrange()
-
-    def create_subplots_matrix(self, m: int, n: int):
-        self.layout_manager.create_subplots_matrix(m, n)
-
-    def set_row_height(self, row: int, percentage: int) -> None:
-        self.layout_manager.set_row_height(row, percentage)
-
-    def set_all_row_height(self, percentage: int) -> None:
-        self.layout_manager.set_all_row_height(percentage)
-    
-    def get_row_height(self, row: int) -> int:
-        return self.layout_manager.get_row_height(row)
-
-    def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
-        self.layout_manager.set_plots_visible(row_set, col_set)
-
-    def replots_after_loading(self):
-        self.cursor_sync_manager.replots_after_loading()
 
 
