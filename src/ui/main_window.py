@@ -252,6 +252,9 @@ class MainWindow(QMainWindow):
 
         self._plot_area_visible = True
         self._saved_geometry = None
+        self._saved_splitter_sizes = None
+        self._was_maximized = False
+        self._was_fullscreen = False
 
     def _init_right_panel(self):
         self.plot_widget = QWidget(self.main_splitter)
@@ -348,12 +351,10 @@ class MainWindow(QMainWindow):
             self._plot_area_visible = False
             self.plot_widget.hide()
 
-            main_margin = self.centralWidget().layout().contentsMargins()
-            frame_width = self.style().pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth) * 2
-            left_width = self.var_table_default_width + main_margin.left() + main_margin.right()
-            new_width = left_width + frame_width
-            self.setFixedWidth(new_width)
-            self._old_max_width = self._window_width_default
+            # 记录 splitter 原始尺寸并压缩右侧
+            self._saved_splitter_sizes = self.main_splitter.sizes()
+            self.main_splitter.setChildrenCollapsible(True)
+            self.main_splitter.setSizes([self.main_splitter.width(), 0])
 
         self.saved_mark_range = None
         self.mark_stats_window = None

@@ -147,25 +147,38 @@ class LayoutManager(MainWindowBaseManager):
 
     def toggle_plot_area(self, checked):
         if checked:
+            # 记录窗口状态和 splitter 原始尺寸
+            self.mw._was_maximized = self.mw.isMaximized()
+            self.mw._was_fullscreen = self.mw.isFullScreen()
             self.mw._saved_geometry = self.mw.saveGeometry()
+            self.mw._saved_splitter_sizes = self.mw.main_splitter.sizes()
+            
             self.mw.plot_widget.hide()
             self.mw.toggle_plot_btn.setText("显示绘图区")
-
-            self.mw._old_max_width = self.mw.maximumWidth()
-            left_width = self.mw.left_widget.width()
-            main_margin = self.mw.centralWidget().layout().contentsMargins()
-            left_width += main_margin.left() + main_margin.right()
-            frame_width = self.mw.frameGeometry().width() - self.mw.width()
-            new_width = left_width + frame_width
-            self.mw.setFixedWidth(new_width)
+            
+            # 通过调整 splitter 将右侧空间压缩为 0
+            self.mw.main_splitter.setChildrenCollapsible(True)
+            self.mw.main_splitter.setSizes([self.mw.main_splitter.width(), 0])
             self.mw._plot_area_visible = False
         else:
-            self.mw.setMaximumWidth(self.mw._old_max_width)
-            self.mw.setMinimumWidth(0)
             self.mw.plot_widget.show()
             self.mw.toggle_plot_btn.setText("隐藏绘图区")
-            if self.mw._saved_geometry:
+            
+            # 恢复 splitter 原始尺寸
+            if hasattr(self.mw, '_saved_splitter_sizes') and self.mw._saved_splitter_sizes:
+                self.mw.main_splitter.setSizes(self.mw._saved_splitter_sizes)
+            self.mw.main_splitter.setChildrenCollapsible(False)
+            
+            # 根据窗口状态恢复
+            if self.mw.isFullScreen() or self.mw._was_fullscreen:
+                self.mw.showFullScreen()
+            elif self.mw.isMaximized() or self.mw._was_maximized:
+                self.mw.showMaximized()
+            elif self.mw._saved_geometry:
                 self.mw.restoreGeometry(self.mw._saved_geometry)
+            
+            self.mw._was_maximized = False
+            self.mw._was_fullscreen = False
             self.mw._plot_area_visible = True
 
     def show_help(self):
