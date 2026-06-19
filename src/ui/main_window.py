@@ -660,27 +660,6 @@ class MainWindow(QMainWindow):
         self.cursor_sync_manager.reset_plots_after_loading(index_xMin, index_xMax, reason=reason)
 
 
-    def _get_cursor_view_range(self, source_plot=None):
-        return self.cursor_sync_manager._get_cursor_view_range(source_plot)
-
-    def _calc_second_cursor_position(self, pinned_x, view_min, view_max):
-        return self.cursor_sync_manager._calc_second_cursor_position(pinned_x, view_min, view_max)
-
-    def _select_farthest_cursor_index(self, context_x):
-        return self.cursor_sync_manager._select_farthest_cursor_index(context_x)
-
-    def _apply_cursor_mode_to_plots(self):
-        return self.cursor_sync_manager._apply_cursor_mode_to_plots()
-
-    def set_cursor_mode(self, mode, *, source_plot=None, context_x=None):
-        self.cursor_sync_manager.set_cursor_mode(mode, source_plot=source_plot, context_x=context_x)
-
-    def set_cursor_enabled(self, enabled: bool) -> None:
-        return self.cursor_sync_manager.set_cursor_enabled(enabled)
-
-    def is_cursor_enabled(self) -> bool:
-        return self.cursor_sync_manager.is_cursor_enabled()
-
     def _on_cursor_shortcut(self):
         """Ctrl+R 快捷键：切换光标显示状态"""
         if not self.plot_widgets:
@@ -706,9 +685,6 @@ class MainWindow(QMainWindow):
             return
         new_state = not self.mark_region_btn.isChecked()
         self.layout_manager.toggle_mark_region(new_state)
-
-    def _realign_pinned_cursor_after_time_correction(self, old_factor, old_offset, new_factor, new_offset):
-        self.cursor_sync_manager._realign_pinned_cursor_after_time_correction(old_factor, old_offset, new_factor, new_offset)
 
     def sync_crosshair(self, x, sender_widget):
         self.cursor_sync_manager.sync_crosshair(x, sender_widget)
