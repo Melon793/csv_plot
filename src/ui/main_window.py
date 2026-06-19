@@ -206,13 +206,11 @@ class MainWindow(QMainWindow):
 
         self.clone_btn = QPushButton("分身", left_widget)
         self.clone_btn.setToolTip("启动独立实例")
-        self.clone_btn.clicked.connect(self.spawn_clone_window)
         title_layout.addWidget(self.clone_btn)
         self.clone_btn.setVisible(True)
 
         self.help_btn_small = QPushButton("?", left_widget)
         self.help_btn_small.setToolTip("帮助文档")
-        self.help_btn_small.clicked.connect(self.show_help)
         title_layout.addWidget(self.help_btn_small)
 
         left_layout.addLayout(title_layout)
@@ -252,7 +250,6 @@ class MainWindow(QMainWindow):
 
         self.toggle_plot_btn = QPushButton("隐藏绘图区", left_widget)
         self.toggle_plot_btn.setCheckable(True)
-        self.toggle_plot_btn.toggled.connect(self.toggle_plot_area)
         bottom_row.addWidget(self.toggle_plot_btn)
         left_layout.addLayout(bottom_row)
         left_layout.setSpacing(2)
@@ -271,7 +268,6 @@ class MainWindow(QMainWindow):
         top_bar.setContentsMargins(0, 0, 5, 5)
 
         self.time_correction_btn = QPushButton("时间修正", self.plot_widget)
-        self.time_correction_btn.clicked.connect(self.open_time_correction_dialog)
         top_bar.addWidget(self.time_correction_btn)
 
         self.clear_all_plots_btn = QPushButton("清除绘图", self.plot_widget)
@@ -314,7 +310,6 @@ class MainWindow(QMainWindow):
         self.mark_region_btn.clicked.connect(self.toggle_mark_region)
 
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
-        self.grid_layout_btn.clicked.connect(self.open_layout_dialog)
 
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
@@ -417,6 +412,13 @@ class MainWindow(QMainWindow):
 
         self.set_button_status(False)
 
+        # 信号连接（需要 Manager 已初始化）
+        self.clone_btn.clicked.connect(self.layout_manager.spawn_clone_window)
+        self.help_btn_small.clicked.connect(self.layout_manager.show_help)
+        self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
+        self.time_correction_btn.clicked.connect(self.layout_manager.open_time_correction_dialog)
+        self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
+
         self._logger.info(
             "CSV Plot 启动 (Python %s, PySide6 %s)",
             sys.version.split()[0],
@@ -463,24 +465,6 @@ class MainWindow(QMainWindow):
                     self.repaint()
                 finally:
                     self._in_sync_resize = False
-
-    def toggle_plot_area(self, checked):
-        self.layout_manager.toggle_plot_area(checked)
-            
-    def show_help(self):
-        self.layout_manager.show_help()
-
-    def _get_plot_container(self, plot_widget) -> PlotContainerWidget | None:
-        return self.layout_manager._get_plot_container(plot_widget)
-
-    def _show_drag_indicator_for_plot(self, plot_widget, var_names: list[str], text_override: str | None = None):
-        self.layout_manager._show_drag_indicator_for_plot(plot_widget, var_names, text_override=text_override)
-
-    def _hide_drag_indicator_for_plot(self, plot_widget):
-        self.layout_manager._hide_drag_indicator_for_plot(plot_widget)
-
-    def spawn_clone_window(self):
-        return self.layout_manager.spawn_clone_window()
 
     def load_btn_click(self):
         self.file_loader_manager.load_btn_click()
@@ -721,12 +705,6 @@ class MainWindow(QMainWindow):
     def update_mark_stats(self):
         self.layout_manager.update_mark_stats()
 
-    def open_layout_dialog(self):
-        self.layout_manager.open_layout_dialog()
-
-    def open_time_correction_dialog(self):
-        self.layout_manager.open_time_correction_dialog()
-
     def update_mark_regions_on_layout_change(self):
         self.layout_manager.update_mark_regions_on_layout_change()
 
@@ -740,13 +718,6 @@ class MainWindow(QMainWindow):
         if handled:
             return True
         return super().eventFilter(obj, event)
-
-    def show_drop_overlay(self):
-        self.layout_manager.show_drop_overlay()
-
-    def hide_drop_overlay(self):
-        self.layout_manager.hide_drop_overlay()
-
 
     def reset_plots_after_loading(self,index_xMin,index_xMax, *, reason: str | None = None):
         self.cursor_sync_manager.reset_plots_after_loading(index_xMin, index_xMax, reason=reason)
