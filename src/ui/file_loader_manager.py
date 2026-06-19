@@ -634,7 +634,7 @@ class FileLoaderManager(MainWindowBaseManager):
         # 自动恢复：replots_after_loading 优先，auto-save 仅作降级兜底
         if hasattr(self.mw, 'plot_config_manager'):
             any_curve_restored = any(
-                container.isVisible() and (
+                not container.isHidden() and (
                     container.plot_widget.y_name or
                     (container.plot_widget.is_multi_curve_mode and container.plot_widget.curves)
                 )
