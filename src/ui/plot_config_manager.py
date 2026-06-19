@@ -87,7 +87,7 @@ class PlotConfigManager(QObject):
 
             # 应用各 Plot 的配置 - 只遍历可见的 container（row-major 顺序）
             applied_count = 0
-            visible_containers = [c for c in main_window.plot_widgets if c.isVisible()]
+            visible_containers = [c for c in main_window.plot_widgets if not c.isHidden()]
             logger.debug(f"可见容器数: {len(visible_containers)}")
 
             for i, plot_config in enumerate(config.plots):
