@@ -2,12 +2,10 @@ from __future__ import annotations
 import sys
 import os
 
-if sys.platform == "darwin":
-    pass
+from src.utils.platform_setup import setup_platform
 
-os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
+ico_path = setup_platform()
 
-from src.utils.paths import resource_path  # noqa: E402
 from src.core.config import (  # noqa: E402
     PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT,
     PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
@@ -30,15 +28,6 @@ from PySide6.QtWidgets import (  # noqa: E402
 
 SCREEN_WIDTH_MARGIN = 0.3
 SCREEN_HEIGHT_MARGIN = 0.3
-
-if sys.platform == "win32":
-    import ctypes
-    myappid = "mycompany.csv_plot.0.1"
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    ico_path = resource_path("assets/icon.ico")
-
-elif sys.platform == "darwin":
-    ico_path = resource_path("assets/icon.icns")
 
 _widget_logger = get_logger("widget")
 
@@ -103,7 +92,7 @@ class MainWindow(QMainWindow):
                 _hide_plot_area = bool(layout_config_dict.get("hide_plot_area", None))
                 _read_status = all(x > 0 for x in (_width, _height, _max_row, _max_col, _default_row, _default_col)) and _hide_plot_area is not None
             except Exception as e:
-                print(f"配置文件读取失败: {e}")
+                _widget_logger.warning("配置文件读取失败: %s", e)
 
         if _read_status:
             self._window_width_default = max(600, _width)

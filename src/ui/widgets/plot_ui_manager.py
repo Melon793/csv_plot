@@ -33,6 +33,9 @@ from src.core.config import (
     UI_DEBOUNCE_DELAY_MS,
     XRANGE_THRESHOLD_FOR_SYMBOLS,
 )
+from src.core.logger import get_logger
+
+logger = get_logger("widget.plot_ui")
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.widgets.base_manager import BasePlotManager
 
@@ -415,7 +418,7 @@ class PlotUIManager(BasePlotManager):
             pw._apply_plot_style(show_symbols)
 
         except Exception as e:
-            print(f"更新绘图样式时出错: {e}")
+            logger.error("更新绘图样式时出错: %s", e)
 
     def _run_cursor_refresh(self, pw: Any) -> None:
         """执行光标刷新"""

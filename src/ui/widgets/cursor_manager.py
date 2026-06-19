@@ -15,9 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 import pyqtgraph as pg
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt
+
+from src.core.logger import get_logger
+
+logger = get_logger("widget.cursor")
 
 if TYPE_CHECKING:
     from src.ui.widgets.multi_curve_manager import MultiCurveManager
@@ -46,8 +51,6 @@ class CursorManager:
 
     def __init__(self, multi_curve_manager: MultiCurveManager):
         """初始化光标管理器，绑定到 MultiCurveManager 以获取依赖链"""
-        import numpy as np
-        globals()['np'] = np
         if multi_curve_manager is None:
             raise ValueError(
                 "CursorManager requires a valid MultiCurveManager instance"
@@ -1748,7 +1751,7 @@ class CursorManager:
                 pw._set_vline_bounds([None, None])
                 return None, None
         except Exception as e:
-            print(f"Error updating vline bounds: {e}")
+            logger.warning("Error updating vline bounds: %s", e)
             pw._set_vline_bounds([None, None])
             return None, None
 

@@ -18,6 +18,9 @@ import pyqtgraph as pg
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 from src.core.data_types import CurveInfo
+from src.core.logger import get_logger
+
+logger = get_logger("widget.multi_curve")
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
@@ -451,7 +454,7 @@ class MultiCurveManager:
                         pw.curve.setSymbol(None)
                         pw.curve._has_symbols = False
         except Exception as e:
-            print(f"应用绘图样式时出错: {e}")
+            logger.error("应用绘图样式时出错: %s", e)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区"""
