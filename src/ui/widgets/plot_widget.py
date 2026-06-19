@@ -284,8 +284,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return True
 
         container = None
-        if hasattr(main_window, '_get_plot_container'):
-            container = main_window._get_plot_container(self)
+        if hasattr(main_window, 'layout_manager'):
+            container = main_window.layout_manager._get_plot_container(self)
         if container is None:
             container = getattr(main_window, '_active_drag_container', None)
         if not container or not container.isVisible():
@@ -335,7 +335,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if self._should_hide_drag_indicator(main_window):
             self._drag_indicator_source = None
             self._drag_indicator_guard.stop()
-            main_window._hide_drag_indicator_for_plot(self)
+            main_window.layout_manager._hide_drag_indicator_for_plot(self)
 
     def _notify_drag_indicator(
         self,
@@ -346,7 +346,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     ):
         main_window = self.window()
 
-        if not main_window or not hasattr(main_window, '_show_drag_indicator_for_plot'):
+        if not main_window or not hasattr(main_window, 'layout_manager'):
             return
 
         if not hide and source_widget is None and self._should_hide_drag_indicator(main_window):
@@ -355,11 +355,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if hide:
             self._drag_indicator_source = None
             self._drag_indicator_guard.stop()
-            main_window._hide_drag_indicator_for_plot(self)
+            main_window.layout_manager._hide_drag_indicator_for_plot(self)
             return
 
         self._drag_indicator_source = source_widget
-        main_window._show_drag_indicator_for_plot(self, var_names or [], indicator_text)
+        main_window.layout_manager._show_drag_indicator_for_plot(self, var_names or [], indicator_text)
         if not self._drag_indicator_guard.isActive():
             self._drag_indicator_guard.start()
 

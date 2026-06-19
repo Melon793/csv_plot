@@ -551,11 +551,11 @@ class DataTableDialog(QMainWindow):
 
     def _cancel_plot_drag_indicator(self):
         main_window = self._get_owner_window()
-        if not main_window:
+        if not main_window or not hasattr(main_window, 'layout_manager'):
             return
         container = getattr(main_window, "_active_drag_container", None)
         if container and getattr(container, "plot_widget", None):
-            main_window._hide_drag_indicator_for_plot(container.plot_widget)
+            main_window.layout_manager._hide_drag_indicator_for_plot(container.plot_widget)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

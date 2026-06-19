@@ -468,7 +468,7 @@ class LayoutManager(MainWindowBaseManager):
                     .endswith(
                         (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
                     )
-                    or self.mw._extract_file_extension(u.toLocalFile()) is not None
+                    or self.mw.file_loader_manager._extract_file_extension(u.toLocalFile()) is not None
                     for u in urls
                 )
 
@@ -494,7 +494,7 @@ class LayoutManager(MainWindowBaseManager):
                     .endswith(
                         (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
                     )
-                    or self.mw._extract_file_extension(u.toLocalFile()) is not None
+                    or self.mw.file_loader_manager._extract_file_extension(u.toLocalFile()) is not None
                     for u in urls
                 )
                 if supported:
@@ -510,9 +510,9 @@ class LayoutManager(MainWindowBaseManager):
                         path.lower().endswith(
                             (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
                         )
-                        or self.mw._extract_file_extension(path) is not None
+                        or self.mw.file_loader_manager._extract_file_extension(path) is not None
                     ):
-                        self.mw.load_csv_file(path)
+                        self.mw.file_loader_manager.load_csv_file(path)
                         event.accept()
                         return True
         return False
