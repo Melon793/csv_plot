@@ -162,6 +162,7 @@ class MainWindow(QMainWindow):
         self._last_template_desc = ""
 
         self.value_cache = {}
+        self._enum_text_maps: dict = {}
 
     def _init_central_widget(self):
         central = QWidget()
