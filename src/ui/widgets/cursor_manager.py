@@ -58,7 +58,7 @@ class CursorManager:
         self._data_manager = multi_curve_manager
 
         # 新标签布局算法的状态
-        self._use_new_label_layout = True   # Feature flag，默认使用旧算法
+        self._use_new_label_layout = True   # 使用新标签布局算法（Phase 1/2/3）
         self._prev_layout: list[LabelLayout] = []  # 上一帧的布局结果
         self._column_count: int = 1          # 当前列数
         self._column_hysteresis_counter: int = 0  # 列数切换滞回计数器
@@ -1776,11 +1776,11 @@ class CursorManager:
 
     def _significant_decimal_format_str(self, value: float, ref: float, max_dp: int | None = None) -> str:
         """根据 ref 的显示精度自动决定 value 的字符串格式"""
-        s = format(ref, 'f').rstrip('0').rstrip('.')
-        if '.' not in s:
-            dp = 0
+        if ref == 0.0 or not np.isfinite(ref):
+            dp = 2  # 零值/非有限值默认 2 位小数
         else:
-            dp = len(s.split('.')[1])
+            s = format(ref, 'f').rstrip('0').rstrip('.')
+            dp = 0 if '.' not in s else len(s.split('.')[1])
 
         if max_dp is not None and max_dp >= 0:
             dp = min(max_dp, dp)

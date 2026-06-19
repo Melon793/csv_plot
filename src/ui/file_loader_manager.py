@@ -160,7 +160,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 try:
                     widget._safe_clear_plot_items()
                 except Exception:
-                    pass
+                    logger.debug("_safe_clear_plot_items 失败（数据重载期间）")
             widget._is_updating_data = True
             widget._cached_data_version = 0  # 设为0跳过版本比对，由 _is_updating_data 和 _is_loading_new_data 提供锁定
             # 暂停视图更新，防止 scene 中间状态触发 paint event 导致 SIGSEGV
@@ -262,26 +262,26 @@ class FileLoaderManager(MainWindowBaseManager):
                             if widget.vline is not None and widget.vline.scene() is not None:
                                 widget.vline.setVisible(True)
                         except RuntimeError:
-                            pass
+                            logger.debug("vline C++ 对象已销毁，跳过显示")
                     if hasattr(widget, "vline2"):
                         try:
                             if widget.vline2 is not None and widget.vline2.scene() is not None:
                                 widget.vline2.setVisible(True)
                         except RuntimeError:
-                            pass
+                            logger.debug("vline2 C++ 对象已销毁，跳过显示")
                 elif saved_cursor_mode == "1 anchored cursor":
                     if hasattr(widget, "vline"):
                         try:
                             if widget.vline is not None and widget.vline.scene() is not None:
                                 widget.vline.setVisible(True)
                         except RuntimeError:
-                            pass
+                            logger.debug("vline C++ 对象已销毁，跳过显示")
                     if hasattr(widget, "vline2"):
                         try:
                             if widget.vline2 is not None and widget.vline2.scene() is not None:
                                 widget.vline2.setVisible(False)
                         except RuntimeError:
-                            pass
+                            logger.debug("vline2 C++ 对象已销毁，跳过隐藏")
 
                 if hasattr(widget.view_box, "is_cursor_pinned"):
                     widget.view_box.is_cursor_pinned = True
@@ -319,7 +319,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 try:
                     widget._safe_clear_plot_items()
                 except Exception:
-                    pass
+                    logger.debug("_safe_clear_plot_items 失败（紧急解锁期间）")
         self.mw._is_loading_new_data = False
         self._safety_unlock_version = -1
         for container in getattr(self.mw, "plot_widgets", []):
