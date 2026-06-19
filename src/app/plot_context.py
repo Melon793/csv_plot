@@ -163,47 +163,47 @@ class PlotContext:
         self._services.set_row_height(row, percentage)
 
     def set_all_row_height(self, percentage: int) -> None:
-        self._services.set_all_row_height(percentage)
+        self._services.layout_manager.set_all_row_height(percentage)
 
     def set_cursor_mode(
         self, mode: str, source_plot: Any | None = None, context_x: float | None = None
     ) -> None:
-        self._services.set_cursor_mode(
+        self._services.cursor_sync_manager.set_cursor_mode(
             mode, source_plot=source_plot, context_x=context_x
         )
 
     def sync_mark_regions(self, mark_region: Any) -> None:
-        self._services.sync_mark_regions(mark_region)
+        self._services.layout_manager.sync_mark_regions(mark_region)
 
     def _sync_min_xrange(self) -> None:
-        self._services._sync_min_xrange()
+        self._services.cursor_sync_manager._sync_min_xrange()
 
     def _get_plot_container(self, plot_widget: Any) -> Any:
-        return self._services._get_plot_container(plot_widget)
+        return self._services.layout_manager._get_plot_container(plot_widget)
 
     def _show_drag_indicator_for_plot(
         self, plot_widget: Any, var_names: list[str], text_override: str | None = None
     ) -> None:
-        self._services._show_drag_indicator_for_plot(
+        self._services.layout_manager._show_drag_indicator_for_plot(
             plot_widget, var_names, text_override
         )
 
     def _hide_drag_indicator_for_plot(self, plot_widget: Any) -> None:
-        self._services._hide_drag_indicator_for_plot(plot_widget)
+        self._services.layout_manager._hide_drag_indicator_for_plot(plot_widget)
 
     def auto_y_in_x_range(self) -> None:
-        self._services.auto_y_in_x_range()
+        self._services.cursor_sync_manager.auto_y_in_x_range()
 
     def collect_global_x_range(
         self, curves_filter: str = "visible"
     ) -> tuple[float | None, float | None]:
-        return self._services.collect_global_x_range(curves_filter)
+        return self._services.cursor_sync_manager.collect_global_x_range(curves_filter)
 
     def set_cursor_enabled(self, enabled: bool) -> None:
-        self._services.set_cursor_enabled(enabled)
+        self._services.cursor_sync_manager.set_cursor_enabled(enabled)
 
     def is_cursor_enabled(self) -> bool:
-        return self._services.is_cursor_enabled()
+        return self._services.cursor_sync_manager.is_cursor_enabled()
 
     def set_cursor_checked(self, checked: bool) -> None:
         btn = self._services.cursor_btn

@@ -405,7 +405,7 @@ class LayoutManager(MainWindowBaseManager):
                     first_plot = self.mw.plot_widgets[0].plot_widget
                     first_plot.view_box.enableAutoRange(x=False)
                     first_plot.view_box.setXRange(new_min, new_max, padding=0)
-                    self.mw._realign_pinned_cursor_after_time_correction(
+                    self.mw.cursor_sync_manager._realign_pinned_cursor_after_time_correction(
                         old_factor, old_offset, new_factor, new_offset
                     )
 
