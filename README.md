@@ -61,13 +61,27 @@
 
 ```
 csv_plot/
-├── csv_plot.py                  # 主入口（~5000 行，DraggablePlotWidget + MainWindow）
+├── csv_plot.py                  # 主入口
+├── pyproject.toml               # 项目配置与依赖管理
+├── uv.lock                      # uv 依赖锁文件
 ├── README.md
+├── .gitignore
 ├── assets/                      # 图标资源
 │   ├── icon.png
 │   ├── icon.ico
 │   └── icon.icns
+├── docs/                        # 文档
+│   ├── help.md                  # 帮助文档
+│   ├── snapshot1.png            # 截图
+│   └── template.yaml            # YAML 模板示例
+├── scripts/                     # 打包脚本
+│   ├── build_exe_nuitka         # macOS/Linux Nuitka 编译脚本
+│   ├── build_exe_pyinstaller    # macOS/Linux PyInstaller 打包脚本
+│   ├── build_exe_pyinstaller.bat # Windows PyInstaller 打包批处理
+│   ├── build_win.py             # Windows Nuitka 编译脚本
+│   └── csv_plot_pyinstaller.spec # PyInstaller spec 配置
 └── src/                         # 模块化源码
+    ├── __init__.py
     ├── app/
     │   └── plot_context.py      # PlotContext 服务层（依赖注入）
     ├── core/
@@ -90,14 +104,15 @@ csv_plot/
     │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
     │   └── metadata.py          # VarMetadata 数据类 + 有效性分类工具
     ├── utils/
-    │   └── paths.py             # resource_path 资源路径解析
+    │   ├── paths.py             # resource_path 资源路径解析
+    │   └── platform_setup.py    # 平台初始化（字体/DPI）
     └── ui/
-        ├── main_window.py       # MainWindow 主窗口（QSettings 重构已接入 AppSettings）
-        ├── drag_drop.py         # 拖放解析（parse_var_names / build_mimedata / create_pixmap）
-        ├── table_dialog.py      # DataTableDialog + PandasTableModel + CustomDelegate + XYScatterPlotDialog
+        ├── main_window.py       # MainWindow 主窗口
+        ├── drag_drop.py         # 拖放解析
+        ├── table_dialog.py      # DataTableDialog + PandasTableModel + XYScatterPlotDialog
         ├── variable_list.py     # MyTableWidget 变量列表面板
         ├── mark_stats.py        # MarkStatsWindow 标记统计窗口
-        ├── plot_config_manager.py  # PlotConfigManager 配置协调（模板 / 自动保存入口）
+        ├── plot_config_manager.py  # PlotConfigManager 配置协调
         ├── plot_variable_editor.py  # PlotVariableEditorDialog 变量编辑器
         ├── main_window_base_manager.py  # MainWindow 基础管理器
         ├── file_loader_manager.py  # 文件加载管理器
@@ -110,13 +125,13 @@ csv_plot/
         │   ├── axis.py          # AxisDialog 坐标轴设置
         │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
         │   ├── sheet_selector.py  # SheetSelectorDialog Excel 工作表选择
-        │   ├── log_window.py    # LogWindow 日志窗口（QSettings 重构已接入 AppSettings）
+        │   ├── log_window.py    # LogWindow 日志窗口
         │   ├── template_editor_dialog.py  # TemplateEditorDialog 模板编辑器
         │   └── template_manager_dialog.py # TemplateManagerDialog 模板管理器
         └── widgets/
             ├── __init__.py
             ├── base_manager.py  # 管理器基类
-            ├── custom_viewbox.py # 信号化 CustomViewBox（10 个信号解耦 MainWindow）
+            ├── custom_viewbox.py # 信号化 CustomViewBox
             ├── plot_widget.py   # PlotWidget 主绘图组件
             ├── plot_container.py # PlotContainerWidget 绘图容器
             ├── plot_ui_manager.py # PlotUIManager 绘图 UI 管理器
@@ -161,21 +176,25 @@ csv_plot/
 
 ### 打包为独立应用
 
-项目提供了 `scripts/` 目录下的打包脚本，可直接运行：
+项目提供了 `scripts/` 目录下的打包脚本，可直接运行。
+
+首先安装 dev 依赖组（含 pytest / nuitka / pyinstaller）：
+
+```bash
+uv sync --group dev
+```
+
+然后运行对应的打包脚本：
 
 ```bash
 # PyInstaller（单目录模式，启动快）
-# 如果没有安装pyinstaller，先安装pyinstaller
-# uv add pyinstaller
 bash scripts/build_exe_pyinstaller
 
 # Nuitka（编译为原生可执行文件，性能更高）
-# 如果没有安装nuitka，先安装nuitka
-# uv add nuitka
 bash scripts/build_exe_nuitka
 
 # 打包为独立应用（Windows）
-uv run scripts/build_win.py 
+uv run scripts/build_win.py
 ```
 
 ## 使用指南
