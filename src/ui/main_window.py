@@ -466,18 +466,6 @@ class MainWindow(QMainWindow):
                 finally:
                     self._in_sync_resize = False
 
-    def _post_load_actions(self, file_path: str):
-        self.file_loader_manager._post_load_actions(file_path)
-
-    def _remember_last_open_dir(self, file_path: str):
-        self.file_loader_manager._remember_last_open_dir(file_path)
-
-    def _get_dialog_initial_directory(self) -> str:
-        return self.file_loader_manager._get_dialog_initial_directory()
-
-    def _default_system_directory(self) -> str:
-        return self.file_loader_manager._default_system_directory()
-
     def _on_auto_restore_toggled(self, checked):
         self.plot_config_manager.auto_save_manager.set_auto_save_enabled(checked)
         self._refresh_auto_restore_indicator()
@@ -631,23 +619,6 @@ class MainWindow(QMainWindow):
         """显示状态消息（在未来可以添加状态栏）"""
         self._logger.info(message)
     
-    def _validate_load_parameters(self, file_path: str, desc_rows, sep, has_unit) -> tuple[bool, str]:
-        return self.file_loader_manager._validate_load_parameters(file_path, desc_rows, sep, has_unit)
-
-    def _load_sync(self, 
-                   file_path: str,
-                   desc_rows: int = 0,
-                   sep: str = ',',
-                   has_unit: bool = True,
-                   encoding: str | None = None):
-        return self.file_loader_manager._load_sync(file_path, desc_rows=desc_rows, sep=sep, has_unit=has_unit, encoding=encoding)
-
-    def _on_load_done(self,loader, file_path: str):
-        self.file_loader_manager._on_load_done(loader, file_path)
-
-    def _on_load_error(self, msg):
-        self.file_loader_manager._on_load_error(msg)
-
     def _apply_loader(self):
         self.file_loader_manager._apply_loader()
 

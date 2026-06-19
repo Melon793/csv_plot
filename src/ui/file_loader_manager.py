@@ -75,7 +75,7 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw.load_btn.setEnabled(False)
 
         try:
-            initial_dir = self.mw._get_dialog_initial_directory()
+            initial_dir = self._get_dialog_initial_directory()
             file_filter = (
                 "All Files (*.*);;"
                 "CSV/TXT Files (*.csv *.txt *.mfile *.t00 *.t01 *.t10 *.t11);;"
@@ -618,7 +618,7 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _post_load_actions(self, file_path: str):
         self.mw.loaded_path = file_path
-        self.mw._remember_last_open_dir(file_path)
+        self._remember_last_open_dir(file_path)
 
         def truncate_string(file_path, max_length=79):
             filename_length = len(os.path.basename(file_path))
@@ -673,7 +673,7 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw._last_open_dir
         ):
             return self.mw._last_open_dir
-        return self.mw._default_system_directory()
+        return self._default_system_directory()
 
     def _default_system_directory(self) -> str:
         candidates: list[str | None] = []
