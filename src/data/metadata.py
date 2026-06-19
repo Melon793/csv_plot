@@ -97,4 +97,41 @@ def extract_enum_map(conversion) -> Optional[dict[int, str]]:
         except (ValueError, TypeError):
             break
 
+    if not result:
+        # 策略三：CAN db 指针型枚举 (conv_type=7)
+        # text_i 为 int（CAN 数据库字符串地址），实际值在 val_i 中
+        # 通过 conversion.convert() 利用 asammdf 内置 CAN db 解析还原文本
+        can_vals = []
+        for i in range(1000):
+            text_attr = f"text_{i}"
+            val_attr = f"val_{i}"
+            if not hasattr(conversion, text_attr):
+                break
+            if not hasattr(conversion, val_attr):
+                continue
+            try:
+                text_val = getattr(conversion, text_attr)
+                raw_val = getattr(conversion, val_attr)
+            except Exception:
+                break
+            if text_val is None or raw_val is None:
+                break
+            # text_i 必须是 int 才走 CAN db 指针策略
+            if not isinstance(text_val, int):
+                can_vals.clear()
+                break
+            can_vals.append(float(raw_val))
+
+        if can_vals:
+            try:
+                raw_arr = np.asarray(can_vals, dtype=np.float64)
+                converted = conversion.convert(raw_arr)
+                for j, raw_val in enumerate(can_vals):
+                    label = converted[j]
+                    if isinstance(label, bytes):
+                        label = label.decode("utf-8", errors="replace").rstrip("\x00")
+                    result[int(raw_val)] = str(label)
+            except Exception:
+                pass  # convert() 失败时不阻塞，返回空 map
+
     return result if result else None
