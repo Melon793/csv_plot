@@ -14,6 +14,8 @@ PlotDataManager - 单曲线绘图和数据管理
 from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
+import pandas as pd
 import pyqtgraph as pg
 from PySide6.QtCore import QSignalBlocker
 
@@ -35,10 +37,6 @@ class PlotDataManager:
     """负责单曲线绘图和数据管理"""
 
     def __init__(self, axis_manager: AxisManager):
-        import numpy as np
-        import pandas as pd
-        globals()['np'] = np
-        globals()['pd'] = pd
         if axis_manager is None:
             raise ValueError("PlotDataManager requires a valid AxisManager instance")
         self._axis_manager = axis_manager

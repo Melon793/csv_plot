@@ -3,11 +3,11 @@ import sys
 import os
 from typing import Any
 
-if sys.platform == "darwin":  # macOS
-    # 屏蔽 macOS ICC 警告
-    pass
+from src.utils.platform_setup import setup_platform
+setup_platform()
 
-os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
+import numpy as np
+import pandas as pd
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
 from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
@@ -25,20 +25,6 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 
-# PyInstaller 解包目录 — 已迁移至 src/utils/paths.py
-from src.utils.paths import resource_path
-
-# 设置应用程序和窗口图标
-if sys.platform == "win32": # Windows
-    import ctypes
-    myappid = 'mycompany.csv_plot.0.1'
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    ico_path = resource_path("assets/icon.ico")  
-
-elif sys.platform == "darwin":  # macOS
-    ico_path = resource_path("assets/icon.icns")  
-
-
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     """
     可拖拽的图形布局控件类
@@ -48,10 +34,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def __init__(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
             time_channels_info = {}
-        import numpy as np
-        import pandas as pd
-        globals()['np'] = np
-        globals()['pd'] = pd
         super().__init__()
         self.factor = 1.0
         self.offset = 0.0

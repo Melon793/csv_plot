@@ -2,18 +2,9 @@ from __future__ import annotations
 import sys
 import os
 
-os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
+from src.utils.platform_setup import setup_platform
 
-from src.utils.paths import resource_path
-
-if sys.platform == "win32":
-    import ctypes
-    myappid = 'mycompany.csv_plot.0.1'
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    ico_path = resource_path("assets/icon.ico")
-
-elif sys.platform == "darwin":
-    ico_path = resource_path("assets/icon.icns")
+ico_path = setup_platform()
 
 
 def main():
