@@ -232,7 +232,6 @@ class MainWindow(QMainWindow):
         self.load_btn = QPushButton("导入数据文件", left_widget)
 
         self.reload_btn = QPushButton("重载", left_widget)
-        self.reload_btn.clicked.connect(self.reload_data)
 
         button_layout.addWidget(self.load_btn, 4)
         button_layout.addWidget(self.reload_btn, 1)
@@ -404,7 +403,7 @@ class MainWindow(QMainWindow):
         self._log_manager = LogManager.get_instance()
         self._logger = self._log_manager.get_logger("app.main")
 
-        self.set_button_status(False)
+        self.file_loader_manager.set_button_status(False)
 
         # 信号连接（需要 Manager 已初始化）
         self.clone_btn.clicked.connect(self.layout_manager.spawn_clone_window)
@@ -413,6 +412,7 @@ class MainWindow(QMainWindow):
         self.time_correction_btn.clicked.connect(self.layout_manager.open_time_correction_dialog)
         self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
         self.load_btn.clicked.connect(self.file_loader_manager.load_btn_click)
+        self.reload_btn.clicked.connect(self.file_loader_manager.reload_data)
         self.clear_all_plots_btn.clicked.connect(self.cursor_sync_manager.clear_all_plots)
         self.auto_range_btn.clicked.connect(self.cursor_sync_manager.auto_range_all_plots)
         self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
@@ -430,7 +430,7 @@ class MainWindow(QMainWindow):
             return
         positional_args = [a for a in sys.argv[1:] if not a.startswith("--")]
         if positional_args:
-            self.load_csv_file(positional_args[0])
+            self.file_loader_manager.load_csv_file(positional_args[0])
 
     def closeEvent(self, event):
         self._logger.info("CSV Plot 应用程序退出")
@@ -466,27 +466,6 @@ class MainWindow(QMainWindow):
                 finally:
                     self._in_sync_resize = False
 
-    def _begin_data_reload(self):
-        self.file_loader_manager._begin_data_reload()
-
-    def _end_data_reload(self):
-        self.file_loader_manager._end_data_reload()
-
-    def _post_reload_ui_refresh(self):
-        self.file_loader_manager._post_reload_ui_refresh()
-
-    def load_csv_file(self, file_path: str):
-        self.file_loader_manager.load_csv_file(file_path)
-
-    def set_button_status(self,status:bool):
-        self.file_loader_manager.set_button_status(status)
-
-    def reload_data(self):
-        self.file_loader_manager.reload_data()
-
-    def _load_file(self, file_path: str, is_reload: bool = False):
-        self.file_loader_manager._load_file(file_path, is_reload=is_reload)
-
     def _post_load_actions(self, file_path: str):
         self.file_loader_manager._post_load_actions(file_path)
 
@@ -499,9 +478,6 @@ class MainWindow(QMainWindow):
     def _default_system_directory(self) -> str:
         return self.file_loader_manager._default_system_directory()
 
-    def _extract_file_extension(self, file_path: str) -> str:
-        return self.file_loader_manager._extract_file_extension(file_path)
-    
     def _on_auto_restore_toggled(self, checked):
         self.plot_config_manager.auto_save_manager.set_auto_save_enabled(checked)
         self._refresh_auto_restore_indicator()

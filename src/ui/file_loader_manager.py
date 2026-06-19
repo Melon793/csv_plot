@@ -301,7 +301,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 if widget:
                     widget._is_updating_data = False
                     widget._cached_data_version = self.mw._data_version
-            QTimer.singleShot(50, self.mw._post_reload_ui_refresh)
+            QTimer.singleShot(50, self._post_reload_ui_refresh)
 
     def _safety_force_unlock(self):
         """版本感知的安全解锁：仅当版本匹配时才执行解锁，防止跨 reload 污染"""
@@ -414,7 +414,7 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _load_file(self, file_path: str, is_reload: bool = False,
                    cached_sheet_name: str | None = None):
-        file_ext = self.mw._extract_file_extension(file_path)
+        file_ext = self._extract_file_extension(file_path)
         is_mdf_file = file_ext in (".mf4", ".mdf", ".dat")
         is_excel_file = file_ext in (".xlsx", ".xlsm")
 
