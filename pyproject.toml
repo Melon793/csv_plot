@@ -1,6 +1,6 @@
 [project]
 name = "csv-plot"
-version = "0.1.0"
+version = "0.2.0"
 description = "A fast CSV data visualization tool with support for large files, interactive plotting, and statistical analysis"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,4 +20,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "nuitka>=2.0",
+    "pyinstaller>=6.0",
 ]
