@@ -143,11 +143,19 @@ class FastDataLoader(BaseDataLoader):
             return None
         return best
 
+    # 列数跳跃检测阈值：当候选标题行列数超过此前候选列数的 N 倍时，
+    # 判定前面的行为元数据描述区，当前行为真正的标题行。
+    _COLUMN_JUMP_FACTOR = 3
+
     @staticmethod
     def _detect_header_from_lines(lines: list[str], sep: str) -> int:
-        """从已读取的行列表中定位标题行（非数值占比法，无 I/O）
+        """从已读取的行列表中定位标题行（非数值占比 + 列数跳跃检测）
 
-        扫描行列表，找到第一个包含分隔符且非数值占比 > 50% 的行作为标题行。
+        CSV 文件在导出时可能带有元数据描述区（如 UniPlot 的 key=value 对），
+        这些行通常仅含少量字段（2-3 列），而真实标题行会包含全部变量列。
+        因此不采用简单的「首命中即返回」，而是追踪候选行列数：
+        当后续候选行的列数发生数量级跳跃（≥ COLUMN_JUMP_FACTOR 倍），
+        说明前面的候选在元数据区，跳跃点才是真正标题行。
 
         Args:
             lines: 已读取的非空行列表
@@ -156,11 +164,15 @@ class FastDataLoader(BaseDataLoader):
         Returns:
             标题行在 lines 列表中的索引 (0-based)，未找到时返回 0
         """
+        candidate_idx = -1
+        candidate_cols = 0
+
         for idx, line in enumerate(lines):
             if sep not in line:
                 continue
             parts = line.split(sep)
-            if len(parts) < 2:
+            col_count = len(parts)
+            if col_count < 2:
                 continue
             non_numeric_count = 0
             for cell in parts:
@@ -171,10 +183,26 @@ class FastDataLoader(BaseDataLoader):
                     float(cell_stripped)
                 except (ValueError, TypeError):
                     non_numeric_count += 1
-            total = len(parts)
-            if total > 0 and non_numeric_count / total > 0.5:
+            total = col_count
+            if not (total > 0 and non_numeric_count / total > 0.5):
+                continue
+
+            # 找到第一个候选
+            if candidate_idx == -1:
+                candidate_idx = idx
+                candidate_cols = col_count
+                continue
+
+            # 列数发生数量级跳跃 → 前面的候选在元数据区，当前行才是标题
+            if col_count >= candidate_cols * FastDataLoader._COLUMN_JUMP_FACTOR:
                 return idx
-        return 0
+
+            # 列数更多但不足够跳跃 → 更新为更优候选
+            if col_count > candidate_cols:
+                candidate_idx = idx
+                candidate_cols = col_count
+
+        return candidate_idx if candidate_idx != -1 else 0
 
     @staticmethod
     def _detect_has_unit_from_lines(
