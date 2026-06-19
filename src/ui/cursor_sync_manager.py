@@ -53,7 +53,7 @@ class CursorSyncManager(MainWindowBaseManager):
 
             if self.mw.mark_region_btn.isChecked():
                 self.mw.mark_region_btn.setChecked(False)
-                self.mw.toggle_mark_region(False)
+                self.mw.layout_manager.toggle_mark_region(False)
 
         finally:
             for container in self.mw.plot_widgets:
