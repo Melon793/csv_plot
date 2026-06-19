@@ -178,6 +178,9 @@ class MyTableWidget(QTableWidget):
         self._column_sort_order = {}  # 记录每列的当前排序状态：{column_index: order}
         self._row_var_names = []   # 当前每行对应的变量名（行号 → 变量名）
         self._is_full_table = False  # 是否已填充全量表
+        self._current_name_keywords = []
+        self._current_unit_keywords = []
+        self._current_units = {}
 
         # 设置自定义委托，从绘制层面彻底禁用悬停和焦点效果
         self.setItemDelegate(NoHoverDelegate(self))
@@ -348,6 +351,13 @@ class MyTableWidget(QTableWidget):
             self.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
             for row in range(self.rowCount())
         ]
+
+        if self._current_name_keywords or self._current_unit_keywords:
+            self.hide_non_matching(
+                self._current_name_keywords,
+                self._current_unit_keywords,
+                self._current_units,
+            )
 
     def _show_context_menu(self, pos):
         index = self.indexAt(pos)
@@ -616,6 +626,10 @@ class MyTableWidget(QTableWidget):
         if not self._is_full_table:
             return False
 
+        self._current_name_keywords = name_keywords
+        self._current_unit_keywords = unit_keywords
+        self._current_units = units
+
         self.setUpdatesEnabled(False)
         try:
             for row, name in enumerate(self._row_var_names):
@@ -637,6 +651,8 @@ class MyTableWidget(QTableWidget):
         """取消所有行隐藏，恢复全量表显示"""
         if not self._is_full_table:
             return False
+        self._current_name_keywords = []
+        self._current_unit_keywords = []
         self.setUpdatesEnabled(False)
         try:
             for row in range(self.rowCount()):
