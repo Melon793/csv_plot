@@ -78,10 +78,11 @@ class MainWindow(QMainWindow):
         _read_status = False
         _hide_plot_area = False
 
-        config_path = self._resolve_config_path("config_dict.json")
+        from src.ui.file_loader_manager import FileLoaderManager
+        config_path = FileLoaderManager._resolve_config_path("config_dict.json")
         if config_path is not None and os.path.isfile(config_path):
             try:
-                config_dict = self.load_dict(config_path)
+                config_dict = FileLoaderManager.load_dict(config_path)
                 layout_config_dict = config_dict.get("layout_config", {})
                 _width = int(layout_config_dict.get("window_width", 0))
                 _height = int(layout_config_dict.get("window_height", 0))
@@ -484,12 +485,6 @@ class MainWindow(QMainWindow):
     def load_btn_click(self):
         self.file_loader_manager.load_btn_click()
 
-    def _validate_file_path(self, file_path: str) -> bool:
-        return self.file_loader_manager._validate_file_path(file_path)
-    
-    def _check_file_size(self, file_path: str) -> bool:
-        return self.file_loader_manager._check_file_size(file_path)
-
     def _begin_data_reload(self):
         self.file_loader_manager._begin_data_reload()
 
@@ -511,18 +506,6 @@ class MainWindow(QMainWindow):
     def _load_file(self, file_path: str, is_reload: bool = False):
         self.file_loader_manager._load_file(file_path, is_reload=is_reload)
 
-    @property
-    def _has_valid_loader(self) -> bool:
-        return self.file_loader_manager._has_valid_loader
-    
-    @property
-    def _has_valid_data(self) -> bool:
-        return self.file_loader_manager._has_valid_data
-    
-    @property
-    def _current_data_length(self) -> int:
-        return self.file_loader_manager._current_data_length
-
     def _release_old_data(self):
         self.file_loader_manager._release_old_data()
 
@@ -539,16 +522,6 @@ class MainWindow(QMainWindow):
     def _default_system_directory(self) -> str:
         return self.file_loader_manager._default_system_directory()
 
-    @staticmethod
-    def load_dict(path: str, *, default=None) -> dict:
-        from src.ui.file_loader_manager import FileLoaderManager
-        return FileLoaderManager.load_dict(path, default=default)
-
-    @staticmethod
-    def _resolve_config_path(filename: str) -> str | None:
-        from src.ui.file_loader_manager import FileLoaderManager
-        return FileLoaderManager._resolve_config_path(filename)
-        
     def _extract_file_extension(self, file_path: str) -> str:
         return self.file_loader_manager._extract_file_extension(file_path)
     
@@ -784,11 +757,6 @@ class MainWindow(QMainWindow):
 
     def _get_cursor_view_range(self, source_plot=None):
         return self.cursor_sync_manager._get_cursor_view_range(source_plot)
-
-    @staticmethod
-    def _clamp_value(value, min_val, max_val):
-        from src.ui.cursor_sync_manager import CursorSyncManager
-        return CursorSyncManager._clamp_value(value, min_val, max_val)
 
     def _calc_second_cursor_position(self, pinned_x, view_min, view_max):
         return self.cursor_sync_manager._calc_second_cursor_position(pinned_x, view_min, view_max)
