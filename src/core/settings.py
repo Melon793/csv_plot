@@ -101,8 +101,9 @@ class AppSettings:
                         self._settings.setValue(new_key, val)
 
             self._settings.sync()
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("配置迁移失败: %s", e)
 
     @property
     def config_dir(self) -> Path:
