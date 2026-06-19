@@ -169,17 +169,23 @@ class ExcelDataLoader(BaseDataLoader):
 
         return var_names, units, actual_has_unit
 
+    # 列数跳跃检测阈值：当候选标题行的列数超过此前候选列数的 N 倍时，
+    # 判定前面的行为元数据描述区，当前行为真正的标题行。
+    _COLUMN_JUMP_FACTOR = 3
+
     @staticmethod
     def _detect_header_row_from_rows(rows: list[tuple]) -> int:
-        """从 Excel 行数据中定位标题行（非数值占比法 + 列数过滤）
+        """从 Excel 行数据中定位标题行（列数跳跃检测策略）
 
-        与 CSV 的 _detect_header_from_lines 算法一致：
-        非数值单元格占比 > 50% 则判定为标题行。
-        Excel 单元格保留原生类型（str/int/float/datetime/None），
-        利用类型信息可更准确地识别标题行。
+        Excel 有严格的列网格结构，这与 CSV 有本质区别：
+        - CSV 的元数据行可能占满整行宽度（以分隔符数量衡量）
+        - Excel 的元数据行（如 UniPlot key=value）通常仅填充前 1-2 列，
+          而真正的标题行会填满所有数据列。
 
-        额外增加列数过滤（total_valid >= 2），避免合并单元格
-        产生的单列描述行被误判为标题行（等效于 CSV 的 len(parts) < 2 过滤）。
+        因此不采用 CSV 的「首命中即返回」，而是追踪候选行列数：
+        当后续候选行的列数发生数量级跳跃（≥ COLUMN_JUMP_FACTOR 倍），
+        说明前面的候选在元数据区，跳跃点才是真正标题行。
+        若无跳跃，则返回唯一（或列数最多）的候选行。
 
         Args:
             rows: openpyxl iter_rows(values_only=True) 读取的前 N 行
@@ -187,15 +193,22 @@ class ExcelDataLoader(BaseDataLoader):
         Returns:
             标题行在 rows 中的 0-based 索引，未找到时返回 0
         """
+        candidate_idx = -1
+        candidate_cols = 0
+
         for idx, row in enumerate(rows):
             str_count = 0
             numeric_count = 0
+            non_null = 0
+
             for cell in row:
                 if cell is None:
                     continue
+                non_null += 1
                 if isinstance(cell, str):
                     cell_str = cell.strip()
                     if not cell_str:
+                        non_null -= 1  # 纯空白不计入有效列
                         continue
                     try:
                         float(cell_str)
@@ -210,9 +223,25 @@ class ExcelDataLoader(BaseDataLoader):
             total_valid = str_count + numeric_count
             if total_valid < 2:
                 continue
-            if str_count / total_valid > 0.5:
+            if str_count / total_valid <= 0.5:
+                continue
+
+            # 找到第一个候选
+            if candidate_idx == -1:
+                candidate_idx = idx
+                candidate_cols = non_null
+                continue
+
+            # 列数发生数量级跳跃 → 前面的候选在元数据区，当前行才是标题
+            if non_null >= candidate_cols * ExcelDataLoader._COLUMN_JUMP_FACTOR:
                 return idx
-        return 0
+
+            # 列数更多但不足够跳跃 → 更新为更优候选
+            if non_null > candidate_cols:
+                candidate_idx = idx
+                candidate_cols = non_null
+
+        return candidate_idx if candidate_idx != -1 else 0
 
     def _auto_detect_format(self, has_unit_hint: bool | None) -> tuple[int, bool | None]:
         """自动检测 Excel 文件的描述行数（实例方法，复用已打开的 self._ws）
