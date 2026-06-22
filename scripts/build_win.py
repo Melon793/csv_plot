@@ -195,6 +195,7 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         f"--include-data-dir={ASSETS_DIR}={ASSETS_DIR}",
         f"--include-data-file={README_FILE}={README_FILE}",
         "--include-data-file=docs/help.md=docs/help.md",
+        "--include-data-file=docs/template.yaml=docs/template.yaml",
         "--follow-imports",
         "--no-deployment-flag=excluded-module-usage",
         "--lto=yes",
