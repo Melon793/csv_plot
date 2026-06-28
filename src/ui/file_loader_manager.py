@@ -311,11 +311,6 @@ class FileLoaderManager(MainWindowBaseManager):
         finally:
             self.mw._is_loading_new_data = False
             self._safety_unlock_version = -1
-            for container in getattr(self.mw, "plot_widgets", []):
-                widget = getattr(container, "plot_widget", None)
-                if widget:
-                    widget._is_updating_data = False
-                    widget._cached_data_version = self.mw._data_version
             QTimer.singleShot(50, self._post_reload_ui_refresh)
 
     def _safety_force_unlock(self):
@@ -343,7 +338,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget._is_updating_data = False
                 widget._cached_data_version = self.mw._data_version
                 widget.setUpdatesEnabled(True)
-                # 紧急解锁后触发一次完整刷新，防止 paintEvent 跳过导致白屏
                 if hasattr(widget, "_queue_ui_refresh"):
                     widget._queue_ui_refresh(immediate=True)
 
@@ -353,6 +347,8 @@ class FileLoaderManager(MainWindowBaseManager):
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget:
+                widget._is_updating_data = False
+                widget._cached_data_version = self.mw._data_version
                 widget.setUpdatesEnabled(True)
                 if hasattr(widget, "_queue_ui_refresh"):
                     if not getattr(widget, '_is_updating_data', False):
