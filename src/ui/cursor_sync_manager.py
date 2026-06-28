@@ -11,8 +11,11 @@ from src.core.config import (
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
 )
+from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
+
+logger = get_logger(__name__)
 
 
 class CursorSyncManager(MainWindowBaseManager):
@@ -408,9 +411,14 @@ class CursorSyncManager(MainWindowBaseManager):
 
         if not all_mins:
             if self.mw.loader and hasattr(self.mw.loader, "global_time_range"):
-                return self.mw.loader.global_time_range
+                fallback = self.mw.loader.global_time_range
+                logger.debug("[GLOBAL_X] collect_global_x_range: no visible plot data, fallback=time_range %s", fallback)
+                return fallback
             elif self.mw.loader and self.mw.loader.datalength > 0:
-                return (1.0, float(self.mw.loader.datalength))
+                fallback = (1.0, float(self.mw.loader.datalength))
+                logger.debug("[GLOBAL_X] collect_global_x_range: no visible plot data, fallback=datalength %s", fallback)
+                return fallback
+            logger.debug("[GLOBAL_X] collect_global_x_range: no data available")
             return (None, None)
 
         result = (min(all_mins), max(all_maxs))
@@ -419,6 +427,11 @@ class CursorSyncManager(MainWindowBaseManager):
             expand_val = 0.5
             result = (result[0] - expand_val, result[1] + expand_val)
 
+        logger.debug(
+            "[GLOBAL_X] collect_global_x_range: filter=%s result=(%.4f, %.4f) "
+            "from %d visible plots",
+            curves_filter, result[0], result[1], len(all_mins),
+        )
         return result
 
     def _compute_baseline_density(self):
@@ -453,11 +466,23 @@ class CursorSyncManager(MainWindowBaseManager):
             new_max = self.mw._baseline_density
 
         if new_max != self.mw._global_max_density and new_max > 0:
+            prev = self.mw._global_max_density
             self.mw._global_max_density = new_max
             min_range = MIN_INDEX_LENGTH / new_max
+            logger.debug(
+                "[MIN_XRANGE] _sync_min_xrange: density %.4f -> %.4f, min_range=%.4f, "
+                "syncing to %d visible plots",
+                prev, new_max, min_range,
+                sum(1 for c in self.mw.plot_widgets if c.isVisible()),
+            )
             for container in self.mw.plot_widgets:
                 if container.isVisible():
                     container.plot_widget._set_min_x_range(min_range)
+        else:
+            logger.debug(
+                "[MIN_XRANGE] _sync_min_xrange: no change, density=%.4f unchanged",
+                self.mw._global_max_density,
+            )
 
     def auto_range_all_plots(self):
         if not self.mw.loader or self.mw.loader.datalength == 0:

@@ -12,6 +12,7 @@ from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
 
 from src.core.config import UI_DEBOUNCE_DELAY_MS
+from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
 from src.ui.mark_stats import MarkStatsWindow
@@ -20,6 +21,8 @@ from src.ui.dialogs.layout_input import LayoutInputDialog
 from src.ui.dialogs.time_correction import TimeCorrectionDialog
 from src.ui.widgets.plot_container import PlotContainerWidget
 from src.app.plot_context import PlotContext
+
+logger = get_logger(__name__)
 
 
 class LayoutManager(MainWindowBaseManager):
@@ -87,17 +90,12 @@ class LayoutManager(MainWindowBaseManager):
             if not getattr(self.mw, "_pending_splitter_adjustment", False):
                 self.mw._pending_splitter_adjustment = True
                 QTimer.singleShot(0, self._apply_fixed_splitter_width)
-        # 窗口 resize（含最大化/还原）后，显式同步所有联动 ViewBox 的 x 范围。
-        # pyqtgraph 的 setXLink 仅在源 ViewBox 的 range 发生变化时才同步，
-        # 而 resize 时源 ViewBox 的 range 可能不变（仅像素尺寸变化），
-        # 导致被联动的 ViewBox 不同步，出现 x 轴不一致的问题。
-        # 使用去抖标志避免快速连续 resize 时 timer 堆积。
         if not getattr(self.mw, "_pending_xlink_sync", False):
             self.mw._pending_xlink_sync = True
+            logger.debug("[XLINK_SYNC] _handle_resize: scheduling _sync_linked_x_ranges in 50ms")
             QTimer.singleShot(50, self._sync_linked_x_ranges)
 
     def _sync_linked_x_ranges(self):
-        """显式同步所有联动 ViewBox 的 x 范围到第一个 plot"""
         self.mw._pending_xlink_sync = False
         if not self.mw.plot_widgets:
             return
@@ -120,6 +118,14 @@ class LayoutManager(MainWindowBaseManager):
         if abs(xmin - xmax) < 1e-12:
             return
 
+        first_geom = first_container.geometry()
+        logger.debug(
+            "[XLINK_SYNC] _sync_linked_x_ranges: source range=(%.4f, %.4f) width=%.4f "
+            "first_geom=(%d,%d %dx%d)",
+            xmin, xmax, xmax - xmin,
+            first_geom.x(), first_geom.y(), first_geom.width(), first_geom.height(),
+        )
+
         for container in self.mw.plot_widgets[1:]:
             if not container or not hasattr(container, "plot_widget"):
                 continue
@@ -130,20 +136,38 @@ class LayoutManager(MainWindowBaseManager):
             try:
                 cur_range = vb.viewRange()[0]
                 if abs(cur_range[0] - xmin) < 1e-12 and abs(cur_range[1] - xmax) < 1e-12:
-                    continue  # 已同步，跳过
+                    continue
             except Exception:
                 continue
-            # 临时断开联动，设置范围后再恢复，避免触发递归信号
             linked = vb.linkedView(0)
             if linked is not None:
                 vb.setXLink(None)
-            # 被 setXLink 联动的 ViewBox 不应独立 auto-range
-            # （否则会在源范围变化时弹回自身数据范围，与联动语义冲突），
-            # 此处显式禁用以确保联动行为正确。
             vb.enableAutoRange(x=False)
             vb.setXRange(xmin, xmax, padding=0)
             if linked is not None:
                 vb.setXLink(linked)
+
+            cur_geom = container.geometry()
+            try:
+                new_range = vb.viewRange()[0]
+                ok = abs(new_range[0] - xmin) < 1e-6 and abs(new_range[1] - xmax) < 1e-6
+            except Exception:
+                new_range = (None, None)
+                ok = False
+            logger.debug(
+                "[XLINK_SYNC]   synced plot: was=(%.4f,%.4f) now=(%.4f,%.4f) "
+                "geom=(%d,%d %dx%d) verified=%s",
+                cur_range[0] if cur_range else -1, cur_range[1] if cur_range else -1,
+                new_range[0] if new_range[0] is not None else -1,
+                new_range[1] if new_range[1] is not None else -1,
+                cur_geom.x(), cur_geom.y(), cur_geom.width(), cur_geom.height(),
+                ok,
+            )
+            if not ok:
+                logger.warning(
+                    "[XLINK_SYNC] SYNC VERIFICATION FAILED! expected=(%.4f, %.4f) got=(%s, %s)",
+                    xmin, xmax, new_range[0], new_range[1],
+                )
 
     def toggle_plot_area(self, checked):
         if checked:
@@ -347,7 +371,6 @@ class LayoutManager(MainWindowBaseManager):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             r, c = dlg.values()
             self.set_plots_visible(r, c)
-            self.update_mark_regions_on_layout_change()
             if hasattr(self.mw, 'plot_config_manager'):
                 self.mw.plot_config_manager.save_auto_save(self.mw)
 
@@ -644,16 +667,26 @@ class LayoutManager(MainWindowBaseManager):
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
         m, n = self.mw._plot_row_max_default, self.mw._plot_col_max_default
+        logger.debug(
+            "[LAYOUT] set_plots_visible: rows=%d cols=%d (max %dx%d)",
+            row_set, col_set, m, n,
+        )
 
         for idx, container in enumerate(self.mw.plot_widgets):
             r, c = divmod(idx, n)
-            visible = r < row_set and c < col_set
-            container.setVisible(visible)
+            container.setVisible(r < row_set and c < col_set)
 
-            if visible:
-                self.mw.plot_layout.setColumnStretch(c, 1)
-            else:
-                self.mw.plot_layout.setColumnStretch(c, 0)
+        for c in range(n):
+            has_visible = any(
+                self.mw.plot_widgets[r * n + c].isVisible()
+                for r in range(m)
+                if r * n + c < len(self.mw.plot_widgets)
+            )
+            self.mw.plot_layout.setColumnStretch(c, 1 if has_visible else 0)
+            logger.debug(
+                "[LAYOUT] setColumnStretch col=%d stretch=%s has_visible=%s",
+                c, 1 if has_visible else 0, has_visible,
+            )
 
         for r in range(m):
             visible = r < row_set
@@ -668,13 +701,118 @@ class LayoutManager(MainWindowBaseManager):
         self.mw._plot_col_current = col_set
         self.update_mark_regions_on_layout_change()
 
-        if self.mw.plot_widgets:
+        if not self.mw.plot_widgets:
+            self.mw.cursor_sync_manager._sync_min_xrange()
+            return
+
+        visible_count = sum(1 for c in self.mw.plot_widgets if c.isVisible())
+        if visible_count == 0:
+            logger.debug("[LAYOUT] no visible plots, skipping X-range sync")
+            self.mw.cursor_sync_manager._sync_min_xrange()
+            return
+
+        global_min, global_max = self.mw.cursor_sync_manager.collect_global_x_range()
+
+        if global_min is not None and global_max is not None:
+            logger.debug(
+                "[LAYOUT] X-range sync source: collect_global_x_range=(%.4f, %.4f) width=%.4f",
+                global_min, global_max, global_max - global_min,
+            )
+        else:
             first_plot = self.mw.plot_widgets[0].plot_widget
-            curr_min, curr_max = first_plot.view_box.viewRange()[0]
+            first_geom = self.mw.plot_widgets[0].geometry()
+            try:
+                global_min, global_max = first_plot.view_box.viewRange()[0]
+            except Exception:
+                logger.warning("[LAYOUT] set_plots_visible: failed to read first plot viewRange")
+                global_min, global_max = None, None
+            logger.debug(
+                "[LAYOUT] X-range sync fallback: first_plot viewRange=(%.4f, %.4f) "
+                "geom=(%d,%d %dx%d)",
+                global_min if global_min is not None else -1,
+                global_max if global_max is not None else -1,
+                first_geom.x(), first_geom.y(), first_geom.width(), first_geom.height(),
+            )
+
+        if global_min is None or global_max is None:
+            self.mw.cursor_sync_manager._sync_min_xrange()
+            return
+
+        synced_count = 0
+        sync_error = None
+        for container in self.mw.plot_widgets:
+            if container.isVisible():
+                container.plot_widget._is_syncing_range = True
+        try:
+            for idx, container in enumerate(self.mw.plot_widgets):
+                if not container.isVisible():
+                    continue
+                widget = container.plot_widget
+                vb = widget.view_box
+                linked = vb.linkedView(0)
+                geom = container.geometry()
+
+                before_min, before_max = None, None
+                try:
+                    before_min, before_max = vb.viewRange()[0]
+                except Exception:
+                    pass
+
+                if linked is not None:
+                    vb.setXLink(None)
+                vb.enableAutoRange(x=False)
+                vb.setXRange(global_min, global_max, padding=0)
+                if linked is not None:
+                    vb.setXLink(linked)
+
+                after_min, after_max = None, None
+                try:
+                    after_min, after_max = vb.viewRange()[0]
+                except Exception:
+                    pass
+
+                r, c = divmod(idx, n)
+                is_xlinked = linked is not None
+                match_ok = (
+                    after_min is not None
+                    and after_max is not None
+                    and abs(after_min - global_min) < 1e-6
+                    and abs(after_max - global_max) < 1e-6
+                )
+                logger.debug(
+                    "[LAYOUT]   plot[%d,%d] idx=%d linked=%s before=(%.4f,%.4f) "
+                    "after=(%.4f,%.4f) geom=(%d,%d %dx%d) match=%s",
+                    r, c, idx, is_xlinked,
+                    before_min if before_min is not None else -1,
+                    before_max if before_max is not None else -1,
+                    after_min if after_min is not None else -1,
+                    after_max if after_max is not None else -1,
+                    geom.x(), geom.y(), geom.width(), geom.height(),
+                    match_ok,
+                )
+                if not match_ok:
+                    logger.warning(
+                        "[LAYOUT] X-RANGE MISMATCH! plot[%d,%d] linked=%s "
+                        "target=(%.4f,%.4f) actual=(%.4f,%.4f)",
+                        r, c, is_xlinked,
+                        global_min, global_max,
+                        after_min if after_min is not None else -1,
+                        after_max if after_max is not None else -1,
+                    )
+                synced_count += 1
+        except Exception as e:
+            sync_error = e
+            logger.warning(
+                "[LAYOUT] set_plots_visible: sync failed at plot %d/%d: %s",
+                synced_count, visible_count, e,
+            )
+        finally:
             for container in self.mw.plot_widgets:
                 if container.isVisible():
-                    widget = container.plot_widget
-                    widget.view_box.setXRange(curr_min, curr_max, padding=0)
-                    widget.plot_item.update()
+                    container.plot_widget._is_syncing_range = False
 
         self.mw.cursor_sync_manager._sync_min_xrange()
+        if sync_error is None:
+            logger.debug(
+                "[LAYOUT] set_plots_visible done: synced %d visible plot(s)", synced_count,
+            )
