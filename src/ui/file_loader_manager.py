@@ -156,11 +156,17 @@ class FileLoaderManager(MainWindowBaseManager):
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
-            if hasattr(widget, "_clear_plot_data"):
+            if hasattr(widget, "_safe_clear_plot_items"):
                 try:
-                    widget._clear_plot_data()
+                    widget._safe_clear_plot_items()
                 except Exception:
-                    logger.debug("_clear_plot_data 失败（数据重载期间）")
+                    logger.debug("_safe_clear_plot_items 失败（数据重载期间）")
+            widget.curve = None
+            if hasattr(widget, "curves"):
+                widget.curves.clear()
+            widget.original_index_x = None
+            widget.original_y = None
+            widget.is_multi_curve_mode = False
             if hasattr(widget, "_cursor_trash_bin"):
                 widget._cursor_trash_bin.clear()
             if hasattr(widget, "_pending_delete_items"):
