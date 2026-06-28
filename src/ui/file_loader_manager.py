@@ -166,7 +166,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget.curves.clear()
             widget.original_index_x = None
             widget.original_y = None
-            widget.is_multi_curve_mode = False
             if hasattr(widget, "_cursor_trash_bin"):
                 widget._cursor_trash_bin.clear()
             if hasattr(widget, "_pending_delete_items"):
@@ -594,7 +593,6 @@ class FileLoaderManager(MainWindowBaseManager):
                         widget.curves.clear()
                     widget.original_index_x = None
                     widget.original_y = None
-                    widget.is_multi_curve_mode = False
 
             # 2) 清理 main window 的重复引用
             self.mw.data = None
