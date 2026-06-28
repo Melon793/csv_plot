@@ -76,17 +76,24 @@ class EventHandler:
 
     @safe_callback
     def _on_range_changed(self, view_box, range, changed=None):
-        """ViewBox范围变化回调处理"""
         try:
             if getattr(self.pw, '_is_updating_data', False) or getattr(self.pw, '_is_being_destroyed', False):
                 self._cancel_ui_refresh()
                 return
 
             if getattr(self.pw, '_is_syncing_range', False):
+                logger.debug(
+                    "[RANGE_CHANGED] _on_range_changed: short-circuit by _is_syncing_range, "
+                    "new_range=(%.4f, %.4f)", range[0][0], range[0][1],
+                )
                 return
 
             if not self._is_interacting:
                 self._is_interacting = True
+                logger.debug(
+                    "[RANGE_CHANGED] _on_range_changed: entering interacting, "
+                    "new_range=(%.4f, %.4f)", range[0][0], range[0][1],
+                )
                 self._start_interaction()
 
             if hasattr(self.pw, '_interaction_timer'):

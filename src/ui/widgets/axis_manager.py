@@ -20,7 +20,10 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_Y,
     MIN_INDEX_LENGTH,
 )
+from src.core.logger import get_logger
 import numpy as np
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_ui_manager import PlotUIManager
@@ -194,13 +197,6 @@ class AxisManager:
         xmax: float,
         padding: float = 0,
     ) -> None:
-        """设置 X 轴范围，同时处理联动
-
-        Args:
-            xmin: X 轴最小值
-            xmax: X 轴最大值
-            padding: 内边距
-        """
         pw = self.pw
         plot = pw.plot_item
 
@@ -214,6 +210,11 @@ class AxisManager:
 
         if linked is not None:
             plot.setXLink(linked)
+
+        logger.debug(
+            "[AXIS] set_xrange_with_link_handling: (%.4f, %.4f) padding=%.4f had_link=%s",
+            xmin, xmax, max(0, padding), linked is not None,
+        )
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """确保 X 轴范围非零
