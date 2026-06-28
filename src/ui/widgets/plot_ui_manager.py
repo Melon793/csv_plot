@@ -45,6 +45,8 @@ class PlotUIManager(BasePlotManager):
 
     def __init__(self, plot_widget: Any):
         super().__init__(plot_widget)
+        # v5.3: cursor 场景修改护栏标志，阻止 paint event 在 BSP 中间态期间访问场景
+        self.pw._is_cursor_modifying_scene = False
 
     # ========================================================================
     # 公开初始化入口

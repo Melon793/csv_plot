@@ -318,16 +318,20 @@ class CursorManager:
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
         if self._is_cursor_update_locked():
+            logger.debug("[cursor] update_cursor_label 跳过: locked")
             return
 
         if self._cursor_label_busy:
+            logger.debug("[cursor] update_cursor_label 跳过: busy")
             return
 
         self._cursor_label_busy = True
         try:
+            logger.debug("[cursor] update_cursor_label 开始")
             self._update_multi_curve_cursor_label()
-        except (RuntimeError, AttributeError):
-            pass
+            logger.debug("[cursor] update_cursor_label 完成")
+        except (RuntimeError, AttributeError) as e:
+            logger.debug("[cursor] update_cursor_label 异常: %s", e, exc_info=True)
         finally:
             self._cursor_label_busy = False
 
@@ -730,12 +734,11 @@ class CursorManager:
                     )
 
                     circle = self._get_circle_from_pool(len(cursor_values) - 1)
-                    # 先确保 circle 在正确的 scene 里，再设置属性
-                    # （Qt 的 prepareGeometryChange 需要 item 在 scene 中才能正确通知 view）
                     circle_scene = circle.scene()
                     if circle_scene != plot_scene:
                         if circle_scene is not None:
                             circle_scene.removeItem(circle)
+                        logger.debug("[cursor] addItem circle 到场景 (cursor_id=%d)", cursor_id)
                         pw.plot_item.addItem(circle, ignoreBounds=True)
                     circle.clear()
                     circle.setData([x_actual], [y_val])
@@ -784,8 +787,12 @@ class CursorManager:
             # 自动调度 paint event（尤其在 reload/批量创建 item 后），
             # 导致部分 TextItem / ScatterPlotItem 不可见，
             # 直到用户交互（拖动 cursor / 缩放）才恢复。
-
-            view_box.update()
+            #
+            # v5.3: 用 QSignalBlocker 阻断 sigRangeChanged 等级联信号，
+            # 防止 view_box.update() 触发的级联回调重新进入 update_cursor_label
+            # 导致 BSP 树在多个回调中交叉修改 → SIGSEGV
+            with QSignalBlocker(view_box):
+                view_box.update()
 
         except Exception:
             self.pw.update_right_header("")
