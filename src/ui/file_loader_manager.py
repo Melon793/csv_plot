@@ -587,12 +587,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget = getattr(container, "plot_widget", None)
                 if widget is not None:
                     widget.data = None
-                    widget.curve = None
-                    if hasattr(widget, "curves"):
-                        widget.curves.clear()
-                    widget.original_index_x = None
-                    widget.original_y = None
-                    widget.is_multi_curve_mode = False
 
             # 2) 清理 main window 的重复引用
             self.mw.data = None
