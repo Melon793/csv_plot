@@ -682,6 +682,8 @@ class CursorSyncManager(MainWindowBaseManager):
 
         finally:
             for container in self.mw.plot_widgets:
+                container.plot_widget._is_updating_data = False
+            for container in self.mw.plot_widgets:
                 widget = container.plot_widget
                 try:
                     if hasattr(widget, "view_box") and hasattr(widget, "plot_item"):
