@@ -161,11 +161,6 @@ class FileLoaderManager(MainWindowBaseManager):
                     widget._safe_clear_plot_items()
                 except Exception:
                     logger.debug("_safe_clear_plot_items 失败（数据重载期间）")
-            widget.curve = None
-            if hasattr(widget, "curves"):
-                widget.curves.clear()
-            widget.original_index_x = None
-            widget.original_y = None
             if hasattr(widget, "_cursor_trash_bin"):
                 widget._cursor_trash_bin.clear()
             if hasattr(widget, "_pending_delete_items"):
@@ -176,8 +171,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     pass
                 widget._pending_delete_items.clear()
             widget._is_updating_data = True
-            widget._cached_data_version = 0  # 设为0跳过版本比对，由 _is_updating_data 和 _is_loading_new_data 提供锁定
-            # 暂停视图更新，防止 scene 中间状态触发 paint event 导致 SIGSEGV
+            widget._cached_data_version = 0
             widget.setUpdatesEnabled(False)
             if hasattr(widget, "_cancel_ui_refresh"):
                 widget._cancel_ui_refresh()
@@ -588,11 +582,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget = getattr(container, "plot_widget", None)
                 if widget is not None:
                     widget.data = None
-                    widget.curve = None
-                    if hasattr(widget, "curves"):
-                        widget.curves.clear()
-                    widget.original_index_x = None
-                    widget.original_y = None
 
             # 2) 清理 main window 的重复引用
             self.mw.data = None
