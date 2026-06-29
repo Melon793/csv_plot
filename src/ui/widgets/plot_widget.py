@@ -12,11 +12,8 @@ import pandas as pd
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
 from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.data_types import CurveInfo
-from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
-
-logger = get_logger("widget.plot")
 
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel
@@ -379,38 +376,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         导致 QGraphicsView 在 scene items 被销毁/重建期间尝试绘制。
         """
         if getattr(self, '_is_updating_data', False):
-            logger.debug("[paintEvent] 跳过: _is_updating_data=True")
             return
         # v5.3 护栏：cursor 正在修改场景 BSP 树时跳过 paint，防止访问中间态 → SIGSEGV
         if getattr(self, '_is_cursor_modifying_scene', False):
-            logger.debug("[paintEvent] 跳过: _is_cursor_modifying_scene=True")
             return
         main_window = self.window()
         if main_window and getattr(main_window, '_is_loading_new_data', False):
-            logger.debug("[paintEvent] 跳过: _is_loading_new_data=True")
             return
         if hasattr(self, 'plot_item') and self.plot_item is not None:
             try:
                 if self.plot_item.scene() is None:
-                    logger.debug("[paintEvent] 跳过: scene is None")
                     return
             except RuntimeError:
-                logger.debug("[paintEvent] 跳过: plot_item C++ 已销毁")
                 return
-        # v5.4 debug：记录 paint event 实际执行，便于排查"曲线不显示"问题
-        curve_count = 0
-        try:
-            if hasattr(self, 'curves') and self.curves:
-                curve_count = sum(1 for ci in self.curves.values() if ci.curve is not None)
-            elif hasattr(self, 'curve') and self.curve is not None:
-                curve_count = 1
-        except Exception:
-            pass
-        logger.debug("[paintEvent] 执行 super().paintEvent (curves=%d)", curve_count)
         try:
             super().paintEvent(event)
-        except Exception as e:
-            logger.debug("[paintEvent] super().paintEvent 异常: %s", e, exc_info=True)
+        except Exception:
+            pass
 
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
