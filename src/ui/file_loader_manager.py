@@ -360,26 +360,17 @@ class FileLoaderManager(MainWindowBaseManager):
     def _post_reload_ui_refresh(self):
         """重载完成后的 UI 刷新：分步清除锁，确保场景一致后再放行 paintEvent。
 
-        v5.3 修复（针对 v5.2 遗留的两个问题）：
-        - 问题 1（绘图区不显示）：widget.update() 不能可靠触发 QGraphicsView
-          viewport 重绘。改用 widget.viewport().update() 直接通知 viewport。
-        - 问题 2（2 cursor 重载闪退）：v5.2 为每个 widget 创建一个
-          QTimer.singleShot(0) 回调（4x3 网格 = 13 个），每个同步触发
-          update_cursor_label + addItem circle 修改 BSP 树，与异步 paint 事件
-          竞争 → SIGSEGV at NULL+0x90。
-          修复：合并 13 个回调为 1 个统一回调，串行执行 cursor 更新；
-          增加 _is_cursor_modifying_scene 护栏阻止 paint 访问 BSP 中间态。
-
         清除顺序：
         1. _is_updating_data → False（允许回调执行）
         2. setUpdatesEnabled(True)（恢复 Qt 更新）
         3. _is_loading_new_data → False（放行 paintEvent）
-        4. widget.viewport().update()（显式触发 viewport 重绘，解决绘图区不显示）
-        5. 单一 QTimer.singleShot(0)（延迟 cursor 更新到下一个事件循环迭代）
+        4. _refresh_curve_paint_path（v5.8 safety net：检测失效曲线并重建）
+        5. widget.viewport().update()（显式触发 viewport 重绘）
+        6. 单一 QTimer.singleShot(0)（延迟 cursor 更新到下一个事件循环迭代，
+           合并 13 个 per-widget 回调为 1 个，避免 BSP 树交叉修改）
         """
         pending_version = getattr(self, "_post_reload_pending_version", -1)
         if pending_version != getattr(self.mw, "_data_version", 0):
-            logger.debug("[v5.3] _post_reload_ui_refresh 版本不匹配，跳过")
             return
         try:
             widgets_to_refresh = []
@@ -398,33 +389,13 @@ class FileLoaderManager(MainWindowBaseManager):
             if hasattr(self, "_safety_timer") and self._safety_timer is not None:
                 self._safety_timer.stop()
                 self._safety_timer = None
-            logger.debug(
-                "[v5.7] 锁已清除: _is_loading_new_data=False, "
-                "将触发曲线 path 重算 + 场景失效 + viewport 重绘"
-            )
 
-            # v5.4-5.6 修复"曲线有概率不显示"：
-            # replots_after_loading 在 setUpdatesEnabled(False) 期间添加曲线，
-            # 需显式触发 curve.updateItems() 重算 path + 失效缓存。
+            # v5.8 safety net：检测并重建失效曲线
             for widget in widgets_to_refresh:
                 try:
                     self._refresh_curve_paint_path(widget)
                 except Exception:
-                    logger.debug("[v5.7] 曲线 path 重算失败", exc_info=True)
-
-            # v5.7 核心修复：用 scene().update() 强制整个场景失效
-            # 根因：setVisible(False)→setVisible(True) 能恢复曲线显示，因为
-            # QGraphicsItem.setVisible 内部触发 scene()->update()（整个场景失效），
-            # 而 curve.update() 只触发 item->update()（仅 item 区域失效）。
-            # setUpdatesEnabled(False) 期间场景脏区域管理不一致，
-            # item->update() 不足以触发曲线区域的正确重绘。
-            # scene()->update() 强制整个场景失效，触发完全重绘。
-            for widget in widgets_to_refresh:
-                try:
-                    if hasattr(widget, "scene") and widget.scene() is not None:
-                        widget.scene().update()
-                except (RuntimeError, AttributeError):
-                    logger.debug("[v5.7] scene().update() 失败")
+                    logger.debug("_refresh_curve_paint_path 失败", exc_info=True)
 
             # v5.3 修复问题 1：用 viewport().update() 可靠触发 QGraphicsView 重绘
             for widget in widgets_to_refresh:
@@ -445,101 +416,31 @@ class FileLoaderManager(MainWindowBaseManager):
                 self._safety_timer = None
 
     def _refresh_curve_paint_path(self, widget):
-        """v5.7: 显式触发曲线 paint path 重算 + 强制重建 display dataset
+        """v5.8 safety net：检测失效曲线并重建。
 
-        根因：replots_after_loading 在 setUpdatesEnabled(False) 期间通过
-        plot_item.plot() 添加曲线。PlotDataItem 的 _datasetDisplay 缓存
-        可能持有空数据（setClipToView + setDownsampling 在 viewRange
-        未稳定时计算的裁剪/降采样结果）。setUpdatesEnabled(True) 后
-        调用 updateItems() 不会重置缓存，导致 curve.curve.hide() 被调用
-        → PlotCurveItem 不绘制 → 曲线不显示。
-
-        修复：
-        1. 失效 _datasetDisplay 缓存，强制 _getDisplayDataset 重新计算
-        2. curve.updateItems() — 重算 paint path
-        3. curve.prepareGeometryChange() — 强制 BSP 树重新索引
-        4. curve.update() — 触发 item 重绘（场景级重绘由调用方 scene().update() 完成）
-
-        日志：记录 PlotCurveItem(curve.curve) 的 boundingRect、visible、
-        _dataset/_datasetDisplay 状态、viewRange、xData/yData 长度。
+        失效通常由 _force_unlock_all 误触发 _safe_clear_plot_items 导致，
+        表现为 PlotDataItem 从 scene 移除（scene=None）或 _dataset 被清空。
+        v5.8 已通过取消过期 safety timer 根治此问题，本方法作为兜底防御。
         """
         if not hasattr(widget, "plot_item") or widget.plot_item is None:
             return
 
-        curves_to_refresh = []
+        curves_to_check = []
         try:
             if hasattr(widget, "curves") and widget.curves:
                 for var_name, ci in widget.curves.items():
                     if ci.curve is not None:
-                        curves_to_refresh.append((var_name, ci.curve))
+                        curves_to_check.append((var_name, ci.curve))
             elif hasattr(widget, "curve") and widget.curve is not None:
                 var_name = getattr(widget, "y_name", "") or "single"
-                curves_to_refresh.append((var_name, widget.curve))
+                curves_to_check.append((var_name, widget.curve))
         except (RuntimeError, AttributeError):
-            logger.debug("[v5.7] 收集曲线失败（C++ 对象可能已销毁）")
             return
 
-        if not curves_to_refresh:
-            logger.debug("[v5.7] widget 无曲线，跳过 path 重算")
-            return
-
-        # 获取 viewRange 用于诊断
-        try:
-            vr = widget.view_box.viewRange()
-            vr_info = f"x=[{vr[0][0]:.2f},{vr[0][1]:.2f}] y=[{vr[1][0]:.2f},{vr[1][1]:.2f}]"
-        except Exception:
-            vr_info = "(invalid)"
-
-        scene_status = "ok" if widget.plot_item.scene() is not None else "None"
-        logger.debug(
-            "[v5.7] 曲线 path 重算: curves=%d, scene=%s, viewRange=%s",
-            len(curves_to_refresh), scene_status, vr_info
-        )
-
-        for var_name, curve in curves_to_refresh:
+        for var_name, curve in curves_to_check:
             try:
-                # 收集诊断信息
                 curve_scene = curve.scene()
-                curve_visible = curve.isVisible()
-                # PlotDataItem 的子 item curve（PlotCurveItem）
-                sub_curve = getattr(curve, "curve", None)
-                sub_curve_visible = None
-                sub_curve_br = "(n/a)"
-                if sub_curve is not None:
-                    try:
-                        sub_curve_visible = sub_curve.isVisible()
-                        br = sub_curve.boundingRect()
-                        sub_curve_br = f"({br.width():.2f}x{br.height():.2f})"
-                    except Exception:
-                        sub_curve_br = "(invalid)"
-                # 数据集缓存状态
                 dataset_none = getattr(curve, "_dataset", None) is None
-                display_none = getattr(curve, "_datasetDisplay", None) is None
-                # xData/yData 长度
-                data_len = 0
-                try:
-                    xd, yd = curve.getData()
-                    if xd is not None:
-                        data_len = len(xd)
-                except Exception:
-                    data_len = -1
-
-                logger.debug(
-                    "[v5.7] curve[%s] PDI(scene=%s vis=%s) subCurve(vis=%s br=%s) "
-                    "dataset=%s displayCache=%s dataLen=%d → 刷新",
-                    var_name,
-                    "ok" if curve_scene is not None else "None",
-                    curve_visible,
-                    sub_curve_visible,
-                    sub_curve_br,
-                    "None" if dataset_none else "ok",
-                    "None" if display_none else "cached",
-                    data_len
-                )
-
-                # v5.8 safety net：检测曲线失效（scene=None 或 dataset=None），
-                # 尝试重建曲线。失效通常由 _force_unlock_all 误触发 _safe_clear_plot_items 导致，
-                # 表现为 PDI 从 scene 移除 + _dataset 被清空，无法通过 updateItems 恢复。
                 if curve_scene is None or dataset_none:
                     logger.warning(
                         "[v5.8] curve[%s] 检测到失效状态 (scene=%s, dataset=%s)，尝试重建",
@@ -564,54 +465,12 @@ class FileLoaderManager(MainWindowBaseManager):
                             logger.warning(
                                 "[v5.8] curve[%s] 重建失败：无法确定重建方式", var_name
                             )
-                        continue
                     except Exception:
                         logger.warning(
                             "[v5.8] curve[%s] 重建失败", var_name, exc_info=True
                         )
-                        continue
-
-                # 1. 失效 _datasetDisplay 缓存（v5.6 核心修复）
-                #    setClipToView + autoDownsample 模式下，_datasetDisplay 可能持有
-                #    viewRange 未稳定时计算的空数据。失效后 updateItems 会重新计算。
-                if hasattr(curve, "_datasetDisplay"):
-                    curve._datasetDisplay = None
-                # 同时清除 xViewRangeWasChanged 属性，强制 _getDisplayDataset 重新计算
-                try:
-                    if curve.property("xViewRangeWasChanged"):
-                        curve.setProperty("xViewRangeWasChanged", False)
-                except Exception:
-                    pass
-
-                # 2. 重算 paint path
-                if hasattr(curve, "updateItems"):
-                    curve.updateItems()
-
-                # 3. 强制 BSP 树重新索引
-                curve.prepareGeometryChange()
-
-                # 4. 触发重绘
-                curve.update()
-
-                # 记录刷新后的子曲线状态
-                if sub_curve is not None:
-                    try:
-                        br_after = sub_curve.boundingRect()
-                        logger.debug(
-                            "[v5.7] curve[%s] 刷新后 subCurve(vis=%s br=%.2fx%.2f)",
-                            var_name,
-                            sub_curve.isVisible(),
-                            br_after.width(), br_after.height()
-                        )
-                    except Exception:
-                        pass
-            except (RuntimeError, AttributeError) as e:
-                logger.debug("[v5.7] curve[%s] 刷新失败: %s", var_name, e)
-
-        try:
-            widget.plot_item.update()
-        except (RuntimeError, AttributeError):
-            logger.debug("[v5.7] plot_item.update() 失败")
+            except (RuntimeError, AttributeError):
+                pass
 
     def _deferred_cursor_refresh_all(self, widgets, ver):
         """统一的延迟 cursor 刷新回调（v5.3：替代 per-widget QTimer.singleShot）
@@ -621,21 +480,16 @@ class FileLoaderManager(MainWindowBaseManager):
         阻止异步 paint 事件访问 BSP 中间态。
         """
         if getattr(self.mw, "_data_version", 0) != ver:
-            logger.debug("[v5.3] 延迟 cursor 更新: 版本已变更，跳过")
             return
         if getattr(self.mw, "_is_loading_new_data", False):
-            logger.debug("[v5.3] 延迟 cursor 更新: 新重载已开始，跳过")
             return
         if getattr(self, "_post_reload_cursor_refreshing", False):
-            logger.debug("[v5.3] 延迟 cursor 更新: 已在执行中，跳过重入")
             return
 
         self._post_reload_cursor_refreshing = True
-        logger.debug("[v5.3] 执行统一延迟 cursor 更新 (widgets=%d)", len(widgets))
         try:
             for w in widgets:
                 if getattr(self.mw, "_data_version", 0) != ver:
-                    logger.debug("[v5.3] 延迟 cursor 更新中途: 版本已变更，中断")
                     return
                 if hasattr(w, "_last_cursor_update_time"):
                     w._last_cursor_update_time = 0
@@ -646,7 +500,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 finally:
                     w._is_cursor_modifying_scene = False
         except Exception:
-            logger.debug("[v5.3] _deferred_cursor_refresh_all 执行失败", exc_info=True)
+            logger.debug("_deferred_cursor_refresh_all 执行失败", exc_info=True)
         finally:
             self._post_reload_cursor_refreshing = False
 

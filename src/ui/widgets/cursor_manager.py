@@ -318,20 +318,16 @@ class CursorManager:
     def update_cursor_label(self):
         """更新光标标签位置和内容"""
         if self._is_cursor_update_locked():
-            logger.debug("[cursor] update_cursor_label 跳过: locked")
             return
 
         if self._cursor_label_busy:
-            logger.debug("[cursor] update_cursor_label 跳过: busy")
             return
 
         self._cursor_label_busy = True
         try:
-            logger.debug("[cursor] update_cursor_label 开始")
             self._update_multi_curve_cursor_label()
-            logger.debug("[cursor] update_cursor_label 完成")
-        except (RuntimeError, AttributeError) as e:
-            logger.debug("[cursor] update_cursor_label 异常: %s", e, exc_info=True)
+        except (RuntimeError, AttributeError):
+            pass
         finally:
             self._cursor_label_busy = False
 
@@ -738,7 +734,6 @@ class CursorManager:
                     if circle_scene != plot_scene:
                         if circle_scene is not None:
                             circle_scene.removeItem(circle)
-                        logger.debug("[cursor] addItem circle 到场景 (cursor_id=%d)", cursor_id)
                         pw.plot_item.addItem(circle, ignoreBounds=True)
                     circle.clear()
                     circle.setData([x_actual], [y_val])
