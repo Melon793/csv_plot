@@ -102,6 +102,14 @@ class PlotConfigManager(QObject):
 
             logger.info(f"已成功应用 {applied_count}/{len(config.plots)} 个 Plot 配置")
 
+            # 同步 factor/offset 到各 plot widget（修复模板恢复后时间轴不生效的问题）
+            if config.time_factor != 1.0 or config.time_offset != 0.0:
+                for container in main_window.plot_widgets:
+                    if not container.isHidden():
+                        container.plot_widget.update_time_correction(
+                            config.time_factor, config.time_offset
+                        )
+
             logger.info("模板配置应用完成")
             return True
         except Exception as e:

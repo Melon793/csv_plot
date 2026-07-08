@@ -397,7 +397,13 @@ class PlotUIManager(BasePlotManager):
     def update_plot_style(self, pw: Any, view_box, range, rect=None):
         """更新绘图样式 - 基于xRange宽度判断细线+symbol或粗线无symbol"""
         try:
+            _mw = pw.window()
+
             if getattr(pw, '_is_updating_data', False) or getattr(pw, '_is_being_destroyed', False):
+                return
+
+            # 重载期间禁止样式刷新，避免中间状态触发错误的 symbol 切换
+            if _mw and getattr(_mw, '_is_loading_new_data', False):
                 return
 
             if not hasattr(pw, 'factor') or not hasattr(pw, 'plot_item'):
@@ -409,10 +415,12 @@ class PlotUIManager(BasePlotManager):
 
             index_range_width, visible_points = self._calculate_visible_points(pw, range)
 
-            main_window = pw.window()
-            density = getattr(main_window, '_global_max_density', 0.0) if main_window else 0.0
+            density = getattr(_mw, '_global_max_density', 0.0) if _mw else 0.0
             if density > 0:
-                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
+                raw_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
+                # clamp 到 [100, 200]，防止 density 变化导致阈值异常（如 factor=10 时 threshold≈999）
+                effective_threshold = max(XRANGE_THRESHOLD_FOR_SYMBOLS,
+                                          min(raw_threshold, XRANGE_THRESHOLD_FOR_SYMBOLS * 2))
             else:
                 effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS
             show_symbols = index_range_width < effective_threshold
