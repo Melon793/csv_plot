@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import warnings
 
 from PySide6.QtCore import Qt, QStandardPaths, QTimer
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
@@ -161,6 +162,26 @@ class FileLoaderManager(MainWindowBaseManager):
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
+            # v5.x: 断开 vline/vline2 信号，防止中间态触发回调导致 SIGSEGV
+            # 重复 reload 时信号可能已断开，使用 catch_warnings 抑制 libpyside 的 RuntimeWarning
+            if hasattr(widget, "vline"):
+                try:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=RuntimeWarning)
+                        widget.vline.sigPositionChanged.disconnect(
+                            widget.on_vline_position_changed
+                        )
+                except (TypeError, RuntimeError):
+                    pass
+            if hasattr(widget, "vline2"):
+                try:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=RuntimeWarning)
+                        widget.vline2.sigPositionChanged.disconnect(
+                            widget.on_vline_position_changed
+                        )
+                except (TypeError, RuntimeError):
+                    pass
             if hasattr(widget, "_safe_clear_plot_items"):
                 try:
                     widget._safe_clear_plot_items()
@@ -307,6 +328,23 @@ class FileLoaderManager(MainWindowBaseManager):
                 # pin 状态已恢复、vline 可见性已设置，label 渲染留给 _post_reload_ui_refresh 统一处理。
                 if hasattr(widget, "_last_cursor_update_time"):
                     widget._last_cursor_update_time = time.time()
+
+            # v5.x: 恢复 vline/vline2 信号连接
+            for widget in widgets_list:
+                if hasattr(widget, "vline"):
+                    try:
+                        widget.vline.sigPositionChanged.connect(
+                            widget.on_vline_position_changed
+                        )
+                    except (TypeError, RuntimeError):
+                        pass
+                if hasattr(widget, "vline2"):
+                    try:
+                        widget.vline2.sigPositionChanged.connect(
+                            widget.on_vline_position_changed
+                        )
+                    except (TypeError, RuntimeError):
+                        pass
 
         except Exception:
             logger.debug("恢复 pin 状态失败", exc_info=True)
