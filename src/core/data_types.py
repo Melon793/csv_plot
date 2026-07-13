@@ -1,10 +1,18 @@
-"""types"""
+"""数据结构和类型定义
+
+包含项目共用的数据类、异常类型和枚举：
+- FormatInfo: 文件格式自动检测结果
+- CurveInfo: 单条曲线元数据
+- MarkStatEntry: 标记区域统计条目
+- AutoDetectError: 格式检测失败异常
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import numpy as np
     import pyqtgraph as pg
 
 

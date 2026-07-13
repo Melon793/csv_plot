@@ -1,4 +1,8 @@
-"""scheduler"""
+"""统一UI更新调度器
+
+UnifiedUpdateScheduler：合并 style/cursor/stats 等更新请求，
+延迟防抖后批量执行，避免频繁刷新。
+"""
 
 from __future__ import annotations
 from PySide6.QtCore import QObject, QTimer
@@ -11,7 +15,8 @@ logger = get_logger(__name__)
 
 class UnifiedUpdateScheduler(QObject):
     """
-    统一UI更新调度器，合并style/cursor/stat等更新请求，延迟200ms批量执行避免频繁刷新
+    统一UI更新调度器，合并style/cursor/stats等更新请求，
+    延迟防抖后批量执行避免频繁刷新（默认延迟 50ms）
     """
 
     def __init__(
