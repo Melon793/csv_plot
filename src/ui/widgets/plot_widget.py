@@ -394,7 +394,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
         if hasattr(self, 'vline'):
             try:
-                _ = self.vline.scene()
+                if self.vline.scene() is None:
+                    # v5.11: vline 已从 scene 移除（reload 期间），跳过绘制
+                    return
+            except RuntimeError:
+                return
+        if hasattr(self, 'vline2'):
+            try:
+                if self.vline2.scene() is None:
+                    return
             except RuntimeError:
                 return
         try:

@@ -502,7 +502,7 @@ class CursorSyncManager(MainWindowBaseManager):
             widget = container.plot_widget
             widget.auto_y_in_x_range()
 
-    def replots_after_loading(self):
+    def replots_after_loading(self, skip_pin_reset: bool = False):
         for container in self.mw.plot_widgets:
             container.plot_widget._is_updating_data = True
             if hasattr(container.plot_widget, "_cancel_ui_refresh"):
@@ -512,7 +512,10 @@ class CursorSyncManager(MainWindowBaseManager):
             if self.mw.loader.datalength == 0:
                 return
 
-            self.reset_all_pin_states()
+            # v5.11: reload 场景下跳过 pin 状态重置，因为 _restore_cursor_state_after_reload
+            # 已经恢复了正确的 cursor_mode 和 pinned_x_values
+            if not skip_pin_reset:
+                self.reset_all_pin_states()
 
             all_y_names = []
             for container in self.mw.plot_widgets:
