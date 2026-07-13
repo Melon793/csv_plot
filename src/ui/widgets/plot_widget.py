@@ -377,11 +377,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         if getattr(self, '_is_updating_data', False):
             return
-        # v5.3 护栏：cursor 正在修改场景 BSP 树时跳过 paint，防止访问中间态 → SIGSEGV
         if getattr(self, '_is_cursor_modifying_scene', False):
             return
         main_window = self.window()
-        if main_window and getattr(main_window, '_is_loading_new_data', False):
+        if main_window is None:
+            return
+        if getattr(main_window, '_is_loading_new_data', False):
             return
         if hasattr(self, 'plot_item') and self.plot_item is not None:
             try:
@@ -389,8 +390,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     return
             except RuntimeError:
                 return
+        if hasattr(self, 'vline'):
+            try:
+                _ = self.vline.scene()
+            except RuntimeError:
+                return
         try:
             super().paintEvent(event)
+        except RuntimeError:
+            pass
         except Exception:
             pass
 
