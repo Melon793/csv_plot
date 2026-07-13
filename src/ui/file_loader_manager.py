@@ -130,6 +130,54 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(self.mw, "文件访问错误", f"无法访问文件: {e}")
             return False
 
+    def _detach_vlines_from_scene(self, widget):
+        """将 vline/vline2 从 scene 中物理移除（v5.11）。
+
+        reload 期间 macOS 异步 paint (sendSpontaneousEvent) 可能遍历 BSP 树，
+        访问 InfiniteLine 内部已失效的 C++ 坐标缓存导致 NULL+0x90 SIGSEGV。
+        将 vline 从 scene 移除后，C++ 层不可能遍历到它。
+        
+        注意：必须使用 PlotItem.removeItem() 而非 scene.removeItem()，
+        因为 PlotItem 内部维护 items 列表，scene.removeItem() 不会清理它，
+        导致后续 PlotItem.addItem() 因重复而跳过。
+        """
+        if not hasattr(widget, "plot_item") or widget.plot_item is None:
+            return
+        for attr_name in ("vline", "vline2"):
+            vline = getattr(widget, attr_name, None)
+            if vline is None:
+                continue
+            try:
+                # 使用 PlotItem.removeItem() 同时清理 scene 和 PlotItem.items
+                widget.plot_item.removeItem(vline)
+            except RuntimeError:
+                pass
+            except Exception:
+                logger.debug("移除 %s 时异常", attr_name, exc_info=True)
+
+    def _reattach_vlines_to_scene(self, widget):
+        """将 vline/vline2 重新添加到 scene 中（v5.11）。
+
+        在 _restore_cursor_state_after_reload 中调用，与 _detach_vlines_from_scene 配对。
+        注意：_detach 使用 PlotItem.removeItem() 已同时清理 scene 和 PlotItem.items，
+        因此这里可以安全使用 PlotItem.addItem() 重新添加。
+        """
+        if not hasattr(widget, "plot_item") or widget.plot_item is None:
+            return
+        for attr_name in ("vline", "vline2"):
+            vline = getattr(widget, attr_name, None)
+            if vline is None:
+                continue
+            try:
+                # 仅当 vline 不在 scene 中时才重新添加
+                if vline.scene() is None:
+                    widget.plot_item.addItem(vline, ignoreBounds=True)
+                # else: vline 已在 scene 中，跳过
+            except RuntimeError:
+                pass
+            except Exception:
+                logger.debug("添加 %s 时异常", attr_name, exc_info=True)
+
     def _begin_data_reload(self):
         if self.mw._is_loading_new_data:
             return
@@ -182,6 +230,11 @@ class FileLoaderManager(MainWindowBaseManager):
                         )
                 except (TypeError, RuntimeError):
                     pass
+            # v5.11: 将 vline/vline2 从 scene 中物理移除，防止 reload 期间
+            # macOS 异步 paint (sendSpontaneousEvent) 遍历 BSP 树时访问 InfiniteLine
+            # 内部已失效的 C++ 坐标缓存 → NULL+0x90 SIGSEGV。
+            # reload 完成后在 _restore_cursor_state_after_reload 中重新添加。
+            self._detach_vlines_from_scene(widget)
             if hasattr(widget, "_safe_clear_plot_items"):
                 try:
                     widget._safe_clear_plot_items()
@@ -238,6 +291,14 @@ class FileLoaderManager(MainWindowBaseManager):
         )
 
         try:
+            # v5.11: 先将 vline/vline2 重新添加到 scene，再做状态恢复。
+            # _begin_data_reload 中将它们从 scene 移除了，此处必须配对恢复。
+            # 对 free cursor 也必须恢复——free cursor 也有 vline（只是不可见）。
+            for container in getattr(self.mw, "plot_widgets", []):
+                widget = getattr(container, "plot_widget", None)
+                if widget:
+                    self._reattach_vlines_to_scene(widget)
+
             if is_free_cursor:
                 # 防抖：阻止 reload 过渡期内的中间 cursor label 更新，
                 # 只在 _post_reload_ui_refresh 中渲染一次
@@ -267,10 +328,11 @@ class FileLoaderManager(MainWindowBaseManager):
                     if widget.factor != 0:
                         widget.pinned_index_values.append((x_val - widget.offset) / widget.factor)
 
+                # v5.11: vline 已重新添加到 scene，现在可以安全操作
                 if hasattr(widget, "vline"):
                     try:
                         vline = widget.vline
-                        if vline is not None and vline.scene() is not None:
+                        if vline is not None:
                             if saved_pinned_x_values:
                                 from PySide6.QtCore import QSignalBlocker
                                 with QSignalBlocker(vline):
@@ -282,7 +344,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 if hasattr(widget, "vline2"):
                     try:
                         vline2 = widget.vline2
-                        if vline2 is not None and vline2.scene() is not None:
+                        if vline2 is not None:
                             if len(saved_pinned_x_values) > 1:
                                 from PySide6.QtCore import QSignalBlocker
                                 with QSignalBlocker(vline2):
@@ -294,26 +356,26 @@ class FileLoaderManager(MainWindowBaseManager):
                 if saved_cursor_mode == "2 anchored cursor":
                     if hasattr(widget, "vline"):
                         try:
-                            if widget.vline is not None and widget.vline.scene() is not None:
+                            if widget.vline is not None:
                                 widget.vline.setVisible(True)
                         except RuntimeError:
                             logger.debug("vline C++ 对象已销毁，跳过显示")
                     if hasattr(widget, "vline2"):
                         try:
-                            if widget.vline2 is not None and widget.vline2.scene() is not None:
+                            if widget.vline2 is not None:
                                 widget.vline2.setVisible(True)
                         except RuntimeError:
                             logger.debug("vline2 C++ 对象已销毁，跳过显示")
                 elif saved_cursor_mode == "1 anchored cursor":
                     if hasattr(widget, "vline"):
                         try:
-                            if widget.vline is not None and widget.vline.scene() is not None:
+                            if widget.vline is not None:
                                 widget.vline.setVisible(True)
                         except RuntimeError:
                             logger.debug("vline C++ 对象已销毁，跳过显示")
                     if hasattr(widget, "vline2"):
                         try:
-                            if widget.vline2 is not None and widget.vline2.scene() is not None:
+                            if widget.vline2 is not None:
                                 widget.vline2.setVisible(False)
                         except RuntimeError:
                             logger.debug("vline2 C++ 对象已销毁，跳过隐藏")
@@ -385,6 +447,8 @@ class FileLoaderManager(MainWindowBaseManager):
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget:
+                # v5.11: 紧急解锁时也要把 vline 加回 scene，否则后续 paint 不会绘制光标
+                self._reattach_vlines_to_scene(widget)
                 widget._is_updating_data = False
                 widget._cached_data_version = self.mw._data_version
                 widget.setUpdatesEnabled(True)
@@ -406,6 +470,10 @@ class FileLoaderManager(MainWindowBaseManager):
         """
         pending_version = getattr(self, "_post_reload_pending_version", -1)
         if pending_version != getattr(self.mw, "_data_version", 0):
+            logger.debug(
+                "_post_reload_ui_refresh 跳过：版本不匹配 pending=%d current=%d",
+                pending_version, self.mw._data_version,
+            )
             return
         try:
             widgets_to_refresh = []
@@ -718,6 +786,7 @@ class FileLoaderManager(MainWindowBaseManager):
                         encoding=encoding,
                         sheet_name=sheet_name,
                         is_excel=is_excel_file,
+                        is_reload=is_reload,
                     )
                 finally:
                     self._end_data_reload()
@@ -725,7 +794,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     self.set_button_status(True)
                     self.mw.load_btn.setEnabled(True)
                     # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-                    QTimer.singleShot(0, lambda: self._post_load_actions(file_path))
+                    QTimer.singleShot(0, lambda: self._post_load_actions(file_path, is_reload=is_reload))
                 else:
                     self.mw.load_btn.setEnabled(True)
             else:
@@ -753,7 +822,7 @@ class FileLoaderManager(MainWindowBaseManager):
 
                 _load_version = self.mw._data_version
                 self.mw._thread.finished.connect(
-                    lambda loader: self._on_load_done(loader, file_path, _load_version)
+                    lambda loader: self._on_load_done(loader, file_path, _load_version, is_reload)
                 )
                 self.mw._thread.error.connect(self._on_load_error)
                 self.mw._thread.start()
@@ -811,7 +880,7 @@ class FileLoaderManager(MainWindowBaseManager):
         except Exception:
             logger.warning("清理旧数据时发生异常", exc_info=True)
 
-    def _post_load_actions(self, file_path: str):
+    def _post_load_actions(self, file_path: str, is_reload: bool = False):
         self.mw.loaded_path = file_path
         self._remember_last_open_dir(file_path)
 
@@ -948,6 +1017,7 @@ class FileLoaderManager(MainWindowBaseManager):
         encoding: str | None = None,
         sheet_name: str | None = None,
         is_excel: bool = False,
+        is_reload: bool = False,
     ):
         if not is_excel:
             is_valid, error_msg = self._validate_load_parameters(
@@ -981,7 +1051,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     encoding=encoding,
                 )
             # 新 loader 成功 → 释放旧数据 → 应用新数据
-            self._swap_loader(new_loader)
+            self._swap_loader(new_loader, is_reload=is_reload)
             status = True
             logger.info("文件加载完成: %s (%d 行)", file_path, new_loader.datalength)
         except MemoryError as e:
@@ -1002,7 +1072,7 @@ class FileLoaderManager(MainWindowBaseManager):
             status = False
         return status
 
-    def _on_load_done(self, new_loader, file_path: str, load_version: int = -1):
+    def _on_load_done(self, new_loader, file_path: str, load_version: int = -1, is_reload: bool = False):
         if load_version >= 0 and load_version != self.mw._data_version:
             logger.warning(
                 "数据版本不匹配，丢弃过期加载结果 (expected=%d, got=%d)",
@@ -1015,13 +1085,13 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw._progress.close()
 
         # —— 释放旧数据 → 应用新 loader
-        self._swap_loader(new_loader)
+        self._swap_loader(new_loader, is_reload=is_reload)
 
         self._end_data_reload()
         self.set_button_status(True)
         self.mw.load_btn.setEnabled(True)
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-        QTimer.singleShot(0, lambda: self._post_load_actions(file_path))
+        QTimer.singleShot(0, lambda: self._post_load_actions(file_path, is_reload=is_reload))
 
     def _on_load_error(self, msg):
         logger.error("后台加载失败: %s", msg)
@@ -1030,13 +1100,13 @@ class FileLoaderManager(MainWindowBaseManager):
         self._end_data_reload()
         self.mw.load_btn.setEnabled(True)
 
-    def _swap_loader(self, new_loader):
+    def _swap_loader(self, new_loader, is_reload: bool = False):
         """释放旧数据并应用新 loader（同步/异步路径共用）"""
         self._release_old_data()
         self.mw.loader = new_loader
-        self._apply_loader()
+        self._apply_loader(is_reload=is_reload)
 
-    def _apply_loader(self):
+    def _apply_loader(self, is_reload: bool = False):
         self.mw.var_names = self.mw.loader.var_names
         self.mw.units = self.mw.loader.units
         self.mw.time_channels_infos = self.mw.loader.time_channels_info
@@ -1070,7 +1140,8 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw.cursor_sync_manager._compute_baseline_density()
         self.mw.cursor_sync_manager._sync_min_xrange()
 
-        self.mw.cursor_sync_manager.replots_after_loading()
+        # v5.11: reload 场景下跳过 pin 状态重置，保留 _restore_cursor_state_after_reload 恢复的 cursor 状态
+        self.mw.cursor_sync_manager.replots_after_loading(skip_pin_reset=is_reload)
 
         from src.ui.table_dialog import DataTableDialog
 
