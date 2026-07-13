@@ -676,6 +676,19 @@ class LayoutManager(MainWindowBaseManager):
             r, c = divmod(idx, n)
             container.setVisible(r < row_set and c < col_set)
 
+        master_vb = self.mw.plot_widgets[0].plot_widget.view_box if self.mw.plot_widgets else None
+        for idx, container in enumerate(self.mw.plot_widgets):
+            if idx == 0:
+                continue
+            r, c = divmod(idx, n)
+            should_be_visible = r < row_set and c < col_set
+            vb = container.plot_widget.view_box
+            currently_linked = vb.linkedView(0) is not None
+            if should_be_visible and not currently_linked:
+                vb.setXLink(master_vb)
+            elif not should_be_visible and currently_linked:
+                vb.setXLink(None)
+
         for c in range(n):
             has_visible = any(
                 self.mw.plot_widgets[r * n + c].isVisible()

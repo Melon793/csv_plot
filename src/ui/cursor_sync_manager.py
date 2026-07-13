@@ -530,150 +530,153 @@ class CursorSyncManager(MainWindowBaseManager):
             is_mdf = getattr(self.mw.loader, "LOADER_TYPE", "") == "mdf"
 
             unique_y_names = set(all_y_names)
+            skip_var_restore = False
+
             if not unique_y_names:
                 if is_mdf:
                     x_min, x_max = self.mw.loader.global_time_range
                 else:
                     x_min, x_max = 1, self.mw.loader.datalength
                 self.reset_plots_after_loading(x_min, x_max, reason="no tracked curves")
-                return
-
-            var_names_set = set(self.mw.loader.var_names)
-            in_var_names = [y for y in unique_y_names if y in var_names_set]
-
-            if in_var_names:
-                # 仅排除已知无效(INVALID=-1)的变量，保留 UNKNOWN(-2) 的变量。
-                # MDF 使用懒加载(lazy loading)不会在加载时扫描全部数据，
-                # 其 df_validity 统一返回 UNKNOWN(-2)；若使用 >=0 会将所有
-                # MDF 变量误判为无效，导致重载后已绘变量被错误清除。
-                # CSV 加载器会主动扫描数据并返回 VALID(1)/CONST(0)/INVALID(-1)，
-                # 对 CSV 场景 != -1 等价于旧逻辑 >=0，行为不变。
-                # 注：后期 MDF 有效性检查将改为用户主动触发。
-                validity_values = [
-                    self.mw.loader.df_validity.get(y, -1) for y in in_var_names
-                ]
-                validity_array = np.array(validity_values)
-                valid_mask = validity_array != -1
-                found = [in_var_names[i] for i in np.where(valid_mask)[0]]
-            else:
-                found = []
-
-            ratio = len(found) / len(unique_y_names) if unique_y_names else 0
+                skip_var_restore = True
 
             cleared = []
 
-            if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
-                if is_mdf:
-                    x_min, x_max = self.mw.loader.global_time_range
-                else:
-                    x_min, x_max = 1, self.mw.loader.datalength
-                self.reset_plots_after_loading(
-                    x_min, x_max, reason="insufficient valid vars"
-                )
-            else:
-                self.mw.value_cache = {}
-                for idx, container in enumerate(self.mw.plot_widgets):
-                    widget = container.plot_widget
+            if not skip_var_restore:
+                var_names_set = set(self.mw.loader.var_names)
+                in_var_names = [y for y in unique_y_names if y in var_names_set]
 
+                if in_var_names:
+                    # 仅排除已知无效(INVALID=-1)的变量，保留 UNKNOWN(-2) 的变量。
+                    # MDF 使用懒加载(lazy loading)不会在加载时扫描全部数据，
+                    # 其 df_validity 统一返回 UNKNOWN(-2)；若使用 >=0 会将所有
+                    # MDF 变量误判为无效，导致重载后已绘变量被错误清除。
+                    # CSV 加载器会主动扫描数据并返回 VALID(1)/CONST(0)/INVALID(-1)，
+                    # 对 CSV 场景 != -1 等价于旧逻辑 >=0，行为不变。
+                    # 注：后期 MDF 有效性检查将改为用户主动触发。
+                    validity_values = [
+                        self.mw.loader.df_validity.get(y, -1) for y in in_var_names
+                    ]
+                    validity_array = np.array(validity_values)
+                    valid_mask = validity_array != -1
+                    found = [in_var_names[i] for i in np.where(valid_mask)[0]]
+                else:
+                    found = []
+
+                ratio = len(found) / len(unique_y_names) if unique_y_names else 0
+
+                if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
                     if is_mdf:
                         x_min, x_max = self.mw.loader.global_time_range
-                        min_x = widget.offset + widget.factor * x_min
-                        max_x = widget.offset + widget.factor * x_max
                     else:
-                        original_index_x = np.arange(
-                            1, self.mw.loader.datalength + 1, dtype=np.float32
-                        )
-                        min_x = widget.offset + widget.factor * np.min(original_index_x)
-                        max_x = widget.offset + widget.factor * np.max(original_index_x)
-                    min_x, max_x = widget._get_safe_x_range(min_x, max_x)
-                    limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                    limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                    widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-                    if hasattr(widget, "_set_vline_bounds"):
-                        widget._set_vline_bounds([min_x, max_x])
-                    else:
-                        widget.vline.setBounds([min_x, max_x])
+                        x_min, x_max = 1, self.mw.loader.datalength
+                    self.reset_plots_after_loading(
+                        x_min, x_max, reason="insufficient valid vars"
+                    )
+                else:
+                    self.mw.value_cache = {}
+                    for idx, container in enumerate(self.mw.plot_widgets):
+                        widget = container.plot_widget
 
-                    if widget.is_multi_curve_mode:
-                        current_curves = dict(widget.curves)
+                        if is_mdf:
+                            x_min, x_max = self.mw.loader.global_time_range
+                            min_x = widget.offset + widget.factor * x_min
+                            max_x = widget.offset + widget.factor * x_max
+                        else:
+                            original_index_x = np.arange(
+                                1, self.mw.loader.datalength + 1, dtype=np.float32
+                            )
+                            min_x = widget.offset + widget.factor * np.min(original_index_x)
+                            max_x = widget.offset + widget.factor * np.max(original_index_x)
+                        min_x, max_x = widget._get_safe_x_range(min_x, max_x)
+                        limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
+                        limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
+                        widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                        if hasattr(widget, "_set_vline_bounds"):
+                            widget._set_vline_bounds([min_x, max_x])
+                        else:
+                            widget.vline.setBounds([min_x, max_x])
 
-                        widget.curves.clear()
-                        widget.is_multi_curve_mode = False
-                        widget.current_color_index = 0
+                        if widget.is_multi_curve_mode:
+                            current_curves = dict(widget.curves)
 
-                        widget._clear_cursor_items(hide_only=False)
-                        widget._safe_clear_plot_items()
-                        widget.curve = None
-                        widget.y_name = ""
-                        widget.original_index_x = None
-                        widget.original_y = None
+                            widget.curves.clear()
+                            widget.is_multi_curve_mode = False
+                            widget.current_color_index = 0
 
-                        curves_added = 0
-                        visibility_to_restore = {}
+                            widget._clear_cursor_items(hide_only=False)
+                            widget._safe_clear_plot_items()
+                            widget.curve = None
+                            widget.y_name = ""
+                            widget.original_index_x = None
+                            widget.original_y = None
 
-                        for var_name, ci in current_curves.items():
+                            curves_added = 0
+                            visibility_to_restore = {}
+
+                            for var_name, ci in current_curves.items():
+                                var_exists = (
+                                    (var_name in self.mw.loader.var_names)
+                                    if is_mdf
+                                    else (var_name in self.mw.loader.df.columns)
+                                )
+                                if (
+                                    var_exists
+                                    and self.mw.loader.df_validity.get(var_name, -1) != -1
+                                ):
+                                    preferred_color = ci.color
+                                    success = widget.add_variable_to_plot(
+                                        var_name,
+                                        skip_existence_check=True,
+                                        preferred_color=preferred_color,
+                                    )
+                                    if success:
+                                        curves_added += 1
+                                        visibility_to_restore[var_name] = ci.visible
+
+                            widget.update_multi_curve_mode()
+
+                            for var_name, original_visible in visibility_to_restore.items():
+                                if var_name in widget.curves:
+                                    widget.curves[var_name].visible = original_visible
+                                    if widget.curves[var_name].curve is not None:
+                                        try:
+                                            widget.curves[var_name].curve.setVisible(
+                                                original_visible
+                                            )
+                                        except Exception:
+                                            pass
+
+                            if curves_added > 0:
+                                widget.update_legend()
+
+                            if curves_added == 0:
+                                cleared.append((idx + 1, "所有变量无效"))
+                        else:
+                            y_name = widget.y_name
+                            if not y_name:
+                                continue
                             var_exists = (
-                                (var_name in self.mw.loader.var_names)
+                                (y_name in self.mw.loader.var_names)
                                 if is_mdf
-                                else (var_name in self.mw.loader.df.columns)
+                                else (y_name in self.mw.loader.df.columns)
                             )
                             if (
                                 var_exists
-                                and self.mw.loader.df_validity.get(var_name, -1) != -1
+                                and self.mw.loader.df_validity.get(y_name, -1) != -1
                             ):
-                                preferred_color = ci.color
-                                success = widget.add_variable_to_plot(
-                                    var_name,
-                                    skip_existence_check=True,
-                                    preferred_color=preferred_color,
-                                )
-                                if success:
-                                    curves_added += 1
-                                    visibility_to_restore[var_name] = ci.visible
-
-                        widget.update_multi_curve_mode()
-
-                        for var_name, original_visible in visibility_to_restore.items():
-                            if var_name in widget.curves:
-                                widget.curves[var_name].visible = original_visible
-                                if widget.curves[var_name].curve is not None:
-                                    try:
-                                        widget.curves[var_name].curve.setVisible(
-                                            original_visible
-                                        )
-                                    except Exception:
-                                        pass
-
-                        if curves_added > 0:
-                            widget.update_legend()
-
-                        if curves_added == 0:
-                            cleared.append((idx + 1, "所有变量无效"))
-                    else:
-                        y_name = widget.y_name
-                        if not y_name:
-                            continue
-                        var_exists = (
-                            (y_name in self.mw.loader.var_names)
-                            if is_mdf
-                            else (y_name in self.mw.loader.df.columns)
-                        )
-                        if (
-                            var_exists
-                            and self.mw.loader.df_validity.get(y_name, -1) != -1
-                        ):
-                            success = widget.plot_variable(y_name)
-                            if not success:
+                                success = widget.plot_variable(y_name)
+                                if not success:
+                                    widget.clear_plot_item()
+                                    cleared.append((idx + 1, "无效数据"))
+                            else:
                                 widget.clear_plot_item()
-                                cleared.append((idx + 1, "无效数据"))
-                        else:
-                            widget.clear_plot_item()
-                            reason = (
-                                f"未找到变量:{y_name}"
-                                if not var_exists
-                                else f"无效数据:{y_name}"
-                            )
-                            cleared.append((idx + 1, reason))
+                                reason = (
+                                    f"未找到变量:{y_name}"
+                                    if not var_exists
+                                    else f"无效数据:{y_name}"
+                                )
+                                cleared.append((idx + 1, reason))
 
             if self.mw.plot_widgets:
                 first_plot = self.mw.plot_widgets[0].plot_widget
