@@ -439,6 +439,9 @@ class FileLoaderManager(MainWindowBaseManager):
                     widget._safe_clear_plot_items()
                 except Exception:
                     logger.debug("_safe_clear_plot_items 失败（紧急解锁期间）")
+        # v5.12: 紧急解锁时也要释放 reload 互斥锁
+        self._reload_in_progress = False
+        self.mw.reload_btn.setEnabled(True)
         self.mw._is_loading_new_data = False
         self._safety_unlock_version = -1
         if hasattr(self, "_safety_timer") and self._safety_timer is not None:
@@ -493,6 +496,9 @@ class FileLoaderManager(MainWindowBaseManager):
                 self._safety_timer.stop()
                 self._safety_timer = None
 
+            # v5.12: reload 流程完全结束，恢复 reload 按钮
+            self.mw.reload_btn.setEnabled(True)
+
             # v5.8 safety net：检测并重建失效曲线
             for widget in widgets_to_refresh:
                 try:
@@ -517,6 +523,8 @@ class FileLoaderManager(MainWindowBaseManager):
             if hasattr(self, "_safety_timer") and self._safety_timer is not None:
                 self._safety_timer.stop()
                 self._safety_timer = None
+            # v5.12: 异常路径也要恢复 reload 按钮
+            self.mw.reload_btn.setEnabled(True)
 
     def _refresh_curve_paint_path(self, widget):
         """v5.8 safety net：检测失效曲线并重建。
@@ -650,7 +658,10 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.grid_layout_btn.setEnabled(status)
 
     def reload_data(self):
-        logger.info("重新加载数据: %s", getattr(self.mw.loader, "path", "?"))
+        # v5.12: 互斥锁 —— 防止快速连续 reload 导致并发冲突
+        if getattr(self, "_reload_in_progress", False):
+            logger.debug("Reload 正在进行中，忽略本次请求")
+            return
 
         if getattr(self.mw, "_is_loading_new_data", False):
             return
@@ -667,13 +678,35 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(self.mw, "错误", "文件不存在，无法重新加载")
             return
 
+        self._reload_in_progress = True
+        self.mw.reload_btn.setEnabled(False)
+
         # 获取缓存的 sheet_name（如果当前 loader 是 ExcelDataLoader）
         cached_sheet_name = None
         if hasattr(self.mw.loader, '_sheet_name'):
             cached_sheet_name = self.mw.loader._sheet_name
 
-        self._load_file(self.mw.loader.path, is_reload=True,
-                        cached_sheet_name=cached_sheet_name)
+        is_async = False
+        try:
+            logger.info("重新加载数据: %s", self.mw.loader.path)
+            self._load_file(self.mw.loader.path, is_reload=True,
+                            cached_sheet_name=cached_sheet_name)
+            # 判断是否走了异步路径（后台线程已启动）
+            is_async = getattr(self.mw, "_thread", None) is not None and \
+                       getattr(self.mw._thread, "isRunning", lambda: False)()
+        except Exception:
+            # 同步路径异常或 _load_file 内部未启动线程就抛异常
+            pass
+        finally:
+            if not is_async:
+                # 同步路径（无论成功或失败）：释放互斥锁，防止重复点击。
+                # 按钮恢复延迟到 _post_reload_ui_refresh，与 _is_loading_new_data 同步；
+                # 但如果加载失败（_post_reload_ui_refresh 不会被调用），必须在此处恢复按钮。
+                self._reload_in_progress = False
+                if not getattr(self.mw, "_is_loading_new_data", False):
+                    # 加载失败路径：_end_data_reload 已清除 _is_loading_new_data，
+                    # _post_reload_ui_refresh 不会运行，必须在此恢复按钮
+                    self.mw.reload_btn.setEnabled(True)
 
     def _load_file(self, file_path: str, is_reload: bool = False,
                    cached_sheet_name: str | None = None):
@@ -797,6 +830,10 @@ class FileLoaderManager(MainWindowBaseManager):
                     QTimer.singleShot(0, lambda: self._post_load_actions(file_path, is_reload=is_reload))
                 else:
                     self.mw.load_btn.setEnabled(True)
+                    # v5.12: 同步 reload 失败时也要恢复 reload 按钮
+                    if is_reload and getattr(self, "_reload_in_progress", False):
+                        self._reload_in_progress = False
+                        self.mw.reload_btn.setEnabled(True)
             else:
                 logger.info("后台加载文件 (%.1f MB)", file_size / 1024 / 1024)
 
@@ -1090,6 +1127,9 @@ class FileLoaderManager(MainWindowBaseManager):
         self._end_data_reload()
         self.set_button_status(True)
         self.mw.load_btn.setEnabled(True)
+        # v5.12: 异步 reload 完成，释放互斥锁
+        self._reload_in_progress = False
+        self.mw.reload_btn.setEnabled(True)
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
         QTimer.singleShot(0, lambda: self._post_load_actions(file_path, is_reload=is_reload))
 
@@ -1099,6 +1139,9 @@ class FileLoaderManager(MainWindowBaseManager):
         QMessageBox.critical(self.mw, "读取失败", msg)
         self._end_data_reload()
         self.mw.load_btn.setEnabled(True)
+        # v5.12: 异步 reload 失败，也要释放互斥锁
+        self._reload_in_progress = False
+        self.mw.reload_btn.setEnabled(True)
 
     def _swap_loader(self, new_loader, is_reload: bool = False):
         """释放旧数据并应用新 loader（同步/异步路径共用）"""
