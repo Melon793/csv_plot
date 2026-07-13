@@ -51,7 +51,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self._cursor_label_busy = False
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
-        self._original_downsample_ds = None
         self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
         self._drag_indicator_source = None
         self._drag_indicator_guard = QTimer(self)
@@ -421,10 +420,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             else:
                 super().wheelEvent(ev)
         else:
-            # 有按键按下，交给父类默认处理（或自己写别的逻辑）
+            # 有按键按下，交给父类默认处理
             super().wheelEvent(ev)
-        
-        #ev.accept()  # 确保事件被处理
     
     @safe_callback
     def mouse_moved(self, evt):

@@ -91,7 +91,7 @@ class MultiCurveStrategy(CurveStrategy):
 
     def get_curve_by_name(self, name: str) -> Any:
         info = self._pw.curves.get(name)
-        return info.curve_item if info else None
+        return info.curve if info else None
 
     def get_curve_color(self, name: str) -> Any:
         info = self._pw.curves.get(name)
@@ -99,4 +99,7 @@ class MultiCurveStrategy(CurveStrategy):
 
     def get_curve_line_width(self, name: str) -> int:
         info = self._pw.curves.get(name)
-        return info.line_width if info else 1
+        if info and info.curve:
+            pen = info.curve.opts.get("pen", None)
+            return pen.width() if pen else 1
+        return 1

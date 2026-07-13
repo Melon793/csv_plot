@@ -111,28 +111,11 @@ class EventHandler:
     def _start_interaction(self):
         """开始交互时的优化处理
         
-        类似iOS的快照策略：在交互期间临时降低渲染质量
+        当前 pyqtgraph 的 peak 降采样 + auto 模式已足够智能，
+        无需手动调整。此方法保留为未来优化的钩子。
+        交互期间的样式更新禁用已在 PlotUIManager.update_plot_style 中实现。
         """
-        try:
-            # 【性能优化】交互期间临时提高降采样阈值，减少渲染的点数
-            # 这样可以显著提升缩放时的流畅度
-            if hasattr(self.pw, 'plot_item'):
-                # 保存原始降采样设置
-                if not hasattr(self.pw, '_original_downsample_ds'):
-                    # 获取当前降采样设置（如果有）
-                    self.pw._original_downsample_ds = getattr(self.pw.plot_item, '_downsample', None)
-                
-                # 临时提高降采样阈值：交互期间使用更激进的降采样
-                # 通过设置更大的ds值来减少渲染的点数
-                # 注意：pyqtgraph的auto模式会自动处理，这里主要是确保降采样更激进
-                # 实际上，pyqtgraph的auto模式已经会根据可见区域自动调整
-                # 但我们可以通过临时禁用某些昂贵的操作来提升性能
-                pass  # pyqtgraph的auto模式已经足够智能，无需手动调整
-            
-            # 【性能优化】交互期间禁用样式更新（已在update_plot_style中实现）
-            # 这样可以避免在缩放时遍历所有曲线并更新样式
-        except Exception:
-            logger.warning("开始交互优化时出错", exc_info=True)
+        pass
 
     def _end_interaction(self):
         """结束交互时的处理"""

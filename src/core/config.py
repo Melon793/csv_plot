@@ -1,4 +1,10 @@
-"""config"""
+"""全局配置常量和工具函数
+
+包含项目共用的配置常量、安全回调装饰器和数值安全检测函数：
+- safe_callback: C++ 对象已销毁时的异常保护装饰器
+- _evaluate_float32_safety: float32 安全表示范围检测
+- 绘图/布局/加载相关的全局常量
+"""
 
 from __future__ import annotations
 import sys
