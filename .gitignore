@@ -2,7 +2,8 @@
 /.reference/
 /data/
 __pycache__/
-/.trae/
+.trae/
+.qoder/
 /build/
 /dist/
 /*.dist/
@@ -12,3 +13,4 @@ __pycache__/
 /tests/
 /.bak/
 error.md
+csv_plot.log
