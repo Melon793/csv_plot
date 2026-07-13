@@ -2,6 +2,7 @@
 
 包含项目共用的配置常量、安全回调装饰器和数值安全检测函数：
 - safe_callback: C++ 对象已销毁时的异常保护装饰器
+- safe_qt_op: 安全执行 Qt 对象操作，忽略 C++ 对象已销毁的异常
 - _evaluate_float32_safety: float32 安全表示范围检测
 - 绘图/布局/加载相关的全局常量
 """
@@ -36,6 +37,31 @@ def safe_callback(func):
             return None
 
     return wrapper
+
+
+def safe_qt_op(func, *args, **kwargs):
+    """安全执行 Qt 对象操作，忽略 C++ 对象已销毁的异常
+
+    用于保护对 PySide6/pyqtgraph 对象的属性访问和方法调用，
+    这些对象可能因 C++ 侧提前销毁而抛出 RuntimeError 或 AttributeError。
+
+    Args:
+        func: 要执行的可调用对象（方法引用、lambda 等）
+        *args, **kwargs: 传给 func 的参数
+
+    Returns:
+        func 的返回值；异常时返回 None
+
+    Example::
+
+        safe_qt_op(item.setVisible, False)
+        safe_qt_op(scene.removeItem, item)
+        safe_qt_op(lambda: item.setText(""))
+    """
+    try:
+        return func(*args, **kwargs)
+    except (RuntimeError, AttributeError):
+        pass
 
 DEFAULT_PADDING_VAL_X = 0.05  # 默认x轴padding，单位为plot宽度
 DEFAULT_PADDING_VAL_Y = 0.1  # 默认y轴padding，单位为plot高度

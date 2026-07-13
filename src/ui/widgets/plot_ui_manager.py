@@ -438,7 +438,7 @@ class PlotUIManager(BasePlotManager):
             try:
                 pw.update_cursor_label()
             except Exception:
-                pass
+                logger.debug("更新光标标签失败", exc_info=True)
 
     def _run_stats_refresh(self, pw: Any) -> None:
         """执行统计刷新"""

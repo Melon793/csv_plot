@@ -10,6 +10,7 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_X,
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
+    safe_qt_op,
 )
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -68,7 +69,7 @@ class CursorSyncManager(MainWindowBaseManager):
                     if has_data:
                         widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
-                    pass
+                    logger.debug("刷新 cursor UI 失败", exc_info=True)
 
     def _get_cursor_source_plot(self, source_plot=None):
         if source_plot is not None and hasattr(source_plot, "view_box"):
@@ -376,10 +377,7 @@ class CursorSyncManager(MainWindowBaseManager):
                 continue
             if getattr(w, "_is_updating_data", False):
                 continue
-            try:
-                w.update_cursor_label()
-            except (RuntimeError, AttributeError):
-                pass
+            safe_qt_op(w.update_cursor_label)
 
     def reset_all_pin_states(self):
         self.mw.cursor_mode = "1 free cursor"
@@ -645,7 +643,7 @@ class CursorSyncManager(MainWindowBaseManager):
                                                 original_visible
                                             )
                                         except Exception:
-                                            pass
+                                            logger.debug("恢复曲线可见性失败", exc_info=True)
 
                             if curves_added > 0:
                                 widget.update_legend()
@@ -697,7 +695,7 @@ class CursorSyncManager(MainWindowBaseManager):
                         if has_data:
                             widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
-                    pass
+                    logger.debug("刷新 cursor UI 失败", exc_info=True)
 
         if cleared:
             # 安全防护：数据重载期间严禁调用 processEvents()，

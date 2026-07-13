@@ -769,7 +769,7 @@ class LayoutManager(MainWindowBaseManager):
                 try:
                     before_min, before_max = vb.viewRange()[0]
                 except Exception:
-                    pass
+                    logger.debug("获取 viewRange 失败", exc_info=True)
 
                 if linked is not None:
                     vb.setXLink(None)
@@ -782,7 +782,7 @@ class LayoutManager(MainWindowBaseManager):
                 try:
                     after_min, after_max = vb.viewRange()[0]
                 except Exception:
-                    pass
+                    logger.debug("获取 viewRange 失败", exc_info=True)
 
                 r, c = divmod(idx, n)
                 is_xlinked = linked is not None

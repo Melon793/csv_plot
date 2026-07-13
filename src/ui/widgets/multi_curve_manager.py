@@ -147,7 +147,7 @@ class MultiCurveManager:
                     preferred_color=ci.color,
                 )
         except Exception:
-            pass
+            logger.debug("重建曲线 '%s' 失败", var_name, exc_info=True)
 
     def _collect_visible_curve_arrays(self, key: str) -> list:
         """收集可见曲线的数据数组"""

@@ -108,7 +108,7 @@ class LogManager:
         try:
             self._queue_listener.stop()
         except Exception:
-            pass
+            pass  # atexit 期间禁止日志输出，避免与 logging 子系统冲突
 
     def get_logger(self, name: str) -> logging.Logger:
         return logging.getLogger(name)

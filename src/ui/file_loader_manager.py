@@ -16,7 +16,7 @@ import warnings
 from PySide6.QtCore import Qt, QStandardPaths, QTimer
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
 
-from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING
+from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING, safe_qt_op
 from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
 from src.data.mdf_lazy_loader import MDFLazyLoader
@@ -190,11 +190,8 @@ class FileLoaderManager(MainWindowBaseManager):
             if hasattr(widget, "_cursor_trash_bin"):
                 widget._cursor_trash_bin.clear()
             if hasattr(widget, "_pending_delete_items"):
-                try:
-                    for item in widget._pending_delete_items:
-                        item.setVisible(False)
-                except Exception:
-                    pass
+                for item in widget._pending_delete_items:
+                    safe_qt_op(item.setVisible, False)
                 widget._pending_delete_items.clear()
             widget._is_updating_data = True
             widget._cached_data_version = 0  # 设为0跳过版本比对，由 _is_updating_data 和 _is_loading_new_data 提供锁定
@@ -476,39 +473,40 @@ class FileLoaderManager(MainWindowBaseManager):
             return
 
         for var_name, curve in curves_to_check:
+            safe_qt_op(lambda: self._safe_check_and_rebuild_curve(widget, var_name, curve))
+
+    def _safe_check_and_rebuild_curve(self, widget, var_name, curve):
+        """检查曲线状态并在失效时尝试重建"""
+        curve_scene = curve.scene()
+        dataset_none = getattr(curve, "_dataset", None) is None
+        if curve_scene is None or dataset_none:
+            logger.warning(
+                "[v5.8] curve[%s] 检测到失效状态 (scene=%s, dataset=%s)，尝试重建",
+                var_name,
+                "ok" if curve_scene is not None else "None",
+                "None" if dataset_none else "ok",
+            )
             try:
-                curve_scene = curve.scene()
-                dataset_none = getattr(curve, "_dataset", None) is None
-                if curve_scene is None or dataset_none:
+                if (
+                    hasattr(widget, "_multi_curve_manager")
+                    and hasattr(widget, "curves")
+                    and var_name in widget.curves
+                ):
+                    widget._multi_curve_manager._recreate_curve(var_name)
+                elif (
+                    hasattr(widget, "plot_variable")
+                    and hasattr(widget, "y_name")
+                    and widget.y_name == var_name
+                ):
+                    widget.plot_variable(var_name, show_duplicate_warning=False)
+                else:
                     logger.warning(
-                        "[v5.8] curve[%s] 检测到失效状态 (scene=%s, dataset=%s)，尝试重建",
-                        var_name,
-                        "ok" if curve_scene is not None else "None",
-                        "None" if dataset_none else "ok",
+                        "[v5.8] curve[%s] 重建失败：无法确定重建方式", var_name
                     )
-                    try:
-                        if (
-                            hasattr(widget, "_multi_curve_manager")
-                            and hasattr(widget, "curves")
-                            and var_name in widget.curves
-                        ):
-                            widget._multi_curve_manager._recreate_curve(var_name)
-                        elif (
-                            hasattr(widget, "plot_variable")
-                            and hasattr(widget, "y_name")
-                            and widget.y_name == var_name
-                        ):
-                            widget.plot_variable(var_name, show_duplicate_warning=False)
-                        else:
-                            logger.warning(
-                                "[v5.8] curve[%s] 重建失败：无法确定重建方式", var_name
-                            )
-                    except Exception:
-                        logger.warning(
-                            "[v5.8] curve[%s] 重建失败", var_name, exc_info=True
-                        )
-            except (RuntimeError, AttributeError):
-                pass
+            except Exception:
+                logger.warning(
+                    "[v5.8] curve[%s] 重建失败", var_name, exc_info=True
+                )
 
     def _deferred_cursor_refresh_all(self, widgets, ver):
         """统一的延迟 cursor 刷新回调（v5.3：替代 per-widget QTimer.singleShot）
@@ -983,9 +981,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     encoding=encoding,
                 )
             # 新 loader 成功 → 释放旧数据 → 应用新数据
-            self._release_old_data()
-            self.mw.loader = new_loader
-            self._apply_loader()
+            self._swap_loader(new_loader)
             status = True
             logger.info("文件加载完成: %s (%d 行)", file_path, new_loader.datalength)
         except MemoryError as e:
@@ -1004,8 +1000,6 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(self.mw, "读取失败", f"加载文件时发生错误: {str(e)}")
             logger.error("加载文件失败: %s", e, exc_info=True)
             status = False
-        finally:
-            new_loader = None
         return status
 
     def _on_load_done(self, new_loader, file_path: str, load_version: int = -1):
@@ -1020,12 +1014,8 @@ class FileLoaderManager(MainWindowBaseManager):
         logger.info("后台加载完成: %s", file_path)
         self.mw._progress.close()
 
-        # —— 阶段 A：释放旧数据（此时新 loader 已就绪，释放是安全的）
-        self._release_old_data()
-
-        # —— 阶段 B：应用新数据
-        self.mw.loader = new_loader
-        self._apply_loader()
+        # —— 释放旧数据 → 应用新 loader
+        self._swap_loader(new_loader)
 
         self._end_data_reload()
         self.set_button_status(True)
@@ -1039,6 +1029,12 @@ class FileLoaderManager(MainWindowBaseManager):
         QMessageBox.critical(self.mw, "读取失败", msg)
         self._end_data_reload()
         self.mw.load_btn.setEnabled(True)
+
+    def _swap_loader(self, new_loader):
+        """释放旧数据并应用新 loader（同步/异步路径共用）"""
+        self._release_old_data()
+        self.mw.loader = new_loader
+        self._apply_loader()
 
     def _apply_loader(self):
         self.mw.var_names = self.mw.loader.var_names

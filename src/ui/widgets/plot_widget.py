@@ -11,6 +11,7 @@ import pandas as pd
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
 from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.logger import get_logger
 from src.core.data_types import CurveInfo
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -18,6 +19,8 @@ from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel
 from PySide6.QtGui import QCursor
+
+logger = get_logger("widget.plot")
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView,
     QMessageBox,
@@ -399,7 +402,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         except RuntimeError:
             pass
         except Exception:
-            pass
+            logger.debug("paintEvent 异常", exc_info=True)
 
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()

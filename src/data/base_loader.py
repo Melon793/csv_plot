@@ -8,6 +8,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from src.core.config import FLOAT32_REPRESENTABLE_MAX
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class BaseDataLoader:
@@ -167,19 +170,19 @@ class BaseDataLoader:
                 try:
                     setattr(self, attr, None)
                 except Exception:
-                    pass
+                    logger.debug("清理属性 '%s' 失败", attr)
 
         # Excel loader: 关闭 workbook（如果存在）
         if hasattr(self, "_wb") and self._wb is not None:
             try:
                 self._wb.close()
             except Exception:
-                pass
+                logger.debug("关闭 workbook 失败")
         if hasattr(self, "_ws"):
             try:
                 self._ws = None
             except Exception:
-                pass
+                logger.debug("清理 worksheet 引用失败")
 
     # ---- 公共属性接口 ----
     @property
