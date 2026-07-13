@@ -24,6 +24,7 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_X,
     DEFAULT_PADDING_VAL_Y,
     _evaluate_float32_safety,
+    safe_qt_op,
 )
 from src.core.logger import get_logger
 
@@ -560,36 +561,40 @@ class PlotDataManager:
     def _safe_clear_plot_items(self):
         """安全地清理所有plot items"""
         pw = self.pw
-        try:
-            if not hasattr(pw, "plot_item") or pw.plot_item is None:
-                return
+        if not hasattr(pw, "plot_item") or pw.plot_item is None:
+            return
 
-            current_scene = pw.plot_item.scene()
+        safe_qt_op(lambda: self._clear_items_from_scene(pw.plot_item))
 
-            if current_scene is not None:
-                all_items = current_scene.items()
-                for item in all_items:
-                    try:
-                        item_scene = item.scene()
-                        if item_scene == current_scene:
-                            should_remove = False
-                            if hasattr(item, "getData") and hasattr(item, "opts"):
-                                if not hasattr(item, "setLabel"):
-                                    should_remove = True
-                                    if hasattr(item, "_cached_pen_key"):
-                                        delattr(item, "_cached_pen_key")
-                                    if hasattr(item, "_has_symbols"):
-                                        delattr(item, "_has_symbols")
-                                    try:
-                                        item.clear()
-                                    except Exception:
-                                        logger.debug("清理 plot item.clear() 异常")
-                            if should_remove:
-                                current_scene.removeItem(item)
-                    except (RuntimeError, AttributeError):
-                        logger.debug("C++ 对象已销毁，跳过该 item 清理")
-        except (RuntimeError, AttributeError):
-            logger.debug("plot_item 场景已销毁，跳过批量清理")
+    def _clear_items_from_scene(self, plot_item):
+        """从场景中逐个清理 plot item"""
+        current_scene = plot_item.scene()
+        if current_scene is None:
+            return
+
+        all_items = current_scene.items()
+        for item in all_items:
+            safe_qt_op(lambda: self._clear_single_item(item, current_scene))
+
+    def _clear_single_item(self, item, current_scene):
+        """清理单个 plot item"""
+        item_scene = item.scene()
+        if item_scene != current_scene:
+            return
+        should_remove = False
+        if hasattr(item, "getData") and hasattr(item, "opts"):
+            if not hasattr(item, "setLabel"):
+                should_remove = True
+                if hasattr(item, "_cached_pen_key"):
+                    delattr(item, "_cached_pen_key")
+                if hasattr(item, "_has_symbols"):
+                    delattr(item, "_has_symbols")
+                try:
+                    item.clear()
+                except Exception:
+                    logger.debug("清理 plot item.clear() 异常")
+        if should_remove:
+            current_scene.removeItem(item)
 
     def _clear_plot_data(self):
         """清除绘图数据"""

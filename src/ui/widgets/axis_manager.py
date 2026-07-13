@@ -371,7 +371,7 @@ class AxisManager:
             pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
             self._set_vline_bounds([None, None])  # [None, None] 表示无边界限制
         except Exception:
-            pass
+            logger.debug("重置绘图限制失败", exc_info=True)
 
     def _set_vline_bounds(self, bounds: list) -> None:
         """设置光标垂直线的边界"""

@@ -20,6 +20,7 @@ import pyqtgraph as pg
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt
 
+from src.core.config import safe_qt_op
 from src.core.logger import get_logger
 
 logger = get_logger("widget.cursor")
@@ -325,9 +326,7 @@ class CursorManager:
 
         self._cursor_label_busy = True
         try:
-            self._update_multi_curve_cursor_label()
-        except (RuntimeError, AttributeError):
-            pass
+            safe_qt_op(self._update_multi_curve_cursor_label)
         finally:
             self._cursor_label_busy = False
 
@@ -349,11 +348,8 @@ class CursorManager:
         # 安全网：vline bounds 为 [None, None] 时禁止 cursor 更新，
         # 防止 vline 处于无效状态（如 reload 中间态）时触发 cursor 回调导致 SIGSEGV
         if hasattr(self.pw, "vline"):
-            try:
-                bounds = self.pw.vline.bounds
-                if bounds == [None, None] or bounds == (None, None):
-                    return True
-            except (RuntimeError, AttributeError):
+            bounds = safe_qt_op(lambda: self.pw.vline.bounds)
+            if bounds is None or bounds == [None, None] or bounds == (None, None):
                 return True
 
         return False
@@ -457,11 +453,8 @@ class CursorManager:
             return
 
         for item in self.pw.multi_cursor_items:
-            try:
-                if item is not None:
-                    item.setVisible(False)
-            except (RuntimeError, AttributeError):
-                pass
+            if item is not None:
+                safe_qt_op(item.setVisible, False)
 
         # 预构建 O(1) 查找集合，避免 list 的 O(n) 线性搜索
         x_labels_set = set(self.pw._cursor_item_pool.get("x_labels", []))
@@ -471,24 +464,15 @@ class CursorManager:
             try:
                 item_type = type(item).__name__
                 if item_type == "ScatterPlotItem":
-                    try:
-                        item.clear()
-                    except (RuntimeError, AttributeError):
-                        pass
+                    safe_qt_op(item.clear)
                 elif item in x_labels_set:
-                    try:
-                        item.setText("")
-                    except (RuntimeError, AttributeError):
-                        pass
+                    safe_qt_op(item.setText, "")
                 elif item in labels_set:
-                    try:
-                        item.setText("")
-                    except (RuntimeError, AttributeError):
-                        pass
+                    safe_qt_op(item.setText, "")
                 else:
                     self._queue_item_for_deletion(item)
             except Exception:
-                pass
+                logger.debug("清理 cursor item 异常", exc_info=True)
 
         self.pw.multi_cursor_items.clear()
 
@@ -512,15 +496,9 @@ class CursorManager:
             for item in (old_circles + old_labels + old_x_labels):
                 if item is None:
                     continue
-                try:
-                    item.setVisible(False)
-                except (RuntimeError, AttributeError):
-                    pass
-                try:
-                    if scene is not None and item.scene() == scene:
-                        scene.removeItem(item)
-                except (RuntimeError, AttributeError):
-                    pass
+                safe_qt_op(item.setVisible, False)
+                if scene is not None:
+                    safe_qt_op(lambda it=item: scene.removeItem(it) if it.scene() == scene else None)
                 # 移入 trash bin 保持引用，延迟到下一次 _clear_cursor_items 时释放。
                 # scene.removeItem 已从场景移除，paint event 不会访问该 item。
                 # trash bin 在下一轮清理时清空，确保至少经历一个完整事件循环。
@@ -530,10 +508,7 @@ class CursorManager:
     def _queue_item_for_deletion(self, item):
         """将 item 加入待删除队列"""
         if item is not None and item not in self.pw._pending_delete_items:
-            try:
-                item.setVisible(False)
-            except (RuntimeError, AttributeError):
-                pass
+            safe_qt_op(item.setVisible, False)
             self.pw._pending_delete_items.append(item)
 
     def _process_pending_deletes(self):
@@ -547,22 +522,17 @@ class CursorManager:
         self.pw._pending_delete_items.clear()
 
         for item in items_to_delete:
-            try:
-                if item is None:
-                    continue
-                try:
-                    scene = item.scene()
-                    if scene is not None:
-                        scene.removeItem(item)
-                except (RuntimeError, AttributeError):
-                    pass
-                try:
-                    if hasattr(item, "deleteLater"):
-                        item.deleteLater()
-                except (RuntimeError, AttributeError):
-                    pass
-            except (RuntimeError, AttributeError):
-                pass
+            if item is None:
+                continue
+            safe_qt_op(lambda: self._safe_delete_item(item))
+
+    def _safe_delete_item(self, item):
+        """安全地从场景移除并调度删除 item"""
+        scene = item.scene()
+        if scene is not None:
+            scene.removeItem(item)
+        if hasattr(item, "deleteLater"):
+            item.deleteLater()
 
     def _update_multi_curve_cursor_label(self):
         """更新多曲线光标标签"""
@@ -655,7 +625,7 @@ class CursorManager:
                             if hasattr(pen, "color"):
                                 curve_color = pen.color().name()
                     except Exception:
-                        pass
+                        logger.debug("获取曲线颜色失败", exc_info=True)
                     curves_to_process.append(
                         {
                             "var_name": self.y_name,
@@ -1510,7 +1480,7 @@ class CursorManager:
             view_box.update()
 
         except Exception:
-            pass
+            logger.debug("更新 anchored cursor 可视化失败", exc_info=True)
 
     def _has_visible_curve_data(self) -> bool:
         """判断当前 plot 是否有可见且有数据的曲线"""
