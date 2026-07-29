@@ -61,6 +61,19 @@ def is_enum_conversion(conversion) -> bool:
     return ct in (7, 9, 10, 11)
 
 
+def _get_enum_entry_count(conversion) -> int:
+    """获取枚举转换的实际条目数。
+
+    优先使用 asammdf 的 ref_param_nr 属性（MDF3/MDF4 均支持），
+    若不可用则回退到保守上限，避免大型枚举表被截断。
+    """
+    nr = getattr(conversion, "ref_param_nr", None)
+    if nr is not None and isinstance(nr, int) and nr > 0:
+        return nr
+    # 回退：保守上限（覆盖绝大多数场景）
+    return 2048
+
+
 def extract_enum_map(conversion) -> Optional[dict[int, str]]:
     if conversion is None:
         return None
@@ -75,7 +88,9 @@ def extract_enum_map(conversion) -> Optional[dict[int, str]]:
         if result:
             return result
 
-    for i in range(1000):
+    max_entries = _get_enum_entry_count(conversion)
+
+    for i in range(max_entries):
         text_attr = f"text_{i}"
         val_attr = f"param_val_{i}"
         if not hasattr(conversion, text_attr):
@@ -102,7 +117,7 @@ def extract_enum_map(conversion) -> Optional[dict[int, str]]:
         # text_i 为 int（CAN 数据库字符串地址），实际值在 val_i 中
         # 通过 conversion.convert() 利用 asammdf 内置 CAN db 解析还原文本
         can_vals = []
-        for i in range(1000):
+        for i in range(max_entries):
             text_attr = f"text_{i}"
             val_attr = f"val_{i}"
             if not hasattr(conversion, text_attr):
