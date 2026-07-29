@@ -6,6 +6,7 @@ __pycache__/
 .qoder/
 /build/
 /dist/
+/tmp/
 /*.dist/
 /*.build/
 .DS_Store
