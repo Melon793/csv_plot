@@ -240,6 +240,12 @@ class FileLoaderManager(MainWindowBaseManager):
                     widget._safe_clear_plot_items()
                 except Exception:
                     logger.debug("_safe_clear_plot_items 失败（数据重载期间）")
+            # 清除旧 X limits，防止跨文件切换时旧 limits 残留导致 X-link 钳制
+            if hasattr(widget, "plot_item") and widget.plot_item is not None:
+                try:
+                    widget.plot_item.setLimits(xMin=None, xMax=None)
+                except Exception:
+                    logger.debug("清除 X limits 失败（数据重载期间）")
             if hasattr(widget, "_cursor_trash_bin"):
                 widget._cursor_trash_bin.clear()
             if hasattr(widget, "_pending_delete_items"):

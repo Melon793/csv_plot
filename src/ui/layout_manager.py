@@ -11,7 +11,7 @@ import numpy as np
 from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
 
-from src.core.config import UI_DEBOUNCE_DELAY_MS
+from src.core.config import UI_DEBOUNCE_DELAY_MS, compute_global_x_limits
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
@@ -118,6 +118,10 @@ class LayoutManager(MainWindowBaseManager):
         if abs(xmin - xmax) < 1e-12:
             return
 
+        # 相对容差：消除 float32 精度导致的误报
+        range_width = abs(xmax - xmin)
+        tolerance = 1e-4 * range_width
+
         first_geom = first_container.geometry()
         logger.debug(
             "[XLINK_SYNC] _sync_linked_x_ranges: source range=(%.4f, %.4f) width=%.4f "
@@ -150,7 +154,10 @@ class LayoutManager(MainWindowBaseManager):
             cur_geom = container.geometry()
             try:
                 new_range = vb.viewRange()[0]
-                ok = abs(new_range[0] - xmin) < 1e-6 and abs(new_range[1] - xmax) < 1e-6
+                ok = (
+                    abs(new_range[0] - xmin) < tolerance
+                    and abs(new_range[1] - xmax) < tolerance
+                )
             except Exception:
                 new_range = (None, None)
                 ok = False
@@ -164,10 +171,58 @@ class LayoutManager(MainWindowBaseManager):
                 ok,
             )
             if not ok:
+                plot_id = getattr(pw, 'y_name', '') or str(list(getattr(pw, 'curves', {}).keys())[:2])
+                vb_xlimits = vb.state.get('limits', {}).get('xLimits', [None, None])
                 logger.warning(
-                    "[XLINK_SYNC] SYNC VERIFICATION FAILED! expected=(%.4f, %.4f) got=(%s, %s)",
+                    "[XLINK_SYNC] SYNC VERIFICATION FAILED! expected=(%.4f, %.4f) got=(%s, %s) "
+                    "target_xLimits=%s plot=%s",
                     xmin, xmax, new_range[0], new_range[1],
+                    vb_xlimits, plot_id,
                 )
+                # 自动修复：统一目标 Plot 的 limits 到全局数据范围后重试同步
+                self._repair_plot_x_limits(pw, vb, xmin, xmax, tolerance, plot_id)
+
+    def _repair_plot_x_limits(self, pw, vb, xmin, xmax, tolerance, plot_id):
+        """同步失败时的自动修复：统一目标 Plot 的 X limits 后重试 setXRange"""
+        loader = getattr(self.mw, "loader", None)
+        factor = getattr(pw, "factor", 1.0)
+        offset = getattr(pw, "offset", 0.0)
+        global_result = compute_global_x_limits(loader, factor=factor, offset=offset)
+        if global_result is None:
+            logger.debug("[XLINK_SYNC] repair skipped: no valid loader for plot=%s", plot_id)
+            return
+
+        _, _, limits_xMin, limits_xMax = global_result
+        try:
+            pw._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+
+            linked = vb.linkedView(0)
+            if linked is not None:
+                vb.setXLink(None)
+            vb.enableAutoRange(x=False)
+            vb.setXRange(xmin, xmax, padding=0)
+            if linked is not None:
+                vb.setXLink(linked)
+
+            retry_range = vb.viewRange()[0]
+            retry_ok = (
+                abs(retry_range[0] - xmin) < tolerance
+                and abs(retry_range[1] - xmax) < tolerance
+            )
+            if retry_ok:
+                logger.info(
+                    "[XLINK_SYNC] REPAIR OK: plot=%s limits unified to (%.4f, %.4f), "
+                    "range now=(%.4f, %.4f)",
+                    plot_id, limits_xMin, limits_xMax, retry_range[0], retry_range[1],
+                )
+            else:
+                logger.warning(
+                    "[XLINK_SYNC] REPAIR FAILED: plot=%s limits=(%.4f, %.4f) "
+                    "still got=(%s, %s)",
+                    plot_id, limits_xMin, limits_xMax, retry_range[0], retry_range[1],
+                )
+        except Exception:
+            logger.debug("[XLINK_SYNC] repair exception for plot=%s", plot_id, exc_info=True)
 
     def toggle_plot_area(self, checked):
         if checked:

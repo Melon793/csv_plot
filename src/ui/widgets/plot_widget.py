@@ -668,10 +668,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """计算在指定x轴范围内的y值范围 → 委托到 PlotDataManager"""
         return self._plot_data_manager._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
     
-    def _setup_plot_axes(self, x_values: np.ndarray, y_values: np.ndarray, update_x_range: bool = True):
-        """设置绘图坐标轴 → 委托到 AxisManager"""
-        self._axis_manager._setup_plot_axes(x_values, y_values, update_x_range)
-
     def _reset_plot_limits(self):
         """重置绘图限制 → 委托到 AxisManager"""
         self._axis_manager._reset_plot_limits()
@@ -716,10 +712,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _update_axes_for_multi_curve(self, update_x_range: bool = False):
         """为多曲线更新坐标轴范围 → 委托到 MultiCurveManager"""
         self._multi_curve_manager._update_axes_for_multi_curve(update_x_range)
-
-    def _update_x_limits_for_plot(self, x_values: np.ndarray, y_values: np.ndarray, is_mdf: bool):
-        """统一更新 X 轴 limits → 委托到 AxisManager"""
-        self._axis_manager._update_x_limits_for_plot(x_values, y_values, is_mdf)
 
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):

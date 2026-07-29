@@ -12,6 +12,7 @@ CursorManager - 光标管理
 """
 
 from __future__ import annotations
+import logging
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -332,27 +333,48 @@ class CursorManager:
 
     def _is_cursor_update_locked(self) -> bool:
         """判断 cursor 相关回调是否需要被暂时禁用"""
+        lock_reason = None
+
         if getattr(self.pw, "_is_updating_data", False) or getattr(
             self.pw, "_is_being_destroyed", False
         ):
-            return True
-
-        if self.pw.plot_context:
+            lock_reason = (
+                f"_is_updating_data={getattr(self.pw, '_is_updating_data', False)} "
+                f"_is_being_destroyed={getattr(self.pw, '_is_being_destroyed', False)}"
+            )
+        elif self.pw.plot_context:
             if getattr(self.pw.plot_context, "_is_loading_new_data", False):
-                return True
-            current_version = getattr(self.pw.plot_context, "_data_version", 0)
-            my_version = getattr(self.pw, "_cached_data_version", 0)
-            if my_version != 0 and my_version != current_version:
-                return True
+                lock_reason = "_is_loading_new_data=True"
+            else:
+                current_version = getattr(self.pw.plot_context, "_data_version", 0)
+                my_version = getattr(self.pw, "_cached_data_version", 0)
+                if my_version != 0 and my_version != current_version:
+                    lock_reason = f"version mismatch my={my_version} current={current_version}"
 
         # 安全网：vline bounds 为 [None, None] 时禁止 cursor 更新，
         # 防止 vline 处于无效状态（如 reload 中间态）时触发 cursor 回调导致 SIGSEGV
-        if hasattr(self.pw, "vline"):
+        if lock_reason is None and hasattr(self.pw, "vline"):
             bounds = safe_qt_op(lambda: self.pw.vline.bounds)
             if bounds is None or bounds == [None, None] or bounds == (None, None):
-                return True
+                lock_reason = f"vline bounds={bounds}"
 
-        return False
+        # 诊断日志：仅在锁定状态变化时记录，避免拖动期间日志洪泛
+        if logger.isEnabledFor(logging.DEBUG):
+            was_locked = getattr(self.pw, "_cursor_lock_logged", False)
+            is_locked = lock_reason is not None
+            if is_locked and not was_locked:
+                logger.debug(
+                    "[CURSOR_LOCK] LOCKED: %s plot=%s",
+                    lock_reason, getattr(self.pw, "y_name", "?"),
+                )
+            elif not is_locked and was_locked:
+                logger.debug(
+                    "[CURSOR_LOCK] UNLOCKED: plot=%s",
+                    getattr(self.pw, "y_name", "?"),
+                )
+            self.pw._cursor_lock_logged = is_locked
+
+        return lock_reason is not None
 
     def _update_single_curve_cursor_label(self):
         """更新单曲线模式的光标标签"""

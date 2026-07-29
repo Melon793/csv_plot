@@ -24,6 +24,7 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_X,
     DEFAULT_PADDING_VAL_Y,
     _evaluate_float32_safety,
+    compute_global_x_limits,
     safe_qt_op,
 )
 from src.core.logger import get_logger
@@ -503,40 +504,20 @@ class PlotDataManager:
                     new_x = pw.offset + pw.factor * pw.original_index_x
                     pw.curve.setData(new_x, pw.original_y)
 
-            if pw.is_multi_curve_mode and pw.curves:
-                first_curve_info = next(iter(pw.curves.values()))
-                datalength = (
-                    len(first_curve_info.y_data)
-                    if first_curve_info.y_data is not None
-                    else 0
-                )
-            elif pw.original_index_x is not None:
-                datalength = len(pw.original_index_x)
-            else:
-                datalength = (
-                    pw.plot_context.loader.datalength
-                    if hasattr(pw.plot_context, "loader")
-                    and pw.plot_context.loader is not None
-                    else 0
-                )
-
-            padding_xVal = DEFAULT_PADDING_VAL_X
-            if (
-                is_mdf
-                and pw.plot_context is not None
-                and hasattr(pw.plot_context.loader, "global_time_range")
-            ):
-                x_min, x_max = pw.plot_context.loader.global_time_range
-                data_min_x = pw.offset + pw.factor * x_min
-                data_max_x = pw.offset + pw.factor * x_max
-            else:
-                index_min = 1 - padding_xVal * datalength
-                index_max = datalength + padding_xVal * datalength
-                data_min_x = pw.offset + pw.factor * index_min
-                data_max_x = pw.offset + pw.factor * index_max
-            limits_xMin = data_min_x - padding_xVal * (data_max_x - data_min_x)
-            limits_xMax = data_max_x + padding_xVal * (data_max_x - data_min_x)
-            self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            # 统一 X limits 计算：始终基于全局数据范围（loader.datalength / global_time_range），
+            # 避免使用 per-plot 曲线长度导致与 reload/auto_range 路径不一致
+            loader = (
+                pw.plot_context.loader
+                if pw.plot_context is not None
+                and hasattr(pw.plot_context, "loader")
+                else None
+            )
+            global_result = compute_global_x_limits(
+                loader, factor=pw.factor, offset=pw.offset
+            )
+            if global_result is not None:
+                _, _, limits_xMin, limits_xMax = global_result
+                self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
             self._update_vline_bounds_from_data()
             if (
                 pw.mark_region is not None

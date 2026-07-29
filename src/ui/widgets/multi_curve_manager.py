@@ -233,7 +233,8 @@ class MultiCurveManager:
         只考虑visible=True的曲线，忽略隐藏的曲线。
 
         Args:
-            update_x_range: 是否更新X轴范围。默认为False，保持当前x轴范围不变。
+            update_x_range: 已废弃，保留仅为 API 兼容。X 轴 limits
+                由 compute_global_x_limits 统一管理，不再由此函数修改。
         """
         import numpy as np
 
@@ -250,38 +251,35 @@ class MultiCurveManager:
         if x_values.size == 0 or y_values.size == 0:
             return
 
-        if update_x_range:
-            pw._setup_plot_axes(x_values, y_values, update_x_range=True)
+        all_data_min_y = np.nanmin(y_values)
+        all_data_max_y = np.nanmax(y_values)
+        self.pw._set_safe_y_range(
+            all_data_min_y, all_data_max_y, set_limits=True
+        )
+
+        special_limits = self._data_manager.handle_single_point_limits(
+            x_values, y_values
+        )
+        if special_limits:
+            min_x, max_x, min_y, max_y = special_limits
+            self.pw._set_safe_y_range(min_y, max_y, set_limits=False)
         else:
-            all_data_min_y = np.nanmin(y_values)
-            all_data_max_y = np.nanmax(y_values)
-            self.pw._set_safe_y_range(
-                all_data_min_y, all_data_max_y, set_limits=True
-            )
+            current_x_range = pw.view_box.viewRange()[0]
+            x_min, x_max = current_x_range
 
-            special_limits = self._data_manager.handle_single_point_limits(
-                x_values, y_values
-            )
-            if special_limits:
-                min_x, max_x, min_y, max_y = special_limits
-                self.pw._set_safe_y_range(min_y, max_y, set_limits=False)
-            else:
-                current_x_range = pw.view_box.viewRange()[0]
-                x_min, x_max = current_x_range
+            all_y_in_range = []
+            for x_arr, y_arr in pairs:
+                min_y, max_y = pw._get_y_range_in_x_window(
+                    x_arr, y_arr, x_min, x_max
+                )
+                all_y_in_range.extend([min_y, max_y])
 
-                all_y_in_range = []
-                for x_arr, y_arr in pairs:
-                    min_y, max_y = pw._get_y_range_in_x_window(
-                        x_arr, y_arr, x_min, x_max
-                    )
-                    all_y_in_range.extend([min_y, max_y])
-
-                if all_y_in_range:
-                    final_min_y = np.nanmin(all_y_in_range)
-                    final_max_y = np.nanmax(all_y_in_range)
-                    self.pw._set_safe_y_range(
-                        final_min_y, final_max_y, set_limits=False
-                    )
+            if all_y_in_range:
+                final_min_y = np.nanmin(all_y_in_range)
+                final_max_y = np.nanmax(all_y_in_range)
+                self.pw._set_safe_y_range(
+                    final_min_y, final_max_y, set_limits=False
+                )
 
     def _on_legend_clicked(self, event):
         """Legend点击事件处理
