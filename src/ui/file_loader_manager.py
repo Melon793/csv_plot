@@ -219,8 +219,8 @@ class FileLoaderManager(MainWindowBaseManager):
                         widget.vline.sigPositionChanged.disconnect(
                             widget.on_vline_position_changed
                         )
-                except (TypeError, RuntimeError):
-                    pass
+                except (TypeError, RuntimeError) as e:
+                    logger.debug("断开 vline 信号失败(可能已断开): %s", e)
             if hasattr(widget, "vline2"):
                 try:
                     with warnings.catch_warnings():
@@ -228,8 +228,8 @@ class FileLoaderManager(MainWindowBaseManager):
                         widget.vline2.sigPositionChanged.disconnect(
                             widget.on_vline_position_changed
                         )
-                except (TypeError, RuntimeError):
-                    pass
+                except (TypeError, RuntimeError) as e:
+                    logger.debug("断开 vline2 信号失败(可能已断开): %s", e)
             # v5.11: 将 vline/vline2 从 scene 中物理移除，防止 reload 期间
             # macOS 异步 paint (sendSpontaneousEvent) 遍历 BSP 树时访问 InfiniteLine
             # 内部已失效的 C++ 坐标缓存 → NULL+0x90 SIGSEGV。
@@ -700,9 +700,13 @@ class FileLoaderManager(MainWindowBaseManager):
             # 判断是否走了异步路径（后台线程已启动）
             is_async = getattr(self.mw, "_thread", None) is not None and \
                        getattr(self.mw._thread, "isRunning", lambda: False)()
-        except Exception:
+        except Exception as e:
             # 同步路径异常或 _load_file 内部未启动线程就抛异常
-            pass
+            logger.error("数据重新加载失败: %s", e, exc_info=True)
+            QMessageBox.warning(
+                self.mw, "加载失败",
+                f"重新加载数据时出错：\n{e}"
+            )
         finally:
             if not is_async:
                 # 同步路径（无论成功或失败）：释放互斥锁，防止重复点击。

@@ -60,8 +60,11 @@ def safe_qt_op(func, *args, **kwargs):
     """
     try:
         return func(*args, **kwargs)
-    except (RuntimeError, AttributeError):
-        pass
+    except (RuntimeError, AttributeError) as e:
+        logger.debug(
+            "safe_qt_op 捕获异常: %s → %s",
+            getattr(func, "__name__", repr(func)), e,
+        )
 
 DEFAULT_PADDING_VAL_X = 0.05  # 默认x轴padding，单位为plot宽度
 DEFAULT_PADDING_VAL_Y = 0.1  # 默认y轴padding，单位为plot高度
