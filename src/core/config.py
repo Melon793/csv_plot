@@ -132,6 +132,49 @@ _UNIT_KEYWORDS = [
 ]
 
 
+def compute_global_x_limits(
+    loader, factor: float = 1.0, offset: float = 0.0
+) -> tuple[float, float, float, float] | None:
+    """计算全局统一的 X 轴数据范围和 limits。
+
+    基于 loader 的全局数据范围（而非 per-plot 曲线数据），
+    确保所有 Plot 的 X limits 一致，避免 X-link 同步时被 ViewBox 钳制。
+
+    Args:
+        loader: 数据加载器（CSV: datalength, MDF: global_time_range）
+        factor: 时间修正系数
+        offset: 时间修正偏移
+
+    Returns:
+        (min_x, max_x, limits_xMin, limits_xMax) 或 None（loader 无效时）
+        - min_x/max_x: 应用 factor/offset 后的数据范围（用于 vline bounds / viewRange）
+        - limits_xMin/limits_xMax: 含 5% padding 的边界（用于 ViewBox limits）
+    """
+    if loader is None:
+        return None
+
+    if getattr(loader, "LOADER_TYPE", "") == "mdf" and hasattr(loader, "global_time_range"):
+        raw_min, raw_max = loader.global_time_range
+    elif getattr(loader, "datalength", 0) > 0:
+        raw_min, raw_max = 1.0, float(loader.datalength)
+    else:
+        return None
+
+    min_x = offset + factor * float(raw_min)
+    max_x = offset + factor * float(raw_max)
+
+    # 安全范围：min == max 时扩展
+    if min_x == max_x:
+        min_x -= 0.5 * (factor if factor != 0 else 1.0)
+        max_x += 0.5 * (factor if factor != 0 else 1.0)
+
+    data_span = max_x - min_x
+    limits_xMin = min_x - DEFAULT_PADDING_VAL_X * data_span
+    limits_xMax = max_x + DEFAULT_PADDING_VAL_X * data_span
+
+    return (min_x, max_x, limits_xMin, limits_xMax)
+
+
 def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     """
     判断数值是否能安全表示为 float32。

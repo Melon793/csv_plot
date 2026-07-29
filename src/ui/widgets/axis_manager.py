@@ -12,6 +12,7 @@ AxisManager - 坐标轴管理
 """
 
 from __future__ import annotations
+import logging
 from typing import Any, TYPE_CHECKING
 
 import pyqtgraph as pg
@@ -19,6 +20,7 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_X,
     DEFAULT_PADDING_VAL_Y,
     MIN_INDEX_LENGTH,
+    compute_global_x_limits,
 )
 from src.core.logger import get_logger
 import numpy as np
@@ -130,6 +132,16 @@ class AxisManager:
 
         limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
         limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
+
+        # 修复: limits 必须基于全局数据范围（而非 per-plot 曲线范围），
+        # 避免 X-link 同步时目标 Plot 的 limits 偏窄导致 viewRange 被钳制
+        if not is_mdf and pw.plot_context is not None:
+            loader = getattr(pw.plot_context, "loader", None)
+            global_result = compute_global_x_limits(
+                loader, factor=pw.factor, offset=pw.offset
+            )
+            if global_result is not None:
+                _, _, limits_xMin, limits_xMax = global_result
 
         pw.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
         self._set_safe_y_range(min_y, max_y)
@@ -259,6 +271,23 @@ class AxisManager:
     ) -> None:
         """统一设置 X 轴的 limits 和 minXRange"""
         pw = self.pw
+        if logger.isEnabledFor(logging.DEBUG):
+            import traceback
+            stack = traceback.extract_stack(limit=4)
+            caller = stack[-2] if len(stack) >= 2 else None
+            caller_info = (
+                f"{caller.filename.split('/')[-1]}:{caller.lineno} {caller.name}"
+                if caller else "unknown"
+            )
+            old_limits = (
+                pw.view_box.state.get('limits', {}).get('xLimits', [None, None])
+                if hasattr(pw, 'view_box') else [None, None]
+            )
+            plot_id = getattr(pw, 'y_name', '') or str(list(getattr(pw, 'curves', {}).keys())[:2])
+            logger.debug(
+                "[XLIMITS] plot=%s set xMin=%s xMax=%s (old: %s) caller=%s",
+                plot_id, limits_xMin, limits_xMax, old_limits, caller_info,
+            )
         minXRange_val = self._get_min_x_range_value()
         pw.plot_item.setLimits(
             xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val
@@ -325,44 +354,6 @@ class AxisManager:
             pw.plot_item.setLimits(yMin=y_min_limit, yMax=y_max_limit)
         pw.view_box.setYRange(y_min_view, y_max_view, padding=DEFAULT_PADDING_VAL_Y)
 
-    def _setup_plot_axes(
-        self,
-        x_values: np.ndarray,
-        y_values: np.ndarray,
-        update_x_range: bool = True,
-    ) -> None:
-        """根据数据设置绘图坐标轴
-
-        Args:
-            x_values: X 轴数据数组
-            y_values: Y 轴数据数组
-            update_x_range: 是否更新 X 轴范围
-        """
-        pw = self.pw
-        try:
-            special_limits = pw.handle_single_point_limits(x_values, y_values)
-            if special_limits:
-                min_x, max_x, min_y, max_y = special_limits
-            else:
-                min_x = np.min(x_values)
-                max_x = np.max(x_values)
-                min_y = np.nanmin(y_values)
-                max_y = np.nanmax(y_values)
-
-            padding_x = DEFAULT_PADDING_VAL_X
-            limits_xMin = min_x - padding_x * (max_x - min_x)
-            limits_xMax = max_x + padding_x * (max_x - min_x)
-
-            if update_x_range:
-                pw.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
-
-            self._set_safe_y_range(min_y, max_y)
-            self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-
-        except Exception:
-            self._set_safe_y_range(0, 1)
-            self._set_x_limits_with_min_range(None, None)
-
     def _reset_plot_limits(self) -> None:
         """重置绘图限制"""
         pw = self.pw
@@ -380,27 +371,3 @@ class AxisManager:
             pw.vline.setBounds(bounds)
         if hasattr(pw, "vline2"):
             pw.vline2.setBounds(bounds)
-
-    def _update_x_limits_for_plot(self, x_values: np.ndarray, y_values: np.ndarray, is_mdf: bool):
-        """统一更新 X 轴 limits，合并本 plot 的可见曲线范围和全局所有可见 plot 的范围"""
-        pw = self.pw
-        x_arrays = pw._collect_visible_curve_arrays('x_data')
-        if x_arrays:
-            combined_x = np.concatenate(x_arrays)
-            data_min_x = float(np.nanmin(combined_x))
-            data_max_x = float(np.nanmax(combined_x))
-        else:
-            data_min_x = float(np.min(x_values))
-            data_max_x = float(np.max(x_values))
-
-        main_window = pw.window()
-        if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
-            global_min, global_max = main_window.cursor_sync_manager.collect_global_x_range(curves_filter="all")
-            if global_min is not None:
-                data_min_x = min(data_min_x, global_min)
-                data_max_x = max(data_max_x, global_max)
-
-        padding_x = DEFAULT_PADDING_VAL_X
-        limits_xMin = data_min_x - padding_x * (data_max_x - data_min_x)
-        limits_xMax = data_max_x + padding_x * (data_max_x - data_min_x)
-        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
