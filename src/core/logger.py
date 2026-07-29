@@ -18,10 +18,63 @@ LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
 LOG_FILE_BACKUP_COUNT = 3
 
 
-def _get_log_dir() -> str:
+def _is_frozen() -> bool:
+    """检测是否处于打包环境（PyInstaller / Nuitka）"""
     if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.getcwd()
+        return True
+    # Nuitka: __compiled__ 始终存在于 __main__ 的 globals 中
+    import __main__
+    if "__compiled__" in getattr(__main__, "__dict__", {}):
+        return True
+    return False
+
+
+def _get_log_dir() -> str:
+    """获取日志文件目录，带多级回退保证可写性。
+
+    回退链：
+    1. 打包环境 → exe 所在目录
+    2. 当前工作目录（开发环境）
+    3. 用户应用数据目录（Windows: %APPDATA%/csv_plot/logs, 其他: ~/.csv_plot/logs）
+    4. 系统临时目录（终极兜底）
+    """
+    import tempfile
+
+    candidates: list[str] = []
+
+    # 1. 打包环境：exe 所在目录
+    if _is_frozen():
+        exe_dir = os.path.dirname(sys.executable)
+        if exe_dir:
+            candidates.append(exe_dir)
+
+    # 2. 当前工作目录（开发环境下通常就是项目根目录）
+    candidates.append(os.getcwd())
+
+    # 3. 用户应用数据目录（跨平台安全，打包环境 CWD 不可写时回退到此）
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(os.path.join(appdata, "csv_plot", "logs"))
+    else:
+        candidates.append(os.path.join(os.path.expanduser("~"), ".csv_plot", "logs"))
+
+    # 4. 终极兜底：系统临时目录
+    candidates.append(os.path.join(tempfile.gettempdir(), "csv_plot_logs"))
+
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            test_file = os.path.join(d, ".write_test")
+            with open(test_file, "w") as f:
+                f.write("")
+            os.remove(test_file)
+            return d
+        except (OSError, PermissionError):
+            continue
+
+    # 理论上不会到这里（tempdir 一定可写），但保底返回 tempdir
+    return tempfile.gettempdir()
 
 
 LOG_FILE_NAME = os.path.join(_get_log_dir(), "csv_plot.log")
@@ -78,18 +131,23 @@ class LogManager:
         ui_formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
         self._ui_handler.setFormatter(ui_formatter)
 
-        self._file_handler = logging.handlers.RotatingFileHandler(
-            LOG_FILE_NAME,
-            maxBytes=LOG_FILE_MAX_BYTES,
-            backupCount=LOG_FILE_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-        self._file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            "%(asctime)s [%(levelname)-8s] %(name)-20s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-        self._file_handler.setFormatter(file_formatter)
+        try:
+            self._file_handler = logging.handlers.RotatingFileHandler(
+                LOG_FILE_NAME,
+                maxBytes=LOG_FILE_MAX_BYTES,
+                backupCount=LOG_FILE_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            self._file_handler.setLevel(logging.DEBUG)
+            file_formatter = logging.Formatter(
+                "%(asctime)s [%(levelname)-8s] %(name)-20s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+            self._file_handler.setFormatter(file_formatter)
+        except (OSError, PermissionError):
+            # 日志文件不可写时降级为 NullHandler，保证程序不崩溃
+            self._file_handler = logging.NullHandler()
+            self._file_handler.setLevel(logging.DEBUG)
 
         self._queue: Queue = Queue()
         self._queue_handler = logging.handlers.QueueHandler(self._queue)
