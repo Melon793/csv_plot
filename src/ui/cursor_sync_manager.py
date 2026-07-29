@@ -91,7 +91,8 @@ class CursorSyncManager(MainWindowBaseManager):
         try:
             view_min, view_max = plot.view_box.viewRange()[0]
             return view_min, view_max
-        except Exception:
+        except Exception as e:
+            logger.debug("获取视图范围失败: %s", e)
             return None, None
 
     @staticmethod

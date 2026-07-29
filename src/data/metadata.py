@@ -10,6 +10,10 @@ from typing import Optional
 
 import numpy as np
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 VALID = 1
 CONST = 0
 INVALID = -1
@@ -146,7 +150,7 @@ def extract_enum_map(conversion) -> Optional[dict[int, str]]:
                     if isinstance(label, bytes):
                         label = label.decode("utf-8", errors="replace").rstrip("\x00")
                     result[int(raw_val)] = str(label)
-            except Exception:
-                pass  # convert() 失败时不阻塞，返回空 map
+            except Exception as e:
+                logger.debug("CAN db convert() 失败，返回空枚举映射: %s", e)
 
     return result if result else None

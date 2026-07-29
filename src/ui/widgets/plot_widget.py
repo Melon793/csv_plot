@@ -407,8 +407,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
         try:
             super().paintEvent(event)
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            logger.debug("paintEvent RuntimeError (C++对象可能已销毁): %s", e)
         except Exception:
             logger.debug("paintEvent 异常", exc_info=True)
 
@@ -444,15 +444,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         mousePoint = self.plot_item.vb.mapSceneToView(pos)
 
-        # 如果cursor被固定，不跟随鼠标移动
-        if self.is_cursor_pinned:
-            # 在pin状态下，cursor保持固定位置，不跟随鼠标
-            pass
-        else:
-            # 正常跟随鼠标模式
+        # cursor被固定时不跟随鼠标移动，仅在非 pin 状态下同步
+        if not self.is_cursor_pinned:
             if hasattr(self.window(), 'cursor_sync_manager'):
                 self.window().cursor_sync_manager.sync_crosshair(mousePoint.x(), self)
-            #print(f"mouse in pos {mousePoint.x()}")
 
     def _is_cursor_update_locked(self) -> bool:
         """判断 cursor 更新是否被锁定 → 委托到 CursorManager"""

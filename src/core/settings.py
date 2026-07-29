@@ -1,12 +1,16 @@
 """统一配置管理器 - 集中管理应用所有配置"""
 
 from __future__ import annotations
+import logging
+import tempfile
 from enum import StrEnum
 from pathlib import Path
 from threading import Lock
 from typing import Any, Optional, Type
 
 from PySide6.QtCore import QSettings
+
+_logger = logging.getLogger(__name__)
 
 
 class ConfigKey(StrEnum):
@@ -39,8 +43,18 @@ class AppSettings:
         config_dir = self._get_config_dir()
         try:
             config_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
-            pass
+        except (PermissionError, OSError) as e:
+            # 降级到系统临时目录，保证程序可运行
+            fallback = Path(tempfile.gettempdir()) / "CSVPlot"
+            try:
+                fallback.mkdir(parents=True, exist_ok=True)
+                config_dir = fallback
+                _logger.warning(
+                    "配置目录创建失败(%s)，降级到临时目录: %s", e, config_dir
+                )
+            except OSError:
+                config_dir = fallback
+                _logger.error("配置目录和临时目录均不可写，设置将无法持久化")
 
         self._settings = QSettings(
             str(config_dir / "app.ini"),

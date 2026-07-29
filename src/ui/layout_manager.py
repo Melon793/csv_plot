@@ -109,7 +109,8 @@ class LayoutManager(MainWindowBaseManager):
         first_vb = first_pw.view_box
         try:
             x_range = first_vb.viewRange()[0]
-        except Exception:
+        except Exception as e:
+            logger.debug("[XLINK_SYNC] 获取源视图范围失败: %s", e)
             return
 
         xmin, xmax = x_range
@@ -334,9 +335,8 @@ class LayoutManager(MainWindowBaseManager):
                 view_min, view_max = self.mw.plot_widgets[
                     0
                 ].plot_widget.view_box.viewRange()[0]
-                if min_x >= view_min and max_x <= view_max:
-                    pass
-                else:
+                # 保存的范围超出当前视图时，重置为视图中间 1/3 区域
+                if min_x < view_min or max_x > view_max:
                     width = view_max - view_min
                     min_x = view_min + width / 3
                     max_x = view_min + 2 * width / 3

@@ -534,7 +534,7 @@ class FastDataLoader(BaseDataLoader):
         else:
             raise RuntimeError("无法以任何可用编码读取文件")
 
-        # 单位行对照校验（不覆盖传入的 has_unit，仅输出 debug 日志）
+        # 单位行对照校验（不修改 actual_has_unit，仅输出诊断日志）
         actual_has_unit = has_unit
         if has_unit and df.shape[0] >= 2:
             row2 = df.iloc[1].fillna("").astype(str).tolist()
@@ -555,7 +555,10 @@ class FastDataLoader(BaseDataLoader):
             )
 
             if unit_keyword_ratio > UNIT_KEYWORD_RATIO_THRESHOLD:
-                pass
+                logger.debug(
+                    "单位行校验通过: unit_keyword_ratio=%.2f > %.2f",
+                    unit_keyword_ratio, UNIT_KEYWORD_RATIO_THRESHOLD,
+                )
             else:
                 numeric_count = 0
                 valid_numeric_count = 0
@@ -574,9 +577,16 @@ class FastDataLoader(BaseDataLoader):
                 if total_cols > 0:
                     valid_numeric_ratio = valid_numeric_count / total_cols
                     if valid_numeric_ratio > VALID_NUMERIC_RATIO_THRESHOLD:
-                        pass
+                        logger.warning(
+                            "单位行校验: 第2行疑似数据行 (numeric_ratio=%.2f > %.2f)，"
+                            "但保持 has_unit 不变",
+                            valid_numeric_ratio, VALID_NUMERIC_RATIO_THRESHOLD,
+                        )
                     else:
-                        pass
+                        logger.debug(
+                            "单位行校验: 未达数值阈值 (ratio=%.2f)，保持 has_unit=%s",
+                            valid_numeric_ratio, has_unit,
+                        )
 
         min_required_rows = 2 if actual_has_unit else 1
         if df.shape[0] < min_required_rows:
