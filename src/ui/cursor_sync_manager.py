@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 import numpy as np
+import pyqtgraph as pg
 
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QMessageBox
 
 from src.core.config import (
+    DEFAULT_LINE_WIDTH,
     DEFAULT_PADDING_VAL_X,
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
@@ -638,18 +640,31 @@ class CursorSyncManager(MainWindowBaseManager):
 
                             widget.update_multi_curve_mode()
 
-                            for var_name, original_visible in visibility_to_restore.items():
-                                if var_name in widget.curves:
-                                    widget.curves[var_name].visible = original_visible
-                                    if widget.curves[var_name].curve is not None:
-                                        try:
-                                            widget.curves[var_name].curve.setVisible(
-                                                original_visible
-                                            )
-                                        except Exception:
-                                            logger.debug("恢复曲线可见性失败", exc_info=True)
-
-                            if curves_added > 0:
+                            # 修复：仅剩1条曲线时，转换为规范化单曲线状态，
+                            # 避免 curves 字典有数据但 curve/original_y 为空的混合状态
+                            if curves_added == 1:
+                                single_var = next(iter(widget.curves.keys()))
+                                saved_color = widget.curves[single_var].color
+                                widget.plot_variable(single_var)
+                                # 恢复原有颜色（plot_variable 会重置为蓝色）
+                                try:
+                                    if widget.curve is not None and hasattr(widget.curve, 'opts'):
+                                        pen = pg.mkPen(color=saved_color, width=DEFAULT_LINE_WIDTH)
+                                        widget.curve.setPen(pen)
+                                except Exception:
+                                    logger.debug("重载归一化后恢复曲线颜色失败", exc_info=True)
+                            elif curves_added > 1:
+                                # 原有的 visibility 恢复逻辑（仅多曲线时执行）
+                                for var_name, original_visible in visibility_to_restore.items():
+                                    if var_name in widget.curves:
+                                        widget.curves[var_name].visible = original_visible
+                                        if widget.curves[var_name].curve is not None:
+                                            try:
+                                                widget.curves[var_name].curve.setVisible(
+                                                    original_visible
+                                                )
+                                            except Exception:
+                                                logger.debug("恢复曲线可见性失败", exc_info=True)
                                 widget.update_legend()
 
                             if curves_added == 0:

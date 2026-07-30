@@ -194,6 +194,13 @@ class AxisManager:
                 _, y_data = pw.curve.getData()
                 if y_data is not None:
                     return np.nanmin(y_data), np.nanmax(y_data)
+            elif pw.curves:
+                # 兜底：混合状态下从 curves 字典收集数据
+                y_arrays = pw._collect_visible_curve_arrays("y_data")
+                if y_arrays:
+                    combined = np.concatenate(y_arrays)
+                    if combined.size:
+                        return float(np.nanmin(combined)), float(np.nanmax(combined))
             return 0, 1
 
     def auto_y_in_x_range(self) -> None:

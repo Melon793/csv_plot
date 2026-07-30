@@ -441,6 +441,19 @@ class PlotVariableEditorDialog(QDialog):
         # 更新多曲线模式
         self.plot_widget.update_multi_curve_mode()
 
+        # 修复：从多曲线降至1条时，归一化为单曲线状态
+        if len(self.plot_widget.curves) == 1 and not self.plot_widget.is_multi_curve_mode:
+            single_ci = next(iter(self.plot_widget.curves.values()))
+            saved_color = single_ci.color
+            self.plot_widget.plot_variable(single_ci.var_name)
+            # 恢复用户自定义颜色（plot_variable 会重置为蓝色）
+            try:
+                if self.plot_widget.curve is not None and hasattr(self.plot_widget.curve, 'opts'):
+                    pen = pg.mkPen(color=saved_color, width=DEFAULT_LINE_WIDTH)
+                    self.plot_widget.curve.setPen(pen)
+            except Exception:
+                logger.debug("删除归一化后恢复曲线颜色失败", exc_info=True)
+
         # 更新vline bounds以反映移除变量后的数据范围
         self.plot_widget._update_vline_bounds_from_data()
 

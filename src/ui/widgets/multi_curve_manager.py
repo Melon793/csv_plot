@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 from src.core.data_types import CurveInfo
@@ -505,7 +506,13 @@ class MultiCurveManager:
                         y_format=pw.y_format,
                         visible=True
                     )
-                    pw.current_color_index = 1
+                    # 颜色冲突检测：跳过已被现有曲线占用的颜色索引（统一为 hex 格式比较）
+                    existing_colors = {QColor(ci.color).name() for ci in pw.curves.values()}
+                    start_idx = 1
+                    n_colors = len(pw.curve_colors)
+                    while start_idx < n_colors and QColor(pw.curve_colors[start_idx % n_colors]).name() in existing_colors:
+                        start_idx += 1
+                    pw.current_color_index = start_idx
 
                 for var_name, x_array, y_array, y_format in variables_data:
                     x_values = pw.offset + pw.factor * x_array
@@ -596,7 +603,13 @@ class MultiCurveManager:
                     y_format=pw.y_format,
                     visible=True
                 )
-                pw.current_color_index = 1
+                # 颜色冲突检测：跳过已被现有曲线占用的颜色索引（统一为 hex 格式比较）
+                existing_colors = {QColor(ci.color).name() for ci in pw.curves.values()}
+                start_idx = 1
+                n_colors = len(pw.curve_colors)
+                while start_idx < n_colors and QColor(pw.curve_colors[start_idx % n_colors]).name() in existing_colors:
+                    start_idx += 1
+                pw.current_color_index = start_idx
 
                 if var_name == pw.y_name and not skip_existence_check:
                     if show_duplicate_warning:
@@ -626,7 +639,13 @@ class MultiCurveManager:
                     y_format=pw.y_format,
                     visible=True
                 )
-                pw.current_color_index = 1
+                # 颜色冲突检测：跳过已被现有曲线占用的颜色索引（统一为 hex 格式比较）
+                existing_colors = {QColor(ci.color).name() for ci in pw.curves.values()}
+                start_idx = 1
+                n_colors = len(pw.curve_colors)
+                while start_idx < n_colors and QColor(pw.curve_colors[start_idx % n_colors]).name() in existing_colors:
+                    start_idx += 1
+                pw.current_color_index = start_idx
 
             default_color = pw.curve_colors[pw.current_color_index % len(pw.curve_colors)]
             pw.current_color_index += 1
