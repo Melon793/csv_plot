@@ -463,24 +463,25 @@ class MultiCurveManager:
 
         if len(names) > 1:
             pw = self.pw
-            failed_vars = []
+            invalid_vars = []   # 数据无效/不存在的变量
+            duplicate_vars = [] # 已在绘图中的变量
             success_vars = []
             variables_data = []
 
             for var_name in names:
                 is_valid, _ = pw._validate_plot_data(var_name)
                 if not is_valid:
-                    failed_vars.append(var_name)
+                    invalid_vars.append(var_name)
                     continue
 
                 success, _, x_array, y_array, y_format = pw._prepare_plot_data(var_name)
                 if not success:
-                    failed_vars.append(var_name)
+                    invalid_vars.append(var_name)
                     continue
 
                 if (pw.is_multi_curve_mode and var_name in pw.curves) or \
                    (not pw.is_multi_curve_mode and var_name == pw.y_name):
-                    failed_vars.append(var_name)
+                    duplicate_vars.append(var_name)
                     continue
 
                 variables_data.append((var_name, x_array, y_array, y_format))
@@ -562,8 +563,13 @@ class MultiCurveManager:
                 if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
                     main_window.cursor_sync_manager._sync_min_xrange()
 
-            if failed_vars:
-                QMessageBox.information(pw, "提示", f"以下变量已在绘图中:\n" + "\n".join(failed_vars))
+            if invalid_vars or duplicate_vars:
+                msg_parts = []
+                if invalid_vars:
+                    msg_parts.append("以下变量没有有效数据:\n" + "\n".join(invalid_vars))
+                if duplicate_vars:
+                    msg_parts.append("以下变量已在绘图中:\n" + "\n".join(duplicate_vars))
+                QMessageBox.information(pw, "提示", "\n\n".join(msg_parts))
         else:
             self.pw.plot_variable(names[0])
 
