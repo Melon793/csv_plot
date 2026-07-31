@@ -520,7 +520,10 @@ class MultiCurveManager:
                     pw.current_color_index += 1
 
                     pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-                    curve = pw.plot_item.plot(x_values, y_array, pen=pen, name=var_name, skipFiniteCheck=True)
+                    curve = pw.plot_item.plot(
+                        x_values, y_array, pen=pen, name=var_name,
+                        skipFiniteCheck=True, connect="all",
+                    )
 
                     pw.curves[var_name] = CurveInfo(
                         var_name=var_name,
@@ -656,7 +659,8 @@ class MultiCurveManager:
                 x_values, y_values,
                 pen=pen,
                 name=var_name,
-                skipFiniteCheck=True
+                skipFiniteCheck=True,
+                connect="all",
             )
 
             pw.curves[var_name] = CurveInfo(
