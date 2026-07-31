@@ -88,6 +88,11 @@ class EventHandler:
                 )
                 return
 
+            # XLink 级联抑制：如果兄弟子图正在交互，本次 range 变化是 XLink 传播结果，
+            # 无需进入交互模式或启动 timer。交互结束后由源子图统一广播刷新。
+            if not self._is_interacting and self._sibling_is_interaction_source():
+                return
+
             if not self._is_interacting:
                 self._is_interacting = True
                 logger.debug(
@@ -108,6 +113,22 @@ class EventHandler:
         except Exception:
             logger.warning("范围变化处理出错", exc_info=True)
 
+    def _sibling_is_interaction_source(self) -> bool:
+        """检查是否有兄弟子图正在作为交互源（用户直接操作的子图）。
+
+        用于 XLink 级联抑制：当用户操作子图 A 时，XLink 会将 range 变化传播到
+        子图 B-L。这些传播触发的 sigRangeChanged 不需要进入交互模式。
+        """
+        pw = self.pw
+        main_window = pw.window() if hasattr(pw, 'window') else None
+        if main_window is None or not hasattr(main_window, 'plot_widgets'):
+            return False
+        for container in main_window.plot_widgets:
+            sibling = container.plot_widget
+            if sibling is not pw and getattr(sibling, '_is_interacting', False):
+                return True
+        return False
+
     def _start_interaction(self):
         """开始交互时的优化处理
         
@@ -118,15 +139,34 @@ class EventHandler:
         pass
 
     def _end_interaction(self):
-        """结束交互时的处理"""
+        """结束交互时的处理，并广播刷新到所有 XLink 兄弟子图"""
         try:
             self._is_interacting = False
             self._queue_ui_refresh(immediate=True)
+            # 广播刷新到兄弟子图（它们在交互期间被级联抑制跳过了刷新）
+            self._refresh_siblings_after_interaction()
             if getattr(self.pw, '_pending_cursor_geometry_update', False):
                 self.pw._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()
         except Exception:
             logger.warning("结束交互出错", exc_info=True)
+
+    def _refresh_siblings_after_interaction(self):
+        """交互结束后触发兄弟子图的样式/光标刷新。
+
+        XLink 级联抑制期间，兄弟子图跳过了 _on_range_changed 中的刷新调度。
+        交互结束后需统一补刷，确保 symbol/line 切换和光标状态正确。
+        """
+        pw = self.pw
+        main_window = pw.window() if hasattr(pw, 'window') else None
+        if main_window is None or not hasattr(main_window, 'plot_widgets'):
+            return
+        for container in main_window.plot_widgets:
+            sibling = container.plot_widget
+            if sibling is pw:
+                continue
+            if hasattr(sibling, '_queue_ui_refresh'):
+                sibling._queue_ui_refresh(immediate=True)
 
     def _schedule_cursor_geometry_update(self):
         """调度光标几何更新"""
