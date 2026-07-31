@@ -14,7 +14,7 @@ def main():
     import pyqtgraph as pg
     import time
 
-    pg.setConfigOptions(antialias=False)
+    pg.setConfigOptions(antialias=False, crashWarning=False)
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

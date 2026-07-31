@@ -88,7 +88,7 @@ class PlotDataManager:
 
             pw.y_format = y_format
             pw.y_name = var_name
-            pw.original_index_x = np.asarray(x_array, dtype=np.float32)
+            pw.original_index_x = np.ascontiguousarray(x_array, dtype=np.float32)
             safe_for_float32, abs_max_plot = _evaluate_float32_safety(y_array)
             keep_float64 = (
                 y_format in ["s", "date"]
@@ -96,7 +96,7 @@ class PlotDataManager:
                 or (abs_max_plot is not None and abs_max_plot > 1e8)
             )
             target_y_dtype = np.float64 if keep_float64 else np.float32
-            pw.original_y = np.asarray(y_array, dtype=target_y_dtype)
+            pw.original_y = np.ascontiguousarray(y_array, dtype=target_y_dtype)
             x_values = pw.offset + pw.factor * pw.original_index_x
 
             pw._clear_cursor_items(hide_only=False)
@@ -105,7 +105,8 @@ class PlotDataManager:
 
             _pen = pg.mkPen(color="blue", width=DEFAULT_LINE_WIDTH)
             pw.curve = pw.plot_item.plot(
-                x_values, pw.original_y, pen=_pen, name=var_name, skipFiniteCheck=True
+                x_values, pw.original_y, pen=_pen, name=var_name,
+                skipFiniteCheck=True, connect="all",
             )
 
             pw._queue_ui_refresh()
