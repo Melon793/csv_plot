@@ -236,6 +236,23 @@ class PlotDataManager:
                 else:
                     y_array = np.asarray(array_source, dtype=np.float64)
 
+            # 过滤 CAN/Automotive 哨兵值（约 -2^127 ≈ -1.7e38，表示"无效"信号状态）
+            # 这类值会将 Y 轴范围撑到 1e38 量级，导致 QTransform 浮点精度丢失，
+            # 进而使 InfiniteLine 的 mapFromScene 失效，cursor 无法被鼠标选中。
+            SENTINEL_THRESHOLD = -1e30
+            if y_array.dtype.kind == "f":
+                sentinel_mask = y_array < SENTINEL_THRESHOLD
+                if np.any(sentinel_mask):
+                    sentinel_count = int(np.sum(sentinel_mask))
+                    logger.debug(
+                        "变量 %s 检测到 %d 个哨兵值（< %.1e），已替换为 NaN",
+                        var_name,
+                        sentinel_count,
+                        SENTINEL_THRESHOLD,
+                    )
+                    y_array = y_array.copy()
+                    y_array[sentinel_mask] = np.nan
+
             if np.all(np.isnan(y_array)):
                 return False, f"变量 {var_name} 的数据全为无效值", None, None, ""
 
