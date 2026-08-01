@@ -648,11 +648,13 @@ class PlotDataManager:
         if not (np.isnan(xMax) or np.isinf(xMax)):
             xMin, xMax = self._axis_manager._get_safe_x_range(xMin, xMax)
 
-            pw.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
+            # 先设 limits
             padding_xVal = DEFAULT_PADDING_VAL_X
             limits_xMin = xMin - padding_xVal * (xMax - xMin)
             limits_xMax = xMax + padding_xVal * (xMax - xMin)
             self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+            # 再设 range
+            pw.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
 
         pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
         self._axis_manager._set_vline_bounds([None, None])

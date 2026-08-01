@@ -1678,6 +1678,16 @@ class CursorManager:
 
                             with QSignalBlocker(target_line):
                                 target_line.setPos(x_pos)
+                        else:
+                            logger.debug(
+                                "[CURSOR_SYNC] skip: widget=%s y_name=%s cursor_index=%d "
+                                "vline=%s vline2=%s is_pinned=%s pinned_x_values=%s",
+                                id(widget), getattr(widget, "y_name", "?"), cursor_index,
+                                widget.vline is not None,
+                                getattr(widget, "vline2", None) is not None,
+                                widget.is_cursor_pinned,
+                                getattr(widget, "pinned_x_values", None),
+                            )
                         if len(widget.pinned_x_values) <= cursor_index:
                             widget.pinned_x_values += [x_pos] * (
                                 cursor_index + 1 - len(widget.pinned_x_values)
