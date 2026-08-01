@@ -353,6 +353,36 @@ class AxisManager:
         pw = self.pw
         padding_yVal_limit = 0.5
 
+        # 防御性检查：Y 范围跨度过大（> 1e20）会导致 QTransform 浮点精度丢失，
+        # 使 InfiniteLine 的 mapFromScene 失效，cursor 无法被鼠标选中。
+        # 通常由未过滤的 CAN 哨兵值（≈ -1.7e38）引起，回退到有限值的真实范围。
+        Y_RANGE_ABS_LIMIT = 1e20
+        if abs(min_y) > Y_RANGE_ABS_LIMIT or abs(max_y) > Y_RANGE_ABS_LIMIT:
+            logger.warning(
+                "[Y_RANGE] 检测到超大 Y 范围 [%s, %s]，可能存在未过滤的哨兵值",
+                min_y,
+                max_y,
+            )
+            if getattr(pw, "is_multi_curve_mode", False) and getattr(pw, "curves", None) is not None:
+                try:
+                    y_arrays = pw._collect_visible_curve_arrays("y_data")
+                except Exception:
+                    y_arrays = []
+                if y_arrays:
+                    combined = np.concatenate(y_arrays)
+                    finite_mask = np.isfinite(combined) & (
+                        np.abs(combined) < Y_RANGE_ABS_LIMIT
+                    )
+                    if finite_mask.any():
+                        finite_vals = combined[finite_mask]
+                        min_y = float(np.min(finite_vals))
+                        max_y = float(np.max(finite_vals))
+                        logger.info(
+                            "[Y_RANGE] 已限制为有限值范围 [%s, %s]",
+                            min_y,
+                            max_y,
+                        )
+
         if np.isnan(min_y) or np.isnan(max_y) or min_y == max_y:
             y_center = min_y if not np.isnan(min_y) else 0
             y_range_half = 1.0 if y_center == 0 else abs(y_center) * 0.2
