@@ -987,23 +987,29 @@ class FileLoaderManager(MainWindowBaseManager):
         return self._default_system_directory()
 
     def _default_system_directory(self) -> str:
-        candidates: list[str | None] = []
-        if sys.platform.startswith("win"):
-            candidates.append("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")
+        """返回文件对话框的默认目录。
 
+        注意：Windows 上不能使用 CLSID（如 "::{20D04FE0-...}"）作为
+        QFileDialog 的 initial_dir，Qt 内部 QUrl::fromLocalFile() 会将其
+        解析为畸形 URL "file::/"，导致 SHCreateItemFromParsingName 失败。
+        统一使用 QStandardPaths 获取有效路径。
+        """
         def _safe_location(location):
             try:
                 return QStandardPaths.writableLocation(location)
             except AttributeError:
                 return ""
 
-        candidates.extend(
-            [
-                _safe_location(QStandardPaths.StandardLocation.HomeLocation),
-                _safe_location(QStandardPaths.StandardLocation.DesktopLocation),
-                os.path.sep,
-            ]
-        )
+        candidates: list[str | None] = [
+            _safe_location(QStandardPaths.StandardLocation.HomeLocation),
+            _safe_location(QStandardPaths.StandardLocation.DesktopLocation),
+        ]
+        # Windows 回退到系统盘根目录，Unix 回退到 /
+        if sys.platform.startswith("win"):
+            candidates.append(os.environ.get("SystemDrive", "C:") + os.sep)
+        else:
+            candidates.append(os.path.sep)
+
         for path in candidates:
             if path:
                 return path
