@@ -157,17 +157,24 @@ class LogManager:
         self._queue_listener.start()
 
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
-        root_logger.addHandler(self._queue_handler)
 
         # 环境变量控制的调试日志开关（无需改代码即可开关）:
-        #   CSV_PLOT_DEBUG_XLIMITS=1 → X轴 limits 变更追踪 + X-link 同步过程
-        #   CSV_PLOT_DEBUG_CURSOR=1  → Cursor 锁定/同步状态追踪
+        #   CSV_PLOT_DEBUG=1          → 全局 DEBUG 级别（开启所有模块调试输出）
+        #   CSV_PLOT_DEBUG_XLIMITS=1  → X轴 limits 变更追踪 + X-link 同步过程
+        #   CSV_PLOT_DEBUG_CURSOR=1   → Cursor 锁定/同步状态追踪
+        if os.environ.get("CSV_PLOT_DEBUG"):
+            root_logger.setLevel(logging.DEBUG)
+        else:
+            root_logger.setLevel(logging.INFO)
+
+        root_logger.addHandler(self._queue_handler)
+
         if os.environ.get("CSV_PLOT_DEBUG_XLIMITS"):
             logging.getLogger("src.ui.widgets.axis_manager").setLevel(logging.DEBUG)
             logging.getLogger("src.ui.layout_manager").setLevel(logging.DEBUG)
         if os.environ.get("CSV_PLOT_DEBUG_CURSOR"):
-            logging.getLogger("src.ui.widgets.cursor_manager").setLevel(logging.DEBUG)
+            logging.getLogger("widget.cursor").setLevel(logging.DEBUG)
+            logging.getLogger("src.ui.cursor_sync_manager").setLevel(logging.DEBUG)
             logging.getLogger("src.ui.file_loader_manager").setLevel(logging.DEBUG)
 
         atexit.register(self._stop_listener)

@@ -506,6 +506,9 @@ class CursorSyncManager(MainWindowBaseManager):
             widget.auto_y_in_x_range()
 
     def replots_after_loading(self, skip_pin_reset: bool = False):
+        # 防止 QGraphicsView 在 items 清空/重建期间处理 paint 事件导致
+        # use-after-free 崩溃 (EXC_BAD_ACCESS / SIGSEGV)
+        self.mw.setUpdatesEnabled(False)
         for container in self.mw.plot_widgets:
             container.plot_widget._is_updating_data = True
             if hasattr(container.plot_widget, "_cancel_ui_refresh"):
@@ -701,6 +704,7 @@ class CursorSyncManager(MainWindowBaseManager):
                 first_plot.view_box.setXRange(curr_min, curr_max, padding=0)
 
         finally:
+            self.mw.setUpdatesEnabled(True)
             for container in self.mw.plot_widgets:
                 container.plot_widget._is_updating_data = False
 

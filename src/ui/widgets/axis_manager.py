@@ -143,9 +143,7 @@ class AxisManager:
             if global_result is not None:
                 _, _, limits_xMin, limits_xMax = global_result
 
-        pw.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
-        self._set_safe_y_range(min_y, max_y)
-
+        # 先设 limits（确保新 limits 生效后再设 range，避免被旧 limits 钳制）
         minXRange_val = self._get_min_x_range_value()
         if is_mdf:
             pw.plot_item.setLimits(minXRange=minXRange_val)
@@ -153,6 +151,10 @@ class AxisManager:
             pw.plot_item.setLimits(
                 xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val
             )
+
+        # 再设 range（此时 limits 已是新值）
+        pw.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
+        self._set_safe_y_range(min_y, max_y)
 
         self._set_vline_bounds([min_x, max_x])
 
@@ -223,12 +225,21 @@ class AxisManager:
 
         if linked is not None:
             plot.setXLink(None)
+            logger.debug(
+                "[XLINK] plot=%s temp unlink for setXRange (%.4f, %.4f)",
+                getattr(pw, 'y_name', '?'), xmin, xmax,
+            )
 
-        plot.getViewBox().enableAutoRange(x=False)
-        plot.setXRange(xmin, xmax, padding=max(0, padding))
-
-        if linked is not None:
-            plot.setXLink(linked)
+        try:
+            plot.getViewBox().enableAutoRange(x=False)
+            plot.setXRange(xmin, xmax, padding=max(0, padding))
+        finally:
+            if linked is not None:
+                plot.setXLink(linked)
+                logger.debug(
+                    "[XLINK] plot=%s link restored after setXRange",
+                    getattr(pw, 'y_name', '?'),
+                )
 
         logger.debug(
             "[AXIS] set_xrange_with_link_handling: (%.4f, %.4f) padding=%.4f had_link=%s",
