@@ -14,4 +14,4 @@ __pycache__/
 /tests/
 /.bak/
 error.md
-csv_plot.log
+/*.log
