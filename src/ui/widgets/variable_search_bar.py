@@ -177,6 +177,17 @@ class VariableSearchBar(QWidget):
         self._recently_added: set[str] = set()
         # 输入来源标志：键盘 Enter 添加后选中下一个可选项；鼠标单击添加后保持当前位置
         self._last_input_was_mouse = False
+        # 鼠标场景预存"emit 前的滚动条 value（像素值）"：emit variable_selected 之前保存
+        # 因为 emit 会同步触发 curves_changed → 第一次 refresh（select_first=True），
+        # 该 refresh 会重置滚动条；mark_added 触发的第二次 refresh（select_first=False）
+        # 需使用 emit 前的像素值恢复位置。
+        # 用像素值而非 var_name：scrollToItem(PositionAtTop) 只能对齐到项边界，
+        # 若原位置让项顶部"高于"视口顶部（部分截断），恢复后会丢失像素偏移，产生细微跳动；
+        # setValue(像素) 精确到 1px，无偏移。
+        # 异步执行（QTimer.singleShot(0)）：QListWidget 几何布局惰性更新，
+        # addItem 后立即读 verticalScrollBar().maximum() 仍是 0，setValue 会被 clamp；
+        # singleShot(0) 让 Qt 先完成 updateGeometries 计算真实 scrollbar range
+        self._pending_mouse_scroll: int | None = None
         # 刚添加的变量名：键盘添加后从该项往后找下一个可选项（而非回到列表顶部）
         # textChanged 时清除，让新关键词搜索回到"选中第一个"的默认行为
         self._last_added_var: str | None = None
@@ -363,6 +374,9 @@ class VariableSearchBar(QWidget):
             self._expand_candidates()
         else:
             self._collapse_candidates()
+        # 搜索词变化时原 pending 已无意义（列表内容将重新过滤），
+        # 防御性清空：避免 add 失败时 _pending_mouse_scroll 遗留
+        self._pending_mouse_scroll = None
         # 关键词集合变化（增加/减少/修改/清空）→ 提交刚添加的（转为之前已添加挪末尾）
         current_keywords = set(self.search_edit.text().split())
         if current_keywords != self._prev_keywords_set:
@@ -471,6 +485,16 @@ class VariableSearchBar(QWidget):
                          False 时保持当前位置（鼠标场景，不跳到列表顶部）
         """
         self.candidate_list.blockSignals(True)
+        # 鼠标场景使用 emit 前预存的滚动条像素值（_pending_mouse_scroll）恢复位置。
+        # 不在渲染后立即 setValue：QListWidget 几何布局惰性更新，
+        # addItem 后立即读 verticalScrollBar().maximum() 仍是 0，setValue 会被 clamp；
+        # 改用 QTimer.singleShot(0) 异步恢复：Qt 在下一次事件循环会先完成
+        # updateGeometries 计算真实 scrollbar range，此时 setValue 不再被 clamp
+        # 不用 scrollToItem：PositionAtTop 只能对齐到 item 边界，丢失像素偏移导致细微跳动
+        mouse_scroll = None
+        if not select_first and self._pending_mouse_scroll is not None:
+            mouse_scroll = self._pending_mouse_scroll
+            self._pending_mouse_scroll = None  # 消费一次，避免遗留
         self.candidate_list.clear()
 
         existing = self._get_existing_set()
@@ -518,7 +542,13 @@ class VariableSearchBar(QWidget):
                     self.candidate_list.setCurrentRow(i)
                     break
             # 找不到下一个可选项：保持不选中（currentRow=-1），用户按 ↓ 可重新从头选择
-        # 鼠标场景：不主动选中，保持 currentRow=-1，用户手动单击下一项
+        elif mouse_scroll is not None:
+            # 鼠标场景：异步恢复滚动条到 emit 前的像素值
+            # 同步 setValue 失效原因：addItem 后几何未立即更新，scrollbar maximum 仍为 0
+            # QTimer.singleShot(0) 让 Qt 先完成 updateGeometries 再 setValue
+            # （_recently_added 保证刚添加项保持原位仅置灰，列表顺序未变，恢复安全）
+            sb = self.candidate_list.verticalScrollBar()
+            QTimer.singleShot(0, lambda v=mouse_scroll, bar=sb: bar.setValue(v))
 
         self.candidate_list.blockSignals(False)
 
@@ -607,6 +637,18 @@ class VariableSearchBar(QWidget):
         if var_name:
             # 鼠标触发：refresh 后保持当前位置，不跳到列表顶部
             self._last_input_was_mouse = True
+            # emit 前预存滚动条 value（像素值）：emit 内部会同步触发
+            # curves_changed → 一次 select_first=True 的 refresh（会重置滚动条），
+            # mark_added 触发的第二次 refresh（select_first=False）使用此值通过
+            # QTimer.singleShot(0) + setValue 恢复位置。
+            # 用像素值而非 var_name：scrollToItem(PositionAtTop) 只能对齐到 item 边界，
+            # 若原位置让项顶部"高于"视口顶部（部分截断），恢复后丢失像素偏移，产生细微跳动；
+            # setValue(像素) 精确到 1px，无偏移。
+            # 异步执行：QListWidget 几何惰性更新，addItem 后立即 setValue 时
+            # scrollbar maximum 仍为 0 会被 clamp；singleShot(0) 让 Qt 先完成几何更新
+            self._pending_mouse_scroll = (
+                self.candidate_list.verticalScrollBar().value()
+            )
             self.variable_selected.emit(var_name)
             # 启动防抖：阻塞双击间隔内的后续 click
             self._click_blocked = True
