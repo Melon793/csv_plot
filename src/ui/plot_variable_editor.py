@@ -224,17 +224,17 @@ class PlotVariableEditorDialog(QDialog):
     def _on_variable_removed(self, var_name: str):
         """处理搜索栏中移除已添加变量的请求
 
-        复用 _remove_selected_variable_impl 的删除逻辑，但不调用 commit_recently_added：
-        搜索栏移除是单次操作，不应结束整个添加会话（否则同会话内其他暂存的
-        _recently_added 会被意外提交，从"保持原位"跳到"挪末尾"）。
+        复用 _remove_selected_variable_impl 的删除逻辑，但不调用 reset_session：
+        搜索栏移除是单次操作，不应清空 _last_op_var 锚点（否则后续键盘 Enter
+        无法从被移除项往后定位下一个未添加项）。
 
         流程：
         1. 按变量名在表格中定位行
         2. selectRow 该行
-        3. 调用 _remove_selected_variable_impl()（curves 删除/表格行删除/归一化/清理，不含 commit）
+        3. 调用 _remove_selected_variable_impl()（curves 删除/表格行删除/归一化/清理，不含会话重置）
         4. 调用 search_bar.mark_removed(var_name) 记录锚点（变量回原位）
 
-        会话结束仍由 Esc/关键词变化/表格删除按钮/清空 触发，搜索栏移除不在此列。
+        会话锚点清空仍由 Esc/关键词变化/表格删除按钮/清空 触发，搜索栏移除不在此列。
         """
         # 按变量名定位表格行（变量名在第 1 列，索引 1）
         target_row = None
@@ -250,11 +250,11 @@ class PlotVariableEditorDialog(QDialog):
             if self.search_bar is not None:
                 self.search_bar._pending_mouse_top = None
             return
-        # 选中该行并复用核心删除逻辑（不含会话结束 commit）
+        # 选中该行并复用核心删除逻辑（不含会话重置）
         self.var_table.selectRow(target_row)
         self._remove_selected_variable_impl()
         self.update_button_states()
-        # 标记为"本次刚移除"：记录锚点，变量回原位（保持暂存会话不被打断）
+        # 标记为"本次刚移除"：记录锚点 _last_op_var，变量回原位（不清空锚点，供后续 select_first 定位）
         if self.search_bar is not None:
             self.search_bar.mark_removed(var_name)
             # 焦点恢复：上方 selectRow / removeRow 会让 var_table 抢走焦点，
@@ -498,28 +498,27 @@ class PlotVariableEditorDialog(QDialog):
         super().closeEvent(event)
 
     def remove_selected_variable(self):
-        """表格"删除选中"按钮入口：删除选中行 + 结束添加会话
+        """表格"删除选中"按钮入口：删除选中行 + 重置搜索会话
 
         表格删除是显式会话结束动作（用户心智：删除 = 这批操作到此为止），
-        因此末尾调用 commit_recently_added，把所有暂存的 _recently_added
-        转为"之前已添加"挪到末尾。
+        因此末尾调用 reset_session 清空搜索栏的 _last_op_var 锚点。
 
-        注意：搜索栏内移除变量不应调本方法（会意外结束暂存会话），
+        注意：搜索栏内移除变量不应调本方法（会清空锚点，影响后续 select_first 定位），
         应改调 _remove_selected_variable_impl + mark_removed（见 _on_variable_removed）。
         """
         self._remove_selected_variable_impl()
         self.update_button_states()
-        # 删除变量 → 结束添加会话，刚添加的转为"之前已添加"挪到末尾
+        # 删除变量 → 重置搜索会话（清锚点 + 刷新已添加样式）
         if self.search_bar is not None:
-            self.search_bar.commit_recently_added()
+            self.search_bar.reset_session()
 
     def _remove_selected_variable_impl(self):
-        """删除选中行的核心逻辑（不含会话结束 commit）
+        """删除选中行的核心逻辑（不含会话重置）
 
         供 remove_selected_variable（表格删除按钮）和 _on_variable_removed
         （搜索栏移除）共用。调用方负责后续的会话状态处理：
-        - 表格删除：调 commit_recently_added 结束会话
-        - 搜索栏移除：调 mark_removed 保持暂存状态
+        - 表格删除：调 reset_session 清锚点
+        - 搜索栏移除：调 mark_removed 保持锚点（保持原位 + select_first 定位）
         """
         selected_items = self.var_table.selectedItems()
         if not selected_items:
@@ -689,9 +688,9 @@ class PlotVariableEditorDialog(QDialog):
             # 清空表格
             self.var_table.setRowCount(0)
             self.update_button_states()
-            # 清空所有 → 结束添加会话，刚添加的转为"之前已添加"挪到末尾
+            # 清空所有 → 重置搜索会话（清锚点 + 刷新已添加样式）
             if self.search_bar is not None:
-                self.search_bar.commit_recently_added()
+                self.search_bar.reset_session()
 
             # 更新显示
             self.plot_widget.update_left_header("channel name")
