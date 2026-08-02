@@ -5,7 +5,7 @@
 - QTimer 100ms 防抖
 - 子串匹配 + 关键词分割 + 分级排序
 - 有效性色块（与左侧变量列表 NoHoverDelegate 一致）
-- 已添加变量置灰不可选
+- 已添加变量置灰可选可移除（点击/Enter 已添加项触发移除）
 - 弱引用持有 plot_widget，实时查询已添加变量集合
 """
 
@@ -135,11 +135,13 @@ class VariableSearchBar(QWidget):
     （`plot_widget.curves.keys()` 与 `plot_widget.y_name`），避免快照失效。
 
     Signals:
-        variable_selected(str): 用户选中某候选变量（变量名）
+        variable_selected(str): 用户选中某候选变量（未添加 → 添加）
+        variable_removed(str): 用户在搜索栏中移除已添加变量（已添加 → 移除）
         escape_pressed(): 用户在搜索框为空时按 Esc，父容器可据此把焦点交还表格
     """
 
     variable_selected = Signal(str)
+    variable_removed = Signal(str)
     escape_pressed = Signal()
 
     def __init__(
@@ -191,6 +193,9 @@ class VariableSearchBar(QWidget):
         # 刚添加的变量名：键盘添加后从该项往后找下一个可选项（而非回到列表顶部）
         # textChanged 时清除，让新关键词搜索回到"选中第一个"的默认行为
         self._last_added_var: str | None = None
+        # 刚移除的变量名：键盘移除后从该项往后找下一个可选项（与 _last_added_var 对称）
+        # 避免键盘移除后 select_first 从头找导致跳顶。textChanged / commit_recently_added 时清除
+        self._last_removed_var: str | None = None
         # 上一次的关键词集合：用于检测关键词集合变化（增加/减少/修改）
         # 变化时提交 _recently_added（刚添加的转为之前已添加挪末尾）
         self._prev_keywords_set: set[str] = set()
@@ -299,8 +304,8 @@ class VariableSearchBar(QWidget):
         self._debounce_timer.timeout.connect(self._refresh_list)
         self.search_edit.textChanged.connect(self._on_text_changed)
 
-        # 候选项单击 → 添加（Spotlight 心智模型；已添加项已置灰禁用，单击不触发）
-        # 注意：不连接 itemActivated，避免双击时单击与激活重复添加
+        # 候选项单击 → 添加/移除（Spotlight 心智模型；已添加项单击触发移除）
+        # 注意：不连接 itemActivated，避免双击时单击与激活重复操作
         self.candidate_list.itemClicked.connect(self._on_item_clicked)
 
         # 鼠标点击防抖：避免双击时第二次 release 再次触发 itemClicked
@@ -349,20 +354,46 @@ class VariableSearchBar(QWidget):
         self._recently_added.add(var_name)
         # 记录刚添加的变量，供 _populate_candidate_list 从该项往后找下一个可选项
         self._last_added_var = var_name
+        # 清除 _last_removed_var，避免下次 select_first 误用旧锚点
+        self._last_removed_var = None
         # 鼠标添加不主动选中下一项，键盘添加选中下一个可选项
         self._refresh_list(select_first=not self._last_input_was_mouse)
 
+    def mark_removed(self, var_name: str):
+        """标记变量为"本次刚移除"：恢复正常显示并回原位
+
+        与 mark_added 对称：移除后变量回原位（按原始顺序排序），符合用户心智
+        （移除 = 回到未添加状态）。仅保留 _last_removed_var 锚点供键盘移除后
+        select_first 定位光标，避免跳顶。
+
+        输入来源区分：
+        - 键盘 Enter：refresh 后从该项往后找下一个未添加项（避免跳顶）
+        - 鼠标单击：refresh 后保持当前位置
+
+        Args:
+            var_name: 刚被移除的变量名
+        """
+        # 记录刚移除的变量，供 _populate_candidate_list 从该项往后找下一个可选项
+        self._last_removed_var = var_name
+        # 清除 _last_added_var，避免下次 select_first 误用旧添加锚点
+        self._last_added_var = None
+        # 鼠标移除不主动选中下一项，键盘移除选中下一个未添加项
+        self._refresh_list(select_first=not self._last_input_was_mouse)
+
     def commit_recently_added(self):
-        """提交当前添加会话：清空 _recently_added，并刷新候选列表
+        """提交当前添加/移除会话：清空 _recently_added，并刷新候选列表
 
         无论 _recently_added 是否为空都刷新，因为删除/清空变量后需要重新查询 curves
         更新"已添加"状态（否则用户没用搜索栏添加过变量时，删除已有变量不会刷新）。
 
-        触发时机：Esc 清空输入框、删除变量、清空所有变量。
+        触发时机：Esc 清空输入框、删除变量、清空所有变量、关键词集合变化。
+        注意：搜索栏内移除变量会经 remove_selected_variable 间接调用本方法
+        （见设计文档 1.4 语义澄清）。
         """
         self._recently_added.clear()
-        # 清除"刚添加项"标记：会话已结束，下次键盘添加从头找下一个
+        # 清除"刚添加/刚移除项"标记：会话已结束，下次键盘操作从头找下一个
         self._last_added_var = None
+        self._last_removed_var = None
         self._refresh_list()
 
     # ---------------- 防抖与刷新 ----------------
@@ -382,8 +413,9 @@ class VariableSearchBar(QWidget):
         if current_keywords != self._prev_keywords_set:
             self._recently_added.clear()
         self._prev_keywords_set = current_keywords
-        # 清除"刚添加项"标记，回到"选中第一个可选项"的默认行为
+        # 清除"刚添加/刚移除项"标记，回到"选中第一个可选项"的默认行为
         self._last_added_var = None
+        self._last_removed_var = None
 
     def _refresh_list(self, select_first: bool = True):
         """实际执行过滤 + 排序 + 渲染
@@ -411,8 +443,9 @@ class VariableSearchBar(QWidget):
 
         过滤：空格分隔多个关键字，任一关键字命中即保留（OR 逻辑）。
 
-        排序优先级（统一三态，不区分单/多关键词）：
-        1. existing_rank：未添加(0) = 本次刚添加(0,保持原位) > 之前已添加(1,挪末尾)
+        排序优先级（统一多态，不区分单/多关键词）：
+        1. existing_rank：未添加(0) = 本次刚添加(0,保持原位) >
+          之前已添加(1,挪末尾)。刚移除的变量回原位（rank=0，与未添加同等对待）
         2. last_hit_rank：命中的最后一个关键词索引越大越优先
            （越后输入的关键词匹配的变量越靠前，多关键词时自然生效）
         3. hit_count_rank：总命中数多 → 少
@@ -448,8 +481,10 @@ class VariableSearchBar(QWidget):
 
             hit_count = sum(1 for kw in keywords_lower if kw in name_lower)
 
-            # existing_rank 统一三态：
-            # 0=未添加 或 本次刚添加（保持原位只置灰），1=之前已添加（挪末尾）
+            # existing_rank 统一两态：
+            # 0=未添加 / 本次刚添加（保持原位只置灰）/ 刚移除（回原位，与未添加同等对待）
+            # 1=之前已添加（挪末尾）
+            # 注意：刚移除的变量此时已不在 existing 集合中（父容器已删除曲线），rank=0 回原位
             if var_name in existing:
                 existing_rank = 0 if var_name in self._recently_added else 1
             else:
@@ -516,33 +551,30 @@ class VariableSearchBar(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, var_name)
             item.setData(Qt.ItemDataRole.UserRole + 1, valid)
             item.setData(Qt.ItemDataRole.UserRole + 2, is_existing)
-
-            if is_existing:
-                # 已添加项：置灰禁用，不可选中、不可激活
-                item.setFlags(
-                    item.flags()
-                    & ~Qt.ItemFlag.ItemIsSelectable
-                    & ~Qt.ItemFlag.ItemIsEnabled
-                )
+            # 已添加项不再禁用：保持可选可激活，点击/Enter 触发移除（与添加逻辑对称）
+            # 视觉上仍通过委托灰色斜体 + "(已添加)" 后缀区分
 
             self.candidate_list.addItem(item)
 
         if select_first:
-            # 键盘场景：从"刚添加项"的下一个开始找可选项，找不到则不选中
-            # 理由：用户已用 ↑↓ 跳过前面的项，说明前面的不想要，添加后应跳到当前位置的下一个
+            # 键盘场景：从"刚添加/刚移除项"的下一个开始找"未添加"项，找不到则不选中
+            # 优先 _last_removed_var（键盘移除场景），其次 _last_added_var（键盘添加场景）
+            # 跳过已添加项：避免连续 Enter 误移除（已添加项 Enter 触发移除）
+            anchor_var = self._last_removed_var or self._last_added_var
             start_idx = -1
-            if self._last_added_var is not None:
+            if anchor_var is not None:
                 for i, name in enumerate(filtered):
-                    if name == self._last_added_var:
+                    if name == anchor_var:
                         start_idx = i
                         break
-            # 从 start_idx+1 往后找第一个可选项
+            # 从 start_idx+1 往后找第一个"未添加"项（跳过已添加，避免 Enter 误移除）
             for i in range(start_idx + 1, self.candidate_list.count()):
                 item = self.candidate_list.item(i)
-                if item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                is_item_existing = item.data(Qt.ItemDataRole.UserRole + 2)
+                if not is_item_existing:
                     self.candidate_list.setCurrentRow(i)
                     break
-            # 找不到下一个可选项：保持不选中（currentRow=-1），用户按 ↓ 可重新从头选择
+            # 找不到下一个未添加项：保持不选中（currentRow=-1），用户按 ↓ 可重新从头选择
         elif mouse_top is not None:
             # 鼠标场景：异步恢复滚动条到 emit 前的"视口顶部可见项"位置
             # 用 var_name + 像素偏移：
@@ -582,7 +614,7 @@ class VariableSearchBar(QWidget):
 
     def _update_status_bar(self, count: int):
         self.status_label.setText(
-            f"找到 {count} 个变量 | Enter 添加 | ↑↓ 移动 | Esc 清空"
+            f"找到 {count} 个变量 | Enter 添加/移除 | ↑↓ 移动 | Esc 清空"
         )
 
     # ---------------- 展开/折叠 ----------------
@@ -632,7 +664,7 @@ class VariableSearchBar(QWidget):
                 return
 
     def _accept_current_candidate(self):
-        """Enter 触发：发射当前高亮变量（已添加项不会到这里，因为禁用且不可选）"""
+        """Enter 触发：发射当前高亮变量（已添加 → 移除；未添加 → 添加）"""
         # 双保险：候选列表隐藏或为空时不响应
         # （_refresh_list 已保证空查询时不填充列表，此处防御性兜底）
         if not self.candidate_list.isVisible() or self.candidate_list.count() == 0:
@@ -644,18 +676,26 @@ class VariableSearchBar(QWidget):
             return
         var_name = item.data(Qt.ItemDataRole.UserRole)
         if var_name:
-            # 键盘触发：refresh 后选中第一个可选项
+            is_existing = item.data(Qt.ItemDataRole.UserRole + 2)
+            # 键盘触发：refresh 后选中下一个未添加项
             self._last_input_was_mouse = False
-            self.variable_selected.emit(var_name)
+            if is_existing:
+                # 已添加 → 移除
+                # 键盘场景不需要滚动恢复：清空 pending 防御性兜底，避免遗留被后续 refresh 误用
+                self._pending_mouse_top = None
+                self.variable_removed.emit(var_name)
+            else:
+                # 未添加 → 添加
+                self.variable_selected.emit(var_name)
 
     def _on_item_clicked(self, item: QListWidgetItem):
-        """单击候选项 → 添加变量
+        """单击候选项 → 已添加则移除；未添加则添加
 
-        Spotlight 心智模型：单击即添加。已添加项已通过 ItemIsSelectable & ItemIsEnabled
-        置灰禁用，QListWidget 不会为禁用项 emit itemClicked 信号，因此无需额外去重判断。
+        Spotlight 心智模型：单击即操作。已添加项通过委托灰色斜体 + "(已添加)" 后缀区分，
+        点击已添加项触发移除（与添加逻辑对称）。
 
-        防抖：双击时第一次 release 添加变量后 refresh 切到下一项，第二次 release
-        会误添加下一项。添加后阻塞一个系统双击间隔，避免重复触发。
+        防抖：双击时第一次 release 操作后 refresh 切到下一项，第二次 release
+        会误操作下一项。操作后阻塞一个系统双击间隔，避免重复触发。
         """
         if self._click_blocked:
             return
@@ -663,12 +703,13 @@ class VariableSearchBar(QWidget):
             return
         var_name = item.data(Qt.ItemDataRole.UserRole)
         if var_name:
+            is_existing = item.data(Qt.ItemDataRole.UserRole + 2)
             # 鼠标触发：refresh 后保持当前位置，不跳到列表顶部
             self._last_input_was_mouse = True
             # emit 前预存"视口顶部可见项"的 var_name + 像素偏移：
             # emit 内部会同步触发 curves_changed → 一次 select_first=True 的 refresh，
-            # mark_added 触发的第二次 refresh（select_first=False）使用此信息通过
-            # QTimer.singleShot(0) + scrollToItem + setValue 恢复位置。
+            # mark_added/mark_removed 触发的第二次 refresh（select_first=False）使用此信息
+            # 通过 QTimer.singleShot(0) + scrollToItem + setValue 恢复位置。
             # 用 var_name + offset 而非像素值或比例：
             #   - 像素值：视口高度变化时 setValue 会被 clamp
             #   - 比例：视口变化后"列表 X% 处"对应的项完全变了
@@ -682,7 +723,12 @@ class VariableSearchBar(QWidget):
                 self._pending_mouse_top = (top_var, offset)
             else:
                 self._pending_mouse_top = None
-            self.variable_selected.emit(var_name)
+            if is_existing:
+                # 已添加 → 移除
+                self.variable_removed.emit(var_name)
+            else:
+                # 未添加 → 添加
+                self.variable_selected.emit(var_name)
             # 启动防抖：阻塞双击间隔内的后续 click
             self._click_blocked = True
             self._click_debounce_timer.start()
