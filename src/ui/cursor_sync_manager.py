@@ -604,6 +604,12 @@ class CursorSyncManager(MainWindowBaseManager):
                         else:
                             widget.vline.setBounds([min_x, max_x])
 
+                        # v5.x 修复问题 B：设置 viewRange 到新数据范围，
+                        # 避免后续 plot_variable/add_variable_to_plot 读取旧 viewRange
+                        # （reload 前用户缩放过的范围）导致 Y 范围计算错误。
+                        # 此时 _is_updating_data=True，setXRange 不会触发回调副作用。
+                        widget.view_box.setXRange(min_x, max_x, padding=0)
+
                         if widget.is_multi_curve_mode:
                             current_curves = dict(widget.curves)
 

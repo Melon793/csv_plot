@@ -201,6 +201,25 @@ class FileLoaderManager(MainWindowBaseManager):
             except (TypeError, RuntimeError) as e:
                 logger.debug("重连 %s 信号失败: %s", line_attr, e)
 
+    def _clamp_pinned_to_global_range(self, pinned_values):
+        """将 pinned 值钳制到全局数据 X 范围内。
+
+        v5.x 修复问题 A：reload 后新数据范围可能变小，旧 pinned 值可能超出范围。
+        InfiniteLine.setPos() 不受 setBounds() 钳制，vline 会显示在数据范围之外，
+        拖动时突然跳到 bounds 边界。此处统一钳制 pinned 值，使 MainWindow 与
+        widget 的 pinned_x_values 保持一致。
+        """
+        if not pinned_values:
+            return list(pinned_values)
+        try:
+            x_min, x_max = self.mw.cursor_sync_manager.collect_global_x_range()
+            if x_min is None or x_max is None:
+                return list(pinned_values)
+            return [max(float(x_min), min(float(x_max), v)) for v in pinned_values]
+        except Exception:
+            logger.debug("钳制 pinned 值失败，返回原值", exc_info=True)
+            return list(pinned_values)
+
     def _begin_data_reload(self):
         if self.mw._is_loading_new_data:
             return
@@ -345,6 +364,12 @@ class FileLoaderManager(MainWindowBaseManager):
                     if widget and hasattr(widget, "_last_cursor_update_time"):
                         widget._last_cursor_update_time = time.time()
                 return
+
+            # v5.x 修复问题 A：钳制 pinned 值到新数据范围。
+            # reload 后新数据范围可能变小，旧 pinned 值可能超出范围，
+            # InfiniteLine.setPos() 不受 setBounds() 钳制会导致 vline 显示在数据范围外，
+            # 拖动时突然跳到 bounds 边界。此处统一钳制，后续代码自动使用钳制后的值。
+            saved_pinned_x_values = self._clamp_pinned_to_global_range(saved_pinned_x_values)
 
             self.mw.cursor_mode = saved_cursor_mode
             self.mw.pinned_x_values = list(saved_pinned_x_values)
