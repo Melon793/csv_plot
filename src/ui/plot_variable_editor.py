@@ -75,6 +75,7 @@ class PlotVariableEditorDialog(QDialog):
                 parent=self,
             )
             self.search_bar.variable_selected.connect(self._on_variable_selected)
+            self.search_bar.variable_removed.connect(self._on_variable_removed)
             # 搜索框为空时按 Esc → 焦点切回表格（取消聚焦）
             self.search_bar.escape_pressed.connect(self._on_search_escape)
             layout.addWidget(self.search_bar)
@@ -205,10 +206,10 @@ class PlotVariableEditorDialog(QDialog):
         self.var_table.setFocus()
 
     def _on_variable_selected(self, var_name: str):
-        """处理搜索栏中选中的变量
+        """处理搜索栏中选中（未添加）变量的添加请求
 
-        - show_duplicate_warning=False：搜索栏已通过置灰禁用保证不会重复添加，
-          此处抑制底层 warning 避免双重提示（双保险）
+        - show_duplicate_warning=False：搜索栏已通过 select_first 跳过已添加项
+          保证不会重复添加，此处抑制底层 warning 避免双重提示（双保险）
         - load_current_curves 由 curves_changed 信号触发，无需显式调用
         """
         success = self.plot_widget.add_variable_to_plot(
@@ -218,7 +219,48 @@ class PlotVariableEditorDialog(QDialog):
             # 标记为"本次刚添加"：置灰但保持原位置，避免连续添加时列表频繁跳动
             if self.search_bar is not None:
                 self.search_bar.mark_added(var_name)
-        # 失败分支保持静默：搜索栏已通过置灰禁用保证不会重复添加
+        # 失败分支保持静默：搜索栏已通过 select_first 跳过已添加项保证不会重复添加
+
+    def _on_variable_removed(self, var_name: str):
+        """处理搜索栏中移除已添加变量的请求
+
+        复用 _remove_selected_variable_impl 的删除逻辑，但不调用 commit_recently_added：
+        搜索栏移除是单次操作，不应结束整个添加会话（否则同会话内其他暂存的
+        _recently_added 会被意外提交，从"保持原位"跳到"挪末尾"）。
+
+        流程：
+        1. 按变量名在表格中定位行
+        2. selectRow 该行
+        3. 调用 _remove_selected_variable_impl()（curves 删除/表格行删除/归一化/清理，不含 commit）
+        4. 调用 search_bar.mark_removed(var_name) 记录锚点（变量回原位）
+
+        会话结束仍由 Esc/关键词变化/表格删除按钮/清空 触发，搜索栏移除不在此列。
+        """
+        # 按变量名定位表格行（变量名在第 1 列，索引 1）
+        target_row = None
+        for row in range(self.var_table.rowCount()):
+            item = self.var_table.item(row, 1)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == var_name:
+                target_row = row
+                break
+        if target_row is None:
+            # 变量不在表格中（理论上不会发生，防御性兜底）
+            # 清空 _pending_mouse_top，避免搜索栏 _on_item_clicked emit 前已设置的
+            # pending 值遗留，被后续 refresh 误用导致滚动条跳到错误位置
+            if self.search_bar is not None:
+                self.search_bar._pending_mouse_top = None
+            return
+        # 选中该行并复用核心删除逻辑（不含会话结束 commit）
+        self.var_table.selectRow(target_row)
+        self._remove_selected_variable_impl()
+        self.update_button_states()
+        # 标记为"本次刚移除"：记录锚点，变量回原位（保持暂存会话不被打断）
+        if self.search_bar is not None:
+            self.search_bar.mark_removed(var_name)
+            # 焦点恢复：上方 selectRow / removeRow 会让 var_table 抢走焦点，
+            # 移除完成后把焦点还给搜索框，用户可继续输入关键词或 Enter 操作下一项
+            # 不用 focus_search_edit()（会 selectAll 打断输入），直接 setFocus
+            self.search_bar.search_edit.setFocus()
 
     def load_current_curves(self):
         """加载当前绘图中的曲线"""
@@ -456,7 +498,29 @@ class PlotVariableEditorDialog(QDialog):
         super().closeEvent(event)
 
     def remove_selected_variable(self):
-        """删除选中的变量"""
+        """表格"删除选中"按钮入口：删除选中行 + 结束添加会话
+
+        表格删除是显式会话结束动作（用户心智：删除 = 这批操作到此为止），
+        因此末尾调用 commit_recently_added，把所有暂存的 _recently_added
+        转为"之前已添加"挪到末尾。
+
+        注意：搜索栏内移除变量不应调本方法（会意外结束暂存会话），
+        应改调 _remove_selected_variable_impl + mark_removed（见 _on_variable_removed）。
+        """
+        self._remove_selected_variable_impl()
+        self.update_button_states()
+        # 删除变量 → 结束添加会话，刚添加的转为"之前已添加"挪到末尾
+        if self.search_bar is not None:
+            self.search_bar.commit_recently_added()
+
+    def _remove_selected_variable_impl(self):
+        """删除选中行的核心逻辑（不含会话结束 commit）
+
+        供 remove_selected_variable（表格删除按钮）和 _on_variable_removed
+        （搜索栏移除）共用。调用方负责后续的会话状态处理：
+        - 表格删除：调 commit_recently_added 结束会话
+        - 搜索栏移除：调 mark_removed 保持暂存状态
+        """
         selected_items = self.var_table.selectedItems()
         if not selected_items:
             return
@@ -499,6 +563,14 @@ class PlotVariableEditorDialog(QDialog):
                 # 单曲线模式：清除整个plot
                 self.plot_widget.clear_plot_item()
 
+            # 修复：del curves[var_name] 只删字典项，不会清 y_name 残留
+            # （add_variable_to_plot 单→多切换时 y_name 未清空，仍指向已删除变量）
+            # 搜索栏 _get_existing_set 会把 y_name 误判为"已添加"，导致样式不刷新
+            # 此处统一清理：第三个分支 clear_plot_item 已清 y_name，此条件对其为 False，无副作用
+            if self.plot_widget.y_name == var_name:
+                self.plot_widget.y_name = ""
+                self.plot_widget.y_format = ""
+
             # 从表格中移除
             self.var_table.removeRow(row)
 
@@ -538,6 +610,11 @@ class PlotVariableEditorDialog(QDialog):
             except Exception:
                 logger.debug("删除归一化后恢复曲线颜色失败", exc_info=True)
 
+            # 归一化的 plot_variable 会 emit curves_changed → load_current_curves
+            # 重建表格，清除上方 selectRow(next_row) 设置的选中。归一化后表格仅 1 行，重选行 0
+            if self.var_table.rowCount() > 0:
+                self.var_table.selectRow(0)
+
         # 更新vline bounds以反映移除变量后的数据范围
         self.plot_widget._update_vline_bounds_from_data()
 
@@ -546,7 +623,10 @@ class PlotVariableEditorDialog(QDialog):
             self.plot_widget.update_cursor_label()
 
         # 如果删除了所有曲线，确保完全清理
-        if not self.plot_widget.curves:
+        # 注意：2→1 场景归一化块（上方）会把唯一曲线从 curves 迁移到 y_name，
+        # 此时 curves 为空但 y_name 有值，不应进入全清理块（否则会把归一化保留的
+        # y_name 也清掉，导致搜索栏 _get_existing_set 误判所有变量为"未添加"）
+        if not self.plot_widget.curves and not self.plot_widget.y_name:
             # 清理所有可能的残留
             if self.plot_widget.curve and self.plot_widget.curve.scene() is not None:
                 self.plot_widget.plot_item.removeItem(self.plot_widget.curve)
@@ -560,20 +640,19 @@ class PlotVariableEditorDialog(QDialog):
             self.plot_widget.update_left_header("channel name")
             self.plot_widget.update_right_header("")
 
+            # 先重置 Y 轴范围（与 clear_plot_item 顺序一致：先 reset 再 clear）
+            self.plot_widget._reset_plot_limits()
             # 清理所有plot item（先清除cursor items）
             # 清空所有变量时完全清除对象池，避免复用异常状态的items
             self.plot_widget._clear_cursor_items(hide_only=False)
             self.plot_widget._safe_clear_plot_items()
+            # 通知其他 widget 曲线已清空（与 clear_plot_item 的 emit 行为一致）
+            self.plot_widget.curves_changed.emit()
 
         self.plot_widget._recalc_max_point_density()
         main_window = self.plot_widget.window()
         if main_window is not None and hasattr(main_window, "cursor_sync_manager"):
             main_window.cursor_sync_manager._sync_min_xrange()
-
-        self.update_button_states()
-        # 删除变量 → 结束添加会话，刚添加的转为"之前已添加"挪到末尾
-        if self.search_bar is not None:
-            self.search_bar.commit_recently_added()
 
     def clear_all_variables(self):
         """清空所有变量"""
@@ -598,6 +677,8 @@ class PlotVariableEditorDialog(QDialog):
                 self.plot_widget.curve = None
                 self.plot_widget.original_index_x = None
                 self.plot_widget.original_y = None
+                # 重置 Y 轴范围到默认 0-1（与单曲线分支 clear_plot_item 行为一致）
+                self.plot_widget._reset_plot_limits()
             else:
                 # 单曲线模式：清空整个plot（clear_plot_item 内部会清空 y_name 等）
                 self.plot_widget.clear_plot_item()
