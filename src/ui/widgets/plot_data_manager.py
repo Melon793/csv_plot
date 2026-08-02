@@ -123,8 +123,14 @@ class PlotDataManager:
                 data_max_y = np.nanmax(pw.original_y)
                 self._axis_manager._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
 
-                current_x_range = pw.view_box.viewRange()[0]
-                x_min, x_max = current_x_range
+                # v5.x 修复问题 B：Y viewRange 基于"用户当前 viewRange 与新数据范围的交集"计算。
+                # 保留用户的 X viewRange 不变，但 Y 范围只反映用户可见窗口内实际存在的数据。
+                # 交集为空时 _get_y_range_in_x_window 内部会回退到全数据范围。
+                data_x_min = float(np.min(x_values))
+                data_x_max = float(np.max(x_values))
+                view_x_min, view_x_max = pw.view_box.viewRange()[0]
+                x_min = max(view_x_min, data_x_min)
+                x_max = min(view_x_max, data_x_max)
                 min_y, max_y = self._get_y_range_in_x_window(
                     x_values, pw.original_y, x_min, x_max
                 )
