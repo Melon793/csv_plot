@@ -56,6 +56,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
         self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
         self._drag_indicator_source = None
+        self._drag_indicator_var_names = None  # 缓存当前拖入变量名，供定时器轮询 Shift 时复用
+        self._drag_indicator_last_text = None  # 缓存上次提示文字，避免定时器重复刷新
         self._drag_indicator_guard = QTimer(self)
         self._drag_indicator_guard.setInterval(120)
         self._drag_indicator_guard.timeout.connect(self._enforce_drag_indicator_visibility)
@@ -332,12 +334,27 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if not source_widget or not source_widget.isVisible():
                 self._drag_indicator_source = None
             else:
+                # source_widget 存在（从变量编辑器拖入）：跳过 Shift 轮询，保持需求边界清晰
                 return
 
         if self._should_hide_drag_indicator(main_window):
             self._drag_indicator_source = None
+            self._drag_indicator_var_names = None
+            self._drag_indicator_last_text = None
             self._drag_indicator_guard.stop()
             main_window.layout_manager._hide_drag_indicator_for_plot(self)
+            return
+
+        # Shift 状态轮询：仅在从变量表拖入（source_widget 为 None）时生效。
+        # 解决 dragMoveEvent 在鼠标静止时不触发、无法实时切换提示文字的问题。
+        var_names = getattr(self, '_drag_indicator_var_names', None)
+        if var_names is None:
+            return
+        shift_pressed = bool(QApplication.queryKeyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        desired_text = "释放以替换" if shift_pressed else None
+        if desired_text != getattr(self, '_drag_indicator_last_text', '_unset'):
+            self._drag_indicator_last_text = desired_text
+            main_window.layout_manager._show_drag_indicator_for_plot(self, var_names, desired_text)
 
     def _notify_drag_indicator(
         self,
@@ -356,11 +373,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         if hide:
             self._drag_indicator_source = None
+            self._drag_indicator_var_names = None  # 清空缓存
+            self._drag_indicator_last_text = None  # 清空缓存
             self._drag_indicator_guard.stop()
             main_window.layout_manager._hide_drag_indicator_for_plot(self)
             return
 
         self._drag_indicator_source = source_widget
+        self._drag_indicator_var_names = var_names or []  # 缓存供定时器轮询使用
+        self._drag_indicator_last_text = indicator_text  # 缓存当前提示文字
         main_window.layout_manager._show_drag_indicator_for_plot(self, var_names or [], indicator_text)
         if not self._drag_indicator_guard.isActive():
             self._drag_indicator_guard.start()
@@ -609,7 +630,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
             var_names = self._extract_var_names_from_text(event.mimeData().text())
-            self._notify_drag_indicator(var_names, hide=False)
+            shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            # Shift 时强制显示"释放以替换"；非 Shift 时让 _build_indicator_text 自行判断
+            text_override = "释放以替换" if shift_pressed else None
+            self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
             event.acceptProposedAction()
         else:
             self._notify_drag_indicator(hide=True)
@@ -618,7 +642,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def dragMoveEvent(self, event):
         if event.mimeData().hasText():
             var_names = self._extract_var_names_from_text(event.mimeData().text())
-            self._notify_drag_indicator(var_names, hide=False)
+            shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            text_override = "释放以替换" if shift_pressed else None
+            self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
             event.acceptProposedAction()
         else:
             self._notify_drag_indicator(hide=True)
@@ -631,7 +657,29 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def dropEvent(self, event):
         self._notify_drag_indicator(hide=True)
         var_names = parse_var_names_from_mimedata(event.mimeData())
-        self.add_variables_to_plot(var_names)
+        shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if shift_pressed:
+            # Shift + 拖入 = 替换：先清空，再走对应绘制路径
+            self.clear_plot_item()
+            if len(var_names) > 1:
+                self.add_variables_to_plot(var_names)
+            elif len(var_names) == 1:
+                # 复用 plot_variable 的"首绘"路径（设置 original_index_x/original_y、blue 颜色）
+                self.plot_variable(var_names[0])
+            # var_names 为空时无操作
+        else:
+            # 普通拖入 = 添加
+            if len(var_names) > 1:
+                self.add_variables_to_plot(var_names)
+            elif len(var_names) == 1:
+                if not self.is_multi_curve_mode and self.curve and self.y_name:
+                    # plot 已有 1 个变量 → 走"添加"路径（add_variable_to_plot 内部会把旧曲线转入 pw.curves）
+                    self.add_variable_to_plot(var_names[0])
+                else:
+                    # plot 空白（首绘）或 多变量模式（plot_variable 内部转交 add_variable_to_plot）
+                    self.plot_variable(var_names[0])
+
         event.acceptProposedAction()
         if self.window():
             self.window().layout_manager.request_mark_stats_refresh()
