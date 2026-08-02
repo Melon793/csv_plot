@@ -17,7 +17,7 @@ from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
 from src.ui.mark_stats import MarkStatsWindow
 from src.ui.dialogs.help import HelpDialog
-from src.ui.dialogs.layout_input import LayoutInputDialog
+from src.ui.dialogs.layout_grid_selector import LayoutGridSelector
 from src.ui.dialogs.time_correction import TimeCorrectionDialog
 from src.ui.widgets.plot_container import PlotContainerWidget
 from src.app.plot_context import PlotContext
@@ -401,7 +401,7 @@ class LayoutManager(MainWindowBaseManager):
             self.mw.mark_stats_window.update_stats(stats_list)
 
     def open_layout_dialog(self):
-        dlg = LayoutInputDialog(
+        dlg = LayoutGridSelector(
             max_rows=self.mw._plot_row_max_default,
             max_cols=self.mw._plot_col_max_default,
             cur_rows=self.mw._plot_row_current,

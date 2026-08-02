@@ -120,7 +120,7 @@ csv_plot/
         ├── splash_screen.py     # SplashScreen 启动画面
         ├── dialogs/
         │   ├── help.py          # HelpDialog 帮助文档
-        │   ├── layout_input.py  # LayoutInputDialog 行列数配置
+        │   ├── layout_grid_selector.py  # LayoutGridSelector 网格布局选择（类 Word 插入表格）
         │   ├── axis.py          # AxisDialog 坐标轴设置
         │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
         │   ├── sheet_selector.py  # SheetSelectorDialog Excel 工作表选择
