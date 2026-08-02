@@ -50,20 +50,7 @@ class PlotContainerWidget(QWidget):
         layout.addWidget(self._indicator_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def _build_indicator_text(self, var_names: list[str]) -> str:
-        has_curve = bool(getattr(self.plot_widget, "curve", None))
-        has_multi_curves = bool(getattr(self.plot_widget, "curves", None))
-        multi_mode = bool(
-            getattr(self.plot_widget, "is_multi_curve_mode", False)
-            or len(var_names) > 1
-            or has_multi_curves
-        )
-
-        if multi_mode:
-            return "释放以添加"
-
-        if has_curve:
-            return "释放以替换"
-
+        # 非 Shift 路径统一为"添加"（Shift 路径通过 text_override 直接传入"释放以替换"）
         return "释放以添加"
 
     def show_drag_indicator(
