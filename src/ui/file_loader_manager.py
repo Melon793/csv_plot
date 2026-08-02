@@ -178,6 +178,29 @@ class FileLoaderManager(MainWindowBaseManager):
             except Exception:
                 logger.debug("添加 %s 时异常", attr_name, exc_info=True)
 
+    def _reconnect_vline_signals(self, widget):
+        """幂等重连 vline/vline2 的 sigPositionChanged 信号。
+
+        v5.x 修复：_begin_data_reload 断开了 vline 信号，但 _restore_cursor_state_after_reload
+        在 free cursor 路径下提前 return 跳过重连，导致后续开启 anchored cursor 时
+        on_vline_position_changed 永不触发、跨 plot cursor link 失效。
+        本方法在所有路径下统一重连，先 disconnect 再 connect 保证幂等。
+        """
+        for line_attr in ("vline", "vline2"):
+            line = getattr(widget, line_attr, None)
+            if line is None:
+                continue
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=RuntimeWarning)
+                    line.sigPositionChanged.disconnect(widget.on_vline_position_changed)
+            except (TypeError, RuntimeError):
+                pass  # 原本就未连接，忽略
+            try:
+                line.sigPositionChanged.connect(widget.on_vline_position_changed)
+            except (TypeError, RuntimeError) as e:
+                logger.debug("重连 %s 信号失败: %s", line_attr, e)
+
     def _begin_data_reload(self):
         if self.mw._is_loading_new_data:
             return
@@ -305,6 +328,15 @@ class FileLoaderManager(MainWindowBaseManager):
                 if widget:
                     self._reattach_vlines_to_scene(widget)
 
+            # v5.x 修复：无条件重连 vline 信号（必须在 free cursor 判断之前）。
+            # _begin_data_reload 断开了信号，但原实现把重连放在 is_free_cursor return 之后，
+            # 导致 reload 前 free cursor 时信号永远不会被重连，后续开启 anchored cursor
+            # 拖动 vline 不会触发 on_vline_position_changed，跨 plot link 失效。
+            for container in getattr(self.mw, "plot_widgets", []):
+                widget = getattr(container, "plot_widget", None)
+                if widget:
+                    self._reconnect_vline_signals(widget)
+
             if is_free_cursor:
                 # 防抖：阻止 reload 过渡期内的中间 cursor label 更新，
                 # 只在 _post_reload_ui_refresh 中渲染一次
@@ -394,22 +426,8 @@ class FileLoaderManager(MainWindowBaseManager):
                 if hasattr(widget, "_last_cursor_update_time"):
                     widget._last_cursor_update_time = time.time()
 
-            # v5.x: 恢复 vline/vline2 信号连接
-            for widget in widgets_list:
-                if hasattr(widget, "vline"):
-                    try:
-                        widget.vline.sigPositionChanged.connect(
-                            widget.on_vline_position_changed
-                        )
-                    except (TypeError, RuntimeError):
-                        pass
-                if hasattr(widget, "vline2"):
-                    try:
-                        widget.vline2.sigPositionChanged.connect(
-                            widget.on_vline_position_changed
-                        )
-                    except (TypeError, RuntimeError):
-                        pass
+            # v5.x: vline 信号重连已上移到 free cursor 判断之前（_reconnect_vline_signals），
+            # 此处不再重复连接，避免槽被多次调用。
 
         except Exception:
             logger.debug("恢复 pin 状态失败", exc_info=True)
