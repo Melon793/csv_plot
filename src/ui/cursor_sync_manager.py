@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 import numpy as np
-import pyqtgraph as pg
 
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QMessageBox
 
 from src.core.config import (
-    DEFAULT_LINE_WIDTH,
     DEFAULT_PADDING_VAL_X,
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
@@ -65,9 +63,7 @@ class CursorSyncManager(MainWindowBaseManager):
             for container in self.mw.plot_widgets:
                 widget = container.plot_widget
                 try:
-                    has_data = (widget.curve is not None) or (
-                        widget.is_multi_curve_mode and widget.curves
-                    )
+                    has_data = bool(widget.curves)
                     if has_data:
                         widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
@@ -262,8 +258,11 @@ class CursorSyncManager(MainWindowBaseManager):
         datalength = 0
         if hasattr(self.mw, "loader") and self.mw.loader is not None:
             datalength = max(int(self.mw.loader.datalength), 0)
-        elif self.mw.plot_widgets[0].plot_widget.original_index_x is not None:
-            datalength = len(self.mw.plot_widgets[0].plot_widget.original_index_x)
+        else:
+            first_widget = self.mw.plot_widgets[0].plot_widget
+            first_ci = next(iter(first_widget.curves.values()), None)
+            if first_ci is not None and first_ci.original_index is not None:
+                datalength = len(first_ci.original_index)
 
         new_display_values = []
         for index_pos in pinned_indices:
@@ -284,24 +283,11 @@ class CursorSyncManager(MainWindowBaseManager):
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
 
-            if (
-                hasattr(widget, "original_index_x")
-                and widget.original_index_x is not None
-                and len(widget.original_index_x) > 0
-            ):
-                min_index = np.min(widget.original_index_x)
-                max_index = np.max(widget.original_index_x)
-                new_min_x = widget.offset + widget.factor * min_index
-                new_max_x = widget.offset + widget.factor * max_index
-            elif widget.is_multi_curve_mode and widget.curves:
-                first_curve_info = next(iter(widget.curves.values()), None)
-                if first_curve_info is not None and first_curve_info.y_data is not None:
-                    data_len = len(first_curve_info.y_data)
-                    new_min_x = widget.offset + widget.factor * 1
-                    new_max_x = widget.offset + widget.factor * data_len
-                else:
-                    new_min_x = widget.offset + widget.factor * 1
-                    new_max_x = widget.offset + widget.factor * datalength
+            # 统一版：始终从 curves 字典获取数据范围
+            x_arrays = widget._collect_visible_curve_arrays('x_data')
+            if x_arrays:
+                combined = np.concatenate(x_arrays)
+                new_min_x, new_max_x = np.nanmin(combined), np.nanmax(combined)
             else:
                 new_min_x = widget.offset + widget.factor * 1
                 new_max_x = widget.offset + widget.factor * datalength
@@ -526,10 +512,8 @@ class CursorSyncManager(MainWindowBaseManager):
             all_y_names = []
             for container in self.mw.plot_widgets:
                 widget = container.plot_widget
-                if widget.y_name:
-                    all_y_names.append(widget.y_name)
-                if widget.is_multi_curve_mode and widget.curves:
-                    all_y_names.extend(widget.curves.keys())
+                # 统一：始终从 curves 字典获取变量名
+                all_y_names.extend(widget.curves.keys())
 
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
@@ -604,99 +588,66 @@ class CursorSyncManager(MainWindowBaseManager):
                         else:
                             widget.vline.setBounds([min_x, max_x])
 
-                        if widget.is_multi_curve_mode:
-                            current_curves = dict(widget.curves)
+                        # === 统一 reload 路径：始终从 curves 字典保存/重建 ===
+                        saved_state = {
+                            var_name: {"color": ci.color, "visible": ci.visible}
+                            for var_name, ci in widget.curves.items()
+                        }
+                        logger.debug(
+                            "[RELOAD] Plot[%d] saved_state: %s",
+                            idx, {k: v for k, v in saved_state.items()},
+                        )
 
-                            widget.curves.clear()
-                            widget.is_multi_curve_mode = False
-                            widget.current_color_index = 0
+                        # 清空所有状态
+                        widget._clear_cursor_items(hide_only=False)
+                        widget._safe_clear_plot_items()
+                        widget.curves.clear()
+                        widget.current_color_index = 0
 
-                            widget._clear_cursor_items(hide_only=False)
-                            widget._safe_clear_plot_items()
-                            widget.curve = None
-                            widget.y_name = ""
-                            widget.original_index_x = None
-                            widget.original_y = None
-
-                            curves_added = 0
-                            visibility_to_restore = {}
-
-                            for var_name, ci in current_curves.items():
-                                var_exists = (
-                                    (var_name in self.mw.loader.var_names)
-                                    if is_mdf
-                                    else (var_name in self.mw.loader.df.columns)
-                                )
-                                if (
-                                    var_exists
-                                    and self.mw.loader.df_validity.get(var_name, -1) != -1
-                                ):
-                                    preferred_color = ci.color
-                                    success = widget.add_variable_to_plot(
-                                        var_name,
-                                        skip_existence_check=True,
-                                        preferred_color=preferred_color,
-                                    )
-                                    if success:
-                                        curves_added += 1
-                                        visibility_to_restore[var_name] = ci.visible
-
-                            widget.update_multi_curve_mode()
-
-                            # 修复：仅剩1条曲线时，转换为规范化单曲线状态，
-                            # 避免 curves 字典有数据但 curve/original_y 为空的混合状态
-                            if curves_added == 1:
-                                single_var = next(iter(widget.curves.keys()))
-                                saved_color = widget.curves[single_var].color
-                                widget.plot_variable(single_var)
-                                # 恢复原有颜色（plot_variable 会重置为蓝色）
-                                try:
-                                    if widget.curve is not None and hasattr(widget.curve, 'opts'):
-                                        pen = pg.mkPen(color=saved_color, width=DEFAULT_LINE_WIDTH)
-                                        widget.curve.setPen(pen)
-                                except Exception:
-                                    logger.debug("重载归一化后恢复曲线颜色失败", exc_info=True)
-                            elif curves_added > 1:
-                                # 原有的 visibility 恢复逻辑（仅多曲线时执行）
-                                for var_name, original_visible in visibility_to_restore.items():
-                                    if var_name in widget.curves:
-                                        widget.curves[var_name].visible = original_visible
-                                        if widget.curves[var_name].curve is not None:
-                                            try:
-                                                widget.curves[var_name].curve.setVisible(
-                                                    original_visible
-                                                )
-                                            except Exception:
-                                                logger.debug("恢复曲线可见性失败", exc_info=True)
-                                widget.update_legend()
-
-                            if curves_added == 0:
-                                cleared.append((idx + 1, "所有变量无效"))
-                        else:
-                            y_name = widget.y_name
-                            if not y_name:
-                                continue
+                        # 逐个重建
+                        curves_added = 0
+                        for var_name, state in saved_state.items():
                             var_exists = (
-                                (y_name in self.mw.loader.var_names)
+                                (var_name in self.mw.loader.var_names)
                                 if is_mdf
-                                else (y_name in self.mw.loader.df.columns)
+                                else (var_name in self.mw.loader.df.columns)
                             )
-                            if (
+                            if not (
                                 var_exists
-                                and self.mw.loader.df_validity.get(y_name, -1) != -1
+                                and self.mw.loader.df_validity.get(var_name, -1) != -1
                             ):
-                                success = widget.plot_variable(y_name)
-                                if not success:
-                                    widget.clear_plot_item()
-                                    cleared.append((idx + 1, "无效数据"))
-                            else:
-                                widget.clear_plot_item()
-                                reason = (
-                                    f"未找到变量:{y_name}"
-                                    if not var_exists
-                                    else f"无效数据:{y_name}"
+                                logger.debug(
+                                    "[RELOAD] Plot[%d] 变量 %s 无效，跳过 (exists=%s)",
+                                    idx, var_name, var_exists,
                                 )
-                                cleared.append((idx + 1, reason))
+                                continue
+                            success = widget.add_variable_to_plot(
+                                var_name,
+                                skip_existence_check=True,
+                                preferred_color=state["color"],
+                            )
+                            if success:
+                                curves_added += 1
+                                # 恢复可见性
+                                if var_name in widget.curves:
+                                    widget.curves[var_name].visible = state["visible"]
+                                    if widget.curves[var_name].curve is not None:
+                                        try:
+                                            widget.curves[var_name].curve.setVisible(
+                                                state["visible"]
+                                            )
+                                        except Exception:
+                                            logger.debug("恢复曲线可见性失败", exc_info=True)
+
+                        # 更新 UI（统一路径，无需归一化）
+                        widget._update_header_for_curves()
+                        logger.debug(
+                            "[RELOAD] Plot[%d] 重建完成: curves_added=%d/%d",
+                            idx, curves_added, len(saved_state),
+                        )
+
+                        if curves_added == 0 and saved_state:
+                            cleared.append((idx + 1, "所有变量无效"))
 
             if self.mw.plot_widgets:
                 first_plot = self.mw.plot_widgets[0].plot_widget
@@ -712,9 +663,7 @@ class CursorSyncManager(MainWindowBaseManager):
                 widget = container.plot_widget
                 try:
                     if hasattr(widget, "view_box") and hasattr(widget, "plot_item"):
-                        has_data = (widget.curve is not None) or (
-                            widget.is_multi_curve_mode and widget.curves
-                        )
+                        has_data = bool(widget.curves)
                         if has_data:
                             widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:

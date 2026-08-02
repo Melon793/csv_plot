@@ -1,3 +1,9 @@
+"""曲线数据访问策略（统一版）
+
+单线/多线模式统一后，所有曲线均存储在 pw.curves 字典中，
+不再区分 SingleCurveStrategy / MultiCurveStrategy。
+"""
+
 from abc import ABC, abstractmethod
 from typing import Any
 import numpy as np
@@ -26,49 +32,9 @@ class CurveStrategy(ABC):
     def get_curve_line_width(self, name: str) -> int: ...
 
 
-class SingleCurveStrategy(CurveStrategy):
-    def __init__(self, plot_widget):
-        self._pw = plot_widget
+class UnifiedCurveStrategy(CurveStrategy):
+    """统一曲线策略 — 始终从 curves 字典获取数据"""
 
-    def has_data(self) -> bool:
-        return self._pw.curve is not None and getattr(self._pw, "y_name", None) is not None
-
-    def get_curve_names(self) -> list[str]:
-        if not self.has_data():
-            return []
-        return [self._pw.y_name]
-
-    def get_y_arrays(self) -> list[np.ndarray]:
-        if not self.has_data():
-            return []
-        return [self._pw.curve.y_data]
-
-    def get_x_data(self) -> np.ndarray:
-        if self._pw.curve is None:
-            return np.array([])
-        return self._pw.curve.x_data
-
-    def get_curve_by_name(self, name: str) -> Any:
-        if name == getattr(self._pw, "y_name", None):
-            return self._pw.curve
-        return None
-
-    def get_curve_color(self, name: str) -> Any:
-        curve = self.get_curve_by_name(name)
-        if curve is not None:
-            pen = curve.opts.get("pen", None)
-            return pen.color() if pen else None
-        return None
-
-    def get_curve_line_width(self, name: str) -> int:
-        curve = self.get_curve_by_name(name)
-        if curve is not None:
-            pen = curve.opts.get("pen", None)
-            return pen.width() if pen else 1
-        return 1
-
-
-class MultiCurveStrategy(CurveStrategy):
     def __init__(self, plot_widget):
         self._pw = plot_widget
 
@@ -81,13 +47,13 @@ class MultiCurveStrategy(CurveStrategy):
     def get_y_arrays(self) -> list[np.ndarray]:
         if not self._pw.curves:
             return []
-        return [c.y_data for c in self._pw.curves.values()]
+        return [c.y_data for c in self._pw.curves.values() if c.y_data is not None]
 
     def get_x_data(self) -> np.ndarray:
-        names = self.get_curve_names()
-        if not names:
+        if not self._pw.curves:
             return np.array([])
-        return self._pw.curves[names[0]].x_data
+        first_ci = next(iter(self._pw.curves.values()))
+        return first_ci.x_data if first_ci.x_data is not None else np.array([])
 
     def get_curve_by_name(self, name: str) -> Any:
         info = self._pw.curves.get(name)

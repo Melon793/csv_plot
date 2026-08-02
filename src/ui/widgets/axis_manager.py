@@ -80,7 +80,7 @@ class AxisManager:
             and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
         )
 
-        has_own_data = bool(pw.curve or pw.curves)
+        has_own_data = bool(pw.curves)  # 统一：只看 curves 字典
 
         x_values = None
         own_min_x = None
@@ -90,15 +90,10 @@ class AxisManager:
             pw.axis_x.setTicks(None)
             pw.axis_y.setTicks(None)
 
-            if pw.is_multi_curve_mode and pw.curves:
-                x_arrays = pw._collect_visible_curve_arrays("x_data")
-                if x_arrays:
-                    x_values = np.concatenate(x_arrays)
-            elif pw.original_index_x is not None:
-                x_values = pw.offset + pw.factor * pw.original_index_x
-            elif pw.curve:
-                x_data, _ = pw.curve.getData()
-                x_values = x_data if x_data is not None else None
+            # 统一：始终从 curves 字典收集
+            x_arrays = pw._collect_visible_curve_arrays("x_data")
+            if x_arrays:
+                x_values = np.concatenate(x_arrays)
 
             if x_values is not None:
                 own_min_x = np.min(x_values)
@@ -129,6 +124,14 @@ class AxisManager:
             return False
 
         min_y, max_y = self._get_y_range_for_auto_range(has_own_data, x_values)
+        logger.debug(
+            "[AUTO_RANGE] auto_range: has_own_data=%s, X=(%s, %s), Y=(%.6g, %.6g), "
+            "curves=%s",
+            has_own_data,
+            f"{min_x:.4f}" if min_x is not None else None,
+            f"{max_x:.4f}" if max_x is not None else None,
+            min_y, max_y, list(pw.curves.keys()),
+        )
 
         limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
         limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
@@ -169,41 +172,23 @@ class AxisManager:
         has_own_data: bool,
         x_values: np.ndarray | None,
     ) -> tuple[float, float]:
-        """获取 auto_range 所需的 Y 轴范围"""
+        """获取 auto_range 所需的 Y 轴范围（统一版：始终从 curves 字典收集）"""
         pw = self.pw
-
+    
         if not has_own_data:
             return 0, 1
-
-        if pw.is_multi_curve_mode and pw.curves:
-            y_arrays = pw._collect_visible_curve_arrays("y_data")
-            if y_arrays:
-                combined = np.concatenate(y_arrays)
-                if combined.size:
-                    min_y = np.nanmin(combined)
-                    max_y = np.nanmax(combined)
-                    return min_y, max_y
-            return 0, 1
-        else:
-            if pw.original_y is not None:
-                special_limits = pw.handle_single_point_limits(x_values, pw.original_y)
+    
+        y_arrays = pw._collect_visible_curve_arrays("y_data")
+        if y_arrays:
+            combined = np.concatenate(y_arrays)
+            if combined.size:
+                special_limits = pw.handle_single_point_limits(x_values, combined)
                 if special_limits:
                     return special_limits[2], special_limits[3]
-                min_y = np.nanmin(pw.original_y)
-                max_y = np.nanmax(pw.original_y)
+                min_y = np.nanmin(combined)
+                max_y = np.nanmax(combined)
                 return min_y, max_y
-            elif pw.curve:
-                _, y_data = pw.curve.getData()
-                if y_data is not None:
-                    return np.nanmin(y_data), np.nanmax(y_data)
-            elif pw.curves:
-                # 兜底：混合状态下从 curves 字典收集数据
-                y_arrays = pw._collect_visible_curve_arrays("y_data")
-                if y_arrays:
-                    combined = np.concatenate(y_arrays)
-                    if combined.size:
-                        return float(np.nanmin(combined)), float(np.nanmax(combined))
-            return 0, 1
+        return 0, 1
 
     def auto_y_in_x_range(self) -> None:
         """在当前 X 范围内自动调整 Y 轴"""
@@ -301,7 +286,7 @@ class AxisManager:
                 pw.view_box.state.get('limits', {}).get('xLimits', [None, None])
                 if hasattr(pw, 'view_box') else [None, None]
             )
-            plot_id = getattr(pw, 'y_name', '') or str(list(getattr(pw, 'curves', {}).keys())[:2])
+            plot_id = str(list(getattr(pw, 'curves', {}).keys())[:2])
             logger.debug(
                 "[XLIMITS] plot=%s set xMin=%s xMax=%s (old: %s) caller=%s",
                 plot_id, limits_xMin, limits_xMax, old_limits, caller_info,
@@ -317,22 +302,12 @@ class AxisManager:
         pw.plot_item.setLimits(minXRange=minXRange)
 
     def _recalc_max_point_density(self) -> None:
-        """重新计算当前 plot 的最大数据点密度"""
+        """重新计算当前 plot 的最大数据点密度（统一版：仅从 curves 字典）"""
         pw = self.pw
         densities: list[float] = []
         for ci in pw.curves.values():
             if ci.point_density > 0:
                 densities.append(ci.point_density)
-        if not densities and pw.curve is not None and pw.original_y is not None:
-            n = len(pw.original_y)
-            if n > 1 and pw.original_index_x is not None:
-                x_span = (
-                    pw.offset
-                    + pw.factor * float(np.max(pw.original_index_x))
-                    - (pw.offset + pw.factor * float(np.min(pw.original_index_x)))
-                )
-                if x_span > 0:
-                    densities.append(n / x_span)
         pw._max_point_density = max(densities) if densities else 0.0
 
     def _set_safe_y_range(
@@ -363,7 +338,7 @@ class AxisManager:
                 min_y,
                 max_y,
             )
-            if getattr(pw, "is_multi_curve_mode", False) and getattr(pw, "curves", None) is not None:
+            if getattr(pw, "curves", None):
                 try:
                     y_arrays = pw._collect_visible_curve_arrays("y_data")
                 except Exception:

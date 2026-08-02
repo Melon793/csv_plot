@@ -1,14 +1,13 @@
 """
-PlotDataManager - 单曲线绘图和数据管理
+PlotDataManager - 绘图和数据管理（统一版）
 
-负责 DraggableGraphicsLayoutWidget 的单曲线绘图和数据管理功能：
-- 单曲线绘制
+负责 DraggableGraphicsLayoutWidget 的绘图和数据管理功能：
+- 曲线绘制（统一路径：始终写入 curves 字典）
 - 数据准备、验证
-- 时间修正
+- 时间修正（统一从 CurveInfo.original_index 重算）
 - 数据清除
-- 原始数据缓存
 
-此模块从 csv_plot_pyqt6.py 迁移而来。
+单线/多线模式统一后，所有曲线均以 CurveInfo 存储在 pw.curves 字典中。
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from src.core.config import (
     compute_global_x_limits,
     safe_qt_op,
 )
+from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
 
 logger = get_logger("widget.plot_data")
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 
 class PlotDataManager:
-    """负责单曲线绘图和数据管理"""
+    """负责绘图和数据管理（统一路径：始终写入 curves 字典）"""
 
     def __init__(self, axis_manager: AxisManager):
         if axis_manager is None:
@@ -48,35 +48,43 @@ class PlotDataManager:
         return self._axis_manager.pw
 
     def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
-        """绘制变量到图表
-
+        """绘制变量到图表（统一版）
+    
+        空 plot 时创建首条曲线（蓝色）写入 curves 字典；
+        已有曲线时转交 add_variable_to_plot 路径。
+    
         Args:
             var_name: 要绘制的变量名称
             show_duplicate_warning: 是否显示重复变量警告
-
+    
         Returns:
             bool: 绘制是否成功
         """
         pw = self.pw
-
+        logger.debug(
+            "[PLOT_VAR] plot_variable 入口: var_name=%s, 当前 curves=%s",
+            var_name, list(pw.curves.keys()),
+        )
+    
         is_valid, error_msg = self._validate_plot_data(var_name)
         if not is_valid:
             from PySide6.QtWidgets import QMessageBox
-
+    
             QMessageBox.warning(pw, "错误", error_msg)
             return False
-
+    
         success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(
             var_name
         )
         if not success:
             from PySide6.QtWidgets import QMessageBox
-
+    
             QMessageBox.warning(pw, "错误", error_msg)
             return False
-
+    
         try:
-            if pw.is_multi_curve_mode:
+            # 已有曲线时，转交 add_variable_to_plot 路径（由后者负责 emit curves_changed）
+            if pw.curves:
                 x_values = pw.offset + pw.factor * x_array
                 return pw.add_variable_to_plot(
                     var_name,
@@ -85,10 +93,15 @@ class PlotDataManager:
                     y_format,
                     show_duplicate_warning=show_duplicate_warning,
                 )
-
-            pw.y_format = y_format
-            pw.y_name = var_name
-            pw.original_index_x = np.ascontiguousarray(x_array, dtype=np.float32)
+    
+            # === 统一路径：始终写入 curves 字典 ===
+            pw._clear_cursor_items(hide_only=False)
+            self._safe_clear_plot_items()
+            pw.curves.clear()
+            pw.current_color_index = 0
+    
+            # 性能优化：保持 ascontiguousarray + float32 动态选择
+            original_index = np.ascontiguousarray(x_array, dtype=np.float32)
             safe_for_float32, abs_max_plot = _evaluate_float32_safety(y_array)
             keep_float64 = (
                 y_format in ["s", "date"]
@@ -96,34 +109,51 @@ class PlotDataManager:
                 or (abs_max_plot is not None and abs_max_plot > 1e8)
             )
             target_y_dtype = np.float64 if keep_float64 else np.float32
-            pw.original_y = np.ascontiguousarray(y_array, dtype=target_y_dtype)
-            x_values = pw.offset + pw.factor * pw.original_index_x
-
-            pw._clear_cursor_items(hide_only=False)
-            self._safe_clear_plot_items()
-            pw.curves.clear()
-
-            _pen = pg.mkPen(color="blue", width=DEFAULT_LINE_WIDTH)
-            pw.curve = pw.plot_item.plot(
-                x_values, pw.original_y, pen=_pen, name=var_name,
+            y_contiguous = np.ascontiguousarray(y_array, dtype=target_y_dtype)
+            x_values = pw.offset + pw.factor * original_index
+    
+            # 首条曲线保持蓝色（向后兼容）
+            color = "blue"
+            _pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            curve = pw.plot_item.plot(
+                x_values, y_contiguous, pen=_pen, name=var_name,
                 skipFiniteCheck=True, connect="all",
             )
-
+    
+            # 写入 curves 字典（统一数据源）
+            pw.curves[var_name] = CurveInfo(
+                var_name=var_name,
+                curve=curve,
+                x_data=x_values,
+                y_data=y_contiguous,
+                original_index=original_index,
+                color=color,
+                y_format=y_format or '',
+                visible=True,
+            )
+            pw.current_color_index = 1  # 后续曲线从颜色循环第 2 色开始
+            logger.debug(
+                "[PLOT_VAR] CurveInfo 已创建: var_name=%s, x_shape=%s, y_shape=%s, "
+                "y_dtype=%s, color=%s",
+                var_name, x_values.shape, y_contiguous.shape,
+                y_contiguous.dtype, color,
+            )
+    
             pw._queue_ui_refresh()
-
+    
             full_title = f"{var_name} ({pw.units.get(var_name, '')})".strip()
             pw.update_left_header(full_title)
-
-            special_limits = self.handle_single_point_limits(x_values, pw.original_y)
+    
+            special_limits = self.handle_single_point_limits(x_values, y_contiguous)
             if special_limits:
                 min_x, max_x, min_y, max_y = special_limits
                 self._axis_manager._set_safe_y_range(min_y, max_y)
             else:
-                data_min_y = np.nanmin(pw.original_y)
-                data_max_y = np.nanmax(pw.original_y)
+                data_min_y = np.nanmin(y_contiguous)
+                data_max_y = np.nanmax(y_contiguous)
                 self._axis_manager._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
-
-                # v5.x 修复问题 B：Y viewRange 基于"用户当前 viewRange 与新数据范围的交集"计算。
+    
+                # v5.x 修复问题 B：Y viewRange 基于“用户当前 viewRange 与新数据范围的交集”计算。
                 # 保留用户的 X viewRange 不变，但 Y 范围只反映用户可见窗口内实际存在的数据。
                 # 交集为空时 _get_y_range_in_x_window 内部会回退到全数据范围。
                 data_x_min = float(np.min(x_values))
@@ -132,15 +162,19 @@ class PlotDataManager:
                 x_min = max(view_x_min, data_x_min)
                 x_max = min(view_x_max, data_x_max)
                 min_y, max_y = self._get_y_range_in_x_window(
-                    x_values, pw.original_y, x_min, x_max
+                    x_values, y_contiguous, x_min, x_max
                 )
                 self._axis_manager._set_safe_y_range(min_y, max_y, set_limits=False)
-
+                logger.debug(
+                    "[PLOT_VAR] Y轴范围计算: limits=(%.6g, %.6g), view=(%.6g, %.6g)",
+                    data_min_y, data_max_y, min_y, max_y,
+                )
+    
             min_x, max_x = np.min(x_values), np.max(x_values)
             self._axis_manager._set_vline_bounds([min_x, max_x])
             pw.plot_item.update()
             pw._update_cursor_after_plot(min_x, max_x)
-
+    
             self._axis_manager._recalc_max_point_density()
             if not getattr(pw, "_is_updating_data", False):
                 main_window = pw.window()
@@ -148,12 +182,13 @@ class PlotDataManager:
                     main_window, "cursor_sync_manager"
                 ):
                     main_window.cursor_sync_manager._sync_min_xrange()
-
+    
+            logger.debug("[PLOT_VAR] plot_variable 完成: var_name=%s, 数据点=%d", var_name, len(y_contiguous))
             return True
-
+    
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
-
+    
             QMessageBox.critical(pw, "绘图错误", f"绘制变量时发生错误: {str(e)}")
             return False
 
@@ -488,7 +523,7 @@ class PlotDataManager:
         return y_values, y_format
 
     def update_time_correction(self, new_factor: float, new_offset: float):
-        """更新时间修正参数"""
+        """更新时间修正参数（统一版：始终从 CurveInfo.original_index 重算）"""
         pw = self.pw
         pw._suppress_pin_update = True
         try:
@@ -496,37 +531,29 @@ class PlotDataManager:
             old_offset = pw.offset
             pw.factor = new_factor
             pw.offset = new_offset
-
-            is_mdf = (
-                pw.plot_context is not None
-                and hasattr(pw.plot_context, "loader")
-                and pw.plot_context.loader is not None
-                and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
+            logger.debug(
+                "[TIME_CORR] update_time_correction: factor %.6g -> %.6g, "
+                "offset %.6g -> %.6g, 影响曲线数=%d",
+                old_factor, new_factor, old_offset, new_offset, len(pw.curves),
             )
 
-            if pw.is_multi_curve_mode:
-                for var_name, ci in pw.curves.items():
-                    if ci.curve is not None and ci.y_data is not None:
-                        curve = ci.curve
-                        y_data = ci.y_data
-                        if is_mdf:
-                            old_x_data = ci.x_data
-                            if old_x_data is not None and old_factor != 0:
-                                original_time = (old_x_data - old_offset) / old_factor
-                            elif old_x_data is not None:
-                                original_time = old_x_data
-                            else:
-                                original_time = np.arange(1, len(y_data) + 1)
-                        else:
-                            original_time = np.arange(1, len(y_data) + 1)
-                        new_x = pw.offset + pw.factor * original_time
-                        curve.setData(new_x, y_data)
-                        ci.x_data = new_x
-                        ci.update_x_range()
-            else:
-                if pw.original_index_x is not None:
-                    new_x = pw.offset + pw.factor * pw.original_index_x
-                    pw.curve.setData(new_x, pw.original_y)
+            # 统一路径：遍历所有曲线，从 original_index 重算 x_data（消除反算精度问题）
+            for var_name, ci in pw.curves.items():
+                if ci.curve is None or ci.y_data is None:
+                    continue
+                if ci.original_index is not None:
+                    new_x = pw.offset + pw.factor * ci.original_index
+                else:
+                    # 兆底：无 original_index 时用 arange 重建（不应发生）
+                    logger.warning(
+                        "[TIME_CORR] 曲线 %s 缺少 original_index，使用 arange 兆底", var_name
+                    )
+                    new_x = pw.offset + pw.factor * np.arange(
+                        1, len(ci.y_data) + 1, dtype=np.float32
+                    )
+                ci.curve.setData(new_x, ci.y_data)
+                ci.x_data = new_x
+                ci.update_x_range()
 
             # 统一 X limits 计算：始终基于全局数据范围（loader.datalength / global_time_range），
             # 避免使用 per-plot 曲线长度导致与 reload/auto_range 路径不一致
@@ -602,30 +629,15 @@ class PlotDataManager:
             current_scene.removeItem(item)
 
     def _clear_plot_data(self):
-        """清除绘图数据"""
+        """清除绘图数据（统一版：仅操作 curves 字典）"""
         pw = self.pw
         try:
+            cleared_count = len(pw.curves)
             pw._clear_cursor_items(hide_only=False)
             self._safe_clear_plot_items()
             pw.axis_y.setLabel(text="")
-            pw.y_name = ""
-            pw.y_format = ""
             pw.update_left_header("channel name")
             pw.update_right_header("")
-
-            if pw.curve:
-                if hasattr(pw.curve, "_cached_pen_key"):
-                    delattr(pw.curve, "_cached_pen_key")
-                if hasattr(pw.curve, "_has_symbols"):
-                    delattr(pw.curve, "_has_symbols")
-                try:
-                    pw.curve.clear()
-                except Exception:
-                    logger.debug("清理 curve 时异常")
-
-            pw.curve = None
-            pw.original_index_x = None
-            pw.original_y = None
 
             for var_name, ci in pw.curves.items():
                 if ci.curve is not None:
@@ -637,11 +649,11 @@ class PlotDataManager:
                     try:
                         curve.clear()
                     except Exception:
-                        logger.debug("清理多曲线 curve 时异常: %s", var_name)
+                        logger.debug("清理曲线时异常: %s", var_name)
 
             pw.curves.clear()
-            pw.is_multi_curve_mode = False
             pw.current_color_index = 0
+            logger.debug("[CLEAR] _clear_plot_data: 已清除 %d 条曲线", cleared_count)
 
             self._axis_manager._recalc_max_point_density()
             if not getattr(pw, "_is_updating_data", False):
@@ -684,23 +696,20 @@ class PlotDataManager:
 
         pw.xMin = xMin
         pw.xMax = xMax
-        pw.y_name = ""
-        pw.y_format = ""
         pw._clear_cursor_items(hide_only=False)
         self._safe_clear_plot_items()
         pw.axis_y.setLabel(text="")
         pw.update_left_header("channel name")
         pw.update_right_header("")
 
-        pw.curve = None
-        pw.original_index_x = None
-        pw.original_y = None
+        pw.curves.clear()
+        pw.current_color_index = 0
 
     def _update_vline_bounds_from_data(self):
-        """从数据更新光标线边界"""
+        """从数据更新光标线边界（统一版：始终从 curves 字典收集）"""
         pw = self.pw
         updated = False
-        if pw.is_multi_curve_mode and pw.curves:
+        if pw.curves:
             all_x = []
             for ci in pw.curves.values():
                 if ci.x_data is not None:
@@ -708,9 +717,5 @@ class PlotDataManager:
             if all_x:
                 self._axis_manager._set_vline_bounds([min(all_x), max(all_x)])
                 updated = True
-        elif pw.original_index_x is not None:
-            x_values = pw.offset + pw.factor * pw.original_index_x
-            self._axis_manager._set_vline_bounds([np.min(x_values), np.max(x_values)])
-            updated = True
         if not updated:
             self._axis_manager._set_vline_bounds([None, None])
