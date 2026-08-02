@@ -599,7 +599,7 @@ class CursorManager:
             self._show_x_position_only()
             return
 
-        if not self.pw.curves and not self.pw.curve:
+        if not self.pw.curves:
             self.pw.update_right_header("")
             return
 
@@ -617,50 +617,29 @@ class CursorManager:
             (x_min, x_max), (y_min, y_max) = view_box.viewRange()
 
             curves_to_process = []
-            if self.pw.curves:
-                for var_name, ci in self.pw.curves.items():
-                    if not ci.visible:
-                        continue
-                    curves_to_process.append(
-                        {
-                            "var_name": var_name,
-                            "x_data": ci.x_data,
-                            "y_data": ci.y_data,
-                            "color": ci.color,
-                            "y_format": ci.y_format,
-                            "unit": self.pw.units.get(var_name, ""),
-                            "enum_map": getattr(
-                                self.pw.plot_context, "_enum_text_maps", {}
-                            ).get(var_name, {}),
-                        }
-                    )
-            elif not self.pw.is_multi_curve_mode and self.pw.curve and self.y_name:
-                x_data, y_data = self.pw.curve.getData()
-                if x_data is not None and len(x_data) > 0:
-                    curve_color = "blue"
-                    try:
-                        if (
-                            hasattr(self.pw.curve, "opts")
-                            and "pen" in self.pw.curve.opts
-                        ):
-                            pen = self.pw.curve.opts["pen"]
-                            if hasattr(pen, "color"):
-                                curve_color = pen.color().name()
-                    except Exception:
-                        logger.debug("获取曲线颜色失败", exc_info=True)
-                    curves_to_process.append(
-                        {
-                            "var_name": self.y_name,
-                            "x_data": x_data,
-                            "y_data": y_data,
-                            "color": curve_color,
-                            "y_format": self.y_format,
-                            "unit": self.pw.units.get(self.y_name, ""),
-                            "enum_map": getattr(
-                                self.pw.plot_context, "_enum_text_maps", {}
-                            ).get(self.y_name, {}),
-                        }
-                    )
+            # 统一路径：始终从 curves 字典获取
+            for var_name, ci in self.pw.curves.items():
+                if not ci.visible:
+                    continue
+                curves_to_process.append(
+                    {
+                        "var_name": var_name,
+                        "x_data": ci.x_data,
+                        "y_data": ci.y_data,
+                        "color": ci.color,
+                        "y_format": ci.y_format,
+                        "unit": self.pw.units.get(var_name, ""),
+                        "enum_map": getattr(
+                            self.pw.plot_context, "_enum_text_maps", {}
+                        ).get(var_name, {}),
+                    }
+                )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[CURSOR] update_cursor_label: 处理曲线数=%d, x_positions=%s",
+                    len(curves_to_process),
+                    [f"{x:.4f}" for x in x_positions[:3]],
+                )
 
             import pyqtgraph as pg
 
@@ -1505,19 +1484,14 @@ class CursorManager:
             logger.debug("更新 anchored cursor 可视化失败", exc_info=True)
 
     def _has_visible_curve_data(self) -> bool:
-        """判断当前 plot 是否有可见且有数据的曲线"""
+        """判断当前 plot 是否有可见且有数据的曲线（统一版）"""
         try:
-            if self.pw.curves:
-                for ci in self.pw.curves.values():
-                    if not ci.visible:
-                        continue
-                    x_data = ci.x_data
-                    if x_data is not None and len(x_data) > 0:
-                        return True
-                return False
-            if self.pw.curve:
-                x_data, _ = self.pw.curve.getData()
-                return x_data is not None and len(x_data) > 0
+            for ci in self.pw.curves.values():
+                if not ci.visible:
+                    continue
+                x_data = ci.x_data
+                if x_data is not None and len(x_data) > 0:
+                    return True
             return False
         except Exception:
             return False
@@ -1711,40 +1685,14 @@ class CursorManager:
                 self.update_cursor_label()
 
     def _update_vline_bounds_from_data(self):
-        """根据当前绘制的数据更新vline bounds"""
+        """根据当前绘制的数据更新vline bounds（统一版：始终从 curves 字典）"""
         pw = self.pw
         try:
-            if hasattr(pw, 'original_index_x') and pw.original_index_x is not None and len(pw.original_index_x) > 0:
-                min_index = np.min(pw.original_index_x)
-                max_index = np.max(pw.original_index_x)
-                min_x = pw.offset + pw.factor * min_index
-                max_x = pw.offset + pw.factor * max_index
-                pw._set_vline_bounds([min_x, max_x])
-                return min_x, max_x
-
-            if pw.is_multi_curve_mode and pw.curves:
-                for ci in pw.curves.values():
-                    if ci.y_data is not None:
-                        datalength = len(ci.y_data)
-                        if datalength > 0:
-                            min_x = pw.offset + pw.factor * 1
-                            max_x = pw.offset + pw.factor * datalength
-                            pw._set_vline_bounds([min_x, max_x])
-                            return min_x, max_x
-                        break
-
-            if pw.is_multi_curve_mode and pw.curves:
+            if pw.curves:
                 x_arrays = pw._collect_visible_curve_arrays('x_data')
                 if x_arrays:
                     combined = np.concatenate(x_arrays)
                     min_x, max_x = np.nanmin(combined), np.nanmax(combined)
-                    pw._set_vline_bounds([min_x, max_x])
-                    return min_x, max_x
-
-            if pw.curve is not None:
-                x_data, _ = pw.curve.getData()
-                if x_data is not None and len(x_data) > 0:
-                    min_x, max_x = np.min(x_data), np.max(x_data)
                     pw._set_vline_bounds([min_x, max_x])
                     return min_x, max_x
 

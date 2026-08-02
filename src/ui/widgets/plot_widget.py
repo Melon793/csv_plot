@@ -12,7 +12,6 @@ import pandas as pd
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
 from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
-from src.core.data_types import CurveInfo
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
@@ -43,8 +42,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         super().__init__()
         self.factor = 1.0
         self.offset = 0.0
-        self.original_index_x = None
-        self.original_y = None
         self.mark_region = None
         self.is_cursor_pinned = False  # 记录cursor是否被固定
         self.last_valid_cursor_mode = "1 free cursor"
@@ -96,10 +93,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     @property
     def curve_strategy(self):
-        from src.core.curve_strategy import SingleCurveStrategy, MultiCurveStrategy
-        if self.is_multi_curve_mode and self.curves:
-            return MultiCurveStrategy(self)
-        return SingleCurveStrategy(self)
+        from src.core.curve_strategy import UnifiedCurveStrategy
+        return UnifiedCurveStrategy(self)
 
     def setup_header(self):
         """配置顶部 header → 委托到 PlotUIManager"""
@@ -661,28 +656,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._notify_drag_indicator(hide=True)
         var_names = parse_var_names_from_mimedata(event.mimeData())
         shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-
+    
         if shift_pressed:
             # Shift + 拖入 = 替换：先清空，再走对应绘制路径
             self.clear_plot_item()
             if len(var_names) > 1:
                 self.add_variables_to_plot(var_names)
             elif len(var_names) == 1:
-                # 复用 plot_variable 的"首绘"路径（设置 original_index_x/original_y、blue 颜色）
                 self.plot_variable(var_names[0])
             # var_names 为空时无操作
         else:
-            # 普通拖入 = 添加
+            # 普通拖入 = 添加（统一路径：plot_variable 内部自动判断首绘/追加）
             if len(var_names) > 1:
                 self.add_variables_to_plot(var_names)
             elif len(var_names) == 1:
-                if not self.is_multi_curve_mode and self.curve and self.y_name:
-                    # plot 已有 1 个变量 → 走"添加"路径（add_variable_to_plot 内部会把旧曲线转入 pw.curves）
-                    self.add_variable_to_plot(var_names[0])
-                else:
-                    # plot 空白（首绘）或 多变量模式（plot_variable 内部转交 add_variable_to_plot）
-                    self.plot_variable(var_names[0])
-
+                self.plot_variable(var_names[0])
+    
         event.acceptProposedAction()
         if self.window():
             self.window().layout_manager.request_mark_stats_refresh()
@@ -691,11 +680,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """批量添加变量到当前绘图区 → 委托到 MultiCurveManager"""
         if not var_names:
             return
-        prev_count = len(self.curves) + (1 if (self.y_name and not self.is_multi_curve_mode) else 0)
+        prev_count = len(self.curves)
         self._multi_curve_manager.add_variables_to_plot(var_names)
         # 仅多变量分支 emit（len==1 时内部调 plot_variable，由后者 emit，避免双 emit）
         if len(var_names) > 1:
-            cur_count = len(self.curves) + (1 if (self.y_name and not self.is_multi_curve_mode) else 0)
+            cur_count = len(self.curves)
             if cur_count != prev_count:
                 self.curves_changed.emit()
 
@@ -713,8 +702,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
         """绘制变量到图表 → 委托到 PlotDataManager"""
         success = self._plot_data_manager.plot_variable(var_name, show_duplicate_warning)
-        # 仅非多曲线分支 emit（多曲线分支内部已委托给 add_variable_to_plot，由后者 emit，避免双 emit）
-        if success and not self.is_multi_curve_mode:
+        # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）
+        if success and len(self.curves) == 1:
             self.curves_changed.emit()
         return success
 
@@ -753,8 +742,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return success
     
     def update_multi_curve_mode(self):
-        """更新多曲线模式状态 → 委托到 MultiCurveManager"""
-        self._multi_curve_manager.update_multi_curve_mode()
+        """更新 header 显示 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._update_header_for_curves()
+
+    def _update_header_for_curves(self):
+        """统一的 header 更新 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._update_header_for_curves()
 
     def update_legend(self):
         """更新图例显示 → 委托到 MultiCurveManager"""

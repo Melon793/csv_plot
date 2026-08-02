@@ -62,7 +62,7 @@ class MarkRegionManager:
             self.pw.mark_region.setRegion([old_min, old_max])
 
     def get_mark_stats(self) -> list | None:
-        """获取标记区域的统计信息
+        """获取标记区域的统计信息（统一版：始终走 curves 字典路径）
 
         【NumPy优化】使用NumPy掩码数组批量计算统计值，避免循环过滤
         """
@@ -70,11 +70,7 @@ class MarkRegionManager:
             return None
 
         min_x, max_x = self.pw.mark_region.getRegion()
-
-        if self.pw.is_multi_curve_mode:
-            return self._get_mark_stats_multi_curve(min_x, max_x)
-        else:
-            return self._get_mark_stats_single_curve(min_x, max_x)
+        return self._get_mark_stats_multi_curve(min_x, max_x)
 
     def _get_mark_stats_multi_curve(self, min_x: float, max_x: float) -> list | None:
         """多曲线模式的统计计算"""
@@ -155,70 +151,3 @@ class MarkRegionManager:
             )
 
         return stats_list if stats_list else None
-
-    def _get_mark_stats_single_curve(self, min_x: float, max_x: float) -> list | None:
-        """单曲线模式的统计计算"""
-        if not self.pw.curve:
-            return None
-
-        if (
-            hasattr(self.pw, "original_index_x")
-            and hasattr(self.pw, "original_y")
-            and self.pw.original_index_x is not None
-        ):
-            x_data = self.pw.offset + self.pw.factor * self.pw.original_index_x
-            y_data = self.pw.original_y
-        else:
-            x_data, y_data = self.pw.curve.getData()
-            if x_data is None or len(x_data) == 0:
-                return None
-
-        x_data = np.asarray(x_data)
-        y_data = np.asarray(y_data)
-        if x_data.dtype.kind in "iu":
-            safe_x, _ = _evaluate_float32_safety(x_data)
-            x_dtype = np.float32 if safe_x else np.float64
-            x_data = x_data.astype(x_dtype)
-        if y_data.dtype.kind in "iu":
-            safe_y, _ = _evaluate_float32_safety(y_data)
-            y_dtype = np.float32 if safe_y else np.float64
-            y_data = y_data.astype(y_dtype)
-
-        idx_left = np.argmin(np.abs(x_data - min_x))
-        idx_right = np.argmin(np.abs(x_data - max_x))
-        x1 = x_data[idx_left]
-        y1 = y_data[idx_left]
-        x2 = x_data[idx_right]
-        y2 = y_data[idx_right]
-        dx = x2 - x1
-        dy = y2 - y1
-        slope = float("inf") if dx == 0 else dy / dx
-
-        mask = (x_data >= min_x) & (x_data <= max_x)
-        if not np.any(mask):
-            y_avg = y_max = y_min = np.nan
-        else:
-            y_masked = y_data[mask]
-            valid_y = y_masked[~np.isnan(y_masked)]
-            if len(valid_y) > 0:
-                y_avg = np.mean(valid_y)
-                y_max = np.max(valid_y)
-                y_min = np.min(valid_y)
-            else:
-                y_avg = y_max = y_min = np.nan
-
-        return [
-            MarkStatEntry(
-                x1=x1,
-                x2=x2,
-                y1=y1,
-                y2=y2,
-                dx=dx,
-                dy=dy,
-                slope=slope,
-                label=self.pw.label_left.text(),
-                y_avg=y_avg,
-                y_max=y_max,
-                y_min=y_min,
-            )
-        ]

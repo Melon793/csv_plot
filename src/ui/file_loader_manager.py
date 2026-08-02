@@ -591,9 +591,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 for var_name, ci in widget.curves.items():
                     if ci.curve is not None:
                         curves_to_check.append((var_name, ci.curve))
-            elif hasattr(widget, "curve") and widget.curve is not None:
-                var_name = getattr(widget, "y_name", "") or "single"
-                curves_to_check.append((var_name, widget.curve))
         except (RuntimeError, AttributeError):
             return
 
@@ -618,12 +615,6 @@ class FileLoaderManager(MainWindowBaseManager):
                     and var_name in widget.curves
                 ):
                     widget._multi_curve_manager._recreate_curve(var_name)
-                elif (
-                    hasattr(widget, "plot_variable")
-                    and hasattr(widget, "y_name")
-                    and widget.y_name == var_name
-                ):
-                    widget.plot_variable(var_name, show_duplicate_warning=False)
                 else:
                     logger.warning(
                         "[v5.8] curve[%s] 重建失败：无法确定重建方式", var_name
@@ -988,10 +979,7 @@ class FileLoaderManager(MainWindowBaseManager):
         # 自动恢复：replots_after_loading 优先，auto-save 仅作降级兜底
         if hasattr(self.mw, 'plot_config_manager'):
             any_curve_restored = any(
-                not container.isHidden() and (
-                    container.plot_widget.y_name or
-                    (container.plot_widget.is_multi_curve_mode and container.plot_widget.curves)
-                )
+                not container.isHidden() and bool(container.plot_widget.curves)
                 for container in self.mw.plot_widgets
             )
 

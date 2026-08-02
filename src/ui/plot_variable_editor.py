@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 from src.core.config import DEFAULT_LINE_WIDTH
-from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.ui.widgets.variable_search_bar import VariableSearchBar
@@ -263,50 +262,11 @@ class PlotVariableEditorDialog(QDialog):
             self.search_bar.search_edit.setFocus()
 
     def load_current_curves(self):
-        """加载当前绘图中的曲线"""
-        import numpy as np
+        """加载当前绘图中的曲线（统一版：始终从 curves 字典加载）"""
         # 先清空表格
         self.var_table.setRowCount(0)
 
-        # 检查多曲线模式
-        if self.plot_widget.curves:
-            # 有curves字典：从curves字典加载（无论是否是多曲线模式）
-            for var_name, curve_info in self.plot_widget.curves.items():
-                self._add_variable_to_table(var_name, curve_info)
-        elif self.plot_widget.curve and self.plot_widget.y_name:
-            # 单曲线模式：从curve和y_name加载
-            var_name = self.plot_widget.y_name
-
-            # 获取曲线的实际可见性状态
-            curve_visible = True
-            try:
-                if hasattr(self.plot_widget.curve, "isVisible"):
-                    curve_visible = self.plot_widget.curve.isVisible()
-            except Exception:
-                logger.debug("curve.isVisible() 异常，跳过 visible 状态读取", exc_info=True)
-
-            # 获取曲线的实际颜色
-            curve_color = "blue"
-            try:
-                if (
-                    hasattr(self.plot_widget.curve, "opts")
-                    and "pen" in self.plot_widget.curve.opts
-                ):
-                    pen = self.plot_widget.curve.opts["pen"]
-                    if hasattr(pen, "color"):
-                        curve_color = pen.color().name()
-            except Exception:
-                logger.debug("pen.color() 异常，使用默认颜色", exc_info=True)
-
-            curve_info = CurveInfo(
-                var_name=var_name,
-                curve=self.plot_widget.curve,
-                x_data=np.array([]),
-                y_data=np.array([]),
-                color=curve_color,
-                visible=curve_visible,
-                y_format=self.plot_widget.y_format,
-            )
+        for var_name, curve_info in self.plot_widget.curves.items():
             self._add_variable_to_table(var_name, curve_info)
 
         self.update_button_states()
@@ -399,23 +359,18 @@ class PlotVariableEditorDialog(QDialog):
         self.var_table.setItem(row, 2, color_item)
 
     def _on_checkbox_changed(self, var_name, state):
-        """复选框状态变化处理"""
+        """复选框状态变化处理（统一版）"""
         is_visible = state == Qt.CheckState.Checked.value
+        logger.debug(
+            "[EDITOR] _on_checkbox_changed: var=%s, visible=%s", var_name, is_visible
+        )
 
-        # 更新曲线可见性
-        if self.plot_widget.curves and var_name in self.plot_widget.curves:
+        if var_name in self.plot_widget.curves:
             self.plot_widget.curves[var_name].visible = is_visible
             ci = self.plot_widget.curves[var_name]
             if ci.curve is not None:
-                curve_obj = ci.curve
-                curve_obj.setVisible(is_visible)
-            self.plot_widget.update_legend()
-        elif (
-            not self.plot_widget.is_multi_curve_mode
-            and var_name == self.plot_widget.y_name
-        ):
-            if self.plot_widget.curve:
-                self.plot_widget.curve.setVisible(is_visible)
+                ci.curve.setVisible(is_visible)
+            self.plot_widget._update_header_for_curves()
 
     def on_selection_changed(self):
         """选择改变时的处理"""
@@ -427,16 +382,18 @@ class PlotVariableEditorDialog(QDialog):
             self.set_variable_color(row)
 
     def toggle_variable_visibility(self, row):
-        """切换变量显示状态"""
+        """切换变量显示状态（统一版）"""
         var_name = self.var_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         visible_item = self.var_table.item(row, 0)
         is_visible = visible_item.checkState() == Qt.CheckState.Checked
+        logger.debug(
+            "[EDITOR] toggle_variable_visibility: var=%s, visible=%s",
+            var_name, is_visible,
+        )
 
-        if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
-            # 多曲线模式：更新curves字典中的可见性
+        if var_name in self.plot_widget.curves:
             self.plot_widget.curves[var_name].visible = is_visible
 
-            # 更新曲线显示
             ci = self.plot_widget.curves[var_name]
             if ci.curve is not None:
                 try:
@@ -447,19 +404,7 @@ class PlotVariableEditorDialog(QDialog):
                 except Exception:
                     logger.debug("_recreate_curve(%s) 异常，跳过", var_name, exc_info=True)
 
-            # 更新legend
-            self.plot_widget.update_legend()
-        elif (
-            not self.plot_widget.is_multi_curve_mode
-            and var_name == self.plot_widget.y_name
-        ):
-            # 单曲线模式：更新curve的可见性
-            if self.plot_widget.curve:
-                try:
-                    if self.plot_widget.curve.scene() is not None:
-                        self.plot_widget.curve.setVisible(is_visible)
-                except Exception:
-                    logger.debug("curve.setVisible(%s) 异常，跳过", is_visible, exc_info=True)
+            self.plot_widget._update_header_for_curves()
     def update_button_states(self):
         """更新按钮状态"""
         has_selection = len(self.var_table.selectedItems()) > 0
@@ -539,37 +484,14 @@ class PlotVariableEditorDialog(QDialog):
             if var_name_item is None:
                 continue
             var_name = var_name_item.data(Qt.ItemDataRole.UserRole)
-
-            if (
-                self.plot_widget.is_multi_curve_mode
-                and var_name in self.plot_widget.curves
-            ):
-                # 多曲线模式：从curves字典中移除
+        
+            # 统一版：始终从 curves 字典移除
+            if var_name in self.plot_widget.curves:
                 ci = self.plot_widget.curves[var_name]
                 if ci.curve is not None and ci.curve.scene() is not None:
                     self.plot_widget.plot_item.removeItem(ci.curve)
                 del self.plot_widget.curves[var_name]
-            elif var_name in self.plot_widget.curves:
-                # 单曲线模式但曲线在curves字典中：从curves字典中移除
-                ci = self.plot_widget.curves[var_name]
-                if ci.curve is not None and ci.curve.scene() is not None:
-                    self.plot_widget.plot_item.removeItem(ci.curve)
-                del self.plot_widget.curves[var_name]
-            elif (
-                not self.plot_widget.is_multi_curve_mode
-                and var_name == self.plot_widget.y_name
-            ):
-                # 单曲线模式：清除整个plot
-                self.plot_widget.clear_plot_item()
-
-            # 修复：del curves[var_name] 只删字典项，不会清 y_name 残留
-            # （add_variable_to_plot 单→多切换时 y_name 未清空，仍指向已删除变量）
-            # 搜索栏 _get_existing_set 会把 y_name 误判为"已添加"，导致样式不刷新
-            # 此处统一清理：第三个分支 clear_plot_item 已清 y_name，此条件对其为 False，无副作用
-            if self.plot_widget.y_name == var_name:
-                self.plot_widget.y_name = ""
-                self.plot_widget.y_format = ""
-
+        
             # 从表格中移除
             self.var_table.removeRow(row)
 
@@ -586,33 +508,8 @@ class PlotVariableEditorDialog(QDialog):
             # 选中整行
             self.var_table.selectRow(next_row)
 
-        # 更新多曲线模式
-        self.plot_widget.update_multi_curve_mode()
-
-        # 修复：多曲线模式下 y_name 可能是历史残留（add_variable_to_plot 单→多切换时未清空）
-        # 删除变量后若 y_name 指向已不存在的变量，清空避免搜索栏 _get_existing_set 误判为已添加
-        if self.plot_widget.is_multi_curve_mode and self.plot_widget.curves:
-            if self.plot_widget.y_name and self.plot_widget.y_name not in self.plot_widget.curves:
-                self.plot_widget.y_name = ""
-                self.plot_widget.y_format = ""
-
-        # 修复：从多曲线降至1条时，归一化为单曲线状态
-        if len(self.plot_widget.curves) == 1 and not self.plot_widget.is_multi_curve_mode:
-            single_ci = next(iter(self.plot_widget.curves.values()))
-            saved_color = single_ci.color
-            self.plot_widget.plot_variable(single_ci.var_name)
-            # 恢复用户自定义颜色（plot_variable 会重置为蓝色）
-            try:
-                if self.plot_widget.curve is not None and hasattr(self.plot_widget.curve, 'opts'):
-                    pen = pg.mkPen(color=saved_color, width=DEFAULT_LINE_WIDTH)
-                    self.plot_widget.curve.setPen(pen)
-            except Exception:
-                logger.debug("删除归一化后恢复曲线颜色失败", exc_info=True)
-
-            # 归一化的 plot_variable 会 emit curves_changed → load_current_curves
-            # 重建表格，清除上方 selectRow(next_row) 设置的选中。归一化后表格仅 1 行，重选行 0
-            if self.var_table.rowCount() > 0:
-                self.var_table.selectRow(0)
+        # 更新 header 显示
+        self.plot_widget._update_header_for_curves()
 
         # 更新vline bounds以反映移除变量后的数据范围
         self.plot_widget._update_vline_bounds_from_data()
@@ -622,26 +519,13 @@ class PlotVariableEditorDialog(QDialog):
             self.plot_widget.update_cursor_label()
 
         # 如果删除了所有曲线，确保完全清理
-        # 注意：2→1 场景归一化块（上方）会把唯一曲线从 curves 迁移到 y_name，
-        # 此时 curves 为空但 y_name 有值，不应进入全清理块（否则会把归一化保留的
-        # y_name 也清掉，导致搜索栏 _get_existing_set 误判所有变量为"未添加"）
-        if not self.plot_widget.curves and not self.plot_widget.y_name:
-            # 清理所有可能的残留
-            if self.plot_widget.curve and self.plot_widget.curve.scene() is not None:
-                self.plot_widget.plot_item.removeItem(self.plot_widget.curve)
-            self.plot_widget.curve = None
-            self.plot_widget.y_name = ""
-            self.plot_widget.y_format = ""
-            self.plot_widget.original_index_x = None
-            self.plot_widget.original_y = None
+        if not self.plot_widget.curves:
             self.plot_widget.current_color_index = 0
-            self.plot_widget.is_multi_curve_mode = False
             self.plot_widget.update_left_header("channel name")
             self.plot_widget.update_right_header("")
-
+        
             # 先重置 Y 轴范围（与 clear_plot_item 顺序一致：先 reset 再 clear）
             self.plot_widget._reset_plot_limits()
-            # 清理所有plot item（先清除cursor items）
             # 清空所有变量时完全清除对象池，避免复用异常状态的items
             self.plot_widget._clear_cursor_items(hide_only=False)
             self.plot_widget._safe_clear_plot_items()
@@ -654,7 +538,7 @@ class PlotVariableEditorDialog(QDialog):
             main_window.cursor_sync_manager._sync_min_xrange()
 
     def clear_all_variables(self):
-        """清空所有变量"""
+        """清空所有变量（统一版）"""
         reply = QMessageBox.question(
             self,
             "确认",
@@ -662,42 +546,33 @@ class PlotVariableEditorDialog(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            # 清空所有曲线
-            if self.plot_widget.is_multi_curve_mode:
-                # 多曲线模式：清空curves字典
-                for var_name, ci in list(self.plot_widget.curves.items()):
-                    if ci.curve is not None and ci.curve.scene() is not None:
-                        self.plot_widget.plot_item.removeItem(ci.curve)
-                self.plot_widget.curves.clear()
-                # 清空单曲线残留状态（y_name 等）
-                # 否则搜索栏 _get_existing_set() 会误判 y_name 仍为"已添加"
-                self.plot_widget.y_name = ""
-                self.plot_widget.y_format = ""
-                self.plot_widget.curve = None
-                self.plot_widget.original_index_x = None
-                self.plot_widget.original_y = None
-                # 重置 Y 轴范围到默认 0-1（与单曲线分支 clear_plot_item 行为一致）
-                self.plot_widget._reset_plot_limits()
-            else:
-                # 单曲线模式：清空整个plot（clear_plot_item 内部会清空 y_name 等）
-                self.plot_widget.clear_plot_item()
-
-            self.plot_widget.is_multi_curve_mode = False
+            cleared_count = len(self.plot_widget.curves)
+            logger.debug("[EDITOR] clear_all_variables: 清除 %d 条曲线", cleared_count)
+            # 统一版：清空 curves 字典
+            for var_name, ci in list(self.plot_widget.curves.items()):
+                if ci.curve is not None and ci.curve.scene() is not None:
+                    self.plot_widget.plot_item.removeItem(ci.curve)
+            self.plot_widget.curves.clear()
             self.plot_widget.current_color_index = 0
-
+            # 重置 Y 轴范围到默认 0-1
+            self.plot_widget._reset_plot_limits()
+    
             # 清空表格
             self.var_table.setRowCount(0)
             self.update_button_states()
             # 清空所有 → 重置搜索会话（清锚点 + 刷新已添加样式）
             if self.search_bar is not None:
                 self.search_bar.reset_session()
-
+    
             # 更新显示
             self.plot_widget.update_left_header("channel name")
             self.plot_widget.update_right_header("")
-
+    
             # 重置vline bounds到默认值
             self.plot_widget._update_vline_bounds_from_data()
+    
+            # 通知其他组件曲线已清空
+            self.plot_widget.curves_changed.emit()
 
     def reset_curve_colors(self):
         """按照默认顺序重新分配曲线颜色"""
@@ -712,8 +587,6 @@ class PlotVariableEditorDialog(QDialog):
             for idx, var_name in enumerate(self.plot_widget.curves.keys()):
                 color_name = color_cycle[idx % len(color_cycle)]
                 self._apply_color_to_curve(var_name, color_name)
-        elif self.plot_widget.curve and self.plot_widget.y_name:
-            self._apply_color_to_curve(self.plot_widget.y_name, color_cycle[0])
 
         # 重新加载表格以更新颜色显示
         selected_row = self._get_selected_row()
@@ -722,9 +595,9 @@ class PlotVariableEditorDialog(QDialog):
             self.var_table.selectRow(selected_row)
 
     def _apply_color_to_curve(self, var_name: str, color_name: str):
-        """将指定变量的颜色更新为给定颜色"""
+        """将指定变量的颜色更新为给定颜色（统一版）"""
         updated = False
-        if self.plot_widget.curves and var_name in self.plot_widget.curves:
+        if var_name in self.plot_widget.curves:
             ci = self.plot_widget.curves[var_name]
             ci.color = color_name
             if ci.curve is not None:
@@ -745,28 +618,6 @@ class PlotVariableEditorDialog(QDialog):
                 # 清除缓存标志，强制下次刷新时重新应用样式
                 if hasattr(curve_obj, "_cached_pen_key"):
                     delattr(curve_obj, "_cached_pen_key")
-
-            updated = True
-        elif var_name == self.plot_widget.y_name and self.plot_widget.curve:
-            old_pen = self.plot_widget.curve.opts.get("pen")
-            width = DEFAULT_LINE_WIDTH
-            if hasattr(old_pen, "widthF"):
-                width = old_pen.widthF()
-            elif hasattr(old_pen, "width"):
-                width = old_pen.width()
-            self.plot_widget.curve.setPen(pg.mkPen(color=color_name, width=width))
-
-            # 如果curve当前有symbols，也需要更新symbol的颜色
-            if (
-                hasattr(self.plot_widget.curve, "_has_symbols")
-                and self.plot_widget.curve._has_symbols
-            ):
-                self.plot_widget.curve.setSymbolPen(color_name)
-                self.plot_widget.curve.setSymbolBrush(color_name)
-
-            # 清除缓存标志，强制下次刷新时重新应用样式
-            if hasattr(self.plot_widget.curve, "_cached_pen_key"):
-                delattr(self.plot_widget.curve, "_cached_pen_key")
 
             updated = True
 
@@ -798,7 +649,7 @@ class PlotVariableEditorDialog(QDialog):
 
         # 打开颜色选择对话框
         current_color = "blue"  # 默认颜色
-        if self.plot_widget.is_multi_curve_mode and var_name in self.plot_widget.curves:
+        if var_name in self.plot_widget.curves:
             current_color = self.plot_widget.curves[var_name].color
 
         color = QColorDialog.getColor(QColor(current_color), self, "选择颜色")
@@ -855,14 +706,8 @@ class PlotVariableEditorDialog(QDialog):
                 success_count = 0
 
                 for var_name in var_names:
-                    # 检查变量是否已存在
-                    if (
-                        self.plot_widget.is_multi_curve_mode
-                        and var_name in self.plot_widget.curves
-                    ) or (
-                        not self.plot_widget.is_multi_curve_mode
-                        and var_name == self.plot_widget.y_name
-                    ):
+                    # 检查变量是否已存在（统一版：始终检查 curves 字典）
+                    if var_name in self.plot_widget.curves:
                         failed_vars.append(f"{var_name} (已存在)")
                         continue
 
@@ -894,14 +739,8 @@ class PlotVariableEditorDialog(QDialog):
                     )
                     return
 
-                # 检查变量是否已存在
-                if (
-                    self.plot_widget.is_multi_curve_mode
-                    and var_name in self.plot_widget.curves
-                ) or (
-                    not self.plot_widget.is_multi_curve_mode
-                    and var_name == self.plot_widget.y_name
-                ):
+                # 检查变量是否已存在（统一版）
+                if var_name in self.plot_widget.curves:
                     QMessageBox.information(self, "提示", f"变量 {var_name} 已在绘图中")
                     return
 

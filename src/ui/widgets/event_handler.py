@@ -250,10 +250,8 @@ class EventHandler:
         if not pw:
             return
         var_names = []
-        if getattr(pw, "is_multi_curve_mode", False) and pw.curves:
+        if pw.curves:
             var_names = list(pw.curves.keys())
-        elif getattr(pw, "y_name", ""):
-            var_names = [pw.y_name]
         if var_names:
             from PySide6.QtWidgets import QApplication
 

@@ -81,21 +81,17 @@ class PlotUIManager(BasePlotManager):
         pw.time_channels_info = time_channels_info or {}
         pw.synchronizer = synchronizer
 
-        pw.curve = None
         pw.time_column_name = None
         pw.time_axis_label = "Index"
 
-        pw.y_name = ""
-        pw.y_format = ""
         pw.x_name = ""
         pw.x_format = ""
 
         pw.xMin: int = 0
         pw.xMax: int = 1
 
-        # 多曲线支持
+        # 曲线统一管理
         pw.curves = {}
-        pw.is_multi_curve_mode = False
         pw._batch_adding = False
         pw.curve_colors = [
             "blue",
@@ -384,10 +380,7 @@ class PlotUIManager(BasePlotManager):
         else:
             index_range_width = x_range_width
 
-        if hasattr(pw, 'is_multi_curve_mode') and pw.is_multi_curve_mode:
-            curve_count = len(pw.curves) if hasattr(pw, 'curves') and pw.curves else 0
-        else:
-            curve_count = 1 if hasattr(pw, 'curve') and pw.curve is not None else 0
+        curve_count = len(pw.curves) if hasattr(pw, 'curves') and pw.curves else 0
 
         curve_count = max(curve_count, 1)
         visible_points = index_range_width * curve_count

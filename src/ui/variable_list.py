@@ -437,14 +437,9 @@ class MyTableWidget(QTableWidget):
 
             # 判断这个坐标是否在用户当前的(mxn)布局内
             if r < rows and c < cols:
-                # 如果在布局内，再判断是否为空白（需同时检查单曲线和多曲线模式）
+                # 如果在布局内，再判断是否为空白（统一版：仅检查 curves 字典）
                 pw = container.plot_widget
-                is_blank = (
-                    pw.y_name == ""
-                    and pw.curve is None
-                    and not getattr(pw, "curves", None)
-                    and not getattr(pw, "is_multi_curve_mode", False)
-                )
+                is_blank = not getattr(pw, "curves", None)
                 if is_blank:
                     blank_plot = pw
                     break  # 找到第一个可用的就退出

@@ -133,7 +133,7 @@ class VariableSearchBar(QWidget):
     """内嵌式变量搜索栏组件
 
     通过弱引用持有 plot_widget，每次刷新候选列表时实时查询当前已添加变量集合
-    （`plot_widget.curves.keys()` 与 `plot_widget.y_name`），避免快照失效。
+    （`plot_widget.curves.keys()`），避免快照失效。
 
     Signals:
         variable_selected(str): 用户选中某候选变量（未添加 → 添加）
@@ -600,7 +600,7 @@ class VariableSearchBar(QWidget):
     # ---------------- 弱引用查询 ----------------
 
     def _get_existing_set(self) -> set[str]:
-        """通过弱引用实时查询当前 plot 已添加的变量集合"""
+        """通过弱引用实时查询当前 plot 已添加的变量集合（统一版：仅查 curves 字典）"""
         pw = self._plot_ref() if self._plot_ref is not None else None
         if pw is None:
             return set()
@@ -608,9 +608,6 @@ class VariableSearchBar(QWidget):
         curves = getattr(pw, "curves", None)
         if curves:
             existing.update(curves.keys())
-        y_name = getattr(pw, "y_name", "")
-        if y_name:
-            existing.add(y_name)
         return existing
 
     # ---------------- 候选项操作 ----------------
