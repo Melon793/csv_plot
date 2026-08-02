@@ -192,6 +192,34 @@ class MultiCurveManager:
             pairs.append((x_arr, y_arr))
         return pairs
 
+    def _get_x_window_intersected(self, x_values) -> tuple:
+        """计算用户当前 X viewRange 与新数据范围的交集。
+
+        v5.x 修复问题 B：reload 后 Y viewRange 应基于"用户可见窗口与新数据的交集"，
+        而非旧的 X viewRange（可能包含已不存在的数据范围）。
+        交集为空时返回 (min > max) 的反转范围，使 _get_y_range_in_x_window
+        内部 mask 为空，触发其回退逻辑（基于全数据范围）。
+        """
+        import numpy as np
+
+        pw = self.pw
+        try:
+            data_x_min = float(np.min(x_values))
+            data_x_max = float(np.max(x_values))
+            view_x_min, view_x_max = pw.view_box.viewRange()[0]
+            x_min = max(float(view_x_min), data_x_min)
+            x_max = min(float(view_x_max), data_x_max)
+            if x_min > x_max:
+                # 交集为空：返回反转范围使 mask 为空，触发全数据回退
+                return data_x_max + 1.0, data_x_min - 1.0
+            return x_min, x_max
+        except Exception:
+            # 异常时返回反转范围，触发全数据回退（保守策略）
+            try:
+                return float(np.max(x_values)) + 1.0, float(np.min(x_values)) - 1.0
+            except Exception:
+                return 1.0, 0.0
+
     def get_curve_x_limits(self, curves_filter: str = "visible") -> tuple:
         """获取曲线 X 轴限制
 
@@ -265,8 +293,8 @@ class MultiCurveManager:
             min_x, max_x, min_y, max_y = special_limits
             self.pw._set_safe_y_range(min_y, max_y, set_limits=False)
         else:
-            current_x_range = pw.view_box.viewRange()[0]
-            x_min, x_max = current_x_range
+            # v5.x 修复问题 B：用 viewRange 与新数据范围的交集，而非旧 viewRange
+            x_min, x_max = self._get_x_window_intersected(x_values)
 
             all_y_in_range = []
             for x_arr, y_arr in pairs:
@@ -719,8 +747,8 @@ class MultiCurveManager:
                         final_max_y = max(current_max_y, max_y)
                         pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
                 else:
-                    current_x_range = pw.view_box.viewRange()[0]
-                    x_min, x_max = current_x_range
+                    # v5.x 修复问题 B：用 viewRange 与新数据范围的交集，而非旧 viewRange
+                    x_min, x_max = self._get_x_window_intersected(x_values)
 
                     new_min_y, new_max_y = pw._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
                     has_other_curves = len(pw.curves) > 1
