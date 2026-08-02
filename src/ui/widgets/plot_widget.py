@@ -17,7 +17,7 @@ from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel
+from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, Signal
 from PySide6.QtGui import QCursor
 
 logger = get_logger("widget.plot")
@@ -34,6 +34,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     支持图表区域的拖拽重排和动态布局调整
     提供灵活的图表排列和交互功能
     """
+    # 曲线集合变化信号（添加/删除/清空时 emit）
+    curves_changed = Signal()
+
     def __init__(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
             time_channels_info = {}
@@ -686,7 +689,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区 → 委托到 MultiCurveManager"""
+        if not var_names:
+            return
+        prev_count = len(self.curves) + (1 if (self.y_name and not self.is_multi_curve_mode) else 0)
         self._multi_curve_manager.add_variables_to_plot(var_names)
+        # 仅多变量分支 emit（len==1 时内部调 plot_variable，由后者 emit，避免双 emit）
+        if len(var_names) > 1:
+            cur_count = len(self.curves) + (1 if (self.y_name and not self.is_multi_curve_mode) else 0)
+            if cur_count != prev_count:
+                self.curves_changed.emit()
 
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
         """验证绘图数据的有效性 → 委托到 PlotDataManager"""
@@ -701,7 +712,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
         """绘制变量到图表 → 委托到 PlotDataManager"""
-        return self._plot_data_manager.plot_variable(var_name, show_duplicate_warning)
+        success = self._plot_data_manager.plot_variable(var_name, show_duplicate_warning)
+        # 仅非多曲线分支 emit（多曲线分支内部已委托给 add_variable_to_plot，由后者 emit，避免双 emit）
+        if success and not self.is_multi_curve_mode:
+            self.curves_changed.emit()
+        return success
 
     def _compute_valid_min_max(self, values) -> tuple[float | None, float | None]:
         """Safely compute min/max ignoring NaN/INF values → 委托到 PlotDataManager"""
@@ -718,19 +733,24 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _clear_plot_data(self):
         """清除绘图数据 → 委托到 PlotDataManager"""
         self._plot_data_manager._clear_plot_data()
+        self.curves_changed.emit()
 
     def clear_plot_item(self):
         """清除绘图项 → 委托到 PlotDataManager"""
         self._plot_data_manager.clear_plot_item()
-        
+        self.curves_changed.emit()
+
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
                              show_duplicate_warning: bool = True, preferred_color: str | None = None) -> bool:
         """添加变量到多曲线绘图 → 委托到 MultiCurveManager"""
-        return self._multi_curve_manager.add_variable_to_plot(
+        success = self._multi_curve_manager.add_variable_to_plot(
             var_name, x_values, y_values, y_format,
             skip_existence_check, show_duplicate_warning, preferred_color
         )
+        if success:
+            self.curves_changed.emit()  # 仅成功添加才 emit
+        return success
     
     def update_multi_curve_mode(self):
         """更新多曲线模式状态 → 委托到 MultiCurveManager"""
