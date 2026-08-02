@@ -192,6 +192,8 @@ class PlotVariableEditorDialog(QDialog):
         self.var_table.itemSelectionChanged.connect(self.on_selection_changed)
         self.var_table.cellClicked.connect(self.on_cell_clicked)
         # 不再需要itemChanged信号，因为使用QCheckBox控件
+        # 拖拽添加等外部变化时刷新表格（必需，否则拖拽后表格不更新）
+        self.plot_widget.curves_changed.connect(self.load_current_curves)
 
     def _focus_search_bar(self):
         """⌘F / Ctrl+F / Insert：焦点切到搜索栏并全选文本"""
@@ -207,13 +209,12 @@ class PlotVariableEditorDialog(QDialog):
 
         - show_duplicate_warning=False：搜索栏已通过置灰禁用保证不会重复添加，
           此处抑制底层 warning 避免双重提示（双保险）
-        - 添加成功后刷新表格与搜索栏的"已添加"状态
+        - load_current_curves 由 curves_changed 信号触发，无需显式调用
         """
         success = self.plot_widget.add_variable_to_plot(
             var_name, show_duplicate_warning=False
         )
         if success:
-            self.load_current_curves()
             # 标记为"本次刚添加"：置灰但保持原位置，避免连续添加时列表频繁跳动
             if self.search_bar is not None:
                 self.search_bar.mark_added(var_name)
@@ -441,6 +442,19 @@ class PlotVariableEditorDialog(QDialog):
             and selected_row < self.var_table.rowCount() - 1
         )
 
+    def closeEvent(self, event):
+        """关闭时断开 curves_changed 信号，避免重复打开编辑器导致信号连接累积"""
+        try:
+            self.plot_widget.curves_changed.disconnect(self.load_current_curves)
+        except (TypeError, RuntimeError):
+            pass
+        if self.search_bar is not None:
+            try:
+                self.plot_widget.curves_changed.disconnect(self.search_bar._on_curves_changed)
+            except (TypeError, RuntimeError):
+                pass
+        super().closeEvent(event)
+
     def remove_selected_variable(self):
         """删除选中的变量"""
         selected_items = self.var_table.selectedItems()
@@ -503,6 +517,13 @@ class PlotVariableEditorDialog(QDialog):
 
         # 更新多曲线模式
         self.plot_widget.update_multi_curve_mode()
+
+        # 修复：多曲线模式下 y_name 可能是历史残留（add_variable_to_plot 单→多切换时未清空）
+        # 删除变量后若 y_name 指向已不存在的变量，清空避免搜索栏 _get_existing_set 误判为已添加
+        if self.plot_widget.is_multi_curve_mode and self.plot_widget.curves:
+            if self.plot_widget.y_name and self.plot_widget.y_name not in self.plot_widget.curves:
+                self.plot_widget.y_name = ""
+                self.plot_widget.y_format = ""
 
         # 修复：从多曲线降至1条时，归一化为单曲线状态
         if len(self.plot_widget.curves) == 1 and not self.plot_widget.is_multi_curve_mode:
@@ -773,8 +794,8 @@ class PlotVariableEditorDialog(QDialog):
                         failed_vars.append(var_name)
 
                 # 重新加载列表以显示新添加的变量
-                if success_count > 0:
-                    self.load_current_curves()
+                # load_current_curves 由 curves_changed 信号触发（每次 add_variable_to_plot 成功都 emit）
+                # 注意：批量添加时信号会多次触发 load_current_curves，可接受（表格行数小）
 
                 # 显示结果消息（只在有失败时提示）
                 if failed_vars:
@@ -806,10 +827,8 @@ class PlotVariableEditorDialog(QDialog):
 
                 # 添加变量到绘图
                 success = self.plot_widget.add_variable_to_plot(var_name)
-                if success:
-                    # 重新加载列表以显示新添加的变量
-                    self.load_current_curves()
-                else:
+                # load_current_curves 由 curves_changed 信号触发，无需显式调用
+                if not success:
                     QMessageBox.warning(self, "错误", f"无法添加变量 {var_name}")
 
             event.acceptProposedAction()

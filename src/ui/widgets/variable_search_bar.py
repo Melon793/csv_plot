@@ -167,6 +167,9 @@ class VariableSearchBar(QWidget):
         self._all_validity_unknown: bool = all(v == -2 for v in self._validity.values())
         # 弱引用持有 plot_widget，避免延长其生命周期
         self._plot_ref = weakref.ref(plot_widget) if plot_widget is not None else None
+        # 连接曲线变化信号：拖拽添加等外部变化时自动刷新候选列表
+        if plot_widget is not None:
+            plot_widget.curves_changed.connect(self._on_curves_changed)
 
         self._filtered: list[str] = []
         # 本次会话刚添加的变量：置灰但保持原位置（不挪末尾），避免连续添加时列表频繁跳动
@@ -316,6 +319,10 @@ class VariableSearchBar(QWidget):
 
     def refresh(self):
         """父容器在添加变量后调用，刷新候选列表的"已添加"状态"""
+        self._refresh_list()
+
+    def _on_curves_changed(self):
+        """plot_widget 曲线变化时刷新候选列表（拖拽添加等外部来源）"""
         self._refresh_list()
 
     def mark_added(self, var_name: str):
