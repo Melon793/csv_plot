@@ -1,8 +1,9 @@
 """绘图变量编辑器"""
 
 from __future__ import annotations
+import sys
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -22,6 +23,7 @@ from src.core.config import DEFAULT_LINE_WIDTH
 from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
 from src.ui.drag_drop import parse_var_names_from_mimedata
+from src.ui.widgets.variable_search_bar import VariableSearchBar
 
 logger = get_logger(__name__)
 
@@ -38,7 +40,7 @@ class PlotVariableEditorDialog(QDialog):
         self.setWindowTitle("绘图变量编辑器")
         self.setWindowFlag(Qt.WindowType.Tool, True)
         self.setModal(False)
-        self.resize(600, 400)
+        self.resize(600, 600)  # 高度从 400 调到 600，留出候选列表空间
         self.setAcceptDrops(True)
 
         # 高DPI支持 - PySide6中不需要WA_UseHighDpiPixmaps
@@ -57,6 +59,41 @@ class PlotVariableEditorDialog(QDialog):
             "font-size: 16px; font-weight: bold; margin-bottom: 15px;"
         )
         layout.addWidget(title_label)
+
+        # ===== 内嵌搜索栏 =====
+        # 数据源：从主窗口获取 var_names 与 data_validity；units 用 plot_widget.units（与现有 _add_variable_to_table 一致）
+        main_window = self.plot_widget.window()
+        if (
+            main_window is not None
+            and getattr(main_window, "loader", None) is not None
+        ):
+            self.search_bar = VariableSearchBar(
+                var_names=list(main_window.loader.var_names),
+                units=self.plot_widget.units or {},
+                validity=getattr(main_window, "data_validity", None) or {},
+                plot_widget=self.plot_widget,
+                parent=self,
+            )
+            self.search_bar.variable_selected.connect(self._on_variable_selected)
+            # 搜索框为空时按 Esc → 焦点切回表格（取消聚焦）
+            self.search_bar.escape_pressed.connect(self._on_search_escape)
+            layout.addWidget(self.search_bar)
+
+            # 快捷键：焦点切到搜索栏
+            # 1) StandardKey.Find：mac=⌘F，Win/Linux=Ctrl+F（符合平台查找习惯）
+            self._search_shortcut_find = QShortcut(
+                QKeySequence(QKeySequence.StandardKey.Find), self
+            )
+            self._search_shortcut_find.activated.connect(self._focus_search_bar)
+            # 2) Insert：仅非 mac 平台注册（macBook 无独立 Insert 键，注册也无响应）
+            if sys.platform != "darwin":
+                self._search_shortcut_insert = QShortcut(
+                    QKeySequence(Qt.Key.Key_Insert), self
+                )
+                self._search_shortcut_insert.activated.connect(self._focus_search_bar)
+        else:
+            self.search_bar = None
+        # ======================
 
         # 创建表格
         self.var_table = QTableWidget()
@@ -155,6 +192,32 @@ class PlotVariableEditorDialog(QDialog):
         self.var_table.itemSelectionChanged.connect(self.on_selection_changed)
         self.var_table.cellClicked.connect(self.on_cell_clicked)
         # 不再需要itemChanged信号，因为使用QCheckBox控件
+
+    def _focus_search_bar(self):
+        """⌘F / Ctrl+F / Insert：焦点切到搜索栏并全选文本"""
+        if self.search_bar is not None:
+            self.search_bar.focus_search_edit()
+
+    def _on_search_escape(self):
+        """搜索框为空时按 Esc：取消聚焦，焦点切回表格"""
+        self.var_table.setFocus()
+
+    def _on_variable_selected(self, var_name: str):
+        """处理搜索栏中选中的变量
+
+        - show_duplicate_warning=False：搜索栏已通过置灰禁用保证不会重复添加，
+          此处抑制底层 warning 避免双重提示（双保险）
+        - 添加成功后刷新表格与搜索栏的"已添加"状态
+        """
+        success = self.plot_widget.add_variable_to_plot(
+            var_name, show_duplicate_warning=False
+        )
+        if success:
+            self.load_current_curves()
+            # 标记为"本次刚添加"：置灰但保持原位置，避免连续添加时列表频繁跳动
+            if self.search_bar is not None:
+                self.search_bar.mark_added(var_name)
+        # 失败分支保持静默：搜索栏已通过置灰禁用保证不会重复添加
 
     def load_current_curves(self):
         """加载当前绘图中的曲线"""
@@ -487,6 +550,9 @@ class PlotVariableEditorDialog(QDialog):
             main_window.cursor_sync_manager._sync_min_xrange()
 
         self.update_button_states()
+        # 删除变量 → 结束添加会话，刚添加的转为"之前已添加"挪到末尾
+        if self.search_bar is not None:
+            self.search_bar.commit_recently_added()
 
     def clear_all_variables(self):
         """清空所有变量"""
@@ -504,8 +570,15 @@ class PlotVariableEditorDialog(QDialog):
                     if ci.curve is not None and ci.curve.scene() is not None:
                         self.plot_widget.plot_item.removeItem(ci.curve)
                 self.plot_widget.curves.clear()
+                # 清空单曲线残留状态（y_name 等）
+                # 否则搜索栏 _get_existing_set() 会误判 y_name 仍为"已添加"
+                self.plot_widget.y_name = ""
+                self.plot_widget.y_format = ""
+                self.plot_widget.curve = None
+                self.plot_widget.original_index_x = None
+                self.plot_widget.original_y = None
             else:
-                # 单曲线模式：清空整个plot
+                # 单曲线模式：清空整个plot（clear_plot_item 内部会清空 y_name 等）
                 self.plot_widget.clear_plot_item()
 
             self.plot_widget.is_multi_curve_mode = False
@@ -514,6 +587,9 @@ class PlotVariableEditorDialog(QDialog):
             # 清空表格
             self.var_table.setRowCount(0)
             self.update_button_states()
+            # 清空所有 → 结束添加会话，刚添加的转为"之前已添加"挪到末尾
+            if self.search_bar is not None:
+                self.search_bar.commit_recently_added()
 
             # 更新显示
             self.plot_widget.update_left_header("channel name")
