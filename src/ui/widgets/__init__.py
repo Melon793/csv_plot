@@ -23,6 +23,7 @@ from src.ui.widgets.cursor_manager import CursorManager
 from src.ui.widgets.mark_region_manager import MarkRegionManager
 from src.ui.widgets.event_handler import EventHandler
 from src.ui.widgets.log_viewer import LogViewer
+from src.ui.widgets.variable_search_bar import VariableSearchBar
 
 __all__ = [
     "BasePlotManager",
@@ -36,4 +37,5 @@ __all__ = [
     "CustomViewBox",
     "PlotContainerWidget",
     "LogViewer",
+    "VariableSearchBar",
 ]

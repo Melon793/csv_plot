@@ -140,7 +140,8 @@ csv_plot/
             ├── multi_curve_manager.py # MultiCurveManager 多曲线管理器
             ├── mark_region_manager.py # MarkRegionManager 标记区域管理器
             ├── event_handler.py # EventHandler 事件处理器
-            └── log_viewer.py    # LogViewer 日志查看器
+            ├── log_viewer.py    # LogViewer 日志查看器
+            └── variable_search_bar.py # VariableSearchBar 绘图变量编辑器内嵌搜索栏
 ```
 
 ## 快速开始
