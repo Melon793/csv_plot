@@ -304,6 +304,7 @@ class MainWindow(QMainWindow):
         self.mark_region_btn.setToolTip("切换标记区域 (Ctrl+T)")
 
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
+        self.grid_layout_btn.setToolTip("修改图表布局 (Ctrl+L)")
 
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
@@ -410,6 +411,8 @@ class MainWindow(QMainWindow):
         self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
         self.time_correction_btn.clicked.connect(self.layout_manager.open_time_correction_dialog)
         self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
+        self._grid_layout_shortcut = QShortcut(QKeySequence("Ctrl+L"), self.plot_widget)
+        self._grid_layout_shortcut.activated.connect(self._on_grid_layout_shortcut)
         self.load_btn.clicked.connect(self.file_loader_manager.load_btn_click)
         self.reload_btn.clicked.connect(self.file_loader_manager.reload_data)
         self.clear_all_plots_btn.clicked.connect(self.cursor_sync_manager.clear_all_plots)
@@ -659,6 +662,17 @@ class MainWindow(QMainWindow):
             return
         new_state = not self.mark_region_btn.isChecked()
         self.layout_manager.toggle_mark_region(new_state)
+
+    def _on_grid_layout_shortcut(self):
+        """Ctrl+L 快捷键：修改图表布局
+
+        守卫条件直接复用 grid_layout_btn.isEnabled()，确保快捷键与
+        GUI 按钮激活状态完全一致（未加载数据等场景下按钮被 disabled，
+        快捷键同步忽略），避免绕过 set_button_status 的状态控制。
+        """
+        if not self.grid_layout_btn.isEnabled():
+            return
+        self.layout_manager.open_layout_dialog()
 
 
 

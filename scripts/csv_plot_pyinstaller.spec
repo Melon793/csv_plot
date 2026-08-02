@@ -78,7 +78,7 @@ a = Analysis(
         "src.core.curve_strategy",
         "src.ui.dialogs",
         "src.ui.dialogs.help",
-        "src.ui.dialogs.layout_input",
+        "src.ui.dialogs.layout_grid_selector",
         "src.ui.dialogs.axis",
         "src.ui.dialogs.time_correction",
         "src.ui.dialogs.log_window",
