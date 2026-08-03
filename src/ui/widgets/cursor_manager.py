@@ -216,6 +216,12 @@ class CursorManager:
 
     def apply_cursor_mode(self, mode: str, pinned_x_values: list = None):
         """应用光标模式"""
+        logger.debug(
+            "[VLINE_TRACE] apply_cursor_mode: mode=%s, 传入 pinned=%s, "
+            "widget 现有 pinned=%s, vline=%s, vline2=%s",
+            mode, pinned_x_values, getattr(self, "pinned_x_values", None),
+            self._vline_pos("vline"), self._vline_pos("vline2"),
+        )
         if pinned_x_values is None:
             pinned_x_values = []
 
@@ -295,6 +301,11 @@ class CursorManager:
                     self.pinned_x_values = [x1, x2]
                 else:
                     self.pinned_x_values = [0.0, 0.0]
+                logger.debug(
+                    "[VLINE_TRACE] apply_cursor_mode: 2anchored pinned 为空，"
+                    "使用视图兜底位置 view=(%s, %s) -> pinned=%s",
+                    view_min, view_max, self.pinned_x_values,
+                )
             self.pinned_x_value = self.pinned_x_values[0]
             self.pinned_index_values = []
             for x_val in self.pinned_x_values:
@@ -512,19 +523,42 @@ class CursorManager:
             self.pw._cursor_item_pool = {"circles": [], "labels": [], "x_labels": []}
 
             scene = None
+            plot_item = None
             if hasattr(self.pw, 'plot_item') and self.pw.plot_item is not None:
-                scene = self.pw.plot_item.scene()
+                plot_item = self.pw.plot_item
+                scene = plot_item.scene()
 
             for item in (old_circles + old_labels + old_x_labels):
                 if item is None:
                     continue
                 safe_qt_op(item.setVisible, False)
-                if scene is not None:
-                    safe_qt_op(lambda it=item: scene.removeItem(it) if it.scene() == scene else None)
+                try:
+                    in_scene = item.scene() == scene and scene is not None
+                except RuntimeError:
+                    in_scene = False
+                if in_scene:
+                    # 【崩溃修复】优先用 PlotItem.removeItem 同时清理 scene 与
+                    # PlotItem.items：仅用 scene.removeItem 会在 PlotItem.items
+                    # 残留引用，导致后续 addItem 被 pyqtgraph 判重跳过（坐标失效）。
+                    removed = False
+                    if plot_item is not None:
+                        try:
+                            plot_item.removeItem(item)
+                            removed = True
+                        except Exception:
+                            pass
+                    if not removed:
+                        safe_qt_op(lambda it=item: scene.removeItem(it))
                 # 移入 trash bin 保持引用，延迟到下一次 _clear_cursor_items 时释放。
                 # scene.removeItem 已从场景移除，paint event 不会访问该 item。
                 # trash bin 在下一轮清理时清空，确保至少经历一个完整事件循环。
                 self.pw._cursor_trash_bin.append(item)
+            logger.debug(
+                "[CURSOR_CLEAR] _clear_cursor_items(hide_only=False): "
+                "pool 回收 circles=%d, labels=%d, x_labels=%d, trash_bin=%d",
+                len(old_circles), len(old_labels), len(old_x_labels),
+                len(self.pw._cursor_trash_bin),
+            )
 
 
     def _queue_item_for_deletion(self, item):
@@ -1601,8 +1635,23 @@ class CursorManager:
             pw._set_vline_bounds([None, None])
             pw.toggle_cursor(False)
 
+    def _vline_pos(self, attr: str):
+        """诊断用：安全获取 vline/vline2 当前位置"""
+        line = getattr(self.pw, attr, None)
+        if line is None:
+            return None
+        try:
+            return round(float(line.value()), 4)
+        except Exception:
+            return "<dead>"
+
     def on_vline_position_changed(self, line_obj=None):
         """vline 位置变化时更新光标状态"""
+        logger.debug(
+            "[VLINE_TRACE] on_vline_position_changed: 触发源=%s, vline=%s, vline2=%s",
+            type(line_obj).__name__ if line_obj is not None else None,
+            self._vline_pos("vline"), self._vline_pos("vline2"),
+        )
         if self._is_cursor_update_locked():
             return
         if self.pw.plot_context and getattr(

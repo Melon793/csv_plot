@@ -11,6 +11,7 @@ MultiCurveManager - 曲线绘图管理（统一版）
 """
 
 from __future__ import annotations
+import time
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
@@ -47,6 +48,7 @@ class MultiCurveManager:
         """
         pw = self.pw
         curve_count = len(pw.curves)
+        t0 = time.perf_counter()
         logger.debug(
             "[HEADER] _update_header_for_curves: curve_count=%d, 显示模式=%s",
             curve_count, "图例" if curve_count > 1 else ("简单标题" if curve_count == 1 else "空"),
@@ -61,6 +63,10 @@ class MultiCurveManager:
         else:
             pw.update_left_header("channel name")
             pw.update_right_header("")
+        logger.debug(
+            "[PERF] _update_header_for_curves: took=%.1fms, curve_count=%d",
+            (time.perf_counter() - t0) * 1000, curve_count,
+        )
 
     def update_multi_curve_mode(self):
         """兼容别名：委托到 _update_header_for_curves"""
@@ -552,6 +558,7 @@ class MultiCurveManager:
             "preferred_color=%s, skip_existence_check=%s",
             var_name, len(pw.curves), preferred_color, skip_existence_check,
         )
+        t_add_start = time.perf_counter()
         try:
             original_index = None
             if x_values is None or y_values is None:
@@ -568,6 +575,7 @@ class MultiCurveManager:
                     original_index = np.ascontiguousarray(
                         (np.asarray(x_values) - pw.offset) / pw.factor, dtype=np.float32
                     )
+            t_prepared = time.perf_counter()
 
             # 统一重复检测：始终检查 curves 字典
             if not skip_existence_check and var_name in pw.curves:
@@ -597,6 +605,7 @@ class MultiCurveManager:
                 skipFiniteCheck=True,
                 connect="all",
             )
+            t_plotted = time.perf_counter()
 
             pw.curves[var_name] = CurveInfo(
                 var_name=var_name,
@@ -617,6 +626,7 @@ class MultiCurveManager:
             )
 
             self._update_header_for_curves()
+            t_header = time.perf_counter()
 
             batch_adding = getattr(pw, '_batch_adding', False)
             if not batch_adding:
@@ -675,6 +685,19 @@ class MultiCurveManager:
                 main_window = pw.window()
                 if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
                     main_window.cursor_sync_manager._sync_min_xrange()
+
+            t_done = time.perf_counter()
+            logger.debug(
+                "[PERF] add_variable_to_plot: total=%.1fms "
+                "(prep=%.1f, plot_create=%.1f, header=%.1f, range_and_post=%.1f), "
+                "var=%s, curves=%d",
+                (t_done - t_add_start) * 1000,
+                (t_prepared - t_add_start) * 1000,
+                (t_plotted - t_prepared) * 1000,
+                (t_header - t_plotted) * 1000,
+                (t_done - t_header) * 1000,
+                var_name, len(pw.curves),
+            )
 
             return True
 
