@@ -227,7 +227,7 @@ class VariableSearchBar(QWidget):
 
         # 候选列表
         self.candidate_list = QListWidget(self)
-        self.candidate_list.setMaximumHeight(120)
+        self.candidate_list.setMaximumHeight(180)
         # 列表不获取键盘焦点：鼠标点击项时焦点留在搜索框，用户可继续输入/删除
         # ↑↓ 导航通过 eventFilter 拦截搜索框按键实现，不依赖列表焦点
         self.candidate_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -241,7 +241,7 @@ class VariableSearchBar(QWidget):
                 outline: none;
             }
             QListWidget::item {
-                padding: 6px 12px;
+                padding: 3px 6px;
                 border-bottom: 1px solid #eee;
             }
             QListWidget::item:selected {
