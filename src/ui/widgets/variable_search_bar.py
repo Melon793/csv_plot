@@ -13,11 +13,14 @@
 from __future__ import annotations
 
 import sys
+import time
 import weakref
 from typing import Any
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QRect, Signal
 from PySide6.QtGui import QColor, QPen
+
+from src.core.logger import get_logger
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -33,6 +36,8 @@ from PySide6.QtWidgets import (
 
 # 平台标识：macOS 上用 ⌘F，其他平台用 Ctrl+F（避免 ⌘ 符号在 Win/Linux 上不自然）
 _IS_MAC = sys.platform == "darwin"
+
+logger = get_logger("widget.search_bar")
 
 
 class _CandidateItemDelegate(QStyledItemDelegate):
@@ -177,24 +182,6 @@ class VariableSearchBar(QWidget):
         self._filtered: list[str] = []
         # 输入来源标志：键盘 Enter 添加后选中下一个可选项；鼠标单击添加后保持当前位置
         self._last_input_was_mouse = False
-        # 鼠标场景预存"emit 前的滚动条 value（像素值）"：emit variable_selected 之前保存
-        # 因为 emit 会同步触发 curves_changed → 第一次 refresh（select_first=True），
-        # 该 refresh 会重置滚动条；mark_added 触发的第二次 refresh（select_first=False）
-        # 需使用 emit 前的像素值恢复位置。
-        # 用像素值而非 var_name：scrollToItem(PositionAtTop) 只能对齐到项边界，
-        # 若原位置让项顶部"高于"视口顶部（部分截断），恢复后会丢失像素偏移，产生细微跳动；
-        # setValue(像素) 精确到 1px，无偏移。
-        # 异步执行（QTimer.singleShot(0)）：QListWidget 几何布局惰性更新，
-        # addItem 后立即读 verticalScrollBar().maximum() 仍是 0，setValue 会被 clamp；
-        # singleShot(0) 让 Qt 先完成 updateGeometries 计算真实 scrollbar range
-        self._pending_mouse_top: tuple[str, int] | None = None
-        # 最近一次操作的变量名（add 或 remove 合一）：键盘操作后从该项往后找下一个未添加项，
-        # 避免每次都从头查找导致跳顶。textChanged / reset_session 时清除。
-        # 替代了原 _last_added_var + _last_removed_var 两个互斥字段：
-        # - 无需"设置时清对方"
-        # - select_first 锚点查询从 `a or b` 简化为单一字段
-        # - remove 操作后变量已不在 existing，rank 自然为 0（回原位），无需额外集合区分
-        self._last_op_var: str | None = None
 
         self._build_ui()
         self._connect_signals()
@@ -327,78 +314,90 @@ class VariableSearchBar(QWidget):
         self.search_edit.setFocus()
         self.search_edit.selectAll()
 
-    def refresh(self):
-        """父容器在添加变量后调用，刷新候选列表的"已添加"状态"""
-        self._refresh_list()
-
     def _on_curves_changed(self):
-        """plot_widget 曲线变化时刷新候选列表（拖拽添加等外部来源）"""
-        self._refresh_list()
+        """plot_widget 曲线变化时刷新候选列表（拖拽添加等外部来源）
+
+        增量路径：仅更新"已添加"标记与样式，不重建列表、不重排、
+        不动滚动条与选中项。列表为空（空查询/无匹配）时回退全量刷新，
+        无副作用：空查询早退，无匹配时不选中任何项。
+        """
+        if self.candidate_list.count() > 0:
+            self._update_existing_marks()
+        else:
+            self._refresh_list()
 
     def mark_added(self, var_name: str):
-        """标记变量为"本次刚添加"：保持原位置，只更新样式（置灰）
-
-        设计简化：所有变量始终按原始顺序排序，已添加仅通过样式区分（灰色斜体），
-        不再挪到末尾。这样 add/remove 行为完全对称，无需 _recently_added 集合
-        区分"刚添加"vs"之前已添加"。
+        """标记变量为"本次刚添加"：增量更新标记，不重建列表
 
         输入来源区分：
-        - 键盘 Enter：refresh 后从 _last_op_var 往后找下一个未添加项
-        - 鼠标单击：refresh 后保持当前位置
+        - 键盘 Enter：标记更新后从被操作项往后选中下一个未添加项
+        - 鼠标单击：标记更新后保持当前位置（滚动条与选中完全不动）
         """
-        self._last_op_var = var_name
-        self._refresh_list(select_first=not self._last_input_was_mouse)
+        self._update_existing_marks()
+        if not self._last_input_was_mouse:
+            self._select_next_unadded(from_var=var_name)
 
     def mark_removed(self, var_name: str):
-        """标记变量为"本次刚移除"：变量回原位（与未添加同等对待）
+        """标记变量为"本次刚移除"：增量更新标记，不移动选中
 
-        与 mark_added 对称：移除后变量不在 existing 集合中，rank 自然为 0，
-        无需额外集合。仅保留 _last_op_var 锚点供键盘移除后 select_first 定位光标。
-
-        输入来源区分：
-        - 键盘 Enter：refresh 后从 _last_op_var 往后找下一个未添加项
-        - 鼠标单击：refresh 后保持当前位置
+        移除后变量回原位（与未添加同等对待）：
+        - 键盘 Enter：移除后停留原项（此时它已变回未添加，误删可立即重新添加）
+        - 鼠标单击：天然不动
 
         Args:
             var_name: 刚被移除的变量名
         """
-        self._last_op_var = var_name
-        self._refresh_list(select_first=not self._last_input_was_mouse)
+        self._update_existing_marks()
 
     def reset_session(self):
-        """重置搜索会话：清空 _last_op_var 锚点并刷新
+        """重置搜索会话：增量更新"已添加"样式
 
-        此方法负责清锚点 + 刷新样式。保留刷新是为了：删除/清空变量后
-        重新查询 curves 更新"已添加"状态。
-
+        行为变更（v1.3 方案）：不再选中第一个未添加项，当前选中停留原位。
         触发时机：表格删除按钮、清空所有变量。
         注意：搜索栏内移除变量不调本方法（见 _on_variable_removed 注释）。
         """
-        self._last_op_var = None
+        self._update_existing_marks()
+
+    def update_data_source(
+        self,
+        var_names: list[str],
+        units: dict[str, str],
+        validity: dict[str, int],
+    ):
+        """就地更新数据源（数据重载/新加载场景）
+
+        替换变量名/单位/有效性快照，保留搜索词，对新数据集执行一次
+        全量重建（重新过滤+排序）。数据集已替换，重建列表与滚动条复位
+        是正确语义。
+
+        由 PlotVariableEditorDialog.refresh_data_source 在加载完成后调用。
+        """
+        self._all_var_names = list(var_names)
+        self._lower_names = [n.lower() for n in self._all_var_names]
+        self._units = dict(units) if units else {}
+        self._validity = dict(validity) if validity else {}
+        # 全为 -2（未知）时不显示色块，与 variable_list._all_validity_unknown 一致
+        self._all_validity_unknown = all(v == -2 for v in self._validity.values())
         self._refresh_list()
 
     # ---------------- 防抖与刷新 ----------------
 
     def _on_text_changed(self, _text: str):
-        """textChanged 触发：重置防抖定时器；清锚点"""
+        """textChanged 触发：重置防抖定时器"""
         self._debounce_timer.start()  # 已在运行则重新计时
         if self.search_edit.text().strip():
             self._expand_candidates()
         else:
             self._collapse_candidates()
-        # 搜索词变化时原 pending 已无意义（列表内容将重新过滤），
-        # 防御性清空：避免 add 失败时 _pending_mouse_top 遗留
-        self._pending_mouse_top = None
-        # 清除操作锚点，回到"选中第一个可选项"的默认行为
-        # （不再需要关键词集合变化检测：已添加始终在原位，无"暂存→提交"语义）
-        self._last_op_var = None
 
     def _refresh_list(self, select_first: bool = True):
-        """实际执行过滤 + 排序 + 渲染
+        """实际执行过滤 + 排序 + 渲染（全量重建路径）
+
+        仅在查询词变化（防抖定时器）或数据源替换（update_data_source）时调用；
+        变量增删走增量路径 _update_existing_marks，不重建列表。
 
         Args:
-            select_first: True 时选中第一个可选项（键盘场景），
-                         False 时保持当前位置（鼠标场景）
+            select_first: True 时选中第一个未添加项（方便连续 Enter 添加）
         """
         query = self.search_edit.text()
         # 空查询时不填充候选列表：避免折叠后隐藏项仍被 currentItem() 选中
@@ -476,44 +475,90 @@ class VariableSearchBar(QWidget):
         results.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
         return [name for _, _, _, _, name in results]
 
+    # ---------------- 显示文本与增量标记更新 ----------------
+
+    def _build_display_text(self, var_name: str, is_existing: bool) -> str:
+        """统一构造候选项显示文本
+
+        _update_existing_marks 与 _populate_candidate_list 共用，
+        避免拼接逻辑漂移（单位格式、后缀文案等）。
+        """
+        unit = self._units.get(var_name, "")
+        text = f"{var_name} ({unit})" if unit else var_name
+        if is_existing:
+            text = f"{text} (已添加)"
+        return text
+
+    def _update_existing_marks(self):
+        """增量更新"已添加"标记与样式：不重建列表、不改排序、不动滚动条
+
+        查询词未变化时变量增删的增量路径：仅更新状态发生变化的 item
+        的 DisplayRole 文本与 UserRole+2，无变化的 item 完全不动。
+        幂等：重复调用无副作用（状态相同则 skip）。
+        """
+        if self.candidate_list.count() == 0:
+            return
+        t0 = time.perf_counter()
+        changed = 0
+        existing = self._get_existing_set()
+        for i in range(self.candidate_list.count()):
+            item = self.candidate_list.item(i)
+            var_name = item.data(Qt.ItemDataRole.UserRole)
+            was_existing = bool(item.data(Qt.ItemDataRole.UserRole + 2))
+            is_existing = var_name in existing
+            if was_existing == is_existing:
+                continue
+            changed += 1
+            item.setData(Qt.ItemDataRole.UserRole + 2, is_existing)
+            item.setText(self._build_display_text(var_name, is_existing))
+        logger.debug(
+            "[PERF] _update_existing_marks: items=%d, changed=%d, took=%.2fms",
+            self.candidate_list.count(), changed, (time.perf_counter() - t0) * 1000,
+        )
+
+    def _select_next_unadded(self, from_var: str | None = None):
+        """从 from_var 对应项往后找第一个未添加项并选中
+
+        语义与旧版 select_first 分支一致：
+        - 不回绕：只往后找，找不到则清除选中（currentRow=-1，与旧版全量
+          重建后自然无选中的行为一致），用户按 ↓ 可重新从头选择
+        - 依赖 _update_existing_marks() 已先行执行（标记状态必须是最新的）
+        - 无需 blockSignals：setCurrentRow 不触发 itemClicked 等已连接信号
+        """
+        lst = self.candidate_list
+        start_idx = 0
+        if from_var is not None:
+            for i in range(lst.count()):
+                if lst.item(i).data(Qt.ItemDataRole.UserRole) == from_var:
+                    start_idx = i
+                    break
+        for i in range(start_idx, lst.count()):
+            item = lst.item(i)
+            if not item.data(Qt.ItemDataRole.UserRole + 2):
+                lst.setCurrentRow(i)  # 仅必要时滚动（ensureVisible），邻近项无跳动
+                return
+        # 找不到未添加项：清除选中（避免停留在刚添加项上，误按 Enter 会触发移除）
+        lst.setCurrentRow(-1)
+
     # ---------------- 渲染 ----------------
 
     def _populate_candidate_list(self, filtered: list[str], select_first: bool = True):
-        """渲染候选列表
+        """渲染候选列表（全量重建）
 
         Args:
-            select_first: True 时选中第一个可选项（键盘场景，方便连续 Enter 添加）；
-                         False 时保持当前位置（鼠标场景，不跳到列表顶部）
+            select_first: True 时选中第一个未添加项（方便连续 Enter 添加）；
+                         False 时不做任何选中动作
         """
         self.candidate_list.blockSignals(True)
-        # 鼠标场景使用 emit 前预存的"视口顶部可见项"恢复位置（_pending_mouse_top）。
-        # 不用比例（value/max）：添加变量会触发窗口布局调整，视口高度可能变化（max 1951→901），
-        # 比例恢复后用户看到的"列表 X% 处"对应的项完全变了，不符合"看到原来项"的预期。
-        # 用 var_name + 像素偏移：scrollToItem 让该项对齐视口顶部，setValue 调整偏移
-        # 恢复精确视觉位置。无论视口大小如何变化，项在列表中的索引不变，恢复正确。
-        # 异步执行（QTimer.singleShot(0)）：QListWidget 几何布局惰性更新，
-        # addItem 后立即 scrollToItem 可能失效；singleShot(0) 让 Qt 先完成几何更新
-        mouse_top = None
-        if not select_first and self._pending_mouse_top is not None:
-            mouse_top = self._pending_mouse_top
-            self._pending_mouse_top = None  # 消费一次，避免遗留
         self.candidate_list.clear()
 
         existing = self._get_existing_set()
 
         for var_name in filtered:
-            unit = self._units.get(var_name, "")
             is_existing = var_name in existing
             valid = self._validity.get(var_name, -2)
 
-            if unit:
-                display_text = f"{var_name} ({unit})"
-            else:
-                display_text = var_name
-            if is_existing:
-                display_text = f"{display_text} (已添加)"
-
-            item = QListWidgetItem(display_text)
+            item = QListWidgetItem(self._build_display_text(var_name, is_existing))
             item.setData(Qt.ItemDataRole.UserRole, var_name)
             item.setData(Qt.ItemDataRole.UserRole + 1, valid)
             item.setData(Qt.ItemDataRole.UserRole + 2, is_existing)
@@ -523,62 +568,13 @@ class VariableSearchBar(QWidget):
             self.candidate_list.addItem(item)
 
         if select_first:
-            # 键盘场景：从"最近操作项"开始找第一个"未添加"项，找不到则不选中
-            # _last_op_var 合一锚点：add/remove 共用，无需 `a or b` 优先级表达式
-            #
-            # add/remove 不对称设计（符合心智）：
-            # - Enter 添加：anchor 现在是已添加 → 循环跳过它 → 从下一个未添加项开始选中
-            # - Enter 移除：anchor 现在是未添加（刚被移除）→ 循环停在它身上 → 保持原位
-            #   （误删后可立即重新 Enter 添加，或继续 ↓ 操作下一项）
-            anchor_var = self._last_op_var
-            start_idx = -1
-            if anchor_var is not None:
-                for i, name in enumerate(filtered):
-                    if name == anchor_var:
-                        start_idx = i
-                        break
-            # 从 start_idx 往后找第一个"未添加"项（add 跳过已添加的 anchor，remove 停在未添加的 anchor）
-            for i in range(max(0, start_idx), self.candidate_list.count()):
+            # 从索引 0 起选中第一个"未添加"项（查询词变化后可直接 Enter 添加）
+            for i in range(self.candidate_list.count()):
                 item = self.candidate_list.item(i)
-                is_item_existing = item.data(Qt.ItemDataRole.UserRole + 2)
-                if not is_item_existing:
+                if not item.data(Qt.ItemDataRole.UserRole + 2):
                     self.candidate_list.setCurrentRow(i)
                     break
-            # 找不到下一个未添加项：保持不选中（currentRow=-1），用户按 ↓ 可重新从头选择
-        elif mouse_top is not None:
-            # 鼠标场景：异步恢复滚动条到 emit 前的"视口顶部可见项"位置
-            # 用 var_name + 像素偏移：
-            #   1. scrollToItem(item, PositionAtTop) 让目标项对齐视口顶部
-            #   2. setValue(scrollbar.value - offset) 恢复像素偏移（offset<=0，项原本可能部分截断）
-            # 自适应视口大小变化：项在列表中的索引不变，无论视口多大都能滚到该项
-            # QTimer.singleShot(0) 让 Qt 先完成 updateGeometries 再操作
-            top_var, offset = mouse_top
-            lst = self.candidate_list
-
-            def _restore_scroll(var=top_var, off=offset, lst=lst):
-                # 找到目标项
-                target_item = None
-                for i in range(lst.count()):
-                    it = lst.item(i)
-                    if it.data(Qt.ItemDataRole.UserRole) == var:
-                        target_item = it
-                        break
-                if target_item is None:
-                    return
-                # 滚动到目标项对齐视口顶部
-                bar = lst.verticalScrollBar()
-                lst.scrollToItem(
-                    target_item,
-                    QListWidget.ScrollHint.PositionAtTop,
-                )
-                # 调整像素偏移：offset 是该项顶部相对视口顶部的偏移（<=0）
-                # 原始状态：scrollbar.value = S, item_top_y = S + offset
-                # scrollToItem 后：scrollbar.value = item_top_y（项对齐视口顶部）
-                # 恢复原始位置：setValue(item_top_y - offset) = S
-                # 注意符号：offset 是负值，- offset 是正值（往下滚回到原位置）
-                bar.setValue(bar.value() - off)
-
-            QTimer.singleShot(0, _restore_scroll)
+            # 找不到未添加项：保持不选中（currentRow=-1），用户按 ↓ 可重新从头选择
 
         self.candidate_list.blockSignals(False)
 
@@ -648,8 +644,6 @@ class VariableSearchBar(QWidget):
             self._last_input_was_mouse = False
             if is_existing:
                 # 已添加 → 移除
-                # 键盘场景不需要滚动恢复：清空 pending 防御性兜底，避免遗留被后续 refresh 误用
-                self._pending_mouse_top = None
                 self.variable_removed.emit(var_name)
             else:
                 # 未添加 → 添加
@@ -678,25 +672,8 @@ class VariableSearchBar(QWidget):
         self._last_click_time = now
 
         is_existing = item.data(Qt.ItemDataRole.UserRole + 2)
-        # 鼠标触发：refresh 后保持当前位置，不跳到列表顶部
+        # 鼠标触发：增量路径保持当前位置，滚动条与选中完全不动
         self._last_input_was_mouse = True
-        # emit 前预存"视口顶部可见项"的 var_name + 像素偏移：
-        # emit 内部会同步触发 curves_changed → 一次 select_first=True 的 refresh，
-        # mark_added/mark_removed 触发的第二次 refresh（select_first=False）使用此信息
-        # 通过 QTimer.singleShot(0) + scrollToItem + setValue 恢复位置。
-        # 用 var_name + offset 而非像素值或比例：
-        #   - 像素值：视口高度变化时 setValue 会被 clamp
-        #   - 比例：视口变化后"列表 X% 处"对应的项完全变了
-        #   - var_name + offset：基于"看到原来的项"恢复，自适应视口大小变化
-        # offset = visualItemRect(item).top()：项顶部相对视口顶部的偏移（<=0）
-        #   0 表示项顶部对齐视口顶部；负值表示项顶部在视口上方（部分截断）
-        top_item = self.candidate_list.itemAt(0, 0)
-        if top_item is not None:
-            top_var = top_item.data(Qt.ItemDataRole.UserRole)
-            offset = self.candidate_list.visualItemRect(top_item).top()
-            self._pending_mouse_top = (top_var, offset)
-        else:
-            self._pending_mouse_top = None
         if is_existing:
             # 已添加 → 移除
             self.variable_removed.emit(var_name)

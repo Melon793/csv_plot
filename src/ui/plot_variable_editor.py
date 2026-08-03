@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 import sys
+import time
+import weakref
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -36,6 +38,9 @@ class PlotVariableEditorDialog(QDialog):
     def __init__(self, plot_widget, parent=None):
         super().__init__(parent)
         self.plot_widget = plot_widget
+        # 弱引用持有 plot_widget：refresh_data_source 中检查其存活状态
+        # （subplot 关闭/重建后 C++ 对象销毁，直接访问属性会抛 RuntimeError）
+        self._plot_widget_ref = weakref.ref(plot_widget) if plot_widget is not None else None
         self.setWindowTitle("绘图变量编辑器")
         self.setWindowFlag(Qt.WindowType.Tool, True)
         self.setModal(False)
@@ -193,7 +198,8 @@ class PlotVariableEditorDialog(QDialog):
         self.var_table.cellClicked.connect(self.on_cell_clicked)
         # 不再需要itemChanged信号，因为使用QCheckBox控件
         # 拖拽添加等外部变化时刷新表格（必需，否则拖拽后表格不更新）
-        self.plot_widget.curves_changed.connect(self.load_current_curves)
+        # 性能优化（方案 A）：改走增量更新，仅增删变化行；复杂场景内部回退全量重建
+        self.plot_widget.curves_changed.connect(self._on_curves_changed_incremental)
 
     def _focus_search_bar(self):
         """⌘F / Ctrl+F / Insert：焦点切到搜索栏并全选文本"""
@@ -204,36 +210,66 @@ class PlotVariableEditorDialog(QDialog):
         """搜索框为空时按 Esc：取消聚焦，焦点切回表格"""
         self.var_table.setFocus()
 
+    def refresh_data_source(self):
+        """数据重载/新加载后就地更新搜索栏数据源（保留搜索词）
+
+        由 file_loader_manager 加载完成路径通过
+        main_window.findChildren(PlotVariableEditorDialog) 逐个调用。
+
+        存活检查：subplot 关闭/重建场景下 plot_widget 的 C++ 对象可能已销毁，
+        此时静默跳过本实例，避免阻断其他实例的更新。
+        """
+        if self.search_bar is None:
+            return
+        pw = self._plot_widget_ref() if self._plot_widget_ref is not None else None
+        if pw is None:
+            return
+        main_window = self.window()
+        loader = getattr(main_window, "loader", None)
+        if loader is None:
+            return
+        try:
+            units = pw.units or {}
+        except RuntimeError:
+            # C++ 对象已销毁（subplot 关闭/重建）：静默跳过
+            logger.debug("refresh_data_source: plot_widget 已销毁，跳过更新")
+            return
+        self.search_bar.update_data_source(
+            var_names=list(loader.var_names),
+            units=units,
+            validity=getattr(main_window, "data_validity", None) or {},
+        )
+
     def _on_variable_selected(self, var_name: str):
         """处理搜索栏中选中（未添加）变量的添加请求
 
-        - show_duplicate_warning=False：搜索栏已通过 select_first 跳过已添加项
+        - show_duplicate_warning=False：搜索栏已跳过已添加项
           保证不会重复添加，此处抑制底层 warning 避免双重提示（双保险）
-        - load_current_curves 由 curves_changed 信号触发，无需显式调用
+        - 表格刷新由 curves_changed 信号触发增量更新，无需显式调用
         """
         success = self.plot_widget.add_variable_to_plot(
             var_name, show_duplicate_warning=False
         )
         if success:
-            # 标记为"本次刚添加"：置灰但保持原位置，避免连续添加时列表频繁跳动
+            # 标记为"本次刚添加"：增量更新样式（置灰），列表不重建不跳动
             if self.search_bar is not None:
                 self.search_bar.mark_added(var_name)
-        # 失败分支保持静默：搜索栏已通过 select_first 跳过已添加项保证不会重复添加
+        else:
+            # 失败分支仅记录日志（不弹框）：正常路径下搜索栏已跳过已添加项，
+            # 失败多见于陈旧快照等异常场景（如重载中间态），便于排查
+            logger.debug("搜索栏添加变量失败: %s", var_name)
 
     def _on_variable_removed(self, var_name: str):
         """处理搜索栏中移除已添加变量的请求
 
         复用 _remove_selected_variable_impl 的删除逻辑，但不调用 reset_session：
-        搜索栏移除是单次操作，不应清空 _last_op_var 锚点（否则后续键盘 Enter
-        无法从被移除项往后定位下一个未添加项）。
+        搜索栏移除是单次操作，移除后选中停留原项（误删可立即重新 Enter 添加）。
 
         流程：
         1. 按变量名在表格中定位行
         2. selectRow 该行
         3. 调用 _remove_selected_variable_impl()（curves 删除/表格行删除/归一化/清理，不含会话重置）
-        4. 调用 search_bar.mark_removed(var_name) 记录锚点（变量回原位）
-
-        会话锚点清空仍由 Esc/关键词变化/表格删除按钮/清空 触发，搜索栏移除不在此列。
+        4. 调用 search_bar.mark_removed(var_name) 增量更新标记（变量回原位）
         """
         # 按变量名定位表格行（变量名在第 1 列，索引 1）
         target_row = None
@@ -244,16 +280,12 @@ class PlotVariableEditorDialog(QDialog):
                 break
         if target_row is None:
             # 变量不在表格中（理论上不会发生，防御性兜底）
-            # 清空 _pending_mouse_top，避免搜索栏 _on_item_clicked emit 前已设置的
-            # pending 值遗留，被后续 refresh 误用导致滚动条跳到错误位置
-            if self.search_bar is not None:
-                self.search_bar._pending_mouse_top = None
             return
         # 选中该行并复用核心删除逻辑（不含会话重置）
         self.var_table.selectRow(target_row)
         self._remove_selected_variable_impl()
         self.update_button_states()
-        # 标记为"本次刚移除"：记录锚点 _last_op_var，变量回原位（不清空锚点，供后续 select_first 定位）
+        # 标记为"本次刚移除"：增量更新标记，变量回原位
         if self.search_bar is not None:
             self.search_bar.mark_removed(var_name)
             # 焦点恢复：上方 selectRow / removeRow 会让 var_table 抢走焦点，
@@ -263,6 +295,7 @@ class PlotVariableEditorDialog(QDialog):
 
     def load_current_curves(self):
         """加载当前绘图中的曲线（统一版：始终从 curves 字典加载）"""
+        t0 = time.perf_counter()
         # 先清空表格
         self.var_table.setRowCount(0)
 
@@ -270,6 +303,90 @@ class PlotVariableEditorDialog(QDialog):
             self._add_variable_to_table(var_name, curve_info)
 
         self.update_button_states()
+        logger.debug(
+            "[PERF] load_current_curves: 全量重建表格 curves=%d, took=%.1fms",
+            len(self.plot_widget.curves), (time.perf_counter() - t0) * 1000,
+        )
+
+    def _on_curves_changed_incremental(self):
+        """curves_changed 增量表格更新（性能优化方案 A）
+
+        对表格行与 curves 字典做 diff，按场景分流：
+        - 名称+顺序完全一致：轻量就地刷新（可见性/颜色），不重建任何控件；
+        - 纯添加且新曲线全部在末尾：仅追加新行（Enter 连续添加的主场景）；
+        - 纯删除且剩余顺序一致：仅删除对应行；
+        - 其余复杂场景（重排、中间插入、混合增删）：回退 load_current_curves 全量重建。
+
+        回退兜底保证正确性：增量路径出错的最坏结果也只是退回全量重建。
+        """
+        t0 = time.perf_counter()
+        table = self.var_table
+        table_names: list[str] = []
+        for row in range(table.rowCount()):
+            name_item = table.item(row, 1)
+            table_names.append(
+                name_item.data(Qt.ItemDataRole.UserRole) if name_item is not None else None
+            )
+        curve_names = list(self.plot_widget.curves.keys())
+        table_set = set(table_names)
+        curve_set = set(curve_names)
+        removed = table_set - curve_set
+        added = curve_set - table_set
+
+        path = "full_rebuild"
+        try:
+            if not removed and not added and table_names == curve_names:
+                # 场景 1：集合与顺序均未变 → 就地刷新可见性/颜色
+                self._refresh_rows_in_place()
+                path = "in_place"
+            elif not removed and added and curve_names[:-len(added)] == table_names:
+                # 场景 2：纯添加且全部在末尾 → 追加行
+                for name in curve_names[-len(added):]:
+                    self._add_variable_to_table(name, self.plot_widget.curves[name])
+                path = "append"
+            elif not added and removed:
+                # 场景 3：纯删除 → 删除对应行（倒序删除避免行号漂移）
+                survivors = [n for n in table_names if n in curve_set]
+                if survivors == curve_names:
+                    for row in range(table.rowCount() - 1, -1, -1):
+                        if table_names[row] in removed:
+                            table.removeRow(row)
+                    path = "remove"
+        except Exception:
+            logger.debug("增量表格更新异常，回退全量重建", exc_info=True)
+            path = "full_rebuild"
+
+        if path == "full_rebuild":
+            self.load_current_curves()
+            return
+
+        self.update_button_states()
+        logger.debug(
+            "[PERF] _on_curves_changed_incremental: path=%s, curves=%d, took=%.1fms",
+            path, len(curve_names), (time.perf_counter() - t0) * 1000,
+        )
+
+    def _refresh_rows_in_place(self):
+        """就地刷新表格行的可见性与颜色（不重建控件）
+
+        用于 curves 集合与顺序均未变的场景（如颜色修改、外部可见性变更）。
+        """
+        table = self.var_table
+        for row in range(table.rowCount()):
+            var_name = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            curve_info = self.plot_widget.curves.get(var_name)
+            if curve_info is None:
+                continue
+            checkbox = table.cellWidget(row, 0)
+            if checkbox is not None:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(curve_info.visible)
+                checkbox.blockSignals(False)
+            color_widget = table.cellWidget(row, 2)
+            if color_widget is not None:
+                color_widget.setStyleSheet(
+                    f"background-color: {curve_info.color}; border: 1px solid #333;"
+                )
 
     def _get_selected_row(self) -> int | None:
         """获取当前选中的行号"""
@@ -432,7 +549,7 @@ class PlotVariableEditorDialog(QDialog):
     def closeEvent(self, event):
         """关闭时断开 curves_changed 信号，避免重复打开编辑器导致信号连接累积"""
         try:
-            self.plot_widget.curves_changed.disconnect(self.load_current_curves)
+            self.plot_widget.curves_changed.disconnect(self._on_curves_changed_incremental)
         except (TypeError, RuntimeError):
             pass
         if self.search_bar is not None:
@@ -446,14 +563,15 @@ class PlotVariableEditorDialog(QDialog):
         """表格"删除选中"按钮入口：删除选中行 + 重置搜索会话
 
         表格删除是显式会话结束动作（用户心智：删除 = 这批操作到此为止），
-        因此末尾调用 reset_session 清空搜索栏的 _last_op_var 锚点。
+        因此末尾调用 reset_session 增量刷新搜索栏的"已添加"样式。
 
-        注意：搜索栏内移除变量不应调本方法（会清空锚点，影响后续 select_first 定位），
+        注意：搜索栏内移除变量不应调本方法（reset_session 后选中停留原位，
+        与搜索栏移除的键盘行为不一致），
         应改调 _remove_selected_variable_impl + mark_removed（见 _on_variable_removed）。
         """
         self._remove_selected_variable_impl()
         self.update_button_states()
-        # 删除变量 → 重置搜索会话（清锚点 + 刷新已添加样式）
+        # 删除变量 → 重置搜索会话（增量刷新已添加样式，不跳顶）
         if self.search_bar is not None:
             self.search_bar.reset_session()
 
@@ -462,8 +580,8 @@ class PlotVariableEditorDialog(QDialog):
 
         供 remove_selected_variable（表格删除按钮）和 _on_variable_removed
         （搜索栏移除）共用。调用方负责后续的会话状态处理：
-        - 表格删除：调 reset_session 清锚点
-        - 搜索栏移除：调 mark_removed 保持锚点（保持原位 + select_first 定位）
+        - 表格删除：调 reset_session 增量刷新样式
+        - 搜索栏移除：调 mark_removed 增量刷新标记（选中停留原项）
         """
         selected_items = self.var_table.selectedItems()
         if not selected_items:
@@ -560,7 +678,7 @@ class PlotVariableEditorDialog(QDialog):
             # 清空表格
             self.var_table.setRowCount(0)
             self.update_button_states()
-            # 清空所有 → 重置搜索会话（清锚点 + 刷新已添加样式）
+            # 清空所有 → 重置搜索会话（增量刷新已添加样式，不跳顶）
             if self.search_bar is not None:
                 self.search_bar.reset_session()
     
@@ -719,8 +837,8 @@ class PlotVariableEditorDialog(QDialog):
                         failed_vars.append(var_name)
 
                 # 重新加载列表以显示新添加的变量
-                # load_current_curves 由 curves_changed 信号触发（每次 add_variable_to_plot 成功都 emit）
-                # 注意：批量添加时信号会多次触发 load_current_curves，可接受（表格行数小）
+                # 表格刷新由 curves_changed 信号触发增量更新（每次 add_variable_to_plot 成功都 emit）
+                # 批量添加时信号多次触发，增量路径每次仅追加 1 行，开销可忽略
 
                 # 显示结果消息（只在有失败时提示）
                 if failed_vars:
@@ -746,7 +864,7 @@ class PlotVariableEditorDialog(QDialog):
 
                 # 添加变量到绘图
                 success = self.plot_widget.add_variable_to_plot(var_name)
-                # load_current_curves 由 curves_changed 信号触发，无需显式调用
+                # 表格刷新由 curves_changed 信号触发增量更新，无需显式调用
                 if not success:
                     QMessageBox.warning(self, "错误", f"无法添加变量 {var_name}")
 
