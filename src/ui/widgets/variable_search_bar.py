@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import sys
-import time
 import weakref
 from typing import Any
 
@@ -498,8 +497,6 @@ class VariableSearchBar(QWidget):
         """
         if self.candidate_list.count() == 0:
             return
-        t0 = time.perf_counter()
-        changed = 0
         existing = self._get_existing_set()
         for i in range(self.candidate_list.count()):
             item = self.candidate_list.item(i)
@@ -508,13 +505,8 @@ class VariableSearchBar(QWidget):
             is_existing = var_name in existing
             if was_existing == is_existing:
                 continue
-            changed += 1
             item.setData(Qt.ItemDataRole.UserRole + 2, is_existing)
             item.setText(self._build_display_text(var_name, is_existing))
-        logger.debug(
-            "[PERF] _update_existing_marks: items=%d, changed=%d, took=%.2fms",
-            self.candidate_list.count(), changed, (time.perf_counter() - t0) * 1000,
-        )
 
     def _select_next_unadded(self, from_var: str | None = None):
         """从 from_var 对应项往后找第一个未添加项并选中

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import sys
-import time
 import weakref
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
@@ -295,7 +294,6 @@ class PlotVariableEditorDialog(QDialog):
 
     def load_current_curves(self):
         """加载当前绘图中的曲线（统一版：始终从 curves 字典加载）"""
-        t0 = time.perf_counter()
         # 先清空表格
         self.var_table.setRowCount(0)
 
@@ -303,10 +301,6 @@ class PlotVariableEditorDialog(QDialog):
             self._add_variable_to_table(var_name, curve_info)
 
         self.update_button_states()
-        logger.debug(
-            "[PERF] load_current_curves: 全量重建表格 curves=%d, took=%.1fms",
-            len(self.plot_widget.curves), (time.perf_counter() - t0) * 1000,
-        )
 
     def _on_curves_changed_incremental(self):
         """curves_changed 增量表格更新（性能优化方案 A）
@@ -319,7 +313,6 @@ class PlotVariableEditorDialog(QDialog):
 
         回退兜底保证正确性：增量路径出错的最坏结果也只是退回全量重建。
         """
-        t0 = time.perf_counter()
         table = self.var_table
         table_names: list[str] = []
         for row in range(table.rowCount()):
@@ -361,10 +354,6 @@ class PlotVariableEditorDialog(QDialog):
             return
 
         self.update_button_states()
-        logger.debug(
-            "[PERF] _on_curves_changed_incremental: path=%s, curves=%d, took=%.1fms",
-            path, len(curve_names), (time.perf_counter() - t0) * 1000,
-        )
 
     def _refresh_rows_in_place(self):
         """就地刷新表格行的可见性与颜色（不重建控件）
