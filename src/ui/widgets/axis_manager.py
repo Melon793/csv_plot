@@ -390,24 +390,7 @@ class AxisManager:
     def _set_vline_bounds(self, bounds: list) -> None:
         """设置光标垂直线的边界"""
         pw = self.pw
-        # 【诊断】InfiniteLine.setBounds 默认 update=True 会将当前位置钳制进新边界，
-        # 记录前后位置以追踪 vline 被意外移动的问题
-        def _pos(line):
-            try:
-                return round(float(line.value()), 4)
-            except Exception:
-                return "<dead>"
-
-        before = None
-        if hasattr(pw, "vline"):
-            before = (_pos(pw.vline), _pos(pw.vline2) if hasattr(pw, "vline2") else None)
         if hasattr(pw, "vline"):
             pw.vline.setBounds(bounds)
         if hasattr(pw, "vline2"):
             pw.vline2.setBounds(bounds)
-        if before is not None:
-            after = (_pos(pw.vline), _pos(pw.vline2) if hasattr(pw, "vline2") else None)
-            logger.debug(
-                "[VLINE_TRACE] _set_vline_bounds: bounds=%s, 位置变化 %s -> %s",
-                bounds, before, after,
-            )

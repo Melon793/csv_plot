@@ -172,7 +172,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 # 仅当 vline 不在 scene 中时才重新添加
                 if vline.scene() is None:
                     widget.plot_item.addItem(vline, ignoreBounds=True)
-                    logger.debug("[LOAD_GUARD] _reattach_vlines_to_scene: %s 已重新加入 scene", attr_name)
                 # else: vline 已在 scene 中，跳过
             except RuntimeError:
                 pass
@@ -226,10 +225,6 @@ class FileLoaderManager(MainWindowBaseManager):
             return
         self.mw._is_loading_new_data = True
         self.mw._data_version += 1
-        logger.debug(
-            "[LOAD_GUARD] _begin_data_reload: 开始加载防护, data_version=%d, plots=%d",
-            self.mw._data_version, len(getattr(self.mw, "plot_widgets", [])),
-        )
 
         # v5.8 修复：取消之前的 safety timer，防止跨 reload 的过期 timer 触发 _force_unlock_all。
         # 之前的实现仅靠版本号防污染，但 _safety_unlock_version 会被最新 _end_data_reload 覆盖，
@@ -303,7 +298,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 # 移除后移入 trash bin 保持引用，延迟到下一轮清理时释放。
                 # 注：trash bin 中是上一轮已 removeItem 的 item，此处清空安全。
                 pending = widget._pending_delete_items
-                removed_cnt = 0
                 scene = None
                 plot_item = getattr(widget, "plot_item", None)
                 if plot_item is not None:
@@ -331,16 +325,10 @@ class FileLoaderManager(MainWindowBaseManager):
                                 pass
                         if not removed and scene is not None:
                             safe_qt_op(scene.removeItem, item)
-                        removed_cnt += 1
                     safe_qt_op(item.setVisible, False)
                     if trash is not None:
                         trash.append(item)
                 widget._pending_delete_items.clear()
-                if removed_cnt:
-                    logger.debug(
-                        "[LOAD_GUARD] _begin_data_reload: 从 scene 移除 %d 个 pending item 并移入 trash bin",
-                        removed_cnt,
-                    )
             widget._is_updating_data = True
             widget._cached_data_version = 0  # 设为0跳过版本比对，由 _is_updating_data 和 _is_loading_new_data 提供锁定
             # 暂停视图更新，防止 scene 中间状态触发 paint event 导致 SIGSEGV
@@ -370,38 +358,6 @@ class FileLoaderManager(MainWindowBaseManager):
 
         QTimer.singleShot(0, self._restore_cursor_state_after_reload)
 
-    def _log_scene_snapshot(self, widget, tag: str):
-        """诊断日志：输出 widget 场景内 item 清单（崩溃排查用）。
-
-        若再次发生 paint SIGSEGV，可对比崩溃前最后一份快照定位残留悬空项。
-        """
-        try:
-            plot_item = getattr(widget, "plot_item", None)
-            if plot_item is None:
-                return
-            scene = plot_item.scene()
-            if scene is None:
-                logger.debug("[SCENE] %s: scene=None", tag)
-                return
-            items = scene.items()
-            type_counts: dict[str, int] = {}
-            for it in items:
-                try:
-                    type_counts[type(it).__name__] = type_counts.get(type(it).__name__, 0) + 1
-                except RuntimeError:
-                    type_counts["<dead>"] = type_counts.get("<dead>", 0) + 1
-            logger.debug(
-                "[SCENE] %s: items=%d, types=%s, pending=%d, trash=%d, curves=%d",
-                tag,
-                len(items),
-                type_counts,
-                len(getattr(widget, "_pending_delete_items", [])),
-                len(getattr(widget, "_cursor_trash_bin", [])),
-                len(getattr(widget, "curves", {})),
-            )
-        except Exception:
-            logger.debug("[SCENE] %s: 快照失败", tag, exc_info=True)
-
     def _restore_cursor_state_after_reload(self):
         """延迟恢复 cursor 状态（在 UI 稳定后调用）"""
         if getattr(self.mw, "_is_being_destroyed", False):
@@ -410,10 +366,6 @@ class FileLoaderManager(MainWindowBaseManager):
 
         saved_cursor_mode = getattr(self.mw, "_saved_cursor_mode", None)
         saved_pinned_x_values = getattr(self.mw, "_saved_pinned_x_values", [])
-        logger.debug(
-            "[LOAD_GUARD] _restore_cursor_state_after_reload: mode=%s, pinned=%s",
-            saved_cursor_mode, saved_pinned_x_values,
-        )
 
         is_free_cursor = (
             not saved_cursor_mode
@@ -498,20 +450,6 @@ class FileLoaderManager(MainWindowBaseManager):
                             vline2.setMovable(True)
                     except RuntimeError:
                         logger.debug("vline2 C++ 对象已销毁，跳过恢复")
-
-                # 【诊断】setPos 后回读实际位置，验证恢复是否生效
-                # （后续若位置变化，可由 [VLINE_TRACE] 链定位到责任调用）
-                def _safe_val(line):
-                    try:
-                        return round(float(line.value()), 4)
-                    except Exception:
-                        return "<dead>"
-                logger.debug(
-                    "[VLINE_TRACE] restore: 目标 pinned=%s, 实际 vline=%s, vline2=%s",
-                    saved_pinned_x_values,
-                    _safe_val(widget.vline) if hasattr(widget, "vline") and widget.vline is not None else None,
-                    _safe_val(widget.vline2) if hasattr(widget, "vline2") and widget.vline2 is not None else None,
-                )
 
                 if saved_cursor_mode == "2 anchored cursor":
                     if hasattr(widget, "vline"):
@@ -642,11 +580,6 @@ class FileLoaderManager(MainWindowBaseManager):
                 self._safety_timer.stop()
                 self._safety_timer = None
 
-            # 【崩溃诊断】解锁后、放行 paint 前的场景快照：
-            # 若后续 paint 崩溃，可据此定位场景残留的悬空项
-            for widget in widgets_to_refresh:
-                self._log_scene_snapshot(widget, "unlock-before")
-
             # v5.12: reload 流程完全结束，恢复 reload 按钮
             self.mw.reload_btn.setEnabled(True)
 
@@ -660,10 +593,6 @@ class FileLoaderManager(MainWindowBaseManager):
             # v5.3 修复问题 1：用 viewport().update() 可靠触发 QGraphicsView 重绘
             for widget in widgets_to_refresh:
                 widget.viewport().update()
-            logger.debug(
-                "[LOAD_GUARD] _post_reload_ui_refresh: 已解锁并触发重绘, widgets=%d, data_version=%d",
-                len(widgets_to_refresh), self.mw._data_version,
-            )
 
             # v5.3 修复问题 2：合并 13 个 per-widget QTimer.singleShot(0) 为 1 个统一回调
             current_version = self.mw._data_version

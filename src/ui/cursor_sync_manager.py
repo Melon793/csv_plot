@@ -117,11 +117,6 @@ class CursorSyncManager(MainWindowBaseManager):
         return int(np.argmax(distances))
 
     def _apply_cursor_mode_to_plots(self):
-        logger.debug(
-            "[VLINE_TRACE] _apply_cursor_mode_to_plots: mode=%s, pinned=%s",
-            getattr(self.mw, "cursor_mode", None),
-            getattr(self.mw, "pinned_x_values", None),
-        )
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget is None:
@@ -129,11 +124,6 @@ class CursorSyncManager(MainWindowBaseManager):
             widget.apply_cursor_mode(self.mw.cursor_mode, self.mw.pinned_x_values)
 
     def set_cursor_mode(self, mode, *, source_plot=None, context_x=None):
-        logger.debug(
-            "[VLINE_TRACE] set_cursor_mode: 请求 mode=%s, 当前 mode=%s, context_x=%s, pinned=%s",
-            mode, getattr(self.mw, "cursor_mode", None), context_x,
-            getattr(self.mw, "pinned_x_values", None),
-        )
         if mode == "off":
             if self.mw.cursor_btn.isChecked():
                 self.toggle_cursor_all(False)
@@ -220,11 +210,6 @@ class CursorSyncManager(MainWindowBaseManager):
         return False
 
     def toggle_cursor_all(self, checked):
-        logger.debug(
-            "[VLINE_TRACE] toggle_cursor_all: checked=%s, 当前 mode=%s, pinned=%s",
-            checked, getattr(self.mw, "cursor_mode", None),
-            getattr(self.mw, "pinned_x_values", None),
-        )
         if not self.mw.plot_widgets:
             return
         for container in self.mw.plot_widgets:
