@@ -226,7 +226,6 @@ class CursorManager:
                 self.pw.vline.setVisible(False)
             if hasattr(self.pw, "vline2"):
                 self.pw.vline2.setVisible(False)
-            self.pw.update_right_header("")
             self._clear_cursor_items(hide_only=True)
             return
 
@@ -375,43 +374,6 @@ class CursorManager:
             self.pw._cursor_lock_logged = is_locked
 
         return lock_reason is not None
-
-    def _update_single_curve_cursor_label(self):
-        """更新单曲线模式的光标标签"""
-        if len(self.pw.plot_item.listDataItems()) == 0:
-            self.pw.update_right_header("")
-            return
-
-        try:
-            x = self.pw.vline.value()
-            curve = self.pw.plot_item.listDataItems()[0]
-            x_data, y_data = curve.getData()
-            if x_data is None or len(x_data) == 0:
-                self.pw.update_right_header("")
-                return
-            x = np.clip(x, x_data.min(), x_data.max())
-            idx = np.argmin(np.abs(x_data - x))
-            y_val = y_data[idx]
-            x_str = self._significant_decimal_format_str(
-                value=float(x), ref=self.factor
-            )
-            if self.y_format == "enum":
-                enum_map = getattr(self.pw.plot_context, "_enum_text_maps", {}).get(
-                    self.y_name, {}
-                )
-                y_str = enum_map.get(int(y_val), str(y_val))
-                self.pw.update_right_header(f"x={x_str}, y={y_str}")
-            elif self.y_format == "s":
-                time_str = self.sInt_to_fmtStr(y_val)
-                self.pw.update_right_header(f"x={x_str}, y={time_str}")
-            elif self.y_format == "date":
-                date_str = self.dateInt_to_fmtStr(y_val)
-                self.pw.update_right_header(f"x={x_str}, y={date_str}")
-            else:
-                self.pw.update_right_header(f"x={x_str}, y={y_val:.5g}")
-
-        except Exception:
-            self.pw.update_right_header("")
 
     def _get_circle_from_pool(self, index: int):
         """从对象池获取 ScatterPlotItem"""
@@ -609,7 +571,6 @@ class CursorManager:
         else:
             vline_visible = self.pw.vline.isVisible()
         if not vline_visible:
-            self.pw.update_right_header("")
             return
 
         if self.show_values_only:
@@ -617,12 +578,10 @@ class CursorManager:
             return
 
         if not self.pw.curves:
-            self.pw.update_right_header("")
             return
 
         x_positions = self._get_cursor_x_positions()
         if not x_positions:
-            self.pw.update_right_header("")
             return
 
         try:
@@ -778,7 +737,7 @@ class CursorManager:
                 view_box.update()
 
         except Exception:
-            self.pw.update_right_header("")
+            logger.warning("更新多曲线光标标签失败", exc_info=True)
 
     def _position_labels_avoid_overlap(
         self,
@@ -1436,7 +1395,6 @@ class CursorManager:
         try:
             if not self._has_visible_curve_data():
                 self._clear_cursor_items()
-                self.pw.update_right_header("")
                 return
             x_positions = (
                 x_positions
@@ -1444,7 +1402,6 @@ class CursorManager:
                 else self._get_cursor_x_positions()
             )
             if not x_positions:
-                self.pw.update_right_header("")
                 return
 
             pw = self.pw
@@ -1483,15 +1440,6 @@ class CursorManager:
                 x_info_item.setZValue(100000)
 
                 pw.multi_cursor_items.append(x_info_item)
-
-            parts = []
-            for x in x_positions:
-                x_str = self._significant_decimal_format_str(
-                    value=float(x), ref=self.factor
-                )
-                parts.append(f"x={x_str}")
-            header_text = " | ".join(parts)
-            self.pw.update_right_header(header_text)
 
             # 所有 cursor 可视化元素设置完毕后，
             # 强制触发 ViewBox 重绘，避免部分 item 不可见
@@ -1533,7 +1481,6 @@ class CursorManager:
 
             if not show:
                 self._clear_cursor_items()
-                self.pw.update_right_header("")
                 self.is_cursor_pinned = False
                 self.pinned_x_value = None
                 self.pinned_index_value = None

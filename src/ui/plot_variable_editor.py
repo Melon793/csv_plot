@@ -629,8 +629,7 @@ class PlotVariableEditorDialog(QDialog):
         if not self.plot_widget.curves:
             self.plot_widget.current_color_index = 0
             self.plot_widget.update_left_header("channel name")
-            self.plot_widget.update_right_header("")
-        
+
             # 先重置 Y 轴范围（与 clear_plot_item 顺序一致：先 reset 再 clear）
             self.plot_widget._reset_plot_limits()
             # 清空所有变量时完全清除对象池，避免复用异常状态的items
@@ -673,8 +672,7 @@ class PlotVariableEditorDialog(QDialog):
     
             # 更新显示
             self.plot_widget.update_left_header("channel name")
-            self.plot_widget.update_right_header("")
-    
+
             # 重置vline bounds到默认值
             self.plot_widget._update_vline_bounds_from_data()
     
