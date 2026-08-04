@@ -34,7 +34,12 @@ class EventHandler:
     @property
     def pw(self) -> Any:
         """关联的 DraggableGraphicsLayoutWidget 实例"""
-        return self._mark_region_manager.pw
+        mrm = self._mark_region_manager
+        if mrm is None:
+            raise RuntimeError(
+                "EventHandler: dependency chain broken (_mark_region_manager is None)"
+            )
+        return mrm.pw
 
     @property
     def _cursor_manager(self):

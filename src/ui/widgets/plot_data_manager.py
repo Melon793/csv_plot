@@ -45,7 +45,12 @@ class PlotDataManager:
 
     @property
     def pw(self) -> Any:
-        return self._axis_manager.pw
+        am = self._axis_manager
+        if am is None:
+            raise RuntimeError(
+                "PlotDataManager: dependency chain broken (_axis_manager is None)"
+            )
+        return am.pw
 
     def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
         """绘制变量到图表（统一版）

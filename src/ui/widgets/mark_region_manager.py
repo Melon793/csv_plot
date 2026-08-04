@@ -34,7 +34,12 @@ class MarkRegionManager:
 
     @property
     def pw(self) -> Any:
-        return self._cursor_manager.pw
+        cm = self._cursor_manager
+        if cm is None:
+            raise RuntimeError(
+                "MarkRegionManager: dependency chain broken (_cursor_manager is None)"
+            )
+        return cm.pw
 
     def add_mark_region(self, min_x: float, max_x: float):
         """添加标记区域"""
