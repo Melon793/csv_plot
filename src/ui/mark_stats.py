@@ -68,8 +68,9 @@ class MarkStatsWindow(QDialog):
         layout.addWidget(self.tree)
         self.no_curve_item = QTreeWidgetItem(self.tree, ["No Curve"])
         self.no_curve_item.setExpanded(False)
-        if self.parent().mark_stats_geometry:
-            self.restoreGeometry(self.parent().mark_stats_geometry)
+        parent = self.parent()
+        if parent is not None and getattr(parent, "mark_stats_geometry", None):
+            self.restoreGeometry(parent.mark_stats_geometry)
         else:
             self.resize(1200, 300)
 

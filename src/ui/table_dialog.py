@@ -844,13 +844,13 @@ class DataTableDialog(QMainWindow):
         self.frozen_view.viewport().update()
         self.main_view.viewport().update()
 
-    def _update_highlights_frozen(self, selected, deselected):
-        # 设置当前焦点视图为冻结视图
+    def _update_highlights_frozen(self, _selected, _deselected):
+        # selected/deselected 由 Qt selectionModel 信号传入，此处不需要
         self.current_focused_view = self.frozen_view
         self._update_highlights_on_focus_change()
 
-    def _update_highlights_main(self, selected, deselected):
-        # 设置当前焦点视图为主视图
+    def _update_highlights_main(self, _selected, _deselected):
+        # selected/deselected 由 Qt selectionModel 信号传入，此处不需要
         self.current_focused_view = self.main_view
         self._update_highlights_on_focus_change()
 
@@ -873,11 +873,21 @@ class DataTableDialog(QMainWindow):
         if not isinstance(view, QTableView):
             return
 
-        selected_indexes = view.selectionModel().selectedIndexes()
-        if not selected_indexes:
+        analysis = self._analyze_selection(view)
+        if analysis is None:
             return
 
-        # 计算两侧选择与列集合
+        menu = QMenu(self)
+        scatter_added = self._build_plot_menu(menu, analysis)
+        self._build_copy_menu(menu, analysis, scatter_added)
+        menu.exec(view.mapToGlobal(pos))
+
+    def _analyze_selection(self, view):
+        """分析当前视图及另一视图的选中内容，返回分析结果字典；无选中时返回 None。"""
+        selected_indexes = view.selectionModel().selectedIndexes()
+        if not selected_indexes:
+            return None
+
         frozen_cols = set(self._df.columns.get_loc(col) for col in self.frozen_columns)
         if view == self.main_view:
             other_view = self.frozen_view
@@ -900,19 +910,16 @@ class DataTableDialog(QMainWindow):
         rows_order: list[int] = []
 
         if len(total_cols) == 1:
-            # 单列：允许复制（支持多段选择）
             only_col = next(iter(total_cols))
             ordered_cols = [only_col]
             rows_order = sorted(rows_per_col_all[only_col])
             can_copy = len(rows_order) > 0
         elif len(total_cols) >= 2:
-            # 多列：几列的行号集合需完全相同
             cols_list = list(total_cols)
             base_rows = rows_per_col_all[cols_list[0]] if cols_list else set()
             if base_rows and all(
                 rows_per_col_all[c] == base_rows for c in cols_list[1:]
             ):
-                # 左到右的可视列顺序：先冻结区，再主区
                 frozen_header = self.frozen_view.horizontalHeader()
                 main_header = self.main_view.horizontalHeader()
                 frozen_selected_cols = [c for c in total_cols if c in frozen_cols]
@@ -923,7 +930,7 @@ class DataTableDialog(QMainWindow):
                 rows_order = sorted(base_rows)
                 can_copy = True
 
-        # 计算绘图相关（尽量保持原有逻辑）
+        # 计算绘图可行性
         plot_enabled = False
         x_col = y_col = None
         plot_rows: list[int] = []
@@ -952,50 +959,74 @@ class DataTableDialog(QMainWindow):
                 plot_rows = sorted(all_rows)
                 plot_enabled = True
 
-        menu = QMenu(self)
+        return {
+            "total_cols": total_cols,
+            "can_copy": can_copy,
+            "ordered_cols": ordered_cols,
+            "rows_order": rows_order,
+            "plot_enabled": plot_enabled,
+            "x_col": x_col,
+            "y_col": y_col,
+            "plot_rows": plot_rows,
+        }
 
-        # 绘图菜单（仅在正好两列被选中时展示；保持原行为）
-        scatter_actions_added = False
-        plot_candidate_cols = total_cols
-        if len(plot_candidate_cols) == 2:
-            # 获取列名用于展示
-            cols_list = sorted(list(plot_candidate_cols))
-            if plot_enabled and x_col is not None and y_col is not None:
-                x_show, y_show = x_col, y_col
-            else:
-                x_show, y_show = cols_list[0], cols_list[1]
-            x_name = self.model.headerData(
-                x_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
-            ).replace("\n", " ")
-            y_name = self.model.headerData(
-                y_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
-            ).replace("\n", " ")
+    def _build_plot_menu(self, menu, analysis):
+        """构建绘图子菜单。返回是否已添加可用的散点图动作。"""
+        total_cols = analysis["total_cols"]
+        if len(total_cols) != 2:
+            return False
 
-            act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
-            act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
-            if plot_enabled and x_col is not None and y_col is not None:
-                act1.triggered.connect(
-                    lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(
-                        x, y, rows
-                    )
+        plot_enabled = analysis["plot_enabled"]
+        x_col = analysis["x_col"]
+        y_col = analysis["y_col"]
+        plot_rows = analysis["plot_rows"]
+
+        cols_list = sorted(list(total_cols))
+        if plot_enabled and x_col is not None and y_col is not None:
+            x_show, y_show = x_col, y_col
+        else:
+            x_show, y_show = cols_list[0], cols_list[1]
+        x_name = self.model.headerData(
+            x_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
+        ).replace("\n", " ")
+        y_name = self.model.headerData(
+            y_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
+        ).replace("\n", " ")
+
+        # 存储列名供 _build_copy_menu 在禁用场景下复用
+        analysis["x_name"] = x_name
+        analysis["y_name"] = y_name
+
+        act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
+        act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
+        if plot_enabled and x_col is not None and y_col is not None:
+            act1.triggered.connect(
+                lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(
+                    x, y, rows
                 )
-                act2.triggered.connect(
-                    lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(
-                        y, x, rows
-                    )
+            )
+            act2.triggered.connect(
+                lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(
+                    y, x, rows
                 )
-                act1.setEnabled(True)
-                act2.setEnabled(True)
-                # 若可激活绘图，则先放绘图菜单
-                menu.addAction(act1)
-                menu.addAction(act2)
-                scatter_actions_added = True
-            else:
-                act1.setEnabled(False)
-                act2.setEnabled(False)
-                # 若无法激活绘图，则稍后把它们放在复制项之后
+            )
+            act1.setEnabled(True)
+            act2.setEnabled(True)
+            menu.addAction(act1)
+            menu.addAction(act2)
+            return True
+        else:
+            act1.setEnabled(False)
+            act2.setEnabled(False)
+            return False
 
-        # 复制到剪贴板（两个按钮）
+    def _build_copy_menu(self, menu, analysis, scatter_added):
+        """构建复制子菜单（含禁用绘图项的补位逻辑）。"""
+        can_copy = analysis["can_copy"]
+        ordered_cols = analysis["ordered_cols"]
+        rows_order = analysis["rows_order"]
+        total_cols = analysis["total_cols"]
+
         act_copy_selected = QAction("复制所选数据到剪贴板", menu)
         act_copy_selected.setEnabled(can_copy)
         if can_copy:
@@ -1011,25 +1042,23 @@ class DataTableDialog(QMainWindow):
         if enable_all:
             act_copy_all.triggered.connect(self._copy_all_to_clipboard)
 
-        if scatter_actions_added:
+        if scatter_added:
             menu.addSeparator()
             menu.addAction(act_copy_selected)
             menu.addAction(act_copy_all)
         else:
-            # 若无法激活x/y散点图，则优先展示复制功能
             menu.addAction(act_copy_selected)
             menu.addAction(act_copy_all)
-            # 若存在两列但不可激活，也追加禁用的绘图项在其后
-            if len(plot_candidate_cols) == 2:
+            if len(total_cols) == 2:
                 menu.addSeparator()
+                x_name = analysis.get("x_name", "")
+                y_name = analysis.get("y_name", "")
                 act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
                 act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
                 act1.setEnabled(False)
                 act2.setEnabled(False)
                 menu.addAction(act1)
                 menu.addAction(act2)
-
-        menu.exec(view.mapToGlobal(pos))
 
     def _plot_xy_scatter(
         self, x_col_idx, y_col_idx, rows=None, start_row=None, num_rows=None
@@ -1235,6 +1264,10 @@ class DataTableDialog(QMainWindow):
     def has_column(self, var_name: str) -> bool:
         return var_name in self._df.columns
 
+    def get_column_names(self) -> list[str]:
+        """返回 DataFrame 中所有列名（公开接口，避免外部访问私有属性）。"""
+        return self._df.columns.tolist()
+
     def add_series(self, var_name: str, data: pd.Series):
         self._add_variable_to_table(var_name, data)
 
@@ -1319,6 +1352,19 @@ class DataTableDialog(QMainWindow):
                     main_header.moveSection(current_visual_idx, current_visual_index)
                 current_visual_index += 1
 
+    def _rebuild_frozen_column_order(self, full_visual_order: list[str]) -> list[str]:
+        """根据 frozen_columns 重建完整视觉列顺序（冻结列在前）"""
+        new_order: list[str] = []
+        # 冻结列在前
+        for col in full_visual_order:
+            if col in self.frozen_columns and col not in new_order:
+                new_order.append(col)
+        # 非冻结列在后
+        for col in full_visual_order:
+            if col not in self.frozen_columns and col not in new_order:
+                new_order.append(col)
+        return new_order
+
     def freeze_column(self, logical_col):
         var_name = self._df.columns[logical_col]
 
@@ -1345,17 +1391,7 @@ class DataTableDialog(QMainWindow):
             # 将要冻结的列添加到冻结列列表
             self.frozen_columns.append(var_name)
 
-            # 重新构建列顺序
-            new_column_order = []
-
-            # 按照完整视觉顺序添加列，但冻结列在前，非冻结列在后
-            for col in full_visual_order:
-                if col in self.frozen_columns and col not in new_column_order:
-                    new_column_order.append(col)
-
-            for col in full_visual_order:
-                if col not in self.frozen_columns and col not in new_column_order:
-                    new_column_order.append(col)
+            new_column_order = self._rebuild_frozen_column_order(full_visual_order)
 
             # 重新排列DataFrame
             self._df = self._df[new_column_order]
@@ -1396,17 +1432,7 @@ class DataTableDialog(QMainWindow):
             # 将要解冻的列从冻结列列表中移除
             self.frozen_columns.remove(var_name)
 
-            # 重新构建列顺序
-            new_column_order = []
-
-            # 按照完整视觉顺序添加列，但冻结列在前，非冻结列在后
-            for col in full_visual_order:
-                if col in self.frozen_columns and col not in new_column_order:
-                    new_column_order.append(col)
-
-            for col in full_visual_order:
-                if col not in self.frozen_columns and col not in new_column_order:
-                    new_column_order.append(col)
+            new_column_order = self._rebuild_frozen_column_order(full_visual_order)
 
             # 重新排列DataFrame
             self._df = self._df[new_column_order]

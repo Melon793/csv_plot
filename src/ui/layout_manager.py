@@ -77,9 +77,8 @@ class LayoutManager(MainWindowBaseManager):
         if right_width <= 0:
             return
 
-        mw.main_splitter.blockSignals(True)
-        mw.main_splitter.setSizes([mw.var_table_default_width, right_width])
-        mw.main_splitter.blockSignals(False)
+        with QSignalBlocker(mw.main_splitter):
+            mw.main_splitter.setSizes([mw.var_table_default_width, right_width])
 
     def _schedule_xlink_sync(self):
         """节流调度 X-link 健康检查与同步（50ms 防抖）"""
@@ -160,6 +159,10 @@ class LayoutManager(MainWindowBaseManager):
                 if abs(cur_range[0] - xmin) < 1e-12 and abs(cur_range[1] - xmax) < 1e-12:
                     continue
             except Exception:
+                logger.debug(
+                    "[XLINK] viewRange 获取失败，跳过同步",
+                    exc_info=True,
+                )
                 continue
             linked = vb.linkedView(0)
             if linked is not None:
@@ -187,6 +190,10 @@ class LayoutManager(MainWindowBaseManager):
                     and abs(new_range[1] - xmax) < tolerance
                 )
             except Exception:
+                logger.debug(
+                    "[XLINK_SYNC] viewRange 验证失败",
+                    exc_info=True,
+                )
                 new_range = (None, None)
                 ok = False
             logger.debug(
@@ -448,6 +455,10 @@ class LayoutManager(MainWindowBaseManager):
                                     index_pos
                                 )
             except Exception:
+                logger.warning(
+                    "时间修正 pin 值反算失败，重置为空列表",
+                    exc_info=True,
+                )
                 self.mw._time_correction_pinned_index_values = []
 
             try:
@@ -529,6 +540,19 @@ class LayoutManager(MainWindowBaseManager):
             app.removeEventFilter(self.mw)
         self.mw._drop_event_filter_registered = False
 
+    def _is_supported_drop(self, mime_data) -> bool:
+        """检查 MIME 数据是否包含支持的文件类型 URL"""
+        if not mime_data.hasUrls():
+            return False
+        urls = mime_data.urls()
+        return any(
+            u.toLocalFile().lower().endswith(
+                (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
+            )
+            or self.mw.file_loader_manager._extract_file_extension(u.toLocalFile()) is not None
+            for u in urls
+        )
+
     def _handle_event_filter(self, obj, event):
         if not isinstance(obj, QWidget):
             return False
@@ -536,46 +560,23 @@ class LayoutManager(MainWindowBaseManager):
             return False
         etype = event.type()
         if etype == QEvent.Type.DragEnter:
-            if event.mimeData().hasUrls():
-                urls = event.mimeData().urls()
-                supported = any(
-                    u.toLocalFile()
-                    .lower()
-                    .endswith(
-                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
-                    )
-                    or self.mw.file_loader_manager._extract_file_extension(u.toLocalFile()) is not None
-                    for u in urls
-                )
-
-                if supported:
-                    self.show_drop_overlay()
-                    self.mw.drop_overlay.adjust_text(file_type_supported=True)
-                    event.acceptProposedAction()
-                    return True
-                else:
-                    self.show_drop_overlay()
-                    self.mw.drop_overlay.adjust_text(file_type_supported=False)
-                    event.ignore()
-                    return True
+            if self._is_supported_drop(event.mimeData()):
+                self.show_drop_overlay()
+                self.mw.drop_overlay.adjust_text(file_type_supported=True)
+                event.acceptProposedAction()
+                return True
+            else:
+                self.show_drop_overlay()
+                self.mw.drop_overlay.adjust_text(file_type_supported=False)
+                event.ignore()
+                return True
         elif etype == QEvent.Type.DragLeave:
             self.hide_drop_overlay()
             return True
         elif etype == QEvent.Type.DragMove:
-            if event.mimeData().hasUrls():
-                urls = event.mimeData().urls()
-                supported = any(
-                    u.toLocalFile()
-                    .lower()
-                    .endswith(
-                        (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
-                    )
-                    or self.mw.file_loader_manager._extract_file_extension(u.toLocalFile()) is not None
-                    for u in urls
-                )
-                if supported:
-                    event.acceptProposedAction()
-                    return True
+            if self._is_supported_drop(event.mimeData()):
+                event.acceptProposedAction()
+                return True
         elif etype == QEvent.Type.Drop:
             self.hide_drop_overlay()
             if event.mimeData().hasUrls():
@@ -706,16 +707,25 @@ class LayoutManager(MainWindowBaseManager):
         return self.mw.row_height_factors.get(row, 100)
 
     def set_plots_visible(self, row_set: int = 1, col_set: int = 1):
+        """设置可见 Plot 区域"""
         m, n = self.mw._plot_row_max_default, self.mw._plot_col_max_default
         logger.debug(
             "[LAYOUT] set_plots_visible: rows=%d cols=%d (max %dx%d)",
             row_set, col_set, m, n,
         )
+        self._apply_visibility(row_set, col_set, m, n)
+        self._sync_xlink_after_visibility_change(row_set, col_set)
+        self._adjust_stretch_and_range(row_set, col_set)
 
+    def _apply_visibility(self, row_set, col_set, m, n):
+        """批量设置 container 可见性"""
         for idx, container in enumerate(self.mw.plot_widgets):
             r, c = divmod(idx, n)
             container.setVisible(r < row_set and c < col_set)
 
+    def _sync_xlink_after_visibility_change(self, row_set, col_set):
+        """可见性变更后同步 X-link"""
+        n = self.mw._plot_col_max_default
         master_vb = self.mw.plot_widgets[0].plot_widget.view_box if self.mw.plot_widgets else None
         for idx, container in enumerate(self.mw.plot_widgets):
             if idx == 0:
@@ -730,6 +740,11 @@ class LayoutManager(MainWindowBaseManager):
             elif not should_be_visible and currently_linked:
                 logger.debug("[XLINK] set_plots_visible: breaking link for hidden plot idx=%d r=%d c=%d", idx, r, c)
                 vb.setXLink(None)
+
+    def _adjust_stretch_and_range(self, row_set, col_set):
+        """调整 stretch 因子和 X 范围"""
+        m = self.mw._plot_row_max_default
+        n = self.mw._plot_col_max_default
 
         for c in range(n):
             has_visible = any(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import sys
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
@@ -364,9 +364,8 @@ class PlotVariableEditorDialog(QDialog):
                 continue
             checkbox = table.cellWidget(row, 0)
             if checkbox is not None:
-                checkbox.blockSignals(True)
-                checkbox.setChecked(curve_info.visible)
-                checkbox.blockSignals(False)
+                with QSignalBlocker(checkbox):
+                    checkbox.setChecked(curve_info.visible)
             color_widget = table.cellWidget(row, 2)
             if color_widget is not None:
                 color_widget.setStyleSheet(

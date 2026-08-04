@@ -13,13 +13,16 @@ CursorManager - 光标管理
 
 from __future__ import annotations
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt
+from PySide6.QtWidgets import QApplication
 
 from src.core.config import safe_qt_op
 from src.core.logger import get_logger
@@ -263,8 +266,6 @@ class CursorManager:
             )
             if hasattr(self.pw, "vline") and self.pinned_x_value is not None:
                 self.pw.vline.setMovable(True)
-                from PySide6.QtCore import QSignalBlocker
-
                 with QSignalBlocker(self.pw.vline):
                     self.pw.vline.setPos(self.pinned_x_value)
             if hasattr(self.pw, "vline2"):
@@ -303,8 +304,6 @@ class CursorManager:
             if hasattr(self.pw, "vline2"):
                 self.pw.vline2.setMovable(True)
             if hasattr(self.pw, "vline") and self.pinned_x_values:
-                from PySide6.QtCore import QSignalBlocker
-
                 with QSignalBlocker(self.pw.vline):
                     self.pw.vline.setPos(self.pinned_x_values[0])
             if hasattr(self.pw, "vline2") and len(self.pinned_x_values) > 1:
@@ -380,8 +379,6 @@ class CursorManager:
         if index < len(pool):
             return pool[index]
 
-        import pyqtgraph as pg
-
         while len(pool) <= index:
             circle = pg.ScatterPlotItem(symbol="o", size=8, brush=None)
             pool.append(circle)
@@ -392,9 +389,6 @@ class CursorManager:
         pool = self.pw._cursor_item_pool["labels"]
         if index < len(pool):
             return pool[index]
-
-        import pyqtgraph as pg
-        from PySide6.QtWidgets import QApplication
 
         while len(pool) <= index:
             label = pg.TextItem(
@@ -411,9 +405,6 @@ class CursorManager:
         pool = self.pw._cursor_item_pool["x_labels"]
         if index < len(pool):
             return pool[index]
-
-        import pyqtgraph as pg
-        from PySide6.QtWidgets import QApplication
 
         while len(pool) <= index:
             x_label = pg.TextItem(
@@ -528,18 +519,16 @@ class CursorManager:
 
     def _safe_delete_item(self, item):
         """安全地从场景移除并调度删除 item"""
-        scene = item.scene()
+        scene = safe_qt_op(item.scene)
         if scene is not None:
-            scene.removeItem(item)
+            safe_qt_op(scene.removeItem, item)
         if hasattr(item, "deleteLater"):
-            item.deleteLater()
+            safe_qt_op(item.deleteLater)
 
     def _update_multi_curve_cursor_label(self):
         """更新多曲线光标标签"""
         if self._is_interacting:
             return
-
-        import time
 
         current_time = time.time()
 
@@ -615,8 +604,6 @@ class CursorManager:
                     len(curves_to_process),
                     [f"{x:.4f}" for x in x_positions[:3]],
                 )
-
-            import pyqtgraph as pg
 
             for cursor_id, x in enumerate(x_positions):
                 # anchored cursor 的 x 位置是用户固定的，不应因 view range
@@ -1238,8 +1225,6 @@ class CursorManager:
             (x_min, x_max), (y_min, y_max) = view_box.viewRange()
             self._clear_cursor_items()
 
-            import pyqtgraph as pg
-
             show_x_mode = self._get_cursor_mode()
             for idx, x in enumerate(x_positions):
                 # anchored cursor 的 x 位置是用户固定的，不因为 view range 变化而被过滤
@@ -1433,8 +1418,6 @@ class CursorManager:
                             else getattr(widget, "vline2", None)
                         )
                         if target_line is not None:
-                            from PySide6.QtCore import QSignalBlocker
-
                             with QSignalBlocker(target_line):
                                 target_line.setPos(x_pos)
                         else:
@@ -1492,7 +1475,7 @@ class CursorManager:
             pw._set_vline_bounds([None, None])
             return None, None
 
-    # ── 格式化工助方法 ──
+    # ── 格式化工具方法 ──
 
     def sInt_to_fmtStr(self, value: int) -> str:
         """将秒数转换为时间字符串 HH:MM:SS.SS"""
@@ -1504,7 +1487,6 @@ class CursorManager:
 
     def dateInt_to_fmtStr(self, value: int) -> str:
         """将时间戳转换为日期字符串"""
-        from datetime import datetime
         try:
             dt = datetime.fromtimestamp(value)
             return dt.strftime('%Y/%m/%d')

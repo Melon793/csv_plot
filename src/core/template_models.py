@@ -3,8 +3,11 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from src.core.plot_config import PlotSessionConfig
 
 
 @dataclass
@@ -80,3 +83,27 @@ def count_template_variables(config: dict) -> int:
         curves = (plot or {}).get("curves", []) or []
         var_set.update(curves)
     return len(var_set)
+
+
+def extract_variables_from_config(config: "PlotSessionConfig | dict") -> set[str]:
+    """从配置中提取所有变量名（统一实现，支持 PlotSessionConfig 和 dict 两种格式）。
+
+    Args:
+        config: PlotSessionConfig 对象或 dict 格式的配置
+
+    Returns:
+        变量名的集合
+    """
+    var_set: set[str] = set()
+
+    if isinstance(config, dict):
+        plots = config.get("plots", []) or []
+        for plot in plots:
+            curves = (plot or {}).get("curves", []) or []
+            var_set.update(curves)
+    else:
+        for plot in config.plots:
+            for v in plot.curves:
+                var_set.add(v)
+
+    return var_set

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 import logging
+import os
+import sys
 import tempfile
 from enum import StrEnum
 from pathlib import Path
@@ -65,14 +67,11 @@ class AppSettings:
 
     @staticmethod
     def _get_config_dir() -> Path:
-        import sys
         if sys.platform == "darwin":
             base = Path.home() / "Library" / "Application Support"
         elif sys.platform == "win32":
-            import os
             base = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
         else:
-            import os
             base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
         return base / "CSVPlot"
 
@@ -116,7 +115,6 @@ class AppSettings:
 
             self._settings.sync()
         except Exception as e:
-            import logging
             logging.getLogger(__name__).warning("配置迁移失败: %s", e)
 
     @property

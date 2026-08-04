@@ -198,7 +198,7 @@ class CursorSyncManager(MainWindowBaseManager):
             widget = getattr(container, "plot_widget", None)
             if widget is not None:
                 widget._last_cursor_update_time = 0
-                widget.update_cursor_label()
+                safe_qt_op(widget.update_cursor_label)
 
     def set_cursor_enabled(self, enabled: bool) -> None:
         if self.mw.cursor_btn:
@@ -516,7 +516,7 @@ class CursorSyncManager(MainWindowBaseManager):
                 all_y_names.extend(widget.curves.keys())
 
             if DataTableDialog._instance is not None:
-                all_y_names.extend(DataTableDialog._instance._df.columns.tolist())
+                all_y_names.extend(DataTableDialog._instance.get_column_names())
 
             is_mdf = getattr(self.mw.loader, "LOADER_TYPE", "") == "mdf"
 

@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Optional, Tuple
 from PySide6.QtCore import QObject, Signal
 from src.core.plot_config import PlotSessionConfig
+from src.core.settings import AppSettings
 from src.core.logger import get_logger
+from src.core.template_models import extract_variables_from_config
 
 
 logger = get_logger(__name__)
@@ -27,7 +29,6 @@ class AutoSaveManager(QObject):
     def __init__(self, storage_path: Optional[Path] = None):
         super().__init__()
         if storage_path is None:
-            from src.core.settings import AppSettings
             storage_path = AppSettings().config_dir
         self._storage_path = storage_path
         self._storage_path.mkdir(parents=True, exist_ok=True)
@@ -35,11 +36,9 @@ class AutoSaveManager(QObject):
         self._auto_save_backup_file = self._storage_path / "auto_save.yaml.backup"
 
     def is_auto_save_enabled(self) -> bool:
-        from src.core.settings import AppSettings
         return AppSettings().is_auto_save_enabled()
 
     def set_auto_save_enabled(self, enabled: bool):
-        from src.core.settings import AppSettings
         settings = AppSettings()
         settings.set_auto_save_enabled(enabled)
         settings.sync()
@@ -60,12 +59,12 @@ class AutoSaveManager(QObject):
             os.replace(tmp_file, self._auto_save_file)
             logger.debug("Auto-saved config successfully")
         except Exception as e:
-            logger.error(f"Failed to auto-save config: {e}")
+            logger.error("Failed to auto-save config: %s", e, exc_info=True)
             if tmp_file is not None and tmp_file.exists():
                 try:
                     tmp_file.unlink()
                 except OSError:
-                    pass
+                    logger.debug("清理临时自动保存文件失败", exc_info=True)
 
     def load_auto_save(self) -> Optional[PlotSessionConfig]:
         """加载自动保存的配置"""
@@ -80,7 +79,7 @@ class AutoSaveManager(QObject):
                     data = yaml.safe_load(f)
                 return PlotSessionConfig.from_dict(data)
         except Exception as e:
-            logger.error(f"Failed to load auto-saved config: {e}")
+            logger.error("Failed to load auto-saved config: %s", e, exc_info=True)
         return None
 
     def should_apply_auto_save(self, current_vars: list[str]) -> Tuple[bool, str]:
@@ -92,7 +91,7 @@ class AutoSaveManager(QObject):
         if not config:
             return False, "No auto-saved config"
 
-        config_vars = self._extract_variables(config)
+        config_vars = extract_variables_from_config(config)
         current_vars_set = set(current_vars)
 
         if not config_vars:
@@ -113,11 +112,3 @@ class AutoSaveManager(QObject):
         else:
             return False, "No matching variables"
 
-    @staticmethod
-    def _extract_variables(config: PlotSessionConfig) -> set[str]:
-        """从配置中提取所有变量名"""
-        var_set = set()
-        for plot in config.plots:
-            for v in plot.curves:
-                var_set.add(v)
-        return var_set

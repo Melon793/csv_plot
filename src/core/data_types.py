@@ -39,16 +39,17 @@ class FormatInfo:
 
 @dataclass
 class CurveInfo:
-    """单条曲线的元数据（统一版）
+    """单条曲线的元数据。
 
-    统一单线/多线模式后，所有曲线（含首条）均以 CurveInfo 存储在 pw.curves 字典中。
+    包含曲线的变量名、PlotDataItem 引用、数据数组、颜色、可见性等属性。
+    缓存 x_min/x_max 和 point_density 以避免重复计算。
     """
 
     var_name: str
     curve: "pg.PlotDataItem"
     x_data: np.ndarray
     y_data: np.ndarray
-    original_index: np.ndarray = None  # 原始索引/时间戳（用于时间修正重算，消除反算精度问题）
+    original_index: np.ndarray | None = None  # 原始索引/时间戳（用于时间修正重算，消除反算精度问题）
     color: str = "blue"
     y_format: str = ""
     visible: bool = True

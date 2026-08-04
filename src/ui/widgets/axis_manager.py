@@ -342,6 +342,10 @@ class AxisManager:
                 try:
                     y_arrays = pw._collect_visible_curve_arrays("y_data")
                 except Exception:
+                    logger.warning(
+                        "收集可见曲线 y_data 失败，使用空列表作为回退",
+                        exc_info=True,
+                    )
                     y_arrays = []
                 if y_arrays:
                     combined = np.concatenate(y_arrays)

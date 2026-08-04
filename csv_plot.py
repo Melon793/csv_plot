@@ -8,6 +8,10 @@ ico_path = setup_platform()
 
 
 def main():
+    """CSV Plot 应用程序入口。
+
+    初始化 Qt 应用、设置 pyqtgraph 全局配置、创建主窗口并启动事件循环。
+    """
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QFont, QIcon
     from PySide6.QtWidgets import QApplication

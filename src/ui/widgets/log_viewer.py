@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from collections import deque
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -191,25 +191,23 @@ class LogViewer(QWidget):
         if not self._buffer:
             return
 
-        self._text_edit.verticalScrollBar().blockSignals(True)
+        scrollbar = self._text_edit.verticalScrollBar()
+        with QSignalBlocker(scrollbar):
 
-        show_all = len(self._level_filter) == 0
-        lines = []
-        for entry in self._buffer:
-            if show_all or entry.levelno in self._level_filter:
-                lines.append(entry.message)
+            show_all = len(self._level_filter) == 0
+            lines = []
+            for entry in self._buffer:
+                if show_all or entry.levelno in self._level_filter:
+                    lines.append(entry.message)
 
-        if lines:
-            text = "\n".join(lines) + "\n"
-            scrollbar = self._text_edit.verticalScrollBar()
-            was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
+            if lines:
+                text = "\n".join(lines) + "\n"
+                was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
 
-            self._text_edit.insertPlainText(text)
+                self._text_edit.insertPlainText(text)
 
-            if was_at_bottom and self._scroll_locked:
-                self._text_edit.moveCursor(self._text_edit.textCursor().MoveOperation.End)
-
-        self._text_edit.verticalScrollBar().blockSignals(False)
+                if was_at_bottom and self._scroll_locked:
+                    self._text_edit.moveCursor(self._text_edit.textCursor().MoveOperation.End)
         self._buffer.clear()
         self._update_count_label()
 

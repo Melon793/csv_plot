@@ -43,9 +43,11 @@ class MarkRegionManager:
             line.setHoverPen(pg.mkPen(color="r", width=10))
 
         self.pw.plot_item.addItem(self.pw.mark_region)
-        self.pw.mark_region.sigRegionChanged.connect(
-            self.pw.window().layout_manager.sync_mark_regions
-        )
+        window = self.pw.window()
+        if window is not None and hasattr(window, "layout_manager"):
+            self.pw.mark_region.sigRegionChanged.connect(
+                window.layout_manager.sync_mark_regions
+            )
 
     def remove_mark_region(self):
         """移除标记区域"""

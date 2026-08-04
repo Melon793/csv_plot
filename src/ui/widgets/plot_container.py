@@ -49,8 +49,8 @@ class PlotContainerWidget(QWidget):
         )
         layout.addWidget(self._indicator_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-    def _build_indicator_text(self, var_names: list[str]) -> str:
-        # 非 Shift 路径统一为"添加"（Shift 路径通过 text_override 直接传入"释放以替换"）
+    def _build_indicator_text(self, _var_names: list[str]) -> str:
+        """构建拖拽指示文本。非 Shift 路径统一返回固定文本。"""
         return "释放以添加"
 
     def show_drag_indicator(
