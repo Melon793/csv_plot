@@ -151,7 +151,7 @@ class MultiCurveManager:
 
         self.update_legend()
 
-        self._update_axes_for_multi_curve(update_x_range=False)
+        self._update_axes_for_multi_curve()
 
         if pw.vline.isVisible():
             pw.update_cursor_label()
@@ -522,7 +522,7 @@ class MultiCurveManager:
             if success_vars:
                 self._update_header_for_curves()
 
-                self._update_axes_for_multi_curve(update_x_range=False)
+                self._update_axes_for_multi_curve()
 
                 x_arrays = pw._collect_visible_curve_arrays('x_data')
                 if x_arrays:
