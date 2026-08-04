@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import os
+import shutil
 import yaml
 from pathlib import Path
 from typing import Optional, Tuple
@@ -51,10 +52,10 @@ class AutoSaveManager(QObject):
             with open(tmp_file, "w", encoding="utf-8") as f:
                 yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
 
+            # 用 copy2 备份主文件（主文件始终保留，避免 rename 造成的"主文件不存在"窗口），
+            # 再原子替换主文件；即使中途崩溃，主文件与备份至少有一个可用
             if self._auto_save_file.exists():
-                if self._auto_save_backup_file.exists():
-                    self._auto_save_backup_file.unlink()
-                self._auto_save_file.rename(self._auto_save_backup_file)
+                shutil.copy2(self._auto_save_file, self._auto_save_backup_file)
 
             os.replace(tmp_file, self._auto_save_file)
             logger.debug("Auto-saved config successfully")

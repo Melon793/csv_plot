@@ -869,10 +869,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """移除标记区域 → 委托到 MarkRegionManager"""
         self._mark_region_manager.remove_mark_region()
 
-    def update_mark_region(self):
-        """更新标记区域 → 委托到 MarkRegionManager"""
-        self._mark_region_manager.update_mark_region()
-
     def get_mark_stats(self):
         """获取标记区域统计 → 委托到 MarkRegionManager"""
         return self._mark_region_manager.get_mark_stats()

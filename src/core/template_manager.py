@@ -124,22 +124,6 @@ class TemplateManager(QObject):
             self.template_list_changed.emit()
             return template
 
-    def rename_template(self, template_id: str, new_name: str) -> bool:
-        """重命名模板"""
-        template = self._storage.read_template(template_id)
-        if not template:
-            raise TemplateNotFoundError(f"Template {template_id} not found")
-
-        if self.exists(new_name, exclude_id=template_id):
-            raise TemplateNameConflictError(f"Template name '{new_name}' already exists")
-
-        template.metadata.name = new_name
-        template.metadata.updated_at = datetime.now().isoformat()
-        self._storage.write_template(template)
-        self.template_updated.emit(template_id)
-        self.template_list_changed.emit()
-        return True
-
     def delete_template(self, template_id: str) -> bool:
         """删除模板"""
         template = self._storage.read_template(template_id)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import sys
-import weakref
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -37,9 +36,6 @@ class PlotVariableEditorDialog(QDialog):
     def __init__(self, plot_widget, parent=None):
         super().__init__(parent)
         self.plot_widget = plot_widget
-        # 弱引用持有 plot_widget：refresh_data_source 中检查其存活状态
-        # （subplot 关闭/重建后 C++ 对象销毁，直接访问属性会抛 RuntimeError）
-        self._plot_widget_ref = weakref.ref(plot_widget) if plot_widget is not None else None
         self.setWindowTitle("绘图变量编辑器")
         self.setWindowFlag(Qt.WindowType.Tool, True)
         self.setModal(False)
@@ -220,7 +216,7 @@ class PlotVariableEditorDialog(QDialog):
         """
         if self.search_bar is None:
             return
-        pw = self._plot_widget_ref() if self._plot_widget_ref is not None else None
+        pw = self.plot_widget
         if pw is None:
             return
         main_window = self.window()
@@ -487,30 +483,6 @@ class PlotVariableEditorDialog(QDialog):
         if column == 2:  # 颜色列
             self.set_variable_color(row)
 
-    def toggle_variable_visibility(self, row):
-        """切换变量显示状态（统一版）"""
-        var_name = self.var_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        visible_item = self.var_table.item(row, 0)
-        is_visible = visible_item.checkState() == Qt.CheckState.Checked
-        logger.debug(
-            "[EDITOR] toggle_variable_visibility: var=%s, visible=%s",
-            var_name, is_visible,
-        )
-
-        if var_name in self.plot_widget.curves:
-            self.plot_widget.curves[var_name].visible = is_visible
-
-            ci = self.plot_widget.curves[var_name]
-            if ci.curve is not None:
-                try:
-                    if ci.curve.scene() is not None:
-                        ci.curve.setVisible(is_visible)
-                    else:
-                        self.plot_widget._recreate_curve(var_name)
-                except Exception:
-                    logger.debug("_recreate_curve(%s) 异常，跳过", var_name, exc_info=True)
-
-            self.plot_widget._update_header_for_curves()
     def update_button_states(self):
         """更新按钮状态"""
         has_selection = len(self.var_table.selectedItems()) > 0

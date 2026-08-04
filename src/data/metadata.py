@@ -38,26 +38,6 @@ class VarMetadata:
     enum_map: Optional[dict[int, str]] = None
 
 
-def classify_validity(values: np.ndarray) -> int:
-    if values.size == 0:
-        return INVALID
-    if not np.issubdtype(values.dtype, np.number):
-        return VALID
-    finite_mask = np.isfinite(values)
-    if not np.any(finite_mask):
-        return INVALID
-    finite_vals = values[finite_mask]
-    if np.allclose(finite_vals, finite_vals[0]):
-        return CONST
-    return VALID
-
-
-def make_var_name_unique(name: str, group_index: int, conflict_set: set[str]) -> str:
-    if name in conflict_set:
-        return f"{name}_G{group_index}"
-    return name
-
-
 def is_enum_conversion(conversion) -> bool:
     if conversion is None:
         return False

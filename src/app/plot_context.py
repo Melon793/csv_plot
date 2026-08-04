@@ -41,6 +41,8 @@ class PlotServices(Protocol):
     @property
     def _is_loading_new_data(self) -> bool: ...
     @property
+    def _data_version(self) -> int: ...
+    @property
     def _is_time_correction_active(self) -> bool: ...
     @property
     def _global_max_density(self) -> float: ...
@@ -204,8 +206,3 @@ class PlotContext:
 
     def is_cursor_enabled(self) -> bool:
         return self._services.cursor_sync_manager.is_cursor_enabled()
-
-    def set_cursor_checked(self, checked: bool) -> None:
-        btn = self._services.cursor_btn
-        if btn:
-            btn.setChecked(checked)
