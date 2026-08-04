@@ -41,7 +41,12 @@ class AxisManager:
 
     @property
     def pw(self) -> Any:
-        return self._ui_manager.pw
+        ui = self._ui_manager
+        if ui is None:
+            raise RuntimeError(
+                "AxisManager: dependency chain broken (_ui_manager is None)"
+            )
+        return ui.pw
 
     def update_x_axis_label(self) -> None:
         """更新 X 轴标签文本"""

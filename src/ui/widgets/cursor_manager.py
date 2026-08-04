@@ -71,7 +71,12 @@ class CursorManager:
     @property
     def pw(self) -> Any:
         """关联的 DraggableGraphicsLayoutWidget 实例"""
-        return self._data_manager.pw
+        dm = self._data_manager
+        if dm is None:
+            raise RuntimeError(
+                "CursorManager: dependency chain broken (_data_manager is None)"
+            )
+        return dm.pw
 
     @property
     def _is_interacting(self) -> bool:
@@ -487,7 +492,10 @@ class CursorManager:
                             plot_item.removeItem(item)
                             removed = True
                         except Exception:
-                            pass
+                            logger.debug(
+                                "PlotItem.removeItem 失败，回退 scene.removeItem",
+                                exc_info=True,
+                            )
                     if not removed:
                         safe_qt_op(lambda it=item: scene.removeItem(it))
                 # 移入 trash bin 保持引用，延迟到下一次 _clear_cursor_items 时释放。

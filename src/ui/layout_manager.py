@@ -345,9 +345,7 @@ class LayoutManager(MainWindowBaseManager):
                     container.plot_widget.add_mark_region(min_x, max_x)
 
             self.mw.mark_stats_window = MarkStatsWindow.get_instance(self.mw)
-            geom = self.mw.mark_stats_window.load_geom()
-            if geom:
-                self.mw.mark_stats_window.restoreGeometry(geom)
+            self.mw.mark_stats_window.load_geom()  # 内部完成恢复，无返回值
 
             self.mw.mark_stats_window.showNormal()
             self.request_mark_stats_refresh(immediate=True)

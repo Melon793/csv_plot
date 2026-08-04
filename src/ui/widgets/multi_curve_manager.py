@@ -38,7 +38,12 @@ class MultiCurveManager:
 
     @property
     def pw(self) -> Any:
-        return self._data_manager.pw
+        dm = self._data_manager
+        if dm is None:
+            raise RuntimeError(
+                "MultiCurveManager: dependency chain broken (_data_manager is None)"
+            )
+        return dm.pw
 
     def _assign_curve_color(self, preferred_color: str | None = None) -> str:
         """为曲线分配颜色。

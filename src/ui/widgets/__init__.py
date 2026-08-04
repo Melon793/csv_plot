@@ -2,7 +2,7 @@
 ui.widgets —— 绘图相关的组件模块
 
 包含 DraggableGraphicsLayoutWidget 的所有组合模式管理器:
-- BasePlotManager: 管理器基类 (weakref + 生命周期钩子)
+- BasePlotManager: 管理器基类 (单一 weakref 锚点 + 依赖链断链防御)
 - PlotUIManager: UI 初始化 + 防抖刷新协调
 - AxisManager: X/Y 轴范围、标签、限制管理
 - PlotDataManager: 单曲线绘图 + 时间修正 + 数据验证

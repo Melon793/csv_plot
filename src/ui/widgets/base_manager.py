@@ -1,8 +1,9 @@
 """
-BasePlotManager —— 所有绘图组件管理器的基类
+BasePlotManager —— 绘图组件管理器的基类
 
-提供通用的弱引用模式，避免管理器与主类之间的循环引用，
-以及统一的生命周期钩子方法。
+采用"单一 weakref 锚点"设计：仅链首 (PlotUIManager) 持有 plot_widget 的
+weakref，其余管理器经依赖链委托访问 pw，避免循环引用。链中各 manager 的
+pw property 在依赖被外部置 None 时抛统一的 RuntimeError（详见各 manager）。
 """
 
 from __future__ import annotations
@@ -11,9 +12,10 @@ from typing import Any
 
 
 class BasePlotManager:
-    """所有绘图管理器的基类，提供统一的弱引用和生命周期管理。
+    """绘图管理器基类，提供弱引用锚点与统一的 GC 错误契约。
 
-    子类应该继承此类，并在需要时重写生命周期钩子方法。
+    设计上仅链首管理器继承本类持有 weakref；链中其余管理器通过依赖链
+    委托访问 pw，并在断链时抛 RuntimeError（错误信息含管理器名）。
     """
 
     def __init__(self, plot_widget: Any):

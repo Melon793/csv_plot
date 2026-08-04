@@ -75,6 +75,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._plot_ui_manager.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
 
     def _init_manager_chain(self):
+        # 设计：单一 weakref 锚点 + 依赖链委托
+        # 仅 PlotUIManager 继承 BasePlotManager 持有 plot_widget 的 weakref；
+        # 其余 manager 通过 _xxx_manager 强引用链访问 pw，断链时各 manager
+        # 的 pw property 抛统一 RuntimeError（详见 base_manager.py）。
         from src.ui.widgets.plot_ui_manager import PlotUIManager
         from src.ui.widgets.axis_manager import AxisManager
         from src.ui.widgets.plot_data_manager import PlotDataManager

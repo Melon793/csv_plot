@@ -166,24 +166,30 @@ class MarkStatsWindow(QDialog):
             )
 
     def save_geom(self):
+        parent = self.parent()
+        if parent is None:
+            return
         if self.isMinimized() or self.isMaximized():
-            self.parent().mark_stats_geometry = None  # 不保存，强制下次使用默认
+            parent.mark_stats_geometry = None  # 不保存，强制下次使用默认
         else:
-            self.parent().mark_stats_geometry = self.saveGeometry()
+            parent.mark_stats_geometry = self.saveGeometry()
 
     def load_geom(self):
-        if self.parent().mark_stats_geometry is not None:
-            geom = self.parent().mark_stats_geometry
+        parent = self.parent()
+        if parent is not None and parent.mark_stats_geometry is not None:
+            geom = parent.mark_stats_geometry
             self.restoreGeometry(geom)
         else:
             # 默认大小和位置：resize并居中
             self.resize(1200, 300)
-            screen = QApplication.primaryScreen().availableGeometry()
-            x = (screen.width() - self.width()) // 2
-            y = (screen.height() - self.height()) // 2
-            self.move(x, y)
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                x = (avail.width() - self.width()) // 2
+                y = (avail.height() - self.height()) // 2
+                self.move(x, y)
 
-        # 新增：防御性重置状态，确保不是 min/max
+        # 既有逻辑保留：防御性重置状态，确保不是 min/max
         if self.isMinimized() or self.isMaximized():
             self.setWindowState(Qt.WindowState.WindowNoState)  # 强制正常状态
 
