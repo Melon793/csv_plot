@@ -60,7 +60,6 @@ class MultiCurveManager:
             pw.update_left_header(full_title)
         else:
             pw.update_left_header("channel name")
-            pw.update_right_header("")
 
     def update_multi_curve_mode(self):
         """兼容别名：委托到 _update_header_for_curves"""

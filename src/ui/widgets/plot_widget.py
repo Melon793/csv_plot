@@ -200,11 +200,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if left_text is not None:
             self.label_left.setText(left_text)
 
-    def update_right_header(self, right_text=None):
-        """更新顶部文本内容（已移除右侧label）"""
-        # 右侧label已被移除，此方法保留以兼容现有代码
-        pass
-
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """确保 X 轴范围非零 → 委托到 AxisManager"""
         return self._axis_manager._get_safe_x_range(min_x, max_x)
@@ -524,9 +519,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """更新光标标签 → 委托到 CursorManager"""
         self._cursor_manager.update_cursor_label()
 
-    def _update_single_curve_cursor_label(self):
-        """更新单曲线光标标签 → 委托到 CursorManager"""
-        self._cursor_manager._update_single_curve_cursor_label()
+    
     
     def _get_circle_from_pool(self, index):
         """从对象池获取 ScatterPlotItem → 委托到 CursorManager"""
@@ -802,9 +795,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 if dialog.exec():
                     min_val, max_val = self.view_box.viewRange()[0]
                     for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
-                        #view.view_box.setXRange(min_val, max_val, padding=0.00)
-                        #view.plot_item.setXRange(min_val, max_val, padding=0.00)
-                        self.set_xrange_with_link_handling(xmin=min_val,xmax=max_val,padding=DEFAULT_PADDING_VAL_X)
+                        view.set_xrange_with_link_handling(xmin=min_val, xmax=max_val, padding=DEFAULT_PADDING_VAL_X)
                         view.plot_item.update()
                 return
             # 然后检测绘图区域（在检测Y轴之前）

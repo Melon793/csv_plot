@@ -637,7 +637,6 @@ class PlotDataManager:
             self._safe_clear_plot_items()
             pw.axis_y.setLabel(text="")
             pw.update_left_header("channel name")
-            pw.update_right_header("")
 
             for var_name, ci in pw.curves.items():
                 if ci.curve is not None:
@@ -700,7 +699,6 @@ class PlotDataManager:
         self._safe_clear_plot_items()
         pw.axis_y.setLabel(text="")
         pw.update_left_header("channel name")
-        pw.update_right_header("")
 
         pw.curves.clear()
         pw.current_color_index = 0

@@ -101,15 +101,18 @@ class EventHandler:
                 )
                 self._start_interaction()
 
-            if hasattr(self.pw, '_interaction_timer'):
-                self.pw._interaction_timer.stop()
-                self.pw._interaction_timer.start(UI_DEBOUNCE_DELAY_MS)
-
-            if self._is_interacting:
-                self._cancel_ui_refresh('style', 'cursor')
+            timer = getattr(self.pw, '_interaction_timer', None)
+            if timer is None:
+                # 防御分支：防抖定时器缺失时复用 _end_interaction 完整收尾
+                # （复位 _is_interacting + immediate 刷新 + 广播兄弟子图 + cursor geometry 兜底）
+                self._end_interaction()
                 return
 
-            self._queue_ui_refresh()
+            timer.stop()
+            timer.start(UI_DEBOUNCE_DELAY_MS)
+            # 交互期间（无论刚进入还是持续中）取消挂起的样式/光标刷新，
+            # 防抖定时器超时后由 _end_interaction 统一兜底刷新
+            self._cancel_ui_refresh('style', 'cursor')
         except Exception:
             logger.warning("范围变化处理出错", exc_info=True)
 
