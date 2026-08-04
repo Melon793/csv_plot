@@ -139,27 +139,27 @@ class PlotUIManager(BasePlotManager):
         layout.addItem(left_margin)
         layout.setItemSpacing(0, base_spacing * 0)
 
-        pw.label_left = QLabel("channel name")
-        pw.label_left.setStyleSheet("""
+        pw.legend_label = QLabel("channel name")
+        pw.legend_label.setStyleSheet("""
             color: #000;
             font-weight: bold;
             background-color: transparent;
         """)
-        pw.label_left.setSizePolicy(
+        pw.legend_label.setSizePolicy(
             QSizePolicy.Policy.Minimum,
             QSizePolicy.Policy.Preferred,
         )
-        pw.label_left.setTextFormat(Qt.TextFormat.RichText)
-        pw.label_left.setTextInteractionFlags(
+        pw.legend_label.setTextFormat(Qt.TextFormat.RichText)
+        pw.legend_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextBrowserInteraction,
         )
-        pw.label_left.setContextMenuPolicy(
+        pw.legend_label.setContextMenuPolicy(
             Qt.ContextMenuPolicy.NoContextMenu,
         )
-        pw.label_left.mousePressEvent = pw._on_legend_clicked
+        pw.legend_label.mousePressEvent = pw._on_legend_clicked
 
         proxy_left = QGraphicsProxyWidget()
-        proxy_left.setWidget(pw.label_left)
+        proxy_left.setWidget(pw.legend_label)
         layout.addItem(proxy_left)
         layout.setStretchFactor(proxy_left, 1)
         layout.setAlignment(

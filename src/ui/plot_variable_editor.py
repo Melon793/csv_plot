@@ -599,7 +599,7 @@ class PlotVariableEditorDialog(QDialog):
         # 如果删除了所有曲线，确保完全清理
         if not self.plot_widget.curves:
             self.plot_widget.current_color_index = 0
-            self.plot_widget.update_left_header("channel name")
+            self.plot_widget.update_legend_label("channel name")
 
             # 先重置 Y 轴范围（与 clear_plot_item 顺序一致：先 reset 再 clear）
             self.plot_widget._reset_plot_limits()
@@ -642,7 +642,7 @@ class PlotVariableEditorDialog(QDialog):
                 self.search_bar.reset_session()
     
             # 更新显示
-            self.plot_widget.update_left_header("channel name")
+            self.plot_widget.update_legend_label("channel name")
 
             # 重置vline bounds到默认值
             self.plot_widget._update_vline_bounds_from_data()

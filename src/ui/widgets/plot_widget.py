@@ -199,10 +199,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """在当前 X 范围内自动调整 Y 轴 → 委托到 AxisManager"""
         self._axis_manager.auto_y_in_x_range()
 
-    def update_left_header(self, left_text=None):
+    def update_legend_label(self, text=None):
         """更新顶部文本内容"""
-        if left_text is not None:
-            self.label_left.setText(left_text)
+        if text is not None:
+            self.legend_label.setText(text)
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """确保 X 轴范围非零 → 委托到 AxisManager"""
