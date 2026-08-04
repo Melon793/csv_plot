@@ -560,23 +560,29 @@ class LayoutManager(MainWindowBaseManager):
             return False
         etype = event.type()
         if etype == QEvent.Type.DragEnter:
-            if self._is_supported_drop(event.mimeData()):
-                self.show_drop_overlay()
-                self.mw.drop_overlay.adjust_text(file_type_supported=True)
-                event.acceptProposedAction()
-                return True
-            else:
-                self.show_drop_overlay()
-                self.mw.drop_overlay.adjust_text(file_type_supported=False)
-                event.ignore()
-                return True
+            if event.mimeData().hasUrls():
+                if self._is_supported_drop(event.mimeData()):
+                    self.show_drop_overlay()
+                    self.mw.drop_overlay.adjust_text(file_type_supported=True)
+                    event.acceptProposedAction()
+                    return True
+                else:
+                    self.show_drop_overlay()
+                    self.mw.drop_overlay.adjust_text(file_type_supported=False)
+                    event.ignore()
+                    return True
+            # 非 URL 拖入（如文本变量拖拽），交由子控件处理
+            return False
         elif etype == QEvent.Type.DragLeave:
             self.hide_drop_overlay()
             return True
         elif etype == QEvent.Type.DragMove:
-            if self._is_supported_drop(event.mimeData()):
-                event.acceptProposedAction()
-                return True
+            if event.mimeData().hasUrls():
+                if self._is_supported_drop(event.mimeData()):
+                    event.acceptProposedAction()
+                    return True
+            # 非 URL 拖入（如文本变量拖拽），交由子控件处理
+            return False
         elif etype == QEvent.Type.Drop:
             self.hide_drop_overlay()
             if event.mimeData().hasUrls():
