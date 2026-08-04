@@ -19,6 +19,8 @@ from typing import Any
 from PySide6.QtCore import QEvent, Qt, QTimer, QRect, Signal
 from PySide6.QtGui import QColor, QPen
 
+from src.core.config import safe_qt_op
+
 from src.core.logger import get_logger
 from PySide6.QtWidgets import (
     QFrame,
@@ -321,9 +323,9 @@ class VariableSearchBar(QWidget):
         无副作用：空查询早退，无匹配时不选中任何项。
         """
         if self.candidate_list.count() > 0:
-            self._update_existing_marks()
+            safe_qt_op(self._update_existing_marks)
         else:
-            self._refresh_list()
+            safe_qt_op(self._refresh_list)
 
     def mark_added(self, var_name: str):
         """标记变量为"本次刚添加"：增量更新标记，不重建列表
@@ -353,7 +355,7 @@ class VariableSearchBar(QWidget):
 
         行为变更（v1.3 方案）：不再选中第一个未添加项，当前选中停留原位。
         触发时机：表格删除按钮、清空所有变量。
-        注意：搜索栏内移除变量不调本方法（见 _on_variable_removed 注释）。
+        注意：搜索栏内移除变量不调本方法（见 plot_variable_editor._on_variable_removed）。
         """
         self._update_existing_marks()
 

@@ -1,7 +1,6 @@
- 
 import math
 import sys
- 
+
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF, QElapsedTimer, QEventLoop, Signal
 from PySide6.QtGui import (
     QPainter,
@@ -40,7 +39,7 @@ class SplashScreen(QWidget):
         self.elapsed_timer = QElapsedTimer()
         self.elapsed = 0
 
-        self.timer = QTimer()
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -156,10 +155,10 @@ class SplashScreen(QWidget):
         # - arc_radius: 弧线半径 (35)
         # - arc_start_angle: 起始角度 (225度)
         # - arc_span: 扫过角度 (100度)
-        arc_width = ICON_SIZE * 0.08 // 1 
-        arc_center_offset_x = ICON_SIZE * 0.175 // 1   # 圆心向右偏移5px
-        arc_center_offset_y = ICON_SIZE * 0.175 // 1     # 圆心向下偏移5px
-        arc_radius = ICON_SIZE * 0.7 // 2           # 弧线半径
+        arc_width = int(ICON_SIZE * 0.08)
+        arc_center_offset_x = int(ICON_SIZE * 0.175)   # 圆心向右偏移5px
+        arc_center_offset_y = int(ICON_SIZE * 0.175)     # 圆心向下偏移5px
+        arc_radius = int(ICON_SIZE * 0.7 // 2)           # 弧线半径
         pen = QPen(QColor(255, 255, 255), arc_width)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)  # 圆角端点
         painter.setPen(pen)
@@ -234,13 +233,3 @@ class SplashScreen(QWidget):
         painter.drawRoundedRect(
             QRectF(bar_segment_x, bar_y, bar_segment_width, bar_height), 2, 2
         )
- 
- 
-if __name__ == "__main__":
-    from PySide6.QtWidgets import QApplication
- 
-    app = QApplication(sys.argv)
-    splash = SplashScreen()
-    splash.show()
-    QTimer.singleShot(3000, splash.close)
-    sys.exit(app.exec())

@@ -9,11 +9,12 @@
 
 from __future__ import annotations
 import os
+import re
 import sys
 import time
 import warnings
 
-from PySide6.QtCore import Qt, QStandardPaths, QTimer
+from PySide6.QtCore import Qt, QStandardPaths, QTimer, QSignalBlocker
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
 
 from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING, safe_qt_op
@@ -322,7 +323,9 @@ class FileLoaderManager(MainWindowBaseManager):
                                 plot_item.removeItem(item)
                                 removed = True
                             except Exception:
-                                pass
+                                logger.debug(
+                                    "plot_item.removeItem 失败", exc_info=True
+                                )
                         if not removed and scene is not None:
                             safe_qt_op(scene.removeItem, item)
                     safe_qt_op(item.setVisible, False)
@@ -432,7 +435,6 @@ class FileLoaderManager(MainWindowBaseManager):
                         vline = widget.vline
                         if vline is not None:
                             if saved_pinned_x_values:
-                                from PySide6.QtCore import QSignalBlocker
                                 with QSignalBlocker(vline):
                                     vline.setPos(saved_pinned_x_values[0])
                             vline.setMovable(True)
@@ -444,7 +446,6 @@ class FileLoaderManager(MainWindowBaseManager):
                         vline2 = widget.vline2
                         if vline2 is not None:
                             if len(saved_pinned_x_values) > 1:
-                                from PySide6.QtCore import QSignalBlocker
                                 with QSignalBlocker(vline2):
                                     vline2.setPos(saved_pinned_x_values[1])
                             vline2.setMovable(True)
@@ -971,7 +972,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 try:
                     DataTableDialog._instance.clear_all_columns()
                 except Exception:
-                    logger.debug("清理 DataTableDialog 数据失败")
+                    logger.debug("清理 DataTableDialog 数据失败", exc_info=True)
 
             # 4) 释放旧 loader
             if self._has_valid_loader:
@@ -980,12 +981,12 @@ class FileLoaderManager(MainWindowBaseManager):
                     try:
                         old_loader.close()
                     except Exception:
-                        logger.debug("关闭旧 loader 时发生异常")
+                        logger.debug("关闭旧 loader 时发生异常", exc_info=True)
                 if hasattr(old_loader, "release_memory"):
                     try:
                         old_loader.release_memory()
                     except Exception:
-                        logger.debug("释放旧 loader 内存时发生异常")
+                        logger.debug("释放旧 loader 内存时发生异常", exc_info=True)
                 self.mw.loader = None
 
             # 5) 触发 GC — 把 numpy 数组真正归还给操作系统
@@ -1034,11 +1035,11 @@ class FileLoaderManager(MainWindowBaseManager):
                         self.mw.plot_config_manager.auto_save_manager.load_auto_save()
                     )
                     if success:
-                        logger.info(f"自动恢复配置成功: {reason}")
+                        logger.info("自动恢复配置成功: %s", reason)
                     else:
-                        logger.warning(f"自动恢复配置失败")
+                        logger.warning("自动恢复配置失败")
                 else:
-                    logger.info(f"不应用自动保存: {reason}")
+                    logger.info("不应用自动保存: %s", reason)
 
     def _remember_last_open_dir(self, file_path: str):
         directory = os.path.dirname(file_path)
@@ -1082,8 +1083,6 @@ class FileLoaderManager(MainWindowBaseManager):
         return ""
 
     def _extract_file_extension(self, file_path: str) -> str:
-        import re
-
         supported_extensions = [
             ".csv",
             ".mfile",

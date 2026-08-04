@@ -49,12 +49,15 @@ class TimeCorrectionDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         QTimer.singleShot(0, lambda: self.factor_spin.selectAll())
 
-        if self.parent().time_correction_geometry:
-            self.restoreGeometry(self.parent().time_correction_geometry)
+        parent = self.parent()
+        if parent is not None and getattr(parent, "time_correction_geometry", None):
+            self.restoreGeometry(parent.time_correction_geometry)
 
     def values(self):
         return self.factor_spin.value(), self.offset_spin.value()
 
     def closeEvent(self, event):
-        self.parent().time_correction_geometry = self.saveGeometry()
+        parent = self.parent()
+        if parent is not None:
+            parent.time_correction_geometry = self.saveGeometry()
         super().closeEvent(event)

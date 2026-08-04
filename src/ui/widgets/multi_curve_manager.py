@@ -40,6 +40,28 @@ class MultiCurveManager:
     def pw(self) -> Any:
         return self._data_manager.pw
 
+    def _assign_curve_color(self, preferred_color: str | None = None) -> str:
+        """为曲线分配颜色。
+
+        - 首条曲线固定蓝色（无 preferred_color 时）
+        - 指定 preferred_color 时使用该颜色
+        - 否则按 curve_colors 顺序轮转
+        - 索引在所有分支统一推进（含 preferred_color 场景），
+          避免 reload 恢复 N 条曲线后索引停留导致颜色碰撞
+        """
+        pw = self.pw
+        is_first_curve = len(pw.curves) == 0
+
+        if preferred_color:
+            color = preferred_color
+        elif is_first_curve:
+            color = "blue"
+        else:
+            color = pw.curve_colors[pw.current_color_index % len(pw.curve_colors)]
+
+        pw.current_color_index = max(pw.current_color_index + 1, 1)
+        return color
+
     def _update_header_for_curves(self):
         """统一的 header 更新逻辑（替代原 update_multi_curve_mode）
 
@@ -146,7 +168,7 @@ class MultiCurveManager:
                     preferred_color=ci.color,
                 )
         except Exception:
-            logger.debug("重建曲线 '%s' 失败", var_name, exc_info=True)
+            logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)
 
     def _collect_visible_curve_arrays(self, key: str) -> list:
         """收集可见曲线的数据数组"""
@@ -241,15 +263,15 @@ class MultiCurveManager:
             return (None, None)
         return (min(mins), max(maxs))
 
-    def _update_axes_for_multi_curve(self, update_x_range: bool = False):
-        """为多曲线更新坐标轴范围
+    def _update_axes_for_multi_curve(self, _update_x_range: bool = False):
+        """为多曲线更新坐标轴范围。
 
         计算所有可见曲线的数据范围，并更新坐标轴显示范围。
-        只考虑visible=True的曲线，忽略隐藏的曲线。
+        只考虑 visible=True 的曲线，忽略隐藏的曲线。
 
-        Args:
-            update_x_range: 已废弃，保留仅为 API 兼容。X 轴 limits
-                由 compute_global_x_limits 统一管理，不再由此函数修改。
+        注意:
+            _update_x_range 参数已废弃（保留仅为 API 兼容）。
+            X 轴 limits 由 compute_global_x_limits 统一管理。
         """
         import numpy as np
 
@@ -477,17 +499,11 @@ class MultiCurveManager:
                     x_values = pw.offset + pw.factor * original_index
                     y_contiguous = np.ascontiguousarray(y_array)
 
-                    # 颜色分配：首条曲线蓝色，后续颜色循环
-                    is_first_curve = len(pw.curves) == 0
-                    if is_first_curve:
-                        color = "blue"
-                        pw.current_color_index = 1
-                    else:
-                        color = pw.curve_colors[pw.current_color_index % len(pw.curve_colors)]
-                        pw.current_color_index += 1
+                    # 颜色分配（统一方法）
+                    color = self._assign_curve_color()
                     logger.debug(
-                        "[COLOR] 批量添加颜色分配: var=%s, is_first=%s, color=%s",
-                        var_name, is_first_curve, color,
+                        "[COLOR] 批量添加颜色分配: var=%s, color=%s",
+                        var_name, color,
                     )
 
                     pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
@@ -574,18 +590,11 @@ class MultiCurveManager:
                     QMessageBox.information(pw, "提示", f"变量 {var_name} 已在绘图中")
                 return False
 
-            # 颜色分配：首条曲线蓝色，后续颜色循环
-            # 索引始终推进（含 preferred_color 场景）：避免 reload 恢复 N 条曲线后
-            # 索引停留导致新增曲线与已恢复曲线颜色碰撞
-            is_first_curve = len(pw.curves) == 0
-            if preferred_color:
-                color = preferred_color
-            else:
-                color = "blue" if is_first_curve else pw.curve_colors[pw.current_color_index % len(pw.curve_colors)]
-            pw.current_color_index = max(pw.current_color_index + 1, 1)
+            # 颜色分配（统一方法，含 preferred_color 场景）
+            color = self._assign_curve_color(preferred_color)
             logger.debug(
-                "[COLOR] 颜色分配: var=%s, is_first=%s, preferred=%s, assigned=%s, next_index=%d",
-                var_name, is_first_curve, preferred_color, color, pw.current_color_index,
+                "[COLOR] 颜色分配: var=%s, preferred=%s, assigned=%s, next_index=%d",
+                var_name, preferred_color, color, self.pw.current_color_index,
             )
 
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
-from src.core.config import (safe_callback, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -182,10 +182,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         qindex = model.index(index, col_idx)
 
         # 跳转并居中，使用 QTimer 确保在窗口显示后执行
-        QTimer.singleShot(0, lambda: view.scrollTo(qindex, QAbstractItemView.ScrollHint.PositionAtCenter))
+        QTimer.singleShot(0, lambda: safe_qt_op(
+            view.scrollTo, qindex, QAbstractItemView.ScrollHint.PositionAtCenter
+        ))
 
         # 选中该单元格
-        QTimer.singleShot(0, lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect))
+        QTimer.singleShot(0, lambda: safe_qt_op(
+            lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        ))
 
     def auto_range(self, external_xmin: float | None = None, external_xmax: float | None = None):
         """自动调整视图范围 → 委托到 AxisManager"""
@@ -424,7 +428,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         except RuntimeError as e:
             logger.debug("paintEvent RuntimeError (C++对象可能已销毁): %s", e)
         except Exception:
-            logger.debug("paintEvent 异常", exc_info=True)
+            logger.warning("paintEvent 异常", exc_info=True)
 
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()

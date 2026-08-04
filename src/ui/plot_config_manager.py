@@ -57,10 +57,10 @@ class PlotConfigManager(QObject):
     def apply_config(self, main_window, config: PlotSessionConfig) -> bool:
         """将配置应用到 MainWindow"""
         try:
-            logger.info(f"开始应用模板配置")
-            logger.info(f"  布局: {config.layout_rows} 行 × {config.layout_cols} 列")
-            logger.info(f"  时间因子: {config.time_factor}, 偏移: {config.time_offset}")
-            logger.info(f"  Plot 数量: {len(config.plots)}")
+            logger.info("开始应用模板配置")
+            logger.info("  布局: %d 行 × %d 列", config.layout_rows, config.layout_cols)
+            logger.info("  时间因子: %s, 偏移: %s", config.time_factor, config.time_offset)
+            logger.info("  Plot 数量: %d", len(config.plots))
             
             # 设置布局
             from src.ui.layout_manager import LayoutManager
@@ -78,17 +78,17 @@ class PlotConfigManager(QObject):
 
             # 检查是否有数据
             has_data = main_window.loader is not None
-            logger.info(f"数据加载状态: {'已加载' if has_data else '未加载'}")
-            
+            logger.info("数据加载状态: %s", "已加载" if has_data else "未加载")
+
             if not has_data:
                 logger.warning("⚠️  未加载数据，只能设置布局和时间参数，无法加载曲线")
             else:
-                logger.debug(f"可用数据列数: {len(main_window.loader.var_names)}")
+                logger.debug("可用数据列数: %d", len(main_window.loader.var_names))
 
             # 应用各 Plot 的配置 - 只遍历可见的 container（row-major 顺序）
             applied_count = 0
             visible_containers = [c for c in main_window.plot_widgets if not c.isHidden()]
-            logger.debug(f"可见容器数: {len(visible_containers)}")
+            logger.debug("可见容器数: %d", len(visible_containers))
 
             for i, plot_config in enumerate(config.plots):
                 if i < len(visible_containers):
@@ -98,9 +98,9 @@ class PlotConfigManager(QObject):
                     if success:
                         applied_count += 1
                 else:
-                    logger.warning(f"Plot[{i}] 没有对应的可见容器，跳过")
+                    logger.warning("Plot[%d] 没有对应的可见容器，跳过", i)
 
-            logger.info(f"已成功应用 {applied_count}/{len(config.plots)} 个 Plot 配置")
+            logger.info("已成功应用 %d/%d 个 Plot 配置", applied_count, len(config.plots))
 
             # 同步 factor/offset 到各 plot widget（修复模板恢复后时间轴不生效的问题）
             if config.time_factor != 1.0 or config.time_offset != 0.0:
@@ -113,31 +113,31 @@ class PlotConfigManager(QObject):
             logger.info("模板配置应用完成")
             return True
         except Exception as e:
-            logger.error(f"❌ 应用配置失败: {e}", exc_info=True)
+            logger.error("❌ 应用配置失败: %s", e, exc_info=True)
             return False
 
     def _apply_plot_config(self, plot_widget, plot_config: PlotConfig, main_window, plot_index: int):
         """将配置应用到单个 Plot"""
-        logger.debug(f"处理 Plot[{plot_index}], 曲线: {plot_config.curves}")
-        
+        logger.debug("处理 Plot[%d], 曲线: %s", plot_index, plot_config.curves)
+
         # 先清除现有曲线
         plot_widget.clear_plot_item()
 
         # 根据曲线数量设置模式
         if len(plot_config.curves) == 0:
-            logger.debug(f"Plot[{plot_index}] 没有曲线配置，跳过")
+            logger.debug("Plot[%d] 没有曲线配置，跳过", plot_index)
             return False
         elif len(plot_config.curves) == 1:
             var_name = plot_config.curves[0]
             if main_window.loader and var_name in main_window.loader.var_names:
-                logger.debug(f"Plot[{plot_index}] 设置单曲线: {var_name}")
+                logger.debug("Plot[%d] 设置单曲线: %s", plot_index, var_name)
                 plot_widget.plot_variable(var_name)
                 return True
             else:
                 if not main_window.loader:
-                    logger.warning(f"Plot[{plot_index}] 无法加载曲线 '{var_name}': 未加载数据")
+                    logger.warning("Plot[%d] 无法加载曲线 '%s': 未加载数据", plot_index, var_name)
                 else:
-                    logger.warning(f"Plot[{plot_index}] 无法加载曲线 '{var_name}': 变量名不存在于数据中")
+                    logger.warning("Plot[%d] 无法加载曲线 '%s': 变量名不存在于数据中", plot_index, var_name)
                 return False
         else:
             # 多曲线模式
@@ -145,14 +145,14 @@ class PlotConfigManager(QObject):
             added_count = 0
             for var_name in plot_config.curves:
                 if main_window.loader and var_name in main_window.loader.var_names:
-                    logger.debug(f"Plot[{plot_index}] 添加曲线: {var_name}")
+                    logger.debug("Plot[%d] 添加曲线: %s", plot_index, var_name)
                     plot_widget.add_variable_to_plot(var_name)
                     added_count += 1
                 else:
                     if not main_window.loader:
-                        logger.warning(f"Plot[{plot_index}] 无法加载曲线 '{var_name}': 未加载数据")
+                        logger.warning("Plot[%d] 无法加载曲线 '%s': 未加载数据", plot_index, var_name)
                     else:
-                        logger.warning(f"Plot[{plot_index}] 无法加载曲线 '{var_name}': 变量名不存在于数据中")
+                        logger.warning("Plot[%d] 无法加载曲线 '%s': 变量名不存在于数据中", plot_index, var_name)
             
             return added_count > 0
 
@@ -181,11 +181,11 @@ class PlotConfigManager(QObject):
         self, main_window, template_id: str,
         check_match: bool = False, current_vars: list[str] | None = None
     ) -> bool:
-        logger.info(f"========================================")
-        logger.info(f"开始加载模板，ID: {template_id}")
+        logger.info("========================================")
+        logger.info("开始加载模板，ID: %s", template_id)
         template = self._template_manager.get_template(template_id)
         if not template:
-            logger.error(f"❌ 找不到模板: {template_id}")
+            logger.error("❌ 找不到模板: %s", template_id)
             return False
 
         config = PlotSessionConfig.from_dict(template.config)
@@ -196,20 +196,21 @@ class PlotConfigManager(QObject):
             )
             if ratio < RATIO_RESET_PLOTS:
                 logger.warning(
-                    f"模板[{template.metadata.name}]匹配度 {ratio:.0%} < {RATIO_RESET_PLOTS:.0%}"
+                    "模板[%s]匹配度 %.0f%% < %.0f%%",
+                    template.metadata.name, ratio * 100, RATIO_RESET_PLOTS * 100,
                 )
                 return False
 
-        logger.info(f"模板名称: {template.metadata.name}")
-        logger.info(f"模板描述: {template.metadata.description or '无'}")
+        logger.info("模板名称: %s", template.metadata.name)
+        logger.info("模板描述: %s", template.metadata.description or "无")
 
         result = self.apply_config(main_window, config)
 
         if result:
-            logger.info(f"✅ 模板加载成功")
+            logger.info("✅ 模板加载成功")
         else:
-            logger.error(f"❌ 模板加载失败")
-        logger.info(f"========================================")
+            logger.error("❌ 模板加载失败")
+        logger.info("========================================")
 
         return result
 
@@ -221,7 +222,7 @@ class PlotConfigManager(QObject):
         try:
             return self._template_manager.save_template(config, name, description)
         except Exception as e:
-            logger.error(f"Failed to save template: {e}")
+            logger.error("Failed to save template: %s", e)
             raise
 
     def save_auto_save(self, main_window):

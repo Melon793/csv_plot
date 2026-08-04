@@ -90,8 +90,15 @@ class MainWindow(QMainWindow):
                 _max_col = int(layout_config_dict.get("max_col", 0))
                 _default_row = int(layout_config_dict.get("default_row", 0))
                 _default_col = int(layout_config_dict.get("default_col", 0))
-                _hide_plot_area = bool(layout_config_dict.get("hide_plot_area", None))
-                _read_status = all(x > 0 for x in (_width, _height, _max_row, _max_col, _default_row, _default_col)) and _hide_plot_area is not None
+                # hide_plot_area 缺键时回退 False，不纳入 _read_status
+                _hide_plot_area = bool(layout_config_dict.get("hide_plot_area", False))
+                _read_status = all(
+                    x > 0 for x in (
+                        _width, _height, _max_row, _max_col, _default_row, _default_col
+                    )
+                )
+                if "hide_plot_area" in layout_config_dict:
+                    _widget_logger.debug("layout_config: hide_plot_area=%s", _hide_plot_area)
             except Exception as e:
                 _widget_logger.warning("配置文件读取失败: %s", e)
 

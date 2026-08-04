@@ -6,6 +6,7 @@
 from __future__ import annotations
 import os
 import gc
+import datetime as _dt
 from typing import Callable
 import numpy as np
 import pandas as pd
@@ -317,7 +318,6 @@ class ExcelDataLoader(BaseDataLoader):
 
         内存峰值从 ~3×（all_rows list + chunks list + concat）降到 ~1×（预分配数组）。
         """
-        import datetime as _dt
         data_start = self.desc_rows + (3 if self.has_unit else 2)  # 1-based
         max_row = self._ws.max_row or 0
         total_rows = max_row - data_start + 1
@@ -457,7 +457,6 @@ class ExcelDataLoader(BaseDataLoader):
     @staticmethod
     def _detect_datetime_cols(df_chunk: pd.DataFrame) -> set[str]:
         """从首块数据中检测 datetime 类型列"""
-        import datetime as _dt
         dt_cols: set[str] = set()
         for col in df_chunk.columns:
             sample = df_chunk[col].dropna()
@@ -470,8 +469,6 @@ class ExcelDataLoader(BaseDataLoader):
 
     def _infer_time_columns(self):
         """推断时间列"""
-        import datetime as _dt
-
         time_keywords = ["time", "date", "datetime", "timestamp", "zeit", "tmod"]
         date_candidates = [
             "%H:%M:%S.%f", "%H:%M:%S",

@@ -12,6 +12,7 @@ import sys
 import os
 from typing import Any
 import logging
+from functools import wraps
 
 from src.core.logger import get_logger
 
@@ -21,8 +22,6 @@ DEFAULT_SHOW_X_AXIS_LABEL = False
 
 
 def safe_callback(func):
-    from functools import wraps
-
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
@@ -30,6 +29,9 @@ def safe_callback(func):
         except RuntimeError as e:
             err_msg = str(e).lower()
             if "deleted" in err_msg or "wrapped" in err_msg or "c++ object" in err_msg:
+                logger.debug(
+                    "safe_callback: C++ 对象已销毁 in %s", func.__name__
+                )
                 return None
             raise
         except Exception:
@@ -60,11 +62,24 @@ def safe_qt_op(func, *args, **kwargs):
     """
     try:
         return func(*args, **kwargs)
-    except (RuntimeError, AttributeError) as e:
+    except RuntimeError as e:
+        err_msg = str(e).lower()
+        if "deleted" in err_msg or "c++ object" in err_msg:
+            logger.debug(
+                "safe_qt_op: C++ 对象已销毁 → %s",
+                getattr(func, "__name__", repr(func)),
+            )
+            return None
+        # 非 deletion 的 RuntimeError 仍向上传播
+        raise
+    except AttributeError as e:
+        # 保留 AttributeError 捕获，但记录调用名以便排查拼写错误
         logger.debug(
-            "safe_qt_op 捕获异常: %s → %s",
+            "safe_qt_op 捕获 AttributeError: %s → %s",
             getattr(func, "__name__", repr(func)), e,
+            exc_info=True,
         )
+        return None
 
 DEFAULT_PADDING_VAL_X = 0.05  # 默认x轴padding，单位为plot宽度
 DEFAULT_PADDING_VAL_Y = 0.1  # 默认y轴padding，单位为plot高度

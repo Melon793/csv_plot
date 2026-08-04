@@ -315,6 +315,9 @@ class PlotDataManager:
             return True, "", x_array, y_array, y_format
 
         except Exception as e:
+            logger.warning(
+                "准备绘图数据时出错: %s", e, exc_info=True
+            )
             return False, f"处理数据时出错: {str(e)}", None, None, ""
 
     def _compute_valid_min_max(self, values) -> tuple[float | None, float | None]:
@@ -373,6 +376,9 @@ class PlotDataManager:
                 return 0.0, 1.0
             return bounds
         except Exception:
+            logger.warning(
+                "Y 范围计算失败，回退默认值 (0.0, 1.0)", exc_info=True
+            )
             return 0.0, 1.0
 
     def handle_single_point_limits(
@@ -544,9 +550,9 @@ class PlotDataManager:
                 if ci.original_index is not None:
                     new_x = pw.offset + pw.factor * ci.original_index
                 else:
-                    # 兆底：无 original_index 时用 arange 重建（不应发生）
+                    # 兜底：无 original_index 时用 arange 重建（不应发生）
                     logger.warning(
-                        "[TIME_CORR] 曲线 %s 缺少 original_index，使用 arange 兆底", var_name
+                        "[TIME_CORR] 曲线 %s 缺少 original_index，使用 arange 兜底", var_name
                     )
                     new_x = pw.offset + pw.factor * np.arange(
                         1, len(ci.y_data) + 1, dtype=np.float32
@@ -628,7 +634,7 @@ class PlotDataManager:
                 try:
                     item.clear()
                 except Exception:
-                    logger.debug("清理 plot item.clear() 异常")
+                    logger.debug("清理 plot item.clear() 异常", exc_info=True)
         if should_remove:
             current_scene.removeItem(item)
 

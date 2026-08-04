@@ -9,6 +9,7 @@ Supported formats: .mf4 (MDF 4.x), .mdf (MDF 3.x), .dat (INCA export)
 """
 
 import os
+import traceback
 from collections import OrderedDict
 from typing import Optional, Callable
 
@@ -83,7 +84,7 @@ class MDFLazyLoader:
             try:
                 self._progress(value)
             except Exception:
-                pass  # 进度回调不应阻断主流程
+                logger.debug("进度通知回调失败", exc_info=True)
 
     def _validate_file(self):
         if not os.path.exists(self._path):
@@ -306,7 +307,6 @@ class MDFLazyLoader:
                 total_samples = max(total_samples, cycles)
 
             except Exception as e:
-                import traceback
                 logger.debug("汇总信号 gi=%d 时间范围时异常，跳过\n%s", gi, traceback.format_exc())
 
             if self._progress and total_groups > 0:
@@ -359,7 +359,6 @@ class MDFLazyLoader:
             try:
                 self._mdf.close()
             except Exception as e:
-                import traceback
                 logger.debug("关闭 MDF 文件时异常\n%s", traceback.format_exc())
             del self._mdf
             self._mdf = None

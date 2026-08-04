@@ -105,6 +105,3 @@ class AxisDialog(QDialog):
             QMessageBox.warning(
                 self, "错误", "请输入有效的数值（最小值、最大值、刻度数量）"
             )
-
-
-# ---------------- 自定义 QTableWidget ----------------

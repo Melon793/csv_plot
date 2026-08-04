@@ -1,6 +1,7 @@
 """变量列表面板 —— MyTableWidget + NoHoverDelegate"""
 
 from __future__ import annotations
+from itertools import groupby
 from PySide6.QtCore import Qt, QTimer, QPoint, QRect
 from PySide6.QtGui import QDrag, QPen, QColor, QAction
 from PySide6.QtWidgets import (
@@ -13,7 +14,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
 )
+from src.core.logger import get_logger
 from src.ui.drag_drop import build_var_mimedata, create_drag_pixmap
+
+logger = get_logger(__name__)
 
 
 class NoHoverDelegate(QStyledItemDelegate):
@@ -260,9 +264,8 @@ class MyTableWidget(QTableWidget):
         # 直接调用自定义排序方法（不使用sortByColumn，因为setSortingEnabled=False）
         self.sortItems(logicalIndex, new_order)
 
-    def sortItems(self, column, order=Qt.SortOrder.AscendingOrder):
-        """重写排序方法，确保有效性始终是第一优先级"""
-        # 收集所有行数据（整行移动）
+    def _collect_sort_data(self, column: int, order: Qt.SortOrder) -> list[tuple]:
+        """收集所有行数据并按有效性+指定列排序，返回排序后的 (name, unit, index, valid) 元组列表"""
         rows = []
         for row in range(self.rowCount()):
             name_item = self.item(row, 0)
@@ -271,65 +274,53 @@ class MyTableWidget(QTableWidget):
 
             if name_item and unit_item and index_item:
                 valid = name_item.data(Qt.ItemDataRole.UserRole)
-                # 获取原始变量名（存储在UserRole+1中）
                 original_name = name_item.data(Qt.ItemDataRole.UserRole + 1)
                 rows.append(
-                    {
-                        "name": original_name if original_name else "",
-                        "unit": unit_item.text(),
-                        "index": index_item.data(Qt.ItemDataRole.DisplayRole),
-                        "valid": valid if valid is not None else -999,
-                    }
+                    (
+                        original_name if original_name else "",
+                        unit_item.text(),
+                        index_item.data(Qt.ItemDataRole.DisplayRole),
+                        valid if valid is not None else -999,
+                    )
                 )
 
-        # 排序逻辑：
         # Level 1: 有效性降序（1 → 0 → -1，即有效的在前）
-        # Level 2: 按选择的列升序或降序
+        rows.sort(key=lambda x: -x[3])
 
-        # 使用分组排序：先按有效性分组，再在组内排序
-        from itertools import groupby
-
-        # 先按有效性降序排序（保证有效的在前）
-        rows.sort(key=lambda x: -x["valid"])
-
-        # 按有效性分组，然后在每组内按第二级字段排序
-        rows_sorted = []
-        for valid_value, group in groupby(rows, key=lambda x: x["valid"]):
+        # Level 2: 按有效性分组，组内按选择的列排序
+        rows_sorted: list[tuple] = []
+        for _valid_value, group in groupby(rows, key=lambda x: x[3]):
             group_list = list(group)
 
-            # 在组内按选择的列排序
             if column == 0:  # 变量名
                 group_list.sort(
-                    key=lambda x: x["name"].lower(),
+                    key=lambda x: x[0].lower(),
                     reverse=(order == Qt.SortOrder.DescendingOrder),
                 )
             elif column == 1:  # 单位
                 group_list.sort(
-                    key=lambda x: x["unit"].lower(),
+                    key=lambda x: x[1].lower(),
                     reverse=(order == Qt.SortOrder.DescendingOrder),
                 )
             elif column == 2:  # 序号
                 group_list.sort(
-                    key=lambda x: x["index"],
+                    key=lambda x: x[2],
                     reverse=(order == Qt.SortOrder.DescendingOrder),
                 )
 
             rows_sorted.extend(group_list)
 
-        rows = rows_sorted
+        return rows_sorted
 
-        # 重新填充表格（整行移动，包括颜色）
-        # 注意：不需要再次禁用排序，因为已经在__init__中禁用了
-
-        for row, data in enumerate(rows):
-            # 创建新的item（不含emoji，彩色方块由delegate绘制）
-            valid_value = data["valid"]
-            original_name = data["name"]
+    def _apply_sorted_order(self, sorted_data: list[tuple]) -> None:
+        """按排序后的数据重新填充表格（整行移动，包含颜色信息）"""
+        for row, data in enumerate(sorted_data):
+            original_name, unit, index_val, valid_value = data
 
             name_item = QTableWidgetItem()  # 变量名列（文本留空，由delegate绘制）
-            unit_item = QTableWidgetItem(data["unit"])
+            unit_item = QTableWidgetItem(unit)
             index_item = QTableWidgetItem()
-            index_item.setData(Qt.ItemDataRole.DisplayRole, data["index"])
+            index_item.setData(Qt.ItemDataRole.DisplayRole, index_val)
 
             # 存储原始变量名到UserRole+1（用于delegate绘制和所有操作）
             name_item.setData(Qt.ItemDataRole.UserRole + 1, original_name)
@@ -339,10 +330,14 @@ class MyTableWidget(QTableWidget):
             unit_item.setData(Qt.ItemDataRole.UserRole, valid_value)
             index_item.setData(Qt.ItemDataRole.UserRole, valid_value)
 
-            # 设置到表格
             self.setItem(row, 0, name_item)
             self.setItem(row, 1, unit_item)
             self.setItem(row, 2, index_item)
+
+    def sortItems(self, column, order=Qt.SortOrder.AscendingOrder):
+        """重写排序方法，确保有效性始终是第一优先级"""
+        sorted_data = self._collect_sort_data(column, order)
+        self._apply_sorted_order(sorted_data)
 
         # 更新排序指示器
         self.horizontalHeader().setSortIndicator(column, order)
@@ -352,6 +347,7 @@ class MyTableWidget(QTableWidget):
             for row in range(self.rowCount())
         ]
 
+        # 排序后重新应用当前过滤条件
         if self._current_name_keywords or self._current_unit_keywords:
             self.hide_non_matching(
                 self._current_name_keywords,
@@ -418,10 +414,6 @@ class MyTableWidget(QTableWidget):
         # 获取 MainWindow 实例
         main_window = self.window()
         if not (main_window and hasattr(main_window, "loader")):
-            QMessageBox.warning(self, "错误", "未找到主窗口实例")
-            return
-
-        if main_window is None:
             QMessageBox.warning(self, "错误", "未找到主窗口实例")
             return
 
@@ -545,9 +537,17 @@ class MyTableWidget(QTableWidget):
             return
 
         if getattr(main_window.loader, "LOADER_TYPE", "") == "mdf":
-            series = main_window.loader.get_series(var_name)
+            try:
+                series = main_window.loader.get_series(var_name)
+            except KeyError:
+                logger.warning("MDF 变量 '%s' 在 loader 中不存在", var_name)
+                return
         else:
-            series = main_window.loader.df[var_name]
+            try:
+                series = main_window.loader.df[var_name]
+            except KeyError:
+                logger.warning("CSV 变量 '%s' 在 DataFrame 中不存在", var_name)
+                return
 
         # 弹出数值变量表
         from src.ui.table_dialog import DataTableDialog

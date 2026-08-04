@@ -28,15 +28,27 @@ _FONT_PRIORITY_WIN = [
 ]
 
 
-def _detect_font_win() -> str:
-    """枚举系统字体并返回第一个匹配的中文字体名"""
+def _detect_font(priority_list: list[str]) -> str:
+    """按优先级列表检测第一个可用的字体名。
+
+    Args:
+        priority_list: 按优先级排序的字体名列表
+
+    Returns:
+        第一个可用的字体名，或空字符串
+    """
     from PySide6.QtGui import QFontDatabase
 
     available = QFontDatabase.families()
-    for name in _FONT_PRIORITY_WIN:
+    for name in priority_list:
         if name in available:
             return name
     return ""
+
+
+def _detect_font_win() -> str:
+    """枚举系统字体并返回第一个匹配的中文字体名"""
+    return _detect_font(_FONT_PRIORITY_WIN)
 
 
 _MONO_FONT_PRIORITY = [
@@ -58,13 +70,7 @@ _MONO_CACHE_VERSION = 1
 
 def _detect_mono_font() -> str:
     """枚举系统字体并返回第一个匹配的等宽字体名"""
-    from PySide6.QtGui import QFontDatabase
-
-    available = QFontDatabase.families()
-    for name in _MONO_FONT_PRIORITY:
-        if name in available:
-            return name
-    return ""
+    return _detect_font(_MONO_FONT_PRIORITY)
 
 
 def get_monospace_font_cached() -> str:
@@ -97,7 +103,7 @@ def get_windows_chinese_font_cached() -> str:
     """
     返回缓存或检测到的中文字体名。
 
-    写缓存不显式返回给调用方, 仅作为副作用保存字体名。
+    命中缓存时直接返回缓存字体名；否则现场检测并写入缓存后返回。
     下游用返回的名字创建 QFont(name, pixel_size)。
 
     返回空字符串时调用方应回退到 QApplication.font()。

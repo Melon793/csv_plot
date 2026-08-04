@@ -429,7 +429,7 @@ class FastDataLoader(BaseDataLoader):
         )
 
         # 推断schema（包含时间格式）
-        dtype_map, parse_dates, date_formats, downcast_ratio = self._infer_schema(
+        dtype_map, parse_dates, date_formats, _ = self._infer_schema(
             sample
         )
         self.date_formats = date_formats
@@ -560,7 +560,6 @@ class FastDataLoader(BaseDataLoader):
                     unit_keyword_ratio, UNIT_KEYWORD_RATIO_THRESHOLD,
                 )
             else:
-                numeric_count = 0
                 valid_numeric_count = 0
                 total_cols = len(row2)
 
@@ -568,7 +567,6 @@ class FastDataLoader(BaseDataLoader):
                     cell_str = str(cell).strip()
                     try:
                         val = float(cell_str)
-                        numeric_count += 1
                         if abs(val - 1.0) > 1e-9 and abs(val + 1.0) > 1e-9:
                             valid_numeric_count += 1
                     except (ValueError, TypeError):

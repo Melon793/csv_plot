@@ -10,23 +10,13 @@ import sys
 from queue import Queue
 
 from PySide6.QtCore import QObject, Signal
+from src.utils.platform_setup import is_frozen
 
 
 LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(name)-20s | %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
 LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
 LOG_FILE_BACKUP_COUNT = 3
-
-
-def _is_frozen() -> bool:
-    """检测是否处于打包环境（PyInstaller / Nuitka）"""
-    if getattr(sys, "frozen", False):
-        return True
-    # Nuitka: __compiled__ 始终存在于 __main__ 的 globals 中
-    import __main__
-    if "__compiled__" in getattr(__main__, "__dict__", {}):
-        return True
-    return False
 
 
 def _get_log_dir() -> str:
@@ -43,7 +33,7 @@ def _get_log_dir() -> str:
     candidates: list[str] = []
 
     # 1. 打包环境：exe 所在目录
-    if _is_frozen():
+    if is_frozen():
         exe_dir = os.path.dirname(sys.executable)
         if exe_dir:
             candidates.append(exe_dir)
