@@ -172,8 +172,6 @@ class MultiCurveManager:
 
     def _collect_visible_curve_arrays(self, key: str) -> list:
         """收集可见曲线的数据数组"""
-        import numpy as np
-
         pw = self.pw
         arrays = []
         if not getattr(pw, "curves", None):
@@ -192,8 +190,6 @@ class MultiCurveManager:
 
     def _collect_visible_curve_pairs(self) -> list:
         """收集可见曲线的 x-y 数据对"""
-        import numpy as np
-
         pw = self.pw
         pairs = []
         if not getattr(pw, "curves", None):
@@ -220,8 +216,6 @@ class MultiCurveManager:
         交集为空时返回 (min > max) 的反转范围，使 _get_y_range_in_x_window
         内部 mask 为空，触发其回退逻辑（基于全数据范围）。
         """
-        import numpy as np
-
         pw = self.pw
         try:
             data_x_min = float(np.min(x_values))
@@ -273,8 +267,6 @@ class MultiCurveManager:
             _update_x_range 参数已废弃（保留仅为 API 兼容）。
             X 轴 limits 由 compute_global_x_limits 统一管理。
         """
-        import numpy as np
-
         pw = self.pw
 
         if not pw.curves:

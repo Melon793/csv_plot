@@ -85,8 +85,6 @@ class AppSettings:
 
     def _migrate_from_v0(self) -> None:
         try:
-            from PySide6.QtCore import QSettings as QS
-
             migrations: list[tuple[str, str, list[tuple[str, str]]]] = [
                 ("csv_plot", "font_cache", [
                     ("cache_version", ConfigKey.FONT_CACHE_VERSION),
@@ -107,7 +105,7 @@ class AppSettings:
             ]
 
             for org, app, key_mappings in migrations:
-                old_settings = QS(org, app)
+                old_settings = QSettings(org, app)
                 for old_key, new_key in key_mappings:
                     val = old_settings.value(old_key)
                     if val is not None:
