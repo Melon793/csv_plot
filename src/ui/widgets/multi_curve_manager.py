@@ -63,25 +63,21 @@ class MultiCurveManager:
         return color
 
     def _update_header_for_curves(self):
-        """统一的 header 更新逻辑（替代原 update_multi_curve_mode）
+        """统一的图例更新逻辑
 
-        1 条曲线 = 简单标题，多条曲线 = HTML 图例。
+        始终使用 HTML 图例格式（颜色方块 + 文字），支持点击切换可见性。
         """
         pw = self.pw
         curve_count = len(pw.curves)
         logger.debug(
             "[HEADER] _update_header_for_curves: curve_count=%d, 显示模式=%s",
-            curve_count, "图例" if curve_count > 1 else ("简单标题" if curve_count == 1 else "空"),
+            curve_count, "图例" if curve_count > 0 else "空",
         )
 
-        if curve_count > 1:
+        if curve_count > 0:
             self.update_legend()
-        elif curve_count == 1:
-            var_name = next(iter(pw.curves.keys()))
-            full_title = f"{var_name} ({pw.units.get(var_name, '')})".strip()
-            pw.update_left_header(full_title)
         else:
-            pw.update_left_header("channel name")
+            pw.update_legend_label("channel name")
 
     def update_multi_curve_mode(self):
         """兼容别名：委托到 _update_header_for_curves"""
@@ -117,9 +113,9 @@ class MultiCurveManager:
 
         if legend_items:
             legend_text = " | ".join(legend_items)
-            pw.update_left_header(legend_text)
+            pw.update_legend_label(legend_text)
         else:
-            pw.update_left_header("channel name")
+            pw.update_legend_label("channel name")
 
     def toggle_curve_visibility_by_name(self, var_name: str):
         """通过变量名切换曲线可见性
@@ -354,7 +350,7 @@ class MultiCurveManager:
 
         doc = QTextDocument()
         doc.setDocumentMargin(0)
-        doc.setDefaultFont(pw.label_left.font())
+        doc.setDefaultFont(pw.legend_label.font())
         doc.setHtml(full_html)
 
         layout = doc.documentLayout()

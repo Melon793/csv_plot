@@ -141,8 +141,7 @@ class PlotDataManager:
     
             pw._queue_ui_refresh()
     
-            full_title = f"{var_name} ({pw.units.get(var_name, '')})".strip()
-            pw.update_left_header(full_title)
+            pw._update_header_for_curves()
     
             special_limits = self.handle_single_point_limits(x_values, y_contiguous)
             if special_limits:
@@ -646,7 +645,7 @@ class PlotDataManager:
             pw._clear_cursor_items(hide_only=False)
             self._safe_clear_plot_items()
             pw.axis_y.setLabel(text="")
-            pw.update_left_header("channel name")
+            pw.update_legend_label("channel name")
 
             for var_name, ci in pw.curves.items():
                 if ci.curve is not None:
@@ -708,7 +707,7 @@ class PlotDataManager:
         pw._clear_cursor_items(hide_only=False)
         self._safe_clear_plot_items()
         pw.axis_y.setLabel(text="")
-        pw.update_left_header("channel name")
+        pw.update_legend_label("channel name")
 
         pw.curves.clear()
         pw.current_color_index = 0
