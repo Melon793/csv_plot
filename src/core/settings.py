@@ -157,7 +157,7 @@ class AppSettings:
         self._settings.setValue(ConfigKey.FONT_MONO_NAME, name)
 
     def is_auto_save_enabled(self) -> bool:
-        return self._settings.value(ConfigKey.AUTO_SAVE_ENABLED, True, type=bool)
+        return self._settings.value(ConfigKey.AUTO_SAVE_ENABLED, False, type=bool)
 
     def set_auto_save_enabled(self, enabled: bool) -> None:
         self._settings.setValue(ConfigKey.AUTO_SAVE_ENABLED, enabled)
