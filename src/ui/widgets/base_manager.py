@@ -40,24 +40,3 @@ class BasePlotManager:
                 f"{type(self).__name__}: PlotWidget has been garbage collected"
             )
         return pw
-
-    def initialize(self) -> None:
-        """在主类 setup_ui 完成后调用，用于执行初始化后的额外设置。
-
-        子类可重写此方法以初始化计时器、连接信号等。
-        """
-        pass
-
-    def cleanup(self) -> None:
-        """在 plot_widget 销毁前调用，用于释放资源、断开信号等。
-
-        子类可重写此方法以执行清理工作。
-        """
-        pass
-
-    def reset(self) -> None:
-        """在 reset_plot 或 clear_plot_item 后调用，用于重置管理器特有状态。
-
-        子类可重写此方法以清空内部缓存、重置标志位等。
-        """
-        pass

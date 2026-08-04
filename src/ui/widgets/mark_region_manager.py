@@ -14,7 +14,6 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSignalBlocker
 
 from src.core.config import _evaluate_float32_safety
 from src.core.data_types import MarkStatEntry
@@ -53,13 +52,6 @@ class MarkRegionManager:
         if self.pw.mark_region and self.pw.mark_region.scene() is not None:
             self.pw.plot_item.removeItem(self.pw.mark_region)
         self.pw.mark_region = None
-
-    def update_mark_region(self):
-        """更新标记区域"""
-        if self.pw.mark_region:
-            old_min, old_max = self.pw.mark_region.getRegion()
-            blocker = QSignalBlocker(self.pw.mark_region)
-            self.pw.mark_region.setRegion([old_min, old_max])
 
     def get_mark_stats(self) -> list | None:
         """获取标记区域的统计信息（统一版：始终走 curves 字典路径）

@@ -569,7 +569,9 @@ class PlotDataManager:
             if global_result is not None:
                 _, _, limits_xMin, limits_xMax = global_result
                 self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-            self._update_vline_bounds_from_data()
+            # 统一走 CursorManager 版本（含可见曲线过滤、NaN 保护与异常处理），
+            # 避免与 plot_widget 转发路径行为不一致
+            self.pw._cursor_manager._update_vline_bounds_from_data()
             if (
                 pw.mark_region is not None
                 and pw.plot_context
@@ -581,9 +583,11 @@ class PlotDataManager:
                     index_max = (old_max - old_offset) / old_factor
                     new_min = new_offset + new_factor * index_min
                     new_max = new_offset + new_factor * index_max
-                    QSignalBlocker(pw.mark_region)
-                    pw.mark_region.setRegion([new_min, new_max])
-                    pw.plot_context.sync_mark_regions(pw.mark_region)
+                    # 用 with 持有 QSignalBlocker，确保阻塞覆盖 setRegion 全过程，
+                    # 避免临时对象被提前回收导致 sigRegionChanged 触发递归同步
+                    with QSignalBlocker(pw.mark_region):
+                        pw.mark_region.setRegion([new_min, new_max])
+                        pw.plot_context.sync_mark_regions(pw.mark_region)
         finally:
             if pw.plot_context is not None:
                 if not getattr(pw, "_is_being_destroyed", False):
@@ -702,18 +706,3 @@ class PlotDataManager:
 
         pw.curves.clear()
         pw.current_color_index = 0
-
-    def _update_vline_bounds_from_data(self):
-        """从数据更新光标线边界（统一版：始终从 curves 字典收集）"""
-        pw = self.pw
-        updated = False
-        if pw.curves:
-            all_x = []
-            for ci in pw.curves.values():
-                if ci.x_data is not None:
-                    all_x.extend(ci.x_data)
-            if all_x:
-                self._axis_manager._set_vline_bounds([min(all_x), max(all_x)])
-                updated = True
-        if not updated:
-            self._axis_manager._set_vline_bounds([None, None])

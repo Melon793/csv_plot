@@ -59,8 +59,7 @@ class CursorManager:
             )
         self._data_manager = multi_curve_manager
 
-        # 新标签布局算法的状态
-        self._use_new_label_layout = True   # 使用新标签布局算法（Phase 1/2/3）
+        # 标签布局算法的状态
         self._prev_layout: list[LabelLayout] = []  # 上一帧的布局结果
         self._column_count: int = 1          # 当前列数
         self._column_hysteresis_counter: int = 0  # 列数切换滞回计数器
@@ -747,183 +746,11 @@ class CursorManager:
         y_min: float,
         y_max: float,
     ):
-        """标签定位算法入口，通过 feature flag 分发到新旧算法"""
-        if getattr(self, '_use_new_label_layout', False):
-            self._position_labels_new(cursor_values, x_min, x_max, y_min, y_max)
-        else:
-            self._position_labels_legacy(cursor_values, x_min, x_max, y_min, y_max)
-
-    def _position_labels_legacy(
-        self,
-        cursor_values: list,
-        x_min: float,
-        x_max: float,
-        y_min: float,
-        y_max: float,
-    ):
-        """优化的标签定位算法，使用对角线位置避免遮挡曲线。
-
-        使用4个候选位置策略（右上、左上、右下、左下）依次尝试，
-        选择第一个在边界内的位置。如果都超出边界，则约束在右上位置。
-
-        【内存优化】使用对象池复用TextItem，避免频繁创建销毁
-
-        Args:
-            cursor_values: 光标值列表，每个元素为包含var_name, x_pos, y_pos, y_value, color的字典
-            x_min: 视图x轴最小值（数据坐标）
-            x_max: 视图x轴最大值（数据坐标）
-            y_min: 视图y轴最小值（数据坐标）
-            y_max: 视图y轴最大值（数据坐标）
-        """
-        if not cursor_values:
-            return
-
-        pw = self.pw
-
-        # 计算视图范围，用于边界检查
-        x_range = x_max - x_min
-        y_range = y_max - y_min
-
-        # 获取实际视图尺寸
-        view_box = pw.plot_item.getViewBox()
-        view_width_pixels = max(1, view_box.width())  # 防止除零
-        view_height_pixels = max(1, view_box.height())
-
-        # 预计算转换比例（像素 -> 数据坐标）
-        pixel_to_data_x = x_range / view_width_pixels
-        pixel_to_data_y = y_range / view_height_pixels
-
-        # 设置固定的屏幕像素偏移
-        gap_pixels = self.LABEL_GAP_TO_CURSOR  # 文本框左边缘距离cursor的水平像素间隔
-        vertical_gap_pixels = self.LABEL_Y_OFFSET  # 垂直像素间隔（标签底部到交点的距离）
-
-        # 获取TextItem的字体来动态计算标签尺寸（缓存font_metrics避免重复创建）
-        if not hasattr(self, '_cached_font_metrics'):
-            sample_text_item = self._get_label_from_pool(0)
-            text_font = sample_text_item.textItem.font()
-            self._cached_font_metrics = QFontMetrics(text_font)
-            self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
-
-        font_metrics = self._cached_font_metrics
-        label_height_pixels = self._cached_label_height_pixels
-        label_height_data = label_height_pixels * pixel_to_data_y  # 在循环外计算
-
-        for idx, item in enumerate(cursor_values):
-            x_pos = item['x_pos']
-            y_pos = item['y_pos']
-            y_value = item['y_value']
-            color = item['color']
-
-            # 从对象池获取TextItem并更新其属性
-            text_item = self._get_label_from_pool(idx)
-            text_item.setText(y_value)
-
-            # 复用pen对象或只在颜色变化时创建
-            if not hasattr(text_item, '_cached_border_color') or text_item._cached_border_color != color:
-                border_pen = pg.mkPen(color, width=1.5)
-                text_item.border = border_pen
-                text_item._cached_border_color = color
-            text_item.setVisible(True)
-
-            # 根据实际文本内容动态计算标签宽度
-            text_width = font_metrics.horizontalAdvance(y_value)
-            label_width_pixels = text_width + 12
-            label_width_data = label_width_pixels * pixel_to_data_x  # 在循环内计算宽度（动态的）
-
-            # 将数据坐标转换为场景坐标（屏幕像素）
-            cursor_scene_pos = view_box.mapViewToScene(QPointF(x_pos, y_pos))
-            cursor_scene_x = cursor_scene_pos.x()
-            cursor_scene_y = cursor_scene_pos.y()
-
-            # 计算文本框偏移（TextItem的anchor=(0, 0.5)，位置为左边缘）
-            offset_x_right = gap_pixels
-            offset_x_left = -(gap_pixels + label_width_pixels)
-            offset_y_up = -(vertical_gap_pixels + label_height_pixels / 2)
-            offset_y_down = vertical_gap_pixels + label_height_pixels / 2
-
-            # 尝试4个候选位置（右上、左上、右下、左下）
-            strategies = [
-                (offset_x_right, offset_y_up, "右上"),
-                (offset_x_left, offset_y_up, "左上"),
-                (offset_x_right, offset_y_down, "右下"),
-                (offset_x_left, offset_y_down, "左下"),
-            ]
-
-            label_scene_x, label_scene_y = None, None
-
-            for strategy_idx, (dx_pixels, dy_pixels, name) in enumerate(strategies):
-                candidate_scene_x = cursor_scene_x + dx_pixels
-                candidate_scene_y = cursor_scene_y + dy_pixels
-
-                # 转换回数据坐标检查边界
-                candidate_data_pos = view_box.mapSceneToView(QPointF(candidate_scene_x, candidate_scene_y))
-                candidate_x = candidate_data_pos.x()
-                candidate_y = candidate_data_pos.y()
-
-                # 检查是否在数据范围内（anchor=(0,0.5)，candidate_x 是左边缘）
-                left_ok = candidate_x >= x_min
-                right_ok = candidate_x + label_width_data <= x_max
-                bottom_ok = candidate_y - label_height_data * 0.5 >= y_min
-                top_ok = candidate_y + label_height_data * 0.5 <= y_max
-
-                in_bounds = left_ok and right_ok and bottom_ok and top_ok
-
-                if in_bounds:
-                    label_scene_x = candidate_scene_x
-                    label_scene_y = candidate_scene_y
-                    label_x = candidate_x
-                    label_y = candidate_y
-                    break
-
-            # 如果所有策略都超界，默认使用右上并约束在边界内
-            if label_scene_x is None:
-                label_scene_x = cursor_scene_x + offset_x_right
-                label_scene_y = cursor_scene_y + offset_y_up
-
-                label_data_pos = view_box.mapSceneToView(QPointF(label_scene_x, label_scene_y))
-                label_x = label_data_pos.x()
-                label_y = label_data_pos.y()
-
-                label_x = max(x_min, min(x_max - label_width_data, label_x))
-                label_y = max(y_min + label_height_data * 0.5,
-                             min(y_max - label_height_data * 0.5, label_y))
-
-            # 边缘避让逻辑：防止标签在边缘抖动
-            edge_margin_strict = label_height_data * 0.1
-            y_center = (y_min + y_max) / 2
-            # y_quarter_upper = y_min + (y_max - y_min) * 0.25
-            # y_quarter_lower = y_max - (y_max - y_min) * 0.25
-
-            data_point_near_bottom = (y_pos - y_min) < edge_margin_strict
-            data_point_near_top = (y_max - y_pos) < edge_margin_strict
-
-            if data_point_near_bottom:
-                # label_y = max(y_quarter_upper, label_y)
-                label_y = min(label_y, y_center)
-            elif data_point_near_top:
-                # label_y = min(y_quarter_lower, label_y)
-                label_y = max(label_y, y_center)
-            else:
-                edge_margin_soft = label_height_data * 0.25
-                if label_y - y_min < edge_margin_soft:
-                    label_y = y_min + edge_margin_soft
-                elif y_max - label_y < edge_margin_soft:
-                    label_y = y_max - edge_margin_soft
-
-            text_item.setPos(label_x, label_y)
-            text_item.setZValue(201)
-
-            text_scene = text_item.scene()
-            plot_scene = pw.plot_item.scene()
-            if text_scene != plot_scene:
-                if text_scene is not None:
-                    text_scene.removeItem(text_item)
-                pw.plot_item.addItem(text_item, ignoreBounds=True)
-
-            pw.multi_cursor_items.append(text_item)
+        """标签定位算法入口（全局排布 + 多列自适应）"""
+        self._position_labels_new(cursor_values, x_min, x_max, y_min, y_max)
 
     # ========================================================================
-    # 新标签布局算法 (Phase 1 → Phase 2 → Phase 3)
+    # 标签布局算法 (Phase 1 → Phase 2 → Phase 3)
     # ========================================================================
 
     def _position_labels_new(
@@ -1536,12 +1363,6 @@ class CursorManager:
             with QSignalBlocker(self.pw.vline2):
                 self.pw.vline2.setMovable(False)
                 self.pw.vline2.setVisible(False)
-
-    def _update_view_range_from_data(self):
-        """从数据更新视图范围"""
-        x_min, x_max = self.pw.get_curve_x_limits()
-        if x_min is not None and x_max is not None:
-            self.pw.view_box.setXRange(x_min, x_max, padding=0.02)
 
     def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
         """绘图后更新光标边界和可见性"""

@@ -196,9 +196,6 @@ class XYScatterPlotDialog(QDialog):
         self.setWindowTitle("X/Y 散点图")
         self.resize(500, 500)
 
-        # 设置窗口在关闭时释放内存
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-
         layout = QVBoxLayout(self)
 
         import pyqtgraph as pg
@@ -1032,32 +1029,6 @@ class DataTableDialog(QMainWindow):
                 menu.addAction(act1)
                 menu.addAction(act2)
 
-        menu.exec(view.mapToGlobal(pos))
-
-    def _show_plot_menu(self, pos, view, x_col, y_col, rows, enabled=True):
-        x_name = self.model.headerData(
-            x_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
-        ).replace("\n", " ")
-        y_name = self.model.headerData(
-            y_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
-        ).replace("\n", " ")
-        menu = QMenu(self)
-        act1 = QAction(f"绘制x/y图，x={x_name}，y={y_name}", menu)
-        act1.triggered.connect(
-            lambda _checked=False, rows=rows, x=x_col, y=y_col: self._plot_xy_scatter(
-                x, y, rows
-            )
-        )
-        act1.setEnabled(enabled)
-        act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
-        act2.triggered.connect(
-            lambda _checked=False, rows=rows, x=x_col, y=y_col: self._plot_xy_scatter(
-                y, x, rows
-            )
-        )
-        act2.setEnabled(enabled)
-        menu.addAction(act1)
-        menu.addAction(act2)
         menu.exec(view.mapToGlobal(pos))
 
     def _plot_xy_scatter(

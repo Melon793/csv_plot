@@ -62,49 +62,50 @@ class ExcelDataLoader(BaseDataLoader):
             file_path, read_only=True, data_only=True
         )
 
-        # 解析 sheet_name（支持字符串名或索引）
-        if isinstance(sheet_name, int):
-            ws_name = self._wb.sheetnames[sheet_name]
-        else:
-            ws_name = sheet_name
-        self._ws = self._wb[ws_name]
+        try:
+            # 解析 sheet_name（支持字符串名或索引）
+            if isinstance(sheet_name, int):
+                ws_name = self._wb.sheetnames[sheet_name]
+            else:
+                ws_name = sheet_name
+            self._ws = self._wb[ws_name]
 
-        if self._progress_cb:
-            self._progress_cb(5)
+            if self._progress_cb:
+                self._progress_cb(5)
 
-        # 自动检测 desc_rows
-        if desc_rows is None:
-            try:
-                self.desc_rows, has_unit = self._auto_detect_format(has_unit)
-                logger.info(
-                    "Excel auto_detect: desc_rows=%d, has_unit=%s (sheet=%s)",
-                    self.desc_rows, has_unit, ws_name,
-                )
-            except Exception as e:
-                logger.warning("Excel 自动检测失败 (%s)，使用默认值 desc_rows=0", e)
-                self.desc_rows = 0
-        else:
-            self.desc_rows = desc_rows
+            # 自动检测 desc_rows
+            if desc_rows is None:
+                try:
+                    self.desc_rows, has_unit = self._auto_detect_format(has_unit)
+                    logger.info(
+                        "Excel auto_detect: desc_rows=%d, has_unit=%s (sheet=%s)",
+                        self.desc_rows, has_unit, ws_name,
+                    )
+                except Exception as e:
+                    logger.warning("Excel 自动检测失败 (%s)，使用默认值 desc_rows=0", e)
+                    self.desc_rows = 0
+            else:
+                self.desc_rows = desc_rows
 
-        # 读取表头 + 自动检测 has_unit
-        self._var_names, self._units, self.has_unit = self._load_header_units(has_unit)
+            # 读取表头 + 自动检测 has_unit
+            self._var_names, self._units, self.has_unit = self._load_header_units(has_unit)
 
-        if self._progress_cb:
-            self._progress_cb(10)
+            if self._progress_cb:
+                self._progress_cb(10)
 
-        # 读取数据：优先使用 calamine (Rust)，fallback 到优化后的 openpyxl
-        self._df = self._read_data()
+            # 读取数据：优先使用 calamine (Rust)，fallback 到优化后的 openpyxl
+            self._df = self._read_data()
 
-        # 时间列推断
-        self._infer_time_columns()
+            # 时间列推断
+            self._infer_time_columns()
 
-        # 后处理：合并 downcast + validity 为单次遍历
-        self._df_validity = self._postprocess_columns(
-            downcast=downcast_float
-        )
-
-        # 关闭 workbook 释放资源
-        self._wb.close()
+            # 后处理：合并 downcast + validity 为单次遍历
+            self._df_validity = self._postprocess_columns(
+                downcast=downcast_float
+            )
+        finally:
+            # 关闭 workbook 释放资源（finally 保证异常路径也关闭，避免文件句柄泄漏）
+            self._wb.close()
 
         if self._progress_cb:
             self._progress_cb(100)

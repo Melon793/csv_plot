@@ -740,7 +740,7 @@ class FastDataLoader(BaseDataLoader):
             chunks.append(chunk)
             if self._progress_cb and file_size > 0:
                 # 粗略进度估算（基于已读 chunk 数 × chunksize / 文件大小）
-                progress = min(80, int((idx + 1) * chunksize * 100 / (file_size / 100)))
+                progress = min(80, int((idx + 1) * chunksize * 100 / file_size))
                 self._progress_cb(15 + progress)
 
         df = pd.concat(chunks, ignore_index=True)

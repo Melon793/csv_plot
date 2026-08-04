@@ -60,7 +60,13 @@ class UnifiedUpdateScheduler(QObject):
             self._timer.stop()
 
     def run_immediately(self, *names: str) -> None:
-        tasks = list(names) if names else (self._order or list(self._pending))
+        if names:
+            tasks = list(names)
+        else:
+            # 按 _order 顺序执行，并追加不在 _order 中的 pending 任务，
+            # 避免这些任务被静默跳过
+            tasks = list(self._order)
+            tasks += [name for name in self._pending if name not in tasks]
         if not tasks:
             return
         for name in tasks:

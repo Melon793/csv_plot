@@ -50,6 +50,9 @@ class UnifiedCurveStrategy(CurveStrategy):
         return [c.y_data for c in self._pw.curves.values() if c.y_data is not None]
 
     def get_x_data(self) -> np.ndarray:
+        # 前提假设：同一 plot 内所有曲线共享同一 x_data（同源数据/同一时间轴）。
+        # 当前 MDF 多 group 场景下每个 plot 仅绘制单一 group 的数据，该假设成立；
+        # 若未来引入跨 group（不同时间轴）曲线混绘，必须重新评估本方法。
         if not self._pw.curves:
             return np.array([])
         first_ci = next(iter(self._pw.curves.values()))

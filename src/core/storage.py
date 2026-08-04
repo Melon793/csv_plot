@@ -120,19 +120,27 @@ class TemplateStorage(QObject):
                     f"Name '{name}' already used by template {existing_id}"
                 )
 
-            if template.metadata.id in self._cache:
-                old = self._cache[template.metadata.id]
-                old_filename = self._make_filename(old.metadata.name) + ".yaml"
-                if old_filename != new_filename:
-                    old_file = self._storage_path / old_filename
-                    if old_file.exists():
-                        old_file.unlink()
+            # 重命名场景：先记录旧文件，等新文件写入成功后再删除，
+            # 避免"先删后写"期间进程崩溃导致模板丢失。
+            # 旧文件名取自 _id_to_filename（实际落盘记录），而非从缓存对象重建——
+            # 调用方可能就地修改缓存模板的 name，重建文件名会与实际文件不一致
+            old_file: Optional[Path] = None
+            old_filename = self._id_to_filename.get(template.metadata.id)
+            if old_filename and old_filename != new_filename:
+                candidate = self._storage_path / old_filename
+                if candidate.exists():
+                    old_file = candidate
 
             file = self._storage_path / new_filename
             tmp_file = file.with_suffix(".yaml.tmp")
             with open(tmp_file, "w", encoding="utf-8") as f:
                 yaml.dump(template.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
             os.replace(tmp_file, file)
+            if old_file is not None:
+                try:
+                    old_file.unlink()
+                except OSError as e:
+                    logger.warning(f"Failed to remove old template file {old_file}: {e}")
             self._cache[template.metadata.id] = template
             self._id_to_filename[template.metadata.id] = new_filename
             return True
@@ -159,12 +167,6 @@ class TemplateStorage(QObject):
         except Exception as e:
             logger.error(f"Error deleting template {template_id}: {e}")
             raise TemplateStorageError(f"Failed to delete template: {e}")
-
-    def template_exists(self, template_id: str) -> bool:
-        """检查模板是否存在"""
-        if template_id in self._cache:
-            return True
-        return self._find_file_by_id(template_id) is not None
 
     def import_from_external(self, external_path: Path) -> Optional[PlotTemplate]:
         """从外部文件导入"""
@@ -237,25 +239,15 @@ class TemplateStorage(QObject):
                 self._id_to_filename[template.metadata.id] = file.name
                 self.file_changed.emit(template.metadata.id)
         else:
+            # 文件已被删除：无需再读取（必然抛 FileNotFoundError），直接清理缓存
             for tid, tpl in list(self._cache.items()):
                 expected = self._make_filename(tpl.metadata.name) + ".yaml"
                 if expected == file.name:
-                    try:
-                        deleted = self.read_template_from_file(file)
-                    except Exception:
-                        deleted = None
-                    if deleted is None or deleted.metadata.id == tid:
-                        del self._cache[tid]
-                        self._id_to_filename.pop(tid, None)
-                        self.file_changed.emit(tid)
-                        break
+                    del self._cache[tid]
+                    self._id_to_filename.pop(tid, None)
+                    self.file_changed.emit(tid)
+                    break
         self.directory_changed.emit()
 
     def get_all_templates(self) -> list[PlotTemplate]:
         return list(self._cache.values())
-
-    def get_cache_size(self) -> int:
-        return len(self._cache)
-
-    def clear_cache(self):
-        self._cache.clear()

@@ -9,8 +9,7 @@ Supported formats: .mf4 (MDF 4.x), .mdf (MDF 3.x), .dat (INCA export)
 """
 
 import os
-import re
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from typing import Optional, Callable
 
 import numpy as np
@@ -34,8 +33,6 @@ class MDFLazyLoader:
     MAX_CACHE_SIZE = 256
 
     _ASAMMDF_IMPORT_ERROR = "asammdf 库未安装。请运行: pip install asammdf>=7.4.0"
-
-    _CONFLICT_SUFFIX_PATTERN = re.compile(r"_(G\d+)$")
 
     def __init__(self, path: str, *, _progress: Callable[[int], None] = None):
         self._path = path
@@ -371,10 +368,6 @@ class MDFLazyLoader:
     # Core data access
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _resolve_pure_column_name(display_name: str) -> str:
-        return MDFLazyLoader._CONFLICT_SUFFIX_PATTERN.sub("", display_name)
-
     def get_series(self, display_name: str) -> pd.Series:
         meta = self._var_to_meta.get(display_name)
         if meta is None:
@@ -392,66 +385,6 @@ class MDFLazyLoader:
             self._cache_put(display_name, y)
 
         return pd.Series(y, name=display_name)
-
-    def get_series_batch(self, display_names: list[str]) -> dict[str, pd.Series]:
-        result: dict[str, pd.Series] = {}
-        uncached: list[tuple[str, int, int, bool]] = []
-
-        for name in display_names:
-            meta = self._var_to_meta.get(name)
-            if meta is None:
-                continue
-            y = self._cache_get(name)
-            if y is not None:
-                result[name] = pd.Series(y, name=name)
-            else:
-                uncached.append(
-                    (name, meta.group_index, meta.channel_index, meta.is_enum)
-                )
-
-        if not uncached:
-            return result
-
-        enum_by_group: dict[int, list[tuple[int, str]]] = defaultdict(list)
-        nonenum_by_group: dict[int, list[tuple[int, str]]] = defaultdict(list)
-
-        for name, gi, ci, is_enum in uncached:
-            if gi not in self._time_cache:
-                master_ci = self._group_master_ci.get(gi, 0)
-                master_signal = self._mdf.get(
-                    name=None,
-                    group=gi,
-                    index=master_ci,
-                )
-                self._time_cache[gi] = master_signal.timestamps.astype(np.float64)
-
-            if is_enum:
-                enum_by_group[gi].append((ci, name))
-            else:
-                nonenum_by_group[gi].append((ci, name))
-
-        for gi, channels in enum_by_group.items():
-            for ci, name in channels:
-                signal = self._mdf.get(
-                    name=None,
-                    group=gi,
-                    index=ci,
-                    raw=True,
-                )
-                y = signal.samples
-                self._cache_put(name, y)
-                result[name] = pd.Series(y, name=name)
-
-        for gi, channels in nonenum_by_group.items():
-            selection = [(None, gi, ci) for ci, _ in channels]
-            signals = self._mdf.select(selection)
-
-            for (ci, name), signal in zip(channels, signals):
-                y = signal.samples
-                self._cache_put(name, y)
-                result[name] = pd.Series(y, name=name)
-
-        return result
 
     def get_value_from_name(self, display_name: str):
         meta = self._var_to_meta.get(display_name)
@@ -488,17 +421,6 @@ class MDFLazyLoader:
             enum_map = self._enum_cache.get(display_name)
 
         return x, y, meta.unit, enum_map or {}
-
-    # ------------------------------------------------------------------
-    # Group management
-    # ------------------------------------------------------------------
-
-    def select_group(self, index: int):
-        if index < 0 or index >= self.group_count:
-            raise IndexError(
-                f"Group 索引 {index} 超出范围，有效范围: 0-{self.group_count - 1}"
-            )
-        self._current_group_index = index
 
     # ------------------------------------------------------------------
     # Properties (aligned with FastDataLoader interface)
@@ -573,8 +495,10 @@ class MDFLazyLoader:
         return pd.Series(np.arange(self.datalength), name="index")
 
     @property
-    def time_channels_info(self) -> list:
-        return []
+    def time_channels_info(self) -> dict[str, str]:
+        # 与基类契约一致返回 dict[str, str]（消费方按 key 检查/取值）；
+        # MDF 时间通道为数值型，无日期格式串，值统一为空字符串
+        return {m.name: "" for m in self._metadata if m.is_time_channel}
 
     @property
     def groups(self) -> list:
