@@ -277,7 +277,11 @@ class AxisManager:
         limits_xMin: float | None,
         limits_xMax: float | None,
     ) -> None:
-        """统一设置 X 轴的 limits 和 minXRange"""
+        """统一设置 X 轴的 limits 和 minXRange
+
+        保证 limits 宽度 >= minXRange，避免 pyqtgraph 约束求解器
+        在 xMin/xMax 与 minXRange 冲突时产生不稳定的 viewRange。
+        """
         pw = self.pw
         if logger.isEnabledFor(logging.DEBUG):
             import traceback
@@ -297,13 +301,54 @@ class AxisManager:
                 plot_id, limits_xMin, limits_xMax, old_limits, caller_info,
             )
         minXRange_val = self._get_min_x_range_value()
+        # 确保 limits 宽度 >= minXRange，防止约束冲突导致 viewRange 振荡
+        if limits_xMin is not None and limits_xMax is not None:
+            limits_width = limits_xMax - limits_xMin
+            if limits_width < minXRange_val:
+                center = (limits_xMin + limits_xMax) / 2.0
+                limits_xMin = center - minXRange_val / 2.0
+                limits_xMax = center + minXRange_val / 2.0
+                logger.debug(
+                    "[XLIMITS] limits width %.4f < minXRange %.4f, "
+                    "expanded limits to [%.4f, %.4f]",
+                    limits_width, minXRange_val, limits_xMin, limits_xMax,
+                )
         pw.plot_item.setLimits(
             xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val
         )
 
     def _set_min_x_range(self, minXRange: float) -> None:
-        """设置 X 轴的最小范围"""
+        """设置 X 轴的最小范围
+
+        同时确保 xMin/xMax limits 宽度 >= minXRange，
+        防止 pyqtgraph 约束求解器在二者冲突时产生不稳定的 viewRange。
+        """
         pw = self.pw
+        # 获取当前的 xMin/xMax limits，必要时扩展以容纳 minXRange
+        try:
+            current_limits = pw.view_box.state.get('limits', {})
+            x_limits = current_limits.get('xLimits', [None, None])
+            cur_xMin = x_limits[0] if x_limits else None
+            cur_xMax = x_limits[1] if len(x_limits) > 1 else None
+        except Exception:
+            cur_xMin, cur_xMax = None, None
+
+        if cur_xMin is not None and cur_xMax is not None:
+            limits_width = cur_xMax - cur_xMin
+            if limits_width < minXRange:
+                center = (cur_xMin + cur_xMax) / 2.0
+                cur_xMin = center - minXRange / 2.0
+                cur_xMax = center + minXRange / 2.0
+                logger.debug(
+                    "[XLIMITS] _set_min_x_range: limits width %.4f < minXRange %.4f, "
+                    "expanded limits to [%.4f, %.4f]",
+                    limits_width, minXRange, cur_xMin, cur_xMax,
+                )
+                pw.plot_item.setLimits(
+                    xMin=cur_xMin, xMax=cur_xMax, minXRange=minXRange
+                )
+                return
+
         pw.plot_item.setLimits(minXRange=minXRange)
 
     def _recalc_max_point_density(self) -> None:
