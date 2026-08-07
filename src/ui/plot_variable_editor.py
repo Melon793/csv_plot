@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 import sys
-import time
-from PySide6.QtCore import Qt, QSignalBlocker, QTimer
+from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
@@ -35,7 +34,6 @@ class PlotVariableEditorDialog(QDialog):
     """
 
     def __init__(self, plot_widget, parent=None):
-        _t0 = time.perf_counter()
         super().__init__(parent)
         self.plot_widget = plot_widget
         self.setWindowTitle("绘图变量编辑器")
@@ -48,29 +46,7 @@ class PlotVariableEditorDialog(QDialog):
         # PySide6默认支持高DPI，通过样式表控制字体大小
 
         self.setup_ui()
-        _t1 = time.perf_counter()
         self.load_current_curves()
-        _t2 = time.perf_counter()
-        logger.debug(
-            "editor construct: setup_ui=%.1fms load_curves=%.1fms total=%.1fms",
-            (_t1 - _t0) * 1000, (_t2 - _t1) * 1000, (_t2 - _t0) * 1000,
-        )
-        # 用于 showEvent/paintEvent 测量首帧空白窗口期
-        self._show_event_time: float = 0.0
-        self._first_paint_logged: bool = False
-
-    def showEvent(self, event):
-        """记录 show 时间点，用于测量首帧空白窗口期"""
-        self._show_event_time = time.perf_counter()
-        super().showEvent(event)
-
-    def paintEvent(self, event):
-        """首次绘制时输出 show→first-paint 间隔"""
-        super().paintEvent(event)
-        if not self._first_paint_logged:
-            self._first_paint_logged = True
-            gap_ms = (time.perf_counter() - self._show_event_time) * 1000
-            logger.debug("editor show→first-paint gap=%.1fms", gap_ms)
 
     def setup_ui(self):
         """设置UI界面"""
