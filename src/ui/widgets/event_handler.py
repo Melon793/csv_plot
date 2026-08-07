@@ -270,10 +270,17 @@ class EventHandler:
         if pw:
             from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
+            import time as _time
+            _ts = _time.perf_counter()
             parent = pw.window() if pw.window() else None
             dialog = PlotVariableEditorDialog(pw, parent)
             dialog.show()
             dialog.raise_()
+            _te = _time.perf_counter()
+            logger.debug(
+                "editor show() total=%.1fms (via context menu, incl construct+show)",
+                (_te - _ts) * 1000,
+            )
 
     def _connect_viewbox_signals(self):
         """连接 ViewBox 信号"""

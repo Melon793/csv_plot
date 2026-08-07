@@ -809,10 +809,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 然后检测绘图区域（在检测Y轴之前）
             elif view_box_rect_scene.contains(scene_pos):
                 # 双击绘图区域（网格内部），弹出变量编辑器
+                import time as _time
+                _ts = _time.perf_counter()
                 dialog = PlotVariableEditorDialog(self, self.window())
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
+                _te = _time.perf_counter()
+                logger.debug(
+                    "editor show() total=%.1fms (incl construct+show+activate)",
+                    (_te - _ts) * 1000,
+                )
                 return
             # 最后检测Y轴区域（最后兜底）
             elif y_axis_rect_scene.contains(scene_pos):
