@@ -205,9 +205,9 @@ class VariableSearchBar(QWidget):
         self.search_edit = QLineEdit(self)
         # placeholder 平台化：macBook 无独立 Insert 键，仅显示 ⌘F；其他平台显示 Ctrl+F 或 Insert
         if _IS_MAC:
-            placeholder = "🔍 搜索变量...（⌘F 聚焦）"
+            placeholder = "搜索变量...（⌘F 聚焦）"
         else:
-            placeholder = "🔍 搜索变量...（Ctrl+F 或 Insert 聚焦）"
+            placeholder = "搜索变量...（Ctrl+F 或 Insert 聚焦）"
         self.search_edit.setPlaceholderText(placeholder)
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setStyleSheet("""
