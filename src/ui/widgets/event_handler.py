@@ -11,6 +11,7 @@ EventHandler - 事件处理管理
 """
 
 from __future__ import annotations
+import time
 from typing import Any, TYPE_CHECKING
 
 from src.core.config import safe_callback, UI_DEBOUNCE_DELAY_MS
@@ -115,6 +116,9 @@ class EventHandler:
 
             timer.stop()
             timer.start(UI_DEBOUNCE_DELAY_MS)
+            # 【性能诊断】记录防抖定时器重启时刻，_end_interaction 中计算实际触发
+            # 相对预期的拖尾延迟：Windows 未做 timeBeginPeriod(1) 时被 15.6ms 量化（§7.3）
+            self.pw._interaction_timer_restart_ts = time.perf_counter()
             # 交互期间（无论刚进入还是持续中）取消挂起的样式/光标刷新，
             # 防抖定时器超时后由 _end_interaction 统一兜底刷新
             self._cancel_ui_refresh('style', 'cursor')
@@ -149,6 +153,18 @@ class EventHandler:
     def _end_interaction(self):
         """结束交互时的处理，并广播刷新到所有 XLink 兄弟子图"""
         try:
+            # 【性能诊断】交互收尾拖尾测量（§7.3 指标 2）：停止滚动到本回调触发的
+            # 实际延迟若明显 >UI_DEBOUNCE_DELAY_MS 且抖动 → 证实定时器量化拖尾
+            ts = getattr(self.pw, '_interaction_timer_restart_ts', None)
+            if ts is not None:
+                lag_ms = (time.perf_counter() - ts) * 1000 - UI_DEBOUNCE_DELAY_MS
+                self.pw._interaction_timer_restart_ts = None
+                if lag_ms > 10:
+                    logger.warning("[PERF][INTERACT] end lag=%.1fms (expected %dms debounce)",
+                                   lag_ms, UI_DEBOUNCE_DELAY_MS)
+                else:
+                    logger.debug("[PERF][INTERACT] end lag=%.1fms", lag_ms)
+            t0 = time.perf_counter()
             self._is_interacting = False
             self._queue_ui_refresh(immediate=True)
             # 广播刷新到兄弟子图（它们在交互期间被级联抑制跳过了刷新）
@@ -156,6 +172,9 @@ class EventHandler:
             if getattr(self.pw, '_pending_cursor_geometry_update', False):
                 self.pw._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()
+            cost_ms = (time.perf_counter() - t0) * 1000
+            if cost_ms > 16:
+                logger.warning("[PERF][INTERACT] end cost=%.1fms", cost_ms)
         except Exception:
             logger.warning("结束交互出错", exc_info=True)
 

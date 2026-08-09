@@ -91,6 +91,14 @@ FROZEN_VIEW_WIDTH_DEFAULT = 180  # 冻结视图宽度，默认值为180px
 XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol
 BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
+
+# 【性能诊断/优化】见 docs/windows_smoothness_optimization.md §2.4/§7
+PERF_PAINT_WARN_MS = 33.3   # paint 耗时超此值 → 严重掉帧(<30fps)，warning 日志
+PERF_PAINT_DEBUG_MS = 16.0  # paint 超一帧预算(60fps)，debug 日志
+PERF_CURSOR_WARN_MS = 16.0  # mouse_moved/sync_crosshair 单次耗时超一帧预算
+PERF_CURSOR_DEBUG_MS = 8.0  # 游标路径接近帧预算，debug 日志
+PERF_WHEEL_COALESCE_MS = 16  # 滚轮事件合并窗口（§7.4 方案 A，约 ≤60Hz flush）
+
 MIN_INDEX_LENGTH = 3  # 每个plot，至少显示MIN_INDEX_LENGTH个点
 DEFAULT_LINE_WIDTH = 2  # 默认线宽
 THICK_LINE_WIDTH = 2  # 粗线宽

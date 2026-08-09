@@ -2,9 +2,31 @@ from __future__ import annotations
 import sys
 import os
 
-from src.utils.platform_setup import setup_platform
+from src.utils.platform_setup import setup_platform, setup_windows_performance
 
 ico_path = setup_platform()
+# Windows 性能初始化（timeBeginPeriod(1)，见 docs/windows_smoothness_optimization.md §2.1）：
+# 只需在定时器实际触发前生效即可，放模块级保证在事件循环启动前完成。
+_applied_win_measures = setup_windows_performance()
+
+
+def _log_startup_environment() -> None:
+    """输出启动环境诊断信息，用于定位 Windows 流畅性问题（§2.2）。"""
+    from src.core.logger import get_logger
+    from PySide6.QtGui import QGuiApplication
+
+    logger = get_logger("startup")
+    app = QGuiApplication.instance()
+    if app is None:
+        return
+    screen = app.primaryScreen()
+    logger.info(
+        "platform=%s refreshRate=%.1fHz dpr=%.2f win_measures=%s",
+        app.platformName(),
+        screen.refreshRate() if screen else -1.0,
+        screen.devicePixelRatio() if screen else -1.0,
+        _applied_win_measures,
+    )
 
 
 def main():
@@ -24,6 +46,10 @@ def main():
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    _log_startup_environment()
+    # 配对清理 timeBeginPeriod（托盘驻留场景推荐，见 §2.1 cleanup 说明）
+    from src.utils.platform_setup import cleanup_windows_performance
+    app.aboutToQuit.connect(cleanup_windows_performance)
 
     if sys.platform == "win32":
         from src.core.font_cache import get_windows_chinese_font_cached

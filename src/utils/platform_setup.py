@@ -78,3 +78,51 @@ def setup_platform() -> str | None:
     elif sys.platform == "darwin":
         return resource_path("assets/icon.icns")
     return None
+
+
+def setup_windows_performance() -> list[str]:
+    """Windows 专属性能初始化。必须在创建 QApplication 之前调用。
+
+    Returns:
+        已应用的措施列表（失败项以 "-failed" 后缀标记，用于启动日志排查）
+    """
+    applied: list[str] = []
+    if sys.platform != "win32":
+        return applied
+
+    # 1. 系统定时器分辨率提到 1ms（QTimer 精度从 ~15.6ms 量化提升到 1ms）。
+    #    这是 Qt 事件分发器在 Windows 上的已知行为（等待超时按系统时钟
+    #    分辨率取整）。
+    #    作用域说明（重要）：
+    #    - Win11 22H2（2022 起）后，timeBeginPeriod 仅对"调用进程在前台时"
+    #      生效，不再全局抬高整个系统的时钟分辨率，也不再显著影响整机功耗；
+    #    - Win10 / Win11 21H2 及更早版本仍为全局生效，会禁用部分空闲 C 状态。
+    #    因此本调用在所有版本上都是安全的：在新版系统上副作用已被收敛，
+    #    在旧版系统上属于"按需付功耗换精度"的合理取舍。
+    #    进程退出时建议配对调用 timeEndPeriod(1)（见 cleanup_windows_performance）。
+    try:
+        import ctypes
+        ctypes.windll.winmm.timeBeginPeriod(1)
+        applied.append("timeBeginPeriod(1)")
+    except Exception:
+        applied.append("timeBeginPeriod-failed")
+
+    return applied
+
+
+def cleanup_windows_performance() -> None:
+    """与 setup_windows_performance 配对的退出清理。
+
+    在 QApplication.aboutToQuit 信号里调用，配对 timeEndPeriod(1)。
+    - 长驻 GUI 应用：进程生命周期内不调用也无副作用（进程退出时系统自动回收）；
+    - 托盘最小化 / 后台驻留场景：Win11 22H2+ 把 timeBeginPeriod 作用域收到
+      "前台进程"，前台态切换会让 1ms 分辨率失效再恢复，行为略复杂——配对
+      调用 timeEndPeriod 可让状态切换更干净，作为良好实践推荐实施。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        pass
