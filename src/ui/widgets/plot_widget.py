@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sys
 import os
+import time
 from typing import Any
 
 from src.utils.platform_setup import setup_platform
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
-from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, PERF_PAINT_WARN_MS, PERF_PAINT_DEBUG_MS, PERF_CURSOR_WARN_MS, PERF_CURSOR_DEBUG_MS, PERF_WHEEL_COALESCE_MS)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -61,6 +62,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._drag_indicator_guard = QTimer(self)
         self._drag_indicator_guard.setInterval(120)
         self._drag_indicator_guard.timeout.connect(self._enforce_drag_indicator_visibility)
+        # 【性能优化】滚轮缩放合并器（见 docs/windows_smoothness_optimization.md §7.4 方案 A）：
+        # Windows 上滚轮事件无合并，事件堆积时每个过期事件都触发完整 N×M 重算。
+        # 用 PreciseTimer 合并窗口把 flush 频率钳制在 ≤~60Hz，消灭废功。
+        # 注：PreciseTimer 需配合 timeBeginPeriod(1) 才能摆脱 15.6ms 量化（platform_setup.py）。
+        self._wheel_coalesce_timer = QTimer(self)
+        self._wheel_coalesce_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._wheel_coalesce_timer.setInterval(PERF_WHEEL_COALESCE_MS)
+        self._wheel_coalesce_timer.setSingleShot(True)
+        self._wheel_coalesce_timer.timeout.connect(self._flush_wheel_zoom)
+        self._wheel_pending_factor = 1.0   # 累积的缩放因子（各事件 factor 连乘）
+        self._wheel_pending_count = 0      # 窗口内合并的事件数（诊断日志用）
+        self._wheel_last_mouse_pos = None  # 最后一次鼠标 widget 坐标（flush 时重新映射）
+        self._wheel_last_event_ts = 0.0    # 上一滚轮事件时间戳（事件间隔诊断用）
         # 【稳定性优化】安全删除timer
         self._cleanup_timer = QTimer(self)
         self._cleanup_timer.setSingleShot(True)
@@ -428,37 +442,91 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             except RuntimeError:
                 return
         try:
+            t0 = time.perf_counter()
             super().paintEvent(event)
+            # 【性能诊断】CPU 光栅耗时（不含 DWM 合成），阈值见 config.py（§2.4）
+            dt = (time.perf_counter() - t0) * 1000
+            if dt > PERF_PAINT_WARN_MS:
+                logger.warning("[PERF][PAINT] very slow: %.1fms", dt)
+            elif dt > PERF_PAINT_DEBUG_MS:
+                logger.debug("[PERF][PAINT] slow: %.1fms", dt)
         except RuntimeError as e:
             logger.debug("paintEvent RuntimeError (C++对象可能已销毁): %s", e)
         except Exception:
             logger.warning("paintEvent 异常", exc_info=True)
 
     def wheelEvent(self, ev):
-        vb = self.plot_item.getViewBox()
+        """滚轮缩放入口：无修饰键时累积 delta 交给合并器 flush（§7.4 方案 A）。
+
+        不再逐事件立即 vb.scaleBy，避免 Windows 上事件堆积导致的过期事件废功。
+        """
         delta = ev.angleDelta().y()
         # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
         if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
             if delta != 0:
-                # 获取鼠标位置
-                mouse_pos = ev.position().toPoint()
-                scene_pos = self.mapToScene(mouse_pos)
-                view_pos = vb.mapSceneToView(scene_pos)
-                mouse_x = view_pos.x()
-                mouse_y = view_pos.y()
+                # 【性能诊断】记录事件间隔：若单事件处理耗时 > 间隔 → 证实事件堆积（§7.3）
+                now = time.perf_counter()
+                if self._wheel_last_event_ts > 0:
+                    interval_ms = (now - self._wheel_last_event_ts) * 1000
+                    logger.debug("[PERF][WHEEL] event interval=%.1fms pending=%d",
+                                 interval_ms, self._wheel_pending_count + 1)
+                self._wheel_last_event_ts = now
 
-                factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
-                vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
+                factor = max(0.000001, 1 - FACTOR_SCROLL_ZOOM) if delta > 0 else (1 + FACTOR_SCROLL_ZOOM)
+                self._wheel_pending_factor *= factor
+                self._wheel_pending_count += 1
+                self._wheel_last_mouse_pos = ev.position().toPoint()
+                # 节流窗口内只启动一次；窗口到期 flush（带尾沿，最后一个事件不丢）
+                if not self._wheel_coalesce_timer.isActive():
+                    self._wheel_coalesce_timer.start()
                 ev.accept()  # 确保事件被处理
             else:
                 super().wheelEvent(ev)
         else:
             # 有按键按下，交给父类默认处理
             super().wheelEvent(ev)
+
+    def _flush_wheel_zoom(self):
+        """合并器超时回调：一次性应用累积的滚轮缩放（§7.4 方案 A）。
+
+        flush 时机约束：执行 scaleBy 前必须重新 mapToScene/mapToView 计算最新
+        鼠标位置——直接复用 wheelEvent 缓存的 view 坐标会因 XLink 联动而失真。
+        """
+        factor = self._wheel_pending_factor
+        count = self._wheel_pending_count
+        mouse_pos = self._wheel_last_mouse_pos
+        self._wheel_pending_factor = 1.0
+        self._wheel_pending_count = 0
+        self._wheel_last_mouse_pos = None
+        self._wheel_last_event_ts = 0.0
+        if count == 0:
+            return
+        try:
+            vb = self.plot_item.getViewBox()
+            center = None
+            if mouse_pos is not None:
+                scene_pos = self.mapToScene(mouse_pos)
+                view_pos = vb.mapSceneToView(scene_pos)
+                center = (view_pos.x(), view_pos.y())
+            t0 = time.perf_counter()
+            vb.scaleBy((factor, 1), center=center)
+            dt = (time.perf_counter() - t0) * 1000
+        except Exception:
+            logger.warning("滚轮合并缩放应用失败", exc_info=True)
+            return
+        # 【性能诊断】flush 耗时 + 合并事件数：coalesced>1 即证实废功被消灭（§7.3）
+        if dt > PERF_PAINT_WARN_MS:
+            logger.warning("[PERF][WHEEL] flush very slow: %.1fms coalesced=%d factor=%.3f",
+                           dt, count, factor)
+        else:
+            logger.debug("[PERF][WHEEL] flush: %.1fms coalesced=%d factor=%.3f",
+                         dt, count, factor)
     
     @safe_callback
     def mouse_moved(self, evt):
         """鼠标移动事件处理"""
+        # 【性能诊断】单次 mouse_moved 耗时测量（§2.5 前置测量），用于决定 rateLimit 上限
+        t0 = time.perf_counter()
         pos = evt[0]
         if not self.plot_item.sceneBoundingRect().contains(pos):
             return
@@ -470,6 +538,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not self.is_cursor_pinned:
             if hasattr(self.window(), 'cursor_sync_manager'):
                 self.window().cursor_sync_manager.sync_crosshair(mousePoint.x(), self)
+
+        dt = (time.perf_counter() - t0) * 1000
+        if dt > PERF_CURSOR_WARN_MS:
+            logger.warning("[PERF][CURSOR] mouse_moved very slow: %.1fms", dt)
+        elif dt > PERF_CURSOR_DEBUG_MS:
+            logger.debug("[PERF][CURSOR] mouse_moved slow: %.1fms", dt)
 
     def _is_cursor_update_locked(self) -> bool:
         """判断 cursor 更新是否被锁定 → 委托到 CursorManager"""

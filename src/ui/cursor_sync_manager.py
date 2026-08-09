@@ -1,6 +1,7 @@
 """MainWindow 光标同步与图表同步管理器"""
 
 from __future__ import annotations
+import time
 import numpy as np
 
 from PySide6.QtCore import QSignalBlocker
@@ -10,6 +11,8 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_X,
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
+    PERF_CURSOR_WARN_MS,
+    PERF_CURSOR_DEBUG_MS,
     safe_qt_op,
 )
 from src.core.logger import get_logger
@@ -305,6 +308,9 @@ class CursorSyncManager(MainWindowBaseManager):
             widget.update_cursor_label()
 
     def sync_crosshair(self, x, sender_widget):
+        # 【性能诊断】游标同步热路径计时（§2.5/§2.6）：每次鼠标移动都会进入，
+        # 超帧预算时打日志定位 pinned 遍历 / vline 更新开销
+        _t0 = time.perf_counter()
         if not self.mw.cursor_btn.isChecked():
             return
         if getattr(self.mw, "cursor_mode", "1 free cursor") != "1 free cursor":
@@ -350,6 +356,11 @@ class CursorSyncManager(MainWindowBaseManager):
 
         finally:
             self.mw._is_syncing_crosshair = False
+            _dt = (time.perf_counter() - _t0) * 1000
+            if _dt > PERF_CURSOR_WARN_MS:
+                logger.warning("[PERF][CURSOR] sync_crosshair very slow: %.1fms", _dt)
+            elif _dt > PERF_CURSOR_DEBUG_MS:
+                logger.debug("[PERF][CURSOR] sync_crosshair slow: %.1fms", _dt)
 
     def _flush_crosshair_updates(self):
         if self.mw._is_loading_new_data:
