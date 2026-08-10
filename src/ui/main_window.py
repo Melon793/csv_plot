@@ -382,6 +382,9 @@ class MainWindow(QMainWindow):
         self._mark_region_shortcut = QShortcut(QKeySequence("Ctrl+T"), self.plot_widget)
         self._mark_region_shortcut.activated.connect(self._on_mark_region_shortcut)
 
+        self._open_file_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
+        self._open_file_shortcut.activated.connect(self._on_open_file_shortcut)
+
     def _init_managers(self):
         from src.ui.file_loader_manager import FileLoaderManager
         from src.ui.cursor_sync_manager import CursorSyncManager
@@ -669,6 +672,12 @@ class MainWindow(QMainWindow):
             return
         new_state = not self.mark_region_btn.isChecked()
         self.layout_manager.toggle_mark_region(new_state)
+
+    def _on_open_file_shortcut(self):
+        """Ctrl+O 快捷键：加载数据文件"""
+        if not self.load_btn.isEnabled():
+            return
+        self.file_loader_manager.load_btn_click()
 
     def _on_grid_layout_shortcut(self):
         """Ctrl+L 快捷键：修改图表布局
