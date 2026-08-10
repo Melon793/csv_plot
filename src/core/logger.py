@@ -152,6 +152,8 @@ class LogManager:
         #   CSV_PLOT_DEBUG=1          → 全局 DEBUG 级别（开启所有模块调试输出）
         #   CSV_PLOT_DEBUG_XLIMITS=1  → X轴 limits 变更追踪 + X-link 同步过程
         #   CSV_PLOT_DEBUG_CURSOR=1   → Cursor 锁定/同步状态追踪
+        #   CSV_PLOT_DEBUG_PERF=1     → 仅性能诊断日志（[PERF] 前缀，见
+        #                               docs/windows_smoothness_optimization.md §2.4/§7.3）
         if os.environ.get("CSV_PLOT_DEBUG"):
             root_logger.setLevel(logging.DEBUG)
         else:
@@ -166,6 +168,11 @@ class LogManager:
             logging.getLogger("widget.cursor").setLevel(logging.DEBUG)
             logging.getLogger("src.ui.cursor_sync_manager").setLevel(logging.DEBUG)
             logging.getLogger("src.ui.file_loader_manager").setLevel(logging.DEBUG)
+        if os.environ.get("CSV_PLOT_DEBUG_PERF"):
+            # 性能热路径三个 logger：滚轮合并/游标同步/交互收尾的 [PERF] debug 日志
+            logging.getLogger("widget.plot").setLevel(logging.DEBUG)
+            logging.getLogger("src.ui.widgets.event_handler").setLevel(logging.DEBUG)
+            logging.getLogger("src.ui.cursor_sync_manager").setLevel(logging.DEBUG)
 
         atexit.register(self._stop_listener)
 
