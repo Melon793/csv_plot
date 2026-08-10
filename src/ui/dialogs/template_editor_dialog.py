@@ -321,6 +321,29 @@ class TemplateEditorDialog(QDialog):
 
             session_config = PlotSessionConfig.from_dict(config)
 
+            # 同名冲突检查：由用户选择覆盖 / 另存新名 / 取消
+            conflict = self._find_conflict_template(name)
+            if conflict is not None:
+                action = self._ask_conflict_resolution(name)
+                if action == "cancel":
+                    return
+                if action == "overwrite":
+                    template = self._template_manager.save_template(
+                        session_config,
+                        name,
+                        self._desc_edit.text().strip(),
+                        conflict.metadata.id,
+                    )
+                    QMessageBox.information(self, "成功", f"已覆盖模板 [{name}]")
+                    try:
+                        self.template_saved.emit(template.metadata.id)
+                    finally:
+                        self.accept()
+                    return
+                # action == "rename"：自动改用不冲突的新名称继续保存
+                name = self._suggest_unique_name(name)
+                self._name_edit.setText(name)
+
             if self._edit_template_id:
                 template = self._template_manager.save_template(
                     session_config,
@@ -352,6 +375,49 @@ class TemplateEditorDialog(QDialog):
         except Exception as e:
             logger.error(f"Save error: {e}")
             QMessageBox.critical(self, "错误", f"保存失败: {str(e)}")
+
+    def _find_conflict_template(self, name: str):
+        """查找同名模板（排除正在编辑的模板自身），无冲突返回 None"""
+        for t in self._template_manager.get_all_templates():
+            if t.metadata.name == name and t.metadata.id != self._edit_template_id:
+                return t
+        return None
+
+    def _suggest_unique_name(self, base: str) -> str:
+        """生成不冲突的新名称：名称 (2)、名称 (3)..."""
+        i = 2
+        new_name = f"{base} ({i})"
+        while self._template_manager.exists(new_name):
+            i += 1
+            new_name = f"{base} ({i})"
+        return new_name
+
+    def _ask_conflict_resolution(self, name: str) -> str:
+        """同名冲突时的选择：overwrite / rename / cancel
+
+        编辑模式下不提供覆盖选项，避免误覆盖另一个模板。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("模板名称冲突")
+        box.setIcon(QMessageBox.Icon.Warning)
+        overwrite_btn = None
+        if self._edit_template_id:
+            box.setText(f"已存在同名模板 [{name}]，请另存为新名称或取消后修改名称")
+        else:
+            box.setText(f"已存在同名模板 [{name}]，如何处理？")
+            overwrite_btn = box.addButton(
+                "覆盖原模板", QMessageBox.ButtonRole.DestructiveRole
+            )
+        rename_btn = box.addButton("另存新名", QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if overwrite_btn is not None and clicked is overwrite_btn:
+            return "overwrite"
+        if clicked is rename_btn:
+            return "rename"
+        return "cancel"
 
     def _on_saveas_clicked(self):
         """另存为按钮点击"""
