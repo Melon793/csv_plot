@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
-from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, PERF_LOG_ENABLED, PERF_PAINT_WARN_MS, PERF_WHEEL_WARN_MS)
+from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, PERF_LOG_ENABLED, PERF_PAINT_WARN_MS, PERF_WHEEL_WARN_MS, PERF_WHEEL_COALESCE_INTERVAL_MS)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -47,6 +47,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             time_channels_info = {}
         super().__init__()
         self.factor = 1.0
+        # === 滚轮事件合并器（Phase 1：16ms 节流带尾沿）===
+        # wheelEvent 只累积 factor（连乘）+ 记录最后一次鼠标位置，
+        # Timer 到期时一次性 scaleBy 累积 factor，消灭过期事件的废功重算。
+        self._wheel_coalesce_timer = QTimer(self)
+        self._wheel_coalesce_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._wheel_coalesce_timer.setInterval(PERF_WHEEL_COALESCE_INTERVAL_MS)
+        self._wheel_coalesce_timer.setSingleShot(True)
+        self._wheel_coalesce_timer.timeout.connect(self._flush_wheel_zoom)
+        self._wheel_accumulated_factor = 1.0
+        self._wheel_last_mouse_x = 0.0
+        self._wheel_last_mouse_y = 0.0
+        self._wheel_coalesced_count = 0
         self.offset = 0.0
         self.mark_region = None
         self.is_cursor_pinned = False  # 记录cursor是否被固定
@@ -487,24 +499,66 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 mouse_x = view_pos.x()
                 mouse_y = view_pos.y()
 
-                factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
-                if PERF_LOG_ENABLED:
-                    _t0 = time.perf_counter()
-                    self._perf_wheel_timestamp = _t0  # 记录 wheel 事件时间戳
-                vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
-                if PERF_LOG_ENABLED:
-                    _dt_ms = (time.perf_counter() - _t0) * 1000
-                    if _dt_ms > PERF_WHEEL_WARN_MS:
-                        logger.warning(
-                            "[PERF][WHEEL] slow scaleBy: %.2fms (factor=%.3f, center=(%.2f, %.2f))",
-                            _dt_ms, factor, mouse_x, mouse_y,
-                        )
-                ev.accept()  # 确保事件被处理
+                factor = max(0.000001, 1 - FACTOR_SCROLL_ZOOM) if delta > 0 else (1 + FACTOR_SCROLL_ZOOM)
+
+                # 累积 factor（连乘）+ 记录最后一次鼠标位置
+                self._wheel_accumulated_factor *= factor
+                self._wheel_last_mouse_x = mouse_x
+                self._wheel_last_mouse_y = mouse_y
+                self._wheel_coalesced_count += 1
+
+                # 启动合并器（只启动一次，到期 flush）
+                if not self._wheel_coalesce_timer.isActive():
+                    self._wheel_coalesce_timer.start()
+
+                ev.accept()
             else:
                 super().wheelEvent(ev)
         else:
             # 有按键按下，交给父类默认处理
             super().wheelEvent(ev)
+
+    def _flush_wheel_zoom(self):
+        """合并器到期：一次性执行累积的缩放。
+
+        将 16ms 窗口内累积的 factor（连乘）一次性传给 scaleBy，
+        消灭过期事件的废功重算。center 用最后一次鼠标位置，
+        保证缩放锚点是用户最终的意图位置。
+        """
+        # 异步 timer 回调守卫：widget 销毁中 / 数据重载中 / C++ 对象已失效时跳过
+        # （与 paintEvent、_on_range_changed 的守卫模式一致）
+        if getattr(self, '_is_updating_data', False) or getattr(self, '_is_being_destroyed', False):
+            self._wheel_accumulated_factor = 1.0
+            self._wheel_coalesced_count = 0
+            return
+        try:
+            vb = self.plot_item.getViewBox()
+        except (RuntimeError, AttributeError):
+            return
+        factor = self._wheel_accumulated_factor
+        mouse_x = self._wheel_last_mouse_x
+        mouse_y = self._wheel_last_mouse_y
+        count = self._wheel_coalesced_count
+
+        # 复位累积状态
+        self._wheel_accumulated_factor = 1.0
+        self._wheel_coalesced_count = 0
+
+        if PERF_LOG_ENABLED:
+            _t0 = time.perf_counter()
+            self._perf_wheel_timestamp = _t0  # 记录 flush 时间戳（用于 WHEEL_LATENCY 追踪）
+        try:
+            vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
+        except RuntimeError:
+            logger.debug("[WHEEL] flush scaleBy skipped: ViewBox C++ object destroyed")
+            return
+        if PERF_LOG_ENABLED:
+            _dt_ms = (time.perf_counter() - _t0) * 1000
+            if _dt_ms > PERF_WHEEL_WARN_MS:
+                logger.warning(
+                    "[PERF][WHEEL] flush scaleBy: %.2fms (factor=%.4f, coalesced=%d, center=(%.2f, %.2f))",
+                    _dt_ms, factor, count, mouse_x, mouse_y,
+                )
     
     @safe_callback
     def mouse_moved(self, evt):

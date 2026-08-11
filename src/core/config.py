@@ -104,6 +104,9 @@ PERF_WHEEL_WARN_MS = 8.0          # wheelEvent scaleBy 超过此值输出 WARNIN
 PERF_INTERACTION_WARN_MS = 50.0   # _end_interaction 总耗时超过此值输出 WARNING
 PERF_RANGE_CB_WARN_MS = 5.0       # _on_range_changed 回调耗时超过此值输出 WARNING
 
+# === Wheel Coalescing ===
+PERF_WHEEL_COALESCE_INTERVAL_MS = 16  # 滚轮合并器间隔（~60Hz）
+
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3
