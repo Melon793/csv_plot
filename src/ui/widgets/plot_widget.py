@@ -819,6 +819,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _get_y_range_in_x_window(self, x_values: np.ndarray, y_values: np.ndarray, x_min: float, x_max: float):
         """计算在指定x轴范围内的y值范围 → 委托到 PlotDataManager"""
         return self._plot_data_manager._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
+
+    def _compute_visible_y_range_union(self, x_min: float, x_max: float) -> tuple[float, float] | None:
+        """计算可见 X 范围内所有可见曲线的 Y 范围并集 → 委托到 PlotDataManager"""
+        return self._plot_data_manager._compute_visible_y_range_union(x_min, x_max)
     
     def _reset_plot_limits(self):
         """重置绘图限制 → 委托到 AxisManager"""

@@ -385,6 +385,58 @@ class PlotDataManager:
             )
             return 0.0, 1.0
 
+    def _compute_visible_y_range_union(
+        self, x_min: float, x_max: float
+    ) -> tuple[float, float] | None:
+        """计算当前可见 X 范围 [x_min, x_max] 内所有可见曲线的 Y 范围并集。
+
+        遍历 pw.curves 中 visible=True 的曲线，对每条曲线调用
+        _get_y_range_in_x_window 取其在 X 窗口内的 Y 范围，最后取所有曲线的
+        Y 并集（nanmin/nanmax）。带有 per-curve X 范围快速排除优化。
+
+        供 multi_curve_manager._update_axes_for_multi_curve（初始显示）和
+        event_handler._compute_and_set_visible_y_range（交互结束 Y 恢复）共用，
+        避免逻辑漂移。
+
+        Args:
+            x_min: 可见 X 范围最小值
+            x_max: 可见 X 范围最大值
+
+        Returns:
+            (min_y, max_y) 或 None（无可见数据 / 全部失败）
+        """
+        pw = self.pw
+        if not pw.curves:
+            return None
+
+        all_y: list[float] = []
+        for ci in pw.curves.values():
+            if not ci.visible or ci.x_data is None or ci.y_data is None:
+                continue
+            # 跳过空数组（与 multi_curve_manager._collect_visible_curve_pairs 一致）：
+            # 否则 _get_y_range_in_x_window 会回退到 (0.0, 1.0) 污染并集
+            x_arr = np.asarray(ci.x_data)
+            y_arr = np.asarray(ci.y_data)
+            if x_arr.size == 0 or y_arr.size == 0:
+                continue
+            # 快速排除：数据 X 范围与可见 X 范围不重叠时跳过
+            if ci.x_max < x_min or ci.x_min > x_max:
+                continue
+            try:
+                min_y, max_y = self._get_y_range_in_x_window(
+                    x_arr, y_arr, x_min, x_max
+                )
+                all_y.extend([min_y, max_y])
+            except Exception:
+                logger.debug(
+                    "[Y_RANGE] compute y range failed for curve",
+                    exc_info=True,
+                )
+
+        if not all_y:
+            return None
+        return float(np.nanmin(all_y)), float(np.nanmax(all_y))
+
     def handle_single_point_limits(
         self, x_values: np.ndarray, y_values: np.ndarray
     ) -> tuple | None:

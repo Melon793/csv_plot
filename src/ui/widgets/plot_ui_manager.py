@@ -188,6 +188,7 @@ class PlotUIManager(BasePlotManager):
         pw._interaction_timer.setSingleShot(True)
         pw._interaction_timer.timeout.connect(pw._end_interaction)
         pw._is_syncing_range = False
+        pw._interaction_x_only = False  # 标记当前交互是否为 X-only（用于 _end_interaction 决策）
 
         pw.view_box.setAutoVisible(x=False, y=True)
         pw.plot_item.setTitle(None)
