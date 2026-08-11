@@ -37,6 +37,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     # 曲线集合变化信号（添加/删除/清空时 emit）
     curves_changed = Signal()
 
+    # === 帧级性能追踪（类级别，跨所有 plot 实例共享）===
+    _perf_last_paint_time: float = 0.0          # 上一次任意 plot 的 paintEvent 时间戳
+    _perf_frame_count: int = 0                  # 累计 paintEvent 次数
+    _perf_wheel_timestamp: float = 0.0          # 最近一次 wheel 事件的时间戳
+
     def __init__(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
             time_channels_info = {}
@@ -441,6 +446,29 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         list(getattr(self, 'curves', {}).keys())[:2],
                         len(getattr(self, 'curves', {})),
                     )
+                # 帧级追踪：记录本次 paint 时间戳
+                now = time.perf_counter()
+                self._perf_frame_count += 1
+                prev_paint = self._perf_last_paint_time
+                self._perf_last_paint_time = now
+                # 计算帧间隔（相邻两次 paint 之间的时间差）
+                if prev_paint > 0:
+                    frame_interval_ms = (now - prev_paint) * 1000
+                    # 每 30 次 paint 输出一次帧率摘要（避免日志洪泛）
+                    if self._perf_frame_count % 30 == 0:
+                        fps = 1000.0 / frame_interval_ms if frame_interval_ms > 0 else 0
+                        logger.info(
+                            "[PERF][FRAME] avg interval=%.1fms (~%.1f fps), total_painted=%d",
+                            frame_interval_ms, fps, self._perf_frame_count,
+                        )
+                # Wheel-to-paint 延迟：如果距离上次 wheel < 500ms，说明这是级联的一部分
+                if self._perf_wheel_timestamp > 0:
+                    wheel_latency_ms = (now - self._perf_wheel_timestamp) * 1000
+                    if wheel_latency_ms < 500 and wheel_latency_ms > PERF_PAINT_WARN_MS:
+                        logger.warning(
+                            "[PERF][WHEEL_LATENCY] last paint after wheel: %.1fms ago",
+                            wheel_latency_ms,
+                        )
         except RuntimeError as e:
             logger.debug("paintEvent RuntimeError (C++对象可能已销毁): %s", e)
         except Exception:
@@ -462,6 +490,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
                 if PERF_LOG_ENABLED:
                     _t0 = time.perf_counter()
+                    self._perf_wheel_timestamp = _t0  # 记录 wheel 事件时间戳
                 vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
                 if PERF_LOG_ENABLED:
                     _dt_ms = (time.perf_counter() - _t0) * 1000
