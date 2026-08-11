@@ -370,6 +370,12 @@ class AxisManager:
 
         自动处理 NaN 或恒定值的情况。
 
+        副作用：setYRange 内部调用 setRange(disableAutoRange=True) 会把
+        state['autoRange'][1] 设为 False。本方法在调用方未处于 syncing_range
+        状态时，会显式恢复 state['autoRange'][1] = True，使后续 X 范围变化
+        时 Y 能自适应。调用方若希望保持 autoRange[1]=False（如批量同步），
+        应预先设置 pw._is_syncing_range = True。
+
         Args:
             min_y: Y 轴最小值
             max_y: Y 轴最大值
@@ -430,6 +436,16 @@ class AxisManager:
         if set_limits:
             pw.plot_item.setLimits(yMin=y_min_limit, yMax=y_max_limit)
         pw.view_box.setYRange(y_min_view, y_max_view, padding=DEFAULT_PADDING_VAL_Y)
+        # setYRange 内部调用 setRange(disableAutoRange=True) 会将 autoRange[1] 设为 False。
+        # 在初始显示路径（auto_range / plot_variable / 多曲线添加）中，
+        # 我们希望 Y autoRange 保持启用，这样后续 X 范围变化时 Y 能自适应。
+        # 只有用户手动拖拽 Y 轴时才应关闭 Y autoRange（由 _on_range_changed 处理）。
+        # 直接修改 state 而非调用 enableAutoRange，避免触发 _autoRangeNeedsUpdate。
+        if not getattr(pw, '_is_syncing_range', False):
+            try:
+                pw.view_box.state['autoRange'][1] = True
+            except (KeyError, TypeError, IndexError):
+                pass
 
     def _reset_plot_limits(self) -> None:
         """重置绘图限制"""

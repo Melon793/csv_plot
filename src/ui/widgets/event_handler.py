@@ -14,7 +14,17 @@ from __future__ import annotations
 import time
 from typing import Any, TYPE_CHECKING
 
-from src.core.config import safe_callback, UI_DEBOUNCE_DELAY_MS, PERF_LOG_ENABLED, PERF_RANGE_CB_WARN_MS, PERF_INTERACTION_WARN_MS
+import numpy as np
+from PySide6.QtCore import QTimer
+
+from src.core.config import (
+    safe_callback,
+    UI_DEBOUNCE_DELAY_MS,
+    PERF_LOG_ENABLED,
+    PERF_RANGE_CB_WARN_MS,
+    PERF_INTERACTION_WARN_MS,
+    ASYNC_Y_RESTORE_BATCH_SIZE,
+)
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -95,6 +105,12 @@ class EventHandler:
                 )
                 return
 
+            # 交互轴检测：只有 X-only 交互才需要禁用/恢复 Y autoRange。
+            # changed=[x_changed, y_changed]，None 时保守处理为 y_touched（不动 Y）。
+            # 依据：wheelEvent 硬编码 (factor, 1) → [True, False]；
+            #       拖拽 Y 轴 → [False, True]；绘图区平移/框选 → [True, True]。
+            x_only = bool(changed is not None and changed[0] and not changed[1])
+
             # XLink 级联抑制：如果兄弟子图正在交互，本次 range 变化是 XLink 传播结果，
             # 无需进入交互模式或启动 timer。交互结束后由源子图统一广播刷新。
             if not self._is_interacting and self._sibling_is_interaction_source():
@@ -102,11 +118,24 @@ class EventHandler:
 
             if not self._is_interacting:
                 self._is_interacting = True
+                # 记录本次交互是否为 X-only（用于 _end_interaction 决策是否恢复 Y）
+                self.pw._interaction_x_only = x_only
                 logger.debug(
-                    "[RANGE_CHANGED] _on_range_changed: entering interacting, "
-                    "new_range=(%.4f, %.4f)", range[0][0], range[0][1],
+                    "[RANGE_CHANGED] _on_range_changed: entering interacting (x_only=%s), "
+                    "new_range=(%.4f, %.4f)", x_only, range[0][0], range[0][1],
                 )
+                # 只有 X-only 交互才禁用 Y autoVisible（Y-touched 交互尊重用户手动 Y）
+                if x_only:
+                    self._start_interaction()
+            elif x_only and not getattr(self.pw, '_interaction_x_only', False):
+                # 交互中途从 Y-touched 切换到 X-only：补充禁用 Y autoVisible
+                self.pw._interaction_x_only = True
                 self._start_interaction()
+            elif not x_only and getattr(self.pw, '_interaction_x_only', False):
+                # 交互中途从 X-only 切换到 Y-touched（如 box zoom 先 setXRange 再 setYRange，
+                # 或 wheel 后拖拽 Y 轴）：用户手动操作了 Y 轴，_end_interaction 时
+                # 不应恢复 Y autoRange，否则会覆盖用户指定的 yRange。
+                self.pw._interaction_x_only = False
 
             timer = getattr(self.pw, '_interaction_timer', None)
             if timer is None:
@@ -148,19 +177,95 @@ class EventHandler:
         return False
 
     def _start_interaction(self):
-        """开始交互时的优化处理
-        
-        当前 pyqtgraph 的 peak 降采样 + auto 模式已足够智能，
-        无需手动调整。此方法保留为未来优化的钩子。
-        交互期间的样式更新禁用已在 PlotUIManager.update_plot_style 中实现。
+        """交互开始时禁用所有可见 plot 的 Y autoVisible（仅限 X-only 交互）。
+
+        条件式禁用：只对 autoRangeEnabled()[1] == True 的 plot 禁用 Y autoVisible，
+        尊重用户手动取消过 Y autoRange 的 plot（完全不动）。
+        交互期间 Y 轴范围冻结，避免每次 X 范围变化触发全数据 Y 扫描。
+        交互结束后由 _end_interaction 异步恢复 Y auto-range。
+
+        遍历所有 plot（不仅限于交互源）的原因：XLink 级联会将 range 变化
+        传播到所有 linked plot，每个都会触发 Y auto-range。
         """
-        pass
+        _t0 = time.perf_counter() if PERF_LOG_ENABLED else 0
+
+        pw = self.pw
+        main_window = pw.window() if hasattr(pw, 'window') else None
+        if main_window is None or not hasattr(main_window, 'plot_widgets'):
+            return
+
+        count = 0
+        # 取消挂起的 ASYNC_Y_RESTORE 队列：用户在 restore 期间又发起新交互时，
+        # 旧的 restore 队列已失效（X 范围已变），继续执行会导致 Y 轴范围抖动
+        # （setYRange 用旧 X 范围计算的 Y 值，与新的 X 范围不匹配）。
+        if hasattr(self, '_y_restore_queue'):
+            self._y_restore_queue = []
+
+        for container in main_window.plot_widgets:
+            sibling = container.plot_widget
+            if not container.isVisible():
+                continue
+            if not hasattr(sibling, 'view_box'):
+                continue
+            try:
+                # 读取当前 autoRange 状态 [x_auto, y_auto]
+                # 关键：scaleBy((factor, 1)) → setRange(xRange=...) 只设 autoRange[0]=False，
+                # 不碰 autoRange[1]。所以此时 autoRange[1] 反映的是用户手动操作的结果：
+                #   - True：用户未手动取消 Y autoRange（正常情况）
+                #   - False：用户手动取消过 Y autoRange（如拖拽 Y 轴）
+                try:
+                    auto_state = sibling.view_box.autoRangeEnabled()
+                except (AttributeError, TypeError):
+                    auto_state = sibling.view_box.state.get('autoRange', [False, False])
+
+                y_auto = auto_state[1] if isinstance(auto_state, (list, tuple)) else False
+
+                # 记录原始状态（用于 _schedule_async_y_restore 决策是否恢复 Y）
+                sibling._pre_interaction_y_auto = y_auto
+
+                # 只对 y_auto=True 的 plot 禁用 Y autoVisible
+                # （用户手动取消过 Y autoRange 的 plot 完全不动，尊重用户意图）
+                if y_auto:
+                    # 直接修改 state 而非调用 setAutoVisible(y=False)，
+                    # 避免触发 _autoRangeNeedsUpdate → prepareForPaint → 延迟 sigRangeChanged
+                    try:
+                        sibling.view_box.state['autoVisibleOnly'][1] = False
+                        count += 1
+                    except (KeyError, TypeError, IndexError):
+                        sibling.view_box.setAutoVisible(x=False, y=False)
+                        count += 1
+            except Exception:
+                logger.debug(
+                    "[INTERACT] setAutoVisible(y=False) failed for plot",
+                    exc_info=True,
+                )
+
+        if PERF_LOG_ENABLED:
+            _dt_ms = (time.perf_counter() - _t0) * 1000
+            logger.info(
+                "[PERF][START_INTERACT] disabled Y autoVisible on %d plots in %.2fms",
+                count, _dt_ms,
+            )
 
     def _end_interaction(self):
-        """结束交互时的处理，并广播刷新到所有 XLink 兄弟子图"""
+        """结束交互：异步恢复 Y autoRange → 广播刷新。
+
+        只有 X-only 交互才需要恢复 Y autoRange（Y-touched 交互尊重用户手动 Y）。
+        Y 恢复通过 QTimer.singleShot(0) 异步执行，避免阻塞当前 wheel flush
+        的最终呈现（WHEEL_LATENCY 从 ~200ms 降到 ~50ms）。
+        """
         _t0 = time.perf_counter() if PERF_LOG_ENABLED else 0
         try:
             self._is_interacting = False
+
+            # 只有 X-only 交互才需要恢复 Y autoRange
+            if getattr(self.pw, '_interaction_x_only', False):
+                self._schedule_async_y_restore()
+
+            # 重置交互轴标记
+            self.pw._interaction_x_only = False
+
+            # 标准交互结束刷新
             self._queue_ui_refresh(immediate=True)
             # 广播刷新到兄弟子图（它们在交互期间被级联抑制跳过了刷新）
             self._refresh_siblings_after_interaction()
@@ -177,6 +282,142 @@ class EventHandler:
                         "[PERF][END_INTERACT] slow _end_interaction: %.2fms",
                         _dt_ms,
                     )
+
+    def _schedule_async_y_restore(self):
+        """调度异步 Y auto-range 恢复。
+
+        用 QTimer.singleShot(0) 推迟到下一事件循环，
+        避免阻塞当前 wheel flush 的最终呈现。
+        分批处理（每帧 ASYNC_Y_RESTORE_BATCH_SIZE 个 plot）避免单次 100ms+ 阻塞。
+        只恢复 _pre_interaction_y_auto==True 的 plot（尊重用户手动 Y）。
+        """
+        pw = self.pw
+        main_window = pw.window() if hasattr(pw, 'window') else None
+        if main_window is None or not hasattr(main_window, 'plot_widgets'):
+            return
+
+        # 收集需要恢复 Y autoRange 的 plot（仅 _pre_interaction_y_auto=True 的）
+        # 尊重用户手动取消过 Y autoRange 的 plot（完全不动）
+        # _pre_interaction_y_auto 在 _start_interaction 中记录，反映用户手动操作结果
+        targets = []
+        for container in main_window.plot_widgets:
+            sibling = container.plot_widget
+            if not container.isVisible():
+                continue
+            if not hasattr(sibling, 'view_box'):
+                continue
+            if getattr(sibling, '_pre_interaction_y_auto', False):
+                targets.append(sibling)
+
+        if not targets:
+            return
+
+        # 交互源 plot 优先（放到队列首位，用户关注的 plot 最快恢复）
+        if pw in targets:
+            targets.remove(pw)
+            targets.insert(0, pw)
+
+        # 启动分批处理
+        self._y_restore_queue = targets
+        self._y_restore_batch_size = ASYNC_Y_RESTORE_BATCH_SIZE
+        QTimer.singleShot(0, self._process_y_restore_batch)
+
+    def _process_y_restore_batch(self):
+        """分批处理 Y auto-range 恢复（每帧 ASYNC_Y_RESTORE_BATCH_SIZE 个 plot）。
+
+        每个 plot 用 _compute_and_set_visible_y_range 计算可见 X 范围内的 Y 范围
+        并精确设置（避免 pyqtgraph 全数据扫描），然后恢复 setAutoVisible(y=True)。
+        跨 EventHandler 协调：若 plot 已被另一个交互接管（_is_interacting=True），
+        跳过本次恢复，避免与正在进行的交互打架。
+        """
+        if not hasattr(self, '_y_restore_queue') or not self._y_restore_queue:
+            return
+
+        # 取本批次
+        batch = self._y_restore_queue[:self._y_restore_batch_size]
+        self._y_restore_queue = self._y_restore_queue[self._y_restore_batch_size:]
+
+        _t0 = time.perf_counter() if PERF_LOG_ENABLED else 0
+
+        processed = 0
+        for sibling in batch:
+            # 跨 widget 协调：若该 plot 已被另一个交互接管，跳过恢复
+            # （场景：A 调度 restore 后用户又操作了 B，B 的 _start_interaction
+            #  无法清空 A 的队列，A 的 restore 仍会执行——此处跳过正在交互的 plot）
+            if getattr(sibling, '_is_interacting', False):
+                continue
+
+            # 用 _is_syncing_range 抑制 setYRange 同步触发的 sigRangeChanged
+            sibling._is_syncing_range = True
+            try:
+                # 用已有方法计算可见 Y 范围 + 精确设置（避免全数据扫描）
+                # setYRange 是同步的，sigRangeChanged 在 _is_syncing_range=True 时被短路
+                self._compute_and_set_visible_y_range(sibling)
+            except Exception:
+                logger.debug("[INTERACT] async Y restore failed", exc_info=True)
+            finally:
+                # 无论 _compute_and_set_visible_y_range 成败，都恢复 autoRange/autoVisibleOnly
+                # 标志：setYRange 已将 autoRange[1] 设为 False（_is_syncing_range=True
+                # 跳过了 _set_safe_y_range 内部的恢复分支），此处必须显式恢复，
+                # 否则 plot 永久 autoRange[1]=False，后续 wheel 报 "0 plots"。
+                try:
+                    sibling.view_box.state['autoRange'][1] = True
+                    sibling.view_box.state['autoVisibleOnly'][1] = True
+                except (KeyError, TypeError, IndexError):
+                    pass
+                # setYRange 是同步的，sigRangeChanged 已在 _is_syncing_range=True 时被处理，
+                # 可以立即清除标志（无延迟发射需要防范）
+                sibling._is_syncing_range = False
+                # 清除 _pre_interaction_y_auto 标记，避免陈旧状态残留
+                sibling._pre_interaction_y_auto = False
+                processed += 1
+
+        if PERF_LOG_ENABLED:
+            _dt_ms = (time.perf_counter() - _t0) * 1000
+            remaining = len(self._y_restore_queue) if hasattr(self, '_y_restore_queue') else 0
+            logger.info(
+                "[PERF][ASYNC_Y_RESTORE] processed %d plots in %.2fms, %d remaining",
+                processed, _dt_ms, remaining,
+            )
+
+        # 如果还有剩余，调度下一批
+        if hasattr(self, '_y_restore_queue') and self._y_restore_queue:
+            QTimer.singleShot(0, self._process_y_restore_batch)
+
+    def _compute_and_set_visible_y_range(self, pw):
+        """计算可见 X 范围内的 Y 范围并精确设置（避免全数据扫描）。
+
+        复用 PlotDataManager._compute_visible_y_range_union（与
+        multi_curve_manager._update_axes_for_multi_curve 共用同一实现）和
+        pw._set_safe_y_range 包装方法。使用 ci.x_data / ci.y_data（原始数据，
+        非降采样）。全曲线失败时记录 warning，便于排查"Y 范围冻结"问题。
+        """
+        if not hasattr(pw, 'curves') or not pw.curves:
+            return
+
+        # 获取当前可见 X 范围
+        try:
+            (x_min, x_max), _ = pw.view_box.viewRange()
+        except Exception:
+            return
+
+        if x_min is None or x_max is None or abs(x_max - x_min) < 1e-12:
+            return
+
+        # 复用 PlotDataManager 的共享实现（含 per-curve X 范围快速排除）
+        y_range = pw._compute_visible_y_range_union(x_min, x_max)
+        if y_range is None:
+            logger.warning(
+                "[ASYNC_Y] no valid Y range for plot (curves=%d, x_window=(%.4f, %.4f)), "
+                "leaving frozen range",
+                len(pw.curves), x_min, x_max,
+            )
+            return
+
+        final_min_y, final_max_y = y_range
+        # 用 pw._set_safe_y_range 包装方法（含 NaN/sentinel 保护），
+        # 不直接访问 pw._axis_manager._set_safe_y_range，保持封装一致
+        pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
 
     def _refresh_siblings_after_interaction(self):
         """交互结束后触发兄弟子图的样式/光标刷新。

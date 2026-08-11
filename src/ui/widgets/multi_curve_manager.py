@@ -297,16 +297,10 @@ class MultiCurveManager:
             # v5.x 修复问题 B：用 viewRange 与新数据范围的交集，而非旧 viewRange
             x_min, x_max = self._get_x_window_intersected(x_values)
 
-            all_y_in_range = []
-            for x_arr, y_arr in pairs:
-                min_y, max_y = pw._get_y_range_in_x_window(
-                    x_arr, y_arr, x_min, x_max
-                )
-                all_y_in_range.extend([min_y, max_y])
-
-            if all_y_in_range:
-                final_min_y = np.nanmin(all_y_in_range)
-                final_max_y = np.nanmax(all_y_in_range)
+            # 复用 PlotDataManager._compute_visible_y_range_union 计算 Y 并集
+            y_range = pw._compute_visible_y_range_union(x_min, x_max)
+            if y_range is not None:
+                final_min_y, final_max_y = y_range
                 self.pw._set_safe_y_range(
                     final_min_y, final_max_y, set_limits=False
                 )

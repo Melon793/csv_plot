@@ -107,6 +107,9 @@ PERF_RANGE_CB_WARN_MS = 5.0       # _on_range_changed 回调耗时超过此值�
 # === Wheel Coalescing ===
 PERF_WHEEL_COALESCE_INTERVAL_MS = 16  # 滚轮合并器间隔（~60Hz）
 
+# === Async Y Range Restore ===
+ASYNC_Y_RESTORE_BATCH_SIZE = 3  # 交互结束后异步恢复 Y autoRange 的每帧批大小
+
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3
