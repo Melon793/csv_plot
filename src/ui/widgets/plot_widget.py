@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sys
 import os
+import time
 from typing import Any
 
 from src.utils.platform_setup import setup_platform
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
-from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, PERF_LOG_ENABLED, PERF_PAINT_WARN_MS, PERF_WHEEL_WARN_MS)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -428,7 +429,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             except RuntimeError:
                 return
         try:
+            if PERF_LOG_ENABLED:
+                _t0 = time.perf_counter()
             super().paintEvent(event)
+            if PERF_LOG_ENABLED:
+                _dt_ms = (time.perf_counter() - _t0) * 1000
+                if _dt_ms > PERF_PAINT_WARN_MS:
+                    logger.warning(
+                        "[PERF][PAINT] slow paint: %.2fms (plot=%s, curves=%d)",
+                        _dt_ms,
+                        list(getattr(self, 'curves', {}).keys())[:2],
+                        len(getattr(self, 'curves', {})),
+                    )
         except RuntimeError as e:
             logger.debug("paintEvent RuntimeError (C++对象可能已销毁): %s", e)
         except Exception:
@@ -448,7 +460,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 mouse_y = view_pos.y()
 
                 factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
+                if PERF_LOG_ENABLED:
+                    _t0 = time.perf_counter()
                 vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
+                if PERF_LOG_ENABLED:
+                    _dt_ms = (time.perf_counter() - _t0) * 1000
+                    if _dt_ms > PERF_WHEEL_WARN_MS:
+                        logger.warning(
+                            "[PERF][WHEEL] slow scaleBy: %.2fms (factor=%.3f, center=(%.2f, %.2f))",
+                            _dt_ms, factor, mouse_x, mouse_y,
+                        )
                 ev.accept()  # 确保事件被处理
             else:
                 super().wheelEvent(ev)
