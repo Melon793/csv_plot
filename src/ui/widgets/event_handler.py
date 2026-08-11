@@ -11,9 +11,10 @@ EventHandler - 事件处理管理
 """
 
 from __future__ import annotations
+import time
 from typing import Any, TYPE_CHECKING
 
-from src.core.config import safe_callback, UI_DEBOUNCE_DELAY_MS
+from src.core.config import safe_callback, UI_DEBOUNCE_DELAY_MS, PERF_LOG_ENABLED, PERF_RANGE_CB_WARN_MS, PERF_INTERACTION_WARN_MS
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -81,6 +82,7 @@ class EventHandler:
 
     @safe_callback
     def _on_range_changed(self, view_box, range, changed=None):
+        _t0 = time.perf_counter() if PERF_LOG_ENABLED else 0
         try:
             if getattr(self.pw, '_is_updating_data', False) or getattr(self.pw, '_is_being_destroyed', False):
                 self._cancel_ui_refresh()
@@ -118,6 +120,14 @@ class EventHandler:
             # 交互期间（无论刚进入还是持续中）取消挂起的样式/光标刷新，
             # 防抖定时器超时后由 _end_interaction 统一兜底刷新
             self._cancel_ui_refresh('style', 'cursor')
+
+            if PERF_LOG_ENABLED:
+                _dt_ms = (time.perf_counter() - _t0) * 1000
+                if _dt_ms > PERF_RANGE_CB_WARN_MS:
+                    logger.warning(
+                        "[PERF][RANGE_CB] slow _on_range_changed: %.2fms (interacting=%s)",
+                        _dt_ms, self._is_interacting,
+                    )
         except Exception:
             logger.warning("范围变化处理出错", exc_info=True)
 
@@ -148,6 +158,7 @@ class EventHandler:
 
     def _end_interaction(self):
         """结束交互时的处理，并广播刷新到所有 XLink 兄弟子图"""
+        _t0 = time.perf_counter() if PERF_LOG_ENABLED else 0
         try:
             self._is_interacting = False
             self._queue_ui_refresh(immediate=True)
@@ -158,6 +169,14 @@ class EventHandler:
                 self._schedule_cursor_geometry_update()
         except Exception:
             logger.warning("结束交互出错", exc_info=True)
+        finally:
+            if PERF_LOG_ENABLED:
+                _dt_ms = (time.perf_counter() - _t0) * 1000
+                if _dt_ms > PERF_INTERACTION_WARN_MS:
+                    logger.warning(
+                        "[PERF][END_INTERACT] slow _end_interaction: %.2fms",
+                        _dt_ms,
+                    )
 
     def _refresh_siblings_after_interaction(self):
         """交互结束后触发兄弟子图的样式/光标刷新。

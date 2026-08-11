@@ -96,6 +96,14 @@ DEFAULT_LINE_WIDTH = 2  # 默认线宽
 THICK_LINE_WIDTH = 2  # 粗线宽
 THIN_LINE_WIDTH = 1  # 细线宽
 UI_DEBOUNCE_DELAY_MS = 50  # UI事件防抖延迟时间
+
+# === Performance Logging ===
+PERF_LOG_ENABLED = True           # 总开关：False 时所有 [PERF] 日志降级为 no-op
+PERF_PAINT_WARN_MS = 16.0         # paintEvent 超过此值输出 WARNING
+PERF_WHEEL_WARN_MS = 8.0          # wheelEvent scaleBy 超过此值输出 WARNING
+PERF_INTERACTION_WARN_MS = 50.0   # _end_interaction 总耗时超过此值输出 WARNING
+PERF_RANGE_CB_WARN_MS = 5.0       # _on_range_changed 回调耗时超过此值输出 WARNING
+
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3
