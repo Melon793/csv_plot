@@ -10,6 +10,8 @@ from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QMenu
 import pyqtgraph as pg
 
+import time
+
 
 class CustomViewBoxSignals(QObject):
     """CustomViewBox 发出的信号集合 —— 用于解耦与 MainWindow 的直接依赖"""
@@ -46,6 +48,29 @@ class CustomViewBox(pg.ViewBox):
         self.signals = CustomViewBoxSignals(parent=self)
         self.context_x: float | None = None
         self.plot_widget = None
+
+    def mouseDragEvent(self, ev, axis=None):
+        # 标记真实用户事件（拖拽平移/右键拖拽缩放/Y 轴拖拽）：
+        # 供 EventHandler._on_range_changed 区分用户触发与内部信号，
+        # 防止交互所有权反转（auto-range 重算抢占所有权后抑制用户操作）
+        if self.plot_widget is not None:
+            self.plot_widget._user_event_pending = True
+            self.plot_widget._user_event_ts = time.perf_counter()
+        super().mouseDragEvent(ev, axis=axis)
+        # 信号已在 super() 内同步消费则为 no-op；若本次事件未产生
+        # range 变化（无信号发射）则清除残留标记防泄漏
+        if self.plot_widget is not None:
+            self.plot_widget._user_event_pending = False
+
+    def wheelEvent(self, ev, axis=None):
+        # 原生滚轮回退路径（带修饰键等）同样标记为用户事件
+        if self.plot_widget is not None:
+            self.plot_widget._user_event_pending = True
+            self.plot_widget._user_event_ts = time.perf_counter()
+        super().wheelEvent(ev, axis=axis)
+        # 同上：未产生 range 变化时清除残留标记
+        if self.plot_widget is not None:
+            self.plot_widget._user_event_pending = False
 
     def getMenu(self, ev):
         scene_pos = ev.scenePos()

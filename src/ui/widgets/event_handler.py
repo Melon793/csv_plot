@@ -115,15 +115,41 @@ class EventHandler:
             #       拖拽 Y 轴 → [False, True]；绘图区平移/框选 → [True, True]。
             x_only = bool(changed is not None and changed[0] and not changed[1])
 
-            # XLink 级联抑制：如果兄弟子图正在交互，本次 range 变化是 XLink 传播结果，
-            # 无需进入交互模式或启动 timer。交互结束后由源子图统一广播刷新。
-            if not self._is_interacting and self._sibling_is_interaction_source():
+            # 真实用户事件标记：由用户事件入口（_flush_wheel_zoom / 框选 /
+            # CustomViewBox 拖拽与原生滚轮）置位，此处消费。用于区分
+            # “用户触发”与“auto-range 重算等内部信号”，防止交互所有权反转
+            # （见 tmp/phase1_phase2_deep_review.md P0 实测补充）。
+            # 年龄校验：用户事件未产生 range 变化（触达 limits 钳制/拖拽轴
+            # 被禁等）时标记会泄漏，过期标记视为陈旧，避免污染后续内部信号
+            user_event = False
+            if getattr(self.pw, '_user_event_pending', False):
+                _age_ms = (time.perf_counter()
+                            - getattr(self.pw, '_user_event_ts', 0.0)) * 1000
+                user_event = _age_ms <= UI_DEBOUNCE_DELAY_MS
+                self.pw._user_event_pending = False
+
+            # 非用户的 Y-only 信号（restore 后 paint 触发的 auto-range 重算等）
+            # 不进入交互模式：若进入会抢占交互所有权，并在 50ms 防抖窗口内
+            # 经 _sibling_is_interaction_source 错误抑制用户实际操作的其他 plot。
+            # 批量同步/程序化 setYRange 已由 _is_syncing_range 短路；
+            # 用户拖拽 Y 轴带 user_event 标记，不受影响。
+            if (not user_event and changed is not None
+                    and not changed[0] and changed[1]):
+                return
+
+            # XLink 级联抑制：如果兄弟子图正在用户源交互，本次 range 变化是
+            # 级联传播结果，无需进入交互模式或启动 timer。用户事件永不被抑制
+            # （所有权归属真实用户操作，不依赖进入先后竞争）。
+            if (not self._is_interacting and not user_event
+                    and self._sibling_is_interaction_source()):
                 return
 
             if not self._is_interacting:
                 self._is_interacting = True
                 # 记录本次交互是否为 X-only（用于 _end_interaction 决策是否恢复 Y）
                 self.pw._interaction_x_only = x_only
+                # 记录交互是否由真实用户事件发起（供兄弟 plot 的级联抑制判定）
+                self.pw._interaction_user_origin = user_event
                 logger.debug(
                     "[RANGE_CHANGED] _on_range_changed: entering interacting (x_only=%s), "
                     "new_range=(%.4f, %.4f)", x_only, range[0][0], range[0][1],
@@ -135,6 +161,8 @@ class EventHandler:
                 # 交互中途从 Y-touched 切换到 X-only：补充禁用 Y autoVisible
                 self.pw._interaction_x_only = True
                 self._start_interaction()
+                if user_event:
+                    self.pw._interaction_user_origin = True
             elif not x_only and getattr(self.pw, '_interaction_x_only', False):
                 # 交互中途从 X-only 切换到 Y-touched（如 box zoom 先 setXRange 再 setYRange，
                 # 或 wheel 后拖拽 Y 轴）：用户手动操作了 Y 轴，_end_interaction 时
@@ -143,6 +171,8 @@ class EventHandler:
                 # 否则兄弟 plot 的 autoRange[1] 永久停留在 False（Y 自适应失效）
                 self.pw._interaction_x_only = False
                 self._unfreeze_frozen_plots()
+                if user_event:
+                    self.pw._interaction_user_origin = True
 
             timer = getattr(self.pw, '_interaction_timer', None)
             if timer is None:
@@ -170,8 +200,11 @@ class EventHandler:
     def _sibling_is_interaction_source(self) -> bool:
         """检查是否有兄弟子图正在作为交互源（用户直接操作的子图）。
 
-        用于 XLink 级联抑制：当用户操作子图 A 时，XLink 会将 range 变化传播到
-        子图 B-L。这些传播触发的 sigRangeChanged 不需要进入交互模式。
+        用于级联抑制：当用户操作子图 A 时，range 变化会传播到子图 B-L，
+        这些传播触发的 sigRangeChanged 不需要进入交互模式。
+
+        只计“用户源”交互（_interaction_user_origin=True）：auto-range 等
+        内部信号发起的交互不应抑制任何其他 plot（否则产生所有权反转）。
         """
         pw = self.pw
         main_window = pw.window() if hasattr(pw, 'window') else None
@@ -179,7 +212,9 @@ class EventHandler:
             return False
         for container in main_window.plot_widgets:
             sibling = container.plot_widget
-            if sibling is not pw and getattr(sibling, '_is_interacting', False):
+            if (sibling is not pw
+                    and getattr(sibling, '_is_interacting', False)
+                    and getattr(sibling, '_interaction_user_origin', False)):
                 return True
         return False
 
@@ -321,8 +356,11 @@ class EventHandler:
             if getattr(self.pw, '_interaction_x_only', False):
                 self._schedule_async_y_restore()
 
-            # 重置交互轴标记
+            # 重置交互轴标记与所有权状态（清除陈旧的用户事件标记，
+            # 避免未消费的标记污染下次交互的起源判定）
             self.pw._interaction_x_only = False
+            self.pw._interaction_user_origin = False
+            self.pw._user_event_pending = False
 
             # 标准交互结束刷新
             self._queue_ui_refresh(immediate=True)
