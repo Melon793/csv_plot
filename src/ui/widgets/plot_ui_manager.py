@@ -41,7 +41,7 @@ from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.widgets.base_manager import BasePlotManager
 
 LEGEND_MAX_LINES = 3
-LEGEND_BOTTOM_PAD = 2  # legend 底部留白，保证末行文字不与 plot 上边框接触
+LEGEND_BOTTOM_PAD = 0  # legend 底部留白，保证末行文字不与 plot 上边框接触
 
 # legend 滚动条样式：细条圆角灰色、无箭头按钮
 LEGEND_SCROLLBAR_QSS = """
