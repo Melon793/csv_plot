@@ -189,6 +189,9 @@ class PlotUIManager(BasePlotManager):
         pw._interaction_timer.timeout.connect(pw._end_interaction)
         pw._is_syncing_range = False
         pw._interaction_x_only = False  # 标记当前交互是否为 X-only（用于 _end_interaction 决策）
+        pw._interaction_user_origin = False  # 交互是否由真实用户事件发起（级联抑制判定用）
+        pw._user_event_pending = False  # 用户事件入口置位、_on_range_changed 消费的瞬时标记
+        pw._user_event_ts = 0.0  # 标记置位时间戳（消费时年龄校验，防陈旧标记污染）
 
         pw.view_box.setAutoVisible(x=False, y=True)
         pw.plot_item.setTitle(None)

@@ -557,12 +557,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             _t0 = time.perf_counter()
             self._perf_wheel_timestamp = _t0  # 记录 flush 时间戳（用于 WHEEL_LATENCY 追踪）
         try:
+            # 标记真实用户事件：供 _on_range_changed 区分用户触发与内部信号，
+            # 防止交互所有权反转（见 event_handler._on_range_changed 注释）。
+            # 附带时间戳：消费时校验年龄，避免用户事件未产生 range 变化时
+            # 标记泄漏污染后续内部信号的起源判定
+            self._user_event_pending = True
+            self._user_event_ts = time.perf_counter()
             # 缩放计算与 scaleBy 的 tl/br = center + (corner-center)*scale 等价
             vr = vb.targetRect()
             new_x_min = mouse_x - (mouse_x - vr.left()) * factor
             new_x_max = mouse_x + (vr.right() - mouse_x) * factor
             vb.setXRange(new_x_min, new_x_max, padding=0)
+            # 信号已在 setXRange 内同步消费则为 no-op；若未发射
+            # （触达 limits 钳制无 range 变化）则清除残留标记防泄漏
+            self._user_event_pending = False
         except RuntimeError:
+            self._user_event_pending = False  # 无信号发射，清除遗留标记
             logger.debug("[WHEEL] flush setXRange skipped: ViewBox C++ object destroyed")
             return
         if PERF_LOG_ENABLED:
@@ -984,8 +994,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 y_min -= margin * dy
                 y_max += margin * dy
 
+                # 标记真实用户事件（框选缩放）：供 _on_range_changed 区分
+                # 用户触发与内部信号，防止交互所有权反转。
+                # 每次产生信号的调用前都需置位（标记被第一个信号消费后，
+                # setYRange 的第二个信号否则会被误判为内部 Y-only 信号）
+                self._user_event_pending = True
+                self._user_event_ts = time.perf_counter()
                 self.view_box.setXRange(x_min, x_max, padding=0)
+                self._user_event_pending = True
+                self._user_event_ts = time.perf_counter()
                 self.view_box.setYRange(y_min, y_max, padding=0)
+                # 同上：若 setYRange 未产生变化（无信号发射）清除残留标记
+                self._user_event_pending = False
             event.accept()
         else:
             super().mouseReleaseEvent(event)
