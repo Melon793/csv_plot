@@ -205,12 +205,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def update_legend_label(self, text=None):
         """更新顶部 legend 内容（纯文本 → 占位态，HTML → 图例态）"""
-        if text is not None:
-            if "<a " in text or "<span" in text:
-                self.legend_label.setHtml(text)
-            else:
-                self.legend_label.setPlainText(text)
-            self._plot_ui_manager.update_legend_height()
+        if text is None:
+            return
+        label = self.legend_label
+        if "<a " in text or "<span" in text:
+            label.setHtml(text)
+        else:
+            # 回归占位态：clear() 置空文档显示 placeholder，
+            # 避免 setPlainText 继承光标处残留字符格式
+            # （点击过彩色锚点后占位文字会变成锚点颜色）
+            # 注意：纯文本 text 仅作触发占位态的信号，其内容被忽略，
+            # 实际占位文案以 plot_ui_manager 中 setPlaceholderText 为准
+            label.clear()
+        # 文本光标复位到文档开头：防止光标停留在彩色锚点内，
+        # 导致后续内容替换继承残留颜色
+        cursor = label.textCursor()
+        if cursor.position() != 0:
+            cursor.setPosition(0)
+            label.setTextCursor(cursor)
+        self._plot_ui_manager.update_legend_height()
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """确保 X 轴范围非零 → 委托到 AxisManager"""
