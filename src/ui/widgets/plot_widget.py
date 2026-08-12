@@ -16,7 +16,7 @@ from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, Signal
+from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, Signal, QEvent
 from PySide6.QtGui import QCursor
 
 logger = get_logger("widget.plot")
@@ -204,9 +204,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._axis_manager.auto_y_in_x_range()
 
     def update_legend_label(self, text=None):
-        """更新顶部文本内容"""
+        """更新顶部 legend 内容（纯文本 → 占位态，HTML → 图例态）"""
         if text is not None:
-            self.legend_label.setText(text)
+            if "<a " in text or "<span" in text:
+                self.legend_label.setHtml(text)
+            else:
+                self.legend_label.setPlainText(text)
+            self._plot_ui_manager.update_legend_height()
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """确保 X 轴范围非零 → 委托到 AxisManager"""
@@ -479,6 +483,31 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         super().resizeEvent(event)
         if hasattr(self, '_event_handler'):
             self._schedule_cursor_geometry_update()
+        if hasattr(self, '_plot_ui_manager'):
+            self._plot_ui_manager.update_legend_height()
+
+    def eventFilter(self, obj, event):
+        """legend_label 宽度变化 → 重算 legend 高度（补齐布局协商时序缺口）"""
+        if (
+            obj is getattr(self, "legend_label", None)
+            and event.type() == QEvent.Type.Resize
+        ):
+            new_w = event.size().width()
+            if new_w != getattr(self, "_legend_last_w", None):
+                self._legend_last_w = new_w
+                if hasattr(self, "_plot_ui_manager"):
+                    self._plot_ui_manager.update_legend_height()
+        # 左轴宽度变化（y 轴刻度位数改变）→ 重算 legend 左右对齐
+        if (
+            obj is getattr(self, "_legend_left_axis", None)
+            and event.type() == QEvent.Type.GraphicsSceneResize
+        ):
+            new_w = round(obj.size().width(), 1)
+            if new_w != getattr(self, "_legend_axis_last_w", None):
+                self._legend_axis_last_w = new_w
+                if hasattr(self, "_plot_ui_manager"):
+                    self._plot_ui_manager.update_legend_height()
+        return super().eventFilter(obj, event)
 
     @safe_callback
     def on_vline_position_changed(self, line_obj=None):
@@ -762,9 +791,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """重新创建失效的曲线 → 委托到 MultiCurveManager"""
         self._multi_curve_manager._recreate_curve(var_name)
     
-    def _on_legend_clicked(self, event):
-        """Legend点击事件处理 → 委托到 MultiCurveManager"""
-        self._multi_curve_manager._on_legend_clicked(event)
+    def _on_legend_anchor_clicked(self, url):
+        """Legend 锚点点击 → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._on_legend_anchor_clicked(url)
     
     def _update_axes_for_multi_curve(self, update_x_range: bool = False):
         """为多曲线更新坐标轴范围 → 委托到 MultiCurveManager"""
