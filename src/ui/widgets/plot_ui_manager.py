@@ -193,6 +193,10 @@ class PlotUIManager(BasePlotManager):
         """)
         pw.legend_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         pw.legend_label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        # 只允许鼠标点击链接(锚点)，禁止选中普通文本
+        pw.legend_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
         pw.legend_label.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
