@@ -441,11 +441,10 @@ class AxisManager:
         # 我们希望 Y autoRange 保持启用，这样后续 X 范围变化时 Y 能自适应。
         # 只有用户手动拖拽 Y 轴时才应关闭 Y autoRange（由 _on_range_changed 处理）。
         # 直接修改 state 而非调用 enableAutoRange，避免触发 _autoRangeNeedsUpdate。
+        # 用 viewbox_state_compat 封装，支持 pyqtgraph 版本升级后的安全降级
         if not getattr(pw, '_is_syncing_range', False):
-            try:
-                pw.view_box.state['autoRange'][1] = True
-            except (KeyError, TypeError, IndexError):
-                pass
+            from src.ui.widgets.viewbox_state_compat import restore_y_autorange
+            restore_y_autorange(pw.view_box)
 
     def _reset_plot_limits(self) -> None:
         """重置绘图限制"""
