@@ -40,7 +40,7 @@ logger = get_logger("widget.plot_ui")
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.widgets.base_manager import BasePlotManager
 
-LEGEND_MAX_LINES = 3
+LEGEND_MAX_LINES = 3  # legend 最大显示行数，超出部分通过滚动条查看
 LEGEND_BOTTOM_PAD = 0  # legend 底部留白，保证末行文字不与 plot 上边框接触
 
 # legend 滚动条样式：细条圆角灰色、无箭头按钮
