@@ -209,7 +209,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         label = self.legend_label
         if "<a " in text or "<span" in text:
+            # 保存滚动位置：setHtml 会重置文档导致 scrollbar 跳顶
+            sb = label.verticalScrollBar()
+            saved_pos = sb.value()
             label.setHtml(text)
+            sb.setValue(saved_pos)
         else:
             # 回归占位态：clear() 置空文档显示 placeholder，
             # 避免 setPlainText 继承光标处残留字符格式
@@ -454,6 +458,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
         delta = ev.angleDelta().y()
+        # 鼠标悬停在 legend 上时，滚轮驱动 legend 滚动而非 X 轴缩放
+        if (
+            ev.modifiers() == Qt.KeyboardModifier.NoModifier
+            and delta != 0
+            and getattr(self, "_legend_proxy", None) is not None
+        ):
+            scene_pos = self.mapToScene(ev.position().toPoint())
+            if self._legend_proxy.sceneBoundingRect().contains(scene_pos):
+                sb = self.legend_label.verticalScrollBar()
+                fm = self.legend_label.fontMetrics()
+                # 每齿(120)滚动约 3 行
+                steps = delta / 120
+                sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
+                ev.accept()
+                return
         # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
         if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
             if delta != 0:
