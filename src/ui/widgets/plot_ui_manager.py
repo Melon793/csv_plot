@@ -18,13 +18,14 @@ from typing import Any
 from PySide6.QtCore import Qt, QTimer, QPoint
 from PySide6.QtGui import QFontMetrics, QPen, QColor
 from PySide6.QtWidgets import (
-    QLabel,
     QSizePolicy,
     QGraphicsProxyWidget,
     QGraphicsLinearLayout,
     QGraphicsWidget,
     QRubberBand,
     QApplication,
+    QTextBrowser,
+    QFrame,
 )
 import pyqtgraph as pg
 
@@ -38,6 +39,35 @@ from src.core.logger import get_logger
 logger = get_logger("widget.plot_ui")
 from src.core.scheduler import UnifiedUpdateScheduler
 from src.ui.widgets.base_manager import BasePlotManager
+
+LEGEND_MAX_LINES = 3
+LEGEND_BOTTOM_PAD = 2  # legend 底部留白，保证末行文字不与 plot 上边框接触
+
+# legend 滚动条样式：细条圆角灰色、无箭头按钮
+LEGEND_SCROLLBAR_QSS = """
+    QScrollBar:vertical {
+        background: #f2f2f2;
+        width: 8px;
+        margin: 1px;
+        border-radius: 4px;
+    }
+    QScrollBar::handle:vertical {
+        background: #b0b0b0;
+        min-height: 16px;
+        border-radius: 3px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: #8f8f8f;
+    }
+    QScrollBar::add-line:vertical,
+    QScrollBar::sub-line:vertical {
+        height: 0px;
+    }
+    QScrollBar::add-page:vertical,
+    QScrollBar::sub-page:vertical {
+        background: transparent;
+    }
+"""
 
 
 class PlotUIManager(BasePlotManager):
@@ -134,29 +164,51 @@ class PlotUIManager(BasePlotManager):
         fm = QFontMetrics(font)
         base_spacing = fm.horizontalAdvance("-10000.01")
         header.setFixedHeight(fm.height() * 2)
+        # 清零默认 margin/spacing（样式默认各 ~12/10px），
+        # 保证 legend 右缘可精确对齐 plot 右边界黑线
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        left_margin = QGraphicsWidget()
-        layout.addItem(left_margin)
+        # 左侧间距占位：宽度动态对齐 plot 左边界黑线（update_legend_height 维护，
+        # 补偿左轴刻度/轴标题占位，随 y 轴宽度变化）
+        pw._legend_left_spacer = QGraphicsWidget()
+        pw._legend_left_spacer.setMinimumWidth(0)
+        pw._legend_left_spacer.setMaximumWidth(0)
+        layout.addItem(pw._legend_left_spacer)
         layout.setItemSpacing(0, base_spacing * 0)
 
-        pw.legend_label = QLabel("channel name")
+        # 右侧间距占位：宽度动态对齐 plot 右边界黑线（update_legend_height 维护）
+        pw._legend_right_spacer = QGraphicsWidget()
+        pw._legend_right_spacer.setMinimumWidth(0)
+        pw._legend_right_spacer.setMaximumWidth(0)
+
+        pw.legend_label = QTextBrowser()
+        pw.legend_label.setOpenLinks(False)           # 禁止真实导航，只发 anchorClicked
+        pw.legend_label.setFrameStyle(QFrame.Shape.NoFrame)
         pw.legend_label.setStyleSheet("""
-            color: #000;
-            font-weight: bold;
-            background-color: transparent;
+            QTextBrowser {
+                background-color: transparent;
+                font-weight: bold;
+                border: none;
+            }
         """)
-        pw.legend_label.setSizePolicy(
-            QSizePolicy.Policy.Minimum,
-            QSizePolicy.Policy.Preferred,
+        pw.legend_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        pw.legend_label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        pw.legend_label.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
-        pw.legend_label.setTextFormat(Qt.TextFormat.RichText)
-        pw.legend_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextBrowserInteraction,
+        pw.legend_label.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        pw.legend_label.setContextMenuPolicy(
-            Qt.ContextMenuPolicy.NoContextMenu,
-        )
-        pw.legend_label.mousePressEvent = pw._on_legend_clicked
+        pw.legend_label.document().setDocumentMargin(1)
+        pw.legend_label.setPlaceholderText("channel name")
+        pw.legend_label.anchorClicked.connect(pw._on_legend_anchor_clicked)
+        pw.legend_label.verticalScrollBar().setStyleSheet(LEGEND_SCROLLBAR_QSS)
+        # 文档内容变化也触发高度重算（补齐宽度协商之外的触发源）
+        pw.legend_label.document().contentsChanged.connect(self.update_legend_height)
+        # label 自身宽度变化（任意布局通道引起）也触发高度重算，
+        # 补齐 pw.resizeEvent 与宽度协商之间的时序缺口
+        pw._legend_last_w = None
+        pw.legend_label.installEventFilter(pw)
 
         proxy_left = QGraphicsProxyWidget()
         proxy_left.setWidget(pw.legend_label)
@@ -166,9 +218,89 @@ class PlotUIManager(BasePlotManager):
             proxy_left,
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft,
         )
+        layout.addItem(pw._legend_right_spacer)
+        layout.setItemSpacing(1, 0)
+        layout.setItemSpacing(2, 0)
+        pw._legend_proxy = proxy_left  # 供 update_legend_height 同步固定高度约束
 
         header.setLayout(layout)
+        pw._header_widget = header  # 供 update_legend_height 同步调整 header 高度
         pw.addItem(header, row=0, col=0, colspan=2)
+
+    def update_legend_height(self) -> None:
+        """根据内容与当前宽度重算 legend 高度（1 行 ~ LEGEND_MAX_LINES 行）"""
+        pw = self.pw
+        label = pw.legend_label
+
+        def _recalc():
+            # 让文档按当前 viewport 宽度排版后再测量
+            doc = label.document()
+            doc.setTextWidth(label.viewport().width())
+            content_h = doc.size().height()
+            # 取富文本排版的真实行高（fontMetrics 兜底），避免行高低估
+            line_h = 0.0
+            block = doc.firstBlock()
+            if block.isValid() and block.layout() and block.layout().lineCount():
+                line_h = block.layout().lineAt(0).height()
+            if line_h <= 0:
+                line_h = float(label.fontMetrics().height())
+            min_h = line_h + 4
+            max_h = line_h * LEGEND_MAX_LINES + 4
+            # 底部留白保证末行文字不与 plot 上边框接触（label 底对齐 header 底）
+            legend_h = int(max(min_h, min(content_h + 4, max_h))) + LEGEND_BOTTOM_PAD
+            label.setFixedHeight(legend_h)
+            # 同步固定 proxy 高度约束（多层防御：内嵌 widget 约束
+            # 在图形布局协商中存在失效场景）
+            proxy = getattr(pw, "_legend_proxy", None)
+            if proxy is not None:
+                proxy.setMinimumHeight(legend_h)
+                proxy.setMaximumHeight(legend_h)
+            # 同步增高 header 容器，避免 legend 溢出入侵绘图区；
+            # 下限保持 2 行高（维持单行/空状态的旧版外观）
+            header = getattr(pw, "_header_widget", None)
+            if header is not None:
+                header.setFixedHeight(max(line_h * 2, legend_h))
+            label.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+                if content_h > max_h
+                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            # 左侧 spacer 对齐：legend 左缘对齐 plot 左边界黑线
+            # （补偿左轴刻度/轴标题占位；宽度随 y 轴刻度位数变化，
+            # 由左轴 Resize 的 eventFilter 触发重算）
+            left_spacer = getattr(pw, "_legend_left_spacer", None)
+            if left_spacer is not None and header is not None and hasattr(pw, "view_box"):
+                try:
+                    left_inset = (
+                        pw.view_box.sceneBoundingRect().left()
+                        - header.sceneBoundingRect().left()
+                    )
+                    if left_inset >= 0 and abs(left_spacer.rect().width() - left_inset) > 0.5:
+                        left_spacer.setMinimumWidth(int(left_inset))
+                        left_spacer.setMaximumWidth(int(left_inset))
+                except Exception:
+                    logger.debug("legend 左对齐计算失败", exc_info=True)
+            # 右侧 spacer 对齐：滚动条右缘对齐 plot 右边界黑线
+            # （补偿 ci 右边距 + 右侧轴占位）
+            spacer = getattr(pw, "_legend_right_spacer", None)
+            if spacer is not None and header is not None and hasattr(pw, "view_box"):
+                try:
+                    inset = (
+                        header.sceneBoundingRect().right()
+                        - pw.view_box.sceneBoundingRect().right()
+                    )
+                    if inset >= 0 and abs(spacer.rect().width() - inset) > 0.5:
+                        spacer.setMinimumWidth(int(inset))
+                        spacer.setMaximumWidth(int(inset))
+                except Exception:
+                    logger.debug("legend 右对齐计算失败", exc_info=True)
+            # 强制外层布局立即落定，消除 header 增高未生效的中间态
+            try:
+                pw.ci.layout.activate()
+            except Exception:
+                logger.debug("强制布局落定失败", exc_info=True)
+
+        QTimer.singleShot(0, _recalc)   # 等 graphics layout 分配完宽度
 
     # ========================================================================
     # Plot Area
@@ -182,6 +314,10 @@ class PlotUIManager(BasePlotManager):
         pw.view_box = pw.plot_item.vb
         pw.view_box.plot_widget = pw
         pw._connect_viewbox_signals()
+        # 左轴宽度变化（y 轴刻度位数改变）→ 重算 legend 左右对齐
+        pw._legend_left_axis = pw.plot_item.getAxis("left")
+        pw._legend_left_axis.installEventFilter(pw)
+        pw._legend_axis_last_w = None
 
         pw._is_interacting = False
         pw._interaction_timer = QTimer()

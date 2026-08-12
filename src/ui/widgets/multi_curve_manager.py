@@ -11,7 +11,9 @@ MultiCurveManager - 曲线绘图管理（统一版）
 """
 
 from __future__ import annotations
+import html
 from typing import Any, TYPE_CHECKING
+from urllib.parse import quote, unquote
 
 import numpy as np
 import pyqtgraph as pg
@@ -21,6 +23,8 @@ from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
 
 logger = get_logger("widget.multi_curve")
+
+ANCHOR_SCHEME = "curve"
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
@@ -88,37 +92,37 @@ class MultiCurveManager:
         """兼容别名：委托到 _update_header_for_curves"""
         self._update_header_for_curves()
 
-    def update_legend(self):
-        """更新图例显示
-
-        在多条曲线时，在左上角显示所有曲线的图例。
-        图例样式：
-        - 可见曲线：实心方块(■) + 曲线颜色 + 变量名(单位)
-        - 隐藏曲线：空心方块(□) + 半透明颜色 + 灰色文字
-
-        点击图例中的曲线名可以切换该曲线的显示/隐藏状态。
-        """
+    def _build_legend_html(self) -> str:
+        """构建图例 HTML（唯一样式来源，供显示与测试复用）"""
         pw = self.pw
-
         legend_items = []
         for var_name, ci in pw.curves.items():
             color = ci.color
             unit = pw.units.get(var_name, "")
-            legend_text = f"{var_name} ({unit})" if unit else var_name
+            legend_text = html.escape(f"{var_name} ({unit})" if unit else var_name)
+            encoded = quote(var_name, safe="")
 
             if ci.visible:
                 legend_items.append(
-                    f"<span style='color: {color}; font-weight: bold;'>■</span> {legend_text}"
+                    f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
+                    f"style='color: {color}; text-decoration: none;'>"
+                    f"<span style='font-weight: bold;'>■</span> {legend_text}</a>"
                 )
             else:
                 legend_items.append(
-                    f"<span style='color: {color}; opacity: 0.5;'>□</span>"
-                    f" <span style='color: gray;'>{legend_text}</span>"
+                    f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
+                    f"style='text-decoration: none;'>"
+                    f"<span style='color: {color}; opacity: 0.5;'>□</span> "
+                    f"<span style='color: gray;'>{legend_text}</span></a>"
                 )
+        return " | ".join(legend_items)
 
-        if legend_items:
-            legend_text = " | ".join(legend_items)
-            pw.update_legend_label(legend_text)
+    def update_legend(self):
+        """更新图例显示（多行自适应 + 锚点点击切换显隐）"""
+        pw = self.pw
+        legend_html = self._build_legend_html()
+        if legend_html:
+            pw.update_legend_label(legend_html)
         else:
             pw.update_legend_label("channel name")
 
@@ -311,110 +315,19 @@ class MultiCurveManager:
                     final_min_y, final_max_y, set_limits=False
                 )
 
-    def _on_legend_clicked(self, event):
-        """Legend点击事件处理
+    def _on_legend_anchor_clicked(self, url):
+        """锚点点击：解析 href 中的变量名并切换曲线显隐
 
-        使用QTextDocument进行精确的hitTest，定位用户点击的是哪条曲线，
-        然后切换该曲线的显示/隐藏状态。
-
-        Args:
-            event: 鼠标点击事件
+        变量名存放在 URL path 部分（curve:///name）：QUrl 会将 host 强制
+        转小写并对非 ASCII 做 IDNA 编码，导致大写/中文变量名无法匹配。
         """
-        pw = self.pw
-
-        pos = event.pos()
-        click_x = pos.x()
-
-        if not pw.curves:
+        prefix = f"{ANCHOR_SCHEME}:///"
+        raw = url.toString()
+        if not raw.startswith(prefix):
             return
-
-        curve_list = list(pw.curves.items())
-        if not curve_list:
-            return
-
-        from PySide6.QtGui import QTextDocument
-        from PySide6.QtCore import QPointF, Qt
-
-        legend_parts = []
-        for var_name, ci in curve_list:
-            color = ci.color
-            unit = pw.units.get(var_name, "")
-            legend_text = f"{var_name} ({unit})" if unit else var_name
-
-            if ci.visible:
-                legend_parts.append(
-                    f"<span style='color: {color}; font-weight: bold;'>■</span> {legend_text}"
-                )
-            else:
-                legend_parts.append(
-                    f"<span style='color: {color}; opacity: 0.5;'>□</span>"
-                    f" <span style='color: gray;'>{legend_text}</span>"
-                )
-
-        full_html = " | ".join(legend_parts)
-
-        doc = QTextDocument()
-        doc.setDocumentMargin(0)
-        doc.setDefaultFont(pw.legend_label.font())
-        doc.setHtml(full_html)
-
-        layout = doc.documentLayout()
-        hit_pos = layout.hitTest(QPointF(click_x, pos.y()), Qt.HitTestAccuracy.ExactHit)
-
-        clicked_index = -1
-        char_pos = 0
-        item_ranges = []
-
-        for i, part in enumerate(legend_parts):
-            if i > 0:
-                char_pos += 3
-
-            part_start = char_pos
-            part_doc = QTextDocument()
-            part_doc.setHtml(part)
-            part_len = len(part_doc.toPlainText())
-            part_end = part_start + part_len
-
-            item_ranges.append(
-                {
-                    "index": i,
-                    "start": part_start,
-                    "end": part_end,
-                    "var_name": curve_list[i][0],
-                }
-            )
-
-            if part_start <= hit_pos < part_end:
-                clicked_index = i
-                break
-
-            char_pos = part_end
-
-        if clicked_index == -1:
-            if hit_pos < 0:
-                total_text_width = doc.size().width()
-                if click_x < total_text_width / 2:
-                    clicked_index = 0
-                else:
-                    clicked_index = len(curve_list) - 1
-            else:
-                min_distance = float("inf")
-                for item in item_ranges:
-                    if hit_pos < item["start"]:
-                        distance = item["start"] - hit_pos
-                    elif hit_pos >= item["end"]:
-                        distance = hit_pos - item["end"]
-                    else:
-                        distance = 0
-
-                    if distance < min_distance:
-                        min_distance = distance
-                        clicked_index = item["index"]
-
-        clicked_index = max(0, min(clicked_index, len(curve_list) - 1))
-
-        target_name, _ = curve_list[clicked_index]
-        self.toggle_curve_visibility_by_name(target_name)
+        var_name = unquote(raw[len(prefix):])
+        if var_name in self.pw.curves:
+            self.toggle_curve_visibility_by_name(var_name)
 
     def _apply_plot_style(self, show_symbols: bool = False):
         """应用绘图样式 - 细线+symbol 或 粗线无symbol（含内存优化pen缓存，统一版）"""
