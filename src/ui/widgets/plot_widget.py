@@ -503,6 +503,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
                 # 累积 factor（连乘）+ 记录最后一次鼠标位置
                 self._wheel_accumulated_factor *= factor
+                # 上下限保护：系统卡顿时大量事件在单窗口内累积，
+                # 连乘 factor 可能达到极端值导致一次性过度缩放
+                self._wheel_accumulated_factor = max(0.01, min(100.0, self._wheel_accumulated_factor))
                 self._wheel_last_mouse_x = mouse_x
                 self._wheel_last_mouse_y = mouse_y
                 self._wheel_coalesced_count += 1
@@ -521,9 +524,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _flush_wheel_zoom(self):
         """合并器到期：一次性执行累积的缩放。
 
-        将 16ms 窗口内累积的 factor（连乘）一次性传给 scaleBy，
+        将 16ms 窗口内累积的 factor（连乘）一次性应用于 X 范围，
         消灭过期事件的废功重算。center 用最后一次鼠标位置，
         保证缩放锚点是用户最终的意图位置。
+
+        实现说明：用 setXRange 而非 scaleBy((factor, 1))——后者内部走
+        setRange(rect) 路径会同时禁用双轴 autoRange，污染 Y 轴 autoRange
+        状态导致 _start_interaction 的 Y 冻结检测失效（根因分析见
+        tmp/yrange_jitter_after_phase2_analysis.md）；setXRange 只影响
+        autoRange[0]，数学上与 scaleBy 的 X 分量等价。
         """
         # 异步 timer 回调守卫：widget 销毁中 / 数据重载中 / C++ 对象已失效时跳过
         # （与 paintEvent、_on_range_changed 的守卫模式一致）
@@ -548,15 +557,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             _t0 = time.perf_counter()
             self._perf_wheel_timestamp = _t0  # 记录 flush 时间戳（用于 WHEEL_LATENCY 追踪）
         try:
-            vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
+            # 缩放计算与 scaleBy 的 tl/br = center + (corner-center)*scale 等价
+            vr = vb.targetRect()
+            new_x_min = mouse_x - (mouse_x - vr.left()) * factor
+            new_x_max = mouse_x + (vr.right() - mouse_x) * factor
+            vb.setXRange(new_x_min, new_x_max, padding=0)
         except RuntimeError:
-            logger.debug("[WHEEL] flush scaleBy skipped: ViewBox C++ object destroyed")
+            logger.debug("[WHEEL] flush setXRange skipped: ViewBox C++ object destroyed")
             return
         if PERF_LOG_ENABLED:
             _dt_ms = (time.perf_counter() - _t0) * 1000
             if _dt_ms > PERF_WHEEL_WARN_MS:
                 logger.warning(
-                    "[PERF][WHEEL] flush scaleBy: %.2fms (factor=%.4f, coalesced=%d, center=(%.2f, %.2f))",
+                    "[PERF][WHEEL] flush setXRange: %.2fms (factor=%.4f, coalesced=%d, center=(%.2f, %.2f))",
                     _dt_ms, factor, count, mouse_x, mouse_y,
                 )
     

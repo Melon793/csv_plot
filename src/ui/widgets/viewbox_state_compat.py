@@ -86,6 +86,40 @@ def disable_y_autovisible(view_box) -> bool:
     return False
 
 
+def disable_y_autorange(view_box) -> bool:
+    """禁用 ViewBox 的 Y autoRange[1]（交互期 Y 冻结用）
+
+    仅禁用 autoVisibleOnly 不足以冻结 Y 轴：autoVisibleOnly 只控制
+    auto-range 的数据源，不禁用 auto-range 本身；必须同时禁用
+    autoRange[1] 才能阻止 prepareForPaint → updateAutoRange 重算 Y
+    （见 tmp/yrange_jitter_after_phase2_analysis.md 根因 #3）。
+
+    优先直接修改 state['autoRange'][1]=False（高效，无副作用）；
+    降级用 blockSignals + enableAutoRange(YAxis, False)。
+
+    Returns:
+        True=使用了高效路径, False=使用了降级路径
+    """
+    if _verify_state_keys(view_box):
+        try:
+            view_box.state['autoRange'][1] = False
+            return True
+        except (KeyError, TypeError, IndexError):
+            pass  # 落到降级路径
+
+    # 降级路径：先清除挂起的 _autoRangeNeedsUpdate 再禁用，
+    # 避免 enableAutoRange(False) 的 "one last auto-range"
+    # （ViewBox.py L886-887）在禁用瞬间触发一次 updateAutoRange → Y 跳变
+    was_blocked = view_box.blockSignals(True)
+    try:
+        if hasattr(view_box, '_autoRangeNeedsUpdate'):
+            view_box._autoRangeNeedsUpdate = False
+        view_box.enableAutoRange(axis=view_box.YAxis, enable=False)
+    finally:
+        view_box.blockSignals(was_blocked)
+    return False
+
+
 def restore_y_autorange(view_box) -> bool:
     """恢复 ViewBox 的 Y autoRange[1]=True
 
