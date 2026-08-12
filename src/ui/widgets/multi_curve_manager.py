@@ -106,13 +106,13 @@ class MultiCurveManager:
                 legend_items.append(
                     f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
                     f"style='color: {color}; text-decoration: none;'>"
-                    f"<span style='font-weight: bold;'>■</span> {legend_text}</a>"
+                    f"<span style='font-weight: bold;'>■</span>&nbsp;{legend_text}</a>"
                 )
             else:
                 legend_items.append(
                     f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
                     f"style='text-decoration: none;'>"
-                    f"<span style='color: {color}; opacity: 0.5;'>□</span> "
+                    f"<span style='color: {color}; opacity: 0.5;'>□</span>&nbsp;"
                     f"<span style='color: gray;'>{legend_text}</span></a>"
                 )
         return " | ".join(legend_items)

@@ -225,7 +225,9 @@ class PlotUIManager(BasePlotManager):
         layout.addItem(pw._legend_right_spacer)
         layout.setItemSpacing(1, 0)
         layout.setItemSpacing(2, 0)
-        pw._legend_proxy = proxy_left  # 供 update_legend_height 同步固定高度约束
+        # 供 wheelEvent 判断鼠标是否悬停在 legend 上，
+        # 以及 update_legend_height 同步固定高度约束
+        pw._legend_proxy = proxy_left
 
         header.setLayout(layout)
         pw._header_widget = header  # 供 update_legend_height 同步调整 header 高度
