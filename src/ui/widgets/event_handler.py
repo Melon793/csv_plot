@@ -14,7 +14,6 @@ from __future__ import annotations
 import time
 from typing import Any, TYPE_CHECKING
 
-import numpy as np
 from PySide6.QtCore import QTimer
 
 from src.core.config import (
@@ -35,6 +34,11 @@ if TYPE_CHECKING:
 
 class EventHandler:
     """负责 ViewBox 信号处理和交互事件"""
+
+    # 全局 Y restore 会话代数：任何 EventHandler 开启新交互时递增，
+    # 用于作废其他 EventHandler 残留的异步 restore 批次（避免 plot B
+    # 交互期间 plot A 的残留批次提前解冻兄弟子图，导致 Y 抖动短暂复发）
+    _y_restore_generation = 0
 
     def __init__(self, mark_region_manager: MarkRegionManager):
         """初始化事件处理器，绑定到 MarkRegionManager 以获取依赖链"""
@@ -135,7 +139,10 @@ class EventHandler:
                 # 交互中途从 X-only 切换到 Y-touched（如 box zoom 先 setXRange 再 setYRange，
                 # 或 wheel 后拖拽 Y 轴）：用户手动操作了 Y 轴，_end_interaction 时
                 # 不应恢复 Y autoRange，否则会覆盖用户指定的 yRange。
+                # 但 _start_interaction 已冻结了兄弟子图，必须立即补解冻，
+                # 否则兄弟 plot 的 autoRange[1] 永久停留在 False（Y 自适应失效）
                 self.pw._interaction_x_only = False
+                self._unfreeze_frozen_plots()
 
             timer = getattr(self.pw, '_interaction_timer', None)
             if timer is None:
@@ -200,6 +207,9 @@ class EventHandler:
         # （setYRange 用旧 X 范围计算的 Y 值，与新的 X 范围不匹配）。
         if hasattr(self, '_y_restore_queue'):
             self._y_restore_queue = []
+        # 递增全局代数，作废所有 EventHandler 残留的 restore 批次
+        # （self._y_restore_queue 只能清自己的，其他 handler 的队列靠代数拦截）
+        EventHandler._y_restore_generation += 1
 
         for container in main_window.plot_widgets:
             sibling = container.plot_widget
@@ -209,8 +219,11 @@ class EventHandler:
                 continue
             try:
                 # 读取当前 autoRange 状态 [x_auto, y_auto]
-                # 关键：scaleBy((factor, 1)) → setRange(xRange=...) 只设 autoRange[0]=False，
-                # 不碰 autoRange[1]。所以此时 autoRange[1] 反映的是用户手动操作的结果：
+                # 关键：_flush_wheel_zoom 用 setXRange（而非 scaleBy）只设
+                # autoRange[0]=False，不碰 autoRange[1]（scaleBy((factor,1)) 走
+                # setRange(rect) 会禁用双轴 autoRange，污染 Y 冻结检测，见
+                # tmp/yrange_jitter_after_phase2_analysis.md 根因 #1）。
+                # 所以此时 autoRange[1] 反映的是用户手动操作的结果：
                 #   - True：用户未手动取消 Y autoRange（正常情况）
                 #   - False：用户手动取消过 Y autoRange（如拖拽 Y 轴）
                 try:
@@ -223,14 +236,21 @@ class EventHandler:
                 # 记录原始状态（用于 _schedule_async_y_restore 决策是否恢复 Y）
                 sibling._pre_interaction_y_auto = y_auto
 
-                # 只对 y_auto=True 的 plot 禁用 Y autoVisible
+                # 只对 y_auto=True 的 plot 冻结 Y 轴
                 # （用户手动取消过 Y autoRange 的 plot 完全不动，尊重用户意图）
                 if y_auto:
                     # 直接修改 state 而非调用 setAutoVisible(y=False)，
                     # 避免触发 _autoRangeNeedsUpdate → prepareForPaint → 延迟 sigRangeChanged
                     # 用 viewbox_state_compat 封装，支持 pyqtgraph 版本升级后的安全降级
-                    from src.ui.widgets.viewbox_state_compat import disable_y_autovisible
+                    from src.ui.widgets.viewbox_state_compat import (
+                        disable_y_autorange,
+                        disable_y_autovisible,
+                    )
                     disable_y_autovisible(sibling.view_box)
+                    # 同时禁用 autoRange[1]：仅禁用 autoVisibleOnly 只改变
+                    # auto-range 数据源，不能阻止 updateAutoRange 重算 Y；
+                    # 必须禁用 autoRange[1] 才能真正冻结 Y 轴（根因 #3）
+                    disable_y_autorange(sibling.view_box)
                     count += 1
             except Exception:
                 logger.debug(
@@ -244,6 +264,47 @@ class EventHandler:
                 "[PERF][START_INTERACT] disabled Y autoVisible on %d plots in %.2fms",
                 count, _dt_ms,
             )
+
+    def _unfreeze_frozen_plots(self):
+        """X-only → Y-touched 切换时的补解冻。
+
+        _start_interaction 已冻结了所有 _pre_interaction_y_auto=True 的子图，
+        切换到 Y-touched 后 _end_interaction 不会再走 _schedule_async_y_restore，
+        必须在此同步恢复，否则兄弟子图 autoRange[1] 永久停留在 False。
+
+        交互源 plot（self.pw）只恢复 autoVisibleOnly，不恢复 autoRange[1]：
+        用户刚手动指定了它的 Y 范围（setYRange 已将其 autoRange[1] 置 False，
+        这是正确终态）。兄弟子图则完整恢复（它们的 Y 未被用户指定）。
+        """
+        pw = self.pw
+        main_window = pw.window() if hasattr(pw, 'window') else None
+        if main_window is None or not hasattr(main_window, 'plot_widgets'):
+            return
+
+        from src.ui.widgets.viewbox_state_compat import (
+            restore_y_autorange,
+            restore_y_autovisible,
+        )
+        count = 0
+        for container in main_window.plot_widgets:
+            sibling = container.plot_widget
+            if not container.isVisible() or not hasattr(sibling, 'view_box'):
+                continue
+            # 只解冻本次交互中被冻结过的 plot（_pre_interaction_y_auto=True）
+            if not getattr(sibling, '_pre_interaction_y_auto', False):
+                continue
+            try:
+                sibling._is_syncing_range = True
+                if sibling is not pw:
+                    restore_y_autorange(sibling.view_box)
+                restore_y_autovisible(sibling.view_box)
+                sibling._pre_interaction_y_auto = False
+                count += 1
+            except Exception:
+                logger.debug("[INTERACT] unfreeze failed for plot", exc_info=True)
+            finally:
+                sibling._is_syncing_range = False
+        logger.debug("[INTERACT] unfroze %d plots on x_only->y_touched switch", count)
 
     def _end_interaction(self):
         """结束交互：异步恢复 Y autoRange → 广播刷新。
@@ -315,9 +376,10 @@ class EventHandler:
             targets.remove(pw)
             targets.insert(0, pw)
 
-        # 启动分批处理
+        # 启动分批处理（记录当前全局代数，批次执行时若代数已变则整批作废）
         self._y_restore_queue = targets
         self._y_restore_batch_size = ASYNC_Y_RESTORE_BATCH_SIZE
+        self._y_restore_gen_at_schedule = EventHandler._y_restore_generation
         QTimer.singleShot(0, self._process_y_restore_batch)
 
     def _process_y_restore_batch(self):
@@ -329,6 +391,12 @@ class EventHandler:
         跳过本次恢复，避免与正在进行的交互打架。
         """
         if not hasattr(self, '_y_restore_queue') or not self._y_restore_queue:
+            return
+
+        # 代数校验：调度后若有新交互开启（_start_interaction 递增了代数），
+        # 本队列已过期，整批作废（避免在其他 plot 交互期间提前解冻兄弟子图）
+        if getattr(self, '_y_restore_gen_at_schedule', None) != EventHandler._y_restore_generation:
+            self._y_restore_queue = []
             return
 
         # 取本批次
