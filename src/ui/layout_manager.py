@@ -32,6 +32,11 @@ class LayoutManager(MainWindowBaseManager):
         if DataTableDialog._instance is not None:
             DataTableDialog._instance.set_skip_close_confirmation(True)
         self._unregister_global_event_filter()
+        # Phase 3: 释放 BatchedXLinkSync 资源，断开所有信号连接
+        batched_xlink = getattr(self.mw, '_batched_xlink', None)
+        if batched_xlink is not None:
+            batched_xlink.dispose()
+            self.mw._batched_xlink = None
 
     def _on_splitter_moved(self, pos, index):
         self.mw.var_table_user_adjusted = True
@@ -99,21 +104,20 @@ class LayoutManager(MainWindowBaseManager):
         self._schedule_xlink_sync()
 
     def _sync_linked_x_ranges(self):
+        """Phase 3: X 范围健康检查与同步
+
+        替代原 setXLink 健康检查逻辑：
+        - 检测可见 plot 之间的 X 范围不一致
+        - 若发现不一致，触发 BatchedXLinkSync.sync_now() 立即同步
+        - 不再依赖 linkedView() 检测（Phase 3 移除了原生 XLink）
+
+        原生 XLink 会按像素几何计算 slave range，导致不同宽度 plot 的 X 范围
+        略有差异（这是原实现的"expected by geometry"行为）。Phase 3 直接
+        setXRange(master_xmin, master_xmax) 到所有 slave，范围完全一致。
+        """
         self.mw._pending_xlink_sync = False
         if not self.mw.plot_widgets:
             return
-
-        # === X-link 健康检查：丢失 link 的 plot 自动重建 ===
-        master_vb = self.mw.plot_widgets[0].plot_widget.view_box
-        for idx, container in enumerate(self.mw.plot_widgets):
-            if idx == 0 or not container or not hasattr(container, "plot_widget"):
-                continue
-            vb = container.plot_widget.view_box
-            if vb.linkedView(0) is None and container.isVisible():
-                logger.warning(
-                    "[XLINK_SYNC] plot idx=%d lost X-link, re-establishing", idx
-                )
-                vb.setXLink(master_vb)
 
         first_container = self.mw.plot_widgets[0]
         if not first_container or not hasattr(first_container, "plot_widget"):
@@ -147,8 +151,12 @@ class LayoutManager(MainWindowBaseManager):
             first_geom.x(), first_geom.y(), first_geom.width(), first_geom.height(),
         )
 
-        for container in self.mw.plot_widgets[1:]:
+        # 检测可见 slave 的 X 范围不一致
+        mismatch_count = 0
+        for idx, container in enumerate(self.mw.plot_widgets[1:], start=1):
             if not container or not hasattr(container, "plot_widget"):
+                continue
+            if not container.isVisible():
                 continue
             pw = container.plot_widget
             if not hasattr(pw, "view_box"):
@@ -156,66 +164,35 @@ class LayoutManager(MainWindowBaseManager):
             vb = pw.view_box
             try:
                 cur_range = vb.viewRange()[0]
-                if abs(cur_range[0] - xmin) < 1e-12 and abs(cur_range[1] - xmax) < 1e-12:
+                if (
+                    abs(cur_range[0] - xmin) < tolerance
+                    and abs(cur_range[1] - xmax) < tolerance
+                ):
                     continue
+                # 发现不一致
+                mismatch_count += 1
+                logger.debug(
+                    "[XLINK_SYNC] plot idx=%d range mismatch: expected=(%.4f, %.4f) "
+                    "got=(%.4f, %.4f), will trigger batched sync",
+                    idx, xmin, xmax, cur_range[0], cur_range[1],
+                )
             except Exception:
                 logger.debug(
-                    "[XLINK] viewRange 获取失败，跳过同步",
+                    "[XLINK_SYNC] viewRange 获取失败，跳过该 plot 检查",
                     exc_info=True,
                 )
                 continue
-            linked = vb.linkedView(0)
-            if linked is not None:
-                vb.setXLink(None)
-                logger.debug(
-                    "[XLINK] plot=%s temp unlink for sync (%.4f, %.4f)",
-                    getattr(pw, 'y_name', '?'), xmin, xmax,
-                )
-            try:
-                vb.enableAutoRange(x=False)
-                vb.setXRange(xmin, xmax, padding=0)
-            finally:
-                if linked is not None:
-                    vb.setXLink(linked)
-                    logger.debug(
-                        "[XLINK] plot=%s link restored after sync",
-                        getattr(pw, 'y_name', '?'),
-                    )
 
-            cur_geom = container.geometry()
-            try:
-                new_range = vb.viewRange()[0]
-                ok = (
-                    abs(new_range[0] - xmin) < tolerance
-                    and abs(new_range[1] - xmax) < tolerance
-                )
-            except Exception:
-                logger.debug(
-                    "[XLINK_SYNC] viewRange 验证失败",
-                    exc_info=True,
-                )
-                new_range = (None, None)
-                ok = False
-            logger.debug(
-                "[XLINK_SYNC]   synced plot: was=(%.4f,%.4f) now=(%.4f,%.4f) "
-                "geom=(%d,%d %dx%d) verified=%s",
-                cur_range[0] if cur_range else -1, cur_range[1] if cur_range else -1,
-                new_range[0] if new_range[0] is not None else -1,
-                new_range[1] if new_range[1] is not None else -1,
-                cur_geom.x(), cur_geom.y(), cur_geom.width(), cur_geom.height(),
-                ok,
+        # 若发现不一致，触发立即同步（绕过 16ms 延迟）
+        if mismatch_count > 0:
+            logger.info(
+                "[XLINK_SYNC] detected %d plot(s) with mismatched X range, "
+                "triggering immediate batched sync",
+                mismatch_count,
             )
-            if not ok:
-                plot_id = getattr(pw, 'y_name', '') or str(list(getattr(pw, 'curves', {}).keys())[:2])
-                vb_xlimits = vb.state.get('limits', {}).get('xLimits', [None, None])
-                # 不同宽度的 linked plot 会由 linkedViewChanged 按像素几何计算 range，
-                # 与 master 的 range 不同是正常行为，降级为 DEBUG
-                logger.debug(
-                    "[XLINK_SYNC] range mismatch (expected by geometry): expected=(%.4f, %.4f) got=(%s, %s) "
-                    "target_xLimits=%s plot=%s",
-                    xmin, xmax, new_range[0], new_range[1],
-                    vb_xlimits, plot_id,
-                )
+            batched_xlink = getattr(self.mw, '_batched_xlink', None)
+            if batched_xlink is not None:
+                batched_xlink.sync_now(source_pw=first_pw)
 
     def toggle_plot_area(self, checked):
         if checked:
@@ -617,8 +594,6 @@ class LayoutManager(MainWindowBaseManager):
                 w.deleteLater()
         self.mw.plot_widgets.clear()
 
-        first_viewbox = None
-
         for r in range(m):
             for c in range(n):
                 plot_widget = DraggableGraphicsLayoutWidget(
@@ -635,16 +610,16 @@ class LayoutManager(MainWindowBaseManager):
                         self.mw.cursor_mode, self.mw.pinned_x_values
                     )
 
-                if c == 0 and r == 0:
-                    first_viewbox = plot_widget.view_box
-                else:
-                    plot_widget.view_box.setXLink(first_viewbox)
+                # Phase 3: 不再调用 setXLink —— 由 BatchedXLinkSync 统一管理
 
                 container = PlotContainerWidget(plot_widget)
                 container.plot_widget = plot_widget
 
                 self.mw.plot_layout.addWidget(container, r, c)
                 self.mw.plot_widgets.append(container)
+
+        # Phase 3: 初始化 BatchedXLinkSync，监听所有 plot 的 sigRangeChanged
+        self._setup_batched_xlink()
 
         for r in range(m):
             percentage = self.mw.row_height_factors.get(r, 100)
@@ -658,6 +633,33 @@ class LayoutManager(MainWindowBaseManager):
         for r in range(m):
             if r not in self.mw.row_height_factors:
                 self.mw.row_height_factors[r] = 100
+
+    def _setup_batched_xlink(self) -> None:
+        """Phase 3: 初始化或重建 BatchedXLinkSync 管理器
+
+        替代 pyqtgraph 原生 setXLink 级联机制，使用 16ms PreciseTimer
+        将多个 sigRangeChanged 事件批处理为一次批量 setXRange 操作。
+
+        监听所有 plot 的 sigRangeChanged（不仅 master），以支持任意 plot
+        上的用户交互。_is_syncing_range 标志防止反馈循环。
+        """
+        from src.ui.widgets.batched_xlink import BatchedXLinkSync
+
+        if not self.mw.plot_widgets:
+            return
+
+        plot_pws = [
+            container.plot_widget
+            for container in self.mw.plot_widgets
+            if hasattr(container, 'plot_widget')
+        ]
+        if not plot_pws:
+            return
+
+        # 复用已存在的实例（避免重复创建），否则新建
+        if not hasattr(self.mw, '_batched_xlink') or self.mw._batched_xlink is None:
+            self.mw._batched_xlink = BatchedXLinkSync()
+        self.mw._batched_xlink.setup(plot_pws)
 
     def set_row_height(self, row: int, percentage: int) -> None:
         if row < 0 or row >= self.mw._plot_row_max_default:
@@ -728,22 +730,33 @@ class LayoutManager(MainWindowBaseManager):
             container.setVisible(r < row_set and c < col_set)
 
     def _sync_xlink_after_visibility_change(self, row_set, col_set):
-        """可见性变更后同步 X-link"""
-        n = self.mw._plot_col_max_default
-        master_vb = self.mw.plot_widgets[0].plot_widget.view_box if self.mw.plot_widgets else None
-        for idx, container in enumerate(self.mw.plot_widgets):
-            if idx == 0:
-                continue
-            r, c = divmod(idx, n)
-            should_be_visible = r < row_set and c < col_set
-            vb = container.plot_widget.view_box
-            currently_linked = vb.linkedView(0) is not None
-            if should_be_visible and not currently_linked:
-                logger.debug("[XLINK] set_plots_visible: establishing link for plot idx=%d r=%d c=%d", idx, r, c)
-                vb.setXLink(master_vb)
-            elif not should_be_visible and currently_linked:
-                logger.debug("[XLINK] set_plots_visible: breaking link for hidden plot idx=%d r=%d c=%d", idx, r, c)
-                vb.setXLink(None)
+        """Phase 3: 可见性变更后同步 X 范围
+
+        替代原 setXLink/setXLink(None) 逻辑：
+        - BatchedXLinkSync 始终监听所有 plot（无论可见性）
+        - _flush_sync 内部跳过不可见 plot
+        - 可见性变更后触发立即同步，让新可见的 plot 跟上当前 X 范围
+        """
+        batched_xlink = getattr(self.mw, '_batched_xlink', None)
+        if batched_xlink is None:
+            return
+
+        # 找到第一个可见 plot 作为同步源（通常是 plot[0]，但防御性处理）
+        source_pw = None
+        for container in self.mw.plot_widgets:
+            if container.isVisible() and hasattr(container, 'plot_widget'):
+                source_pw = container.plot_widget
+                break
+
+        if source_pw is None:
+            return
+
+        logger.debug(
+            "[XLINK] set_plots_visible: triggering batched sync after visibility change "
+            "(row_set=%d, col_set=%d, source=%s)",
+            row_set, col_set, getattr(source_pw, 'y_name', '?'),
+        )
+        batched_xlink.sync_now(source_pw=source_pw)
 
     def _adjust_stretch_and_range(self, row_set, col_set):
         """调整 stretch 因子和 X 范围"""
@@ -816,6 +829,8 @@ class LayoutManager(MainWindowBaseManager):
 
         synced_count = 0
         sync_error = None
+        # Phase 3: 不再有原生 XLink，无需 unlink/restore 模式
+        # _is_syncing_range=True 抑制 _on_range_changed 与 BatchedXLinkSync 的回调
         for container in self.mw.plot_widgets:
             if container.isVisible():
                 container.plot_widget._is_syncing_range = True
@@ -825,7 +840,6 @@ class LayoutManager(MainWindowBaseManager):
                     continue
                 widget = container.plot_widget
                 vb = widget.view_box
-                linked = vb.linkedView(0)
                 geom = container.geometry()
 
                 before_min, before_max = None, None
@@ -834,23 +848,14 @@ class LayoutManager(MainWindowBaseManager):
                 except Exception:
                     logger.debug("获取 viewRange 失败", exc_info=True)
 
-                if linked is not None:
-                    vb.setXLink(None)
-                    logger.debug(
-                        "[XLINK] plot=%s temp unlink for sync_all (%.4f, %.4f)",
-                        getattr(container.plot_widget, 'y_name', f'idx={idx}'),
-                        global_min, global_max,
-                    )
                 try:
                     vb.enableAutoRange(x=False)
                     vb.setXRange(global_min, global_max, padding=0)
-                finally:
-                    if linked is not None:
-                        vb.setXLink(linked)
-                        logger.debug(
-                            "[XLINK] plot=%s link restored after sync_all",
-                            getattr(container.plot_widget, 'y_name', f'idx={idx}'),
-                        )
+                except Exception as e:
+                    logger.warning(
+                        "[LAYOUT] setXRange failed at plot idx=%d: %s", idx, e,
+                    )
+                    raise
 
                 after_min, after_max = None, None
                 try:
@@ -859,7 +864,6 @@ class LayoutManager(MainWindowBaseManager):
                     logger.debug("获取 viewRange 失败", exc_info=True)
 
                 r, c = divmod(idx, n)
-                is_xlinked = linked is not None
                 match_ok = (
                     after_min is not None
                     and after_max is not None
@@ -867,9 +871,9 @@ class LayoutManager(MainWindowBaseManager):
                     and abs(after_max - global_max) < 1e-6
                 )
                 logger.debug(
-                    "[LAYOUT]   plot[%d,%d] idx=%d linked=%s before=(%.4f,%.4f) "
+                    "[LAYOUT]   plot[%d,%d] idx=%d before=(%.4f,%.4f) "
                     "after=(%.4f,%.4f) geom=(%d,%d %dx%d) match=%s",
-                    r, c, idx, is_xlinked,
+                    r, c, idx,
                     before_min if before_min is not None else -1,
                     before_max if before_max is not None else -1,
                     after_min if after_min is not None else -1,
@@ -879,9 +883,9 @@ class LayoutManager(MainWindowBaseManager):
                 )
                 if not match_ok:
                     logger.warning(
-                        "[LAYOUT] X-RANGE MISMATCH! plot[%d,%d] linked=%s "
+                        "[LAYOUT] X-RANGE MISMATCH! plot[%d,%d] "
                         "target=(%.4f,%.4f) actual=(%.4f,%.4f)",
-                        r, c, is_xlinked,
+                        r, c,
                         global_min, global_max,
                         after_min if after_min is not None else -1,
                         after_max if after_max is not None else -1,
@@ -904,5 +908,5 @@ class LayoutManager(MainWindowBaseManager):
                 "[LAYOUT] set_plots_visible done: synced %d visible plot(s)", synced_count,
             )
 
-        # 布局变更后调度一次 X-link 健康检查，覆盖 reload 后 link 丢失场景
+        # 布局变更后调度一次 X 范围健康检查，覆盖 reload 后范围漂移场景
         self._schedule_xlink_sync()
