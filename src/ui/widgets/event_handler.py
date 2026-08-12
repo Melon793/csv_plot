@@ -228,12 +228,10 @@ class EventHandler:
                 if y_auto:
                     # 直接修改 state 而非调用 setAutoVisible(y=False)，
                     # 避免触发 _autoRangeNeedsUpdate → prepareForPaint → 延迟 sigRangeChanged
-                    try:
-                        sibling.view_box.state['autoVisibleOnly'][1] = False
-                        count += 1
-                    except (KeyError, TypeError, IndexError):
-                        sibling.view_box.setAutoVisible(x=False, y=False)
-                        count += 1
+                    # 用 viewbox_state_compat 封装，支持 pyqtgraph 版本升级后的安全降级
+                    from src.ui.widgets.viewbox_state_compat import disable_y_autovisible
+                    disable_y_autovisible(sibling.view_box)
+                    count += 1
             except Exception:
                 logger.debug(
                     "[INTERACT] setAutoVisible(y=False) failed for plot",
@@ -360,11 +358,12 @@ class EventHandler:
                 # 标志：setYRange 已将 autoRange[1] 设为 False（_is_syncing_range=True
                 # 跳过了 _set_safe_y_range 内部的恢复分支），此处必须显式恢复，
                 # 否则 plot 永久 autoRange[1]=False，后续 wheel 报 "0 plots"。
-                try:
-                    sibling.view_box.state['autoRange'][1] = True
-                    sibling.view_box.state['autoVisibleOnly'][1] = True
-                except (KeyError, TypeError, IndexError):
-                    pass
+                # 用 viewbox_state_compat 封装，支持 pyqtgraph 版本升级后的安全降级
+                from src.ui.widgets.viewbox_state_compat import (
+                    restore_y_autorange, restore_y_autovisible,
+                )
+                restore_y_autorange(sibling.view_box)
+                restore_y_autovisible(sibling.view_box)
                 # setYRange 是同步的，sigRangeChanged 已在 _is_syncing_range=True 时被处理，
                 # 可以立即清除标志（无延迟发射需要防范）
                 sibling._is_syncing_range = False
