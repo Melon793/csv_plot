@@ -603,53 +603,41 @@ class CursorSyncManager(MainWindowBaseManager):
                         widget._safe_clear_plot_items()
                         widget.curves.clear()
                         widget.current_color_index = 0
-                        # 清空后立即归零密度，避免全清场景下 _sync_min_xrange
-                        # 读取陈旧 _max_point_density 抬高全局 minXRange
-                        widget._recalc_max_point_density()
 
                         # 逐个重建
                         curves_added = 0
-                        # batch 模式：抑制单曲线级别的 Y 轴调整 / vline bounds /
-                        # 密度重算，全部重建完成（可见性已恢复）后统一执行一次。
-                        # 否则重建中的隐藏曲线以 visible=True 参与自身触发的 Y 轴
-                        # 计算，若其为最后一条重建曲线会污染 Y 范围；且每条曲线都
-                        # 全量扫描已重建数据，总量 O(N²·L)。
-                        widget._batch_adding = True
-                        try:
-                            for var_name, state in saved_state.items():
-                                var_exists = (
-                                    (var_name in self.mw.loader.var_names)
-                                    if is_mdf
-                                    else (var_name in self.mw.loader.df.columns)
+                        for var_name, state in saved_state.items():
+                            var_exists = (
+                                (var_name in self.mw.loader.var_names)
+                                if is_mdf
+                                else (var_name in self.mw.loader.df.columns)
+                            )
+                            if not (
+                                var_exists
+                                and self.mw.loader.df_validity.get(var_name, -1) != -1
+                            ):
+                                logger.debug(
+                                    "[RELOAD] Plot[%d] 变量 %s 无效，跳过 (exists=%s)",
+                                    idx, var_name, var_exists,
                                 )
-                                if not (
-                                    var_exists
-                                    and self.mw.loader.df_validity.get(var_name, -1) != -1
-                                ):
-                                    logger.debug(
-                                        "[RELOAD] Plot[%d] 变量 %s 无效，跳过 (exists=%s)",
-                                        idx, var_name, var_exists,
-                                    )
-                                    continue
-                                success = widget.add_variable_to_plot(
-                                    var_name,
-                                    skip_existence_check=True,
-                                    preferred_color=state["color"],
-                                )
-                                if success:
-                                    curves_added += 1
-                                    # 恢复可见性
-                                    if var_name in widget.curves:
-                                        widget.curves[var_name].visible = state["visible"]
-                                        if widget.curves[var_name].curve is not None:
-                                            try:
-                                                widget.curves[var_name].curve.setVisible(
-                                                    state["visible"]
-                                                )
-                                            except Exception:
-                                                logger.debug("恢复曲线可见性失败", exc_info=True)
-                        finally:
-                            widget._batch_adding = False
+                                continue
+                            success = widget.add_variable_to_plot(
+                                var_name,
+                                skip_existence_check=True,
+                                preferred_color=state["color"],
+                            )
+                            if success:
+                                curves_added += 1
+                                # 恢复可见性
+                                if var_name in widget.curves:
+                                    widget.curves[var_name].visible = state["visible"]
+                                    if widget.curves[var_name].curve is not None:
+                                        try:
+                                            widget.curves[var_name].curve.setVisible(
+                                                state["visible"]
+                                            )
+                                        except Exception:
+                                            logger.debug("恢复曲线可见性失败", exc_info=True)
 
                         # 更新 UI（统一路径，无需归一化）
                         widget._update_header_for_curves()
@@ -660,39 +648,6 @@ class CursorSyncManager(MainWindowBaseManager):
 
                         if curves_added == 0 and saved_state:
                             cleared.append((idx + 1, "所有变量无效"))
-                        elif curves_added > 0:
-                            # 统一补偿 batch 模式跳过的副作用（对齐
-                            # add_variables_to_plot 批量路径的成功后处理）：
-                            # Y 轴仅基于最终可见曲线 + X 窗口交集；
-                            # vline bounds / cursor 用最终可见曲线的 x 范围。
-                            try:
-                                widget._update_axes_for_multi_curve()
-                                x_arrays = widget._collect_visible_curve_arrays('x_data')
-                                if x_arrays:
-                                    combined_x = np.concatenate(x_arrays)
-                                    vline_min_x = np.nanmin(combined_x)
-                                    vline_max_x = np.nanmax(combined_x)
-                                else:
-                                    # 全隐藏时回退到全局数据范围
-                                    # （与循环前设置的 vline bounds 一致）
-                                    vline_min_x, vline_max_x = min_x, max_x
-                                widget._set_vline_bounds([vline_min_x, vline_max_x])
-                                widget._update_cursor_after_plot(vline_min_x, vline_max_x)
-                                if widget.vline.isVisible():
-                                    widget.update_cursor_label()
-                                widget._recalc_max_point_density()
-                            except Exception:
-                                # 补偿失败不中断后续 plot 的重建，
-                                # 避免跨 plot 状态不一致（旧实现中这些调用
-                                # 位于 add_variable_to_plot 内部 try/except）
-                                logger.exception(
-                                    "[RELOAD] Plot[%d] 补偿失败（Y 轴/vline bounds），跳过",
-                                    idx,
-                                )
-
-                # 所有 plot 重建完成后统一同步 minXRange
-                # （原先每条曲线各触发一次全局同步，现收敛为一次）
-                self._sync_min_xrange()
 
             if self.mw.plot_widgets:
                 first_plot = self.mw.plot_widgets[0].plot_widget
