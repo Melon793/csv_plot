@@ -530,10 +530,11 @@ class MultiCurveManager:
                 color,
             )
 
-            self._update_header_for_curves()
-
             batch_adding = getattr(pw, '_batch_adding', False)
+            # batch 模式下 header/legend 由调用方在批量循环后统一刷新，
+            # 避免逐曲线重拼 legend 的 O(N²) 开销
             if not batch_adding:
+                self._update_header_for_curves()
                 y_arrays = pw._collect_visible_curve_arrays('y_data')
                 if y_arrays:
                     combined_y = np.concatenate(y_arrays)
@@ -571,20 +572,22 @@ class MultiCurveManager:
                         final_max_y = max(current_max_y, new_max_y)
                         pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
 
-            x_arrays = pw._collect_visible_curve_arrays('x_data')
-            if x_arrays:
-                combined_x = np.concatenate(x_arrays)
-                min_x, max_x = np.nanmin(combined_x), np.nanmax(combined_x)
-            else:
-                min_x, max_x = np.min(x_values), np.max(x_values)
-            pw._set_vline_bounds([min_x, max_x])
-
-            pw._update_cursor_after_plot(min_x, max_x)
-
-            if pw.vline.isVisible():
-                pw.update_cursor_label()
-
+            # batch 模式下跳过 vline bounds / cursor 更新 / 密度重算，
+            # 由调用方在批量循环完成后统一补偿（可见性已恢复）
             if not batch_adding:
+                x_arrays = pw._collect_visible_curve_arrays('x_data')
+                if x_arrays:
+                    combined_x = np.concatenate(x_arrays)
+                    min_x, max_x = np.nanmin(combined_x), np.nanmax(combined_x)
+                else:
+                    min_x, max_x = np.min(x_values), np.max(x_values)
+                pw._set_vline_bounds([min_x, max_x])
+
+                pw._update_cursor_after_plot(min_x, max_x)
+
+                if pw.vline.isVisible():
+                    pw.update_cursor_label()
+
                 pw._recalc_max_point_density()
                 main_window = pw.window()
                 if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
