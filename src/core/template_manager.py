@@ -157,7 +157,7 @@ class TemplateManager(QObject):
         return new_template
 
     def import_template(self, external_path: Path) -> Optional[PlotTemplate]:
-        """从外部文件导入"""
+        """从外部文件导入:读取 → 名称去重 → 落盘 → 发信号"""
         template = self._storage.import_from_external(external_path)
         if template:
             base_name = template.metadata.name

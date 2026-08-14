@@ -169,16 +169,18 @@ class TemplateStorage(QObject):
             raise TemplateStorageError(f"Failed to delete template: {e}")
 
     def import_from_external(self, external_path: Path) -> Optional[PlotTemplate]:
-        """从外部文件导入"""
+        """从外部文件读取模板并注入导入元数据。
+
+        仅负责读取 + 元数据初始化,不落盘、不写缓存。
+        落盘与名称去重由 TemplateManager.import_template 负责。
+        """
         try:
             template = self.read_template_from_file(external_path)
             if template:
-                new_id = self._generate_template_id()
-                template.metadata.id = new_id
+                template.metadata.id = self._generate_template_id()
                 template.metadata.source_file = str(external_path)
                 template.metadata.created_at = datetime.now().isoformat()
                 template.metadata.updated_at = datetime.now().isoformat()
-                self.write_template(template)
                 return template
         except Exception as e:
             logger.error(f"Error importing template from {external_path}: {e}")
