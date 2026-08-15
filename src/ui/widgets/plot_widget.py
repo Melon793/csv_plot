@@ -9,7 +9,13 @@ setup_platform()
 import numpy as np
 import pandas as pd
 
-from src.ui.drag_drop import VAR_SEPARATOR, parse_var_names_from_mimedata
+from src.ui.drag_drop import (
+    VAR_SEPARATOR,
+    parse_var_names_from_mimedata,
+    LEGEND_MIME_FORMAT,
+    get_active_legend_drag_source,
+    is_legend_drag_active,
+)
 from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
@@ -367,13 +373,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             main_window.layout_manager._hide_drag_indicator_for_plot(self)
             return
 
-        # Shift 状态轮询：仅在从变量表拖入（source_widget 为 None）时生效。
-        # 解决 dragMoveEvent 在鼠标静止时不触发、无法实时切换提示文字的问题。
+        # 修饰键轮询：解决 dragMoveEvent 在鼠标静止时不触发、无法实时切换提示文字的问题。
         var_names = getattr(self, '_drag_indicator_var_names', None)
         if var_names is None:
             return
-        shift_pressed = bool(QApplication.queryKeyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-        desired_text = "释放以替换" if shift_pressed else None
+        mods = QApplication.queryKeyboardModifiers()
+        # 检测目标是否已含所有拖入变量（用于"已存在"文案）
+        already = bool(var_names) and all(name in self.curves for name in var_names)
+
+        if is_legend_drag_active():
+            # legend 来源：轮询 Alt（复制/移动切换），Shift 忽略（设计 §2.2）
+            alt_pressed = bool(mods & Qt.KeyboardModifier.AltModifier)
+            action = "移动" if alt_pressed else "复制"
+            desired_text = self._build_indicator_text(var_names, action, already)
+        else:
+            # 变量列表来源：轮询 Shift（添加/替换切换）
+            shift_pressed = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+            action = "替换" if shift_pressed else "添加"
+            desired_text = self._build_indicator_text(var_names, action, already)
+
         if desired_text != getattr(self, '_drag_indicator_last_text', '_unset'):
             self._drag_indicator_last_text = desired_text
             main_window.layout_manager._show_drag_indicator_for_plot(self, var_names, desired_text)
@@ -687,28 +705,57 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._plot_data_manager.update_time_correction(new_factor, new_offset)
 
     # ---------------- 拖拽相关 ----------------
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasText():
-            var_names = self._extract_var_names_from_text(event.mimeData().text())
-            shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-            # Shift 时强制显示"释放以替换"；非 Shift 时让 _build_indicator_text 自行判断
-            text_override = "释放以替换" if shift_pressed else None
-            self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
-            event.acceptProposedAction()
-        else:
+    def _build_indicator_text(
+        self, var_names: list[str], action: str, already: bool
+    ) -> str:
+        """统一指示器文案构建（设计 §2.2 扩展 + 用户反馈统一）
+
+        Args:
+            var_names: 拖入的变量名列表
+            action: 动作动词（"添加"/"替换"/"复制"/"移动"）
+            already: 目标是否已含该变量
+
+        Returns:
+            指示器文案
+
+        文案规则：
+        - 正常态："释放以{action}"
+        - 已存在态："变量已存在" 或 "变量已存在，释放以{action}"
+        """
+        if already:
+            return f"变量已存在，释放以{action}" if action in ("替换", "移动") else "变量已存在"
+        return f"释放以{action}"
+
+    def _handle_drag_hover(self, event):
+        """dragEnter/dragMove 共用：按来源出指示文案并 accept"""
+        mime = event.mimeData()
+        if not mime.hasText():
             self._notify_drag_indicator(hide=True)
             event.ignore()
+            return
+        var_names = self._extract_var_names_from_text(mime.text())
+        # 检测目标是否已含所有拖入变量（用于"已存在"文案）
+        already = bool(var_names) and all(name in self.curves for name in var_names)
+
+        if mime.hasFormat(LEGEND_MIME_FORMAT):
+            # legend 来源：Alt 决定复制/移动，Shift 忽略
+            alt_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            action = "移动" if alt_pressed else "复制"
+            text_override = self._build_indicator_text(var_names, action, already)
+        else:
+            # 变量列表来源：Shift=替换，否则=添加
+            shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            action = "替换" if shift_pressed else "添加"
+            text_override = self._build_indicator_text(var_names, action, already)
+
+        self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
+        event.acceptProposedAction()
+
+    def dragEnterEvent(self, event):
+        self._handle_drag_hover(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasText():
-            var_names = self._extract_var_names_from_text(event.mimeData().text())
-            shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-            text_override = "释放以替换" if shift_pressed else None
-            self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
-            event.acceptProposedAction()
-        else:
-            self._notify_drag_indicator(hide=True)
-            event.ignore()
+        self._handle_drag_hover(event)
 
     def dragLeaveEvent(self, event):
         self._notify_drag_indicator(hide=True)
@@ -716,27 +763,64 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def dropEvent(self, event):
         self._notify_drag_indicator(hide=True)
-        var_names = parse_var_names_from_mimedata(event.mimeData())
-        shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-    
-        if shift_pressed:
-            # Shift + 拖入 = 替换：先清空，再走对应绘制路径
-            self.clear_plot_item()
-            if len(var_names) > 1:
-                self.add_variables_to_plot(var_names)
-            elif len(var_names) == 1:
-                self.plot_variable(var_names[0])
-            # var_names 为空时无操作
+        mime = event.mimeData()
+        var_names = parse_var_names_from_mimedata(mime)
+
+        if mime.hasFormat(LEGEND_MIME_FORMAT):
+            self._handle_legend_drop(event, var_names)
         else:
+            shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if shift_pressed:
+                # Shift + 拖入 = 替换：先清空，再走对应绘制路径
+                self.clear_plot_item()
             # 普通拖入 = 添加（统一路径：plot_variable 内部自动判断首绘/追加）
             if len(var_names) > 1:
                 self.add_variables_to_plot(var_names)
             elif len(var_names) == 1:
                 self.plot_variable(var_names[0])
-    
+            # var_names 为空时无操作
+
         event.acceptProposedAction()
         if self.window():
             self.window().layout_manager.request_mark_stats_refresh()
+
+    def _handle_legend_drop(self, event, var_names: list[str]):
+        """legend 来源 drop：默认复制，Alt=移动（Shift 忽略，设计 §2.1/§3.3）"""
+        # legend 拖拽恒为单变量（press 瞬间锁定单个锚点），无批量协议
+        name = var_names[0] if var_names else None
+        if name is None:
+            event.ignore()
+            return
+        alt_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        # 前置判重而非依赖 plot_variable 返回值：后者无法区分
+        # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
+        already = name in self.curves
+
+        if alt_pressed:
+            # 移动语义：目标已存在则跳过添加（移动合并），仍删源
+            added = already or self.plot_variable(name, show_duplicate_warning=False)
+            if added:
+                source = get_active_legend_drag_source(event.mimeData())
+                # source is self 守卫：同一 plot + Alt → 无操作
+                if source is not None and source is not self:
+                    # 延迟一拍执行源端删除：dropEvent 调用栈内直接对源 scene
+                    # removeItem + setHtml 重建，存在 BSP 中间态与 paint 并发
+                    # 风险（项目历史踩坑）。singleShot(0) 晚于 drop 栈返回、
+                    # 仍早于源端 exec 返回（对象存活）
+                    def _deferred_remove(src=source, var=name):
+                        try:
+                            src.remove_variable_from_plot(var)
+                        except RuntimeError:
+                            logger.debug("legend 移动拖拽：源 plot 已销毁，跳过删除")
+
+                    QTimer.singleShot(0, _deferred_remove)
+        else:
+            # 复制语义：目标已存在则弹提示（与变量列表行为一致）
+            if already:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
+            else:
+                self.plot_variable(name, show_duplicate_warning=False)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区 → 委托到 MultiCurveManager"""
@@ -790,6 +874,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """清除绘图项 → 委托到 PlotDataManager"""
         self._plot_data_manager.clear_plot_item()
         self.curves_changed.emit()
+
+    def remove_variable_from_plot(self, var_name: str, *, emit_changed: bool = True) -> bool:
+        """从 plot 移除单个变量 → 委托到 PlotDataManager"""
+        return self._plot_data_manager.remove_variable_from_plot(
+            var_name, emit_changed=emit_changed
+        )
+
+    def remove_variables_from_plot(self, var_names: list[str]) -> list[str]:
+        """批量移除变量（不 emit，调用方按需触发）→ 委托到 PlotDataManager"""
+        return self._plot_data_manager.remove_variables_from_plot(var_names)
 
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,

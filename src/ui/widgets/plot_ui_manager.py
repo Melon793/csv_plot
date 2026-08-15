@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, QPoint
-from PySide6.QtGui import QFontMetrics, QPen, QColor
+from PySide6.QtGui import QFontMetrics, QPen, QColor, QDrag
 from PySide6.QtWidgets import (
     QSizePolicy,
     QGraphicsProxyWidget,
@@ -35,6 +35,13 @@ from src.core.config import (
     XRANGE_THRESHOLD_FOR_SYMBOLS,
 )
 from src.core.logger import get_logger
+from src.ui.drag_drop import (
+    build_legend_var_mimedata,
+    clear_active_legend_drag,
+    create_drag_pixmap,
+    parse_anchor_var_name,
+    set_active_legend_drag,
+)
 
 logger = get_logger("widget.plot_ui")
 from src.core.scheduler import UnifiedUpdateScheduler
@@ -68,6 +75,65 @@ LEGEND_SCROLLBAR_QSS = """
         background: transparent;
     }
 """
+
+
+class LegendTextBrowser(QTextBrowser):
+    """支持将变量名拖出到其他 plot 的 legend 容器。
+
+    点击（位移 < startDragDistance）保持原有 anchorClicked 切换显隐行为；
+    超过阈值才发起 QDrag，两种手势物理互斥（见设计文档 §3.4）。
+    """
+
+    def __init__(self, plot_widget):
+        super().__init__()
+        self._pw = plot_widget  # 弱语义持有（同生命周期，无需 weakref）
+        self._drag_press_pos: QPoint | None = None
+        self._drag_var_name: str | None = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            href = self.anchorAt(event.position().toPoint())
+            # 按压瞬间解析变量名（拖拽期间 setHtml 重建文档也不影响）
+            self._drag_var_name = parse_anchor_var_name(href)
+            self._drag_press_pos = event.position().toPoint()
+        super().mousePressEvent(event)  # 保留链接高亮/anchor 内部状态
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_var_name
+            and self._drag_press_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and (event.position().toPoint() - self._drag_press_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._start_var_drag()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # 无条件清空 press 状态，防止悬空状态残留（拖拽取消兜底）
+        self._drag_press_pos = None
+        self._drag_var_name = None
+        super().mouseReleaseEvent(event)  # 未拖拽时正常触发 anchorClicked
+
+    def _start_var_drag(self):
+        var_name = self._drag_var_name
+        self._drag_var_name = None
+        self._drag_press_pos = None
+        drag = QDrag(self)
+        drag.setMimeData(build_legend_var_mimedata([var_name], self._pw))
+        pixmap = create_drag_pixmap([var_name], self.font())
+        if pixmap:
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+        set_active_legend_drag(self._pw, [var_name])
+        try:
+            # CopyAction|MoveAction 并存，drop 端按 Alt 决定语义。
+            # exec 进入嵌套事件循环，release 被拖拽会话消费，
+            # anchorClicked 不会误发 —— 点击/拖拽互斥的核心保证。
+            drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+        finally:
+            clear_active_legend_drag()
 
 
 class PlotUIManager(BasePlotManager):
@@ -181,7 +247,7 @@ class PlotUIManager(BasePlotManager):
         pw._legend_right_spacer.setMinimumWidth(0)
         pw._legend_right_spacer.setMaximumWidth(0)
 
-        pw.legend_label = QTextBrowser()
+        pw.legend_label = LegendTextBrowser(pw)
         pw.legend_label.setOpenLinks(False)           # 禁止真实导航，只发 anchorClicked
         pw.legend_label.setFrameStyle(QFrame.Shape.NoFrame)
         pw.legend_label.setStyleSheet("""

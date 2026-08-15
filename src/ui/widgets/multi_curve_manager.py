@@ -13,7 +13,7 @@ MultiCurveManager - 曲线绘图管理（统一版）
 from __future__ import annotations
 import html
 from typing import Any, TYPE_CHECKING
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 import numpy as np
 import pyqtgraph as pg
@@ -21,10 +21,9 @@ from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
+from src.ui.drag_drop import ANCHOR_SCHEME, parse_anchor_var_name
 
 logger = get_logger("widget.multi_curve")
-
-ANCHOR_SCHEME = "curve"
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
@@ -319,14 +318,11 @@ class MultiCurveManager:
         """锚点点击：解析 href 中的变量名并切换曲线显隐
 
         变量名存放在 URL path 部分（curve:///name）：QUrl 会将 host 强制
-        转小写并对非 ASCII 做 IDNA 编码，导致大写/中文变量名无法匹配。
+        转小写并对非 ASCII 做 IDNA 编码，故用 toString + unquote 解析
+        （封装在 parse_anchor_var_name，与 legend 拖拽发起端共用）。
         """
-        prefix = f"{ANCHOR_SCHEME}:///"
-        raw = url.toString()
-        if not raw.startswith(prefix):
-            return
-        var_name = unquote(raw[len(prefix):])
-        if var_name in self.pw.curves:
+        var_name = parse_anchor_var_name(url.toString())
+        if var_name and var_name in self.pw.curves:
             self.toggle_curve_visibility_by_name(var_name)
 
     def _apply_plot_style(self, show_symbols: bool = False):
