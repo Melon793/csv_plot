@@ -683,6 +683,78 @@ class PlotDataManager:
         self._axis_manager._reset_plot_limits()
         self._clear_plot_data()
 
+    # ========================================================================
+    # 变量移除（权威实现，设计文档 §3.5）
+    # ========================================================================
+
+    def _remove_single_curve_light(self, var_name: str) -> bool:
+        """轻量移除单条曲线（removeItem + del curves，不含刷新链）"""
+        pw = self.pw
+        if var_name not in pw.curves:
+            return False
+        ci = pw.curves[var_name]
+        if ci.curve is not None:
+            try:
+                if ci.curve.scene() is not None:
+                    pw.plot_item.removeItem(ci.curve)
+            except RuntimeError:
+                logger.debug("曲线 C++ 对象已销毁，跳过 removeItem: %s", var_name)
+        del pw.curves[var_name]
+        return True
+
+    def _post_remove_refresh(self):
+        """变量移除后的统一完整刷新链（单量/批量共用，与编辑器原删除逻辑逐条对齐）"""
+        pw = self.pw
+        pw._update_header_for_curves()
+        pw._update_vline_bounds_from_data()
+        if pw.vline.isVisible():
+            pw.update_cursor_label()
+        if not pw.curves:
+            pw.current_color_index = 0
+            # 先重置 Y 轴范围（与 clear_plot_item 顺序一致：先 reset 再 clear）
+            pw._reset_plot_limits()
+            # 完全清除对象池，避免复用异常状态的 items
+            pw._clear_cursor_items(hide_only=False)
+            pw._safe_clear_plot_items()
+        pw._recalc_max_point_density()
+        main_window = pw.window()
+        if main_window is not None and hasattr(main_window, "cursor_sync_manager"):
+            main_window.cursor_sync_manager._sync_min_xrange()
+
+    def remove_variable_from_plot(
+        self, var_name: str, *, emit_changed: bool = True
+    ) -> bool:
+        """从 plot 移除单个变量（legend 移动拖拽专用：完整刷新链 + 条件 emit）
+
+        emit_changed 为 True 且曲线集合实际变化时发射 curves_changed
+        （与项目其他 emit 站点一致的无条件发射），联动编辑器/搜索栏增量刷新。
+        """
+        pw = self.pw
+        if not self._remove_single_curve_light(var_name):
+            return False
+        self._post_remove_refresh()
+        if emit_changed:
+            pw.curves_changed.emit()
+        return True
+
+    def remove_variables_from_plot(self, var_names: list[str]) -> list[str]:
+        """批量移除变量（编辑器多选删除/清空专用）
+
+        内部逐个执行轻量删除（removeItem + del curves），末尾统一执行一次
+        完整刷新链；不 emit curves_changed（由调用方按需触发，防信号回环）。
+        保持编辑器多选删除的现有性能特征（N 选删除 = 1 次全量刷新）。
+
+        Returns:
+            实际删除成功的变量名列表
+        """
+        removed: list[str] = []
+        for var_name in var_names or []:
+            if self._remove_single_curve_light(var_name):
+                removed.append(var_name)
+        if removed:
+            self._post_remove_refresh()
+        return removed
+
     def reset_plot(self, index_xMin: float, index_xMax: float):
         """重置绘图"""
         pw = self.pw

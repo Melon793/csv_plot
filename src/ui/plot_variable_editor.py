@@ -542,6 +542,9 @@ class PlotVariableEditorDialog(QDialog):
         （搜索栏移除）共用。调用方负责后续的会话状态处理：
         - 表格删除：调 reset_session 增量刷新样式
         - 搜索栏移除：调 mark_removed 增量刷新标记（选中停留原项）
+
+        plot 侧删除委托 remove_variables_from_plot（批量、单次刷新链、
+        不 emit，防信号回环），编辑器仅保留表格行删除/选中迁移/删空 emit。
         """
         selected_items = self.var_table.selectedItems()
         if not selected_items:
@@ -555,22 +558,21 @@ class PlotVariableEditorDialog(QDialog):
         # 记录最小的被删除行号，用于后续选中
         min_deleted_row = min(selected_rows)
 
-        # 从后往前删除，避免行号变化
-        for row in sorted(selected_rows, reverse=True):
-            # 获取变量名 - 现在从第二列（变量名列）获取
+        # 收集待删变量名（按行号升序，与 curves 字典顺序一致）
+        selected_names: list[str] = []
+        for row in sorted(selected_rows):
             var_name_item = self.var_table.item(row, 1)
             if var_name_item is None:
                 continue
             var_name = var_name_item.data(Qt.ItemDataRole.UserRole)
-        
-            # 统一版：始终从 curves 字典移除
-            if var_name in self.plot_widget.curves:
-                ci = self.plot_widget.curves[var_name]
-                if ci.curve is not None and ci.curve.scene() is not None:
-                    self.plot_widget.plot_item.removeItem(ci.curve)
-                del self.plot_widget.curves[var_name]
-        
-            # 从表格中移除
+            if var_name:
+                selected_names.append(var_name)
+
+        # plot 侧批量移除（轻量删除 + 末尾一次完整刷新链，不 emit）
+        self.plot_widget.remove_variables_from_plot(selected_names)
+
+        # 从表格中移除（从后往前，避免行号变化）
+        for row in sorted(selected_rows, reverse=True):
             self.var_table.removeRow(row)
 
         # 删除后自动选中下一条或上一条曲线
@@ -586,36 +588,19 @@ class PlotVariableEditorDialog(QDialog):
             # 选中整行
             self.var_table.selectRow(next_row)
 
-        # 更新 header 显示
-        self.plot_widget._update_header_for_curves()
-
-        # 更新vline bounds以反映移除变量后的数据范围
-        self.plot_widget._update_vline_bounds_from_data()
-
-        # 刷新 cursor 标签以反映曲线删除
-        if self.plot_widget.vline.isVisible():
-            self.plot_widget.update_cursor_label()
-
-        # 如果删除了所有曲线，确保完全清理
+        # 删空时才通知其他 widget（与改造前 emit 行为一致；
+        # 部分删除不 emit，避免与编辑器自身行删除双刷新形成回环）
         if not self.plot_widget.curves:
-            self.plot_widget.current_color_index = 0
-            self.plot_widget.update_legend_label("channel name")
-
-            # 先重置 Y 轴范围（与 clear_plot_item 顺序一致：先 reset 再 clear）
-            self.plot_widget._reset_plot_limits()
-            # 清空所有变量时完全清除对象池，避免复用异常状态的items
-            self.plot_widget._clear_cursor_items(hide_only=False)
-            self.plot_widget._safe_clear_plot_items()
-            # 通知其他 widget 曲线已清空（与 clear_plot_item 的 emit 行为一致）
             self.plot_widget.curves_changed.emit()
 
-        self.plot_widget._recalc_max_point_density()
-        main_window = self.plot_widget.window()
-        if main_window is not None and hasattr(main_window, "cursor_sync_manager"):
-            main_window.cursor_sync_manager._sync_min_xrange()
-
     def clear_all_variables(self):
-        """清空所有变量（统一版）"""
+        """清空所有变量（统一版）
+
+        plot 侧删除委托 remove_variables_from_plot（含完整清理链：
+        legend/光标 item 池/密度/_sync_min_xrange，顺带修复原实现
+        缺失的 4 项清理，设计 §3.5 S7）；编辑器仅保留确认框、
+        表格清空与删空 emit（批量 API 不 emit，维持显式触发现状）。
+        """
         reply = QMessageBox.question(
             self,
             "确认",
@@ -625,28 +610,18 @@ class PlotVariableEditorDialog(QDialog):
         if reply == QMessageBox.StandardButton.Yes:
             cleared_count = len(self.plot_widget.curves)
             logger.debug("[EDITOR] clear_all_variables: 清除 %d 条曲线", cleared_count)
-            # 统一版：清空 curves 字典
-            for var_name, ci in list(self.plot_widget.curves.items()):
-                if ci.curve is not None and ci.curve.scene() is not None:
-                    self.plot_widget.plot_item.removeItem(ci.curve)
-            self.plot_widget.curves.clear()
-            self.plot_widget.current_color_index = 0
-            # 重置 Y 轴范围到默认 0-1
-            self.plot_widget._reset_plot_limits()
-    
+            # 批量移除（单次刷新链，不 emit）
+            self.plot_widget.remove_variables_from_plot(
+                list(self.plot_widget.curves)
+            )
+
             # 清空表格
             self.var_table.setRowCount(0)
             self.update_button_states()
             # 清空所有 → 重置搜索会话（增量刷新已添加样式，不跳顶）
             if self.search_bar is not None:
                 self.search_bar.reset_session()
-    
-            # 更新显示
-            self.plot_widget.update_legend_label("channel name")
 
-            # 重置vline bounds到默认值
-            self.plot_widget._update_vline_bounds_from_data()
-    
             # 通知其他组件曲线已清空
             self.plot_widget.curves_changed.emit()
 
