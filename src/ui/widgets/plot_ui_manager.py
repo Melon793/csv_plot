@@ -86,7 +86,10 @@ class LegendTextBrowser(QTextBrowser):
 
     def __init__(self, plot_widget):
         super().__init__()
-        self._pw = plot_widget  # 弱语义持有（同生命周期，无需 weakref）
+        # 强引用：legend_label 经 proxy 由 pw 持有，二者生命周期同源；
+        # 形成的 pw → proxy → label → _pw 引用环由 CPython 循环 GC 回收，
+        # 无需 weakref（Qt 父子链保证 label 先于 pw 销毁）
+        self._pw = plot_widget
         self._drag_press_pos: QPoint | None = None
         self._drag_var_name: str | None = None
 

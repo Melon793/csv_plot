@@ -160,6 +160,52 @@ class MultiCurveManager:
         if pw.vline.isVisible():
             pw.update_cursor_label()
 
+    def _finalize_batch_add(
+        self,
+        *,
+        update_header: bool = True,
+        vline_fallback: tuple[float, float] | None = None,
+        sync_min_xrange: bool = True,
+    ) -> None:
+        """批量添加收尾：补偿 _batch_adding 模式跳过的副作用（唯一权威实现）。
+
+        普通批量添加（add_variables_to_plot）与 reload 批量重建
+        （cursor_sync_manager.replots_after_loading）共用，避免双实现漂移。
+
+        Args:
+            update_header: 是否刷新 legend/header（调用方已刷新时传 False）
+            vline_fallback: 无可见曲线（全隐藏）时的 vline bounds 回退范围；
+                不传则保持原 bounds 不变（普通批量路径行为）
+            sync_min_xrange: 是否触发全局 minXRange 同步（reload 路径在
+                所有 plot 重建后统一触发一次，传 False）
+        """
+        pw = self.pw
+        if update_header:
+            self._update_header_for_curves()
+
+        self._update_axes_for_multi_curve()
+
+        x_arrays = pw._collect_visible_curve_arrays('x_data')
+        if x_arrays:
+            combined = np.concatenate(x_arrays)
+            min_x, max_x = np.nanmin(combined), np.nanmax(combined)
+        else:
+            min_x, max_x = vline_fallback if vline_fallback is not None else (None, None)
+
+        if min_x is not None:
+            pw._set_vline_bounds([min_x, max_x])
+            pw._update_cursor_after_plot(min_x, max_x)
+
+        if pw.vline.isVisible():
+            pw.update_cursor_label()
+
+        pw._recalc_max_point_density()
+
+        if sync_min_xrange:
+            main_window = pw.window()
+            if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
+                main_window.cursor_sync_manager._sync_min_xrange()
+
     def _recreate_curve(self, var_name: str):
         """重新创建失效的曲线"""
         pw = self.pw
@@ -428,24 +474,7 @@ class MultiCurveManager:
                         success_vars.append(var_name)
 
                 if success_vars:
-                    self._update_header_for_curves()
-
-                    self._update_axes_for_multi_curve()
-
-                    x_arrays = pw._collect_visible_curve_arrays('x_data')
-                    if x_arrays:
-                        combined = np.concatenate(x_arrays)
-                        min_x, max_x = np.nanmin(combined), np.nanmax(combined)
-                        pw._set_vline_bounds([min_x, max_x])
-                        pw._update_cursor_after_plot(min_x, max_x)
-
-                    if pw.vline.isVisible():
-                        pw.update_cursor_label()
-
-                    pw._recalc_max_point_density()
-                    main_window = pw.window()
-                    if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
-                        main_window.cursor_sync_manager._sync_min_xrange()
+                    self._finalize_batch_add()
             finally:
                 # try/finally 保证异常路径也复位 flag（对齐 cursor_sync_manager
                 # 批量重建路径）：否则 flag 残留 True 会使后续单曲线添加/

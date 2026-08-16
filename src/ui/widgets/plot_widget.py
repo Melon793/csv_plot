@@ -485,12 +485,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             scene_pos = self.mapToScene(ev.position().toPoint())
             if self._legend_proxy.sceneBoundingRect().contains(scene_pos):
                 sb = self.legend_label.verticalScrollBar()
-                fm = self.legend_label.fontMetrics()
-                # 每齿(120)滚动约 3 行
-                steps = delta / 120
-                sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
-                ev.accept()
-                return
+                if sb.maximum() > sb.minimum():
+                    # 内容溢出可滚动：滚轮驱动 legend 滚动（每齿(120)约 3 行）
+                    fm = self.legend_label.fontMetrics()
+                    steps = delta / 120
+                    sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
+                    ev.accept()
+                    return
+                # 内容未溢出：不吞事件，放行到下方 X 轴缩放路径
         # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
         if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
             if delta != 0:
@@ -904,6 +906,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def remove_variables_from_plot(self, var_names: list[str]) -> list[str]:
         """批量移除变量（不 emit，调用方按需触发）→ 委托到 PlotDataManager"""
         return self._plot_data_manager.remove_variables_from_plot(var_names)
+
+    def _finalize_batch_add(self, **kwargs):
+        """批量添加收尾补偿（唯一权威实现）→ 委托到 MultiCurveManager"""
+        self._multi_curve_manager._finalize_batch_add(**kwargs)
 
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
