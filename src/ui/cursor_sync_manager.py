@@ -661,26 +661,17 @@ class CursorSyncManager(MainWindowBaseManager):
                         if curves_added == 0 and saved_state:
                             cleared.append((idx + 1, "所有变量无效"))
                         elif curves_added > 0:
-                            # 统一补偿 batch 模式跳过的副作用（对齐
-                            # add_variables_to_plot 批量路径的成功后处理）：
-                            # Y 轴仅基于最终可见曲线 + X 窗口交集；
-                            # vline bounds / cursor 用最终可见曲线的 x 范围。
+                            # 复用批量添加收尾的权威实现（_finalize_batch_add）：
+                            # 补偿 batch 模式跳过的 Y 轴/vline bounds/cursor/密度。
+                            # 差异参数：header 上方已单独刷新；全隐藏时回退到
+                            # 全局数据范围（与循环前设置的 vline bounds 一致）；
+                            # minXRange 在所有 plot 重建后统一同步一次。
                             try:
-                                widget._update_axes_for_multi_curve()
-                                x_arrays = widget._collect_visible_curve_arrays('x_data')
-                                if x_arrays:
-                                    combined_x = np.concatenate(x_arrays)
-                                    vline_min_x = np.nanmin(combined_x)
-                                    vline_max_x = np.nanmax(combined_x)
-                                else:
-                                    # 全隐藏时回退到全局数据范围
-                                    # （与循环前设置的 vline bounds 一致）
-                                    vline_min_x, vline_max_x = min_x, max_x
-                                widget._set_vline_bounds([vline_min_x, vline_max_x])
-                                widget._update_cursor_after_plot(vline_min_x, vline_max_x)
-                                if widget.vline.isVisible():
-                                    widget.update_cursor_label()
-                                widget._recalc_max_point_density()
+                                widget._finalize_batch_add(
+                                    update_header=False,
+                                    vline_fallback=(min_x, max_x),
+                                    sync_min_xrange=False,
+                                )
                             except Exception:
                                 # 补偿失败不中断后续 plot 的重建，
                                 # 避免跨 plot 状态不一致（旧实现中这些调用

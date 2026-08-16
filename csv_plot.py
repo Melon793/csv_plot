@@ -36,7 +36,7 @@ def main():
         font.setPixelSize(13)
         app.setFont(font)
 
-    if 'ico_path' in globals() and os.path.exists(ico_path):
+    if os.path.exists(ico_path):
         app.setWindowIcon(QIcon(str(ico_path)))
 
     app.setQuitOnLastWindowClosed(False)

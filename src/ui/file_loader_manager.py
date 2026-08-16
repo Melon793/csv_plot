@@ -152,7 +152,8 @@ class FileLoaderManager(MainWindowBaseManager):
                 # 使用 PlotItem.removeItem() 同时清理 scene 和 PlotItem.items
                 widget.plot_item.removeItem(vline)
             except RuntimeError:
-                pass
+                # C++ 对象已销毁（预期场景），记录 debug 便于排查
+                logger.debug("移除 %s 时 C++ 对象已销毁，跳过", attr_name, exc_info=True)
             except Exception:
                 logger.debug("移除 %s 时异常", attr_name, exc_info=True)
 
@@ -175,7 +176,8 @@ class FileLoaderManager(MainWindowBaseManager):
                     widget.plot_item.addItem(vline, ignoreBounds=True)
                 # else: vline 已在 scene 中，跳过
             except RuntimeError:
-                pass
+                # C++ 对象已销毁（预期场景），记录 debug 便于排查
+                logger.debug("添加 %s 时 C++ 对象已销毁，跳过", attr_name, exc_info=True)
             except Exception:
                 logger.debug("添加 %s 时异常", attr_name, exc_info=True)
 
