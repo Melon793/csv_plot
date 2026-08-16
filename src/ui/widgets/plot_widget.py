@@ -791,6 +791,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if name is None:
             event.ignore()
             return
+        # 拖回原 plot：视为取消操作，不弹窗/不添加/不删除（复制/移动统一）
+        source = get_active_legend_drag_source(event.mimeData())
+        if source is not None and source is self:
+            return
         alt_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
         # 前置判重而非依赖 plot_variable 返回值：后者无法区分
         # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
@@ -800,8 +804,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 移动语义：目标已存在则跳过添加（移动合并），仍删源
             added = already or self.plot_variable(name, show_duplicate_warning=False)
             if added:
-                source = get_active_legend_drag_source(event.mimeData())
-                # source is self 守卫：同一 plot + Alt → 无操作
+                # source 复用方法开头取值；为 None 表示源已销毁，降级为复制不删源
                 if source is not None and source is not self:
                     # 延迟一拍执行源端删除：dropEvent 调用栈内直接对源 scene
                     # removeItem + setHtml 重建，存在 BSP 中间态与 paint 并发
