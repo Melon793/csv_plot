@@ -128,7 +128,7 @@ class LegendTextBrowser(QTextBrowser):
             drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
         set_active_legend_drag(self._pw, [var_name])
         try:
-            # CopyAction|MoveAction 并存，drop 端按 Alt 决定语义。
+            # CopyAction|MoveAction 并存，drop 端按 Ctrl 决定语义（默认移动、Ctrl=复制）。
             # exec 进入嵌套事件循环，release 被拖拽会话消费，
             # anchorClicked 不会误发 —— 点击/拖拽互斥的核心保证。
             drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
