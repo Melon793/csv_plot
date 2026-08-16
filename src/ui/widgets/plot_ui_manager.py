@@ -372,7 +372,18 @@ class PlotUIManager(BasePlotManager):
             except Exception:
                 logger.debug("强制布局落定失败", exc_info=True)
 
-        QTimer.singleShot(0, _recalc)   # 等 graphics layout 分配完宽度
+        def _safe_recalc():
+            # singleShot 延迟执行期间 plot 可能已关闭（C++ 对象销毁），
+            # 此时 label.document()/viewport() 等访问抛 RuntimeError，
+            # 跳过本次重算即可（对齐 safe_callback 的销毁契约）
+            try:
+                _recalc()
+            except RuntimeError:
+                logger.debug(
+                    "legend 高度重算跳过：C++ 对象已销毁", exc_info=True,
+                )
+
+        QTimer.singleShot(0, _safe_recalc)   # 等 graphics layout 分配完宽度
 
     # ========================================================================
     # Plot Area
