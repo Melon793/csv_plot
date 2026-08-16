@@ -382,9 +382,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         already = bool(var_names) and all(name in self.curves for name in var_names)
 
         if is_legend_drag_active():
-            # legend 来源：轮询 Alt（复制/移动切换），Shift 忽略（设计 §2.2）
-            alt_pressed = bool(mods & Qt.KeyboardModifier.AltModifier)
-            action = "移动" if alt_pressed else "复制"
+            # legend 来源：轮询 Ctrl（复制切换），无修饰键=移动，Shift 忽略（设计 §2.2）
+            copy_pressed = bool(mods & Qt.KeyboardModifier.ControlModifier)
+            action = "复制" if copy_pressed else "移动"
             desired_text = self._build_indicator_text(var_names, action, already)
         else:
             # 变量列表来源：轮询 Shift（添加/替换切换）
@@ -738,9 +738,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         already = bool(var_names) and all(name in self.curves for name in var_names)
 
         if mime.hasFormat(LEGEND_MIME_FORMAT):
-            # legend 来源：Alt 决定复制/移动，Shift 忽略
-            alt_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
-            action = "移动" if alt_pressed else "复制"
+            # legend 来源：Ctrl=复制，无修饰键=移动，Shift 忽略
+            copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+            action = "复制" if copy_pressed else "移动"
             text_override = self._build_indicator_text(var_names, action, already)
         else:
             # 变量列表来源：Shift=替换，否则=添加
@@ -785,7 +785,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self.window().layout_manager.request_mark_stats_refresh()
 
     def _handle_legend_drop(self, event, var_names: list[str]):
-        """legend 来源 drop：默认复制，Alt=移动（Shift 忽略，设计 §2.1/§3.3）"""
+        """legend 来源 drop：默认移动，Ctrl=复制（Shift 忽略，设计 §2.1/§3.3）"""
         # legend 拖拽恒为单变量（press 瞬间锁定单个锚点），无批量协议
         name = var_names[0] if var_names else None
         if name is None:
@@ -795,35 +795,52 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         source = get_active_legend_drag_source(event.mimeData())
         if source is not None and source is self:
             return
-        alt_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        # 反转：无修饰键=移动，Ctrl=复制（Shift 忽略）
+        copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
         # 前置判重而非依赖 plot_variable 返回值：后者无法区分
         # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
         already = name in self.curves
 
-        if alt_pressed:
-            # 移动语义：目标已存在则跳过添加（移动合并），仍删源
-            added = already or self.plot_variable(name, show_duplicate_warning=False)
-            if added:
-                # source 复用方法开头取值；为 None 表示源已销毁，降级为复制不删源
-                if source is not None and source is not self:
-                    # 延迟一拍执行源端删除：dropEvent 调用栈内直接对源 scene
-                    # removeItem + setHtml 重建，存在 BSP 中间态与 paint 并发
-                    # 风险（项目历史踩坑）。singleShot(0) 晚于 drop 栈返回、
-                    # 仍早于源端 exec 返回（对象存活）
-                    def _deferred_remove(src=source, var=name):
-                        try:
-                            src.remove_variable_from_plot(var)
-                        except RuntimeError:
-                            logger.debug("legend 移动拖拽：源 plot 已销毁，跳过删除")
-
-                    QTimer.singleShot(0, _deferred_remove)
-        else:
+        if copy_pressed:
             # 复制语义：目标已存在则弹提示（与变量列表行为一致）
             if already:
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
             else:
                 self.plot_variable(name, show_duplicate_warning=False)
+        else:
+            # 移动语义（默认）：目标已含该变量则弹确认窗（与复制反馈对齐），取消则两边都留
+            from PySide6.QtWidgets import QMessageBox
+            remove_source = False
+            if already:
+                if source is None:
+                    # 源已销毁，无源可删，仅提示已在目标
+                    QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
+                else:
+                    reply = QMessageBox.question(
+                        self, "移动确认",
+                        f"变量 {name} 已在目标绘图中。\n是否从源 plot 移除该变量？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    remove_source = reply == QMessageBox.StandardButton.Yes
+            else:
+                # 目标未含：正常添加，添加成功则删源
+                added = self.plot_variable(name, show_duplicate_warning=False)
+                remove_source = bool(added) and source is not None
+
+            if remove_source:
+                # 延迟一拍执行源端删除：dropEvent 调用栈内直接对源 scene
+                # removeItem + setHtml 重建，存在 BSP 中间态与 paint 并发
+                # 风险（项目历史踩坑）。singleShot(0) 晚于 drop 栈返回、
+                # 仍早于源端 exec 返回（对象存活）
+                def _deferred_remove(src=source, var=name):
+                    try:
+                        src.remove_variable_from_plot(var)
+                    except RuntimeError:
+                        logger.debug("legend 移动拖拽：源 plot 已销毁，跳过删除")
+
+                QTimer.singleShot(0, _deferred_remove)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区 → 委托到 MultiCurveManager"""
