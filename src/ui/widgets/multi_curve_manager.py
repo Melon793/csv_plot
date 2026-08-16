@@ -394,60 +394,63 @@ class MultiCurveManager:
                 variables_data.append((var_name, x_array, y_array, y_format))
 
             pw._batch_adding = True
+            try:
+                if variables_data:
+                    for var_name, x_array, y_array, y_format in variables_data:
+                        original_index = np.ascontiguousarray(x_array, dtype=np.float32)
+                        x_values = pw.offset + pw.factor * original_index
+                        y_contiguous = np.ascontiguousarray(y_array)
 
-            if variables_data:
-                for var_name, x_array, y_array, y_format in variables_data:
-                    original_index = np.ascontiguousarray(x_array, dtype=np.float32)
-                    x_values = pw.offset + pw.factor * original_index
-                    y_contiguous = np.ascontiguousarray(y_array)
+                        # 颜色分配（统一方法）
+                        color = self._assign_curve_color()
+                        logger.debug(
+                            "[COLOR] 批量添加颜色分配: var=%s, color=%s",
+                            var_name, color,
+                        )
 
-                    # 颜色分配（统一方法）
-                    color = self._assign_curve_color()
-                    logger.debug(
-                        "[COLOR] 批量添加颜色分配: var=%s, color=%s",
-                        var_name, color,
-                    )
+                        pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        curve = pw.plot_item.plot(
+                            x_values, y_contiguous, pen=pen, name=var_name,
+                            skipFiniteCheck=True, connect="all",
+                        )
 
-                    pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-                    curve = pw.plot_item.plot(
-                        x_values, y_contiguous, pen=pen, name=var_name,
-                        skipFiniteCheck=True, connect="all",
-                    )
+                        pw.curves[var_name] = CurveInfo(
+                            var_name=var_name,
+                            curve=curve,
+                            x_data=x_values,
+                            y_data=y_contiguous,
+                            original_index=original_index,
+                            color=color,
+                            y_format=y_format or '',
+                            visible=True
+                        )
 
-                    pw.curves[var_name] = CurveInfo(
-                        var_name=var_name,
-                        curve=curve,
-                        x_data=x_values,
-                        y_data=y_contiguous,
-                        original_index=original_index,
-                        color=color,
-                        y_format=y_format or '',
-                        visible=True
-                    )
+                        success_vars.append(var_name)
 
-                    success_vars.append(var_name)
+                if success_vars:
+                    self._update_header_for_curves()
 
-            pw._batch_adding = False
+                    self._update_axes_for_multi_curve()
 
-            if success_vars:
-                self._update_header_for_curves()
+                    x_arrays = pw._collect_visible_curve_arrays('x_data')
+                    if x_arrays:
+                        combined = np.concatenate(x_arrays)
+                        min_x, max_x = np.nanmin(combined), np.nanmax(combined)
+                        pw._set_vline_bounds([min_x, max_x])
+                        pw._update_cursor_after_plot(min_x, max_x)
 
-                self._update_axes_for_multi_curve()
+                    if pw.vline.isVisible():
+                        pw.update_cursor_label()
 
-                x_arrays = pw._collect_visible_curve_arrays('x_data')
-                if x_arrays:
-                    combined = np.concatenate(x_arrays)
-                    min_x, max_x = np.nanmin(combined), np.nanmax(combined)
-                    pw._set_vline_bounds([min_x, max_x])
-                    pw._update_cursor_after_plot(min_x, max_x)
-
-                if pw.vline.isVisible():
-                    pw.update_cursor_label()
-
-                pw._recalc_max_point_density()
-                main_window = pw.window()
-                if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
-                    main_window.cursor_sync_manager._sync_min_xrange()
+                    pw._recalc_max_point_density()
+                    main_window = pw.window()
+                    if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
+                        main_window.cursor_sync_manager._sync_min_xrange()
+            finally:
+                # try/finally 保证异常路径也复位 flag（对齐 cursor_sync_manager
+                # 批量重建路径）：否则 flag 残留 True 会使后续单曲线添加/
+                # 显隐切换静默跳过 header/vline/密度等全部刷新
+                pw._batch_adding = False
 
             if invalid_vars or duplicate_vars:
                 msg_parts = []
