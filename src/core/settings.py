@@ -67,6 +67,10 @@ class AppSettings:
 
     @staticmethod
     def _get_config_dir() -> Path:
+        # 环境变量注入优先（供自动化测试重定向到临时目录，避免污染真实用户配置）
+        override = os.environ.get("CSV_PLOT_CONFIG_DIR")
+        if override:
+            return Path(override)
         if sys.platform == "darwin":
             base = Path.home() / "Library" / "Application Support"
         elif sys.platform == "win32":
@@ -114,6 +118,12 @@ class AppSettings:
             self._settings.sync()
         except Exception as e:
             logging.getLogger(__name__).warning("配置迁移失败: %s", e)
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        """仅供自动化测试使用：重置单例，使下次实例化时重新读取配置目录"""
+        with cls._lock:
+            cls._instance = None
 
     @property
     def config_dir(self) -> Path:
