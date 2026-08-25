@@ -783,8 +783,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # var_names 为空时无操作
 
         event.acceptProposedAction()
-        if self.window():
-            self.window().layout_manager.request_mark_stats_refresh()
+        # 与 _notify_drag_indicator 的防御模式对齐：window() 非 MainWindow 时（如独立顶层/测试环境）无 layout_manager
+        main_window = self.window()
+        if main_window is not None and hasattr(main_window, 'layout_manager'):
+            main_window.layout_manager.request_mark_stats_refresh()
 
     def _handle_legend_drop(self, event, var_names: list[str]):
         """legend 来源 drop：默认移动，Ctrl=复制（Shift 忽略，设计 §2.1/§3.3）"""
