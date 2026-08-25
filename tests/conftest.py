@@ -25,7 +25,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-import pytest
+import pytest  # noqa: E402  # 环境变量必须先于任何 Qt/pytest import 设置
 
 
 @pytest.fixture(scope="session")
