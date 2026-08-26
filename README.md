@@ -199,24 +199,7 @@ uv run scripts/build_win.py
 
 ## 测试
 
-项目使用 pytest + pytest-qt + pytest-cov 构建 offscreen 无头测试体系（当前 180 个用例，全量约 3s）。
-
-安装 dev 依赖后即可运行：
-
-```bash
-uv sync --group dev
-
-# 日常开发：仅纯逻辑单元测试（秒级）
-uv run pytest -m unit
-
-# 提交前自检：单元 + 控件级测试
-uv run pytest -m "unit or component"
-
-# CI 全量 + 覆盖率
-uv run pytest --cov=src --cov-report=term-missing
-```
-
-测试环境自动隔离（offscreen 平台、配置/日志路径重定向到临时目录），不会污染真实用户配置。新用例编写指南、已知陷阱清单与拓展路线图见 [tests/README.md](tests/README.md)。
+项目使用 pytest + pytest-qt + pytest-cov 构建 offscreen 无头测试体系（当前 180 个用例，全量约 3s），测试环境自动隔离，不会污染真实用户配置。命令速查、分层设计、新用例编写指南与已知陷阱清单详见 [tests/README.md](tests/README.md)。
 
 ## 使用指南
 
