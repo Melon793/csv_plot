@@ -54,7 +54,16 @@ class FakeHost(QWidget):
 
 @pytest.fixture()
 def plot_factory(qapp):
-    """构造可独立绘图的 DraggableGraphicsLayoutWidget 工厂"""
+    """构造可独立绘图的 DraggableGraphicsLayoutWidget 工厂。
+
+    每个生成的 widget 自动完成：
+    1. 注入 FakePlotContext（否则绘图主路径触发 QMessageBox 阻塞，见
+       tests/README.md 陷阱清单 #1）；
+    2. setParent(FakeHost)，使 window().layout_manager 可解析；
+    3. 登记到 created/hosts 列表，fixture 收尾时统一 deleteLater。
+
+    df 缺省时注入 a/b/c 三列小型 DataFrame。
+    """
     created = []
     hosts = []
 
