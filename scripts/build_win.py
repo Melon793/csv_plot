@@ -1,3 +1,4 @@
+import datetime
 import importlib.metadata
 import importlib.util
 import os
@@ -15,6 +16,7 @@ REPORT_FILE = "report.xml"
 ASSETS_DIR = "assets"
 README_FILE = "README.md"
 ICON_FILE = "assets/icon.ico"
+BUILD_DATE_PREFIX = "> 📅 打包日期: "
 
 
 def get_asammdf_path():
@@ -225,6 +227,23 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
     return cmd
 
 
+def inject_build_date(help_md_path: Path):
+    """在 help.md 标题行后插入/更新打包日期行（幂等：已存在则更新）。"""
+    if not help_md_path.exists():
+        print(f"[WARN] 未找到 {help_md_path}，跳过打包日期注入")
+        return
+    lines = help_md_path.read_text(encoding="utf-8").splitlines()
+    date_line = f"{BUILD_DATE_PREFIX}{datetime.datetime.now():%Y/%m/%d}"
+    for i, line in enumerate(lines):
+        if line.startswith(BUILD_DATE_PREFIX):
+            lines[i] = date_line
+            break
+    else:
+        lines.insert(1, date_line)  # 标题行之后，即新的第二行
+    help_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[Build] 已注入打包日期: {date_line}")
+
+
 def build():
     os.chdir(PROJECT_ROOT)
 
@@ -296,6 +315,8 @@ def build():
         shutil.rmtree(d, ignore_errors=True)
 
     print(f"[Build] .pyc 编译与清理完成 (编译 {pyc_count} 个, 清理 {py_removed} 个 .py, 清理 {len(pycache_dirs)} 个 __pycache__)")
+
+    inject_build_date(dist_dir / "docs" / "help.md")
 
     print()
     print("[Build] ========================================")
