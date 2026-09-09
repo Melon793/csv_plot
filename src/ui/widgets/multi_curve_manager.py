@@ -455,9 +455,11 @@ class MultiCurveManager:
                         )
 
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
+                        # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
+                        # 避免 NaN 坐标进入 Qt 光栅化产生横线伪影。
                         curve = pw.plot_item.plot(
                             x_values, y_contiguous, pen=pen, name=var_name,
-                            skipFiniteCheck=True, connect="all",
                         )
 
                         pw.curves[var_name] = CurveInfo(
@@ -532,12 +534,13 @@ class MultiCurveManager:
             )
 
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck 快速路径；
+            # 含 NaN（ragged CSV 尾部补 NaN）自动断线，避免 NaN 坐标进入 Qt
+            # 光栅化产生横线伪影。
             curve = pw.plot_item.plot(
                 x_values, y_values,
                 pen=pen,
                 name=var_name,
-                skipFiniteCheck=True,
-                connect="all",
             )
 
             pw.curves[var_name] = CurveInfo(
