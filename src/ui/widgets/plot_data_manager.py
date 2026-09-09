@@ -120,9 +120,12 @@ class PlotDataManager:
             # 首条曲线保持蓝色（向后兼容）
             color = "blue"
             _pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            # 不显式传 connect/skipFiniteCheck，使用 pyqtgraph 默认 connect='auto'：
+            # 数据全有限时自动降级为 'all'+skipFiniteCheck=True（快速路径，性能与
+            # 原行为一致）；含 NaN（ragged CSV 短通道尾部补 NaN）时自动切 'finite'
+            # 断线，避免 NaN 坐标进入 Qt 光栅化产生平台相关的横线伪影。
             curve = pw.plot_item.plot(
                 x_values, y_contiguous, pen=_pen, name=var_name,
-                skipFiniteCheck=True, connect="all",
             )
     
             # 写入 curves 字典（统一数据源）
