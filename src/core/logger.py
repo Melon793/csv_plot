@@ -32,6 +32,11 @@ def _get_log_dir() -> str:
 
     candidates: list[str] = []
 
+    # 0. 环境变量注入（供自动化测试重定向日志目录，避免污染项目目录）
+    override = os.environ.get("CSV_PLOT_LOG_DIR")
+    if override:
+        candidates.append(override)
+
     # 1. 打包环境：exe 所在目录
     if is_frozen():
         exe_dir = os.path.dirname(sys.executable)

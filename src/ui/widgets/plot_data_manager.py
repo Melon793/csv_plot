@@ -447,6 +447,9 @@ class PlotDataManager:
             return (series.astype("int64") / 10**6).astype("float64")
         elif "ms" in dtype_str:
             return (series.astype("int64") / 10**3).astype("float64")
+        elif "[s]" in dtype_str:
+            # 秒精度（如 calamine 引擎输出 datetime64[s]）
+            return series.astype("int64").astype("float64")
         else:
             raise ValueError(f"Unsupported datetime dtype: {series.dtype}")
 
@@ -499,7 +502,9 @@ class PlotDataManager:
         elif var_name in pw.time_channels_info:
             fmt = pw.time_channels_info[var_name]
             try:
-                if "%H:%M:%S" in fmt:
+                # 纯时间通道的 fmt 以 %H:%M:%S 开头（日期/datetime 类 fmt 不以此开头，
+                # 旧写法 "%H:%M:%S" in fmt 会把 "%Y-%m-%d %H:%M:%S" 误判为纯时间列）
+                if fmt.startswith("%H:%M:%S"):
                     times = pd.to_datetime(raw_values, format=fmt, errors="coerce")
                     today = pd.Timestamp.today().normalize()
                     time_deltas = times - times.dt.normalize()

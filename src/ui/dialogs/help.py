@@ -3,6 +3,7 @@
 from __future__ import annotations
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QPushButton, QTextEdit, QDialog
 from src.utils.paths import resource_path
+from src._version import get_version, get_build_time
 
 
 class HelpDialog(QDialog):
@@ -28,11 +29,18 @@ class HelpDialog(QDialog):
         text_edit = QTextEdit(self)
         text_edit.setReadOnly(True)
 
-        # 加载 docs/help.md
+        # 加载 docs/help.md，动态注入版本号与编译时间
         help_path = resource_path("docs/help.md")
         if help_path.exists():
             with open(help_path, "r", encoding="utf-8") as f:
-                text_edit.setMarkdown(f.read())
+                md_content = f.read()
+            version = get_version()
+            build_time = get_build_time()
+            if build_time:
+                header = f"# CSV Plot v{version}\n\n编译时间：{build_time}\n\n***\n\n"
+            else:
+                header = f"# CSV Plot v{version}\n\n***\n\n"
+            text_edit.setMarkdown(header + md_content)
         else:
             text_edit.setPlainText("帮助文档未找到。")
 

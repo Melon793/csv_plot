@@ -22,4 +22,17 @@ dev = [
     "pytest>=9.0.3",
     "nuitka>=2.0",
     "pyinstaller>=6.0",
+    "pytest-qt>=4.5.0",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+addopts = "-ra"
+markers = [
+    "unit: 纯逻辑单元测试（无 Qt 界面依赖，秒级完成）",
+    "component: offscreen 控件级功能测试",
+    "e2e: 主窗口端到端冒烟测试",
+    "perf: 性能回归测试",
 ]

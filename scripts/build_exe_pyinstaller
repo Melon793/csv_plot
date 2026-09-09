@@ -5,12 +5,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
+# 构建结束后清理自动生成的构建信息文件，避免陈旧数据污染开发环境
+trap 'rm -f src/_build_info.py' EXIT
+
+# 查找可用的 Python
+if command -v uv &>/dev/null; then
+    PYTHON="uv run python"
+elif [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+else
+    PYTHON="python"
+fi
+
 SPEC="scripts/csv_plot_pyinstaller.spec"
 
 echo "============================================="
 echo " Building csv_plot with PyInstaller (optimized)"
 echo "============================================="
 echo "Spec file: $SPEC"
+echo
+
+echo "Generating build info..."
+$PYTHON scripts/generate_build_info.py
 echo
 
 pyinstaller --noconfirm --clean "$SPEC"

@@ -225,9 +225,37 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
     return cmd
 
 
+def generate_build_info():
+    """生成 src/_build_info.py，注入版本号与编译时间（由 _version.py 运行时读取）。"""
+    print("[Build] 正在生成构建信息 (_build_info.py)...")
+    result = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "scripts" / "generate_build_info.py")]
+    )
+    if result.returncode != 0:
+        print("[ERROR] 构建信息生成失败!")
+        sys.exit(result.returncode)
+
+
+def cleanup_build_info():
+    """构建结束后清理 src/_build_info.py，避免陈旧数据污染开发环境。"""
+    target = PROJECT_ROOT / "src" / "_build_info.py"
+    if target.exists():
+        target.unlink()
+        print("[Build] 已清理临时构建信息文件 src/_build_info.py")
+
+
 def build():
     os.chdir(PROJECT_ROOT)
 
+    generate_build_info()
+
+    try:
+        _run_build()
+    finally:
+        cleanup_build_info()
+
+
+def _run_build():
     include_packages, include_modules, hidden_excludes = discover_asammdf_deps()
 
     cmd = build_nuitka_cmd(include_packages, include_modules, hidden_excludes)

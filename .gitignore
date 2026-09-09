@@ -11,7 +11,11 @@ __pycache__/
 /*.build/
 .DS_Store
 /.*_backup/
-/tests/
 /.bak/
 error.md
 /*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+src/_build_info.py

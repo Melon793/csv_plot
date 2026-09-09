@@ -434,8 +434,10 @@ class MainWindow(QMainWindow):
         self._filter_debounce_timer.timeout.connect(self.cursor_sync_manager.filter_variables)
         self._mark_stats_timer.timeout.connect(self.layout_manager._flush_mark_stats_refresh)
 
+        from src._version import get_version
         self._logger.info(
-            "CSV Plot 启动 (Python %s, PySide6 %s)",
+            "CSV Plot v%s 启动 (Python %s, PySide6 %s)",
+            get_version(),
             sys.version.split()[0],
             __import__("PySide6").__version__,
         )
