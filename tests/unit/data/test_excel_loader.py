@@ -1,8 +1,11 @@
-"""ExcelDataLoader 单元测试：标题行检测、加载、sheet 信息。"""
+"""ExcelDataLoader 单元测试：标题行检测、加载、sheet 信息、时间通道识别。"""
 
 from __future__ import annotations
 
+import datetime as dt
+
 import openpyxl
+import pandas as pd
 import pytest
 
 from src.data.excel_loader import ExcelDataLoader
@@ -104,3 +107,93 @@ class TestGetSheetInfo:
         assert info[0]["name"] == "Sheet1"
         assert info[0]["rows"] == 5  # 标题 + 单位 + 3 数据行
         assert info[0]["cols"] == 3
+
+
+class TestTimeChannelColumns:
+    """时间通道识别回归测试：CSV 转 xlsx 后日期/时间变为原生类型单元格，
+    应与 CSV（字符串单元格）行为一致地进入 time_channels_info。"""
+
+    HEADER3 = ["Date", "Time", "RPM"]
+    UNITS3 = ["-", "-", "rpm"]
+
+    @staticmethod
+    def _load(path, monkeypatch=None):
+        if monkeypatch is not None:
+            # 强制走 openpyxl fallback 路径（跳过 calamine）
+            monkeypatch.setattr(
+                ExcelDataLoader, "_read_with_calamine",
+                lambda self: (_ for _ in ()).throw(ImportError("测试强制 openpyxl")),
+            )
+        return ExcelDataLoader(str(path), sheet_name=0, desc_rows=0, has_unit=True)
+
+    @pytest.fixture(params=["calamine", "openpyxl"])
+    def typed_time_xlsx(self, tmp_path, request, monkeypatch):
+        """生成含原生 date/time 单元格的 xlsx（模拟 Excel 另存 CSV 的默认行为）"""
+        f = _write_xlsx(
+            tmp_path / "typed.xlsx",
+            self.HEADER3, self.UNITS3,
+            [
+                [dt.date(2025, 1, 2), dt.time(13, 4, 34), 800.0],
+                [dt.date(2025, 1, 2), dt.time(13, 4, 35), 810.0],
+                [dt.date(2025, 1, 3), dt.time(13, 5, 12), 820.0],
+            ],
+        )
+        return self._load(f, monkeypatch if request.param == "openpyxl" else None)
+
+    def test_native_time_cells_recognized(self, typed_time_xlsx):
+        """纯时间单元格 → 登记为 %H:%M:%S 时间通道，数据不丢失（旧代码整列 NaT）"""
+        loader = typed_time_xlsx
+        assert loader.time_channels_info["Time"] == "%H:%M:%S"
+        assert loader.df["Time"].tolist() == ["13:04:34", "13:04:35", "13:05:12"]
+        assert loader.df_validity["Time"] == 1
+
+    def test_native_time_cells_monotonic_unix(self, typed_time_xlsx):
+        """时间通道按 fmt 解析后应单调递增（复刻下游 startswith 分支语义）"""
+        loader = typed_time_xlsx
+        fmt = loader.time_channels_info["Time"]
+        assert fmt.startswith("%H:%M:%S")
+        times = pd.to_datetime(loader.df["Time"], format=fmt, errors="coerce")
+        assert times.notna().all()
+        assert times.is_monotonic_increasing
+
+    def test_date_only_column_keeps_real_dates(self, typed_time_xlsx):
+        """纯日期列 → fmt 不含时间分量（旧代码误入 today 分支导致日期被抹平）"""
+        loader = typed_time_xlsx
+        fmt = loader.time_channels_info["Date"]
+        assert not fmt.startswith("%H:%M:%S")
+        ts = pd.to_datetime(loader.df["Date"], format=fmt, errors="coerce")
+        assert ts.iloc[0] == pd.Timestamp("2025-01-02 00:00:00")
+        assert ts.iloc[2] == pd.Timestamp("2025-01-03 00:00:00")
+
+    def test_time_cells_with_microseconds(self, tmp_path, monkeypatch):
+        """带微秒的纯时间单元格 → 列级统一 %H:%M:%S.%f（混合格式会导致匹配失败）"""
+        f = _write_xlsx(
+            tmp_path / "usec.xlsx",
+            ["TMOD", "val"], ["HH:MM:SS.mmm", "-"],
+            [
+                [dt.time(14, 59, 45, 731000), 1.0],
+                [dt.time(14, 59, 45, 831000), 2.0],
+            ],
+        )
+        loader = self._load(f, monkeypatch)
+        assert loader.time_channels_info["TMOD"] == "%H:%M:%S.%f"
+        assert loader.df["TMOD"].tolist() == ["14:59:45.731000", "14:59:45.831000"]
+        # 唯一时间通道会被设为 time_column_name（从 var_names/df_validity 剔除，转作 X 轴）
+        assert loader.time_column_name == "TMOD"
+
+    def test_full_datetime_column_fmt(self, tmp_path):
+        """完整 datetime 单元格 → fmt 为日期+时间（下游走日期分支，保留真实时刻）"""
+        f = _write_xlsx(
+            tmp_path / "dt.xlsx",
+            ["timestamp", "val"], ["-", "-"],
+            [
+                [dt.datetime(2025, 1, 2, 13, 4, 34), 1.0],
+                [dt.datetime(2025, 1, 2, 13, 4, 35), 2.0],
+            ],
+        )
+        loader = ExcelDataLoader(str(f), sheet_name=0, desc_rows=0, has_unit=True)
+        fmt = loader.time_channels_info["timestamp"]
+        assert fmt == "%Y-%m-%d %H:%M:%S"
+        assert not fmt.startswith("%H:%M:%S")  # 不误入 today+time-of-day 分支
+        ts = pd.to_datetime(loader.df["timestamp"], format=fmt, errors="coerce")
+        assert ts.iloc[0] == pd.Timestamp("2025-01-02 13:04:34")
