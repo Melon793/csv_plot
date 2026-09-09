@@ -43,6 +43,9 @@ a = Analysis(
     hiddenimports=[
         # 本项目需要手动声明的隐藏导入
         "src",
+        # 版本信息模块（_version.py 内 try-import，静态分析可能漏掉）
+        "src._version",
+        "src._build_info",
         "src.utils",
         "src.utils.paths",
         "src.core",

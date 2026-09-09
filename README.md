@@ -197,6 +197,10 @@ bash scripts/build_exe_nuitka
 uv run scripts/build_win.py
 ```
 
+## 测试
+
+项目使用 pytest + pytest-qt + pytest-cov 构建 offscreen 无头测试体系（当前 180 个用例，全量约 3s），测试环境自动隔离，不会污染真实用户配置。命令速查、分层设计、新用例编写指南与已知陷阱清单详见 [tests/README.md](tests/README.md)。
+
 ## 使用指南
 
 见 [docs/help.md](docs/help.md)

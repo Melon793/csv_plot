@@ -17,6 +17,24 @@ from src.core.logger import get_logger
 logger = get_logger("data.excel_loader")
 
 
+def _time_objs_to_str_series(series: pd.Series) -> pd.Series:
+    """将 datetime.time 对象列统一转为时间字符串。
+
+    Excel 纯时间单元格读取后是 datetime.time 对象：pd.to_datetime 不支持
+    （errors="coerce" 下整列变 NaT），pd.to_numeric 则销毁为 NaN。
+    转为 "HH:MM:SS[.ffffff]" 字符串后与 CSV 时间列形态一致，
+    可由 _infer_time_columns 的格式候选统一登记。
+
+    是否带微秒小数按列级决定（任一值微秒非零则全列带），
+    避免同列混合格式导致下游 format 严格匹配失败。
+    """
+    has_subsec = any(
+        isinstance(v, _dt.time) and v.microsecond for v in series.dropna()
+    )
+    fmt = "%H:%M:%S.%f" if has_subsec else "%H:%M:%S"
+    return series.map(lambda v: v.strftime(fmt) if isinstance(v, _dt.time) else v)
+
+
 class ExcelDataLoader(BaseDataLoader):
     """Excel 数据加载器，继承自 BaseDataLoader。
 
@@ -299,9 +317,14 @@ class ExcelDataLoader(BaseDataLoader):
 
         # 后处理：类型转换（对象列→数值，跳过 calamine 已推断的类型）
         datetime_cols = self._detect_datetime_cols(df)
+        time_cols = self._detect_time_cols(df)
+        # 纯 time 单元格先转字符串（pd.to_datetime 不支持 time 对象，直接转换会整列 NaT）
+        for col in time_cols:
+            if col in df.columns:
+                df[col] = _time_objs_to_str_series(df[col])
         obj_cols = [
             c for c in df.columns
-            if c not in datetime_cols and df[c].dtype == object
+            if c not in datetime_cols and c not in time_cols and df[c].dtype == object
         ]
         if obj_cols:
             df[obj_cols] = df[obj_cols].apply(
@@ -341,6 +364,14 @@ class ExcelDataLoader(BaseDataLoader):
             col_sample = [row[c] for row in sample_rows if c < len(row) and row[c] is not None]
             if not col_sample:
                 col_dtypes.append("float32")
+                continue
+
+            # 检查是否为纯 time 列（Excel 纯时间单元格）
+            time_count = sum(
+                1 for val in col_sample if isinstance(val, _dt.time)
+            )
+            if time_count > len(col_sample) * 0.5:
+                col_dtypes.append("time")
                 continue
 
             # 检查是否为 datetime 列
@@ -441,8 +472,19 @@ class ExcelDataLoader(BaseDataLoader):
             name: arr for name, arr in zip(self._var_names, arrays)
         })
 
-        # —— 阶段 4.5：object 列的数值兜底转换
-        obj_cols = [c for c in df.columns if df[c].dtype == object]
+        # —— 阶段 4.4：time 列转字符串（对齐 CSV 时间列形态，防止被 to_numeric 销毁）
+        time_col_set = {
+            name for name, dt_ in zip(self._var_names, col_dtypes) if dt_ == "time"
+        }
+        for col in time_col_set:
+            if col in df.columns:
+                df[col] = _time_objs_to_str_series(df[col])
+
+        # —— 阶段 4.5：object 列的数值兜底转换（time 列已是时间字符串，必须排除）
+        obj_cols = [
+            c for c in df.columns
+            if df[c].dtype == object and c not in time_col_set
+        ]
         if obj_cols:
             df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors='coerce')
 
@@ -456,16 +498,29 @@ class ExcelDataLoader(BaseDataLoader):
 
     @staticmethod
     def _detect_datetime_cols(df_chunk: pd.DataFrame) -> set[str]:
-        """从首块数据中检测 datetime 类型列"""
+        """从首块数据中检测 datetime 类型列（date/datetime 对象；纯 time 另见 _detect_time_cols）"""
         dt_cols: set[str] = set()
         for col in df_chunk.columns:
             sample = df_chunk[col].dropna()
             if len(sample) == 0:
                 continue
             first_val = sample.iloc[0]
-            if isinstance(first_val, (_dt.datetime, _dt.date, _dt.time)):
+            if isinstance(first_val, (_dt.datetime, _dt.date)):
                 dt_cols.add(col)
         return dt_cols
+
+    @staticmethod
+    def _detect_time_cols(df_chunk: pd.DataFrame) -> set[str]:
+        """从首块数据中检测纯 time 类型列（datetime.time 对象，Excel 纯时间单元格）"""
+        time_cols: set[str] = set()
+        for col in df_chunk.columns:
+            sample = df_chunk[col].dropna()
+            if len(sample) == 0:
+                continue
+            first_val = sample.iloc[0]
+            if isinstance(first_val, _dt.time):
+                time_cols.add(col)
+        return time_cols
 
     def _infer_time_columns(self):
         """推断时间列"""
@@ -489,18 +544,18 @@ class ExcelDataLoader(BaseDataLoader):
 
             # 情况1: 已解析为 datetime 类型
             if pd.api.types.is_datetime64_any_dtype(s):
-                self.date_formats[col] = "%Y-%m-%d %H:%M:%S"
-                if self.time_column_name is None:
-                    self.time_column_name = col
+                self._register_datetime_column(col, s)
                 continue
 
-            # 情况2: 列元素是 Python datetime 对象（object dtype）
+            # 情况2: 列元素是 Python 原生对象（object dtype）
             first_val = s_sample.iloc[0]
-            if isinstance(first_val, (_dt.datetime, _dt.date)):
+            if isinstance(first_val, _dt.time):
+                # 纯 time 单元格 → 转字符串（对齐 CSV 时间列形态），继续走情况 3 匹配
+                self._df[col] = _time_objs_to_str_series(self._df[col])
+                s_sample = self._df[col].head(10).dropna()
+            elif isinstance(first_val, (_dt.datetime, _dt.date)):
                 self._df[col] = pd.to_datetime(self._df[col], errors="coerce")
-                self.date_formats[col] = "%Y-%m-%d %H:%M:%S"
-                if self.time_column_name is None:
-                    self.time_column_name = col
+                self._register_datetime_column(col, self._df[col])
                 continue
 
             # 情况3: 仍为字符串，使用格式候选列表匹配
@@ -508,11 +563,35 @@ class ExcelDataLoader(BaseDataLoader):
                 try:
                     pd.to_datetime(s_sample, format=fmt, errors="raise")
                     self.date_formats[col] = fmt
-                    if self.time_column_name is None:
-                        self.time_column_name = col
+                    # 不再设置 time_column_name，与 CSV 行为对齐：
+                    # 时间通道保留在 var_names 中，X 轴标签为 "Index"（行号基准）
                     break
                 except (ValueError, TypeError):
                     continue
+
+    def _register_datetime_column(self, col: str, s: pd.Series):
+        """登记 datetime64 列的时间格式，区分纯日期列与完整 datetime 列。
+
+        下游 plot_data_manager 以 fmt.startswith("%H:%M:%S") 判定纯时间通道，
+        纯日期列（时间分量恒为 0）必须登记不含时间分量的 fmt，
+        否则会误入 "today + time-of-day" 分支导致日期被抹平。
+
+        注意：不再设置 time_column_name，与 CSV 行为对齐。
+        时间通道保留在 var_names 中，X 轴标签为 "Index"（行号基准）。
+        """
+        s_valid = s.dropna()
+        has_time_of_day = bool(
+            len(s_valid) > 0
+            and (
+                (s_valid.dt.hour != 0).any()
+                or (s_valid.dt.minute != 0).any()
+                or (s_valid.dt.second != 0).any()
+                or (s_valid.dt.microsecond != 0).any()
+            )
+        )
+        self.date_formats[col] = (
+            "%Y-%m-%d %H:%M:%S" if has_time_of_day else "%Y-%m-%d"
+        )
 
     @staticmethod
     def get_sheet_info(file_path: str) -> list[dict]:
