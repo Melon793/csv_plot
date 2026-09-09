@@ -178,8 +178,9 @@ class TestTimeChannelColumns:
         loader = self._load(f, monkeypatch)
         assert loader.time_channels_info["TMOD"] == "%H:%M:%S.%f"
         assert loader.df["TMOD"].tolist() == ["14:59:45.731000", "14:59:45.831000"]
-        # 唯一时间通道会被设为 time_column_name（从 var_names/df_validity 剔除，转作 X 轴）
-        assert loader.time_column_name == "TMOD"
+        # 方案 3-A：时间通道保留在变量列表中（与 CSV 行为对齐）
+        assert loader.time_column_name is None
+        assert "TMOD" in loader.var_names
 
     def test_full_datetime_column_fmt(self, tmp_path):
         """完整 datetime 单元格 → fmt 为日期+时间（下游走日期分支，保留真实时刻）"""
@@ -197,3 +198,30 @@ class TestTimeChannelColumns:
         assert not fmt.startswith("%H:%M:%S")  # 不误入 today+time-of-day 分支
         ts = pd.to_datetime(loader.df["timestamp"], format=fmt, errors="coerce")
         assert ts.iloc[0] == pd.Timestamp("2025-01-02 13:04:34")
+
+    def test_time_channels_stay_in_var_names(self, typed_time_xlsx):
+        """方案 3-A：时间通道始终保留在 var_names 中（与 CSV 行为对齐）"""
+        loader = typed_time_xlsx
+        # Date 和 Time 都是时间通道，但都应保留在变量列表中
+        assert "Date" in loader.var_names
+        assert "Time" in loader.var_names
+        assert "RPM" in loader.var_names
+        # X 轴标签回归 "Index"（行号基准）
+        assert loader.time_axis_label == "Index"
+        # time_column_name 不再被设置
+        assert loader.time_column_name is None
+        # df_validity 包含所有列
+        assert "Date" in loader.df_validity
+        assert "Time" in loader.df_validity
+
+    def test_mdf_behavior_unchanged(self):
+        """方案 3-A 仅影响 ExcelDataLoader，MDF 行为不变"""
+        # MDFLazyLoader 的 var_names 独立实现，不剔除时间通道
+        # 此用例仅作为文档性验证，实际 MDF 测试在 test_mdf_lazy_loader.py
+        from src.data.mdf_lazy_loader import MDFLazyLoader
+        # 确认 MDFLazyLoader 有自己的 var_names 实现
+        assert hasattr(MDFLazyLoader, 'var_names')
+        # 确认不是继承自 BaseDataLoader 的剔除逻辑
+        import inspect
+        source = inspect.getsource(MDFLazyLoader.var_names.fget)
+        assert 'time_column_name' not in source  # 不引用 time_column_name
