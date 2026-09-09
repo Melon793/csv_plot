@@ -563,8 +563,8 @@ class ExcelDataLoader(BaseDataLoader):
                 try:
                     pd.to_datetime(s_sample, format=fmt, errors="raise")
                     self.date_formats[col] = fmt
-                    if self.time_column_name is None:
-                        self.time_column_name = col
+                    # 不再设置 time_column_name，与 CSV 行为对齐：
+                    # 时间通道保留在 var_names 中，X 轴标签为 "Index"（行号基准）
                     break
                 except (ValueError, TypeError):
                     continue
@@ -575,6 +575,9 @@ class ExcelDataLoader(BaseDataLoader):
         下游 plot_data_manager 以 fmt.startswith("%H:%M:%S") 判定纯时间通道，
         纯日期列（时间分量恒为 0）必须登记不含时间分量的 fmt，
         否则会误入 "today + time-of-day" 分支导致日期被抹平。
+
+        注意：不再设置 time_column_name，与 CSV 行为对齐。
+        时间通道保留在 var_names 中，X 轴标签为 "Index"（行号基准）。
         """
         s_valid = s.dropna()
         has_time_of_day = bool(
@@ -589,8 +592,6 @@ class ExcelDataLoader(BaseDataLoader):
         self.date_formats[col] = (
             "%Y-%m-%d %H:%M:%S" if has_time_of_day else "%Y-%m-%d"
         )
-        if self.time_column_name is None:
-            self.time_column_name = col
 
     @staticmethod
     def get_sheet_info(file_path: str) -> list[dict]:
