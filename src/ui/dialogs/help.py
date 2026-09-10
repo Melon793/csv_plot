@@ -29,18 +29,26 @@ class HelpDialog(QDialog):
         text_edit = QTextEdit(self)
         text_edit.setReadOnly(True)
 
-        # 加载 docs/help.md，动态注入版本号与编译时间
+        # 加载 docs/help.md，在原文标题下方插入编译时间与版本号
         help_path = resource_path("docs/help.md")
         if help_path.exists():
             with open(help_path, "r", encoding="utf-8") as f:
                 md_content = f.read()
             version = get_version()
             build_time = get_build_time()
+            # 仅构建产物有 build_time，开发环境不插入
             if build_time:
-                header = f"# CSV Plot v{version}\n\n编译时间：{build_time}\n\n***\n\n"
-            else:
-                header = f"# CSV Plot v{version}\n\n***\n\n"
-            text_edit.setMarkdown(header + md_content)
+                lines = md_content.splitlines()
+                # 定位第一个 Markdown 标题行, 在其下方插入独立段落
+                idx = next(
+                    (i for i, ln in enumerate(lines) if ln.lstrip().startswith("#")),
+                    None,
+                )
+                insert_at = (idx + 1) if idx is not None else 0
+                # 前后各补一个空行，保证与相邻段落分隔（多余空行会被 Markdown 折叠）
+                lines[insert_at:insert_at] = ["", f"编译时间：{build_time} (v{version})", ""]
+                md_content = "\n".join(lines)
+            text_edit.setMarkdown(md_content)
         else:
             text_edit.setPlainText("帮助文档未找到。")
 
