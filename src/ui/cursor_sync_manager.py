@@ -566,6 +566,10 @@ class CursorSyncManager(MainWindowBaseManager):
                     )
                 else:
                     self.mw.value_cache = {}
+                    # 与 value_cache 成对失效：两者在 plot_data_manager 中是
+                    # 同一处代码成对写入的（枚举通道同时写文本表与值缓存），
+                    # 只清一个会让 cursor 读到旧数据的枚举文本标签。
+                    self.mw._enum_text_maps = {}
                     for idx, container in enumerate(self.mw.plot_widgets):
                         widget = container.plot_widget
 
