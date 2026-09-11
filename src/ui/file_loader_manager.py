@@ -967,6 +967,14 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.var_names = []
             self.mw.units = {}
             self.mw.data_validity = {}
+            # 枚举文本映射：由 plot_data_manager 与 value_cache 成对写入，
+            # 此前却无任何清理点，reload 后残留的旧文本表会让同名变量
+            # 在新数据上显示陈旧标签（新数据该通道可能已不是枚举）。
+            self.mw._enum_text_maps = {}
+            # 变量信息窗口的统计缓存：键为变量名，同名变量在新数据中的
+            # 数值可能完全不同，必须整体作废。缓存条目自带 generation 令牌，
+            # 此处显式清空是第一道保险，令牌校验是第二道。
+            self.mw.var_stats_cache = {}
 
             # 3) 清理 table dialog 的独立 _df
             from src.ui.table_dialog import DataTableDialog
@@ -975,6 +983,16 @@ class FileLoaderManager(MainWindowBaseManager):
                     DataTableDialog._instance.clear_all_columns()
                 except Exception:
                     logger.debug("清理 DataTableDialog 数据失败", exc_info=True)
+
+            # 3.5) 取消变量信息窗口的后台统计任务
+            # 必须在步骤 4 释放 loader **之前**：worker 正在运行的那条任务已把
+            # loader 取到局部变量，若不取消会继续读一个即将 close() 的文件句柄。
+            # 队列条目持 weakref，不会阻止旧 loader 被 GC。
+            from src.ui.dialogs.variable_info_dialog import VariableInfoDialog
+            try:
+                VariableInfoDialog.on_loader_released()
+            except Exception:
+                logger.debug("取消变量信息统计任务失败", exc_info=True)
 
             # 4) 释放旧 loader
             if self._has_valid_loader:
@@ -1292,6 +1310,16 @@ class FileLoaderManager(MainWindowBaseManager):
                 editor.refresh_data_source()
             except Exception:
                 logger.debug("更新绘图变量编辑器数据源失败", exc_info=True)
+
+        # 就地刷新变量信息窗口（单例）：用新 loader 重建所有页面的元数据快照
+        # 并重新提交统计。新数据中不存在的变量保留标签页但标注失效。
+        # 窗口未打开过时 _instance 为 None，函数内部直接返回，无额外开销。
+        from src.ui.dialogs.variable_info_dialog import VariableInfoDialog
+
+        try:
+            VariableInfoDialog.refresh_after_reload(self.mw.loader)
+        except Exception:
+            logger.debug("刷新变量信息窗口失败", exc_info=True)
 
         if self.mw.filter_input.text() or self.mw.unit_filter_input.text():
             self.mw.cursor_sync_manager.filter_variables()
