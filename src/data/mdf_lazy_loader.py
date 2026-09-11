@@ -9,6 +9,8 @@ Supported formats: .mf4 (MDF 4.x), .mdf (MDF 3.x), .dat (INCA export)
 """
 
 import os
+import re
+import threading
 import traceback
 from collections import OrderedDict
 from typing import Optional, Callable
@@ -20,11 +22,28 @@ from src.data.metadata import (
     VarMetadata,
     UNKNOWN,
     is_enum_conversion,
+    is_mdf3_version,
     extract_enum_map,
 )
 from src.core.logger import get_logger
 
 logger = get_logger("data.mdf")
+
+# MDF4 的标称采样间隔藏在 CN comment 的 XML 内（实测 <raster>0.001</raster>）。
+# 仅在 comment 含 "<raster>" 子串时才走正则，避免数千通道的无谓开销。
+_RASTER_RE = re.compile(r"<raster>([^<]+)</raster>")
+
+# 字符串/字节流类 data_type，这类通道不可数值统计与绘图。
+# 为何不能只看 dtype_fmt：MDF4 的可变长字符串在记录里存的是指向
+# SDblock 的索引，asammdf 因此把 dtype_fmt 报为 uint64（实测合成文件：
+# data_type=7(STRING_UTF_8) 而 dtype_fmt=uint64，get() 之后才是 |S1），
+# 单看 dtype_fmt 会把 MDF4 字符串通道误报为数值。MDF3 则相反，其
+# dtype_fmt 就是真实的 |S1，两者并查才能跨版本正确。
+# 取值来自 asammdf 8.8.9 的 DATA_TYPE_* 常量表。
+_STRING_DT_MDF3 = frozenset({7, 8})  # STRING / BYTEARRAY
+_STRING_DT_MDF4 = frozenset({6, 7, 8, 9, 10, 11, 12, 17})
+# 上述集合对应 STRING_LATIN_1 / STRING_UTF_8 / STRING_UTF_16_LE /
+# STRING_UTF_16_BE / BYTEARRAY / MIME_SAMPLE / MIME_STREAM / STRING_WITH_BOM
 
 
 class MDFLazyLoader:
@@ -38,9 +57,25 @@ class MDFLazyLoader:
     def __init__(self, path: str, *, _progress: Callable[[int], None] = None):
         self._path = path
         self._progress = _progress
-        self._validate_file()
-        logger.info("开始加载 MDF 文件: %s (%.1f MB)", path, self._file_size / 1024 / 1024)
 
+        # 并发保护与关闭标志必须在任何可能抛异常的步骤之前初始化：
+        # __del__ 会调用 close()，而 _validate_file() 与 asammdf.MDF() 均可能抛异常，
+        # 此时若锁尚未创建，close() 自身会再抛 AttributeError。
+        #
+        # 为何共享 handle 而不为后台统计开独立 handle：实测 776 MB .mf4 重开需
+        # 737 ms 且元数据内存翻倍。UI 线程绘图与统计 worker 共用同一 handle，
+        # 由 RLock 串行化；CPython 无竞争 RLock 约 50-80 ns，相对 18 ms 级的
+        # 通道读取可忽略。
+        self._access_lock = threading.RLock()
+        # close() 先置位再关句柄；所有数据访问在同一把锁内首行检查此标志，
+        # 使并发方在 loader 关闭后拿到可预期的 KeyError 而非 AttributeError。
+        self._closed = False
+        self._mdf = None
+
+        # close() 会清空下列所有容器，因此它们也必须先于任何可能抛异常的
+        # 步骤创建。实测：_validate_file() 对不存在/零字节文件抛异常后，
+        # __del__ → close() 会因 _signal_cache 缺失再抛
+        # AttributeError（在 GC 路径上表现为 "Exception ignored in __del__"）。
         self._signal_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._time_cache: dict[int, np.ndarray] = {}
         self._enum_cache: dict[str, dict[int, str]] = {}
@@ -49,6 +84,9 @@ class MDFLazyLoader:
         self._original_to_aggregated: dict[tuple[int, str], str] = {}
         self._group_master_ci: dict[int, int] = {}
         self._current_group_index: int = 0
+
+        self._validate_file()
+        logger.info("开始加载 MDF 文件: %s (%.1f MB)", path, self._file_size / 1024 / 1024)
 
         self._notify_progress(0)
 
@@ -107,6 +145,9 @@ class MDFLazyLoader:
             raise ValueError("MDF 文件未包含任何 Channel Group")
 
         raw_metadata: dict[int, list[VarMetadata]] = {}
+        # 版本仅取一次：conversion_type 语义与 raster 提取方式均依赖它，
+        # 避免在数千通道的循环里重复访问。
+        mdf_version = self._mdf.version
 
         mdf3_time_channels = {
             "time",
@@ -146,14 +187,10 @@ class MDFLazyLoader:
 
                 unit = self._extract_channel_unit(ch)
                 conversion = getattr(ch, "conversion", None)
-                enum_flag = is_enum_conversion(conversion)
+                enum_flag = is_enum_conversion(conversion, mdf_version)
                 enum_map = extract_enum_map(conversion) if enum_flag else None
 
-                sampling_rate_hz = None
-                if hasattr(ch, "sampling_rate"):
-                    sr = ch.sampling_rate
-                    if sr is not None and sr > 0:
-                        sampling_rate_hz = float(sr)
+                nominal_raster_s = self._extract_nominal_raster(ch, mdf_version)
 
                 is_time = is_master
 
@@ -175,7 +212,8 @@ class MDFLazyLoader:
                     time_min=0.0,
                     time_max=0.0,
                     sample_count=0,
-                    sampling_rate_hz=sampling_rate_hz,
+                    nominal_raster_s=nominal_raster_s,
+                    original_name=ch_name,
                     is_enum=enum_flag,
                     is_time_channel=is_time,
                     is_date=is_date,
@@ -202,6 +240,36 @@ class MDFLazyLoader:
             if conv_unit and conv_unit.strip():
                 return conv_unit.strip()
         return "-"
+
+    @staticmethod
+    def _extract_nominal_raster(ch, mdf_version: Optional[str]) -> Optional[float]:
+        """提取标称采样间隔（秒）。
+
+        MDF3：ch.sampling_rate 本身就是以秒为单位的间隔（asammdf 文档明确
+              "sampling rate in 's'"），不能当作 Hz。
+        MDF4：v4 Channel 无 sampling_rate 属性，raster 藏在 CN comment 的 XML
+              <raster> 标签内。
+
+        注意标称值不等于有效采样率：实测某 .mf4 标称 0.001 s（1 kHz），
+        而 master 时间戳实测间隔约 0.01 s（100 Hz），两者必须分开展示。
+        """
+        if is_mdf3_version(mdf_version):
+            sr = getattr(ch, "sampling_rate", None)
+            if sr is not None and sr > 0:
+                return float(sr)
+            return None
+
+        comment = getattr(ch, "comment", "") or ""
+        if "<raster>" not in comment:
+            return None
+        match = _RASTER_RE.search(comment)
+        if not match:
+            return None
+        try:
+            val = float(match.group(1))
+        except (TypeError, ValueError):
+            return None
+        return val if val > 0 else None
 
     # ------------------------------------------------------------------
     # Aggregation & conflict resolution
@@ -246,7 +314,8 @@ class MDFLazyLoader:
                     time_min=meta.time_min,
                     time_max=meta.time_max,
                     sample_count=meta.sample_count,
-                    sampling_rate_hz=meta.sampling_rate_hz,
+                    nominal_raster_s=meta.nominal_raster_s,
+                    original_name=pure_name,
                     is_enum=meta.is_enum,
                     is_time_channel=meta.is_time_channel,
                     is_date=meta.is_date,
@@ -265,6 +334,14 @@ class MDFLazyLoader:
         all_maxs = []
         total_samples = 0
         total_groups = len(self._raw_metadata)
+
+        # 按 group_index 预建索引，使下方回填从 O(组数 × 变量数) 降为 O(变量数)：
+        # 4704 变量 × 317 组的场景由 149 万次比较降为 4704 次。
+        # 注意索引的是 self._metadata（聚合后对象），_var_to_meta 指向同一批对象，
+        # 且本方法在 _build_aggregated_properties 末尾调用，此时聚合已完成。
+        metas_by_group: dict[int, list[VarMetadata]] = {}
+        for meta in self._metadata:
+            metas_by_group.setdefault(meta.group_index, []).append(meta)
 
         for idx, gi in enumerate(sorted(self._raw_metadata.keys())):
             if gi not in self._group_master_ci:
@@ -306,7 +383,23 @@ class MDFLazyLoader:
                 all_maxs.append(t_max)
                 total_samples = max(total_samples, cycles)
 
-            except Exception as e:
+                # 回填本组全部变量的时间基准与点数：这些数据此处已经取得，
+                # 不产生任何额外磁盘读取。effective_rate_hz 是平均值，
+                # 对变速/事件型采样会失真，展示时需加注说明。
+                rate = (
+                    (cycles - 1) / (t_max - t_min)
+                    if (cycles > 1 and t_max > t_min)
+                    else None
+                )
+                for meta in metas_by_group.get(gi, ()):
+                    meta.time_min = t_min
+                    meta.time_max = t_max
+                    meta.sample_count = cycles
+                    meta.effective_rate_hz = rate
+
+            except Exception:
+                # 时间范围汇总属于"有则更好"的附加信息（改进 B），失败不得
+                # 影响加载主流程；记完整 traceback 比只记异常文本更易定位。
                 logger.debug("汇总信号 gi=%d 时间范围时异常，跳过\n%s", gi, traceback.format_exc())
 
             if self._progress and total_groups > 0:
@@ -338,88 +431,307 @@ class MDFLazyLoader:
                 self._signal_cache.popitem(last=False)
             self._signal_cache[name] = data
 
+    def _ensure_open(self):
+        """调用方必须已持有 self._access_lock。
+
+        close() 在同一把锁内置位 _closed 并关闭句柄，因此 RLock 互斥保证
+        并发读取与 close 不可能交叉：进入临界区时 close 要么已完成（此处抛
+        KeyError，调用方可预期地降级），要么尚未开始（本次读取完成后 close
+        才拿到锁）。这消除了"在已关闭的 asammdf 句柄上继续读取"导致的
+        C 扩展层崩溃风险。
+        """
+        if self._closed or getattr(self, "_mdf", None) is None:
+            raise KeyError("MDF 数据源已关闭")
+
     def clear_cache(self):
-        self._signal_cache.clear()
-        self._time_cache.clear()
+        with self._access_lock:
+            self._signal_cache.clear()
+            self._time_cache.clear()
 
     def release_memory(self):
         """清空 LRU 缓存（信号数据可以按需重新加载）。"""
-        self._signal_cache.clear()
-        self._time_cache.clear()
+        with self._access_lock:
+            self._signal_cache.clear()
+            self._time_cache.clear()
 
     def close(self):
-        self._signal_cache.clear()
-        self._time_cache.clear()
-        self._enum_cache.clear()
-        self._metadata.clear()
-        self._var_to_meta.clear()
-        self._cached_max_samples = 0
-        self._cached_global_time_range = (0.0, 1.0)
-        if hasattr(self, "_mdf") and self._mdf is not None:
-            try:
-                self._mdf.close()
-            except Exception as e:
-                logger.debug("关闭 MDF 文件时异常\n%s", traceback.format_exc())
-            del self._mdf
-            self._mdf = None
+        # getattr 兜底：__init__ 极端早期失败时 __del__ 仍可能调用到这里。
+        lock = getattr(self, "_access_lock", None)
+        if lock is None:
+            return
+        with lock:
+            # 先置位再关句柄，顺序不可颠倒。
+            self._closed = True
+            # 逐个 getattr 兜底：__del__ 可能在任意构造阶段被触发（包括锁已
+            # 建但容器未建的中间态），此处的 AttributeError 会变成难以诊断的
+            # "Exception ignored in __del__" 噪声，而且会跳过后续的 _mdf.close()。
+            for attr in (
+                "_signal_cache",
+                "_time_cache",
+                "_enum_cache",
+                "_metadata",
+                "_var_to_meta",
+            ):
+                container = getattr(self, attr, None)
+                if container is not None:
+                    container.clear()
+            self._cached_max_samples = 0
+            self._cached_global_time_range = (0.0, 1.0)
+            if getattr(self, "_mdf", None) is not None:
+                try:
+                    self._mdf.close()
+                except Exception:
+                    logger.debug("关闭 MDF 文件时异常\n%s", traceback.format_exc())
+                # 不再 del：del 后紧接赋值语义混乱，且会让并发方拿到
+                # AttributeError('NoneType' object has no attribute 'get')
+                # 而非 _ensure_open 抛出的可预期 KeyError。
+                self._mdf = None
 
     # ------------------------------------------------------------------
     # Core data access
     # ------------------------------------------------------------------
 
     def get_series(self, display_name: str) -> pd.Series:
-        meta = self._var_to_meta.get(display_name)
-        if meta is None:
-            raise KeyError(f"变量 '{display_name}' 不存在")
+        with self._access_lock:
+            self._ensure_open()
+            meta = self._var_to_meta.get(display_name)
+            if meta is None:
+                raise KeyError(f"变量 '{display_name}' 不存在")
 
-        y = self._cache_get(display_name)
-        if y is None:
+            y = self._cache_get(display_name)
+            if y is None:
+                signal = self._mdf.get(
+                    name=None,
+                    group=meta.group_index,
+                    index=meta.channel_index,
+                    raw=meta.is_enum,
+                )
+                y = signal.samples
+                self._cache_put(display_name, y)
+
+        # 锁外构造：纯内存操作，无需占用共享 handle
+        return pd.Series(y, name=display_name)
+
+    def get_value_from_name(self, display_name: str):
+        with self._access_lock:
+            self._ensure_open()
+            meta = self._var_to_meta.get(display_name)
+            if meta is None:
+                raise KeyError(f"变量 '{display_name}' 不存在")
+
+            gi = meta.group_index
+            if gi not in self._time_cache:
+                master_ci = self._group_master_ci.get(gi, 0)
+                master_signal = self._mdf.get(
+                    name=None,
+                    group=gi,
+                    index=master_ci,
+                )
+                self._time_cache[gi] = master_signal.timestamps.astype(np.float64)
+
+            x = self._time_cache[gi]
+
+            y = self._cache_get(display_name)
+            if y is None:
+                signal = self._mdf.get(
+                    name=None,
+                    group=gi,
+                    index=meta.channel_index,
+                    raw=meta.is_enum,
+                )
+                y = signal.samples
+                self._cache_put(display_name, y)
+
+            enum_map = None
+            if meta.is_enum:
+                if display_name not in self._enum_cache and meta.enum_map:
+                    self._enum_cache[display_name] = meta.enum_map
+                enum_map = self._enum_cache.get(display_name)
+            unit = meta.unit
+
+        return x, y, unit, enum_map or {}
+
+    # ------------------------------------------------------------------
+    # Read-only metadata access (供变量信息窗口使用)
+    #
+    # 这组接口的存在意义：不让 UI 层直接触碰 _mdf 与块对象，使信息提取
+    # 逻辑与具体 Loader 解耦。返回值均为已提取好的基础类型（str/int/float/
+    # dict），UI 层只需组织展示，不需感知 MDF3/MDF4 的块结构差异。
+    # ------------------------------------------------------------------
+
+    _CHANNEL_ATTRS = (
+        "name", "unit", "channel_type", "sync_type", "data_type",
+        "bit_count", "byte_offset", "bit_offset", "precision",
+        "lower_limit", "upper_limit", "address", "comment",
+    )
+    _CG_ATTRS = (
+        "cycles_nr", "samples_byte_nr", "record_id",
+        "acq_name", "acq_source", "comment",
+    )
+    _SOURCE_ATTRS = ("name", "path", "bus_type", "source_type", "comment", "address")
+    _CONV_ATTRS = (
+        "conversion_type", "unit", "name", "a", "b", "formula",
+        "ref_param_nr", "comment",
+        "P1", "P2", "P3", "P4", "P5", "P6", "P7",
+    )
+    _HEADER_ATTRS = (
+        "author", "department", "project", "subject",
+        "start_time_string", "comment",
+    )
+
+    @staticmethod
+    def _block_attrs(obj, names: tuple) -> dict:
+        """按名从 asammdf 块对象提取属性；对象为 None 时返回空 dict。
+
+        bytes 统一解码为 str，缺失属性置 None，保证 UI 层拿到的都是可直接
+        渲染的类型。不同 MDF 版本的块属性集不同（如 v3 的 RAT 转换用 P1..P4、
+        v4 用 a/b），用 getattr 兼容两者而不做版本分支。
+        """
+        if obj is None:
+            return {}
+        out = {}
+        for n in names:
+            v = getattr(obj, n, None)
+            if isinstance(v, bytes):
+                v = v.decode("utf-8", errors="replace").rstrip("\x00")
+            out[n] = v
+        return out
+
+    def get_metadata(self, display_name: str) -> Optional[VarMetadata]:
+        """返回聚合后的变量元数据对象（不存在时返回 None）。
+
+        与 get_channel_info / get_samples_chunked 保持一致：数据源已关闭时
+        抛 KeyError。若此处静默返回 None，调用方就无法区分"变量不存在"与
+        "数据源已关闭"，改进 I 的统一降级契约也就失效了。
+        """
+        with self._access_lock:
+            self._ensure_open()
+            return self._var_to_meta.get(display_name)
+
+    def get_channel_info(self, display_name: str) -> dict:
+        """返回单通道的完整块结构信息。
+
+        全部来自加载期已解析的内存对象，**零磁盘 I/O**（实测六组全属性
+        访问约 99 μs），因此可在 UI 线程同步调用。
+
+        dtype 取自 ch.dtype_fmt：实测 v3/v4 通用且与实际读取 dtype 一致
+        （v3 字符串通道 -> dtype('S256')、v4 数值通道 -> dtype('uint16')），
+        因此字符串通道识别无需 get(record_count=1) 探测。
+        """
+        with self._access_lock:
+            self._ensure_open()
+            meta = self._var_to_meta.get(display_name)
+            if meta is None:
+                raise KeyError(f"变量 '{display_name}' 不存在")
+
+            gi, ci = meta.group_index, meta.channel_index
+            group = self._mdf.groups[gi]
+            channels = group.channels
+            ch = channels[ci]
+            cg = group.channel_group
+
+            dtype_fmt = getattr(ch, "dtype_fmt", None)
+            try:
+                np_dtype = np.dtype(dtype_fmt) if dtype_fmt is not None else None
+            except TypeError:
+                np_dtype = None
+
+            version = str(getattr(self._mdf, "version", "") or "")
+            data_type = getattr(ch, "data_type", None)
+            string_dts = _STRING_DT_MDF3 if is_mdf3_version(version) else _STRING_DT_MDF4
+            is_string_by_dt = data_type in string_dts
+
+            # S=字节串 / U=Unicode 串 / O=对象，均不可绘图与统计；
+            # 再并查 data_type 以覆盖 MDF4 字符串通道的 dtype_fmt 失真
+            is_numeric = not is_string_by_dt and (
+                np_dtype.kind not in "SUO" if np_dtype is not None else True
+            )
+            dtype_str = str(np_dtype) if np_dtype is not None else ""
+            if (
+                is_string_by_dt
+                and np_dtype is not None
+                and np_dtype.kind not in "SUO"
+            ):
+                # 如实标注，避免用户看到 uint64 却读到文本而困惑
+                dtype_str = f"{dtype_str}（记录内为字符串索引，读取后解引用为文本）"
+
+            master_ci = self._group_master_ci.get(gi)
+            master_name = (
+                channels[master_ci].name
+                if master_ci is not None and master_ci < len(channels)
+                else ""
+            )
+
+            cg_info = self._block_attrs(cg, self._CG_ATTRS)
+            cg_info["channel_count"] = len(channels)
+
+            return {
+                "meta": meta,
+                "version": version,
+                "dtype": dtype_str,
+                "is_numeric": bool(is_numeric),
+                "channel": self._block_attrs(ch, self._CHANNEL_ATTRS),
+                "channel_group": cg_info,
+                "source": self._block_attrs(getattr(ch, "source", None), self._SOURCE_ATTRS),
+                "conversion": self._block_attrs(
+                    getattr(ch, "conversion", None), self._CONV_ATTRS
+                ),
+                "header": self._block_attrs(
+                    getattr(self._mdf, "header", None), self._HEADER_ATTRS
+                ),
+                "time_base": {
+                    "master_name": master_name,
+                    "nominal_raster_s": meta.nominal_raster_s,
+                    "effective_rate_hz": meta.effective_rate_hz,
+                    "time_min": meta.time_min,
+                    "time_max": meta.time_max,
+                    "sample_count": meta.sample_count,
+                },
+                "file": {
+                    "path": self._path,
+                    "size": self._file_size,
+                    "group_count": len(self._raw_metadata),
+                    "var_count": len(self._metadata),
+                },
+                "enum_map": meta.enum_map,
+            }
+
+    def get_samples_chunked(
+        self, display_name: str, offset: int, count: int
+    ) -> np.ndarray:
+        """分块读取**物理值**样本，供后台统计流式累加。
+
+        与 get_series() 的两个关键差异：
+        1. 恒定 raw=False。绘图路径用 raw=meta.is_enum（枚举取码值配合文本
+           标签），而统计必须基于物理值，否则 min/max/mean 得到的是无意义
+           的枚举码。
+        2. 不写入 _signal_cache。统计是块级流式累加，缓存整块会挤占绘图的
+           LRU 空间（单条 428k float32 约 1.7 MB，上限 256 条）。
+
+        调用方按 count 分块循环，可使单次锁持有时间控制在 ≤20 ms，
+        UI 线程并发绘图无可感知停顿。
+
+        ``count <= 0`` 表示"读到末尾"（供 sample_count 未回填的通道降级使用）。
+        """
+        with self._access_lock:
+            self._ensure_open()
+            meta = self._var_to_meta.get(display_name)
+            if meta is None:
+                raise KeyError(f"变量 '{display_name}' 不存在")
+            # 必须把"读到末尾"规范化为 None 再交给 asammdf：实测 MDF4 会把
+            # -1 当真实点数用于计算缓冲区大小，抛
+            # ValueError: negative count（mdf_v4.py 的 bytearray(split_size)）；
+            # 而 MDF3 恰好容忍 -1。两版行为不一致，故在此统一。
+            record_count = count if count and count > 0 else None
             signal = self._mdf.get(
                 name=None,
                 group=meta.group_index,
                 index=meta.channel_index,
-                raw=meta.is_enum,
+                raw=False,
+                record_offset=offset,
+                record_count=record_count,
             )
-            y = signal.samples
-            self._cache_put(display_name, y)
-
-        return pd.Series(y, name=display_name)
-
-    def get_value_from_name(self, display_name: str):
-        meta = self._var_to_meta.get(display_name)
-        if meta is None:
-            raise KeyError(f"变量 '{display_name}' 不存在")
-
-        gi = meta.group_index
-        if gi not in self._time_cache:
-            master_ci = self._group_master_ci.get(gi, 0)
-            master_signal = self._mdf.get(
-                name=None,
-                group=gi,
-                index=master_ci,
-            )
-            self._time_cache[gi] = master_signal.timestamps.astype(np.float64)
-
-        x = self._time_cache[gi]
-
-        y = self._cache_get(display_name)
-        if y is None:
-            signal = self._mdf.get(
-                name=None,
-                group=gi,
-                index=meta.channel_index,
-                raw=meta.is_enum,
-            )
-            y = signal.samples
-            self._cache_put(display_name, y)
-
-        enum_map = None
-        if meta.is_enum:
-            if display_name not in self._enum_cache and meta.enum_map:
-                self._enum_cache[display_name] = meta.enum_map
-            enum_map = self._enum_cache.get(display_name)
-
-        return x, y, meta.unit, enum_map or {}
+            return signal.samples
 
     # ------------------------------------------------------------------
     # Properties (aligned with FastDataLoader interface)
