@@ -15,7 +15,13 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 from src.core.logger import get_logger
+from src.core.config import VAR_INFO_MAX_TABS
 from src.ui.drag_drop import build_var_mimedata, create_drag_pixmap
+from src.ui.variable_actions import (
+    add_variables_to_blank_plot,
+    add_variables_to_data_table,
+    normalize_var_list,
+)
 
 logger = get_logger(__name__)
 
@@ -394,63 +400,53 @@ class MyTableWidget(QTableWidget):
         )
         menu.addAction(act_copy)
 
+        # d. 变量信息（多选时每个变量一个标签页）
+        menu.addSeparator()
+        act_var_info = QAction("变量信息", menu)
+        act_var_info.triggered.connect(
+            lambda: self._show_variable_info(selected_var_names)
+        )
+        menu.addAction(act_var_info)
+
         menu.exec(self.mapToGlobal(pos))
 
-    def _add_to_data_table(self, var_names):
-        var_list = self._normalize_var_list(var_names)
+    def _show_variable_info(self, var_names):
+        """打开变量信息窗口（全局单例 + 标签页累积）。
+
+        多选时每个变量一个标签页；已存在的变量直接激活其标签页而不重建。
+        元数据为纯内存读取（实测六组全属性约 99 μs），因此窗口可立即显示；
+        统计特征（实测 18.8 ms/428k 点）由窗口内部的后台线程逐条回填。
+        """
+        var_list = normalize_var_list(var_names)
         if not var_list:
             return
 
         main_window = self.window()
-        from src.ui.table_dialog import DataTableDialog
+        if not (main_window and getattr(main_window, "loader", None) is not None):
+            QMessageBox.warning(self, "错误", "尚未加载数据文件")
+            return
 
-        DataTableDialog.add_variables(var_list, parent=main_window)
+        if len(var_list) > VAR_INFO_MAX_TABS:
+            QMessageBox.information(
+                self,
+                "提示",
+                f"一次最多查看 {VAR_INFO_MAX_TABS} 个变量的信息，"
+                f"已截断（原选择 {len(var_list)} 个）。",
+            )
+            var_list = var_list[:VAR_INFO_MAX_TABS]
+
+        # 延迟 import：未使用此功能时不加载窗口模块
+        from src.ui.dialogs.variable_info_dialog import VariableInfoDialog
+
+        VariableInfoDialog.popup(var_list, parent=main_window)
+
+    def _add_to_data_table(self, var_names):
+        """添加至数值变量表 → 委托到 variable_actions"""
+        add_variables_to_data_table(var_names, self.window())
 
     def _add_to_blank_plot(self, var_names):
-        var_list = self._normalize_var_list(var_names)
-        if not var_list:
-            return
-
-        # 获取 MainWindow 实例
-        main_window = self.window()
-        if not (main_window and hasattr(main_window, "loader")):
-            QMessageBox.warning(self, "错误", "未找到主窗口实例")
-            return
-
-        # 2. 在用户设置的当前布局(mxn)中查找空白绘图区，无论绘图区整体是否可见
-        blank_plot = None
-        rows, cols = main_window._plot_row_current, main_window._plot_col_current
-        max_cols = main_window._plot_col_max_default  # 这是完整网格的列数，用于计算索引
-
-        for idx, container in enumerate(main_window.plot_widgets):
-            # 根据一维索引计算其在完整网格(pxq)中的二维坐标(r, c)
-            r = idx // max_cols
-            c = idx % max_cols
-
-            # 判断这个坐标是否在用户当前的(mxn)布局内
-            if r < rows and c < cols:
-                # 如果在布局内，再判断是否为空白（统一版：仅检查 curves 字典）
-                pw = container.plot_widget
-                is_blank = not getattr(pw, "curves", None)
-                if is_blank:
-                    blank_plot = pw
-                    break  # 找到第一个可用的就退出
-
-        if blank_plot is None:
-            QMessageBox.warning(self, "提示", "当前布局中已无空白绘图区")
-            return
-
-        _delay = 0
-        if not main_window._plot_area_visible:
-            main_window.toggle_plot_btn.setChecked(False)
-            _delay = 300
-
-        def _job():
-            # 4. 将变量添加至空白图中
-            blank_plot.add_variables_to_plot(var_list)
-            main_window.layout_manager.request_mark_stats_refresh()
-
-        QTimer.singleShot(_delay, _job)
+        """添加至空白绘图区 → 委托到 variable_actions"""
+        add_variables_to_blank_plot(var_names, self.window(), msg_parent=self)
 
     def _collect_selected_var_names(self) -> list[str]:
         """返回当前选中的变量原始名称列表"""
@@ -466,21 +462,8 @@ class MyTableWidget(QTableWidget):
         return result
 
     def _normalize_var_list(self, var_names) -> list[str]:
-        """将输入标准化为不重复的变量名列表"""
-        if isinstance(var_names, str):
-            candidates = [var_names]
-        else:
-            candidates = list(var_names) if var_names is not None else []
-
-        normalized = []
-        seen = set()
-        for name in candidates:
-            clean_name = (name or "").strip()
-            if not clean_name or clean_name in seen:
-                continue
-            normalized.append(clean_name)
-            seen.add(clean_name)
-        return normalized
+        """将输入标准化为不重复的变量名列表 → 委托到 variable_actions"""
+        return normalize_var_list(var_names)
 
     def startDrag(self, supportedActions):
         """支持多选变量拖拽"""
