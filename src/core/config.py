@@ -96,6 +96,13 @@ DEFAULT_LINE_WIDTH = 2  # 默认线宽
 THICK_LINE_WIDTH = 2  # 粗线宽
 THIN_LINE_WIDTH = 1  # 细线宽
 UI_DEBOUNCE_DELAY_MS = 50  # UI事件防抖延迟时间
+# 变量信息窗口（变量列表右键"变量信息"）
+VAR_INFO_MAX_TABS = 50  # 单次提交的最大标签页数，超出截断并提示
+VAR_INFO_ENUM_DISPLAY_LIMIT = 200  # 枚举文本表在信息页最多展示条目数
+VAR_INFO_STATS_CACHE_MAX = 256  # 统计缓存上限（单条约150字节，共约38KB）
+# MDF 后台统计的分块点数：实测单通道 428k 点全量读取 18.8 ms，
+# 分块后单次锁持有 ≤20 ms，UI 线程并发绘图无可感知停顿，且可逐块取消
+MDF_STATS_CHUNK_SIZE = 1 << 19  # 524288
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3

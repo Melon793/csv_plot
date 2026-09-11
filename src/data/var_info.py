@@ -1,0 +1,756 @@
+"""变量信息提取层 —— 与具体 Loader 解耦的统一信息模型。
+
+设计要点：
+
+1. **零 Qt 依赖**：本模块只产出纯数据结构与 Markdown 字符串，可脱离 GUI
+   做单元测试。
+2. **元数据零磁盘 I/O**：MDF 路径的信息全部来自加载期已解析的内存块结构
+   （实测六组全属性访问约 99 μs），因此 ``build_snapshot()`` 可直接在 UI
+   线程同步调用，窗口打开即有内容。
+3. **统计与元数据分离**：统计需读磁盘（实测 18.8 ms / 428k 点，为元数据的
+   190 倍），由 ``compute_stats()`` 单独提供，交给后台线程调用；结果由
+   ``main_window.var_stats_cache`` 缓存，快照本身不持有统计（避免两份真相）。
+"""
+
+from dataclasses import dataclass, field
+from math import isnan
+from typing import Callable, Optional
+
+import numpy as np
+
+from src.core.logger import get_logger
+from src.data.metadata import CONST, INVALID, UNKNOWN, VALID, is_mdf3_version
+
+logger = get_logger(__name__)
+
+# 有效性 → 中文标签，与 NoHoverDelegate 的绿/橙/红色块语义一一对应
+_VALIDITY_LABELS = {
+    VALID: "有效",
+    CONST: "常量",
+    INVALID: "无效",
+    UNKNOWN: "未知",
+}
+
+# numpy dtype.kind 中属于"可统计数值"的类别：布尔/整数/无符号/浮点/复数
+_NUMERIC_KINDS = "biufc"
+# 不可绘图也不可统计的类别：字节串/Unicode 串/对象
+_STRING_KINDS = "SUO"
+
+
+@dataclass(slots=True)
+class VarStats:
+    """单个变量的统计特征。
+
+    ``std`` / ``nan_count`` / ``finite_count`` 与 min/max/mean 是同一次单趟
+    遍历的副产物，因此整体缓存（拆分成只存三个字段会增加复杂度而无收益）。
+    单条约 150 字节，256 条上限合计约 38 KB。
+    """
+
+    min: Optional[float] = None
+    max: Optional[float] = None
+    mean: Optional[float] = None
+    std: Optional[float] = None
+    nan_count: int = 0
+    finite_count: int = 0
+    computed: bool = False
+    error: str = ""
+    # 缓存失效令牌：等于提交任务时的 main_window._data_version。
+    # reload 后版本递增，旧条目即使残留在缓存里也会因校验失败而被忽略。
+    generation: int = 0
+    # 仅用于 UI 标注"（缓存）"，不参与正确性判断
+    cached: bool = False
+
+
+@dataclass(slots=True)
+class VarInfoSnapshot:
+    """变量元数据快照，**刻意不含统计结果**。
+
+    统计由 ``main_window.var_stats_cache`` 单独管理；快照重建仅需约 99 μs，
+    缓存它反而会引入 sections（含 comment 与枚举表）陈旧的风险与额外的
+    reload 清理负担。
+    """
+
+    name: str
+    source_kind: str = ""
+    original_name: str = ""
+    dtype: str = ""
+    length: int = 0
+    unit: str = "-"
+    validity: int = UNKNOWN
+    is_numeric: bool = True
+    is_enum: bool = False
+    # 整列都是空值（pandas 推断为 0 个 categories 的 category dtype）。
+    # 单独标记而非并入 is_numeric，是因为两者面向用户的解释完全不同：
+    # 非数值列是"这列是文本"，全空列是"这列没数据"。
+    all_empty: bool = False
+    # 有序的「分组标题 → [(键, 值)]」，UI 直接遍历渲染，不感知数据源类型
+    sections: dict = field(default_factory=dict)
+    generation: int = 0
+
+
+# ---------------------------------------------------------------------------
+# 格式化辅助
+# ---------------------------------------------------------------------------
+
+
+def validity_label(validity: int) -> str:
+    return _VALIDITY_LABELS.get(validity, f"未知({validity})")
+
+
+def format_size(num_bytes) -> str:
+    try:
+        n = float(num_bytes)
+    except (TypeError, ValueError):
+        return "-"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return "-"
+
+
+def _fmt(value, suffix: str = "", dash: str = "-") -> str:
+    """把块属性值格式化为可显示字符串：None/空白 → dash。
+
+    bytes 在 loader 的 _block_attrs 中已解码，此处再兜一层以覆盖直接传入
+    块对象的场景。
+    """
+    if value is None:
+        return dash
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace").rstrip("\x00")
+    if isinstance(value, str):
+        s = value.strip()
+        return s if s else dash
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, float):
+        # 不用 ``value != value`` 的 NaN 惯用式：虽然等价，但看上去像笔误
+        if isnan(value):
+            return dash
+        return f"{value:.6g}{suffix}"
+    return f"{value}{suffix}"
+
+
+def _fmt_rate(hz) -> str:
+    """采样率带"平均"注记：该值由组首尾时间戳推算，变速采样会失真。"""
+    if hz is None:
+        return "-"
+    return f"{hz:.4g} Hz（平均，按组首尾时间戳推算）"
+
+
+def _fmt_raster(seconds) -> str:
+    if seconds is None:
+        return "-"
+    return f"{seconds:.6g} s（标称 {1.0 / seconds:.4g} Hz）" if seconds > 0 else f"{seconds:.6g} s"
+
+
+def _constant_label(table_name: str, mdf_version: Optional[str], value, prefix: str) -> str:
+    """按 MDF 版本从 asammdf 常量表取可读标签。
+
+    两版常量表语义完全不同（实测 ct=11 在 MDF4 是 BITFIELD、MDF3 是 TABX；
+    ct=7 在 MDF4 是 TABX、MDF3 是 EXPO），因此必须按版本取表。
+
+    延迟 import asammdf：展示常量仅在打开信息页时才需要，避免 CSV-only
+    场景在导入本模块时就拉起 asammdf（项目有启动性能优化历史）。
+    """
+    if value is None:
+        return "-"
+    try:
+        from asammdf.blocks import v2_v3_constants as v3c
+        from asammdf.blocks import v4_constants as v4c
+
+        module = v3c if is_mdf3_version(mdf_version) else v4c
+        table = getattr(module, table_name, None) or {}
+    except Exception:
+        logger.debug("加载 asammdf 常量表 %s 失败", table_name, exc_info=True)
+        return f"{prefix}{value}"
+    if not table:
+        # 该版本无此常量表（如 MDF3 无 SYNC_TYPE_TO_STRING），回退数值
+        return f"{prefix}{value}"
+    label = table.get(value)
+    return str(label) if label is not None else f"UNKNOWN({value})"
+
+
+def conversion_label(mdf_version: Optional[str], ct) -> str:
+    return _constant_label("CONVERSION_TYPE_TO_STRING", mdf_version, ct, "CT=")
+
+
+def channel_type_label(mdf_version: Optional[str], value) -> str:
+    return _constant_label("CHANNEL_TYPE_TO_STRING", mdf_version, value, "TYPE=")
+
+
+def sync_type_label(mdf_version: Optional[str], value) -> str:
+    return _constant_label("SYNC_TYPE_TO_STRING", mdf_version, value, "SYNC=")
+
+
+def source_type_label(mdf_version: Optional[str], value) -> str:
+    return _constant_label("SOURCE_TYPE_TO_STRING", mdf_version, value, "SRC=")
+
+
+def bus_type_label(mdf_version: Optional[str], value) -> str:
+    return _constant_label("BUS_TYPE_TO_STRING", mdf_version, value, "BUS=")
+
+
+# ---------------------------------------------------------------------------
+# 快照构建（零磁盘 I/O）
+# ---------------------------------------------------------------------------
+
+
+def build_snapshot(loader, var_name: str, generation: int = 0) -> VarInfoSnapshot:
+    """构建变量元数据快照：单一入口，按 ``LOADER_TYPE`` 分派。
+
+    全程零磁盘 I/O。变量不存在时抛 ``KeyError``，由调用方决定提示方式。
+    """
+    kind = getattr(loader, "LOADER_TYPE", "") or ""
+    if kind == "mdf":
+        return _from_mdf(loader, var_name, generation)
+    return _from_tabular(loader, var_name, generation, kind or "tabular")
+
+
+def _from_tabular(loader, var_name, generation, kind) -> VarInfoSnapshot:
+    df = getattr(loader, "df", None)
+    if df is None or var_name not in df.columns:
+        raise KeyError(f"变量 '{var_name}' 不存在")
+
+    series = df[var_name]
+    values = series.to_numpy()
+    dtype = np.dtype(values.dtype)
+    is_numeric = dtype.kind in _NUMERIC_KINDS
+
+    # np.isnan 对整数/布尔数组会抛 TypeError，仅浮点列统计 NaN
+    nan_count = (
+        int(np.count_nonzero(np.isnan(values))) if dtype.kind == "f" else 0
+    )
+
+    # 整列为空的 CSV/Excel 列被 pandas 推断为 category dtype 且 categories
+    # 为空，to_numpy() 后只剩 object 数组，dtype 层面的 "object" 完全丢失了
+    # "这列其实全是空值" 这一事实。这里做 O(1) 判定（只读 categories 长度）：
+    # 刻意不用 pd.isna(series).all()，后者在千万行的列上约需 50 ms，会破坏
+    # "快照构建零磁盘 I/O、约 99 μs、可在 UI 线程同步调用" 的架构前提。
+    all_empty = False
+    if not is_numeric and str(series.dtype) == "category":
+        try:
+            all_empty = len(series.cat.categories) == 0
+        except Exception:
+            logger.debug("判定 %s 是否为全空列失败", var_name, exc_info=True)
+            all_empty = False
+
+    validity = (getattr(loader, "df_validity", None) or {}).get(var_name, UNKNOWN)
+    unit = (getattr(loader, "units", None) or {}).get(var_name, "-") or "-"
+    time_formats = getattr(loader, "time_channels_info", None) or {}
+    time_fmt = time_formats.get(var_name, "")
+
+    snap = VarInfoSnapshot(
+        name=var_name,
+        source_kind=kind,
+        original_name=var_name,
+        dtype=str(dtype),
+        length=len(values),
+        unit=unit,
+        validity=validity,
+        is_numeric=is_numeric,
+        is_enum=False,
+        all_empty=all_empty,
+        generation=generation,
+    )
+
+    if all_empty:
+        # 不写 nan_count（此时恒为 0）：与"全部为空值"自相矛盾，会让用户
+        # 以为这列一个空值都没有。直接按实际语义给出总行数。
+        nan_row = f"{len(values)}（整列为空）"
+    else:
+        nan_row = str(nan_count)
+
+    column_rows = [
+        ("NaN 数量", nan_row),
+        ("是否时间格式列", "是" if var_name in time_formats else "否"),
+    ]
+    if time_fmt:
+        column_rows.append(("时间格式", str(time_fmt)))
+    if all_empty:
+        column_rows.append(("说明", "该列全部为空值，无有效样本（不支持统计与绘图）"))
+    elif not is_numeric:
+        column_rows.append(("说明", f"非数值列（{dtype}），不支持统计与绘图"))
+
+    snap.sections = {
+        "基本信息": [
+            ("变量名", var_name),
+            ("数据类型", str(dtype)),
+            ("数据点总数", f"{len(values)}"),
+            ("单位", unit),
+            ("有效性", validity_label(validity)),
+        ],
+        "列信息": column_rows,
+        "文件信息": _tabular_file_rows(loader),
+    }
+    return snap
+
+
+def _tabular_file_rows(loader) -> list:
+    rows = [("文件路径", _fmt(getattr(loader, "path", None)))]
+    size = getattr(loader, "file_size", None)
+    if size is None:
+        try:
+            import os
+
+            p = getattr(loader, "path", None)
+            size = os.path.getsize(p) if p and os.path.exists(p) else None
+        except Exception:
+            size = None
+    rows.append(("文件大小", format_size(size) if size else "-"))
+    rows.append(("行数", _fmt(getattr(loader, "row_count", None))))
+    rows.append(("列数", _fmt(getattr(loader, "column_count", None))))
+    rows.append(("时间轴标签", _fmt(getattr(loader, "time_axis_label", None))))
+    return rows
+
+
+def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
+    # get_channel_info 全部取自加载期已解析的内存块结构，零磁盘 I/O
+    info = loader.get_channel_info(var_name)
+    meta = info["meta"]
+    version = info["version"]
+    ch = info["channel"]
+    cg = info["channel_group"]
+    src = info["source"]
+    conv = info["conversion"]
+    header = info["header"]
+    tb = info["time_base"]
+    fi = info["file"]
+
+    # 聚合改名场景（MDF 跨通道组重名会被改写为 Name_G{gi}）：
+    # 同时显示聚合显示名与原始通道名，避免用户按原始名搜索不到变量。
+    original = meta.original_name or var_name
+    renamed = original != var_name
+
+    basic = [
+        ("变量名（聚合显示名）" if renamed else "变量名", var_name),
+    ]
+    if renamed:
+        basic.append(("原始通道名", original))
+        basic.append(
+            (
+                "名称改写原因",
+                f"跨通道组重名（组 {meta.group_index}），已追加组序号后缀以便区分",
+            )
+        )
+    basic += [
+        ("数据类型", _fmt(info["dtype"])),
+        ("数据点总数", f"{meta.sample_count}"),
+    ]
+    if not meta.sample_count:
+        # 不依赖统计结果就把空组说清：用户无需点"刷新统计"即可知道
+        # 0 点是数据文件本身的特性，而非软件读取失败。
+        basic.append(
+            (
+                "数据点总数说明",
+                "所属通道组 cycles_nr=0 且无数据块，通常为采集时未写入的预留组",
+            )
+        )
+    basic += [
+        ("单位", _fmt(meta.unit)),
+        ("有效性", validity_label(meta.validity)),
+        ("是否枚举", "是" if meta.is_enum else "否"),
+        # 转换类型标签与"是否枚举"分行显示：两者由不同规则判定，
+        # 一旦矛盾用户可自行识别异常（改进 C / G）
+        ("转换类型", conversion_label(version, conv.get("conversion_type"))),
+    ]
+    if not info["is_numeric"]:
+        basic.append(("说明", "该通道为字符串类型，不支持绘图与统计"))
+
+    channel_rows = [
+        ("通道类型", channel_type_label(version, ch.get("channel_type"))),
+        ("同步类型", sync_type_label(version, ch.get("sync_type"))),
+        ("位宽 (bit_count)", _fmt(ch.get("bit_count"), " bit")),
+        ("字节偏移", _fmt(ch.get("byte_offset"))),
+        ("位偏移", _fmt(ch.get("bit_offset"))),
+        ("精度 (precision)", _fmt(ch.get("precision"))),
+        ("下限 (lower_limit)", _fmt(ch.get("lower_limit"))),
+        ("上限 (upper_limit)", _fmt(ch.get("upper_limit"))),
+        ("块地址", _fmt(ch.get("address"))),
+        ("注释", _fmt(ch.get("comment"))),
+    ]
+
+    cg_rows = [
+        ("通道组索引", _fmt(meta.group_index)),
+        ("通道索引", _fmt(meta.channel_index)),
+        ("组内通道数", _fmt(cg.get("channel_count"))),
+        ("循环数 (cycles_nr)", _fmt(cg.get("cycles_nr"))),
+        ("单条记录字节数", _fmt(cg.get("samples_byte_nr"))),
+        ("采集名 (acq_name)", _fmt(cg.get("acq_name"))),
+        ("采集源 (acq_source)", _fmt(cg.get("acq_source"))),
+        ("记录 ID", _fmt(cg.get("record_id"))),
+        ("组注释", _fmt(cg.get("comment"))),
+    ]
+
+    src_rows = (
+        [
+            ("名称", _fmt(src.get("name"))),
+            ("路径", _fmt(src.get("path"))),
+            ("总线类型", bus_type_label(version, src.get("bus_type"))),
+            ("源类型", source_type_label(version, src.get("source_type"))),
+            ("块地址", _fmt(src.get("address"))),
+            ("注释", _fmt(src.get("comment"))),
+        ]
+        if src
+        else [("说明", "该通道无源信息块 (SBLOCK)")]
+    )
+
+    sections = {
+        "基本信息": basic,
+        "通道 (CNBLOCK)": channel_rows,
+        "通道组 (CGBLOCK)": cg_rows,
+        "源信息 (SBLOCK)": src_rows,
+        "转换规则 (CCBLOCK)": _conversion_rows(version, conv, meta),
+        "时间基准": [
+            ("master 通道名", _fmt(tb.get("master_name"))),
+            ("标称采样间隔", _fmt_raster(tb.get("nominal_raster_s"))),
+            ("有效采样率", _fmt_rate(tb.get("effective_rate_hz"))),
+            ("起始时间戳", _fmt(tb.get("time_min"), " s")),
+            ("结束时间戳", _fmt(tb.get("time_max"), " s")),
+        ],
+        "文件信息 (HDBLOCK)": [
+            ("MDF 版本", _fmt(version)),
+            ("文件路径", _fmt(fi.get("path"))),
+            ("文件大小", format_size(fi.get("size"))),
+            ("通道组数", _fmt(fi.get("group_count"))),
+            ("变量总数", _fmt(fi.get("var_count"))),
+            ("作者", _fmt(header.get("author"))),
+            ("部门", _fmt(header.get("department"))),
+            ("项目", _fmt(header.get("project"))),
+            ("主题", _fmt(header.get("subject"))),
+            ("起始时间", _fmt(header.get("start_time_string"))),
+            ("文件注释", _fmt(header.get("comment"))),
+        ],
+    }
+
+    enum_map = info.get("enum_map") or meta.enum_map
+    if enum_map:
+        sections["枚举映射 (CCBLOCK)"] = _enum_rows(enum_map)
+
+    return VarInfoSnapshot(
+        name=var_name,
+        source_kind="mdf",
+        original_name=original,
+        dtype=_fmt(info["dtype"], dash=""),
+        length=int(meta.sample_count or 0),
+        unit=_fmt(meta.unit),
+        validity=meta.validity,
+        is_numeric=bool(info["is_numeric"]),
+        is_enum=bool(meta.is_enum),
+        sections=sections,
+        generation=generation,
+    )
+
+
+def _conversion_rows(version: Optional[str], conv: dict, meta) -> list:
+    if not conv:
+        return [("说明", "该通道无转换块 (CCBLOCK)，原始值即物理值")]
+
+    ct = conv.get("conversion_type")
+    rows = [
+        ("转换类型", conversion_label(version, ct)),
+        ("转换类型码", _fmt(ct)),
+        ("物理单位", _fmt(conv.get("unit"))),
+        ("转换名", _fmt(conv.get("name"))),
+    ]
+
+    # 线性转换（MDF4 的 a/b）与有理/公式转换（MDF3 的 P1..P7）按存在性展示
+    if conv.get("a") is not None or conv.get("b") is not None:
+        rows.append(("线性系数 a", _fmt(conv.get("a"))))
+        rows.append(("线性系数 b", _fmt(conv.get("b"))))
+    formula = conv.get("formula")
+    if formula:
+        rows.append(("公式", _fmt(formula)))
+    params = [(k, conv.get(k)) for k in ("P1", "P2", "P3", "P4", "P5", "P6", "P7")]
+    params = [(k, v) for k, v in params if v is not None]
+    if params:
+        rows.append(("有理/多项式系数", ", ".join(f"{k}={_fmt(v)}" for k, v in params)))
+
+    ref_nr = conv.get("ref_param_nr")
+    if ref_nr:
+        rows.append(("枚举条目数 (ref_param_nr)", _fmt(ref_nr)))
+    rows.append(("注释", _fmt(conv.get("comment"))))
+
+    # 安全降级：is_enum 为真但文本表提取失败时，绘图仍走 raw=True 取码值
+    # （避免拿到字符串数组导致崩溃），此处显式告知用户当前看到的是码值。
+    if meta.is_enum and not meta.enum_map:
+        rows.append(("提示", "文本表提取失败，当前展示原始码值"))
+    return rows
+
+
+def _enum_rows(enum_map: dict) -> list:
+    from src.core.config import VAR_INFO_ENUM_DISPLAY_LIMIT
+
+    rows = []
+    limit = VAR_INFO_ENUM_DISPLAY_LIMIT
+    for i, (k, v) in enumerate(sorted(enum_map.items())):
+        if i >= limit:
+            rows.append(("…", f"共 {len(enum_map)} 条，仅显示前 {limit} 条"))
+            break
+        rows.append((str(k), str(v)))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 统计计算（重活，供后台线程调用）
+# ---------------------------------------------------------------------------
+
+
+def compute_stats(
+    loader,
+    var_name: str,
+    should_cancel: Optional[Callable[[str], bool]] = None,
+) -> VarStats:
+    """计算统计特征。**不写缓存** —— 缓存写入由 UI 层在收到信号时完成，
+    避免子线程触碰 main_window 属性。
+    """
+    kind = getattr(loader, "LOADER_TYPE", "") or ""
+    try:
+        if kind == "mdf":
+            return _stats_mdf(loader, var_name, should_cancel)
+        return _stats_tabular(loader, var_name)
+    except Exception as e:  # noqa: BLE001 - 后台线程须把任何异常转成可展示的错误
+        logger.debug("计算 %s 统计失败", var_name, exc_info=True)
+        return VarStats(error=f"{type(e).__name__}: {e}")
+
+
+def _stats_tabular(loader, var_name) -> VarStats:
+    df = getattr(loader, "df", None)
+    if df is None or var_name not in df.columns:
+        return VarStats(error="变量不存在或数据已释放")
+    return _stats_from_array(df[var_name].to_numpy())
+
+
+def _stats_from_array(a: np.ndarray) -> VarStats:
+    """从内存数组计算统计（CSV / Excel 路径）。
+
+    刻意**不做** ``astype(np.float64)`` 融合：实测 1000 万行 float32 下
+    ``np.nanmin/nanmax/nanmean`` 三次遍历 9.75 ms，而 astype 单趟融合
+    21.16 ms（慢 2.2 倍，其中 astype 独占 6.07 ms）。精度方面 numpy 采用
+    pairwise summation，float32 均值的相对误差实测仅 3e-8，远小于 float32
+    自身的表示精度 1.2e-7，因此 float64 累加是虚假收益。
+    """
+    if a.size == 0:
+        return VarStats(error="数据为空")
+    if a.dtype.kind not in _NUMERIC_KINDS:
+        return VarStats(error=f"非数值类型（{a.dtype}），不适用统计")
+
+    is_float = a.dtype.kind == "f"
+    nan_count = int(np.count_nonzero(np.isnan(a))) if is_float else 0
+    finite_count = int(a.size - nan_count)
+    if finite_count == 0:
+        # 必须显式判空，不能依赖 nanmin/nanmax 抛 ValueError：
+        # numpy 2.4.6 实测对全 NaN 数组只发 RuntimeWarning（"All-NaN
+        # slice encountered"）并**返回 nan**，于是四个统计量全为 nan 而
+        # computed=True。后果：UI 的 min/max/mean/std 行显示 "nan"，
+        # 且 _lookup_cache 把 computed=True 视为有效结果，这条 nan 会被
+        # 写入缓存并长期复用。与 _stats_mdf 的 ``if n == 0`` 守卫对齐。
+        return VarStats(nan_count=nan_count, error="全部为 NaN，无有效样本")
+
+    try:
+        with np.errstate(invalid="ignore"):
+            mn = float(np.nanmin(a))
+            mx = float(np.nanmax(a))
+            mean = float(np.nanmean(a))
+            std = float(np.nanstd(a))
+    except ValueError:
+        # 老版 numpy 的全 NaN 路径。上面的 finite_count 守卫已覆盖，此处
+        # 仅作纵深防御，避免降级 numpy 时静默回归。
+        return VarStats(nan_count=nan_count, error="全部为 NaN，无有效样本")
+
+    return VarStats(
+        min=mn,
+        max=mx,
+        mean=mean,
+        std=std,
+        nan_count=nan_count,
+        finite_count=finite_count,
+        computed=True,
+    )
+
+
+def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
+    """分块流式统计 MDF 通道。
+
+    恒定 ``raw=False`` 取物理值：绘图路径用 ``raw=is_enum``（枚举取码值配合
+    文本标签），但统计必须基于物理值，否则 min/max/mean 得到的是无意义的
+    枚举码。
+
+    分块的两个目的：
+    1. 把单次 ``_access_lock`` 持有时间压到 ≤20 ms，UI 线程并发绘图无停顿
+    2. 每块之间检查取消标志，实现即时中断（关闭标签页 / reload）
+
+    跨块累加器使用 float64：这与 ``_stats_from_array`` 的结论不矛盾 ——
+    那里是单数组交给 numpy 内置的 pairwise summation，这里是跨多块手动累加，
+    朴素 float32 累加会随块数线性放大误差。
+    """
+    from src.core.config import MDF_STATS_CHUNK_SIZE
+
+    meta = loader.get_metadata(var_name)
+    if meta is None:
+        return VarStats(error=f"变量 '{var_name}' 不存在")
+
+    total = int(meta.sample_count or 0)
+    if total <= 0:
+        # sample_count 依赖 CGBLOCK 的 cycles_nr。实测部分 MDF3 文件（如
+        # Chery .dat 的 AI50 组）的 cycles_nr 在文件头里就是 0 且
+        # data_blocks 为空，即采集时未写入数据的预留组。此时退回
+        # 一次性读取做最后确认，并把结论如实告知用户。
+        try:
+            samples = loader.get_samples_chunked(var_name, 0, -1)
+        except Exception as e:  # 含 loader 已关闭时的 KeyError
+            return VarStats(error=str(e))
+        arr = np.asarray(samples)
+        if arr.size == 0:
+            return VarStats(
+                error="所属通道组无数据（cycles_nr=0 且无数据块），"
+                      "通常为采集时未写入的预留组"
+            )
+        return _stats_from_array(arr)
+
+    mn = np.inf
+    mx = -np.inf
+    total_sum = 0.0
+    total_sumsq = 0.0
+    n = 0
+    nan_count = 0
+    offset = 0
+
+    while offset < total:
+        if should_cancel is not None and should_cancel(var_name):
+            return VarStats(error="已取消")
+
+        count = min(MDF_STATS_CHUNK_SIZE, total - offset)
+        try:
+            samples = loader.get_samples_chunked(var_name, offset, count)
+        except KeyError as e:
+            # loader 已关闭（改进 I 保证统一抛 KeyError 而非 AttributeError）
+            return VarStats(error=str(e))
+        except Exception as e:
+            return VarStats(error=f"读取失败: {e}")
+
+        arr = np.asarray(samples)
+        if arr.dtype.kind in _STRING_KINDS:
+            # 枚举通道的物理值即文本标签（实测 MDF3 TABX 返回 |S14），
+            # 对文本求 min/max/mean 无意义；引导用户去看枚举映射表。
+            if getattr(meta, "is_enum", False):
+                return VarStats(
+                    error="枚举通道：物理值为文本标签（"
+                          f"{arr.dtype}），不适用数值统计；"
+                          "码值含义请见「枚举映射 (CCBLOCK)」"
+                )
+            return VarStats(error=f"字符串通道（{arr.dtype}），不适用统计")
+        if arr.dtype.kind not in _NUMERIC_KINDS:
+            return VarStats(error=f"非数值类型（{arr.dtype}），不适用统计")
+        if arr.size == 0:
+            break
+
+        f = arr.astype(np.float64, copy=False)
+        bad = ~np.isfinite(f)
+        bad_count = int(np.count_nonzero(bad))
+        if bad_count:
+            nan_count += bad_count
+            f = f[~bad]
+        if f.size:
+            mn = min(mn, float(f.min()))
+            mx = max(mx, float(f.max()))
+            total_sum += float(f.sum())
+            total_sumsq += float((f * f).sum())
+            n += int(f.size)
+
+        offset += count
+
+    if n == 0:
+        return VarStats(nan_count=nan_count, error="全部为 NaN，无有效样本")
+
+    mean = total_sum / n
+    # 方差用 E[x²]-E[x]²，浮点舍入可能得到极小负数，需夹到 0
+    variance = max(total_sumsq / n - mean * mean, 0.0)
+    return VarStats(
+        min=float(mn),
+        max=float(mx),
+        mean=mean,
+        std=float(np.sqrt(variance)),
+        nan_count=nan_count,
+        finite_count=n,
+        computed=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Markdown 导出（改进 E）
+# ---------------------------------------------------------------------------
+
+
+def _fmt_stat(v, digits: int = 6) -> str:
+    if v is None:
+        return "-"
+    try:
+        return f"{float(v):.{digits}g}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def stats_to_rows(stats: Optional[VarStats]) -> list:
+    """把统计结果渲染为 [(指标, 值)]，未计算/出错时给出占位而不抛异常。"""
+    if stats is None:
+        return [("状态", "计算中…")]
+    if not stats.computed:
+        return [("状态", stats.error or "未计算")]
+    suffix = "（缓存）" if stats.cached else ""
+    return [
+        ("最小值", _fmt_stat(stats.min) + suffix),
+        ("最大值", _fmt_stat(stats.max) + suffix),
+        ("平均值", _fmt_stat(stats.mean) + suffix),
+        ("标准差", _fmt_stat(stats.std)),
+        ("有效样本数", f"{stats.finite_count}"),
+        ("NaN / 非有限值数", f"{stats.nan_count}"),
+    ]
+
+
+def snapshot_to_markdown(snap: VarInfoSnapshot, stats: Optional[VarStats] = None) -> str:
+    """导出单个变量的 Markdown（便于粘贴到评审报告 / 缺陷单）。
+
+    统计未回填时输出"计算中…"，任何时刻调用都不报错。
+    """
+    lines = [f"## 变量信息：{snap.name}", ""]
+    lines.append(
+        f"- 数据源: {snap.source_kind or '-'} | 单位: {snap.unit} | "
+        f"点数: {snap.length} | dtype: {snap.dtype or '-'} | "
+        f"有效性: {validity_label(snap.validity)}"
+    )
+    if snap.original_name and snap.original_name != snap.name:
+        lines.append(f"- 原始通道名: {snap.original_name}")
+    lines.append("")
+
+    lines.append("### 统计特征")
+    lines.append("| 指标 | 值 |")
+    lines.append("|---|---|")
+    for k, v in stats_to_rows(stats):
+        lines.append(f"| {k} | {_md_escape(v)} |")
+    lines.append("")
+
+    for title, rows in snap.sections.items():
+        if not rows:
+            continue
+        lines.append(f"### {title}")
+        lines.append("| 属性 | 值 |")
+        lines.append("|---|---|")
+        for k, v in rows:
+            lines.append(f"| {k} | {_md_escape(v)} |")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def snapshots_to_markdown(items: list) -> str:
+    """导出多个变量，以水平分隔线拼接。items 为 [(snapshot, stats), ...]。"""
+    parts = [snapshot_to_markdown(snap, stats) for snap, stats in items]
+    return "\n---\n\n".join(p.rstrip() + "\n" for p in parts)
+
+
+def _md_escape(text) -> str:
+    """转义 Markdown 表格中的破坏性字符：竖线与换行。"""
+    s = str(text) if text is not None else "-"
+    return s.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ")
