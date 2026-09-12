@@ -80,20 +80,29 @@ class TestConstantLabels:
     def test_none_value_renders_dash(self):
         assert var_info.conversion_label("4.10", None) == "-"
 
-    def test_channel_type_label_version_aware(self):
-        assert var_info.channel_type_label("3.00", 1) == "MASTER"
-        assert var_info.channel_type_label("3.00", 0) == "VALUE"
+    def test_channel_type_table_is_version_aware(self):
+        """四个 label 包装函数已随 block 合并移除，改测底层取表机制。
+
+        版本感知本身仍必须覆盖：CHANNEL_TYPE_TO_STRING 两版语义不同。
+        """
+        table = "CHANNEL_TYPE_TO_STRING"
+        assert var_info._constant_label(table, "3.00", 1, "TYPE=") == "MASTER"
+        assert var_info._constant_label(table, "3.00", 0, "TYPE=") == "VALUE"
 
     def test_missing_table_falls_back_to_raw_code(self):
         """MDF3 无 SYNC_TYPE_TO_STRING 常量表，需回退为带前缀的原始码。
 
         不能因缺表而抛异常或显示 UNKNOWN —— 缺表是版本差异的正常情况。
+        这一分支 conversion_label 走不到（两版都有
+        CONVERSION_TYPE_TO_STRING），因此刻意用 SYNC_TYPE_TO_STRING 覆盖。
         """
-        label = var_info.sync_type_label("3.00", 5)
+        label = var_info._constant_label("SYNC_TYPE_TO_STRING", "3.00", 5, "SYNC=")
         assert label == "SYNC=5"
 
-    def test_sync_type_label_mdf4(self):
-        assert var_info.sync_type_label("4.10", 1) != "SYNC=1"
+    def test_sync_type_table_exists_in_mdf4(self):
+        """同一张表在 MDF4 存在，因此不得回退到原始码。"""
+        label = var_info._constant_label("SYNC_TYPE_TO_STRING", "4.10", 1, "SYNC=")
+        assert label != "SYNC=1"
 
 
 # ---------------------------------------------------------------------------
@@ -161,18 +170,74 @@ class TestFormatting:
 
 
 class TestMdfSnapshot:
-    def test_sections_cover_all_blocks(self, mdf4_loader):
+    def test_sections_are_merged(self, mdf4_loader):
+        """五个 MDF 块合并为单个「基本信息」（合并方案 2-B）。
+
+        转换规则 / 文件信息 / 枚举映射刻意保持独立块不动。
+        """
         snap = var_info.build_snapshot(mdf4_loader, "Press_G0", generation=3)
-        for title in (
+        assert set(snap.sections) == {
             "基本信息",
+            "转换规则 (CCBLOCK)",
+            "文件信息 (HDBLOCK)",
+        }
+
+    def test_merged_blocks_no_longer_exist(self, mdf4_loader):
+        """被合并的四个块名不得残留，否则 Markdown 导出会出现空块。"""
+        snap = var_info.build_snapshot(mdf4_loader, "Press_G0")
+        for gone in (
             "通道 (CNBLOCK)",
             "通道组 (CGBLOCK)",
             "源信息 (SBLOCK)",
-            "转换规则 (CCBLOCK)",
             "时间基准",
-            "文件信息 (HDBLOCK)",
         ):
-            assert title in snap.sections, f"缺少分组 {title}"
+            assert gone not in snap.sections
+
+    def test_basic_section_row_order(self, mdf4_loader):
+        """行序按用户关注顺序固定，不得回退成按 MDF 块结构排列。
+
+        刻意取 State 而不是 Press_G0：工厂的 with_dup_group 会让 Press 跨组
+        重名而被改名为 Press_G0 / Press_G1，多出「原始通道名」与「名称
+        改写原因」两个条件行。State 唯一且为数值列，正好得到完整的
+        16 行固定序列；条件行另有专测覆盖。
+        """
+        snap = var_info.build_snapshot(mdf4_loader, "State")
+        keys = [k for k, _ in snap.sections["基本信息"]]
+        assert keys == [
+            "变量名",
+            "单位",
+            "通道注释",
+            "记录 ID",
+            "组注释",
+            "数据类型",
+            "数据点总数",
+            "是否枚举",
+            "位宽 (bit_count)",
+            "精度 (precision)",
+            "下限 (lower_limit)",
+            "上限 (upper_limit)",
+            "标称采样间隔",
+            "有效采样率",
+            "起始时间戳",
+            "结束时间戳",
+        ]
+
+    def test_dropped_rows_are_reachable_elsewhere(self, mdf4_loader):
+        """合并删掉的两行必须在别处仍可见，否则就是真丢信息。
+
+        有效性：页头摘要与 snapshot_to_markdown 首行；
+        转换类型：「转换规则 (CCBLOCK)」块。
+
+        用 State 而不是 Press_G0：后者在合成 fixture 里没有 CCBLOCK
+        （只得到“无转换块”占位行），无法证明转换类型仍可见。
+        """
+        snap = var_info.build_snapshot(mdf4_loader, "State")
+        basic = dict(snap.sections["基本信息"])
+        assert "有效性" not in basic
+        assert "转换类型" not in basic
+        assert var_info.validity_label(snap.validity)  # 页头摘要的数据源
+        conv = dict(snap.sections["转换规则 (CCBLOCK)"])
+        assert "转换类型" in conv
 
     def test_generation_propagated(self, mdf4_loader):
         snap = var_info.build_snapshot(mdf4_loader, "Press_G0", generation=7)
@@ -237,11 +302,29 @@ class TestMdfSnapshot:
         assert rows["数据点总数"] == "0"
         assert "预留组" in rows["数据点总数说明"]
 
-    def test_time_base_section_values(self, mdf4_loader):
+    def test_sampling_rows_survive_merge(self, mdf4_loader):
+        """合并方案 2-B 的核心约束：采样两行必须留下。
+
+        它们是全软件唯一展示点（grep 过 src/ 全部 .py），而实测真实
+        文件存在标称 0.001 s（1000 Hz）但有效仅 17.68 Hz 的严重偏差——
+        正是 VarMetadata.sampling_rate_hz 语义修复要在 UI 上体现的场景。
+        删掉这两行等于让那次修复彻底不可见。
+        """
         snap = var_info.build_snapshot(mdf4_loader, "Press_G0")
-        rows = dict(snap.sections["时间基准"])
+        rows = dict(snap.sections["基本信息"])
         assert "10" in rows["有效采样率"]
-        assert rows["master 通道名"] == "time"
+        # 标称采样间隔在合成 fixture 里恒为 "-"：MDF4 的 raster 藏在 CN
+        # comment 的 <raster> 标签内，而工厂没写 comment。所以这里断言的
+        # 是“行必须存在”，真实文件的取值证据记在 _from_mdf 的注释里。
+        assert "标称采样间隔" in rows
+        assert rows["起始时间戳"].endswith("s")
+        assert rows["结束时间戳"].endswith("s")
+
+    def test_master_channel_name_row_dropped(self, mdf4_loader):
+        """master 通道名实测恒为 "time"，合并时作为冗余行删除。"""
+        snap = var_info.build_snapshot(mdf4_loader, "Press_G0")
+        basic = dict(snap.sections["基本信息"])
+        assert "master 通道名" not in basic
 
     def test_unknown_variable_raises_keyerror(self, mdf4_loader):
         with pytest.raises(KeyError):
@@ -751,7 +834,8 @@ class TestMarkdownExport:
         md = var_info.snapshot_to_markdown(snap)
         assert md.startswith("## 变量信息：Press_G0")
         assert "### 统计特征" in md
-        assert "### 通道 (CNBLOCK)" in md
+        assert "### 基本信息" in md
+        assert "### 通道 (CNBLOCK)" not in md, "已合并的块不得再导出为空块"
         assert "| 指标 | 值 |" in md
 
     def test_stats_omitted_renders_pending(self, mdf4_loader):
