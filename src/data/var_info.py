@@ -70,8 +70,16 @@ class VarStats:
     # 缓存失效令牌：等于提交任务时的 main_window._data_version。
     # reload 后版本递增，旧条目即使残留在缓存里也会因校验失败而被忽略。
     generation: int = 0
-    # 仅用于 UI 标注"（缓存）"，不参与正确性判断
-    cached: bool = False
+    # 诊断字段：该结果是否取自缓存（而非本会话现算）。缓存中的母本恒为
+    # False，命中时由 UI 层复制副本并置 True（R4：不得原地改写缓存对象，
+    # 否则母本被污染）。D′ 之后 UI 不再显示「（缓存）」后缀 —— 该后缀
+    # 既被用户误读为"数值可能是旧的"，又会污染 Markdown 导出的数值字段。
+    from_cache: bool = False
+    # 任务在分块边界被取消。取消不是有效统计结果：缓存层必须拒绝此类
+    # 条目（缺-5），否则「已取消」会被下一次命中当作终态展示，且
+    # add_variables 只对 stats is None 的页面提交重算，用户将永远卡在
+    # 「已取消」直到手动点「刷新统计」。
+    cancelled: bool = False
 
 
 @dataclass(slots=True)
@@ -649,7 +657,9 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
 
     while offset < total:
         if should_cancel is not None and should_cancel(var_name):
-            return VarStats(error="已取消")
+            # cancelled 标记让缓存层识别并拒绝（缺-5）：worker 只 emit
+            # 运行中的那条，此处返回值会经 _on_stats_ready 写缓存
+            return VarStats(error="已取消", cancelled=True)
 
         count = min(MDF_STATS_CHUNK_SIZE, total - offset)
         try:
@@ -737,11 +747,14 @@ def stats_to_rows(stats: Optional[VarStats]) -> list:
         return [("状态", "计算中…")]
     if not stats.computed:
         return [("状态", stats.error or "未计算")]
-    suffix = "（缓存）" if stats.cached else ""
+    # D′：缓存来源（from_cache）不再写入数值行。旧实现只给 min/max/mean
+    # 三行加「（缓存）」后缀，一是同源同趟的标准差/计数行不一致，二是
+    # snapshot_to_markdown 复用本函数，复制进报告会变成 `3.5（缓存）`
+    # 破坏数值字段，三是用户极易读成"这个数可能是旧的"。
     rows = [
-        ("最小值", _fmt_stat(stats.min) + suffix),
-        ("最大值", _fmt_stat(stats.max) + suffix),
-        ("平均值", _fmt_stat(stats.mean) + suffix),
+        ("最小值", _fmt_stat(stats.min)),
+        ("最大值", _fmt_stat(stats.max)),
+        ("平均值", _fmt_stat(stats.mean)),
         ("标准差", _fmt_stat(stats.std)),
         ("有效样本数", f"{stats.finite_count}"),
         ("NaN 数", f"{stats.nan_count}"),

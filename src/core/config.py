@@ -103,9 +103,12 @@ VAR_INFO_STATS_CACHE_MAX = 256  # 统计缓存上限（单条约150字节，共�
 # 信息页「属性」列的最小宽度：该列可手动拖动（Interactive），下限用于
 # 防止用户拖到几乎为零后标签全部折行、又找不到拖回来的把手
 VAR_INFO_COL0_MIN_WIDTH = 90
-# MDF 后台统计的分块点数：实测单通道 428k 点全量读取 18.8 ms，
-# 分块后单次锁持有 ≤20 ms，UI 线程并发绘图无可感知停顿，且可逐块取消
-MDF_STATS_CHUNK_SIZE = 1 << 19  # 524288
+# MDF 后台统计的分块点数。v1.1 实测（tmp/bench_chunk_size_tuning.py，
+# 慢转换通道 174k 点）：1<<19 时单块持锁最高 65 ms，UI 线程 get_series
+# 等锁 max 达 131.7 ms；调小至 1<<15 后单块 ≤6 ms，且整条统计总耗时
+# 持平略优（45.6 → 31.2 ms），4.1M 点长通道总耗时不变（42 → 40 ms）。
+# 该常量仅被 var_info._stats_mdf 使用，绘图路径 get_series 不经过它。
+MDF_STATS_CHUNK_SIZE = 1 << 15  # 32768
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3

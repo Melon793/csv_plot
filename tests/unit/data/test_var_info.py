@@ -607,12 +607,14 @@ class TestComputeStats:
         stats = var_info.compute_stats(mdf4_loader, "Press_G0", should_cancel)
         assert stats.computed is False
         assert stats.error == "已取消"
+        # cancelled 标记供缓存层识别并拒绝该条目（缺-5）
+        assert stats.cancelled is True
         assert calls, "取消回调从未被调用"
 
     def test_compute_stats_does_not_write_cache(self, csv_loader):
         """缓存写入属 UI 层职责：子线程不得触碰 main_window 属性。"""
         stats = var_info.compute_stats(csv_loader, "speed")
-        assert stats.cached is False
+        assert stats.from_cache is False
         assert stats.generation == 0
 
     def test_all_nan_csv_column_is_refused_as_non_numeric(self, tmp_path):
@@ -813,14 +815,18 @@ class TestStatsToRows:
         assert rows["Inf 数"] == "1"
         assert rows["NaN 数"] == "1", "Inf 不得再混入 NaN 计数"
 
-    def test_cached_marker_on_key_metrics(self):
-        """缓存标注只加在 min/max/mean 上，避免每行重复噪声。"""
+    def test_stats_rows_contain_no_cached_marker(self):
+        """D′：缓存来源（from_cache）不得写入任何数值行。
+
+        旧实现只给 min/max/mean 加「（缓存）」后缀：一是同源同趟的
+        标准差/计数行不一致，二是 snapshot_to_markdown 复用本函数、
+        复制进报告会破坏数值字段，三是用户极易读成"数值可能是旧的"。
+        """
         stats = var_info.VarStats(
-            min=1.0, max=3.0, mean=2.0, std=0.8, computed=True, cached=True
+            min=1.0, max=3.0, mean=2.0, std=0.8, computed=True, from_cache=True
         )
-        rows = dict(var_info.stats_to_rows(stats))
-        assert rows["最小值"].endswith("（缓存）")
-        assert not rows["标准差"].endswith("（缓存）")
+        for _, value in var_info.stats_to_rows(stats):
+            assert "（缓存）" not in value
 
 
 # ---------------------------------------------------------------------------

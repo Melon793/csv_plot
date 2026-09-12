@@ -26,6 +26,7 @@ from __future__ import annotations
 import threading
 import weakref
 from collections import deque
+from dataclasses import replace
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
@@ -228,6 +229,10 @@ class VarInfoPage(QWidget):
         self._dialog = dialog
         self.snapshot: var_info.VarInfoSnapshot | None = None
         self.stats: var_info.VarStats | None = None
+        # 方案 E 的行为开关（R4）：本会话内是否已有现算结果回填本页。
+        # 命中缓存渲染的页面为 False，成为当前可见页时触发一次静默再
+        # 验证；现算回填后置 True —— "每 tab 每会话至多一次"由此保证。
+        self.validated_this_session = False
         self._stats_item: QTreeWidgetItem | None = None
         self._stale = False
         # 列宽只在首次渲染时按内容定一次，之后交给用户拖动（详见
@@ -332,6 +337,9 @@ class VarInfoPage(QWidget):
         """渲染快照与统计。``snapshot`` 为 None 表示变量已不存在。"""
         self.snapshot = snapshot
         self.stats = stats
+        # 每次渲染都重置验证标记：reload 重建（stats=None）后页面回到
+        # "待现算"状态，现算回填时重新置位
+        self.validated_this_session = False
         self.tree.clear()
         self._stats_item = None
 
@@ -441,6 +449,20 @@ class VarInfoPage(QWidget):
         self._stats_item.setText(1, "计算中…" if pending else "")
 
     def set_stats(self, stats) -> None:
+        """回填统计。展示口径未变时跳过重建（R7）。
+
+        方案 E 的再验证回填值与缓存值几乎必然相同（同一 _data_version
+        内数据不变），仅诊断字段 from_cache 不同；按对象相等判断会退化为
+        每次回填都 takeChildren+重建、肉眼可见地闪动一次。引用本身仍要
+        更新（诊断字段以现算结果为准）。
+        """
+        if (
+            self.stats is not None
+            and stats is not None
+            and var_info.stats_to_rows(self.stats) == var_info.stats_to_rows(stats)
+        ):
+            self.stats = stats
+            return
         self.stats = stats
         self._fill_stats_rows()
 
@@ -571,6 +593,8 @@ class VariableInfoDialog(QDialog):
             return
         try:
             dlg.worker.cancel_all()
+            # 排队中的再验证任务被静默丢弃（不 emit），标记一并整批释放（R1）
+            dlg._revalidating.clear()
         except Exception:
             logger.debug("取消变量信息统计任务失败", exc_info=True)
 
@@ -605,6 +629,10 @@ class VariableInfoDialog(QDialog):
 
         self._owner_ref = None
         self._pages: dict[str, VarInfoPage] = {}
+        # 方案 E 的在途再验证去重集合：同一变量的再验证未完成前不得重复
+        # 提交（快速连切标签页时尤其重要）。泄漏会让该变量永久无法再验证
+        # 且无任何报错（R1），因此在每条完成/丢弃路径与整批清理点都要释放。
+        self._revalidating: set[str] = set()
         # 用户手动调过的「属性」列宽，同窗口内所有标签页共享。
         # 0 表示“用户还没拖过”，此时新建页按自己的内容定宽。
         self.shared_col0_width = 0
@@ -753,8 +781,9 @@ class VariableInfoDialog(QDialog):
             page = VarInfoPage(name, self)
             stats = self._lookup_cache(cache, name, generation)
             if stats is not None:
-                # 命中缓存：标记为缓存来源，UI 显示"（缓存）"
-                stats.cached = True
+                # 命中缓存：复制副本后标记来源。不得原地改写缓存对象（R4）：
+                # 缓存母本必须恒为 from_cache=False，否则回写与诊断语义漂移
+                stats = replace(stats, from_cache=True)
             page.render(snapshot, stats)
             self._pages[name] = page
             last_index = self.tabs.addTab(page, self._tab_title(name, snapshot))
@@ -772,6 +801,11 @@ class VariableInfoDialog(QDialog):
         # 每次都重置提示：截断信息属于本次提交，不得沿用上一轮的
         self._notice = notice
         self._refresh_status()
+        # 方案 E 触发点（共三个，此处兜底第二个）：setCurrentIndex 在索引
+        # 未变（右键已存在变量）或标签栏隐藏（单标签）时不发 currentChanged，
+        # 必须对当前页显式补一次再验证，否则最典型的"关窗后再开同一变量"
+        # 场景会静默漏掉
+        self._revalidate_current_page()
 
     def _tab_title(self, name: str, snapshot) -> str:
         """标签标题带上单位，便于同名不同单位的变量区分。"""
@@ -800,6 +834,10 @@ class VariableInfoDialog(QDialog):
         name = getattr(page, "var_name", "")
         # 先取消后台任务再摘除页面：顺序颠倒会让结果回填到已销毁的页面上
         self.worker.cancel(name)
+        # 排队未启动的再验证任务被 cancel 后不会 emit（worker 只 emit
+        # 运行中的那条），去重标记必须在此释放（R1），否则重开该变量后
+        # 永远无法再次触发再验证
+        self._revalidating.discard(name)
         self._remove_page(name)
         self._sync_tab_bar_visibility()
         if self.tabs.count() == 0:
@@ -826,9 +864,50 @@ class VariableInfoDialog(QDialog):
             # 用户已切换关注点，清掉一次性提示（进度文本保留）
             self._notice = ""
             self._refresh_status()
+            # 方案 E 触发点一：切到的页若显示的是缓存值，静默提交一次现算
+            self._revalidate_page_if_needed(page)
+
+    # -- 可见即再验证（方案 E）---------------------------------------------
+
+    def _revalidate_current_page(self) -> None:
+        """对当前可见页触发再验证（add_variables 末尾的显式触发点）。"""
+        self._revalidate_page_if_needed(self.tabs.currentWidget())
+
+    def _revalidate_page_if_needed(self, page) -> None:
+        """页面成为当前可见页时：若显示的是缓存值，静默提交一次现算覆盖。
+
+        触发条件（全部满足才提交）：
+        - 未处于在途再验证（``_revalidating`` 去重，快速连切不重复入队）
+        - 页面未在本会话内现算过（``validated_this_session`` 为 False；
+          该标记为 False 且 stats.computed 为 True 蕴含"值来自缓存"）
+        - 已有算完的统计（首批计算在途 / 错误终态无从覆盖，等回填）
+
+        静默 = 不清空页面、不显示"计算中…"，回填直接覆盖；值相同时
+        ``set_stats`` 跳过重绘（R7），无闪动。成本从方案 B 的 ×标签数
+        降到 ×1，且与用户注意力对齐 —— 不看的标签页不读盘。
+        """
+        if not isinstance(page, VarInfoPage):
+            return
+        name = page.var_name
+        if name in self._revalidating:
+            return
+        if page.validated_this_session or page.is_stale:
+            return
+        stats = page.stats
+        if stats is None or not stats.computed:
+            return
+        loader = self._resolve_loader()
+        if loader is None:
+            return
+        self._revalidating.add(name)
+        self.worker.submit([(name, _make_ref(loader), self._generation())])
 
     def _close_all_tabs(self) -> None:
         self.worker.cancel_all()
+        # cancel_all 对排队未启动的任务静默丢弃（不 emit），整批去重标记
+        # 必须就地释放（R1）：本方法绕过 _on_tab_close 自行循环摘页，
+        # 残留的名字会让"关闭全部后再打开"永远不再触发再验证
+        self._revalidating.clear()
         # 逐个 removeTab + deleteLater，刻意不用 tabs.clear()：实测 clear() 不
         # 销毁页面，它们会继续挂在 QStackedWidget 下。关窗即清空后这条
         # 路径从“偶尔点按钮”变成“每次关窗”，不销毁就会逐次累积。
@@ -891,6 +970,12 @@ class VariableInfoDialog(QDialog):
         stats = cache.get(name)
         if stats is None:
             return None
+        if getattr(stats, "cancelled", False):
+            # 纵深防御（缺-5）：cancelled 条目不是有效结果，拒绝采用并
+            # 顺手剔除。正常路径下 _store_cache 已拒绝写入，此处兜住
+            # 历史版本残留与异常路径
+            cache.pop(name, None)
+            return None
         if getattr(stats, "generation", -1) != generation:
             cache.pop(name, None)
             return None
@@ -899,6 +984,11 @@ class VariableInfoDialog(QDialog):
         return stats
 
     def _store_cache(self, name: str, stats) -> None:
+        if getattr(stats, "cancelled", False):
+            # 取消不是有效统计结果（缺-5）：写入会让下一次命中直接展示
+            # 「已取消」，而 add_variables 只对 stats is None 的页面提交
+            # 重算，用户将永远卡在错误终态
+            return
         cache = self._cache()
         if cache is None:
             # 主窗口已销毁或属性缺失：无处可存，静默放弃（统计结果仍会回填 UI）
@@ -915,15 +1005,36 @@ class VariableInfoDialog(QDialog):
     def _on_stats_ready(self, name: str, stats) -> None:
         generation = self._generation()
         if getattr(stats, "generation", -1) != generation:
-            # reload 期间完成的陈旧结果：既不写缓存也不回填，直接丢弃
+            # reload 期间完成的陈旧结果：既不写缓存也不回填，直接丢弃。
+            # 去重标记必须一并释放（R1）—— 此分支直接 return，不清理的
+            # 话该变量在本会话内将永远无法再次触发再验证
+            self._revalidating.discard(name)
             return
 
         self._store_cache(name, stats)
+        # 尽早释放去重标记：无论页面是否还在、结果是否被守卫拦截，
+        # 本次验证机会都已用掉
+        self._revalidating.discard(name)
 
         page = self._pages.get(name)
         if page is None:
             return  # 标签页已被用户关闭
+
+        # R2 覆盖守卫：页面已有算完的正确值（缓存命中 + 可见即再验证的
+        # 典型场景）时，迟到的失败结果（取消 / loader 关闭 / 读盘异常）
+        # 只在状态栏提示，不得把数字覆盖成"已取消"
+        current = page.stats
+        if current is not None and current.computed and not stats.computed:
+            if stats.error:
+                self._progress_text = f"{name}: {stats.error}"
+                self._refresh_status()
+            page.validated_this_session = True
+            return
+
         page.set_stats(stats)
+        # 现算结果已回填：本会话内不再对该页触发再验证。「刷新统计」的
+        # force 路径同样经此回填，因此手动刷新过的页也不会被 E 重复触发
+        page.validated_this_session = True
         if not stats.computed and stats.error:
             self._progress_text = f"{name}: {stats.error}"
             self._refresh_status()
@@ -955,6 +1066,9 @@ class VariableInfoDialog(QDialog):
             self.worker.cancel(name)
             page.set_stats(None)
         self.worker.submit([(name, _make_ref(loader), generation)])
+        # 与再验证共用在途去重：recompute 计算期间用户切换标签页不得
+        # 对同一变量重复提交（结果到达时统一在 _on_stats_ready 释放）
+        self._revalidating.add(name)
         self._progress_text = "统计中 0/1…"
         self._refresh_status()
 
@@ -962,6 +1076,9 @@ class VariableInfoDialog(QDialog):
 
     def _rebuild_all_pages(self, loader) -> None:
         self.worker.cancel_all()
+        # 整批释放去重标记（R1）：reload 后所有页面重新走"渲染 → 现算
+        # → 回填置位"流程，旧标记全部作废
+        self._revalidating.clear()
         generation = self._generation()
         cache = self._cache()
         jobs = []
