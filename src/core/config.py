@@ -100,6 +100,9 @@ UI_DEBOUNCE_DELAY_MS = 50  # UI事件防抖延迟时间
 VAR_INFO_MAX_TABS = 50  # 单次提交的最大标签页数，超出截断并提示
 VAR_INFO_ENUM_DISPLAY_LIMIT = 200  # 枚举文本表在信息页最多展示条目数
 VAR_INFO_STATS_CACHE_MAX = 256  # 统计缓存上限（单条约150字节，共约38KB）
+# 信息页「属性」列的最小宽度：该列可手动拖动（Interactive），下限用于
+# 防止用户拖到几乎为零后标签全部折行、又找不到拖回来的把手
+VAR_INFO_COL0_MIN_WIDTH = 90
 # MDF 后台统计的分块点数：实测单通道 428k 点全量读取 18.8 ms，
 # 分块后单次锁持有 ≤20 ms，UI 线程并发绘图无可感知停顿，且可逐块取消
 MDF_STATS_CHUNK_SIZE = 1 << 19  # 524288
