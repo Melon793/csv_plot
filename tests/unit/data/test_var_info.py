@@ -5,6 +5,7 @@
 """
 
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -396,6 +397,48 @@ class TestAllEmptyColumn:
         assert "整列为空" in md
 
 
+class TestRangeTextHint:
+    """RTABX 无法展示文本表时，提示必须说“不支持”而不是“提取失败”（§12.1）。
+
+    两者对用户的含义完全不同：“提取失败”暗示解析出了 bug、数据本可
+    读到；而 RTABX 是结构性的不支持（区间表无法用 dict[int, str] 表达），
+    用户无需也不应该去怀疑自己的文件坏了。
+    """
+
+    @staticmethod
+    def _rows(version, ct, enum_map=None):
+        conv = {
+            "conversion_type": ct,
+            "unit": "-",
+            "name": "range_conv",
+            "ref_param_nr": 3,
+        }
+        meta = SimpleNamespace(is_enum=True, enum_map=enum_map)
+        return dict(var_info._conversion_rows(version, conv, meta))
+
+    def test_mdf3_rtabx_says_unsupported(self):
+        rows = self._rows("3.00", 12)
+        assert "范围文本表" in rows["提示"]
+        assert "提取失败" not in rows["提示"], "不得让用户以为是解析 bug"
+        assert "原始码值" in rows["提示"], "必须告知当前看到的是码值"
+
+    def test_mdf4_rtabx_says_unsupported(self):
+        rows = self._rows("4.10", 8)
+        assert "范围文本表" in rows["提示"]
+        assert "提取失败" not in rows["提示"]
+
+    def test_tabx_still_says_extraction_failed(self):
+        """对照：TABX 属于可提取结构，此时 enum_map 为 None 确实是异常。"""
+        rows = self._rows("3.00", 11)
+        assert "提取失败" in rows["提示"]
+        assert "范围文本表" not in rows["提示"]
+
+    def test_no_hint_when_enum_map_present(self):
+        """文本表已成功提取时不得出现任何降级提示。"""
+        rows = self._rows("3.00", 12, enum_map={0: "off", 1: "on"})
+        assert "提示" not in rows
+
+
 # ---------------------------------------------------------------------------
 # 统计计算
 # ---------------------------------------------------------------------------
@@ -561,6 +604,95 @@ class TestComputeStats:
         assert stats.finite_count == 2
 
 
+class TestInfSemantics:
+    """Inf 必须在两条统计路径上得到**相同**处理（设计文档 §12.3）。
+
+    实测缺陷：``_stats_from_array`` 用 ``isnan`` 计数、``_stats_mdf`` 用
+    ``~isfinite`` 剔除，导致同一个数组 ``[1, 2, inf, nan]`` 在两条路径上
+    给出 4 个不同的数字，且各自都有一个字段名不符实：
+
+    - 表格路径 ``finite_count = size - nan_count = 3``，把 Inf 当成了有限值
+    - MDF 路径 ``nan_count = 2``，把 Inf 当成了 NaN
+    - 表格路径 ``max=inf, mean=inf, std=nan``（std 因 inf-inf），而
+      ``computed=True`` 会让这些脏值进缓存长期复用（与全 NaN 缺陷同源）
+    """
+
+    SAMPLE = np.array([1.0, 2.0, np.inf, np.nan], dtype=np.float64)
+
+    class _FakeMdfLoader:
+        """只实现 ``_stats_mdf`` 用到的两个方法。
+
+        刻意用 stub 而不是造真 MDF 文件：``write_mdf`` 靠 conversion dict
+        自动推断信号内容，无法注入 Inf，为测一个计数语义去扩展合成工厂
+        成本过高。而跨块累加逻辑只依赖这两个方法，stub 足以覆盖。
+        """
+
+        def __init__(self, values):
+            self._values = np.asarray(values, dtype=np.float64)
+
+        def get_metadata(self, var_name):
+            class _Meta:
+                sample_count = self._values.size
+                is_enum = False
+
+            return _Meta()
+
+        def get_samples_chunked(self, var_name, offset, count):
+            if count is None or count < 0:
+                return self._values[offset:]
+            return self._values[offset:offset + count]
+
+    def test_inf_excluded_from_stats_and_counted_separately(self):
+        stats = var_info._stats_from_array(self.SAMPLE)
+        assert stats.computed is True
+        # Inf 不得污染统计量：旧行为是 max=inf, mean=inf, std=nan
+        assert stats.max == 2.0
+        assert stats.mean == pytest.approx(1.5)
+        assert np.isfinite(stats.std)
+        assert stats.nan_count == 1, "nan_count 只数 NaN"
+        assert stats.inf_count == 1, "Inf 必须单独计数，不得混入 nan_count"
+        assert stats.finite_count == 2, "finite_count 不得把 Inf 算成有限值"
+
+    def test_three_counts_partition_the_sample(self):
+        """三个计数之和恒等于样本总数：字段名与实际含义不得脱节。"""
+        stats = var_info._stats_from_array(self.SAMPLE)
+        assert stats.nan_count + stats.inf_count + stats.finite_count == self.SAMPLE.size
+
+    def test_all_inf_rejected_with_readable_error(self):
+        """全 Inf 与全 NaN 同样属于“无有效样本”，不得 computed=True。"""
+        stats = var_info._stats_from_array(np.array([np.inf, -np.inf]))
+        assert stats.computed is False
+        assert stats.inf_count == 2
+        assert stats.nan_count == 0
+        assert "NaN/Inf" in stats.error
+        assert stats.min is None and stats.max is None
+
+    def test_integer_column_unaffected_by_new_counts(self):
+        """整数列不可能有 NaN/Inf，不得因新增计数而改变结果。"""
+        stats = var_info._stats_from_array(np.array([1, 2, 3], dtype=np.int32))
+        assert stats.computed is True
+        assert (stats.nan_count, stats.inf_count, stats.finite_count) == (0, 0, 3)
+
+    def test_mdf_path_agrees_with_tabular_path(self, monkeypatch):
+        """同一数组经两条路径必须得到相同数字（§12.3 的核心诉求）。
+
+        刻意把块大小压到 2，把 4 个样本切成两块且 Inf 与 NaN 分属不同块，
+        以验证**跨块累加**仍然正确——这是真实 MDF 路径特有的风险点，
+        CSV 路径一次拿到整个数组，测不到。
+        """
+        monkeypatch.setattr("src.core.config.MDF_STATS_CHUNK_SIZE", 2)
+        stats = var_info._stats_mdf(self._FakeMdfLoader(self.SAMPLE), "ch", None)
+        ref = var_info._stats_from_array(self.SAMPLE)
+
+        assert stats.computed is True
+        assert (stats.nan_count, stats.inf_count, stats.finite_count) == (
+            ref.nan_count, ref.inf_count, ref.finite_count
+        )
+        assert stats.max == ref.max
+        assert stats.mean == pytest.approx(ref.mean)
+        assert stats.std == pytest.approx(ref.std)
+
+
 # ---------------------------------------------------------------------------
 # 统计结果渲染
 # ---------------------------------------------------------------------------
@@ -583,7 +715,20 @@ class TestStatsToRows:
         assert rows["最小值"] == "1"
         assert rows["最大值"] == "3"
         assert rows["有效样本数"] == "10"
-        assert rows["NaN / 非有限值数"] == "2"
+        assert rows["NaN 数"] == "2"
+        # 旧标签 "NaN / 非有限值数" 的模糊措辞恰好掩盖了两条路径的分歧：
+        # 表格路径数的是纯 NaN，MDF 路径数的是所有非有限值。计数口径
+        # 统一后标签必须说真话，Inf 另起一行。
+        assert "Inf 数" not in rows
+
+    def test_inf_row_appears_only_when_present(self):
+        """Inf 行仅在出现时显示，不给绝大多数正常数据增加噪声。"""
+        rows = dict(var_info.stats_to_rows(var_info.VarStats(
+            min=1.0, max=2.0, mean=1.5, std=0.5,
+            nan_count=1, inf_count=1, finite_count=2, computed=True,
+        )))
+        assert rows["Inf 数"] == "1"
+        assert rows["NaN 数"] == "1", "Inf 不得再混入 NaN 计数"
 
     def test_cached_marker_on_key_metrics(self):
         """缓存标注只加在 min/max/mean 上，避免每行重复噪声。"""

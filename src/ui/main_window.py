@@ -171,7 +171,7 @@ class MainWindow(QMainWindow):
 
         self.value_cache = {}
         self._enum_text_maps: dict = {}
-        # 变量信息窗口的统计结果缓存（min/max/mean/std/nan_count）。
+        # 变量信息窗口的统计结果缓存（min/max/mean/std 及 NaN/Inf/有效样本计数）。
         # 只缓存统计不缓存元数据：实测元数据六组全属性仅 98.9 μs（纯内存零 I/O），
         # 而统计需 18.8 ms（776 MB .mf4 的 428k 点通道），相差 190 倍。
         # 单条约 150 字节，上限 256 条共 38 KB，相比 _signal_cache 单条 1.7 MB 可忽略。
