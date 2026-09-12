@@ -15,6 +15,7 @@ from src.data.metadata import (
     extract_enum_map,
     is_enum_conversion,
     is_mdf3_version,
+    is_range_text_conversion,
 )
 
 
@@ -133,6 +134,50 @@ class TestIsEnumConversion:
     def test_missing_conversion_type_attribute(self):
         conv = SimpleNamespace()
         assert is_enum_conversion(conv, "4.10") is False
+
+
+class TestRangeTextConversion:
+    """RTABX 必须被单独识别，以便 UI 说“不支持”而不是“提取失败”。
+
+    背景：RTABX 映射的是**区间**而非码值，与 ``extract_enum_map`` 的
+    ``dict[int, str]`` 契约不兼容，必定返回 None（属性结构差异已写入该
+    函数 docstring）。若不区分于 TABX，UI 会把结构性不支持误报为解析失败。
+    """
+
+    def test_mdf3_rtabx(self):
+        assert is_range_text_conversion("3.00", 12) is True
+
+    def test_mdf4_rtabx(self):
+        assert is_range_text_conversion("4.10", 8) is True
+
+    @pytest.mark.parametrize("version,ct", [("4.10", 7), ("3.00", 11)])
+    def test_tabx_is_not_range_text(self, version, ct):
+        """TABX 是码值→文本表，``extract_enum_map`` 能正常处理。"""
+        assert is_range_text_conversion(version, ct) is False
+
+    def test_mdf4_rtab_is_not_range_text(self):
+        """回归防护：RTAB(6) 是范围表但输出**数值**，不是范围文本表。"""
+        assert is_range_text_conversion("4.10", 6) is False
+
+    def test_same_ct_value_differs_across_versions(self):
+        """ct=8 在 MDF4 是 RTABX、在 MDF3 是 LOGH（对数，纯数值）。"""
+        assert is_range_text_conversion("4.10", 8) is True
+        assert is_range_text_conversion("3.00", 8) is False
+
+    def test_out_of_table_ct_is_false(self):
+        """MDF4 没有 ct=12（表止于 11 BITFIELD），不得误判。"""
+        assert is_range_text_conversion("4.10", 12) is False
+
+    def test_none_ct_is_false(self):
+        assert is_range_text_conversion("4.10", None) is False
+
+    def test_range_text_is_still_enum(self):
+        """RTABX 仍属枚举（绘图需走 raw=True 避开字符串数组），
+        只是文本表无法展示——两个判定不得互相矛盾。"""
+        conv = SimpleNamespace(conversion_type=12)
+        assert is_enum_conversion(conv, "3.00") is True
+        assert is_range_text_conversion("3.00", 12) is True
+        assert extract_enum_map(conv) is None
 
 
 class _TextAttrConversion:

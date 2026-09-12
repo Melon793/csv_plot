@@ -19,7 +19,14 @@ from typing import Callable, Optional
 import numpy as np
 
 from src.core.logger import get_logger
-from src.data.metadata import CONST, INVALID, UNKNOWN, VALID, is_mdf3_version
+from src.data.metadata import (
+    CONST,
+    INVALID,
+    UNKNOWN,
+    VALID,
+    is_mdf3_version,
+    is_range_text_conversion,
+)
 
 logger = get_logger(__name__)
 
@@ -41,9 +48,14 @@ _STRING_KINDS = "SUO"
 class VarStats:
     """单个变量的统计特征。
 
-    ``std`` / ``nan_count`` / ``finite_count`` 与 min/max/mean 是同一次单趟
-    遍历的副产物，因此整体缓存（拆分成只存三个字段会增加复杂度而无收益）。
-    单条约 150 字节，256 条上限合计约 38 KB。
+    ``std`` / ``nan_count`` / ``inf_count`` / ``finite_count`` 与 min/max/mean 是
+    同一次单趟遍历的副产物，因此整体缓存（拆分成只存这四个字段会增加复杂度
+    而无收益）。单条约 150 字节，256 条上限合计约 38 KB。
+
+    三个计数的口径必须严格与字段名一致：``nan_count`` 只数 NaN，``inf_count``
+    只数 Inf，``finite_count`` 只数有限值，且 ``nan_count + inf_count +
+    finite_count == 样本总数``。两条统计路径（``_stats_from_array`` 与
+    ``_stats_mdf``）必须给出相同的数字，否则同一概念在 CSV 与 MDF 下答案不同。
     """
 
     min: Optional[float] = None
@@ -51,6 +63,7 @@ class VarStats:
     mean: Optional[float] = None
     std: Optional[float] = None
     nan_count: int = 0
+    inf_count: int = 0
     finite_count: int = 0
     computed: bool = False
     error: str = ""
@@ -475,7 +488,17 @@ def _conversion_rows(version: Optional[str], conv: dict, meta) -> list:
     # 安全降级：is_enum 为真但文本表提取失败时，绘图仍走 raw=True 取码值
     # （避免拿到字符串数组导致崩溃），此处显式告知用户当前看到的是码值。
     if meta.is_enum and not meta.enum_map:
-        rows.append(("提示", "文本表提取失败，当前展示原始码值"))
+        if is_range_text_conversion(version, ct):
+            # RTABX 按区间而非码值映射，与 dict[int, str] 契约不兼容（详见
+            # extract_enum_map 的 docstring）。说“提取失败”会让用户以为
+            # 解析出了 bug，实际上是尚不支持这种表结构。
+            hint = (
+                "范围文本表（RTABX）按区间而非码值映射，暂不支持展示；"
+                "当前为原始码值"
+            )
+            rows.append(("提示", hint))
+        else:
+            rows.append(("提示", "文本表提取失败，当前展示原始码值"))
     return rows
 
 
@@ -537,8 +560,19 @@ def _stats_from_array(a: np.ndarray) -> VarStats:
         return VarStats(error=f"非数值类型（{a.dtype}），不适用统计")
 
     is_float = a.dtype.kind == "f"
-    nan_count = int(np.count_nonzero(np.isnan(a))) if is_float else 0
-    finite_count = int(a.size - nan_count)
+    if is_float:
+        # 三个计数各自独立、口径一致：nan_count 只数 NaN，inf_count 只数 Inf，
+        # finite_count 只数有限值，三者之和恒等于 a.size。旧写法
+        # finite_count = size - nan_count 把 Inf 算成了有限值（实测
+        # [1, 2, inf, nan] 得 finite_count=3 而真值为 2）。
+        nan_count = int(np.count_nonzero(np.isnan(a)))
+        inf_count = int(np.count_nonzero(np.isinf(a)))
+        finite_count = int(np.count_nonzero(np.isfinite(a)))
+    else:
+        # 整数/布尔列不可能出现 NaN 或 Inf，全部样本都有效
+        nan_count = inf_count = 0
+        finite_count = int(a.size)
+
     if finite_count == 0:
         # 必须显式判空，不能依赖 nanmin/nanmax 抛 ValueError：
         # numpy 2.4.6 实测对全 NaN 数组只发 RuntimeWarning（"All-NaN
@@ -546,7 +580,27 @@ def _stats_from_array(a: np.ndarray) -> VarStats:
         # computed=True。后果：UI 的 min/max/mean/std 行显示 "nan"，
         # 且 _lookup_cache 把 computed=True 视为有效结果，这条 nan 会被
         # 写入缓存并长期复用。与 _stats_mdf 的 ``if n == 0`` 守卫对齐。
-        return VarStats(nan_count=nan_count, error="全部为 NaN，无有效样本")
+        return VarStats(
+            nan_count=nan_count,
+            inf_count=inf_count,
+            error="全部为 NaN/Inf，无有效样本",
+        )
+
+    if inf_count:
+        # 有 Inf 时必须先剔除再统计：nanmin/nanmax 会把 inf 当极值，nanmean
+        # 得 inf，nanstd 因 inf-inf 得 nan（实测 [1, 2, inf, nan] 得
+        # max=inf, mean=inf, std=nan），而 computed=True 会让这些脏值进缓存
+        # 长期复用（与上面全 NaN 同源）。
+        #
+        # 对表格路径而言这是**纵深防御**：base_loader._postprocess_columns 在
+        # 加载时已把 ±inf 统一清成 NaN（实测 CSV 写 "inf"/"-inf" 读回均为 nan），
+        # 真实文件走不到这个分支。真正需要它的是 _stats_mdf——MDFLazyLoader
+        # 不继承 BaseDataLoader，无此清理，inf 原样存活。两条路径仍必须口径
+        # 一致，否则同一概念在 CSV 与 MDF 下给出不同答案。
+        #
+        # 只在真的存在 Inf 时才付这次布尔索引的代价：无 Inf 的常见路径
+        # 保持原有零额外开销（本函数的性能取舍见 docstring）。
+        a = a[np.isfinite(a)]
 
     try:
         with np.errstate(invalid="ignore"):
@@ -557,7 +611,11 @@ def _stats_from_array(a: np.ndarray) -> VarStats:
     except ValueError:
         # 老版 numpy 的全 NaN 路径。上面的 finite_count 守卫已覆盖，此处
         # 仅作纵深防御，避免降级 numpy 时静默回归。
-        return VarStats(nan_count=nan_count, error="全部为 NaN，无有效样本")
+        return VarStats(
+            nan_count=nan_count,
+            inf_count=inf_count,
+            error="全部为 NaN/Inf，无有效样本",
+        )
 
     return VarStats(
         min=mn,
@@ -565,6 +623,7 @@ def _stats_from_array(a: np.ndarray) -> VarStats:
         mean=mean,
         std=std,
         nan_count=nan_count,
+        inf_count=inf_count,
         finite_count=finite_count,
         computed=True,
     )
@@ -615,6 +674,7 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
     total_sumsq = 0.0
     n = 0
     nan_count = 0
+    inf_count = 0
     offset = 0
 
     while offset < total:
@@ -650,7 +710,11 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
         bad = ~np.isfinite(f)
         bad_count = int(np.count_nonzero(bad))
         if bad_count:
-            nan_count += bad_count
+            # NaN 与 Inf 分开计数：旧写法把 bad_count 全归给 nan_count，
+            # 使 UI 显示的 "NaN 数" 大于真实 NaN 个数（实测 [1,2,inf,nan]
+            # 得 nan_count=2 而真值为 1），用户无从判断数据到底出了什么。
+            nan_count += int(np.count_nonzero(np.isnan(f)))
+            inf_count += int(np.count_nonzero(np.isinf(f)))
             f = f[~bad]
         if f.size:
             mn = min(mn, float(f.min()))
@@ -662,7 +726,11 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
         offset += count
 
     if n == 0:
-        return VarStats(nan_count=nan_count, error="全部为 NaN，无有效样本")
+        return VarStats(
+            nan_count=nan_count,
+            inf_count=inf_count,
+            error="全部为 NaN/Inf，无有效样本",
+        )
 
     mean = total_sum / n
     # 方差用 E[x²]-E[x]²，浮点舍入可能得到极小负数，需夹到 0
@@ -673,6 +741,7 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
         mean=mean,
         std=float(np.sqrt(variance)),
         nan_count=nan_count,
+        inf_count=inf_count,
         finite_count=n,
         computed=True,
     )
@@ -699,14 +768,19 @@ def stats_to_rows(stats: Optional[VarStats]) -> list:
     if not stats.computed:
         return [("状态", stats.error or "未计算")]
     suffix = "（缓存）" if stats.cached else ""
-    return [
+    rows = [
         ("最小值", _fmt_stat(stats.min) + suffix),
         ("最大值", _fmt_stat(stats.max) + suffix),
         ("平均值", _fmt_stat(stats.mean) + suffix),
         ("标准差", _fmt_stat(stats.std)),
         ("有效样本数", f"{stats.finite_count}"),
-        ("NaN / 非有限值数", f"{stats.nan_count}"),
+        ("NaN 数", f"{stats.nan_count}"),
     ]
+    # Inf 单独成行且**仅在出现时**显示：绝大多数正常数据不该多一行噪声，
+    # 而一旦有 Inf，用户需要立即知道为何“最大值不是那个 inf”。
+    if stats.inf_count:
+        rows.append(("Inf 数", f"{stats.inf_count}"))
+    return rows
 
 
 def snapshot_to_markdown(snap: VarInfoSnapshot, stats: Optional[VarStats] = None) -> str:

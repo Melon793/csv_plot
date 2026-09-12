@@ -82,6 +82,23 @@ def enum_conversion_types(version: Optional[str]) -> frozenset:
     return _ENUM_CT_MDF3 if is_mdf3_version(version) else _ENUM_CT_MDF4
 
 
+# RTABX 是「区间 → 文本」表，与 TABX 的「码值 → 文本」结构完全不同，
+# extract_enum_map() 的 dict[int, str] 契约无法表达（详见该函数 docstring）。
+# 单独识别出来，是为了让 UI 能给出准确提示：“范围文本表暂不支持展示”
+# 而不是误导用户的 “文本表提取失败”——后者会让人以为是解析出了 bug。
+# 注意 RTAB（MDF4 ct=6）输出的是**数值**而非文本，不属于范围文本表。
+_RANGE_TEXT_CT_MDF3 = frozenset({12})  # RTABX
+_RANGE_TEXT_CT_MDF4 = frozenset({8})  # RTABX
+
+
+def is_range_text_conversion(version: Optional[str], ct) -> bool:
+    """判断转换类型码是否为「区间 → 文本」的范围文本表 (RTABX)。"""
+    if ct is None:
+        return False
+    table = _RANGE_TEXT_CT_MDF3 if is_mdf3_version(version) else _RANGE_TEXT_CT_MDF4
+    return ct in table
+
+
 def is_enum_conversion(conversion, mdf_version: Optional[str]) -> bool:
     """判定转换块是否为枚举/文本类型。
 
@@ -111,6 +128,29 @@ def _get_enum_entry_count(conversion) -> int:
 
 
 def extract_enum_map(conversion) -> Optional[dict[int, str]]:
+    """提取「码值 → 文本」映射，无法表达时返回 None。
+
+    三个策略依次尝试：asammdf 已解析好的 ``val_to_text``；``param_val_i`` +
+    ``text_i`` 配对遍历；CAN db 指针型（``text_i`` 为 int 地址 + ``val_i``）。
+
+    **RTABX（范围文本表）刻意不支持，必定返回 None** —— 它映射的是区间而不是
+    码值，与本函数的 ``dict[int, str]`` 契约根本不兼容。实测 asammdf 8.8.9 的
+    存储结构（MDF3 与 MDF4 一致，见 v2_v3_blocks.py / v4_blocks.py）：
+
+    - 键值属性：TABX 用 ``param_val_i``；RTABX 用 ``lower_i`` + ``upper_i``
+    - 文本位置：TABX 的 ``text_i`` 直接是 bytes；RTABX 的 ``text_i`` 是 int
+      （TX 块地址），真文本在 ``referenced_blocks["text_i"]``
+    - 条目数：TABX 是 ``ref_param_nr``；RTABX 是 ``ref_param_nr - 1``
+
+    于是策略二因缺 ``param_val_i`` 而 break；策略三又因 RTABX 的 ``text_i``
+    恰好是 int 而误入 CAN db 分支，但 RTABX 无 ``val_i``，最终收集为空。
+    两条路都落空是结构差异导致，不是解析缺陷。
+
+    补充：asammdf 的 ``Conversion.convert()`` **完整支持** RTABX（含 default
+    文本带 ``{X}`` 时退化为线性公式 ``a*X+b`` 的特殊分支），因此 ``raw=False``
+    本可拿到正确文本标签。当前仍按 ``is_enum`` 走 ``raw=True`` 取码值是刻意为之：
+    避免字符串数组进入绘图路径。UI 侧用 ``is_range_text_conversion`` 给出准确提示。
+    """
     if conversion is None:
         return None
 
