@@ -18,6 +18,7 @@ from typing import Any
 from PySide6.QtCore import Qt, QTimer, QPoint
 from PySide6.QtGui import QFontMetrics, QPen, QColor, QDrag
 from PySide6.QtWidgets import (
+    QMenu,
     QSizePolicy,
     QGraphicsProxyWidget,
     QGraphicsLinearLayout,
@@ -82,6 +83,7 @@ class LegendTextBrowser(QTextBrowser):
 
     点击（位移 < startDragDistance）保持原有 anchorClicked 切换显隐行为；
     超过阈值才发起 QDrag，两种手势物理互斥（见设计文档 §3.4）。
+    右键（位移 < startDragDistance）弹出单变量操作菜单（设计 v1.2 方案 B）。
     """
 
     def __init__(self, plot_widget):
@@ -92,6 +94,8 @@ class LegendTextBrowser(QTextBrowser):
         self._pw = plot_widget
         self._drag_press_pos: QPoint | None = None
         self._drag_var_name: str | None = None
+        self._ctx_press_pos: QPoint | None = None
+        self._ctx_var_name: str | None = None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -99,6 +103,13 @@ class LegendTextBrowser(QTextBrowser):
             # 按压瞬间解析变量名（拖拽期间 setHtml 重建文档也不影响）
             self._drag_var_name = parse_anchor_var_name(href)
             self._drag_press_pos = event.position().toPoint()
+        elif event.button() == Qt.MouseButton.RightButton:
+            # 右键：记录锚点与按压位置，release 时校验位移后弹菜单
+            # （设计 v1.2 §3.2；与左键拖拽状态机同构）
+            self._ctx_var_name = parse_anchor_var_name(
+                self.anchorAt(event.position().toPoint())
+            )
+            self._ctx_press_pos = event.position().toPoint()
         super().mousePressEvent(event)  # 保留链接高亮/anchor 内部状态
 
     def mouseMoveEvent(self, event):
@@ -114,10 +125,86 @@ class LegendTextBrowser(QTextBrowser):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            # 右键 release：位移小于拖拽阈值才弹菜单（按住拖出 legend 视为
+            # 取消，与左键手势对称）；锚点解析失败或曲线已陈旧则静默不弹。
+            # 状态无条件清空，防止悬空残留。
+            var_name = self._ctx_var_name
+            press_pos = self._ctx_press_pos
+            self._ctx_var_name = None
+            self._ctx_press_pos = None
+            if (
+                var_name
+                and press_pos is not None
+                and (event.position().toPoint() - press_pos).manhattanLength()
+                < QApplication.startDragDistance()
+                and var_name in self._pw.curves
+            ):
+                global_pos = self.viewport().mapToGlobal(
+                    event.position().toPoint()
+                )
+                # singleShot(0)：不在 release 处理器内直接进 menu.exec 嵌套
+                # 事件循环，让 Qt 先完成 release 收尾（与 _start_var_drag 同构）
+                QTimer.singleShot(
+                    0, lambda: self._exec_var_menu(var_name, global_pos)
+                )
+            return
         # 无条件清空 press 状态，防止悬空状态残留（拖拽取消兜底）
         self._drag_press_pos = None
         self._drag_var_name = None
         super().mouseReleaseEvent(event)  # 未拖拽时正常触发 anchorClicked
+
+    def contextMenuEvent(self, event):
+        """纯抑制器：静默消费，不调 super（屏蔽 QTextBrowser 默认富文本菜单）。
+
+        注：经 QGraphicsProxyWidget 的转发链路此方法实际不会被调用——
+        Qt 源码 qgraphicsproxywidget.cpp 的 contextMenuEvent 存在
+        !hasFocus() 早退，而 legend 为 NoFocus（探针 v7 已证零转发，
+        见 tmp/proxy_context_menu_probe_v7.py）。保留覆写作为纵深防御：
+        若未来 focus 策略变化导致事件到达，静默消费可避免默认富文本
+        菜单与右键业务菜单双弹。
+        """
+        event.accept()
+
+    def _exec_var_menu(self, var_name: str, global_pos: QPoint) -> None:
+        """构建并弹出单变量操作菜单，按 exec 返回值分发动作（设计 §4.1）。
+
+        动作在菜单关闭后才执行（不在嵌套事件循环内改 scene / 重建
+        legend HTML）。首行 + 分发前双查 var_name in pw.curves
+        （§6 R3：菜单打开期间曲线可能被 reload/编辑器删除）。
+        """
+        pw = self._pw
+        if var_name not in pw.curves:
+            return
+        menu = QMenu(pw)
+        act_solo = menu.addAction(pw.get_solo_action(var_name)[1])
+        menu.addSeparator()
+        act_remove = menu.addAction("删除变量")
+        act_copy = menu.addAction("复制变量名")
+        menu.addSeparator()
+        act_info = menu.addAction("变量信息")
+
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if var_name not in pw.curves:  # 菜单打开期间可能已陈旧
+            return
+        main_window = pw.window()
+        if chosen is act_copy:
+            QApplication.clipboard().setText(var_name)
+        elif chosen is act_remove:
+            pw.remove_variable_from_plot(var_name)
+            if main_window is not None and hasattr(main_window, "layout_manager"):
+                main_window.layout_manager.request_mark_stats_refresh()
+        elif chosen is act_solo:
+            pw.solo_curve_visibility(var_name)
+        elif chosen is act_info:
+            if main_window is None or getattr(main_window, "loader", None) is None:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(pw, "错误", "尚未加载数据文件")
+                return
+            from src.ui.dialogs.variable_info_dialog import VariableInfoDialog
+            VariableInfoDialog.popup([var_name], parent=main_window)
 
     def _start_var_drag(self):
         var_name = self._drag_var_name
@@ -261,6 +348,9 @@ class PlotUIManager(BasePlotManager):
             }
         """)
         pw.legend_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # 表意保留：右键菜单走 press/release 入口（LegendTextBrowser 方案 B），
+        # contextMenuEvent 链路已死（proxy 无焦点不转发），此策略仅声明
+        # "legend 不弹 Qt 默认富文本菜单" 的意图
         pw.legend_label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         # 只允许鼠标点击链接(锚点)，禁止选中普通文本
         pw.legend_label.setTextInteractionFlags(

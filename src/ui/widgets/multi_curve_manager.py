@@ -160,6 +160,61 @@ class MultiCurveManager:
         if pw.vline.isVisible():
             pw.update_cursor_label()
 
+    def _is_solo_state(self, var_name: str) -> bool:
+        """当前是否正处于「仅 var_name 可见」状态（多曲线且唯一可见即目标）"""
+        pw = self.pw
+        visible = [n for n, ci in pw.curves.items() if ci.visible]
+        return visible == [var_name] and len(pw.curves) > 1
+
+    def get_solo_action(self, var_name: str) -> tuple[str, str]:
+        """查询 solo 菜单动作：solo 生效中 → 恢复全部；否则 → 仅显示该变量
+
+        Returns:
+            (动作键, 菜单文案)；动作键供测试与调用方区分意图
+        """
+        if self._is_solo_state(var_name):
+            return "show_all", "显示全部变量"
+        return "solo", "仅显示此变量"
+
+    def solo_curve_visibility(self, var_name: str) -> bool:
+        """批量设置可见性：仅显示 var_name；已处于该态则恢复全部显示。
+
+        差量更新（只动可见性需要变化的曲线），单次刷新（legend + 轴 +
+        光标标签），不 emit curves_changed（与左键切换显隐同源，避免
+        编辑器↔plot 信号回环；_recreate_curve 稀有路径会经
+        add_variable_to_plot 触发 emit，与 toggle 同形的既有行为）。
+        """
+        pw = self.pw
+        if var_name not in pw.curves:
+            return False
+        show_all = self._is_solo_state(var_name)
+        targets = {
+            name: want
+            for name, want in (
+                (n, True if show_all else n == var_name) for n in pw.curves
+            )
+            if pw.curves[name].visible != want
+        }
+        if not targets:
+            return False
+        for name, vis in targets.items():
+            ci = pw.curves[name]
+            ci.visible = vis
+            if ci.curve is None:
+                continue
+            try:
+                if ci.curve.scene() is not None:
+                    ci.curve.setVisible(vis)
+                else:
+                    self._recreate_curve(name)
+            except Exception:
+                self._recreate_curve(name)
+        self.update_legend()
+        self._update_axes_for_multi_curve()
+        if pw.vline.isVisible():
+            pw.update_cursor_label()
+        return True
+
     def _finalize_batch_add(
         self,
         *,
