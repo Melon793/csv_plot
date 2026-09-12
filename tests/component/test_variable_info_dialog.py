@@ -7,7 +7,9 @@ tests/unit/data/test_var_info.py）：
 * 元数据同步渲染（打开即有内容）与统计异步回填
 * 缓存写入 / 命中 / generation 失效 / FIFO 淘汰
 * 标签页关闭取消任务、reload 钩子（on_loader_released / refresh_after_reload）
-* Markdown 导出尊重标签页顺序、closeEvent 只隐藏不销毁
+* Markdown 导出尊重标签页顺序
+* 关窗等同「关闭全部」（含多标签确认与页面真正销毁）
+* 分组默认全展开、「属性」列可拖动且同窗口共享
 
 统一使用合成 CSV（3 行）而非 data/ 下的真实大文件，保证测试秒级完成且
 不依赖仓库数据。
@@ -18,7 +20,8 @@ import time
 import pytest
 
 from PySide6.QtCore import QCoreApplication, QEvent
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QHeaderView, QMainWindow, QMessageBox
+from shiboken6 import isValid
 
 from src.data import var_info
 from src.data.loader import FastDataLoader
@@ -79,6 +82,24 @@ def wait_idle(dlg, timeout_s: float = 10.0) -> bool:
                 return True
         time.sleep(0.005)
     return False
+
+
+def fake_msgbox(asked: list, answer):
+    """返回一个替身 QMessageBox：记录 question 的调用并给出固定答案。
+
+    刻意替换模块级名字而不是 patch Qt 类属性：PySide6 的静态方法挂在
+    C++ 类型上，monkeypatch 未必生效，且会污染同进程内的其它测试。
+    """
+
+    class _Fake:
+        StandardButton = QMessageBox.StandardButton
+
+        @staticmethod
+        def question(*args, **kwargs):
+            asked.append(args)
+            return answer
+
+    return _Fake
 
 
 @pytest.fixture()
@@ -700,6 +721,192 @@ class TestTabCloseAndWorker:
 
 
 # ---------------------------------------------------------------------------
+# 关窗语义（等同「关闭全部」）
+# ---------------------------------------------------------------------------
+
+
+class TestCloseSemantics:
+    """关窗必须清空所有标签页 —— 用户实测反馈的语义反转。
+
+    旧实现只 hide()，于是“关窗 → 再右键打开另一个变量”会变成 2 个 tab，
+    甚至加载新数据后旧变量名仍挂在标签上。
+    """
+
+    YES = QMessageBox.StandardButton.Yes
+    NO = QMessageBox.StandardButton.No
+
+    def test_close_single_tab_clears_without_prompt(self, env, monkeypatch):
+        """单个标签页直接清空：关了再开就是它自己，没有误操作损失。"""
+        asked: list = []
+        monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox(asked, self.YES))
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+
+        dlg.close()
+        pump(30)
+
+        assert dlg.tabs.count() == 0, "关窗必须清空标签页"
+        assert dlg._pages == {}
+        assert dlg.isVisible() is False
+        assert VariableInfoDialog._instance is dlg, "closeEvent 不得销毁单例"
+        assert env.mw.var_info_geometry is not None, "关闭时须保存几何信息"
+        assert asked == [], "单个标签页不该弹确认"
+
+    def test_close_multi_tab_prompts_and_clears_on_yes(self, env, monkeypatch):
+        asked: list = []
+        monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox(asked, self.YES))
+        dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
+        assert wait_idle(dlg)
+
+        dlg.close()
+        pump(30)
+
+        assert len(asked) == 1, "多标签必须弹确认"
+        assert "2 个变量标签页" in asked[0][2], "确认文案须报出标签页数量"
+        assert dlg.tabs.count() == 0
+        assert dlg._pages == {}
+
+    def test_close_multi_tab_cancel_keeps_everything(self, env, monkeypatch):
+        """用户选“否”时必须完全维持原状，包括窗口可见性。"""
+        monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox([], self.NO))
+        dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
+        assert wait_idle(dlg)
+
+        dlg.close()
+        pump(30)
+
+        assert dlg.isVisible() is True, "取消后窗口不得被隐藏"
+        assert dlg.tabs.count() == 2
+        assert set(dlg._pages) == {"speed", "load"}
+        assert dlg._pages["speed"].snapshot is not None
+
+    def test_no_prompt_during_app_shutdown(self, env, monkeypatch):
+        """退出流程中不得弹模态框，否则会把关闭流程卡住。
+
+        实测：主窗口 close() 不会给子对话框发 closeEvent，但
+        closeAllWindows() 会，而那时 QApplication.closingDown() 仍为 False
+        —— 所以守卫必须是 shutdown_worker 置的显式标志。
+        """
+        asked: list = []
+        monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox(asked, self.YES))
+        dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
+        assert wait_idle(dlg)
+
+        dlg.shutdown_worker()  # 主窗口 closeEvent 走的就是这条
+        dlg.close()
+        pump(30)
+
+        assert asked == [], "退出流程中不得弹确认框"
+        assert dlg.tabs.count() == 0, "但标签页仍须清空"
+
+    def test_reopen_after_close_starts_empty(self, env):
+        """直接回归用户报告的现象。"""
+        first = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(first)
+        first.close()
+        pump(30)
+
+        second = VariableInfoDialog.popup(["load"], parent=env.mw)
+        pump(30)
+
+        assert second is first, "仍复用同一单例"
+        assert second.tabs.count() == 1, "旧标签页必须已被清空"
+        assert set(second._pages) == {"load"}
+
+    def test_close_destroys_pages_not_just_detaches(self, env):
+        """回归防护：实测 Qt 6.11.1 下 tabs.clear() 只摘标签、不销毁页面。
+
+        关窗即清空后这条路径从“偶尔点按钮”变成“每次关窗”，页面若仍
+        挂在 QStackedWidget 下就会逐次累积 QTreeWidget。
+        """
+        dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
+        assert wait_idle(dlg)
+        pages = [dlg._pages["speed"], dlg._pages["load"]]
+
+        dlg._close_all_tabs()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        pump(30)
+
+        assert dlg.tabs.count() == 0
+        assert [isValid(p) for p in pages] == [False, False], "页面必须真正销毁"
+
+
+# ---------------------------------------------------------------------------
+# 树的展现：默认展开与列宽
+# ---------------------------------------------------------------------------
+
+
+class TestTreePresentation:
+    def test_all_sections_expanded_by_default(self, env):
+        """顶层分组固定为 4 个：统计特征 + 基本信息 / 列信息 / 文件信息。
+
+        写死 4 而不是 ``>= 2``：全展开之所以可接受，前提就是分组数已经降
+        下来（MDF 路径实测 8 → 4，总行数 57 → 41）。若将来又长出几个
+        分组，该重新评估“全展开会不会把关键信息挤出可视区”，而不
+        是让这条测试静默地继续通过。
+        """
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+        tree = dlg._pages["speed"].tree
+
+        assert tree.topLevelItemCount() == 4
+        expanded = []
+        for i in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(i)
+            if item.childCount():
+                assert item.isExpanded(), f"分组「{item.text(0)}」默认必须展开"
+                expanded.append(item.text(0))
+        assert expanded, "至少得有一个带子项的分组，否则本测试是空转的"
+
+    def test_column0_is_user_resizable(self, env):
+        """ResizeToContents 的定义就是“用户拖不动”，必须换成 Interactive。"""
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+        tree = dlg._pages["speed"].tree
+
+        assert tree.header().sectionResizeMode(0) == QHeaderView.ResizeMode.Interactive
+        before = tree.columnWidth(0)
+        tree.setColumnWidth(0, before + 40)
+        assert tree.columnWidth(0) != before, "Interactive 下用户必须能改宽度"
+
+    def test_stats_backfill_does_not_reset_column_width(self, env):
+        """异步回填走 _fill_stats_rows 而非 render，不得顶掉用户调的宽度。
+
+        这正是旧实现用 ResizeToContents 时用户看到的“列宽自行跳动”。
+        """
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        tree = dlg._pages["speed"].tree
+        tree.setColumnWidth(0, tree.columnWidth(0) + 40)
+        target = tree.columnWidth(0)
+
+        assert wait_idle(dlg)  # 统计回填在此期间发生
+        assert tree.columnWidth(0) == target
+
+    def test_manual_width_shared_across_tabs(self, env):
+        """不同步的话，切标签页会看到不同列宽，视觉上像“设置没生效”。"""
+        dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
+        assert wait_idle(dlg)
+        a = dlg._pages["speed"].tree
+        b = dlg._pages["load"].tree
+
+        a.setColumnWidth(0, a.columnWidth(0) + 40)
+
+        assert b.columnWidth(0) == a.columnWidth(0)
+
+    def test_new_tab_inherits_shared_width(self, env):
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+        a = dlg._pages["speed"].tree
+        a.setColumnWidth(0, a.columnWidth(0) + 40)
+        expected = a.columnWidth(0)
+
+        dlg.add_variables(["load"])
+        pump(30)
+
+        assert dlg._pages["load"].tree.columnWidth(0) == expected
+
+
+# ---------------------------------------------------------------------------
 # reload 钩子
 # ---------------------------------------------------------------------------
 
@@ -728,7 +935,13 @@ class TestReloadHooks:
         finally:
             loader_b.release_memory()
 
-    def test_refresh_marks_missing_variable_stale(self, env):
+    def test_refresh_removes_missing_variable_tab(self, env):
+        """新数据中不存在的变量：摘掉标签页并告知，而不是留个“(失效)”。
+
+        留一个点不动也统计不出的旧变量名，只会让人以为换了文件后窗口
+        没跟上（用户实测反馈）。但也不能静默消失，否则“我刚才明明开了
+        2 个”变成无从解释，因此必须在状态栏报出数量。
+        """
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
         assert wait_idle(dlg)
         assert env.mw.var_stats_cache.get("load") is not None
@@ -740,14 +953,11 @@ class TestReloadHooks:
             VariableInfoDialog.refresh_after_reload(loader_b)
             wait_idle(dlg)
 
-            load_page = dlg._pages["load"]
-            assert load_page.is_stale is True
-            assert load_page.snapshot is None
-            assert load_page.stats is None
-            assert "失效" in dlg.tabs.tabText(dlg.tabs.indexOf(load_page))
-            # 标签页保留，不静默移除（用户 reload 的往往是同一批测量）
-            assert dlg.tabs.count() == 2
-            assert dlg._pages["speed"].is_stale is False
+            assert "load" not in dlg._pages, "失效变量须被摘除"
+            assert dlg.tabs.count() == 1
+            assert dlg._pages["speed"].is_stale is False, "仍存在的须原地重建"
+            assert "已移除 1 个" in dlg.status_label.text(), "摘除必须告知用户"
+            assert env.mw.var_stats_cache.get("load") is None, "旧统计须作废"
         finally:
             loader_b.release_memory()
 
@@ -755,7 +965,7 @@ class TestReloadHooks:
         """旧统计一律作废：键相同但新数据里的数值可能完全不同。
 
         这是缓存失效的第一道保险（第二道是每条自带的 generation 令牌）。
-        失效页永远不会拿到新统计，因此其缓存条目必须被彻底移除，
+        被摘除的页永远不会拿到新统计，因此其缓存条目必须被彻底移除，
         而不能留下一条旧数据的 min/max 供人误读。
         """
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
@@ -820,20 +1030,6 @@ class TestExportAndGeometry:
 
         assert "没有可复制" in dlg.status_label.text()
         assert clipboard.text() == "", "无内容时不得污染剪贴板"
-
-    def test_close_event_hides_but_preserves_tabs(self, env):
-        """关闭只隐藏：标签页内容保留，用户再次右键时立即可见。"""
-        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
-
-        dlg.close()
-        pump(30)
-
-        assert dlg.isVisible() is False
-        assert VariableInfoDialog._instance is dlg, "closeEvent 不得销毁单例"
-        assert dlg.tabs.count() == 1, "标签页应保留"
-        assert dlg._pages["speed"].snapshot is not None, "内容不得被清空"
-        assert env.mw.var_info_geometry is not None, "关闭时须保存几何信息"
 
     def test_geometry_roundtrip(self, env):
         """save_geom → load_geom 应把窗口尺寸恢复回去。

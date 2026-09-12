@@ -4,6 +4,9 @@
     变量列表右键「变量信息」→ 单选弹一个标签页，多选每个变量一个标签页。
     窗口已存在时新变量**追加**为标签页，已存在的变量直接激活其标签页。
     标签可逐个关闭；只剩一个标签时隐藏标签栏（视觉上退化为单变量窗口）。
+    关闭窗口等同「关闭全部」：清空所有标签页并取消后台统计，多标签时
+    先弹确认。刻意不保留：保留会让“关窗后重新右键打开”与旧标签页混在
+    一起（实测变成 2 个 tab），甚至加载新数据后旧变量名仍挂在标签上。
 
 线程模型（实测数据驱动）：
     元数据快照构建**零磁盘 I/O**（六组块属性全访问约 99 μs），在 UI 线程
@@ -33,6 +36,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QTabWidget,
     QTreeWidget,
@@ -41,7 +45,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.core.config import VAR_INFO_MAX_TABS, VAR_INFO_STATS_CACHE_MAX
+from src.core.config import (
+    VAR_INFO_COL0_MIN_WIDTH,
+    VAR_INFO_MAX_TABS,
+    VAR_INFO_STATS_CACHE_MAX,
+)
 from src.core.logger import get_logger
 from src.data import var_info
 from src.data.metadata import VALID, CONST, INVALID
@@ -222,6 +230,12 @@ class VarInfoPage(QWidget):
         self.stats: var_info.VarStats | None = None
         self._stats_item: QTreeWidgetItem | None = None
         self._stale = False
+        # 列宽只在首次渲染时按内容定一次，之后交给用户拖动（详见
+        # _apply_col0_width）。_auto_sizing 用于区分“程序定宽”与“用户拖动”，
+        # 否则 resizeColumnToContents 自己触发的 sectionResized 会被当成
+        # 用户意图并广播到其它标签页。
+        self._col0_sized = False
+        self._auto_sizing = False
 
         self._build_ui()
 
@@ -242,9 +256,15 @@ class VarInfoPage(QWidget):
         self.tree.setUniformRowHeights(True)
         self.tree.setWordWrap(True)
         header = self.tree.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        # 「属性」列用 Interactive 而不是 ResizeToContents：后者的定义就是
+        # “由内容决定、用户拖不动”，且每次展开/收起都要重算，表现为
+        # 列宽自行跳动。改为 Interactive 后两个毛病一并消失。
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionsMovable(False)
+        header.setMinimumSectionSize(VAR_INFO_COL0_MIN_WIDTH)
         header.setStretchLastSection(False)
+        header.sectionResized.connect(self._on_section_resized)
         layout.addWidget(self.tree, 1)
 
         layout.addLayout(self._build_toolbar())
@@ -370,13 +390,40 @@ class VarInfoPage(QWidget):
                 child = QTreeWidgetItem(top, [str(key), str(value)])
                 child.setToolTip(1, str(value))
 
-        self.tree.expandItem(self._stats_item)
-        # 只展开统计与基本信息，其余折叠：MDF 通道有 7~8 个分组，
-        # 全部展开会让关键信息被挤出可视区
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if item is not self._stats_item and item.text(0) == "基本信息":
-                self.tree.expandItem(item)
+        # 全部分组默认展开：MDF 原本的五个块（基本信息 / 通道 CN /
+        # 通道组 CGB / 源信息 SB / 时间基准）已合并为单个「基本信息」，
+        # 顶层分组从 8 个降到 4 个（统计特征 + 3 个 sections）；实测真实
+        # 通道总行数 57 → 41。原先“全展开会把关键信息挤出可视区”的
+        # 前提已不成立。最长的枚举映射受
+        # VAR_INFO_ENUM_DISPLAY_LIMIT=200 封顶且行高统一，展开代价可控。
+        self.tree.expandAll()
+        self._apply_col0_width()
+
+    def _apply_col0_width(self) -> None:
+        """首次渲染时按内容定一次「属性」列宽，此后不再自动重算。
+
+        只定一次是关键：异步统计回填走 ``_fill_stats_rows`` 而不走
+        ``render``，若在那里重算就会把用户手动调好的宽度顶掉。
+        同一窗口内已有用户调过的宽度时直接沿用，切标签页不会跳回去。
+        """
+        if self._col0_sized:
+            return
+        self._col0_sized = True
+        self._auto_sizing = True
+        try:
+            shared = self._dialog.shared_col0_width
+            if shared:
+                self.tree.setColumnWidth(0, shared)
+            else:
+                self.tree.resizeColumnToContents(0)
+        finally:
+            self._auto_sizing = False
+
+    def _on_section_resized(self, index: int, _old: int, new: int) -> None:
+        """用户拖动「属性」列时，把宽度共享给同窗口的其它标签页。"""
+        if index != 0 or self._auto_sizing or self._dialog._syncing_col0:
+            return
+        self._dialog.set_shared_col0_width(new, origin=self)
 
     def _fill_stats_rows(self) -> None:
         """把统计结果写入「统计特征」节点。可反复调用（异步回填 / 刷新）。"""
@@ -396,19 +443,6 @@ class VarInfoPage(QWidget):
     def set_stats(self, stats) -> None:
         self.stats = stats
         self._fill_stats_rows()
-
-    def mark_stale(self, reason: str) -> None:
-        """reload 后变量在新数据中不存在：保留标签页但显式标注失效。"""
-        self._stale = True
-        self.snapshot = None
-        self.stats = None
-        self.color_chip.setStyleSheet(
-            "background-color: #cccccc; border: 1px solid #999;"
-        )
-        self.summary_label.setText(reason)
-        self.tree.clear()
-        self._stats_item = None
-        self._render_error(reason)
 
     def _render_error(self, reason: str) -> None:
         self.tree.clear()
@@ -544,8 +578,10 @@ class VariableInfoDialog(QDialog):
     def refresh_after_reload(cls, loader) -> None:
         """新 loader 就位后调用（``_apply_loader`` 末尾）：重建所有页面。
 
-        变量在新数据中不存在时保留标签页并标注失效，而不是静默移除 ——
-        用户 reload 的往往是同一批测量，静默移除会让人误以为窗口坏了。
+        仍存在的变量原地重建（用户 reload 的往往是同一批测量，原地刷新
+        才能对比新旧）；新数据中已不存在的变量**摘掉标签页**并在状态栏
+        告知数量 —— 留一个标着"(失效)"的旧变量名既点不动也统计不出，
+        只会让人以为换了文件后窗口没跟上。
         """
         dlg = cls._live_instance()
         if dlg is None or loader is None:
@@ -559,7 +595,7 @@ class VariableInfoDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("变量信息")
         self.setModal(False)
-        # 独立窗口按钮 + 关闭时仅隐藏（保留标签页，下次打开内容仍在）
+        # 独立窗口按钮（关闭语义见 closeEvent：清空所有标签页）
         self.setWindowFlags(
             self.windowFlags()
             | Qt.WindowType.WindowMinimizeButtonHint
@@ -569,6 +605,15 @@ class VariableInfoDialog(QDialog):
 
         self._owner_ref = None
         self._pages: dict[str, VarInfoPage] = {}
+        # 用户手动调过的「属性」列宽，同窗口内所有标签页共享。
+        # 0 表示“用户还没拖过”，此时新建页按自己的内容定宽。
+        self.shared_col0_width = 0
+        # 应用退出流程标记：由 shutdown_worker() 置位（主窗口 closeEvent
+        # 会调它）。退出时不得弹模态确认框，否则会把关闭流程卡住。
+        self._shutting_down = False
+        # 广播宽度时的重入闸：setColumnWidth 会反过来触发对方的
+        # sectionResized，不拦住会形成页与页之间的信号往返。
+        self._syncing_col0 = False
         # 状态栏由两部分组成，必须分开保存：
         #   _notice        —— 用户必须看到的一次性提示（如“标签页已达上限”）
         #   _progress_text —— 后台统计的实时进度，随任务推进不断刷新
@@ -752,14 +797,28 @@ class VariableInfoDialog(QDialog):
         page = self.tabs.widget(index)
         if page is None:
             return
+        name = getattr(page, "var_name", "")
         # 先取消后台任务再摘除页面：顺序颠倒会让结果回填到已销毁的页面上
-        self.worker.cancel(getattr(page, "var_name", ""))
-        self.tabs.removeTab(index)
-        self._pages.pop(getattr(page, "var_name", ""), None)
-        page.deleteLater()
+        self.worker.cancel(name)
+        self._remove_page(name)
         self._sync_tab_bar_visibility()
         if self.tabs.count() == 0:
             self.hide()
+
+    def _remove_page(self, name: str) -> None:
+        """摘除并**销毁**指定变量的标签页（不取消后台任务，由调用方决定）。
+
+        必须 deleteLater：实测 Qt 6.11.1 下 removeTab / tabs.clear() 都只
+        摘掉标签而保留页面，页面仍作为 QStackedWidget 的子对象驻留内存
+        直到整个对话框销毁。
+        """
+        page = self._pages.pop(name, None)
+        if page is None:
+            return
+        index = self.tabs.indexOf(page)
+        if index >= 0:
+            self.tabs.removeTab(index)
+        page.deleteLater()
 
     def _on_tab_changed(self, index: int) -> None:
         page = self.tabs.widget(index)
@@ -770,7 +829,15 @@ class VariableInfoDialog(QDialog):
 
     def _close_all_tabs(self) -> None:
         self.worker.cancel_all()
-        self.tabs.clear()
+        # 逐个 removeTab + deleteLater，刻意不用 tabs.clear()：实测 clear() 不
+        # 销毁页面，它们会继续挂在 QStackedWidget 下。关窗即清空后这条
+        # 路径从“偶尔点按钮”变成“每次关窗”，不销毁就会逐次累积。
+        # 以 tabs 而不是 _pages 为遍历源：前者是真正需要清空的容器。
+        while self.tabs.count():
+            page = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            if page is not None:
+                page.deleteLater()
         self._pages.clear()
         # 窗口隐藏后下次仍会复用同一实例，不清会看到陈旧的提示/进度
         self._notice = ""
@@ -778,6 +845,22 @@ class VariableInfoDialog(QDialog):
         self._refresh_status()
         self._sync_tab_bar_visibility()
         self.hide()
+
+    def set_shared_col0_width(self, width: int, origin=None) -> None:
+        """把用户拖出的「属性」列宽同步到本窗口所有标签页。
+
+        不同步的话，用户在 A 页调好宽度、切到 B 页会看到完全不同的列宽，
+        视觉上像“设置没生效”。刻意不跨会话持久化：这属于临时阅读偏好，
+        且不同变量的标签长度差异很大，记住一个宽度反而可能不合用。
+        """
+        self.shared_col0_width = width
+        self._syncing_col0 = True
+        try:
+            for page in self._pages.values():
+                if page is not origin:
+                    page.tree.setColumnWidth(0, width)
+        finally:
+            self._syncing_col0 = False
 
     def _sync_tab_bar_visibility(self) -> None:
         """只剩一个标签页时隐藏标签栏，视觉上退化为单变量窗口。"""
@@ -882,6 +965,7 @@ class VariableInfoDialog(QDialog):
         generation = self._generation()
         cache = self._cache()
         jobs = []
+        gone = []
 
         for name, page in self._pages.items():
             # 旧数据的统计一律作废：键相同但数值可能完全不同
@@ -889,20 +973,29 @@ class VariableInfoDialog(QDialog):
                 cache.pop(name, None)
             snapshot = self._safe_snapshot(loader, name, generation)
             if snapshot is None:
-                page.mark_stale("变量不在新加载的数据中")
-                self.tabs.setTabText(self.tabs.indexOf(page), f"{name} (失效)")
+                # 迭代中不得改 _pages（下面要摘除页面），先记下名字
+                gone.append(name)
                 continue
             page.render(snapshot, None)
             self.tabs.setTabText(self.tabs.indexOf(page), self._tab_title(name, snapshot))
             if snapshot.is_numeric:
                 jobs.append((name, _make_ref(loader), generation))
 
+        for name in gone:
+            self._remove_page(name)
+        self._sync_tab_bar_visibility()
+        if self.tabs.count() == 0:
+            self.hide()
+
         if jobs:
             self.worker.submit(jobs)
             self._progress_text = f"统计中 0/{len(jobs)}…"
         else:
             self._progress_text = ""
-        self._notice = ""
+        # 摘除后要告知：静默消失会让“我刚才明明开了 3 个”变成无从解释
+        self._notice = (
+            f"已移除 {len(gone)} 个新数据中不存在的变量标签页" if gone else ""
+        )
         self._refresh_status()
 
     # -- 其他 ---------------------------------------------------------------
@@ -940,16 +1033,44 @@ class VariableInfoDialog(QDialog):
 
     def shutdown_worker(self) -> None:
         """主窗口关闭时调用：确保 QThread 不在运行中被销毁。"""
+        # 先置退出标记：closeEvent 靠它判定“现在不该弹确认框”。
+        # 刻意不用 QApplication.closingDown()：实测 closeAllWindows() 期间
+        # 它仍为 False（Qt 只在 ~QCoreApplication 里置位），拦不住。
+        # 而主窗口 closeEvent 会先调到这里，标记因此总是先于关窗就位。
+        self._shutting_down = True
         try:
             self.worker.shutdown()
         except Exception:
             logger.debug("终止统计线程失败", exc_info=True)
 
     def closeEvent(self, event) -> None:
-        # 只隐藏不销毁：标签页内容保留，用户再次右键时立即可见。
-        # 后台任务不取消 —— 统计通常 <1 s 即可完成，用户往往只是暂时移开窗口。
+        """关窗等同「关闭全部」：清空所有标签页，多标签时先弹确认。
+
+        刻意不保留标签页：旧实现只 hide()，于是"关窗 → 再右键打开另一个
+        变量"会变成 2 个 tab，用户无从预期。后台任务必须一并取消：页面
+        已销毁，统计结果无处可去（_on_stats_ready 虽有 page is None 防护，
+        但让它继续读磁盘纯属浪费）。
+
+        单个标签页不弹确认：关了再开就是它自己，没有误操作损失。
+        退出流程中也不弹（``_shutting_down`` 由 shutdown_worker 置位，主窗口
+        closeEvent 会先调它）：实测主窗口关闭并不会给子对话框发
+        closeEvent，但 closeAllWindows() 会，那时弹模态框会把退出卡住。
+        """
+        count = self.tabs.count()
+        if count > 1 and not self._shutting_down:
+            ret = QMessageBox.question(
+                self,
+                "关闭变量信息",
+                f"当前有 {count} 个变量标签页，关闭窗口将全部清空。\n"
+                "确定关闭吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         self.save_geom()
-        self.hide()
+        self._close_all_tabs()
         event.accept()
 
     @classmethod
