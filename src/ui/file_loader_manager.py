@@ -956,6 +956,16 @@ class FileLoaderManager(MainWindowBaseManager):
         import gc
 
         try:
+            # 0) 统计缓存必须最先、无条件清空（缺-2/缺-3 加固）。
+            # 变量信息窗口的统计缓存键为变量名，同名变量在新数据中的数值
+            # 可能完全不同，必须整体作废。原实现放在步骤 1/2 之间，若上方
+            # 遍历 plot widgets 抛异常会被 except 吞掉而跳过清空；而
+            # _begin_data_reload 在 _is_loading_new_data 残留时不递增
+            # _data_version（generation 令牌随之失效），两道保险将同时
+            # 失效。作为 try 内首条语句执行：后续任何异常都不影响清空，
+            # 且自身抛 AttributeError 时仍受下方 except 保护。
+            self.mw.var_stats_cache = {}
+
             # 1) 清理 plot widgets 的 data 引用
             for container in getattr(self.mw, "plot_widgets", []):
                 widget = getattr(container, "plot_widget", None)
@@ -971,10 +981,6 @@ class FileLoaderManager(MainWindowBaseManager):
             # 此前却无任何清理点，reload 后残留的旧文本表会让同名变量
             # 在新数据上显示陈旧标签（新数据该通道可能已不是枚举）。
             self.mw._enum_text_maps = {}
-            # 变量信息窗口的统计缓存：键为变量名，同名变量在新数据中的
-            # 数值可能完全不同，必须整体作废。缓存条目自带 generation 令牌，
-            # 此处显式清空是第一道保险，令牌校验是第二道。
-            self.mw.var_stats_cache = {}
 
             # 3) 清理 table dialog 的独立 _df
             from src.ui.table_dialog import DataTableDialog

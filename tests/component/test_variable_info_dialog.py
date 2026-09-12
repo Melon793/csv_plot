@@ -15,6 +15,7 @@ tests/unit/data/test_var_info.py）：
 不依赖仓库数据。
 """
 
+import threading
 import time
 
 import pytest
@@ -535,14 +536,18 @@ class TestRendering:
 
 
 class TestCache:
-    def test_cache_hit_skips_resubmit(self, env, submit_spy):
-        """命中缓存时不得再提交任务：这是缓存存在的唯一意义。"""
+    def test_cache_hit_revalidates_current_page_once(self, env, submit_spy):
+        """方案 E：命中缓存的页面成为当前可见页时，恰好提交一次静默再验证。
+
+        这是"可见即再验证"的核心语义：缓存负责瞬时出数，可见页随后必然
+        拿到本会话现算结果。回填完成后页面标记已验证，再次右键同名变量
+        （页已存在、直接激活）不得重复提交 —— 每 tab 每会话至多一次。
+        """
         install, calls = submit_spy
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
         assert wait_idle(dlg)
         assert env.mw.var_stats_cache["speed"].computed is True
 
-        # 先等首批统计落地，再装监听器：只关心“重新打开时是否又提交”
         original = install(dlg)
         try:
             dlg._on_tab_close(0)
@@ -550,13 +555,24 @@ class TestCache:
             calls.clear()
 
             dlg.add_variables(["speed"])
-            pump(30)
+            submitted = [j[0] for j in calls]
+            assert submitted == ["speed"], (
+                f"命中缓存且成为当前页，应恰好提交一次再验证: {submitted}"
+            )
+            assert wait_idle(dlg)
 
-            assert calls == [], f"命中缓存却重新提交了任务: {calls}"
             page = dlg._pages["speed"]
             assert page.stats is not None
-            assert page.stats.cached is True, "UI 须标注结果来自缓存"
             assert page.stats.computed is True
+            assert page.stats.from_cache is False, "回填后应是现算结果"
+            assert page.validated_this_session is True
+            assert dlg.worker.queue_size() == 0
+
+            # 已验证的页面不得重复触发
+            calls.clear()
+            dlg.add_variables(["speed"])
+            pump(30)
+            assert calls == [], f"已验证的页面不得重复再验证: {calls}"
         finally:
             dlg.worker.submit = original
 
@@ -573,6 +589,20 @@ class TestCache:
         """既未算完也无错误的占位条目不算命中，否则会永久卡住该变量。"""
         cache = {"speed": var_info.VarStats(generation=0)}
         assert VariableInfoDialog._lookup_cache(cache, "speed", 0) is None
+
+    def test_lookup_cache_rejects_cancelled_entry(self):
+        """缺-5 纵深防御：cancelled 条目不是有效结果，拒绝采用并顺手剔除。
+
+        正常路径下 _store_cache 已拒绝写入；此处兜住历史版本残留与
+        异常路径（例如绕过 store 直接塞进缓存的取消结果）。
+        """
+        cache = {
+            "speed": var_info.VarStats(
+                error="已取消", cancelled=True, generation=0
+            )
+        }
+        assert VariableInfoDialog._lookup_cache(cache, "speed", 0) is None
+        assert "speed" not in cache, "毒条目应被顺手剔除，避免长期占位"
 
     def test_lookup_cache_handles_none(self):
         """缓存不可用时传 None（而非空 dict），不得抛异常。"""
@@ -626,6 +656,204 @@ class TestCache:
             dlg.shutdown_worker()
             dlg.deleteLater()
             pump(30)
+
+
+# ---------------------------------------------------------------------------
+# 可见即再验证（方案 E）
+# ---------------------------------------------------------------------------
+
+
+class TestVisibleRevalidation:
+    """缓存负责瞬时出数；当前可见页随后必然拿到本会话现算结果。
+
+    触发点共三个：切 tab（currentChanged）、首开/复用窗口当前页
+    （add_variables 末尾显式兜底 —— 单标签或索引未变时不发信号）、
+    关窗后再开（走"新建页 + 命中"，由前两条覆盖）。
+    """
+
+    def test_first_open_with_cache_revalidates(self, env, submit_spy):
+        """首开窗口即命中缓存（无任何切换动作）也须提交一次再验证。
+
+        预置一条与真实数据不符的陈旧缓存，验证可见页的数值最终被
+        现算结果覆盖 —— 这正是 E 的存在意义：兜住"缓存值与数据不一致"
+        的一切未来路径（缺-1）。
+        """
+        env.mw.var_stats_cache["speed"] = var_info.VarStats(
+            min=1.0, max=2.0, mean=1.5, std=0.5, computed=True, generation=0
+        )
+        install, calls = submit_spy
+        # 再验证发生在 popup → add_variables 内部，事后安装监听会错过提交
+        # 时机：必须先构建单例、装好监听，再走 popup 的复用路径
+        dlg = VariableInfoDialog(env.mw)
+        VariableInfoDialog._instance = dlg
+        install(dlg)
+        assert VariableInfoDialog.popup(["speed"], parent=env.mw) is dlg
+
+        submitted = [j[0] for j in calls]
+        assert submitted == ["speed"], f"首开命中缓存应提交一次再验证: {submitted}"
+        assert wait_idle(dlg)
+
+        page = dlg._pages["speed"]
+        assert page.stats.min == pytest.approx(10.0), "陈旧缓存值须被现算覆盖"
+        assert page.stats.from_cache is False
+        assert page.validated_this_session is True
+
+    def test_revalidate_error_keeps_cached_values(self, env, monkeypatch):
+        """R2：再验证返回错误/取消时，页面保留原有正确值，只在状态栏提示。
+
+        迟到的失败结果（取消 / loader 关闭 / 读盘异常）不得把用户正在
+        看的正确数字覆盖成"已取消"。
+        """
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+        page = dlg._pages["speed"]
+        good_min = page.stats.min
+        assert good_min == pytest.approx(10.0)
+
+        def broken(loader, var_name, should_cancel=None):
+            return var_info.VarStats(error="读取失败: 模拟故障")
+
+        monkeypatch.setattr(vid_mod.var_info, "compute_stats", broken)
+        # 模拟缓存命中态：页面显示算完的值但本会话未验证
+        page.validated_this_session = False
+        dlg._revalidate_page_if_needed(page)
+        assert "speed" in dlg._revalidating
+        assert wait_idle(dlg)
+
+        assert page.stats.computed is True, "失败结果不得覆盖页面上的正确值"
+        assert page.stats.min == good_min
+        assert "模拟故障" in dlg._progress_text, "失败原因须在状态栏提示"
+        # 一次机会已用完：不得反复重试（每 tab 每会话至多一次）
+        assert page.validated_this_session is True
+        assert "speed" not in dlg._revalidating
+
+    def test_revalidate_stale_result_discards_and_clears(self, env):
+        """R1：再验证在途时发生 reload → 陈旧结果被丢弃且去重标记被释放。
+
+        _on_stats_ready 的 generation 不匹配分支是直接 return，不释放
+        标记的话该变量在本会话内将永远无法再次触发再验证。
+        """
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+        page = dlg._pages["speed"]
+        good_min = page.stats.min
+
+        # 模拟在途再验证 + reload 后版本递增才完成的迟到结果
+        dlg._revalidating.add("speed")
+        dlg._on_stats_ready(
+            "speed", var_info.VarStats(min=999.0, computed=True, generation=-1)
+        )
+
+        assert page.stats.min == good_min, "陈旧结果不得覆盖已回填的页面"
+        assert "speed" not in dlg._revalidating, "丢弃路径也须释放去重标记"
+
+    def test_revalidate_dedup_while_inflight(self, env, submit_spy):
+        """R1 去重：同一变量的再验证在途时，再次触发不得重复提交。"""
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+        page = dlg._pages["speed"]
+        install, calls = submit_spy
+        original = install(dlg)
+        try:
+            dlg._revalidating.add("speed")  # 模拟在途
+            page.validated_this_session = False
+            dlg._revalidate_page_if_needed(page)
+            dlg._revalidate_page_if_needed(page)
+            assert calls == [], "在途去重失效，重复提交了任务"
+        finally:
+            dlg.worker.submit = original
+            dlg._revalidating.discard("speed")
+
+    def test_rapid_tab_switch_no_duplicate_revalidate(self, env, submit_spy):
+        """快速连切多标签：同一变量至多提交一次再验证。
+
+        去重集合（在途）与 validated_this_session（已完成）双保险，
+        分别挡住"结果未到"与"结果已到"两个窗口期的重复提交。
+        """
+        dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
+        assert wait_idle(dlg)
+        speed_page = dlg._pages["speed"]
+        speed_page.validated_this_session = False  # 模拟缓存命中态
+
+        install, calls = submit_spy
+        original = install(dlg)
+        try:
+            load_idx = dlg.tabs.indexOf(dlg._pages["load"])
+            speed_idx = dlg.tabs.indexOf(speed_page)
+            for _ in range(3):
+                dlg.tabs.setCurrentIndex(load_idx)
+                dlg.tabs.setCurrentIndex(speed_idx)
+            submitted = [j[0] for j in calls]
+            assert submitted.count("speed") <= 1, f"重复提交: {submitted}"
+        finally:
+            dlg.worker.submit = original
+
+    def test_copy_all_markdown_has_no_cached_marker(self, env):
+        """D′：缓存命中态下导出的 Markdown 不得含「（缓存）」字样。
+
+        旧实现的后缀经 snapshot_to_markdown 复用进入导出，把数值字段
+        污染成 `3.5（缓存）`。
+        """
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+        # 关闭再打开：此刻页面显示的是缓存副本（from_cache=True）
+        dlg._close_all_tabs()
+        dlg.add_variables(["speed"])
+
+        md = "\n".join(p.to_markdown() for p in dlg._ordered_pages())
+        assert "（缓存）" not in md
+
+    def test_cancelled_result_not_cached_and_recomputes(self, env, monkeypatch):
+        """缺-5：在途任务被取消后，「已取消」不得写入缓存；重开该变量
+        必须正常提交重算，而不是把「已取消」当终态展示。"""
+        release = threading.Event()
+        real_compute = vid_mod.var_info.compute_stats
+
+        def blocking_compute(loader, var_name, should_cancel=None):
+            while not release.is_set():
+                if should_cancel is not None and should_cancel(var_name):
+                    return var_info.VarStats(error="已取消", cancelled=True)
+                time.sleep(0.005)
+            return real_compute(loader, var_name, should_cancel)
+
+        monkeypatch.setattr(vid_mod.var_info, "compute_stats", blocking_compute)
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and dlg.worker._current != "speed":
+            pump(5)
+        assert dlg.worker._current == "speed", "worker 未开始执行阻塞任务"
+
+        dlg._on_tab_close(0)  # 取消在途任务
+        pump(60)  # 取消结果经 item_ready 到达 _on_stats_ready
+        release.set()
+        assert "speed" not in env.mw.var_stats_cache, "「已取消」不得写入缓存"
+
+        monkeypatch.undo()  # 恢复真实计算
+        dlg.add_variables(["speed"])
+        assert wait_idle(dlg)
+        page = dlg._pages["speed"]
+        assert page.stats is not None
+        assert page.stats.computed is True, "重开后必须自动重算，而非展示「已取消」"
+        assert page.stats.error != "已取消"
+
+    def test_close_all_and_loader_released_clear_revalidating(self, env):
+        """R1：关闭全部与 loader 释放两个整批清理点都必须释放去重标记。
+
+        _close_all_tabs 绕过 _on_tab_close 自行循环摘页，且 cancel_all
+        对排队未启动的任务静默丢弃（不 emit）—— 不清理的话，"关闭全部
+        后再打开"将永远不再触发再验证且无任何报错。
+        """
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        assert wait_idle(dlg)
+
+        dlg._revalidating.add("speed")
+        dlg._close_all_tabs()
+        assert dlg._revalidating == set(), "_close_all_tabs 后标记必须清空"
+
+        dlg._revalidating.add("speed")
+        VariableInfoDialog.on_loader_released()
+        assert dlg._revalidating == set(), "on_loader_released 后标记必须清空"
 
 
 # ---------------------------------------------------------------------------
