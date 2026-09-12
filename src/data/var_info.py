@@ -189,20 +189,10 @@ def conversion_label(mdf_version: Optional[str], ct) -> str:
     return _constant_label("CONVERSION_TYPE_TO_STRING", mdf_version, ct, "CT=")
 
 
-def channel_type_label(mdf_version: Optional[str], value) -> str:
-    return _constant_label("CHANNEL_TYPE_TO_STRING", mdf_version, value, "TYPE=")
-
-
-def sync_type_label(mdf_version: Optional[str], value) -> str:
-    return _constant_label("SYNC_TYPE_TO_STRING", mdf_version, value, "SYNC=")
-
-
-def source_type_label(mdf_version: Optional[str], value) -> str:
-    return _constant_label("SOURCE_TYPE_TO_STRING", mdf_version, value, "SRC=")
-
-
-def bus_type_label(mdf_version: Optional[str], value) -> str:
-    return _constant_label("BUS_TYPE_TO_STRING", mdf_version, value, "BUS=")
+# channel_type_label / sync_type_label / source_type_label / bus_type_label
+# 四个包装函数已随 block 合并移除（它们唯一的调用点在被删掉的
+# 「通道 (CNBLOCK)」与「源信息 (SBLOCK)」行里）。版本感知的取表机制
+# 仍由 _constant_label 保留，并继续被 conversion_label 使用。
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +315,6 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     version = info["version"]
     ch = info["channel"]
     cg = info["channel_group"]
-    src = info["source"]
     conv = info["conversion"]
     header = info["header"]
     tb = info["time_base"]
@@ -336,6 +325,28 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     original = meta.original_name or var_name
     renamed = original != var_name
 
+    # 「基本信息」由原先的五个块（基本信息 / 通道 CNBLOCK / 通道组 CGBLOCK /
+    # 源信息 SBLOCK / 时间基准）合并而来，行序按用户实际关注顺序排列，
+    # 而不再按 MDF 块结构排列 —— 用户查一个变量时想的是“它是什么、
+    # 多少点、什么量程、什么时间跨度”，不是“CN 块里第几个字段”。
+    #
+    # 删掉的行全部经 data/ 下 7 个真实通道逐行核实，不是凭印象裁剪：
+    #   源信息 (SBLOCK) —— 有源块时展开为 6 行，但实测 7/7 通道均为单行
+    #       “该通道无源信息块”占位，无一有内容
+    #   同步类型 / 字节偏移 / 位偏移 / 采集名 / 采集源 —— 实测全为空
+    #   循环数 (cycles_nr) —— 实测恒等于「数据点总数」，纯冗余
+    #   master 通道名 —— 实测恒为 "time"
+    #   块地址 / 通道组索引 / 通道索引 / 组内通道数 / 单条记录字节数
+    #       —— 底层调试字段；组索引已含在下面的「名称改写原因」里
+    # 两行看似删了其实无损：有效性在页头摘要与色块已展示（且
+    # snapshot_to_markdown 的首行仍带它），转换类型在「转换规则 (CCBLOCK)」
+    # 块已展示 —— 在树内重复只会让合并后的块更长。
+    #
+    # 标称采样间隔 / 有效采样率是刻意保留的（合并方案 2-B）：它们是全
+    # 软件唯一展示点（grep 过 src/ 全部 .py），而实测存在标称 0.001 s
+    # （1000 Hz）但有效仅 17.68 Hz 的严重偏差 —— 正是
+    # VarMetadata.sampling_rate_hz 语义修复要在 UI 上体现的场景，删掉
+    # 等于让那次修复彻底不可见。
     basic = [
         ("变量名（聚合显示名）" if renamed else "变量名", var_name),
     ]
@@ -348,6 +359,10 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
             )
         )
     basic += [
+        ("单位", _fmt(meta.unit)),
+        ("通道注释", _fmt(ch.get("comment"))),
+        ("记录 ID", _fmt(cg.get("record_id"))),
+        ("组注释", _fmt(cg.get("comment"))),
         ("数据类型", _fmt(info["dtype"])),
         ("数据点总数", f"{meta.sample_count}"),
     ]
@@ -361,67 +376,22 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
             )
         )
     basic += [
-        ("单位", _fmt(meta.unit)),
-        ("有效性", validity_label(meta.validity)),
         ("是否枚举", "是" if meta.is_enum else "否"),
-        # 转换类型标签与"是否枚举"分行显示：两者由不同规则判定，
-        # 一旦矛盾用户可自行识别异常（改进 C / G）
-        ("转换类型", conversion_label(version, conv.get("conversion_type"))),
+        ("位宽 (bit_count)", _fmt(ch.get("bit_count"), " bit")),
+        ("精度 (precision)", _fmt(ch.get("precision"))),
+        ("下限 (lower_limit)", _fmt(ch.get("lower_limit"))),
+        ("上限 (upper_limit)", _fmt(ch.get("upper_limit"))),
+        ("标称采样间隔", _fmt_raster(tb.get("nominal_raster_s"))),
+        ("有效采样率", _fmt_rate(tb.get("effective_rate_hz"))),
+        ("起始时间戳", _fmt(tb.get("time_min"), " s")),
+        ("结束时间戳", _fmt(tb.get("time_max"), " s")),
     ]
     if not info["is_numeric"]:
         basic.append(("说明", "该通道为字符串类型，不支持绘图与统计"))
 
-    channel_rows = [
-        ("通道类型", channel_type_label(version, ch.get("channel_type"))),
-        ("同步类型", sync_type_label(version, ch.get("sync_type"))),
-        ("位宽 (bit_count)", _fmt(ch.get("bit_count"), " bit")),
-        ("字节偏移", _fmt(ch.get("byte_offset"))),
-        ("位偏移", _fmt(ch.get("bit_offset"))),
-        ("精度 (precision)", _fmt(ch.get("precision"))),
-        ("下限 (lower_limit)", _fmt(ch.get("lower_limit"))),
-        ("上限 (upper_limit)", _fmt(ch.get("upper_limit"))),
-        ("块地址", _fmt(ch.get("address"))),
-        ("注释", _fmt(ch.get("comment"))),
-    ]
-
-    cg_rows = [
-        ("通道组索引", _fmt(meta.group_index)),
-        ("通道索引", _fmt(meta.channel_index)),
-        ("组内通道数", _fmt(cg.get("channel_count"))),
-        ("循环数 (cycles_nr)", _fmt(cg.get("cycles_nr"))),
-        ("单条记录字节数", _fmt(cg.get("samples_byte_nr"))),
-        ("采集名 (acq_name)", _fmt(cg.get("acq_name"))),
-        ("采集源 (acq_source)", _fmt(cg.get("acq_source"))),
-        ("记录 ID", _fmt(cg.get("record_id"))),
-        ("组注释", _fmt(cg.get("comment"))),
-    ]
-
-    src_rows = (
-        [
-            ("名称", _fmt(src.get("name"))),
-            ("路径", _fmt(src.get("path"))),
-            ("总线类型", bus_type_label(version, src.get("bus_type"))),
-            ("源类型", source_type_label(version, src.get("source_type"))),
-            ("块地址", _fmt(src.get("address"))),
-            ("注释", _fmt(src.get("comment"))),
-        ]
-        if src
-        else [("说明", "该通道无源信息块 (SBLOCK)")]
-    )
-
     sections = {
         "基本信息": basic,
-        "通道 (CNBLOCK)": channel_rows,
-        "通道组 (CGBLOCK)": cg_rows,
-        "源信息 (SBLOCK)": src_rows,
         "转换规则 (CCBLOCK)": _conversion_rows(version, conv, meta),
-        "时间基准": [
-            ("master 通道名", _fmt(tb.get("master_name"))),
-            ("标称采样间隔", _fmt_raster(tb.get("nominal_raster_s"))),
-            ("有效采样率", _fmt_rate(tb.get("effective_rate_hz"))),
-            ("起始时间戳", _fmt(tb.get("time_min"), " s")),
-            ("结束时间戳", _fmt(tb.get("time_max"), " s")),
-        ],
         "文件信息 (HDBLOCK)": [
             ("MDF 版本", _fmt(version)),
             ("文件路径", _fmt(fi.get("path"))),
