@@ -19,7 +19,9 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from src.core.config import VAR_INFO_ATTRIBUTION_MAX_LEN
 from src.core.logger import get_logger
+from src.data import mdf_attribution as attr
 from src.data.metadata import (
     CONST,
     INVALID,
@@ -353,6 +355,47 @@ def _tabular_file_rows(loader) -> list:
     return rows
 
 
+def _one_line(text: str) -> str:
+    r"""把多行注释压成单行展示。
+
+    信息页行高固定（VAR_INFO_ROW_HEIGHT），嵌换行符会被裁剪成看不到内容
+    的黑盒；而实测 v4 合成文件与部分 CANape 注释确实带换行（如
+    ``'E2E校验\nDataID ='``），故统一用 " / " 拼接。
+    """
+    return " / ".join(part.strip() for part in (text or "").splitlines() if part.strip())
+
+
+def _clip(text: str, max_len: int = 0) -> str:
+    """归属/注释行的展示截断；全值由信息页 tooltip 承担。"""
+    text = (text or "").strip()
+    limit = max_len or VAR_INFO_ATTRIBUTION_MAX_LEN
+    if limit and len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def _hd_attribution_rows(header_comment, max_len: int = 0) -> list[tuple[str, str]]:
+    """试验级归属（数据库 / 试验 / 工作空间 / 设备清单 / 程序描述 / WP / RP）。
+
+    实测 5/5 个 CANape/INCA 文件的 HD 注释都带这一段 ``Key: Value``，
+    对定位“这条曲线来自哪套标定量”比整段文件注释有用得多。
+    """
+    parsed = attr.parse_hd_comment(header_comment)
+    rows = []
+    for raw_key, label in attr.HD_ATTRIBUTION_KEYS:
+        value = parsed.get(raw_key, "")
+        if value:
+            # 设备清单可达十几个名字（实测 'VCU,ECU,CAN-Monitoring:1,…'），
+            # 不截断会把「值」列撑宽到统计行看不见
+            rows.append(
+                (
+                    f"{label}（{raw_key}）",
+                    _clip(_one_line(attr.repair_text(value)), max_len),
+                )
+            )
+    return rows
+
+
 def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     # get_channel_info 全部取自加载期已解析的内存块结构，零磁盘 I/O
     info = loader.get_channel_info(var_name)
@@ -376,8 +419,10 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     # 多少点、什么量程、什么时间跨度”，不是“CN 块里第几个字段”。
     #
     # 删掉的行全部经 data/ 下 7 个真实通道逐行核实，不是凭印象裁剪：
-    #   源信息 (SBLOCK) —— 有源块时展开为 6 行，但实测 7/7 通道均为单行
-    #       “该通道无源信息块”占位，无一有内容
+    #   源信息 (SBLOCK) —— 当时实测 7/7 通道均为单行“该通道无源信息块”
+    #       占位。**该结论仅对 sampled MDF3 成立**：本次补测发现 MDF4 的 SI 块
+    #       100% 有值（mf4 实测 name=ECU 节点 99.9%、path=设备 100%），故已以
+    #       「归属信息」块的形式回归，且比原 6 行更能回答“这变量属于谁”
     #   同步类型 / 字节偏移 / 位偏移 / 采集名 / 采集源 —— 实测全为空
     #   循环数 (cycles_nr) —— 实测恒等于「数据点总数」，纯冗余
     #   master 通道名 —— 实测恒为 "time"
@@ -392,6 +437,12 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     # （1000 Hz）但有效仅 17.68 Hz 的严重偏差 —— 正是
     # VarMetadata.sampling_rate_hz 语义修复要在 UI 上体现的场景，删掉
     # 等于让那次修复彻底不可见。
+    # 通道注释：实测 v4 真实文件直出整段 XML（<CNcomment …><TX>…</TX>…），
+    # v3 的长文本在 comment 与 description 两处各一份、合成文件只有
+    # description，且 CANape 写的中文被单字节解码成乱码 —— 三者统一交给
+    # mdf_attribution 解析与回转。
+    aux_text = attr.channel_aux_text(ch)
+
     basic = [
         ("变量名（聚合显示名）" if renamed else "变量名", var_name),
     ]
@@ -405,7 +456,7 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
         )
     basic += [
         ("单位", _fmt(meta.unit)),
-        ("通道注释", _fmt(ch.get("comment"))),
+        ("通道注释", _fmt(_one_line(aux_text))),
         ("记录 ID", _fmt(cg.get("record_id"))),
         ("组注释", _fmt(cg.get("comment"))),
         ("数据类型", _fmt(info["dtype"])),
@@ -434,23 +485,34 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     if not info["is_numeric"]:
         basic.append(("说明", "该通道为字符串类型，不支持绘图与统计"))
 
-    sections = {
-        "基本信息": basic,
-        "转换规则 (CCBLOCK)": _conversion_rows(version, conv, meta),
-        "文件信息 (HDBLOCK)": [
-            ("MDF 版本", _fmt(version)),
-            ("文件路径", _fmt(fi.get("path"))),
-            ("文件大小", format_size(fi.get("size"))),
-            ("通道组数", _fmt(fi.get("group_count"))),
-            ("变量总数", _fmt(fi.get("var_count"))),
-            ("作者", _fmt(header.get("author"))),
-            ("部门", _fmt(header.get("department"))),
-            ("项目", _fmt(header.get("project"))),
-            ("主题", _fmt(header.get("subject"))),
-            ("起始时间", _fmt(header.get("start_time_string"))),
-            ("文件注释", _fmt(header.get("comment"))),
-        ],
-    }
+    sections: dict[str, list[tuple[str, str]]] = {"基本信息": basic}
+
+    # 归属信息紧跟基本信息；一行都没提取到时**不建空块**（D3），
+    # 因此 CSV/Excel 路径与无归属信息的 MDF 变量完全不受影响。
+    attribution_rows = attr.build_attribution_rows(info)
+    if attribution_rows:
+        sections["归属信息"] = attribution_rows
+
+    sections["转换规则 (CCBLOCK)"] = _conversion_rows(version, conv, meta)
+
+    # 文件注释同样不得直出 XML：先抽 TX + 乱码回转 + 截断，再把
+    # 其中的 Key: Value 拆成独立行（见 _hd_attribution_rows）。
+    hd_text = attr.repair_text(attr.extract_tx(header.get("comment")))
+    file_rows = [
+        ("MDF 版本", _fmt(version)),
+        ("文件路径", _fmt(fi.get("path"))),
+        ("文件大小", format_size(fi.get("size"))),
+        ("通道组数", _fmt(fi.get("group_count"))),
+        ("变量总数", _fmt(fi.get("var_count"))),
+        ("作者", _fmt(header.get("author"))),
+        ("部门", _fmt(header.get("department"))),
+        ("项目", _fmt(header.get("project"))),
+        ("主题", _fmt(header.get("subject"))),
+        ("起始时间", _fmt(header.get("start_time_string"))),
+        ("文件注释", _fmt(_clip(_one_line(hd_text)))),
+    ]
+    file_rows += _hd_attribution_rows(header.get("comment"))
+    sections["文件信息 (HDBLOCK)"] = file_rows
 
     enum_map = info.get("enum_map") or meta.enum_map
     if enum_map:

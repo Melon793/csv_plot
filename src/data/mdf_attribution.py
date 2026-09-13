@@ -110,6 +110,9 @@ _HD_LINE_RE = re.compile(r"^(?P<k>[A-Za-z][A-Za-z ()/_-]{0,39})\s*:\s*(?P<v>.+)$
 #: HD 正文尾部的 CANape 占位噪声行
 _HD_NOISE_LINES = frozenset({"", "§@", "§", "@"})
 
+#: ``extract_tx`` 最多递进抽取几层（实测 asammdf 写 v3 header 注释时套了两层）
+_TX_NESTING_LIMIT = 3
+
 #: 试验级归属键 → 中文标签（顺序即展示顺序）
 HD_ATTRIBUTION_KEYS: tuple[tuple[str, str], ...] = (
     ("Database", "数据库"),
@@ -193,12 +196,23 @@ def extract_tx(text) -> str:
       （单行）；
     - v4 合成文件 / HD 注释：带换行的 ``<TX>`` 段；
     - v3：不是 XML，原样返回。
+
+    可重入：asammdf 写 MDF3 的 header 注释时会对正文**再包一层并转义**（实测
+    合成 v3 文件读回为 ``<HDcomment><TX>&lt;HDcomment&gt;&lt;TX&gt;Database: …``），
+    所以抽出后若仍是 ``<TX>`` 结构就再抽一层，最多 3 层以防死循环。
     """
     if not isinstance(text, str) or not text.strip():
         return ""
-    match = _TX_RE.search(text)
-    body = match.group(1) if match else text
-    body = html.unescape(body)
+    body = text
+    unescaped = False
+    for _ in range(_TX_NESTING_LIMIT):
+        match = _TX_RE.search(body)
+        if match is None:
+            break
+        body = html.unescape(match.group(1))
+        unescaped = True
+    if not unescaped:
+        body = html.unescape(body)
     lines = [ln.strip() for ln in body.splitlines()]
     # 去掉尾部噪声行（实测 CANape 在 HD 正文末尾写了一行孤立的 '§@'）
     while lines and lines[-1] in _HD_NOISE_LINES:
