@@ -251,6 +251,64 @@ class TestGetChannelInfo:
         info = loader4.get_channel_info("State")
         assert info["enum_map"] == ENUM_TEXTS
 
+    def test_channel_carries_attribution_text_keys(self, loader3, loader4):
+        """归属提取依赖的两个字段必须在两版下都存键（值可空）。
+
+        description 是 v3 长文本真身、display_names 是 v4 层级显示名，
+        另一版无此属性时 getattr 置 None —— 锁的是**键在**，不是值在。
+        """
+        for loader in (loader3, loader4):
+            ch = loader.get_channel_info("Press_G0")["channel"]
+            assert "description" in ch, f"{loader} 的 channel 缺 description"
+            assert "display_names" in ch, f"{loader} 的 channel 缺 display_names"
+
+
+# ---------------------------------------------------------------------------
+# _block_attrs：可调用属性守卫与类型归一
+# ---------------------------------------------------------------------------
+
+
+class _FakeBlock:
+    """模拟 asammdf 块对象：数据属性 / bytes / 方法 / 抛异常的方法混在一起。"""
+
+    def __init__(self):
+        self.author = "xiaolin"
+        self.raw = b"proj\x00\x00"
+        self.missing = None
+
+    def start_time_string(self):
+        return "local time = 22-Apr-2026 14:58:14 + 088990u [GMT+8.00]"
+
+    def boom(self):
+        raise RuntimeError("boom")
+
+
+class TestBlockAttrs:
+    NAMES = ("author", "raw", "missing", "start_time_string", "boom", "absent")
+
+    def test_none_object_returns_empty(self):
+        assert MDFLazyLoader._block_attrs(None, self.NAMES) == {}
+
+    def test_callable_attr_is_invoked_not_repr(self):
+        """实测 v3/v4 的 HeaderBlock.start_time_string 都是**方法**（缺陷 3）。
+
+        不取返回值的话，信息窗口会直出 ``<bound method ...&gt;``。
+        """
+        out = MDFLazyLoader._block_attrs(_FakeBlock(), self.NAMES)
+        assert out["start_time_string"].startswith("local time = ")
+
+    def test_raising_callable_becomes_none(self):
+        """宁可少一行，也不能让归属/文件信息渲染出垃圾。"""
+        out = MDFLazyLoader._block_attrs(_FakeBlock(), self.NAMES)
+        assert out["boom"] is None
+
+    def test_data_and_bytes_attrs_normalized(self):
+        out = MDFLazyLoader._block_attrs(_FakeBlock(), self.NAMES)
+        assert out["author"] == "xiaolin"
+        assert out["raw"] == "proj"
+        assert out["missing"] is None
+        assert out["absent"] is None
+
 
 # ---------------------------------------------------------------------------
 # SingleShotGroup 过滤

@@ -563,6 +563,10 @@ class MDFLazyLoader:
         "name", "unit", "channel_type", "sync_type", "data_type",
         "bit_count", "byte_offset", "bit_offset", "precision",
         "lower_limit", "upper_limit", "address", "comment",
+        # description: v3 的 CN 长文本落点（合成文件只写 description、comment 为空）；
+        # display_names: v4 的层级显示名映射。两者供归属信息提取使用，v3/v4 互缺
+        # 一侧时由 getattr 置 None，调用方按缺省处理。
+        "description", "display_names",
     )
     _CG_ATTRS = (
         "cycles_nr", "samples_byte_nr", "record_id",
@@ -586,12 +590,22 @@ class MDFLazyLoader:
         bytes 统一解码为 str，缺失属性置 None，保证 UI 层拿到的都是可直接
         渲染的类型。不同 MDF 版本的块属性集不同（如 v3 的 RAT 转换用 P1..P4、
         v4 用 a/b），用 getattr 兼容两者而不做版本分支。
+
+        可调用属性（如 v3/v4 HeaderBlock.start_time_string 均为**方法**而非数据）
+        一律无参调用取返回值，调用失败置 None —— 宁可少一行，也不能把 bound
+        method 的 repr 原样显示给用户。
         """
         if obj is None:
             return {}
         out = {}
         for n in names:
             v = getattr(obj, n, None)
+            if callable(v):
+                try:
+                    v = v()
+                except Exception:
+                    logger.debug("块属性 %s 调用失败", n, exc_info=True)
+                    v = None
             if isinstance(v, bytes):
                 v = v.decode("utf-8", errors="replace").rstrip("\x00")
             out[n] = v
@@ -617,6 +631,9 @@ class MDFLazyLoader:
         dtype 取自 ch.dtype_fmt：实测 v3/v4 通用且与实际读取 dtype 一致
         （v3 字符串通道 -> dtype('S256')、v4 数值通道 -> dtype('uint16')），
         因此字符串通道识别无需 get(record_count=1) 探测。
+
+        channel 组额外携带 description / display_names 两个文本字段，
+        供 src.data.mdf_attribution 提取变量归属信息（设备 / ECU / 函数）。
         """
         with self._access_lock:
             self._ensure_open()
