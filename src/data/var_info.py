@@ -4,9 +4,10 @@
 
 1. **零 Qt 依赖**：本模块只产出纯数据结构与 Markdown 字符串，可脱离 GUI
    做单元测试。
-2. **元数据零磁盘 I/O**：MDF 路径的信息全部来自加载期已解析的内存块结构
-   （实测六组全属性访问约 99 μs），因此 ``build_snapshot()`` 可直接在 UI
-   线程同步调用，窗口打开即有内容。
+2. **元数据零磁盘 I/O 且 O(1)**：MDF 路径的信息全部来自加载期已解析的内存块
+   结构（实测六组全属性访问约 99 μs）；表格（CSV/Excel/DAT）路径只读 pandas
+   的 dtype / categories / 长度等元数据，**不物化列数据**。两条路径因此都
+   可直接在 UI 线程同步调用，窗口打开即有内容。
 3. **统计与元数据分离**：统计需读磁盘（实测 18.8 ms / 428k 点，为元数据的
    190 倍），由 ``compute_stats()`` 单独提供，交给后台线程调用；结果由
    ``main_window.var_stats_cache`` 缓存，快照本身不持有统计（避免两份真相）。
@@ -42,6 +43,21 @@ _VALIDITY_LABELS = {
 _NUMERIC_KINDS = "biufc"
 # 不可绘图也不可统计的类别：字节串/Unicode 串/对象
 _STRING_KINDS = "SUO"
+
+
+def _effective_numpy_dtype(dtype) -> np.dtype:
+    """把 pandas dtype 归一为 numpy dtype；扩展 dtype 降级为 object。
+
+    pandas 的字符串列 dtype 可能是 ``StringDtype`` 这类**扩展 dtype**，
+    ``np.dtype()`` 对它直接抛 ``TypeError``（实测 pandas 3.x 下
+    ``Categorical.categories.dtype`` 即为 ``StringDtype``）；而
+    ``Series.to_numpy()`` 对这类列物化出的就是 object 数组。这里取同样的
+    口径，但只读 dtype 元数据、不触碰数据本身。
+    """
+    try:
+        return np.dtype(dtype)
+    except TypeError:
+        return np.dtype("O")
 
 
 @dataclass(slots=True)
@@ -80,15 +96,20 @@ class VarStats:
     # add_variables 只对 stats is None 的页面提交重算，用户将永远卡在
     # 「已取消」直到手动点「刷新统计」。
     cancelled: bool = False
+    # 结果有效但需附带说明（如 MDF 通道组声明的点数多于实际可读点数，
+    # 统计只覆盖了前 n 个样本）。刻意与 ``error`` 分开：``computed=True``
+    # 与 ``error`` 非空并存会让 _on_stats_ready 的 R2 守卫与 stats_to_rows
+    # 的有效性判断语义相混；note 只追加一行提示，不参与任何判断。
+    note: str = ""
 
 
 @dataclass(slots=True)
 class VarInfoSnapshot:
     """变量元数据快照，**刻意不含统计结果**。
 
-    统计由 ``main_window.var_stats_cache`` 单独管理；快照重建仅需约 99 μs，
-    缓存它反而会引入 sections（含 comment 与枚举表）陈旧的风险与额外的
-    reload 清理负担。
+    统计由 ``main_window.var_stats_cache`` 单独管理；快照重建零磁盘 I/O 且
+    O(1)（MDF 路径实测约 99 μs），缓存它反而会引入 sections（含 comment
+    与枚举表）陈旧的风险与额外的 reload 清理负担。
     """
 
     name: str
@@ -225,27 +246,41 @@ def _from_tabular(loader, var_name, generation, kind) -> VarInfoSnapshot:
         raise KeyError(f"变量 '{var_name}' 不存在")
 
     series = df[var_name]
-    values = series.to_numpy()
-    dtype = np.dtype(values.dtype)
-    is_numeric = dtype.kind in _NUMERIC_KINDS
+    # 全程只读 pandas 元数据，刻意**不**调 series.to_numpy()：物化对 category
+    # 列会生成完整的 object 数组（实测 5M 行文本 categories 18.98 ms、全空列
+    # 6.23 ms），对 float 列则还要再付一次 np.isnan 全列扫描（10M 行 1.86 ms）。
+    # 这些都是 O(N)，会打破"快照可在 UI 线程同步调用"的前提 —— 批量打开
+    # VAR_INFO_MAX_TABS=50 个标签页时实测累计 95 ms 以上的 UI 冻结。
+    length = len(series)
+    s_dtype = series.dtype
 
-    # np.isnan 对整数/布尔数组会抛 TypeError，仅浮点列统计 NaN
-    nan_count = (
-        int(np.count_nonzero(np.isnan(values))) if dtype.kind == "f" else 0
-    )
-
-    # 整列为空的 CSV/Excel 列被 pandas 推断为 category dtype 且 categories
-    # 为空，to_numpy() 后只剩 object 数组，dtype 层面的 "object" 完全丢失了
-    # "这列其实全是空值" 这一事实。这里做 O(1) 判定（只读 categories 长度）：
-    # 刻意不用 pd.isna(series).all()，后者在千万行的列上约需 50 ms，会破坏
-    # "快照构建零磁盘 I/O、约 99 μs、可在 UI 线程同步调用" 的架构前提。
     all_empty = False
-    if not is_numeric and str(series.dtype) == "category":
+    if str(s_dtype) == "category":
+        # 整列为空的 CSV/Excel 列被 pandas 推断为 category dtype 且 categories
+        # 为空，dtype 层面的 "category" 完全丢失了"这列其实全是空值"这一事实。
+        # 这里做 O(1) 判定（只读 categories 长度）：刻意不用
+        # pd.isna(series).all()，后者在千万行的列上约需 50 ms。
         try:
-            all_empty = len(series.cat.categories) == 0
+            categories = series.cat.categories
+            all_empty = len(categories) == 0
         except Exception:
             logger.debug("判定 %s 是否为全空列失败", var_name, exc_info=True)
+            categories = None
             all_empty = False
+        # categories 为空时其 dtype 取决于 pandas 的推断（实测真实 CSV 为
+        # object，而对全 NaN 的 float 列显式 astype('category') 会得到
+        # float64），一律按 object 处理：否则"全空列"会被判成数值列，白白
+        # 提交一个注定返回"全部为 NaN/Inf"的统计任务，且 all_empty 的专属
+        # 文案永远出不来
+        dtype = (
+            np.dtype("O")
+            if all_empty or categories is None
+            else _effective_numpy_dtype(categories.dtype)
+        )
+    else:
+        dtype = _effective_numpy_dtype(s_dtype)
+
+    is_numeric = dtype.kind in _NUMERIC_KINDS
 
     validity = (getattr(loader, "df_validity", None) or {}).get(var_name, UNKNOWN)
     unit = (getattr(loader, "units", None) or {}).get(var_name, "-") or "-"
@@ -257,7 +292,7 @@ def _from_tabular(loader, var_name, generation, kind) -> VarInfoSnapshot:
         source_kind=kind,
         original_name=var_name,
         dtype=str(dtype),
-        length=len(values),
+        length=length,
         unit=unit,
         validity=validity,
         is_numeric=is_numeric,
@@ -266,21 +301,23 @@ def _from_tabular(loader, var_name, generation, kind) -> VarInfoSnapshot:
         generation=generation,
     )
 
-    if all_empty:
-        # 不写 nan_count（此时恒为 0）：与"全部为空值"自相矛盾，会让用户
-        # 以为这列一个空值都没有。直接按实际语义给出总行数。
-        nan_row = f"{len(values)}（整列为空）"
-    else:
-        nan_row = str(nan_count)
-
+    # NaN 计数刻意**不放进快照**：它本质是统计量而非元数据，算它必须全列
+    # 扫描（O(N)，正是上面要规避的开销），而 compute_stats 已在后台线程算过
+    # 一遍并以「NaN 数」行呈现。在 UI 线程再算一遍除了阻塞主线程，还会造成
+    # 同一棵树里「NaN 数量」与「NaN 数」两个标签并存、且 MDF 快照从来不
+    # 提供该值的跨格式不一致（非浮点列更是恒报 0，对含 NaN 的文本列属于
+    # 误导）。移除后 NaN 数从"打开即有"变成"统计回填后才有"，与
+    # min/max/mean 的行为一致，用户心智模型反而更统一。
     column_rows = [
-        ("NaN 数量", nan_row),
         ("是否时间格式列", "是" if var_name in time_formats else "否"),
     ]
     if time_fmt:
         column_rows.append(("时间格式", str(time_fmt)))
     if all_empty:
-        column_rows.append(("说明", "该列全部为空值，无有效样本（不支持统计与绘图）"))
+        column_rows.append(
+            ("说明", f"该列全部为空值（共 {length} 行），"
+                     "无有效样本（不支持统计与绘图）")
+        )
     elif not is_numeric:
         column_rows.append(("说明", f"非数值列（{dtype}），不支持统计与绘图"))
 
@@ -288,7 +325,7 @@ def _from_tabular(loader, var_name, generation, kind) -> VarInfoSnapshot:
         "基本信息": [
             ("变量名", var_name),
             ("数据类型", str(dtype)),
-            ("数据点总数", f"{len(values)}"),
+            ("数据点总数", f"{length}"),
             ("单位", unit),
             ("有效性", validity_label(validity)),
         ],
@@ -621,6 +658,12 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
     跨块累加器使用 float64：这与 ``_stats_from_array`` 的结论不矛盾 ——
     那里是单数组交给 numpy 内置的 pairwise summation，这里是跨多块手动累加，
     朴素 float32 累加会随块数线性放大误差。
+
+    ``total`` 取自文件头的 ``cycles_nr``，**不可全信**（与上面 ``total <= 0``
+    分支同根）：声明点数可能多于实际可读点数。因此循环按**实际返回量**
+    推进 offset（按请求量推进会越过中间样本，在统计里挖掉一段连续数据），
+    并在提前读到末尾时把截断事实如实写进 ``note``，而不是静默拿部分数据
+    冒充完整结果。
     """
     from src.core.config import MDF_STATS_CHUNK_SIZE
 
@@ -654,6 +697,8 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
     nan_count = 0
     inf_count = 0
     offset = 0
+    # 实际可读样本少于 cycles_nr 声明值时的截断位置（None = 未截断）
+    truncated_at = None
 
     while offset < total:
         if should_cancel is not None and should_cancel(var_name):
@@ -683,7 +728,13 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
             return VarStats(error=f"字符串通道（{arr.dtype}），不适用统计")
         if arr.dtype.kind not in _NUMERIC_KINDS:
             return VarStats(error=f"非数值类型（{arr.dtype}），不适用统计")
-        if arr.size == 0:
+
+        got = int(arr.size)
+        if got == 0:
+            # cycles_nr 声明的点数多于实际可读点数。不得静默 break 后当
+            # 完整数据出结果：页面「基本信息」显示的 sample_count 是 total，
+            # 而统计只覆盖了 offset 之前的样本，两者自相矛盾却均标为有效
+            truncated_at = offset
             break
 
         f = arr.astype(np.float64, copy=False)
@@ -703,9 +754,23 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
             total_sumsq += float((f * f).sum())
             n += int(f.size)
 
-        offset += count
+        # 按**实际返回量**推进：按请求量 count 推进会在 asammdf 返回不足
+        # count 时越过中间 count-got 个样本，统计里凭空挖掉一段连续数据
+        # （比尾部截断更糟：尾部至少前缀连续，这是中间挖洞）
+        offset += got
+        if got < count:
+            # 已读到真实末尾，无需再试下一块
+            truncated_at = offset
+            break
 
     if n == 0:
+        if truncated_at == 0:
+            # 第一块就读不到数据：真实原因是"读不出样本"，不是"全是 NaN"。
+            # 沿用旧文案会把文件头不可信误报成数据质量问题，用户会去查
+            # 根本不存在的 NaN
+            return VarStats(
+                error=f"通道组无可读样本（文件头声明 {total} 点，实际 0 点）"
+            )
         return VarStats(
             nan_count=nan_count,
             inf_count=inf_count,
@@ -715,6 +780,13 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
     mean = total_sum / n
     # 方差用 E[x²]-E[x]²，浮点舍入可能得到极小负数，需夹到 0
     variance = max(total_sumsq / n - mean * mean, 0.0)
+    note = ""
+    if truncated_at is not None:
+        # 结果仍然有效，但适用范围小于页面宣称的 total，必须告知
+        note = (
+            f"仅统计到前 {truncated_at} 个样本"
+            f"（通道组声明 {total} 个，其后无可读数据）"
+        )
     return VarStats(
         min=float(mn),
         max=float(mx),
@@ -724,6 +796,7 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
         inf_count=inf_count,
         finite_count=n,
         computed=True,
+        note=note,
     )
 
 
@@ -763,6 +836,10 @@ def stats_to_rows(stats: Optional[VarStats]) -> list:
     # 而一旦有 Inf，用户需要立即知道为何“最大值不是那个 inf”。
     if stats.inf_count:
         rows.append(("Inf 数", f"{stats.inf_count}"))
+    # note 放在最后：它是对上面数值**适用范围**的限制说明（如"仅统计到前
+    # N 个样本"），用户读完数字再看到它才不会先入为主
+    if stats.note:
+        rows.append(("说明", stats.note))
     return rows
 
 
