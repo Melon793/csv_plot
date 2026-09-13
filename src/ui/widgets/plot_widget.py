@@ -969,13 +969,26 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """为多曲线更新坐标轴范围 → 委托到 MultiCurveManager"""
         self._multi_curve_manager._update_axes_for_multi_curve(update_x_range)
 
+    def open_variable_editor(self):
+        """打开绘图变量编辑器（唯一实现）。
+
+        双击绘图区、ViewBox 右键菜单（request_variable_editor 信号）、
+        legend 右键菜单三路均调本方法，避免多份构造逻辑漂移。
+        非模态 Tool 窗口，每次新建一个实例（多实例为既有设计，
+        信号断连见 PlotVariableEditorDialog.closeEvent）。
+        """
+        dialog = PlotVariableEditorDialog(self, self.window())
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
     # ---------------- 双击轴弹出对话框 ----------------
     def mouseDoubleClickEvent(self, event):
         if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             super().mouseDoubleClickEvent(event)
             return
         from src.ui.dialogs.axis import AxisDialog
-        from src.ui.plot_variable_editor import PlotVariableEditorDialog
         
         if event.button() == Qt.MouseButton.MiddleButton:
             self.clear_plot_item()
@@ -1007,11 +1020,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
             # 然后检测绘图区域（在检测Y轴之前）
             elif view_box_rect_scene.contains(scene_pos):
-                # 双击绘图区域（网格内部），弹出变量编辑器
-                dialog = PlotVariableEditorDialog(self, self.window())
-                dialog.show()
-                dialog.raise_()
-                dialog.activateWindow()
+                # 双击绘图区域（网格内部），弹出变量编辑器（统一入口）
+                self.open_variable_editor()
                 return
             # 最后检测Y轴区域（最后兜底）
             elif y_axis_rect_scene.contains(scene_pos):
