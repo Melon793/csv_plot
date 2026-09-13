@@ -128,6 +128,18 @@ VAR_INFO_COPY_BTN_MARGIN = 4
 # 持平略优（45.6 → 31.2 ms），4.1M 点长通道总耗时不变（42 → 40 ms）。
 # 该常量仅被 var_info._stats_mdf 使用，绘图路径 get_series 不经过它。
 MDF_STATS_CHUNK_SIZE = 1 << 15  # 32768
+# 变量信息的「归属信息」块（设备 / ECU / 测量组 / 所属函数…）。
+# MDF 标准里没有函数层级块，这些行全部由通道名 / 注释 / SI 块**推断**而
+# 得，因此默认开启但保留一行关停开关：置 False 后归属块整体不输出，
+# 而「通道注释 / 文件注释」的解析与乱码修复不受影响（那是纯缺陷修复）。
+MDF_ATTRIBUTION_ENABLED = True
+# latin-1 误读 GBK 文本的回转修复（CANape 以 GBK 写入中文注释，asammdf
+# 按 cp1252/latin-1 解码 → “82ºÅµ¥ÌåµçÑ¹”）。见 mdf_attribution.repair_text
+# 的四条保守条件，正常中文与纯 ASCII 不受影响；如出现误回转可置 False 回退。
+MDF_GBK_TEXT_REPAIR = True
+# 归属信息 / 注释行的展示截断长度。全值仍由信息页的 tooltip 承担，
+# 不截断会把「值」列撑得很宽、挤掉统计行的可见性。
+VAR_INFO_ATTRIBUTION_MAX_LEN = 120
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3
