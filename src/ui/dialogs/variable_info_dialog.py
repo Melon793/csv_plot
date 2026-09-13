@@ -20,6 +20,11 @@
     只缓存统计（``main_window.var_stats_cache``），不缓存快照 —— 快照重建
     零磁盘 I/O 且 O(1)，缓存它反而引入 sections 陈旧风险。每条统计自带
     generation 令牌，reload 后版本递增，陈旧结果即使到达也会被丢弃。
+
+复制粒度：
+    三个入口各管一档 —— 单个字段值走值列行尾的悬停复制按钮
+    （``CopyFieldDelegate``），整页走「复制本页 Markdown」，多页走
+    「复制全部 Markdown」；``Ctrl+C`` 复制树里选中的若干行（tab 分隔）。
 """
 
 from __future__ import annotations
@@ -29,8 +34,15 @@ import weakref
 from collections import deque
 from dataclasses import replace
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import (
+    QEvent,
+    QRect,
+    Qt,
+    QThread,
+    QPersistentModelIndex,
+    Signal,
+)
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -40,6 +52,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -49,7 +64,10 @@ from PySide6.QtWidgets import (
 
 from src.core.config import (
     VAR_INFO_COL0_MIN_WIDTH,
+    VAR_INFO_COPY_BTN_MARGIN,
+    VAR_INFO_COPY_BTN_SIZE,
     VAR_INFO_MAX_TABS,
+    VAR_INFO_ROW_HEIGHT,
     VAR_INFO_STATS_CACHE_MAX,
 )
 from src.core.logger import get_logger
@@ -84,6 +102,249 @@ def _validity_color(validity: int) -> QColor | None:
     if validity == INVALID:
         return QColor(255, 0, 0)
     return None
+
+
+# ---------------------------------------------------------------------------
+# 「值」列悬停复制按钮
+# ---------------------------------------------------------------------------
+
+# 按钮所在列与无内容占位文本。「值」列的占位短横由 var_info._fmt 对
+# None/空白统一产出，给它画一个复制按钮等于让用户复制一个无意义的 "-"
+_COPY_COLUMN = 1
+_DASH_PLACEHOLDER = "-"
+
+
+def copy_button_rect(
+    cell_rect: QRect,
+    size: int | None = None,
+    margin: int | None = None,
+) -> QRect:
+    """值列单元格里复制按钮的热区：右端对齐、垂直居中的正方形。
+
+    paint 与 editorEvent 必须共用本函数，并且都从**未经收缩的整格 rect**
+    求值：委托在画文本时会把文本区右边收掉一个按钮宽，若热区改用收缩后
+    的 rect 计算，命中区就会与看到的图标错位若干个 margin。
+
+    size/margin 的默认值刻意取 None 而不是直接写常量：默认参数在 def
+    执行时就绑定，等于把 config 的值焊死在这里，而 paint 里的文本区收缩
+    读的是运行时全局 —— 两处会错位。实测踩坑：monkeypatch 常量后按钮
+    边长仍是旧值，据此做的“谁决定行高”实验数据全废。取 None 后两边
+    都走运行时查找，不重启进程也能预览尺寸效果。
+    """
+    if size is None:
+        size = VAR_INFO_COPY_BTN_SIZE
+    if margin is None:
+        margin = VAR_INFO_COPY_BTN_MARGIN
+    # QRect 的 right() 是闭区间右边界（x + width - 1），故 +1 回退一个像素
+    x = cell_rect.right() - margin - size + 1
+    y = cell_rect.center().y() - size // 2
+    return QRect(x, y, size, size)
+
+
+class CopyFieldDelegate(QStyledItemDelegate):
+    """在「值」列右端自绘复制图标，仅在鼠标悬停该行时出现。
+
+    刻意不用 ``setItemWidget`` 挂 QPushButton：一页 40~60 行、最多
+    ``VAR_INFO_MAX_TABS`` 个标签页，常驻控件数量会到数千个，而这份信息
+    绝大多数时候只是看一眼。图标用 QPainter 画两张错开的圆角矩形，不走
+    Unicode 字符：字形在 macOS/Windows 字体里的可用性不可控（Legend 方块
+    已为此踩过坑），也不用往打包里加资源文件。
+    """
+
+    copy_requested = Signal(object)  # QModelIndex
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 悬停/按下态一律用 QPersistentModelIndex 而非 QModelIndex：
+        # render() 会 tree.clear()、_fill_stats_rows() 会 takeChildren()，
+        # 裸索引在行被移除后仍持有已销毁项的内部指针，再取用就是
+        # “访问已删除 C++ 对象”那类崩溃的成因；持久索引会随模型复位
+        # 自动失效。
+        self._hover = QPersistentModelIndex()
+        self._pressed = QPersistentModelIndex()
+
+    # -- 状态 --------------------------------------------------------------
+
+    @staticmethod
+    def is_copyable(index) -> bool:
+        """该行值列是否有可复制的内容（分组标题行与占位行没有）。"""
+        if index.column() != _COPY_COLUMN:
+            return False
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        if not isinstance(text, str) or not text:
+            return False
+        return text != _DASH_PLACEHOLDER
+
+    def set_hover(self, index) -> bool:
+        """更新悬停位置，返回是否变化（调用方据此决定要不要重绘）。"""
+        return self._swap_hover(QPersistentModelIndex(index))
+
+    def clear_hover(self) -> bool:
+        """清除悬停态，返回是否发生变化。"""
+        return self._swap_hover(QPersistentModelIndex())
+
+    def _swap_hover(self, candidate: QPersistentModelIndex) -> bool:
+        # 鼠标在同一行内移动是数量级更高的事件，只有跨行才值得整个
+        # viewport 重绘；两个持久索引相等即位置未变
+        if candidate == self._hover:
+            return False
+        self._hover = candidate
+        return True
+
+    # -- 绘制 --------------------------------------------------------------
+
+    def paint(self, painter, option, index) -> None:
+        show_btn = self.is_copyable(index)
+        btn = copy_button_rect(option.rect) if show_btn else QRect()
+        painter.save()
+        try:
+            if show_btn:
+                # 复制一份再收缩：option 由视图在同一次绘制周期里复用，
+                # 就地改写会污染后续列
+                opt = QStyleOptionViewItem(option)
+                # 预留宽度与悬停无关：若只在悬停时收缩，鼠标划过的那一行
+                # 文本会在“截断位置前移/后移”之间反复跳，视觉上就是整列在抖
+                opt.rect = option.rect.adjusted(
+                    0, 0, -(VAR_INFO_COPY_BTN_SIZE + 2 * VAR_INFO_COPY_BTN_MARGIN), 0
+                )
+            else:
+                opt = option
+            super().paint(painter, opt, index)
+            if show_btn and self._highlighted(index):
+                pressed = QPersistentModelIndex(index) == self._pressed
+                self._paint_icon(painter, btn, pressed)
+        finally:
+            painter.restore()
+
+    def sizeHint(self, option, index):
+        hint = super().sizeHint(option, index)
+        if self.is_copyable(index):
+            # 预留量计入理想宽度。实测 QTreeView 并不支持 word wrap（视图
+            # 会忽略 setWordWrap(True)，长文本一律用省略号截断而非折行），
+            # 所以此处今天不影响行高；保留是为了委托被复到支持折行的
+            # 视图上时，预留宽度能算进行数而不是把第二行截掉
+            hint.setWidth(
+                hint.width() + VAR_INFO_COPY_BTN_SIZE + 2 * VAR_INFO_COPY_BTN_MARGIN
+            )
+        if VAR_INFO_ROW_HEIGHT > 0:
+            # 必须对所有 index 生效：视图开着 setUniformRowHeights(True)，
+            # 任意一行的高度都会被拉平成全表最大值（实测给分组行 40、
+            # 数据行 24 的结果是全部 40），逐行给不同值在这里没有意义
+            hint.setHeight(VAR_INFO_ROW_HEIGHT)
+        return hint
+
+    def _highlighted(self, index) -> bool:
+        # 显式包装再比：QPersistentModelIndex 与 QModelIndex 的 == 依赖隐式
+        # 转换，在 PySide6 上不可靠，走同类型比较
+        persistent = QPersistentModelIndex(index)
+        return persistent == self._hover or persistent == self._pressed
+
+    def _paint_icon(self, painter: QPainter, rect: QRect, pressed: bool) -> None:
+        """两张错开的圆角矩形：后层右上、前层左下。"""
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor("#333333") if pressed else QColor("#8a8a8a"))
+        pen.setWidthF(1.2)
+        painter.setPen(pen)
+        # 后层不填充：选中行/交替行/深浅主题下底色各不相同，用任何固定底色
+        # 去遮罩都会画出一块“补丁”；两张轮廓线错开在 16 px 下已足够可读
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        w = rect.width() - 6
+        h = rect.height() - 4
+        painter.drawRoundedRect(
+            QRect(rect.left() + 5, rect.top(), w, h), 1.5, 1.5
+        )
+        if pressed:
+            painter.setBrush(QColor(33, 150, 243, 70))
+        painter.drawRoundedRect(
+            QRect(rect.left() + 1, rect.top() + 4, w, h), 1.5, 1.5
+        )
+
+    # -- 交互 --------------------------------------------------------------
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        """处理热区内的左键按下/释放，其余事件一律放行给视图。"""
+        et = event.type()
+        if et not in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick,
+        ):
+            return False
+        if not self.is_copyable(index):
+            return False
+        btn = copy_button_rect(option.rect)
+        pos = event.position().toPoint()
+
+        if et == QEvent.Type.MouseButtonPress:
+            if event.button() != Qt.MouseButton.LeftButton or not btn.contains(pos):
+                return False
+            self._pressed = QPersistentModelIndex(index)
+            self._repaint(option)
+            # 返回 True 吞掉这一下：复制是“读”操作，不该顺带把用户原本的
+            # 选区弄乱（按下未吞的话，紧随其后的 release 会把该行选中）
+            return True
+
+        if et == QEvent.Type.MouseButtonDblClick:
+            # 双击必然伴随一次已吞掉的按下；不接住这一就会落到展开/选中上
+            return self._pressed.isValid()
+
+        if not self._pressed.isValid():
+            return False
+        pressed = self._pressed
+        self._pressed = QPersistentModelIndex()
+        self._repaint(option)
+        if pressed == QPersistentModelIndex(index) and btn.contains(pos):
+            self.copy_requested.emit(index)
+        # 起手在热区内，收尾就不该再让视图拿去改选中
+        return True
+
+    @staticmethod
+    def _repaint(option) -> None:
+        # option.widget 由视图填成 viewport，比从 parent() 强转一层更可靠
+        widget = option.widget
+        if widget is not None:
+            widget.update()
+
+
+class VarInfoTree(QTreeWidget):
+    """属性树：在 :class:`CopyFieldDelegate` 之上补悬停追踪与事件出口。
+
+    悬停必须放在视图层：委托的 ``editorEvent`` 拿不到“鼠标离开”事件，
+    而不清悬停的话，鼠标移出树外时最后那一行的图标会永久留着。
+    """
+
+    copy_requested = Signal(object)  # QTreeWidgetItem
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._delegate = CopyFieldDelegate(self)
+        self.setItemDelegate(self._delegate)
+        self.setMouseTracking(True)
+        self._delegate.copy_requested.connect(self._on_delegate_copy)
+        # 滚动后旧悬停索引指向的内容已经换人：不清就会有一枚图标悬停在
+        # 鼠标根本没碰到的行上，而且要等下一次鼠标移动才消失
+        self.verticalScrollBar().valueChanged.connect(self._reset_hover)
+
+    def _on_delegate_copy(self, index) -> None:
+        item = self.itemFromIndex(index)
+        if item is None:
+            # 按下到投递之间树被重建（异步统计回填就在这个窗口里）：
+            # 宁可不复制，也不能把陈旧的键对到新的值上
+            return
+        self.copy_requested.emit(item)
+
+    def _reset_hover(self, *_args) -> None:
+        if self._delegate.clear_hover():
+            self.viewport().update()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._delegate.set_hover(self.indexAt(event.position().toPoint())):
+            self.viewport().update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._reset_hover()
+        super().leaveEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +570,17 @@ class VarInfoPage(QWidget):
 
         layout.addLayout(self._build_header())
 
-        self.tree = QTreeWidget()
+        self.tree = VarInfoTree()
         self.tree.setColumnCount(2)
         self.tree.setHeaderLabels(["属性", "值"])
         self.tree.setAlternatingRowColors(True)
         self.tree.setRootIsDecorated(True)
+        # 行高由 CopyFieldDelegate.sizeHint 按 VAR_INFO_ROW_HEIGHT 统一给出
+        # （PySide6 6.11 的 QTreeView 没有 setRowHeight）。开着本开关时全表
+        # 取最高的一行，所以想要不等高行必须先关掉它
         self.tree.setUniformRowHeights(True)
+        # 实测空操作：QTreeView 不支持折行，长文本一律省略号截断。留着只为
+        # 表明意图，真正的长值出口是 tooltip 与行尾复制按钮
         self.tree.setWordWrap(True)
         header = self.tree.header()
         # 「属性」列用 Interactive 而不是 ResizeToContents：后者的定义就是
@@ -326,6 +592,7 @@ class VarInfoPage(QWidget):
         header.setMinimumSectionSize(VAR_INFO_COL0_MIN_WIDTH)
         header.setStretchLastSection(False)
         header.sectionResized.connect(self._on_section_resized)
+        self.tree.copy_requested.connect(self._on_copy_field)
         layout.addWidget(self.tree, 1)
 
         layout.addLayout(self._build_toolbar())
@@ -567,6 +834,22 @@ class VarInfoPage(QWidget):
         QApplication.clipboard().setText(self.to_markdown())
         self._dialog._notify(f"已复制「{self.var_name}」的 Markdown")
 
+    def _on_copy_field(self, item: QTreeWidgetItem) -> None:
+        """行尾悬停按钮：只把「值」列原文送进剪贴板。
+
+        刻意不拼上属性名：用户要的是能直接粘进报告表格单元格/公式里的
+        干净数值或路径。也不去取未格式化的原值：树里的文本就是
+        ``stats_to_rows`` / ``_fmt`` 产出的那份，与 tooltip 同源。窄窗口下
+        长路径会被视图用省略号截断显示，复制到的是全量 —— 与 tooltip
+        一致，正是想要的。
+
+        状态栏只报键名、不回显数值：一条完整文件路径 120+ 字符，回显
+        出来既读不出新信息（刚点的就是它），又会把底部标签顶长。
+        """
+        key = item.text(0)
+        QApplication.clipboard().setText(item.text(1))
+        self._dialog._notify(f"已复制「{key}」")
+
     def _on_copy_selection(self) -> None:
         """Ctrl+C 复制树中选中的行（tab 分隔，可直接粘贴进表格）。"""
         items = self.tree.selectedItems()
@@ -731,6 +1014,14 @@ class VariableInfoDialog(QDialog):
         bar.setSpacing(6)
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #666;")
+        # 宽度策略取 Ignored：QLabel 的 sizeHint 会经布局抬高整个窗口的
+        # minimumWidth，长提示一显示窗口就被顶宽且再也拖不回去（实测
+        # 复制一条 60+ 字符的文件路径：700 → 769，minimumWidth 同步变
+        # 769）。Ignored 意为不参与宽度计算，窗口宽度只由用户决定，
+        # 提示放不下就裁尾（高度仍按内容走）
+        self.status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         bar.addWidget(self.status_label, 1)
 
         btn_copy_all = QPushButton("复制全部 Markdown")
