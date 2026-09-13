@@ -137,9 +137,6 @@ MDF_ATTRIBUTION_ENABLED = True
 # 按 cp1252/latin-1 解码 → “82ºÅµ¥ÌåµçÑ¹”）。见 mdf_attribution.repair_text
 # 的四条保守条件，正常中文与纯 ASCII 不受影响；如出现误回转可置 False 回退。
 MDF_GBK_TEXT_REPAIR = True
-# 归属信息 / 注释行的展示截断长度。全值仍由信息页的 tooltip 承担，
-# 不截断会把「值」列撑得很宽、挤掉统计行的可见性。
-VAR_INFO_ATTRIBUTION_MAX_LEN = 120
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3

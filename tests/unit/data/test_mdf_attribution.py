@@ -473,16 +473,29 @@ class TestBuildAttributionRows:
         monkeypatch.setattr(A, "MDF_ATTRIBUTION_ENABLED", False)
         assert A.build_attribution_rows(self.full()) == []
 
-    def test_max_len_truncation(self):
-        info = make_info(name="x", acq_name="G" * 300)
-        rows = dict(A.build_attribution_rows(info, max_len=20))
-        assert rows[A.LABEL_GROUP] == "G" * 19 + "…"
-        assert len(rows[A.LABEL_GROUP]) == 20
+    def test_long_value_is_not_truncated(self):
+        """行值不得截断：真实 mf4 有 141/4704 个通道注释超 120 字符。
 
-    def test_default_max_len_follows_config(self, monkeypatch):
-        monkeypatch.setattr(A, "VAR_INFO_ATTRIBUTION_MAX_LEN", 10)
+        截断的原始理由“不截断会撑宽值列”已被实测推翻：值列是
+        ``QHeaderView.Stretch``，内容由 Qt 绘制层 elide，tooltip / 复制按钮 /
+        Markdown 导出都拿得到全值 —— 在数据层截断只会永久丢信息。
+        列宽不受影响的守卫在组件层（test_long_value_does_not_widen_layout）。
+        """
         info = make_info(name="x", acq_name="G" * 300)
-        assert len(dict(A.build_attribution_rows(info))[A.LABEL_GROUP]) == 10
+        rows = dict(A.build_attribution_rows(info))
+        assert rows[A.LABEL_GROUP] == "G" * 300
+
+    def test_value_is_whitespace_stripped(self):
+        """不截断不等于不清洗：行值首尾空白会影响列对齐。"""
+        info = make_info(
+            name="Press",
+            acq_name="  NormalGroup  ",
+            source={"name": " BMCe ", "path": " XCP:1 "},
+        )
+        rows = dict(A.build_attribution_rows(info))
+        assert rows[A.LABEL_GROUP] == "NormalGroup"
+        assert rows[A.LABEL_DEVICE] == "XCP:1"
+        assert rows[A.LABEL_ECU] == "BMCe"
 
     def test_no_empty_value_rows(self):
         info = self.full()
