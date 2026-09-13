@@ -949,6 +949,236 @@ class TestTabCloseAndWorker:
 
 
 # ---------------------------------------------------------------------------
+# 进度分母的「本波」语义
+# ---------------------------------------------------------------------------
+
+
+class TestProgressWaveSemantics:
+    """进度分母必须是「本波」语义，且取消后状态栏必须自愈。
+
+    实测两个用户可见缺陷：
+
+    1. 连续提交两批各 3 个变量，第二批状态栏显示「统计中 4/6…」—— 旧实现
+       维护进程内单调递增的 ``_done_count``，分母也只增不减，于是第二批的
+       分子分母都是两批之和，而用户眼里只有 3 个
+    2. 关掉一个**还在排队**的标签页后，状态栏永久停在「统计中 2/3…」——
+       被 cancel 摘除的任务永远不会走到 ``_advance_progress``，旧实现既不扣
+       分母也不补发信号，队列排空后进度永远追不平
+
+    前三条直接在 worker 层面验证：跳批与取消的时序需要精确控制（哪一条正在
+    跑、哪一条还在队列里），走对话框路径会被 add_variables 的渲染耗时搞浑。
+    用户可见面由最后一条覆盖。
+    """
+
+    @staticmethod
+    def _worker_with_recorder():
+        w = vid_mod.VarInfoWorker(None)
+        seen: list = []
+        # 普通 Python 可调用对象没有线程亲和性，Qt 用 DirectConnection，因此
+        # 记录发生在 worker 线程内、与 emit 严格同步，不会丢也不会乱序
+        w.progress.connect(lambda d, t: seen.append((d, t)))
+        return w, seen
+
+    @staticmethod
+    def _drained(w, seen, timeout_s: float = 10.0) -> bool:
+        """等到本波彻底排空**且终态信号已落地**。
+
+        不能只看 ``_pending_total == 0``：它是在 emit **之前**被复位的，主线程
+        可能在信号抵达前就判定排空，导致断言读到不完整的 seen。
+        """
+        end = time.monotonic() + timeout_s
+        while time.monotonic() < end:
+            if (
+                seen
+                and seen[-1] == (0, 0)
+                and w.queue_size() == 0
+                and w._current is None
+            ):
+                return True
+            QCoreApplication.processEvents()
+            time.sleep(0.005)
+        return False
+
+    @staticmethod
+    def _wait_current(w, name, timeout_s: float = 10.0) -> bool:
+        end = time.monotonic() + timeout_s
+        while time.monotonic() < end:
+            if w._current == name:
+                return True
+            QCoreApplication.processEvents()
+            time.sleep(0.005)
+        return False
+
+    def test_second_wave_denominator_restarts(self, qapp, monkeypatch):
+        gate = threading.Event()
+        monkeypatch.setattr(
+            vid_mod.var_info,
+            "compute_stats",
+            lambda ld, name, sc=None: (
+                gate.wait(10.0), var_info.VarStats(computed=True))[1],
+        )
+        w, seen = self._worker_with_recorder()
+        try:
+            # 只要 ref() 非 None 即可：compute_stats 已被替身接管，不碰 loader
+            def ref():
+                return object()
+
+            w.submit([("a", ref, 0), ("b", ref, 0), ("c", ref, 0)])
+            assert self._wait_current(w, "a"), "第一条应进入运行态"
+            gate.set()
+            assert self._drained(w, seen), f"第一波未排空: {seen}"
+            first = list(seen)
+            seen.clear()
+            gate.clear()
+
+            w.submit([("d", ref, 0), ("e", ref, 0), ("f", ref, 0)])
+            assert self._wait_current(w, "d"), "第二批第一条应进入运行态"
+            gate.set()
+            assert self._drained(w, seen), f"第二波未排空: {seen}"
+
+            assert first == [(1, 3), (2, 3), (0, 0)]
+            assert seen == [(1, 3), (2, 3), (0, 0)], (
+                f"第二批分母必须是本批的 3，而非累加的 6: {seen}"
+            )
+        finally:
+            gate.set()
+            w.shutdown()
+            w.wait(3000)
+
+    def test_cancel_queued_job_shrinks_denominator(self, qapp, monkeypatch):
+        """取消还在排队的任务：分母同步缩减并当场补发信号。"""
+        hold = threading.Event()
+
+        def fake_stats(ld, name, sc=None):
+            if name == "a":
+                hold.wait(10.0)
+            return var_info.VarStats(computed=True)
+
+        monkeypatch.setattr(vid_mod.var_info, "compute_stats", fake_stats)
+        w, seen = self._worker_with_recorder()
+        try:
+            def ref():
+                return object()
+
+            w.submit([("a", ref, 0), ("b", ref, 0), ("c", ref, 0)])
+            assert self._wait_current(w, "a")
+            assert w.queue_size() == 2
+
+            w.cancel("b")
+            assert w._pending_total == 2, "分母必须随队列同步缩减"
+            assert seen == [(0, 2)], "摘除后应当场补发一次信号，否则文案不自愈"
+
+            hold.set()
+            assert self._drained(w, seen), f"未排空: {seen}"
+            # 末了必须是终态 (0, 0)：旧实现的缺陷正是排空后再无信号发出
+            assert seen == [(0, 2), (1, 2), (0, 0)]
+        finally:
+            hold.set()
+            w.shutdown()
+            w.wait(3000)
+
+    def test_cancel_running_job_does_not_over_shrink(self, qapp, monkeypatch):
+        """正在运行的那条不扣分母：它仍会走到 ``_finish_current`` 推进进度。
+
+        取消只是让 compute_stats 在下一个分块边界提前返回，任务本身仍会结束
+        并推进一次。替它扣分母会让已完成数算多一条（实测会显示
+        「统计中 1/2…」而其实一条都没算完）。
+        """
+        hold = threading.Event()
+        monkeypatch.setattr(
+            vid_mod.var_info,
+            "compute_stats",
+            lambda ld, name, sc=None: (
+                hold.wait(10.0), var_info.VarStats(computed=True))[1],
+        )
+        w, seen = self._worker_with_recorder()
+        try:
+            def ref():
+                return object()
+
+            w.submit([("a", ref, 0), ("b", ref, 0), ("c", ref, 0)])
+            assert self._wait_current(w, "a")
+
+            w.cancel("a")
+            assert w._pending_total == 3, "运行中的那条不在扣减之列"
+            assert seen == [], "既未摘除任务也未排空，不该发信号"
+
+            hold.set()
+            assert self._drained(w, seen), f"未排空: {seen}"
+            assert seen == [(1, 3), (2, 3), (0, 0)]
+        finally:
+            hold.set()
+            w.shutdown()
+            w.wait(3000)
+
+    def test_cancel_on_empty_queue_keeps_error_notice(self, qapp, monkeypatch):
+        """队列本已为空时 cancel 不得补发 (0, 0)。
+
+        ``recompute(force=True)`` 会在队列可能为空的时刻先 cancel 再 submit；
+        此时补发终态信号会把 ``_on_stats_ready`` 刚写入状态欄的错误提示清掉。
+        """
+        monkeypatch.setattr(
+            vid_mod.var_info,
+            "compute_stats",
+            lambda ld, name, sc=None: var_info.VarStats(computed=True),
+        )
+        w, seen = self._worker_with_recorder()
+        try:
+            assert w._pending_total == 0
+            w.cancel("never_submitted")
+            pump(30)
+            assert seen == [], f"空队列上的 cancel 不应发信号: {seen}"
+        finally:
+            w.shutdown()
+            w.wait(3000)
+
+    def test_status_bar_self_heals_after_closing_queued_tab(
+        self, env, many_loader, monkeypatch
+    ):
+        """用户可见面：关掉排队中的标签页后状态栏必须自愈。
+
+        旧实现的缺陷是**永久滞留** —— 队列早已排空，状态栏却一直显示
+        「统计中 2/3…」，直到关掉整个窗口。
+        """
+        loader, names = many_loader
+        env.mw.loader = loader
+        hold = threading.Event()
+        v1, v2, v3 = names[0], names[1], names[2]
+
+        def fake_stats(ld, name, sc=None):
+            if name == v1:
+                hold.wait(10.0)
+            return var_info.VarStats(computed=True)
+
+        monkeypatch.setattr(vid_mod.var_info, "compute_stats", fake_stats)
+        dlg = VariableInfoDialog.popup([v1, v2, v3], parent=env.mw)
+        try:
+            # 等 v1 真的进入运行态，此时 v2 / v3 仍在队列里
+            end = time.monotonic() + 10
+            while dlg.worker._current != v1 and time.monotonic() < end:
+                QCoreApplication.processEvents()
+                time.sleep(0.005)
+            assert dlg.worker._current == v1
+            assert dlg.worker.queue_size() == 2
+            assert "统计中" in dlg._progress_text
+
+            dlg._on_tab_close(dlg.tabs.indexOf(dlg._pages[v2]))
+            assert dlg.worker._pending_total == 2
+
+            hold.set()
+            assert wait_idle(dlg)
+            pump(120)
+
+            assert dlg.worker.queue_size() == 0
+            assert dlg.worker._current is None
+            assert "统计中" not in dlg.status_label.text(), (
+                f"队列已空却仍显示进度: {dlg.status_label.text()!r}"
+            )
+        finally:
+            hold.set()
+
+
+# ---------------------------------------------------------------------------
 # 关窗语义（等同「关闭全部」）
 # ---------------------------------------------------------------------------
 

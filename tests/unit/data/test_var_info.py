@@ -363,16 +363,33 @@ class TestTabularSnapshot:
             assert "CNBLOCK" not in title
             assert "CGBLOCK" not in title
 
-    def test_nan_count_reported(self, csv_loader):
-        snap = var_info.build_snapshot(csv_loader, "speed")
-        rows = dict(snap.sections["列信息"])
-        assert rows["NaN 数量"] == "1"
+    def test_nan_count_comes_from_stats_not_snapshot(self, csv_loader):
+        """NaN 计数是统计量而非元数据：快照不得提供，统计必须提供。
 
-    def test_integer_column_has_zero_nan(self, csv_loader):
-        """整数列调 np.isnan 会抛 TypeError，必须跳过。"""
+        旧实现在 UI 线程对整列做 np.isnan 扫描（O(N)），并带来三处不一致：
+        与统计层的「NaN 数」在同一棵树里并存两个标签、MDF 快照从不提供该
+        值、非浮点列恒报 0。移除后 NaN 数与 min/max/mean 一样在统计回填
+        后才出现，用户心智模型统一。
+        """
+        rows = dict(var_info.build_snapshot(csv_loader, "speed").sections["列信息"])
+        assert "NaN 数量" not in rows
+        stats = var_info.compute_stats(csv_loader, "speed")
+        assert stats.nan_count == 1
+        assert dict(var_info.stats_to_rows(stats))["NaN 数"] == "1"
+
+    def test_integer_column_stats_have_zero_nan(self, csv_loader):
+        """整数列没有 NaN，统计层须报 0 而不是抛 TypeError。
+
+        快照侧不再做 isnan，整数列的判定只剩 dtype.kind —— 它必须仍被认作
+        数值列，否则连统计任务都不会被提交。
+        """
         snap = var_info.build_snapshot(csv_loader, "flag")
-        rows = dict(snap.sections["列信息"])
-        assert rows["NaN 数量"] == "0"
+        assert snap.is_numeric is True
+        assert "NaN 数量" not in dict(snap.sections["列信息"])
+        stats = var_info.compute_stats(csv_loader, "flag")
+        assert stats.computed is True
+        assert stats.nan_count == 0
+        assert stats.inf_count == 0
 
     def test_time_column_flagged(self, csv_loader):
         snap = var_info.build_snapshot(csv_loader, "time")
@@ -398,6 +415,164 @@ class TestTabularSnapshot:
 
 
 # ---------------------------------------------------------------------------
+# 表格快照必须是 O(1) 元数据读取
+# ---------------------------------------------------------------------------
+
+
+class _TabularStub:
+    """只带 df 的表格 loader 替身。
+
+    ``_from_tabular`` 对 path / units / df_validity / time_channels_info 全部走
+    ``getattr(..., None)`` 默认值，因此一个 df 属性就足以驱动它 —— 计时与
+    dtype 语义测试无需真的往磁盘写 CSV。
+    """
+
+    LOADER_TYPE = "csv"
+
+    def __init__(self, df):
+        self.df = df
+
+
+class TestTabularSnapshotIsO1:
+    """快照在 UI 线程同步调用，因此不得触碰列数据本身。
+
+    旧实现调 ``series.to_numpy()``（浮点列再叠一次 ``np.isnan``），两者都是
+    O(N)。实测 200 万行 × 50 列：文本 category 列物化 223 ms、float 列
+    61 ms —— 与模块 docstring 承诺的「零磁盘 I/O、可在 UI 线程同步调用」
+    直接矛盾，用户看到的是批量打开标签页时数百毫秒的界面冻结。
+    """
+
+    ROWS = 2_000_000
+    # 阈值取实测新值（约 0.7 ms）的 ~30 倍：既留足 CI 抖动余量，又能稳稳
+    # 捕获旧实现的 61~223 ms 回归
+    BUDGET_MS = 20.0
+
+    @staticmethod
+    def _time_snapshots(loader, names) -> float:
+        import time
+
+        var_info.build_snapshot(loader, names[0])  # 预热，排除首次导入开销
+        t0 = time.perf_counter()
+        for name in names:
+            var_info.build_snapshot(loader, name)
+        return (time.perf_counter() - t0) * 1000
+
+    def test_category_columns_are_not_materialized(self):
+        """50 列文本 category：旧实现会物化出 50 份完整 object 数组。
+
+        DataFrame 的 50 列共享同一个 Series 对象以压住内存（实测独占
+        100 MB、构造 0.01 s；float64 × 50 列则要 800 MB）。快照只读元数据，
+        共享与否不影响被测行为。
+        """
+        import pandas as pd
+
+        codes = np.tile(np.arange(3, dtype=np.int8), self.ROWS // 3 + 1)[: self.ROWS]
+        base = pd.Series(
+            pd.Categorical.from_codes(
+                codes, categories=pd.Index(["alpha", "beta", "gamma"])
+            )
+        )
+        df = pd.DataFrame({f"v{i}": base for i in range(50)})
+        names = list(df.columns)
+
+        elapsed = self._time_snapshots(_TabularStub(df), names)
+        assert elapsed < self.BUDGET_MS, (
+            f"50 列 category 快照 {elapsed:.1f} ms，超出 O(1) 预算 "
+            f"{self.BUDGET_MS} ms（旧实现实测约 223 ms）"
+        )
+
+    def test_float_columns_are_not_scanned(self):
+        """浮点列的 ``np.isnan`` 全列扫描同样是 O(N)，必须一并去掉。
+
+        刻意用**单列跑 50 次**而非 50 列：float64 × 200 万行 × 50 列要占
+        800 MB，而被测的是单次调用成本，重复调用同一列等价。
+        """
+        import pandas as pd
+
+        df = pd.DataFrame({"v": np.linspace(0.0, 1.0, self.ROWS)})
+
+        elapsed = self._time_snapshots(_TabularStub(df), ["v"] * 50)
+        assert elapsed < self.BUDGET_MS, (
+            f"50 次 float 快照 {elapsed:.1f} ms，超出 O(1) 预算 "
+            f"{self.BUDGET_MS} ms（旧实现实测约 61 ms）"
+        )
+
+    def test_all_nan_category_with_float_categories_is_all_empty(self):
+        """全空列的 categories dtype 可能是 float64，不得因此判成数值列。
+
+        实测两条路径给出的空 categories dtype 不同：真实 CSV 读回是
+        ``Index([], dtype='object')``，而对全 NaN 的 float 列显式
+        ``astype('category')`` 得到 ``Index([], dtype='float64')``。后者会让
+        旧实现算出 is_numeric=True —— 于是白白提交一个注定返回"全部为
+        NaN/Inf"的统计任务，且 all_empty 的专属文案永远出不来。
+        """
+        import pandas as pd
+
+        series = pd.Series([np.nan, np.nan, np.nan]).astype("category")
+        cats = series.cat.categories
+        assert len(cats) == 0, "前提已变，请同步本测试"
+        assert cats.dtype.kind == "f", "前提已变，请同步本测试"
+
+        snap = var_info.build_snapshot(_TabularStub(pd.DataFrame({"v": series})), "v")
+        assert snap.all_empty is True
+        assert snap.is_numeric is False
+        assert snap.dtype == "object"
+        assert "全部为空值" in dict(snap.sections["列信息"])["说明"]
+
+    def test_extended_dtype_degrades_to_object(self):
+        """扩展 dtype（StringDtype）不得让快照抛 TypeError。
+
+        实测 pandas 3.0.3 下文本 category 列的 ``categories.dtype`` 是
+        ``StringDtype(storage='python')``，``np.dtype()`` 对它直接抛
+        TypeError；而 ``Series.to_numpy()`` 对同一列物化出的就是 object
+        数组。``_effective_numpy_dtype`` 取同样口径，但只读元数据。
+        """
+        import pandas as pd
+
+        series = pd.Series(["a", "b"], dtype="category")
+        cat_dtype = series.cat.categories.dtype
+        try:
+            np.dtype(cat_dtype)
+        except TypeError:
+            pass  # 扩展 dtype：正是本用例要覆盖的场景
+        else:
+            pytest.skip(f"本 pandas 版本的 {cat_dtype} 可直接转 numpy dtype")
+
+        assert var_info._effective_numpy_dtype(cat_dtype) == np.dtype("O")
+        snap = var_info.build_snapshot(_TabularStub(pd.DataFrame({"v": series})), "v")
+        assert snap.is_numeric is False
+        assert snap.all_empty is False
+        assert "非数值列" in dict(snap.sections["列信息"])["说明"]
+
+    def test_is_numeric_semantics_preserved_across_dtypes(self):
+        """O(1) 改写必须与旧的 to_numpy() 物化口径逐类一致。
+
+        探针 tmp/probe_tabular_o1_equiv.py 对比了 14 种列类型：除上面两个
+        全空列用例外完全一致。这里把一致的部分固化成回归网，防止后续再为
+        性能改动时悄悄漂移（漂移的后果是数值列不提交统计、或文本列提交后
+        必然报错）。
+        """
+        import pandas as pd
+
+        cases = [
+            ("int64", pd.Series([1, 2, 3]), True, False),
+            ("float_with_nan", pd.Series([1.0, np.nan, 3.0]), True, False),
+            ("bool", pd.Series([True, False, True]), True, False),
+            ("cat_int", pd.Series([1, 2, 3], dtype="category"), True, False),
+            ("cat_float", pd.Series([1.0, np.nan, 3.0], dtype="category"), True, False),
+            ("cat_text", pd.Series(["a", "b"], dtype="category"), False, False),
+            ("object_text", pd.Series(["a", "b"], dtype=object), False, False),
+        ]
+        for label, series, want_numeric, want_all_empty in cases:
+            snap = var_info.build_snapshot(
+                _TabularStub(pd.DataFrame({"v": series})), "v"
+            )
+            assert snap.is_numeric is want_numeric, label
+            assert snap.all_empty is want_all_empty, label
+            assert snap.length == len(series), label
+
+
+# ---------------------------------------------------------------------------
 # 全空列的文案（设计文档 §12.2 方案 C 窄化版）
 # ---------------------------------------------------------------------------
 
@@ -405,14 +580,14 @@ class TestTabularSnapshot:
 class TestAllEmptyColumn:
     """整列为空的表格列必须说"没数据"，而不是"类型不对"。
 
-    pandas 把全空列推断为 category dtype（0 个 categories），to_numpy()
-    后只剩 object 数组，于是 UI 原本显示"非数值列（object），不适用统计"
+    pandas 把全空列推断为 category dtype（0 个 categories），dtype 字符串
+    只剩 "category"，于是 UI 原本显示"非数值列（object），不适用统计"
     —— 技术上准确，但用户看到的是"我这列是空的"，会以为自己的列类型被
     误判了。
 
     判定刻意收窄为「category dtype 且 categories 为空」这一 O(1) 检查，
     不用通用的 ``pd.isna(series).all()``：后者在千万行的列上约需 50 ms，
-    会破坏"快照构建零磁盘 I/O、约 99 μs、可在 UI 线程同步调用"的前提。
+    会破坏"快照构建零磁盘 I/O 且 O(1)、可在 UI 线程同步调用"的前提。
     """
 
     @pytest.fixture
@@ -448,9 +623,11 @@ class TestAllEmptyColumn:
         rows = dict(var_info.build_snapshot(loader, "v").sections["列信息"])
         assert "全部为空值" in rows["说明"]
         assert "非数值列" not in rows["说明"]
-        # 关键：object 数组不做 isnan，nan_count 恒为 0，直写会与
-        # "全部为空值" 自相矛盾，让用户以为这列一个空值都没有
-        assert rows["NaN 数量"] == "2（整列为空）"
+        # 关键：行数必须写进文案。快照不再提供 NaN 计数（那属统计层的
+        # 「NaN 数」行），若只说"全部为空值"而不给规模，用户无法区分这是
+        # 2 行的空列还是 200 万行的空列
+        assert "共 2 行" in rows["说明"]
+        assert "NaN 数量" not in rows
 
     def test_text_column_is_not_all_empty(self, loader):
         """对照：本 loader 把**所有**文本列都编码为 category。
@@ -464,7 +641,7 @@ class TestAllEmptyColumn:
         assert snap.all_empty is False
         rows = dict(snap.sections["列信息"])
         assert "非数值列" in rows["说明"]
-        assert rows["NaN 数量"] == "0"
+        assert "NaN 数量" not in rows
 
     def test_numeric_column_never_flagged(self, loader):
         """数值列即使含 NaN 也不算全空：判定必须先过 is_numeric 短路。"""
@@ -477,7 +654,7 @@ class TestAllEmptyColumn:
         snap = var_info.build_snapshot(loader, "v")
         md = var_info.snapshot_to_markdown(snap, None)
         assert "全部为空值" in md
-        assert "整列为空" in md
+        assert "共 2 行" in md
 
 
 class TestRangeTextHint:
@@ -779,6 +956,113 @@ class TestInfSemantics:
 
 
 # ---------------------------------------------------------------------------
+# MDF 分块统计：声明点数 > 实际可读点数
+# ---------------------------------------------------------------------------
+
+
+class TestMdfShortRead:
+    """``CGBLOCK.cycles_nr`` 是文件头声明值，不可全信。
+
+    实测存在采集提前中断的 MDF：声明点数远多于数据块里实际写入的点数，
+    asammdf 对越界 offset 返回**空数组**而不是抛异常。旧实现有三处连锁
+    问题：
+
+    1. 遇空块静默 ``break`` 后仍报 ``computed=True`` —— 页面「基本信息」显示
+       的 sample_count 是声明值，统计却只覆盖了前面的样本，两者自相矛盾
+       且都标为有效，用户无从察觉数据缺了九成
+    2. ``offset += count`` 按**请求量**推进 —— asammdf 返回不足 count 时会越过
+       中间样本，在统计里凭空挖掉一段连续数据（比尾部截断更糟）
+    3. 首块就读不到数据时落入 ``n == 0`` 的通用分支，报"全部为 NaN/Inf" ——
+       把文件头不可信误报成数据质量问题，用户会去查根本不存在的 NaN
+    """
+
+    class _ShortMdfLoader:
+        """声明 ``declared`` 点、实际只有 ``actual`` 点可读的 loader 替身。
+
+        样本值取 ``arange``，使 min / max / finite_count 能直接反推出"到底数了
+        哪些下标"，从而区分「尾部截断」与「中间挖洞」。同
+        ``TestInfSemantics._FakeMdfLoader`` 的理由：跨块累加逻辑只依赖这两个
+        方法，而合成 MDF 工厂无法注入"声明点数与实际不符"这种损坏。
+        """
+
+        def __init__(self, declared: int, actual: int):
+            self.declared = declared
+            self.actual = actual
+            self.calls = []  # [(offset, count), ...]，供断言推进方式
+
+        def get_metadata(self, var_name):
+            return SimpleNamespace(sample_count=self.declared, is_enum=False)
+
+        def get_samples_chunked(self, var_name, offset, count):
+            self.calls.append((offset, count))
+            if count is None or count < 0:
+                count = self.declared - offset
+            end = min(offset + count, self.actual)
+            if end <= offset:
+                return np.array([], dtype=np.float64)
+            return np.arange(offset, end, dtype=np.float64)
+
+    @pytest.fixture
+    def chunk10(self, monkeypatch):
+        """把分块压到 10，让 declared=1000 的读取真的跨越多块。"""
+        monkeypatch.setattr("src.core.config.MDF_STATS_CHUNK_SIZE", 10)
+
+    def test_short_read_is_reported_not_silent(self, chunk10):
+        loader = self._ShortMdfLoader(declared=1000, actual=100)
+        stats = var_info._stats_mdf(loader, "ch", None)
+
+        assert stats.computed is True, "前 100 个样本确实读到了，结果仍有效"
+        assert stats.error == ""
+        assert stats.finite_count == 100
+        assert stats.min == pytest.approx(0.0)
+        assert stats.max == pytest.approx(99.0)
+        assert "仅统计到前 100 个样本" in stats.note
+        assert "1000" in stats.note, "note 必须带上声明值，否则用户不知道差多少"
+        assert dict(var_info.stats_to_rows(stats))["说明"] == stats.note
+
+    def test_partial_tail_counts_every_sample(self, chunk10):
+        """尾块返回不足请求量时，必须按**实际返回量**推进 offset。
+
+        declared=100 / actual=95 / chunk=10：第 10 块只能返回 5 个样本。旧写法
+        ``offset += count`` 会把 offset 推到 100 并当作正常读完，既不报截断、
+        也可能在更极端的分块下越过中间样本。
+        """
+        loader = self._ShortMdfLoader(declared=100, actual=95)
+        stats = var_info._stats_mdf(loader, "ch", None)
+
+        assert stats.computed is True
+        assert stats.finite_count == 95, "95 个样本一个都不能少"
+        assert stats.max == pytest.approx(94.0)
+        assert "仅统计到前 95 个样本" in stats.note
+        # 读到不足量就该停：再请求下一块只会拿到空数组，白花一次锁竞争
+        assert loader.calls[-1][0] == 90
+
+    def test_no_note_when_read_is_complete(self, chunk10):
+        """正常文件不得多出「说明」行。
+
+        否则每份健康文件都会带上一句看似警告的提示，用户很快就学会忽略
+        它，真正需要它的时候反而失效。
+        """
+        loader = self._ShortMdfLoader(declared=100, actual=100)
+        stats = var_info._stats_mdf(loader, "ch", None)
+
+        assert stats.computed is True
+        assert stats.finite_count == 100
+        assert stats.max == pytest.approx(99.0)
+        assert stats.note == ""
+        assert "说明" not in dict(var_info.stats_to_rows(stats))
+
+    def test_first_chunk_empty_reports_unreadable_not_all_nan(self, chunk10):
+        loader = self._ShortMdfLoader(declared=100, actual=0)
+        stats = var_info._stats_mdf(loader, "ch", None)
+
+        assert stats.computed is False
+        assert "无可读样本" in stats.error
+        assert "100" in stats.error, "必须带上文件头声明值，便于定位是哪份文件"
+        assert "NaN" not in stats.error, "真实原因是读不出样本，不是数据质量问题"
+
+
+# ---------------------------------------------------------------------------
 # 统计结果渲染
 # ---------------------------------------------------------------------------
 
@@ -827,6 +1111,36 @@ class TestStatsToRows:
         )
         for _, value in var_info.stats_to_rows(stats):
             assert "（缓存）" not in value
+
+    def test_note_rendered_last_and_only_when_present(self):
+        """``note`` 是对上面数值**适用范围**的限制说明，必须排在最后。
+
+        放在数值行之前会让用户带着"这结果不完整"的先入为主去读 min/max；
+        而 ``note`` 为空时（绝大多数正常数据）不得多出一行噪声。
+        """
+        rows = var_info.stats_to_rows(var_info.VarStats(
+            min=1.0, max=2.0, mean=1.5, std=0.5, finite_count=2,
+            computed=True, note="仅统计到前 2 个样本",
+        ))
+        assert rows[-1] == ("说明", "仅统计到前 2 个样本")
+        assert "说明" not in dict(var_info.stats_to_rows(var_info.VarStats(
+            min=1.0, max=2.0, mean=1.5, std=0.5, finite_count=2, computed=True,
+        )))
+
+    def test_note_does_not_make_result_look_failed(self):
+        """``note`` 与 ``error`` 必须分开：带 note 的结果仍是**有效**结果。
+
+        若把截断说明写进 ``error``，``stats_to_rows`` 的 ``not computed`` 分支会
+        把整张表压成一行提示，min/max/mean 全部丢失。
+        """
+        stats = var_info.VarStats(
+            min=0.0, max=9.0, mean=4.5, std=2.9, finite_count=10,
+            computed=True, note="仅统计到前 10 个样本",
+        )
+        rows = dict(var_info.stats_to_rows(stats))
+        assert "状态" not in rows
+        assert rows["最大值"] == "9"
+        assert rows["有效样本数"] == "10"
 
 
 # ---------------------------------------------------------------------------

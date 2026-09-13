@@ -9,16 +9,17 @@
     一起（实测变成 2 个 tab），甚至加载新数据后旧变量名仍挂在标签上。
 
 线程模型（实测数据驱动）：
-    元数据快照构建**零磁盘 I/O**（六组块属性全访问约 99 μs），在 UI 线程
-    同步完成，因此窗口打开即有内容，不需要"加载中"占位。
+    元数据快照构建**零磁盘 I/O 且 O(1)**（MDF 路径六组块属性全访问约
+    99 μs；表格路径只读 pandas 的 dtype/categories/长度，不物化列数据），
+    在 UI 线程同步完成，因此窗口打开即有内容，不需要"加载中"占位。
     统计特征需读磁盘（776 MB .mf4 的 428k 点通道约 18.8 ms，为元数据的
     190 倍），交给 ``VarInfoWorker`` 后台线程逐条计算、逐条回填，
     任一时刻 UI 线程都不被阻塞。
 
 缓存与失效：
     只缓存统计（``main_window.var_stats_cache``），不缓存快照 —— 快照重建
-    仅 99 μs，缓存它反而引入 sections 陈旧风险。每条统计自带 generation
-    令牌，reload 后版本递增，陈旧结果即使到达也会被丢弃。
+    零磁盘 I/O 且 O(1)，缓存它反而引入 sections 陈旧风险。每条统计自带
+    generation 令牌，reload 后版本递增，陈旧结果即使到达也会被丢弃。
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ class VarInfoWorker(QThread):
     """
 
     item_ready = Signal(str, object)  # (var_name, VarStats)
-    progress = Signal(int, int)  # (已完成条数, 本批总数)
+    progress = Signal(int, int)  # (本波已完成条数, 本波总数)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,13 +109,20 @@ class VarInfoWorker(QThread):
         self._cancel: set = set()
         self._stop = threading.Event()
         self._current: str | None = None
+        # **本波**提交的任务总数：submit 累加、cancel 扣减、队列排空时复位
+        # （一波 = 从队列非空到彻底排空）。已完成条数不单独计数，而是由
+        # 「本波总数 - 仍在队列或正在运行的条数」反推，见 _progress_snapshot。
         self._pending_total = 0
-        self._done_count = 0
 
     # -- 生产者侧（UI 线程） ------------------------------------------------
 
     def submit(self, jobs: list) -> None:
-        """提交任务并唤醒线程；线程未启动时自动启动。"""
+        """提交任务并唤醒线程；线程未启动时自动启动。
+
+        分母在本波内累加是**正确**的：用户可能在上一批还没跑完时继续追加
+        变量，此时"还剩几条"确实等于两批之和。跨波不会漂移，因为
+        _advance_progress 与 cancel 都会在队列排空时把分母复位。
+        """
         if not jobs or self._stop.is_set():
             return
         with self._cond:
@@ -128,11 +136,34 @@ class VarInfoWorker(QThread):
             self.start()
 
     def cancel(self, var_name: str) -> None:
-        """取消单个变量（关闭标签页时调用）。"""
+        """取消单个变量（关闭标签页时调用）。
+
+        分母必须随队列**同步缩减**：被摘除的任务永远不会走到
+        ``_advance_progress``，不扣减则进度永远追不平，队列排空后再无
+        progress 信号发出，状态栏会永久停在「统计中 N/M…」而不自愈。
+        全部清空时当场补发一次信号，让文案立刻恢复。
+        """
         with self._cond:
             self._cancel.add(var_name)
+            pending_before = self._pending_total
+            before = len(self._jobs)
             self._jobs = deque(j for j in self._jobs if j[0] != var_name)
+            removed = before - len(self._jobs)
+            # 正在运行的那条不在扣减之列：它仍会走到 _finish_current 推进
+            # 进度（取消只是在下一个分块边界提前返回），替它扣分母会让
+            # 已完成数算多一条
+            self._pending_total = max(pending_before - removed, 0)
+            idle = not self._jobs and self._current is None
+            if idle:
+                self._pending_total = 0
+            done, total = self._progress_snapshot()
+            # 无任务在途时不发信号：cancel 也可能发生在队列本已为空的时刻
+            # （如 recompute 的 force 路径），补发 (0, 0) 会把状态栏里
+            # _on_stats_ready 刚写入的错误提示清掉
+            notify = removed > 0 or (idle and pending_before > 0)
             self._cond.notify_all()
+        if notify:
+            self.progress.emit(done, total)
 
     def cancel_all(self) -> None:
         """清空队列（reload / 窗口销毁时调用）。
@@ -145,7 +176,6 @@ class VarInfoWorker(QThread):
             self._jobs.clear()
             self._cancel.clear()
             self._pending_total = 0
-            self._done_count = 0
             if self._current is not None:
                 self._cancel.add(self._current)
             self._cond.notify_all()
@@ -183,13 +213,13 @@ class VarInfoWorker(QThread):
 
             if self._should_cancel(var_name):
                 self._cancel.discard(var_name)
-                self._advance_progress()
+                self._finish_current()
                 continue
 
             loader = loader_ref()
             if loader is None:
                 # loader 已被 GC（reload 后旧数据释放），静默跳过
-                self._advance_progress()
+                self._finish_current()
                 continue
 
             try:
@@ -199,18 +229,44 @@ class VarInfoWorker(QThread):
                 stats = var_info.VarStats(error=f"{type(e).__name__}: {e}")
 
             stats.generation = generation
-            with self._cond:
-                self._current = None
-            self._advance_progress()
+            self._finish_current()
             self.item_ready.emit(var_name, stats)
 
         with self._cond:
             self._current = None
 
+    def _finish_current(self) -> None:
+        """结束当前任务：清空 ``_current`` 后推进本波进度。
+
+        三个出口（正常完成 / 被取消跳过 / loader 已释放跳过）都必须走这里。
+        ``_current`` 残留会让 ``cancel_all`` 把已结束的任务重新加入取消集，
+        也会让 ``_progress_snapshot`` 把分母多算一条。
+        """
+        with self._cond:
+            self._current = None
+        self._advance_progress()
+
+    def _progress_snapshot(self) -> tuple:
+        """按「本波」语义算出 (已完成, 总数)。调用方须持有 ``_cond``。
+
+        已完成数由「本波总数 - 仍在队列或正在运行的条数」反推，而不是维护
+        一个单调递增的计数器。后者在三类场景下都会与用户眼中的"本批"脱节：
+        跨批提交（分母累加成两批之和，实测显示「统计中 4/6…」而用户只提交
+        了 3 个）、cancel 摘除任务（已完成数永远追不平）、reload 后旧任务
+        迟到完成（旧计数混进新批次）。反推法天然自洽：任何一条任务的进出
+        都会同时反映在分子与分母上。
+        """
+        remaining = len(self._jobs) + (1 if self._current is not None else 0)
+        total = self._pending_total
+        return max(total - remaining, 0), total
+
     def _advance_progress(self) -> None:
         with self._cond:
-            self._done_count += 1
-            done, total = self._done_count, self._pending_total
+            # 本波排空即复位分母，下一批从 0/N 重新开始。复位后发出的
+            # (0, 0) 由 _on_progress 识别为"无在途任务"并清空文案
+            if not self._jobs and self._current is None:
+                self._pending_total = 0
+            done, total = self._progress_snapshot()
         self.progress.emit(done, total)
 
 
@@ -817,7 +873,9 @@ class VariableInfoDialog(QDialog):
     def _safe_snapshot(self, loader, name, generation):
         """快照构建失败（变量不存在 / 数据异常）时返回 None 而不抛。
 
-        构建过程零磁盘 I/O（约 99 μs），因此在 UI 线程同步调用是安全的。
+        构建过程零磁盘 I/O 且 O(1)（MDF 路径约 99 μs，表格路径只读 pandas
+        元数据），因此在 UI 线程同步调用是安全的；即使一次提交
+        ``VAR_INFO_MAX_TABS`` 个变量，累计耗时也在毫秒量级。
         """
         try:
             return var_info.build_snapshot(loader, name, generation)
@@ -1040,6 +1098,13 @@ class VariableInfoDialog(QDialog):
             self._refresh_status()
 
     def _on_progress(self, done: int, total: int) -> None:
+        """渲染后台统计进度。
+
+        ``(0, 0)`` 是 worker 的**终态信号**（本波队列彻底排空），此时清空
+        文案。分母取的是「本波总数」而非进程内累加值，因此第二批提交会从
+        「0/3」重新开始，不会出现「统计中 4/6…」这类既非本批、又永不
+        自愈的错误分母。
+        """
         if total <= 0 or done >= total:
             if self.worker.queue_size() == 0:
                 self._progress_text = ""
