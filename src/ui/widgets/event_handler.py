@@ -266,14 +266,9 @@ class EventHandler:
             QApplication.clipboard().setText(" ".join(var_names))
 
     def _on_vb_var_editor(self, pw):
-        """ViewBox 信号：打开变量编辑器"""
+        """ViewBox 信号：打开变量编辑器（统一走 PlotWidget.open_variable_editor）"""
         if pw:
-            from src.ui.plot_variable_editor import PlotVariableEditorDialog
-
-            parent = pw.window() if pw.window() else None
-            dialog = PlotVariableEditorDialog(pw, parent)
-            dialog.show()
-            dialog.raise_()
+            pw.open_variable_editor()
 
     def _connect_viewbox_signals(self):
         """连接 ViewBox 信号"""

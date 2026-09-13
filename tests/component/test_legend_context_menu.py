@@ -296,7 +296,8 @@ def test_t7b_menu_layout_and_separators(plot_factory, monkeypatch):
     pw.legend_label._exec_var_menu("a", QPoint(0, 0))
 
     acts = menus[0].actions()
-    # "" 为分隔线占位：仅显隐组与操作组之间一条，复制变量名/变量信息无分隔线
+    # "" 为分隔线占位：显隐组/操作组之间一条，操作组与编辑器之间一条；
+    # 复制变量名/变量信息之间无分隔线
     assert [a.text for a in acts] == [
         "仅显示此变量",
         "显示全部变量",
@@ -304,6 +305,8 @@ def test_t7b_menu_layout_and_separators(plot_factory, monkeypatch):
         "删除变量",
         "复制变量名",
         "变量信息",
+        "",
+        "绘图变量编辑器",
     ]
     # 全可见态：solo 可点、显示全部置灰
     assert acts[0].enabled is True
@@ -404,3 +407,69 @@ def test_t11_right_click_blank_no_menu(plot_factory, monkeypatch, qapp):
     qapp.processEvents()
 
     assert not called
+
+
+# ---------- T12 绘图变量编辑器：从 legend 菜单打开 ----------
+
+class _FakeEditorDialog:
+    """PlotVariableEditorDialog 替身：只记录构造参数与展示动作，不建真实 UI"""
+
+    instances = []
+
+    def __init__(self, plot_widget, parent=None):
+        self.plot_widget = plot_widget
+        self.parent = parent
+        self.actions = []
+        _FakeEditorDialog.instances.append(self)
+
+    def show(self):
+        self.actions.append("show")
+
+    def raise_(self):
+        self.actions.append("raise")
+
+    def activateWindow(self):
+        self.actions.append("activateWindow")
+
+
+def test_t12_open_variable_editor_from_menu(plot_factory, monkeypatch):
+    import src.ui.widgets.plot_widget as pw_mod
+
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    _FakeEditorDialog.instances = []
+    monkeypatch.setattr(pw_mod, "PlotVariableEditorDialog", _FakeEditorDialog)
+
+    _fake_menu_env(monkeypatch, choose_text="绘图变量编辑器")
+    pw.legend_label._exec_var_menu("a", QPoint(0, 0))
+
+    assert len(_FakeEditorDialog.instances) == 1
+    dlg = _FakeEditorDialog.instances[0]
+    assert dlg.plot_widget is pw
+    assert dlg.parent is pw.window()
+    assert dlg.actions == ["show", "raise", "activateWindow"]
+
+
+# ---------- T13 三路入口同源：均汇聚到 open_variable_editor ----------
+
+def test_t13_all_entries_converge_to_open_variable_editor(plot_factory, monkeypatch):
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+
+    called = []
+    monkeypatch.setattr(
+        pw, "open_variable_editor", lambda: called.append(1)
+    )
+
+    # 入口 1：ViewBox 右键菜单信号的处理端（EventHandler 委派）
+    pw._on_vb_var_editor(pw)
+    assert len(called) == 1
+
+    # 入口 2：legend 右键菜单
+    _fake_menu_env(monkeypatch, choose_text="绘图变量编辑器")
+    pw.legend_label._exec_var_menu("a", QPoint(0, 0))
+    assert len(called) == 2
+
+    # 入口 3：信号直发（与 plot 右键菜单 action 的触发方式同构）
+    pw.view_box.signals.request_variable_editor.emit(pw)
+    assert len(called) == 3

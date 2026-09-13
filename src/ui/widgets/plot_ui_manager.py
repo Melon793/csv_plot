@@ -171,7 +171,8 @@ class LegendTextBrowser(QTextBrowser):
 
         显隐两项（仅显示此变量 / 显示全部变量）并列常驻，各自按「点击
         是否还会改变可见性」置灰（已处于目标态则不可点），不再共用一个
-        按状态切换文案的互斥项。
+        按状态切换文案的互斥项。末尾「绘图变量编辑器」与 plot 自身右键
+        菜单同源（均走 PlotWidget.open_variable_editor），总是可点。
 
         动作在菜单关闭后才执行（不在嵌套事件循环内改 scene / 重建
         legend HTML）。首行 + 分发前双查 var_name in pw.curves
@@ -189,6 +190,8 @@ class LegendTextBrowser(QTextBrowser):
         act_remove = menu.addAction("删除变量")
         act_copy = menu.addAction("复制变量名")
         act_info = menu.addAction("变量信息")
+        menu.addSeparator()
+        act_editor = menu.addAction("绘图变量编辑器")
 
         chosen = menu.exec(global_pos)
         if chosen is None:
@@ -206,6 +209,8 @@ class LegendTextBrowser(QTextBrowser):
             pw.solo_curve_visibility(var_name)
         elif chosen is act_show_all:
             pw.show_all_curves()
+        elif chosen is act_editor:
+            pw.open_variable_editor()
         elif chosen is act_info:
             if main_window is None or getattr(main_window, "loader", None) is None:
                 from PySide6.QtWidgets import QMessageBox
