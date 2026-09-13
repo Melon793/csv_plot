@@ -464,13 +464,19 @@ class TestMdfAttributionSection:
             assert text.startswith("Database: SYN_DB")
 
     def test_trial_level_attribution_rows_in_file_section(self, attr4_loader):
+        """HD 注释里的试验级归属行拆成独立行。
+
+        WP/RP 的中文标签必须是「工作页 / 参考页」（working / reference page）：
+        实测 5 个真实文件两者成对出现、且 WP 基本是 RP 基名加改动后缀；
+        “写保护参数集”是错的（那是 CANape 的另一个功能）。
+        """
         rows = self.file_rows(attr4_loader)
         assert rows["数据库（Database）"] == "SYN_DB"
         assert rows["试验（Experiment）"] == "SYN_EXP"
         assert rows["工作空间（Workspace）"] == "SYN_WS"
         assert rows["设备清单（Devices）"] == "XCP:1,CAN-Monitoring:1,CalcDev"
-        assert rows["写保护参数集（WP）"] == "SYN_WP"
-        assert rows["运行参数集（RP）"] == "SYN_RP"
+        assert rows["工作页（WP）"] == "SYN_WP"
+        assert rows["参考页（RP）"] == "SYN_RP"
         # Date / Time 不在展示集合里（已有「起始时间」行）
         assert not any(key.startswith("日期") for key in rows)
 

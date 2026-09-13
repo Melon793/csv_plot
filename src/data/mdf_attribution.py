@@ -116,8 +116,14 @@ HD_ATTRIBUTION_KEYS: tuple[tuple[str, str], ...] = (
     ("Workspace", "工作空间"),
     ("Devices", "设备清单"),
     ("Program Description", "程序描述"),
-    ("WP", "写保护参数集"),
-    ("RP", "运行参数集"),
+    # WP / RP 是 CANape 的参数页概念：working page（工作页，本次测量实际生效的
+    # 参数集）与 reference page（参考页，出厂/烧录基线）。该译法经 5 个真实文件
+    # 核实：两者总是成对出现，且 WP 基本就是「RP 基名 + 改动标记」（
+    # 05I..._EGR → 05I..._EGR_1；…COOL FLOW → …COOL FLOW_EGR DCM）。
+    # 曾误译作“写保护参数集 / 运行参数集”——“写保护”在 CANape 里是另一个
+    # 完全不相关的功能（参数集读写保护状态），会把用户带偏。
+    ("WP", "工作页"),
+    ("RP", "参考页"),
 )
 
 
