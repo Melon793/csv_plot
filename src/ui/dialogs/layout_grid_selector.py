@@ -80,7 +80,8 @@ class CellButton(QPushButton):
     """单个网格单元格按钮
 
     仅负责悬停/点击事件上报；网格离开检测由父级 GridContainerWidget 统一处理。
-    视觉由 `set_visual` 驱动（三态配色 + 逐角圆角），内部用签名缓存跳过无变化的重设。
+    视觉由 `set_visual` 驱动（三态配色，每格恒为独立圆角片），内部用签名缓存
+    跳过无变化的重设。
     """
 
     cell_clicked = Signal(int, int)  # (row, col) 点击信号
@@ -91,8 +92,8 @@ class CellButton(QPushButton):
         super().__init__(parent)
         self.row = row
         self.col = col
-        # 渲染签名 (state, radius_mask)；None 表示尚未应用过样式
-        self._sig: tuple[str, tuple[bool, bool, bool, bool]] | None = None
+        # 渲染签名（最近一次应用的 state）；None 表示尚未应用过样式
+        self._sig: str | None = None
         self.setFixedSize(_CELL_SIZE, _CELL_SIZE)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         # 焦点由 grid_widget 统一持有，单元格不参与 Tab 链与方向键焦点
@@ -101,24 +102,21 @@ class CellButton(QPushButton):
 
     @property
     def visual(self):
-        """当前视觉签名 (state, radius_mask)，供测试与调试读取"""
+        """当前视觉签名（最近一次应用的 state），供测试与调试读取"""
         return self._sig
 
-    def set_visual(self, state: str, radius_mask: tuple[bool, bool, bool, bool]):
-        """更新单元格视觉
+    def set_visual(self, state: str):
+        """更新单元格视觉：三态配色 + 固定圆角
 
         Args:
             state: _S_OFF / _S_CURRENT / _S_SEL 之一
-            radius_mask: (tl, tr, bl, br) 四角是否取圆角
 
-        签名与上次完全相同时直接返回：鼠标每划过一格都会触发整网格刷新，
+        签名与上次相同时直接返回：鼠标每划过一格都会触发整网格刷新，
         而绝大多数单元格的视觉并未改变，跳过可省掉大量样式串解析。
         """
-        sig = (state, radius_mask)
-        if sig == self._sig:
+        if state == self._sig:
             return
-        self._sig = sig
-        tl, tr, bl, br = radius_mask
+        self._sig = state
         bg_top, bg_bot, bd = _STATE_PALETTE[state]
         if bg_top == bg_bot:
             bg = bg_top
@@ -134,10 +132,7 @@ class CellButton(QPushButton):
             f'QPushButton[cellState="{state}"] {{'
             f"background-color: {bg};"
             f"border: 1px solid {bd};"
-            f"border-top-left-radius: {_R_CELL if tl else 0}px;"
-            f"border-top-right-radius: {_R_CELL if tr else 0}px;"
-            f"border-bottom-left-radius: {_R_CELL if bl else 0}px;"
-            f"border-bottom-right-radius: {_R_CELL if br else 0}px;"
+            f"border-radius: {_R_CELL}px;"
             f"}}"
         )
 
@@ -478,41 +473,7 @@ class LayoutGridSelector(QDialog):
 
         for r in range(self.max_rows):
             for c in range(self.max_cols):
-                state = states[r][c]
-                mask = self._radius_mask(states, r, c, state)
-                self.cells[r][c].set_visual(state, mask)
-
-    def _same_state(
-        self, states: list[list[str]], r: int, c: int, state: str
-    ) -> bool:
-        """(r, c) 是否处于指定状态（越界视为否）"""
-        if r < 0 or c < 0 or r >= self.max_rows or c >= self.max_cols:
-            return False
-        return states[r][c] == state
-
-    def _radius_mask(
-        self, states: list[list[str]], r: int, c: int, state: str
-    ) -> tuple[bool, bool, bool, bool]:
-        """逐角判定是否取圆角，返回 (tl, tr, bl, br)
-
-        某角仅当“该角两侧邻格及斜角邻格同为该状态”时取方角，否则圆角。
-        因此同色区域看起来像一整块圆角面板，内部接缝为方角。
-        未选态始终保持独立圆角片，使空白格读作“空位”而非一整块背板。
-        """
-        if state == _S_OFF:
-            return (True, True, True, True)
-
-        filled = self._same_state
-        up = filled(states, r - 1, c, state)
-        down = filled(states, r + 1, c, state)
-        left = filled(states, r, c - 1, state)
-        right = filled(states, r, c + 1, state)
-        return (
-            not (up and left and filled(states, r - 1, c - 1, state)),
-            not (up and right and filled(states, r - 1, c + 1, state)),
-            not (down and left and filled(states, r + 1, c - 1, state)),
-            not (down and right and filled(states, r + 1, c + 1, state)),
-        )
+                self.cells[r][c].set_visual(states[r][c])
 
     def _update_hint(self, row: int, col: int):
         """更新提示区文案。row/col 为 -1 时显示当前布局，否则显示预览布局"""
