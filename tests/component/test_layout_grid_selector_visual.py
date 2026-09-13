@@ -2,7 +2,7 @@
 
 覆盖点：
 1. 三态渲染（新布局预览 sel / 当前布局 current / 未选 off）与回退；
-2. 逐角圆角接缝（同色区内部方角、外轮廓圆角，off 态独立圆角片）；
+2. 单元格圆角恒为独立圆角片（已取消同色区合并的方角接缝）；
 3. 渲染签名缓存（重复刷新不重设样式，反向验证性能意图）；
 4. 网格几何（行列间距、不重叠）与尺寸约束（不锁小、hover 不抖动）；
 5. 提示区双层文案格式、行列标尺、accessibleName；
@@ -40,11 +40,7 @@ def selector(qtbot):
 
 
 def _state(dlg, r, c):
-    return dlg.cells[r][c].visual[0]
-
-
-def _mask(dlg, r, c):
-    return dlg.cells[r][c].visual[1]
+    return dlg.cells[r][c].visual
 
 
 # ---------- 三态渲染 ----------
@@ -82,29 +78,24 @@ def test_grid_left_falls_back_to_initial_states(selector):
     assert _state(selector, 0, 1) == _S_OFF
 
 
-# ---------- 逐角圆角 ----------
+# ---------- 圆角（恒为独立圆角片）----------
 
-def test_sel_block_seams_are_square_and_outline_rounded(selector):
-    """2x2 sel 区：外四角圆角，块中心的接缝角为方角"""
-    selector._on_cell_hovered(1, 1)
-    # (0,0) 的右下角是 2x2 块的中心点，被三格同态包住 -> 方角；其余三角圆角
-    assert _mask(selector, 0, 0) == (True, True, True, False)
-    # (1,1) 的左上角同理为接缝，右下角是整块外轮廓
-    assert _mask(selector, 1, 1)[0] is False
-    assert _mask(selector, 1, 1)[3] is True
+def test_every_cell_keeps_independent_radius_in_all_states(selector):
+    """三态下每格四角都恒为 _R_CELL，不得再出现同色区合并的方角接缝
 
-
-def test_full_selection_interior_is_square(selector):
-    """4x3 全选：中心格四角全为方角，整块读作一个面板"""
-    selector._on_cell_hovered(3, 2)
-    assert _mask(selector, 1, 1) == (False, False, False, False)
-    assert _mask(selector, 3, 2) == (False, True, True, True)
-
-
-def test_off_cells_keep_independent_radius(selector):
-    """未选格始终独立圆角，读作"空位"而非一整块背板"""
-    selector._on_cell_hovered(1, 1)
-    assert _mask(selector, 3, 2) == (True, True, True, True)
+    回归护栏：接缝逻辑（逐角 0px）已整块删除，若被重新引入会在样式串里
+    留下 border-*-radius 写法，本用例按样式串内容捕获。
+    """
+    for hover in [None, (1, 1), (3, 2), (0, 0)]:
+        if hover is None:
+            selector._on_grid_left()
+        else:
+            selector._on_cell_hovered(*hover)
+        for r in range(selector.max_rows):
+            for c in range(selector.max_cols):
+                css = selector.cells[r][c].styleSheet()
+                assert f"border-radius: {_R_CELL}px;" in css, f"({r},{c}) @ {hover}"
+                assert "border-top-left-radius" not in css
 
 
 # ---------- 签名缓存 ----------
@@ -174,7 +165,7 @@ def test_grid_size_hint_covers_formula(selector):
 
 
 def test_cell_style_sheet_carries_radius(selector):
-    """样式串里必须真的带上了逐角半径与渐变
+    """样式串里必须真的带上了圆角与渐变
 
     QSS 靠动态属性选择器生效，属性名/设置顺序被改坏时样式会整体退化为
     默认按钮而 Python 侧签名断言仍全绿，故补一条渲染层弱断言。
@@ -183,8 +174,7 @@ def test_cell_style_sheet_carries_radius(selector):
     css = selector.cells[0][0].styleSheet()
     assert 'QPushButton[cellState="sel"]' in css
     assert "qlineargradient" in css
-    assert f"border-top-left-radius: {_R_CELL}px" in css
-    assert "border-bottom-right-radius: 0px" in css  # 2x2 块中心接缝取方角
+    assert f"border-radius: {_R_CELL}px;" in css
 
 
 def test_size_is_owned_by_layout_constraint(selector):
