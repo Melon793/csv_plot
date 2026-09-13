@@ -590,7 +590,10 @@ class DataTableDialog(QMainWindow):
 
     def _blink_step_off(self, delegate, col_idx, view):
         # 步骤2: 取消高亮 (持续0.5s)
-        delegate.highlighted_cols.remove(col_idx)
+        # discard 而非 remove：highlighted_cols 是 set，同一列在 pulse 窗口
+        # 内被重复闪烁时第二次 add 被去重，但仍会排入等量的 off 回调，
+        # 后到的 remove 会因元素已被删而抛 KeyError
+        delegate.highlighted_cols.discard(col_idx)
         view.viewport().update()
 
     def _blink_column(self, var_name, pulse: int = 800):
