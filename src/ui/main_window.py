@@ -305,9 +305,9 @@ class MainWindow(QMainWindow):
         self.auto_y_btn = QPushButton("仅调节y轴", self.plot_widget)
         self.auto_y_btn.setToolTip("自动调节Y轴范围 (Ctrl+Y)")
 
-        self.cursor_btn = QPushButton("显示光标", self.plot_widget)
+        self.cursor_btn = QPushButton("显示游标", self.plot_widget)
         self.cursor_btn.setCheckable(True)
-        self.cursor_btn.setToolTip("切换光标显示 (Ctrl+R)")
+        self.cursor_btn.setToolTip("切换游标显示 (Ctrl+R)")
 
         self.cursor_values_hidden = False
         self.cursor_mode = "1 free cursor"
