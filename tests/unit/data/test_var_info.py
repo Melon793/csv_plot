@@ -40,6 +40,34 @@ def mdf3_loader(tmp_path_factory):
     loader.close()
 
 
+@pytest.fixture(scope="module")
+def attr4_loader(tmp_path_factory):
+    """带归属信息的 MDF4（SI 源块 + 报文组 + 层级显示名 + HD 试验注释）。"""
+    path = write_mdf(
+        tmp_path_factory.mktemp("attr4") / "syn4.dat",
+        version="4.10",
+        n=12,
+        with_attribution=True,
+    )
+    loader = MDFLazyLoader(str(path))
+    yield loader
+    loader.close()
+
+
+@pytest.fixture(scope="module")
+def attr3_loader(tmp_path_factory):
+    """带归属信息的 MDF3：无 SI 块，设备只能从通道名 '\\XCP:1' 后缀推断。"""
+    path = write_mdf(
+        tmp_path_factory.mktemp("attr3") / "syn3.dat",
+        version="3.30",
+        n=12,
+        with_attribution=True,
+    )
+    loader = MDFLazyLoader(str(path))
+    yield loader
+    loader.close()
+
+
 @pytest.fixture()
 def csv_loader(tmp_path):
     path = write_csv(
@@ -174,13 +202,27 @@ class TestMdfSnapshot:
         """五个 MDF 块合并为单个「基本信息」（合并方案 2-B）。
 
         转换规则 / 文件信息 / 枚举映射刻意保持独立块不动。
+
+        归属信息块对 MDF 路径恒存在（合成组的 acq_name / comment 就能填出
+        「测量组 / 报文」行），因此列入固定集合；它只在 MDF 路径出现，
+        CSV 路径由 test_no_mdf_blocks_leak_into_csv_snapshot 守住。
         """
         snap = var_info.build_snapshot(mdf4_loader, "Press_G0", generation=3)
         assert set(snap.sections) == {
             "基本信息",
+            "归属信息",
             "转换规则 (CCBLOCK)",
             "文件信息 (HDBLOCK)",
         }
+
+    def test_attribution_section_follows_basic_section(self, mdf4_loader):
+        """渲染顺序即 dict 插入顺序：归属块紧跟基本信息。"""
+        snap = var_info.build_snapshot(mdf4_loader, "Press_G0")
+        assert list(snap.sections)[:2] == ["基本信息", "归属信息"]
+
+    def test_mdf3_snapshot_also_carries_attribution(self, mdf3_loader):
+        snap = var_info.build_snapshot(mdf3_loader, "Press_G0")
+        assert "归属信息" in snap.sections
 
     def test_merged_blocks_no_longer_exist(self, mdf4_loader):
         """被合并的四个块名不得残留，否则 Markdown 导出会出现空块。"""
@@ -347,6 +389,108 @@ class TestMdfSnapshot:
 
 
 # ---------------------------------------------------------------------------
+# 归属信息与注释解析（对标 ETAS MDA 的 variable 所属 function）
+# ---------------------------------------------------------------------------
+
+
+class TestMdfAttributionSection:
+    def test_mdf4_rows_from_source_information(self, attr4_loader):
+        snap = var_info.build_snapshot(attr4_loader, "BMS_CellVolt082")
+        rows = dict(snap.sections["归属信息"])
+        assert rows["设备 / 总线"] == "CAN-Monitoring:1"
+        assert rows["ECU / 源节点"] == "BMCe"
+        assert rows["总线类型"] == "CAN"
+        assert rows["采集源类型"] == "ECU"
+        assert rows["测量组 / 报文"] == "BMS_CellVoltInfo"
+        assert rows["来源数据库"] == "CANDB: BMS_CellVolt082"
+        assert rows["层级显示名"] == "CAN-Monitoring:1.BMS_CellVolt082"
+        # 中文注释不是标识符样式，绝不能被当成函数
+        assert "所属函数（推断）" not in rows
+
+    def test_mdf3_function_inferred_from_comment(self, attr3_loader):
+        snap = var_info.build_snapshot(attr3_loader, "WaterTemp\\XCP:1")
+        rows = dict(snap.sections["归属信息"])
+        assert rows["设备 / 总线"] == "XCP:1"
+        assert rows["所属函数（推断）"] == "RBArithmeticElement"
+        assert rows["函数推断依据"] == "通道注释字段(推断)"
+        # 注释推断是唯一需要向用户声明“非 A2L 真值”的路径
+        assert "非 A2L 定义" in rows["提示"]
+        # v3 无 SI 块，而 asammdf 注入的噪声源名必须被过滤
+        assert "ECU / 源节点" not in rows
+
+    def test_mdf3_function_from_channel_name_hierarchy(self, attr3_loader):
+        """'Fkt/Var\\Device' 形态优先于注释推断，且 '#Index' 不产生任何行。"""
+        snap = var_info.build_snapshot(attr3_loader, "EpmCaS_phiSegOfs_CA/isx\\XCP:1")
+        rows = dict(snap.sections["归属信息"])
+        assert rows["所属函数（推断）"] == "EpmCaS_phiSegOfs_CA"
+        assert rows["函数推断依据"] == "通道名层级结构"
+        assert "提示" not in rows
+        assert "#Index" not in " ".join(rows.values())
+
+    def test_channel_comment_is_parsed_not_raw_xml(self, attr4_loader):
+        """缺陷 1 的锁：通道注释不得直出整段 <CNcomment> XML。"""
+        snap = var_info.build_snapshot(attr4_loader, "BMS_CellVolt082")
+        comment = dict(snap.sections["基本信息"])["通道注释"]
+        for token in ("<CNcomment", "<TX>", "</TX>", "<raster>"):
+            assert token not in comment, f"通道注释仍含 {token}: {comment}"
+        assert comment.startswith("82号单体电压")
+
+    def test_channel_comment_falls_back_to_description_for_mdf3(self, attr3_loader):
+        """实测合成 v3 的 Signal(comment=) 落到 CN.description、comment 为空。"""
+        snap = var_info.build_snapshot(attr3_loader, "WaterTemp\\XCP:1")
+        assert dict(snap.sections["基本信息"])["通道注释"] == "RBArithmeticElement"
+
+    def test_channel_comment_is_single_line(self, attr4_loader):
+        """行高固定，多行注释必须拼接成单行而不是嵌换行符。"""
+        snap = var_info.build_snapshot(attr4_loader, "BMS_CellVolt082")
+        assert "\n" not in dict(snap.sections["基本信息"])["通道注释"]
+
+    @staticmethod
+    def file_rows(loader, var_name="Press_G0") -> dict[str, str]:
+        snap = var_info.build_snapshot(loader, var_name)
+        return dict(snap.sections["文件信息 (HDBLOCK)"])
+
+    def test_header_start_time_is_not_bound_method(self, attr4_loader, attr3_loader):
+        """缺陷 3 的锁：start_time_string 在 v3/v4 都是方法而非属性。"""
+        for loader in (attr4_loader, attr3_loader):
+            value = self.file_rows(loader)["起始时间"]
+            assert "bound method" not in value, value
+
+    def test_file_comment_is_parsed_text(self, attr4_loader, attr3_loader):
+        """缺陷 2 同类：文件注释不得直出 <HDcomment> XML（v3 还会二次转义）。"""
+        for loader in (attr4_loader, attr3_loader):
+            text = self.file_rows(loader)["文件注释"]
+            assert "<HDcomment" not in text and "&lt;" not in text, text
+            assert text.startswith("Database: SYN_DB")
+
+    def test_trial_level_attribution_rows_in_file_section(self, attr4_loader):
+        rows = self.file_rows(attr4_loader)
+        assert rows["数据库（Database）"] == "SYN_DB"
+        assert rows["试验（Experiment）"] == "SYN_EXP"
+        assert rows["工作空间（Workspace）"] == "SYN_WS"
+        assert rows["设备清单（Devices）"] == "XCP:1,CAN-Monitoring:1,CalcDev"
+        assert rows["写保护参数集（WP）"] == "SYN_WP"
+        assert rows["运行参数集（RP）"] == "SYN_RP"
+        # Date / Time 不在展示集合里（已有「起始时间」行）
+        assert not any(key.startswith("日期") for key in rows)
+
+    def test_mdf3_file_section_parses_double_escaped_header(self, attr3_loader):
+        """实测 asammdf 写 v3 header 注释时会套两层，两层都必须能解析。"""
+        rows = self.file_rows(attr3_loader)
+        assert rows["数据库（Database）"] == "SYN_DB"
+        assert rows["设备清单（Devices）"] == "XCP:1,CAN-Monitoring:1,CalcDev"
+
+    def test_disabled_attribution_keeps_comment_parsing(self, attr4_loader, monkeypatch):
+        """开关只关掉新块，不能把缺陷修复一并回退。"""
+        from src.data import mdf_attribution
+
+        monkeypatch.setattr(mdf_attribution, "MDF_ATTRIBUTION_ENABLED", False)
+        snap = var_info.build_snapshot(attr4_loader, "BMS_CellVolt082")
+        assert "归属信息" not in snap.sections
+        assert "<CNcomment" not in dict(snap.sections["基本信息"])["通道注释"]
+
+
+# ---------------------------------------------------------------------------
 # 快照构建：表格（CSV / Excel）路径
 # ---------------------------------------------------------------------------
 
@@ -359,6 +503,7 @@ class TestTabularSnapshot:
 
     def test_no_mdf_blocks_leak_into_csv_snapshot(self, csv_loader):
         snap = var_info.build_snapshot(csv_loader, "speed")
+        assert "归属信息" not in snap.sections  # 零回归：表格路径不受影响
         for title in snap.sections:
             assert "CNBLOCK" not in title
             assert "CGBLOCK" not in title

@@ -78,6 +78,39 @@ def make_simple_rows(n: int = 20) -> list[list]:
 #: 合成的枚举文本表：{码值: 标签}
 ENUM_TEXTS: dict[int, str] = {0: "off", 1: "on", 2: "err"}
 
+# ---------------------------------------------------------------------------
+# 归属信息（var_info 的「归属信息」块）用的合成样本
+# ---------------------------------------------------------------------------
+
+#: HD 注释正文：实测 5/5 个 CANape/INCA 文件都是这个 ``Key: Value`` 格式。
+#: **必须给纯文本**：asammdf 会自己套 ``<HDcomment><TX>``，预先包 XML 会被
+#: 递归转义成 ``&amp;lt;HDcomment&amp;gt;``（实测）。
+ATTRIBUTION_HEADER_COMMENT = (
+    "Database: SYN_DB\n"
+    "Experiment: SYN_EXP\n"
+    "Workspace: SYN_WS\n"
+    "Devices: XCP:1,CAN-Monitoring:1,CalcDev\n"
+    "Program Description: SYN_PROG\n"
+    "WP: SYN_WP\n"
+    "RP: SYN_RP\n"
+    "Date: 05/09/2026"
+)
+
+#: 通道名内嵌设备、注释为函数样式（v3/v4 通用）的组注释
+ATTRIBUTION_RASTER_GROUP = "XcpEvent_100ms_Raster"
+#: 设备 / ECU 节点 / 报文组名（取自实测 mf4）
+ATTRIBUTION_DEVICE = "CAN-Monitoring:1"
+ATTRIBUTION_ECU = "BMCe"
+ATTRIBUTION_MESSAGE_GROUP = "BMS_CellVoltInfo"
+#: 中文注释 + 来源数据库标注；变量名与组名不相关，故不会误判为函数
+ATTRIBUTION_SIGNAL_NAME = "BMS_CellVolt082"
+ATTRIBUTION_SIGNAL_COMMENT = "82号单体电压 created from: CANDB: BMS_CellVolt082"
+#: 两条走不同回退规则的通道名（'\Device' 取设备、'Fkt/Var\Device' 取函数）
+ATTRIBUTION_CHANNEL_NAME = "WaterTemp\\XCP:1"
+ATTRIBUTION_CHANNEL_COMMENT = "RBArithmeticElement"
+ATTRIBUTION_HIERARCHY_NAME = "EpmCaS_phiSegOfs_CA/isx\\XCP:1"
+ATTRIBUTION_HIERARCHY_COMMENT = "#Index"  # 非标识符，必须被丢弃
+
 
 def write_mdf(
     path: Path | str,
@@ -89,6 +122,7 @@ def write_mdf(
     with_dup_group: bool = True,
     with_single_shot_group: bool = False,
     with_empty_group: bool = False,
+    with_attribution: bool = False,
 ) -> Path:
     """写入合成 MDF 文件，返回 **asammdf 实际写出的路径**。
 
@@ -113,11 +147,15 @@ def write_mdf(
             MDFLazyLoader 会跳过这类组，用于验证过滤行为
         with_empty_group: 是否写入零长度组（cycles_nr=0 且无数据块），
             实测真实 MDF3 文件中约 12.5% 的通道属于此类预留组
+        with_attribution: 是否追加带归属信息的组与 HD 注释（见本文件的
+            ``ATTRIBUTION_*`` 常量）。v4 额外写一个带 SI 源块与 display_names
+            的报文组（v3 无 SI 块概念，asammdf 只会给它注入一个
+            ``'Channel inserted by Python Script'`` 的噪声源）
 
     Returns:
         asammdf 实际写出的 Path
     """
-    from asammdf import MDF, Signal
+    from asammdf import MDF, Signal, Source
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,6 +240,59 @@ def write_mdf(
             acq_name="EmptyGroup",
             comment="empty reserved group",
         )
+
+    if with_attribution:
+        # 组 A：通道名内嵌设备 + 两条走不同函数回退规则的通道
+        mdf.append(
+            [
+                Signal(
+                    np.zeros(n, dtype=np.float32),
+                    t,
+                    unit="degC",
+                    name=ATTRIBUTION_CHANNEL_NAME,
+                    comment=ATTRIBUTION_CHANNEL_COMMENT,
+                ),
+                Signal(
+                    np.zeros(n, dtype=np.float32),
+                    t,
+                    unit="%",
+                    name=ATTRIBUTION_HIERARCHY_NAME,
+                    comment=ATTRIBUTION_HIERARCHY_COMMENT,
+                ),
+            ],
+            acq_name="RasterGroup",
+            comment=ATTRIBUTION_RASTER_GROUP,
+        )
+        # 组 B：仅 v4 —— SI 源块（设备/ECU/总线类型）+ 层级显示名 + 中文注释
+        if version.startswith("4"):
+            src = Source(
+                name=ATTRIBUTION_ECU,
+                path=ATTRIBUTION_DEVICE,
+                comment="",
+                source_type=1,
+                bus_type=2,
+            )
+            mdf.append(
+                [
+                    Signal(
+                        np.zeros(n, dtype=np.uint16),
+                        t,
+                        unit="V",
+                        name=ATTRIBUTION_SIGNAL_NAME,
+                        comment=ATTRIBUTION_SIGNAL_COMMENT,
+                        source=src,
+                        display_names={
+                            f"{ATTRIBUTION_DEVICE}.{ATTRIBUTION_SIGNAL_NAME}": (
+                                "source_path"
+                            )
+                        },
+                    )
+                ],
+                acq_name=ATTRIBUTION_MESSAGE_GROUP,
+                acq_source=src,
+                comment=ATTRIBUTION_MESSAGE_GROUP,
+            )
+        mdf.header.comment = ATTRIBUTION_HEADER_COMMENT
 
     out = mdf.save(str(path), overwrite=True)
     mdf.close()

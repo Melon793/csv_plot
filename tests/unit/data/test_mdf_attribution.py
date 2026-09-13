@@ -108,6 +108,15 @@ class TestExtractTx:
             "Lambda actual value sensor 1"
         )
 
+    def test_double_escaped_tx_is_unwrapped_repeatedly(self):
+        """asammdf 写 MDF3 的 header 注释时会套两层（实测）。"""
+        raw = (
+            "<HDcomment><TX>&lt;HDcomment&gt;&lt;TX&gt;Database: SYN_DB"
+            "&lt;/TX&gt;&lt;common_properties /&gt;&lt;/HDcomment&gt;"
+            "\nSun Sep 13 2026: updated\n</TX><common_properties/></HDcomment>"
+        )
+        assert A.extract_tx(raw) == "Database: SYN_DB"
+
     def test_trailing_canape_noise_line_is_dropped(self):
         assert A.extract_tx("<TX>Database: DB\n§@\n</TX>") == "Database: DB"
 
@@ -176,6 +185,16 @@ class TestSplitNameDevice:
 
 
 class TestHdComment:
+    def test_parse_hd_comment_from_double_escaped_mdf3_header(self):
+        """实测合成 v3 文件读回的 HD 注释被二次转义，解析必须同样兼容。"""
+        raw = (
+            "<HDcomment><TX>&lt;HDcomment&gt;&lt;TX&gt;Database: SYN_DB\n"
+            "Devices: XCP:1,CAN-Monitoring:1&lt;/TX&gt;&lt;common_properties /&gt;"
+            "&lt;/HDcomment&gt;\nSun Sep 13 2026: updated\n</TX></HDcomment>"
+        )
+        assert A.parse_hd_comment(raw)["Database"] == "SYN_DB"
+        assert A.parse_hd_devices(raw) == frozenset({"XCP:1", "CAN-Monitoring:1"})
+
     def test_parse_hd_comment(self):
         parsed = A.parse_hd_comment(HD_TEXT)
         assert parsed["Database"] == "FAWVW_DHE15"
