@@ -942,12 +942,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._multi_curve_manager.toggle_curve_visibility_by_name(var_name)
 
     def solo_curve_visibility(self, var_name: str) -> bool:
-        """仅显示指定曲线 / 恢复全部显示 → 委托到 MultiCurveManager"""
+        """仅显示指定曲线 → 委托到 MultiCurveManager"""
         return self._multi_curve_manager.solo_curve_visibility(var_name)
 
-    def get_solo_action(self, var_name: str) -> tuple[str, str]:
-        """查询 solo 菜单动作（文案）→ 委托到 MultiCurveManager"""
-        return self._multi_curve_manager.get_solo_action(var_name)
+    def show_all_curves(self) -> bool:
+        """恢复所有曲线可见 → 委托到 MultiCurveManager"""
+        return self._multi_curve_manager.show_all_curves()
+
+    def can_solo(self, var_name: str) -> bool:
+        """「仅显示此变量」是否生效 → 委托到 MultiCurveManager"""
+        return self._multi_curve_manager.can_solo(var_name)
+
+    def can_show_all(self) -> bool:
+        """「显示全部变量」是否生效 → 委托到 MultiCurveManager"""
+        return self._multi_curve_manager.can_show_all()
 
     def _recreate_curve(self, var_name):
         """重新创建失效的曲线 → 委托到 MultiCurveManager"""

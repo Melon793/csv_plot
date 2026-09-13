@@ -169,6 +169,10 @@ class LegendTextBrowser(QTextBrowser):
     def _exec_var_menu(self, var_name: str, global_pos: QPoint) -> None:
         """构建并弹出单变量操作菜单，按 exec 返回值分发动作（设计 §4.1）。
 
+        显隐两项（仅显示此变量 / 显示全部变量）并列常驻，各自按「点击
+        是否还会改变可见性」置灰（已处于目标态则不可点），不再共用一个
+        按状态切换文案的互斥项。
+
         动作在菜单关闭后才执行（不在嵌套事件循环内改 scene / 重建
         legend HTML）。首行 + 分发前双查 var_name in pw.curves
         （§6 R3：菜单打开期间曲线可能被 reload/编辑器删除）。
@@ -177,11 +181,13 @@ class LegendTextBrowser(QTextBrowser):
         if var_name not in pw.curves:
             return
         menu = QMenu(pw)
-        act_solo = menu.addAction(pw.get_solo_action(var_name)[1])
+        act_solo = menu.addAction("仅显示此变量")
+        act_solo.setEnabled(pw.can_solo(var_name))
+        act_show_all = menu.addAction("显示全部变量")
+        act_show_all.setEnabled(pw.can_show_all())
         menu.addSeparator()
         act_remove = menu.addAction("删除变量")
         act_copy = menu.addAction("复制变量名")
-        menu.addSeparator()
         act_info = menu.addAction("变量信息")
 
         chosen = menu.exec(global_pos)
@@ -198,6 +204,8 @@ class LegendTextBrowser(QTextBrowser):
                 main_window.layout_manager.request_mark_stats_refresh()
         elif chosen is act_solo:
             pw.solo_curve_visibility(var_name)
+        elif chosen is act_show_all:
+            pw.show_all_curves()
         elif chosen is act_info:
             if main_window is None or getattr(main_window, "loader", None) is None:
                 from PySide6.QtWidgets import QMessageBox

@@ -160,44 +160,45 @@ class MultiCurveManager:
         if pw.vline.isVisible():
             pw.update_cursor_label()
 
-    def _is_solo_state(self, var_name: str) -> bool:
-        """当前是否正处于「仅 var_name 可见」状态（多曲线且唯一可见即目标）"""
-        pw = self.pw
-        visible = [n for n, ci in pw.curves.items() if ci.visible]
-        return visible == [var_name] and len(pw.curves) > 1
+    def can_solo(self, var_name: str) -> bool:
+        """「仅显示 var_name」是否会改变可见性（供菜单决定该项是否置灰）
 
-    def get_solo_action(self, var_name: str) -> tuple[str, str]:
-        """查询 solo 菜单动作：solo 生效中 → 恢复全部；否则 → 仅显示该变量
-
-        Returns:
-            (动作键, 菜单文案)；动作键供测试与调用方区分意图
-        """
-        if self._is_solo_state(var_name):
-            return "show_all", "显示全部变量"
-        return "solo", "仅显示此变量"
-
-    def solo_curve_visibility(self, var_name: str) -> bool:
-        """批量设置可见性：仅显示 var_name；已处于该态则恢复全部显示。
-
-        差量更新（只动可见性需要变化的曲线），单次刷新（legend + 轴 +
-        光标标签），不 emit curves_changed（与左键切换显隐同源，避免
-        编辑器↔plot 信号回环；_recreate_curve 稀有路径会经
-        add_variable_to_plot 触发 emit，与 toggle 同形的既有行为）。
+        当前可见集合恰为 [var_name] 时该动作是空操作 → 置灰。单曲线
+        plot 同样按「是否生效」判定，不做曲线数量特判。
         """
         pw = self.pw
         if var_name not in pw.curves:
             return False
-        show_all = self._is_solo_state(var_name)
-        targets = {
+        visible = [n for n, ci in pw.curves.items() if ci.visible]
+        return visible != [var_name]
+
+    def can_show_all(self) -> bool:
+        """「显示全部变量」是否会改变可见性（存在隐藏曲线时才可点）"""
+        return any(not ci.visible for ci in self.pw.curves.values())
+
+    def _apply_visibility(self, targets: dict[str, bool]) -> bool:
+        """批量应用可见性：差量更新 + 单次刷新（solo / show all 共用）。
+
+        只动需要变化的曲线，收尾一次性刷新（legend + 轴 + 光标标签），
+        避免逐条切换导致的 N 次重绘；不 emit curves_changed（与左键切换
+        显隐同源，避免编辑器↔plot 信号回环；_recreate_curve 稀有路径会经
+        add_variable_to_plot 触发 emit，与 toggle 同形的既有行为）。
+
+        Args:
+            targets: 变量名 → 期望可见性（无需变化的项由本函数内部过滤）
+
+        Returns:
+            是否有曲线的可见性发生了变化
+        """
+        pw = self.pw
+        changes = {
             name: want
-            for name, want in (
-                (n, True if show_all else n == var_name) for n in pw.curves
-            )
-            if pw.curves[name].visible != want
+            for name, want in targets.items()
+            if name in pw.curves and pw.curves[name].visible != want
         }
-        if not targets:
+        if not changes:
             return False
-        for name, vis in targets.items():
+        for name, vis in changes.items():
             ci = pw.curves[name]
             ci.visible = vis
             if ci.curve is None:
@@ -214,6 +215,17 @@ class MultiCurveManager:
         if pw.vline.isVisible():
             pw.update_cursor_label()
         return True
+
+    def solo_curve_visibility(self, var_name: str) -> bool:
+        """仅显示 var_name，其余全部隐藏（恢复全部见 show_all_curves）"""
+        pw = self.pw
+        if var_name not in pw.curves:
+            return False
+        return self._apply_visibility({n: n == var_name for n in pw.curves})
+
+    def show_all_curves(self) -> bool:
+        """恢复所有曲线可见"""
+        return self._apply_visibility({n: True for n in self.pw.curves})
 
     def _finalize_batch_add(
         self,
