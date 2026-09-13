@@ -116,7 +116,7 @@ def test_shift_drag_replaces_curves(loaded_window, qapp):
 
 
 def test_ctrl_r_toggles_cursor(loaded_window, qapp, qtbot):
-    """Ctrl+R 快捷键切换光标显示（help.md 5️⃣ / ⌨️）"""
+    """Ctrl+R 快捷键切换游标显示（help.md 5️⃣ / ⌨️）"""
     mw = loaded_window
     pw = mw.plot_widgets[0].plot_widget
     mime = build_var_mimedata(["speed"])
@@ -131,14 +131,17 @@ def test_ctrl_r_toggles_cursor(loaded_window, qapp, qtbot):
     mw.activateWindow()
     qapp.processEvents()
     assert not mw.cursor_btn.isChecked()
+    assert mw.cursor_btn.text() == "显示游标"
 
     qtbot.keyClick(mw, Qt.Key_R, Qt.KeyboardModifier.ControlModifier)
     qapp.processEvents()
-    assert mw.cursor_btn.isChecked(), "Ctrl+R 应打开光标"
+    assert mw.cursor_btn.isChecked(), "Ctrl+R 应打开游标"
+    assert mw.cursor_btn.text() == "隐藏游标", "按钮文案需随状态切换（术语统一为游标）"
 
     qtbot.keyClick(mw, Qt.Key_R, Qt.KeyboardModifier.ControlModifier)
     qapp.processEvents()
-    assert not mw.cursor_btn.isChecked(), "再次 Ctrl+R 应关闭光标"
+    assert not mw.cursor_btn.isChecked(), "再次 Ctrl+R 应关闭游标"
+    assert mw.cursor_btn.text() == "显示游标"
 
 
 def test_ctrl_y_auto_y_after_plot(loaded_window, qapp, qtbot):

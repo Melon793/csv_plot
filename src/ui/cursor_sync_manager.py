@@ -226,7 +226,7 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw.cursor_mode = "1 free cursor"
             self.mw.pinned_x_values = []
         self.mw.cursor_btn.setChecked(checked)
-        self.mw.cursor_btn.setText("隐藏光标" if checked else "显示光标")
+        self.mw.cursor_btn.setText("隐藏游标" if checked else "显示游标")
 
     def _realign_pinned_cursor_after_time_correction(
         self, old_factor, old_offset, new_factor, new_offset
