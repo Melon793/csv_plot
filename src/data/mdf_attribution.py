@@ -25,11 +25,7 @@ from __future__ import annotations
 import html
 import re
 
-from src.core.config import (
-    MDF_ATTRIBUTION_ENABLED,
-    MDF_GBK_TEXT_REPAIR,
-    VAR_INFO_ATTRIBUTION_MAX_LEN,
-)
+from src.core.config import MDF_ATTRIBUTION_ENABLED, MDF_GBK_TEXT_REPAIR
 
 # ---------------------------------------------------------------------------
 # 行标签（渲染顺序即此处的常量顺序，见 build_attribution_rows）
@@ -336,11 +332,17 @@ def _clean_source_name(value) -> str:
     return name
 
 
-def _clip(value: str, max_len: int) -> str:
-    value = value.strip()
-    if max_len and len(value) > max_len:
-        return value[: max_len - 1] + "…"
-    return value
+def _clean_value(value) -> str:
+    """行值的统一清洗：只去首尾空白，**不做长度截断**。
+
+    截断曾按 120 字符实现，理由是“不截断会把「值」列撑宽”—— 实测不成立
+    （值列是 ``QHeaderView.Stretch``，3000 字符也不改变列宽，已由
+    ``tests/component/test_variable_info_dialog.py::
+    TestMdfAttributionPresentation`` 固化），而截断会把真值从 tooltip、
+    行尾复制按钮与 Markdown 导出里一并削掉 —— 实测真实 mf4 有 141/4704
+    个通道注释超 120 字符，截了就是丢数据。
+    """
+    return str(value or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +350,7 @@ def _clip(value: str, max_len: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_attribution_rows(info: dict, *, max_len: int = 0) -> list[tuple[str, str]]:
+def build_attribution_rows(info: dict) -> list[tuple[str, str]]:
     """从 ``get_channel_info()`` 的返回构造「归属信息」行。
 
     返回 ``[]`` 表示该变量没有任何可展示的归属信息 —— 调用方据此**不创建该
@@ -356,18 +358,13 @@ def build_attribution_rows(info: dict, *, max_len: int = 0) -> list[tuple[str, s
 
     Args:
         info: ``MDFLazyLoader.get_channel_info()`` 的返回值。
-        max_len: 值截断长度；``0`` 表示取配置默认值。
 
     Note:
         两个开关（``MDF_ATTRIBUTION_ENABLED`` / ``MDF_GBK_TEXT_REPAIR``）在调用
-        时读取，因此测试可用 monkeypatch 改写本模块的名字；``max_len`` 的默认
-        值走 ``0`` 哨兵，避免 ``VAR_INFO_ATTRIBUTION_MAX_LEN`` 在 def 期被绑定成
-        常量而改写不掉。
+        时读取，因此测试可用 monkeypatch 改写本模块的名字。
     """
     if not MDF_ATTRIBUTION_ENABLED or not isinstance(info, dict):
         return []
-    if not max_len:
-        max_len = VAR_INFO_ATTRIBUTION_MAX_LEN
 
     channel = info.get("channel") or {}
     channel_group = info.get("channel_group") or {}
@@ -430,5 +427,5 @@ def build_attribution_rows(info: dict, *, max_len: int = 0) -> list[tuple[str, s
         (LABEL_LONG_NAME, long_name),
         (LABEL_HINT, HINT_INFERRED if basis == BASIS_AUX_TEXT else ""),
     )
-    rows = [(label, _clip(value, max_len)) for label, value in candidates if value]
+    rows = [(label, _clean_value(value)) for label, value in candidates if value]
     return rows

@@ -19,7 +19,6 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from src.core.config import VAR_INFO_ATTRIBUTION_MAX_LEN
 from src.core.logger import get_logger
 from src.data import mdf_attribution as attr
 from src.data.metadata import (
@@ -365,34 +364,22 @@ def _one_line(text: str) -> str:
     return " / ".join(part.strip() for part in (text or "").splitlines() if part.strip())
 
 
-def _clip(text: str, max_len: int = 0) -> str:
-    """归属/注释行的展示截断；全值由信息页 tooltip 承担。"""
-    text = (text or "").strip()
-    limit = max_len or VAR_INFO_ATTRIBUTION_MAX_LEN
-    if limit and len(text) > limit:
-        return text[: limit - 1] + "…"
-    return text
-
-
-def _hd_attribution_rows(header_comment, max_len: int = 0) -> list[tuple[str, str]]:
+def _hd_attribution_rows(header_comment) -> list[tuple[str, str]]:
     """试验级归属（数据库 / 试验 / 工作空间 / 设备清单 / 程序描述 / WP / RP）。
 
     实测 5/5 个 CANape/INCA 文件的 HD 注释都带这一段 ``Key: Value``，
     对定位“这条曲线来自哪套标定量”比整段文件注释有用得多。
+
+    不截断：实测 5 个真实文件里最长的单项是「写保护参数集」72 字符、“设备
+    清单”49 字符，本就不会触发截断；而值列是 Stretch 的，再长也不会
+    撑宽列（截断只会把真值从 tooltip 与导出里删掉）。
     """
     parsed = attr.parse_hd_comment(header_comment)
     rows = []
     for raw_key, label in attr.HD_ATTRIBUTION_KEYS:
         value = parsed.get(raw_key, "")
         if value:
-            # 设备清单可达十几个名字（实测 'VCU,ECU,CAN-Monitoring:1,…'），
-            # 不截断会把「值」列撑宽到统计行看不见
-            rows.append(
-                (
-                    f"{label}（{raw_key}）",
-                    _clip(_one_line(attr.repair_text(value)), max_len),
-                )
-            )
+            rows.append((f"{label}（{raw_key}）", _one_line(attr.repair_text(value))))
     return rows
 
 
@@ -495,8 +482,11 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
 
     sections["转换规则 (CCBLOCK)"] = _conversion_rows(version, conv, meta)
 
-    # 文件注释同样不得直出 XML：先抽 TX + 乱码回转 + 截断，再把
+    # 文件注释同样不得直出 XML：先抽 TX + 乱码回转，再把
     # 其中的 Key: Value 拆成独立行（见 _hd_attribution_rows）。
+    # 不截断：整段 HD 注释实测 388~503 字符，尾巴里的「记录时长」与
+    # “Data has been measured with different RPs” 这类溯源提示不在拆行集合里，
+    # 截了就再也看不到；列宽不受内容影响（值列 Stretch）。
     hd_text = attr.repair_text(attr.extract_tx(header.get("comment")))
     file_rows = [
         ("MDF 版本", _fmt(version)),
@@ -509,7 +499,7 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
         ("项目", _fmt(header.get("project"))),
         ("主题", _fmt(header.get("subject"))),
         ("起始时间", _fmt(header.get("start_time_string"))),
-        ("文件注释", _fmt(_clip(_one_line(hd_text)))),
+        ("文件注释", _fmt(_one_line(hd_text))),
     ]
     file_rows += _hd_attribution_rows(header.get("comment"))
     sections["文件信息 (HDBLOCK)"] = file_rows

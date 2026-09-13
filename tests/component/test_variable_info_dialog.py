@@ -14,9 +14,10 @@ tests/unit/data/test_var_info.py）：
   「属性」列下限走 minimumSectionSize 且管着所有列）
 * 关窗等同「关闭全部」（含多标签确认与页面真正销毁）
 * 分组默认全展开、「属性」列可拖动且同窗口共享
+* MDF 归属信息块的树内位置、推断依据行与 Markdown 导出
 
-统一使用合成 CSV（3 行）而非 data/ 下的真实大文件，保证测试秒级完成且
-不依赖仓库数据。
+统一使用合成 CSV（3 行）与 asammdf 现场生成的合成 MDF（12 点）而非 data/
+下的真实大文件，保证测试秒级完成且不依赖仓库数据。
 """
 
 import sys
@@ -43,15 +44,27 @@ from src.core.config import (
     VAR_INFO_COPY_BTN_SIZE,
     VAR_INFO_ROW_HEIGHT,
 )
+from src.data import mdf_attribution as mda
 from src.data import var_info
 from src.data.loader import FastDataLoader
+from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.dialogs import variable_info_dialog as vid_mod
 from src.ui.dialogs.variable_info_dialog import (
     CopyFieldDelegate,
     VariableInfoDialog,
     copy_button_rect,
 )
-from tests.fixtures.data_factory import write_csv
+from tests.fixtures.data_factory import (
+    ATTRIBUTION_CHANNEL_COMMENT,
+    ATTRIBUTION_CHANNEL_NAME,
+    ATTRIBUTION_DEVICE,
+    ATTRIBUTION_ECU,
+    ATTRIBUTION_HIERARCHY_NAME,
+    ATTRIBUTION_MESSAGE_GROUP,
+    ATTRIBUTION_SIGNAL_NAME,
+    write_csv,
+    write_mdf,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +209,45 @@ def many_loader(qapp, tmp_path):
     loader = FastDataLoader(str(path), has_unit=True, sep=",")
     yield loader, names
     loader.release_memory()
+
+
+@pytest.fixture()
+def mdf_env(qapp, tmp_path):
+    """一套带归属信息的合成 MDF4 环境（不复用 ``env``）。
+
+    不复用是因为 ``env`` 走 CSV 路径、永远不可能是归属块的正面样本；
+    两者各守一侧：本夹具验「MDF 该有的东西有」，``env`` 验「CSV 不应
+    有的东西没有」。
+
+    变量名直接用 ``ATTRIBUTION_*`` 常量而不是字面量：改名时只需改工厂，
+    否则测试会因变量不存在而降级成“错误页也能通过断言”的空转。
+    """
+    VariableInfoDialog.reset_for_tests()
+    pump(30)
+
+    # 12 点与 unit 测试的 attr4_loader 一致；点数不影响归属提取（全部取自
+    # 加载期已解析的块结构），只影响统计回填的数值
+    path = write_mdf(
+        tmp_path / "attr.mf4", version="4.10", n=12, with_attribution=True
+    )
+    loader = MDFLazyLoader(str(path))
+    mw = FakeMainWindow(loader)
+
+    class Env:
+        pass
+
+    e = Env()
+    e.mw = mw
+    e.loader = loader
+
+    yield e
+
+    VariableInfoDialog.reset_for_tests()
+    pump(50)
+    mw.loader = None
+    loader.close()
+    mw.deleteLater()
+    pump(30)
 
 
 @pytest.fixture()
@@ -1319,12 +1371,18 @@ class TestCloseSemantics:
 
 class TestTreePresentation:
     def test_all_sections_expanded_by_default(self, env):
-        """顶层分组固定为 4 个：统计特征 + 基本信息 / 列信息 / 文件信息。
+        """CSV 路径的顶层分组固定为 4 个：统计特征 + 基本信息 / 列信息 / 文件信息。
 
         写死 4 而不是 ``>= 2``：全展开之所以可接受，前提就是分组数已经降
         下来（MDF 路径实测 8 → 4，总行数 57 → 41）。若将来又长出几个
         分组，该重新评估“全展开会不会把关键信息挤出可视区”，而不
         是让这条测试静默地继续通过。
+
+        “将来”已到了：MDF 路径现在多一个「归属信息」块（实测 5 个顶层
+        分组、行数 41 → 48），但仍在“全部展开不挤出关键信息”的区间内
+        （统计特征置顶且不受影响），因此判定维持不变。该侧的正面断言
+        见 ``TestMdfAttributionPresentation``；本测试用 CSV，4 这个数字
+        同时兼职“归属块不得外溢到 CSV”，不得改成 ``>= 4``。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
         assert wait_idle(dlg)
@@ -1385,6 +1443,145 @@ class TestTreePresentation:
         pump(30)
 
         assert dlg._pages["load"].tree.columnWidth(0) == expected
+
+
+# ---------------------------------------------------------------------------
+# MDF「归属信息」块的展现
+# ---------------------------------------------------------------------------
+
+
+def _titles(tree) -> list[str]:
+    return [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+
+
+def _rows(item) -> dict:
+    return {
+        item.child(i).text(0): item.child(i).text(1)
+        for i in range(item.childCount())
+    }
+
+
+def _group(tree, title: str):
+    for i in range(tree.topLevelItemCount()):
+        if tree.topLevelItem(i).text(0) == title:
+            return tree.topLevelItem(i)
+    raise AssertionError(f"分组「{title}」不存在：{_titles(tree)}")
+
+
+class TestMdfAttributionPresentation:
+    def test_attribution_section_follows_basic_section(self, mdf_env):
+        """归属块在树里的位置与内容：紧跟「基本信息」且默认展开。
+
+        写死完整顶层标题序列而不是 ``"归属信息" in titles``：归属块若被
+        插到文件信息之后，用户就需手动滚动才能看到“这变量来自哪个 ECU”，
+        而功能价值正好在“一眼定位”。
+        """
+        dlg = VariableInfoDialog.popup([ATTRIBUTION_SIGNAL_NAME], parent=mdf_env.mw)
+        assert wait_idle(dlg)
+        tree = dlg._pages[ATTRIBUTION_SIGNAL_NAME].tree
+
+        assert _titles(tree) == [
+            "统计特征",
+            "基本信息",
+            "归属信息",
+            "转换规则 (CCBLOCK)",
+            "文件信息 (HDBLOCK)",
+        ]
+
+        group = _group(tree, "归属信息")
+        assert group.isExpanded(), "归属块同样必须默认展开"
+        rows = _rows(group)
+        assert rows[mda.LABEL_DEVICE] == ATTRIBUTION_DEVICE
+        assert rows[mda.LABEL_ECU] == ATTRIBUTION_ECU
+        assert rows[mda.LABEL_BUS_TYPE] == "CAN"
+        assert rows[mda.LABEL_SOURCE_TYPE] == "ECU"
+        assert rows[mda.LABEL_GROUP] == ATTRIBUTION_MESSAGE_GROUP
+        # 首行必须是设备：它是“这数据哪来的”的第一答案
+        assert group.child(0).text(0) == mda.LABEL_DEVICE
+        assert group.child(0).toolTip(1) == ATTRIBUTION_DEVICE
+
+    def test_inferred_function_shows_basis_and_hint(self, mdf_env):
+        """函数名是推断出来的，就必须带上依据与提示行。只看到
+        “所属函数：RBArithmeticElement”会让用户把它当成 A2L 定义的事实，
+        而 MDF 里根本没有函数层级块。
+        """
+        dlg = VariableInfoDialog.popup([ATTRIBUTION_CHANNEL_NAME], parent=mdf_env.mw)
+        assert wait_idle(dlg)
+        group = _group(dlg._pages[ATTRIBUTION_CHANNEL_NAME].tree, "归属信息")
+
+        rows = _rows(group)
+        assert rows[mda.LABEL_FUNCTION] == ATTRIBUTION_CHANNEL_COMMENT
+        assert rows[mda.LABEL_FUNCTION_BASIS] == mda.BASIS_AUX_TEXT
+        assert rows[mda.LABEL_HINT] == mda.HINT_INFERRED
+        # 行序：函数 → 依据 → 提示，不得把依据行排到函数行后面很远
+        labels = [group.child(i).text(0) for i in range(group.childCount())]
+        assert labels.index(mda.LABEL_FUNCTION) + 1 == labels.index(
+            mda.LABEL_FUNCTION_BASIS
+        )
+
+    def test_hierarchy_channel_is_not_flagged_as_inferred(self, mdf_env):
+        """通道名层级（``Fkt/Var\\Device``）是硬信息，不需提示行。
+
+        提示行只在走注释推断时出现；若变成常驻，用户会连硬信息一并不信。
+        """
+        name = ATTRIBUTION_HIERARCHY_NAME
+        dlg = VariableInfoDialog.popup([name], parent=mdf_env.mw)
+        assert wait_idle(dlg)
+        rows = _rows(_group(dlg._pages[name].tree, "归属信息"))
+
+        assert rows[mda.LABEL_FUNCTION] == "EpmCaS_phiSegOfs_CA"
+        assert rows[mda.LABEL_FUNCTION_BASIS] == mda.BASIS_NAME
+        assert mda.LABEL_HINT not in rows
+
+    def test_long_value_does_not_widen_layout_and_stays_full(self, mdf_env):
+        """数据层不截断的前提：长值不撑宽布局，且全值可从 tooltip / 复制拿到。
+
+        曾经的 120 字符截断以“撑宽值列”为由，但值列是 ``Stretch`` 的、只吃
+        剩余空间，属性列又只按短标签自适应：实测 3000 字符的归属值下
+        窗口宽与「属性」列宽均不变。本测试把那个结论固定下来，同时守住
+        tooltip 与行尾复制按钮给全值 —— 三者合起来才是“不截断就
+        不丢信息”成立的依据。
+
+        量的是「属性」列而不是「值」列：值列宽 = 视口宽 - 属性列宽，而视口
+        宽会随垂直滚动条的有无在 712/730 间跳（实测），拿它做基准会误报。
+        """
+        dlg = VariableInfoDialog.popup([ATTRIBUTION_SIGNAL_NAME], parent=mdf_env.mw)
+        assert wait_idle(dlg)
+        page = dlg._pages[ATTRIBUTION_SIGNAL_NAME]
+        tree = page.tree
+        col0_before = tree.columnWidth(0)
+        win_before = dlg.width()
+
+        long_value = "X" * 3000
+        snap = page.snapshot
+        snap.sections["归属信息"] = [(mda.LABEL_DEVICE, long_value)]
+        page.render(snap, page.stats)
+        pump(30)
+
+        group = _group(tree, "归属信息")
+        assert tree.columnWidth(0) == col0_before, "「属性」列不得被归属长值撑宽"
+        assert dlg.width() == win_before, "窗口宽度不得随内容变化"
+        assert group.child(0).toolTip(1) == long_value
+
+        page._on_copy_field(group.child(0))
+        assert QApplication.clipboard().text() == long_value, "复制必须拿到全值"
+
+    def test_attribution_rows_reach_markdown_export(self, mdf_env):
+        """归属行必须随 Markdown 一起出口，否则报告里丢失数据溯源。
+
+        同时反向守住长值不得以“…”形式混入导出：那会把不完整的
+        信息当成权威结果递到工具外部。
+        """
+        dlg = VariableInfoDialog.popup([ATTRIBUTION_SIGNAL_NAME], parent=mdf_env.mw)
+        assert wait_idle(dlg)
+        page = dlg._pages[ATTRIBUTION_SIGNAL_NAME]
+        # 未回填时导出会写“计算中…”，那条省略号不是截断，会干扰下面的反向断言
+        assert page.stats is not None and page.stats.computed
+
+        md = page.to_markdown()
+        assert "## 归属信息" in md
+        assert f"| {mda.LABEL_DEVICE} | {ATTRIBUTION_DEVICE} |" in md
+        assert "…" not in md
 
 
 # ---------------------------------------------------------------------------
