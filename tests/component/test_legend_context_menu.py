@@ -40,6 +40,11 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
     class _FakeAction:
         def __init__(self, text):
             self.text = text
+            self.enabled = True
+
+        def setEnabled(self, enabled):
+            # 真实 QMenu 上置灰项不可选中，exec 同步尊重该标志
+            self.enabled = bool(enabled)
 
     class _FakeMenu:
         def __init__(self, parent=None):
@@ -63,7 +68,7 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
             if choose_text is None:
                 return None
             for act in self._acts:
-                if act.text == choose_text:
+                if act.text == choose_text and act.enabled:
                     return act
             return None
 
@@ -228,18 +233,19 @@ def test_t5_solo_single_refresh(plot_factory, monkeypatch):
     assert len(legend_calls) == 1, "solo 批量切换应只刷新一次 legend"
 
 
-# ---------- T6 solo 反转：恢复全部显示 ----------
+# ---------- T6 显隐两项并列：solo → 显示全部 ----------
 
-def test_t6_solo_toggle_back(plot_factory, monkeypatch):
+def test_t6_solo_then_show_all(plot_factory, monkeypatch):
     pw = plot_factory()
     for n in ("a", "b", "c"):
         assert pw.plot_variable(n)
 
     _fake_menu_env(monkeypatch, choose_text="仅显示此变量")
     pw.legend_label._exec_var_menu("a", QPoint(0, 0))
-    # solo 生效后，同一变量上的菜单文案切换为恢复全部
-    assert pw.get_solo_action("a") == ("show_all", "显示全部变量")
+    assert pw.curves["a"].visible is True
+    assert pw.curves["b"].visible is False
 
+    # 两项常驻：互斥文案不再存在，靠「显示全部变量」恢复
     _fake_menu_env(monkeypatch, choose_text="显示全部变量")
     pw.legend_label._exec_var_menu("a", QPoint(0, 0))
 
@@ -247,23 +253,78 @@ def test_t6_solo_toggle_back(plot_factory, monkeypatch):
     assert all(ci.curve.isVisible() for ci in pw.curves.values())
 
 
-# ---------- T7 solo 文案纯函数 ----------
+# ---------- T7 置灰谓词真值表 ----------
 
-def test_t7_solo_action_texts(plot_factory):
+def test_t7_visibility_predicates(plot_factory):
     pw = plot_factory()
     for n in ("a", "b", "c"):
         assert pw.plot_variable(n)
-    assert pw.get_solo_action("a") == ("solo", "仅显示此变量")
+
+    # 全可见：solo 生效（需隐藏其他），显示全部为空操作
+    assert pw.can_solo("a") is True
+    assert pw.can_show_all() is False
 
     pw.solo_curve_visibility("a")
-    assert pw.get_solo_action("a") == ("show_all", "显示全部变量")
-    # 其他变量：当前非该变量的 solo 态 → 语义为切换 solo 目标
-    assert pw.get_solo_action("b") == ("solo", "仅显示此变量")
+    # solo a 生效中：solo a 置灰，solo b 可切换目标，显示全部可点
+    assert pw.can_solo("a") is False
+    assert pw.can_solo("b") is True
+    assert pw.can_show_all() is True
 
-    # 单曲线 plot：无 solo 语义，但文案不报错
+    # 陈旧变量名：无曲线可 solo → 置灰
+    assert pw.can_solo("nope") is False
+
+    # 单曲线且可见：两个动作都是空操作 → 都置灰
     pw2 = plot_factory()
     assert pw2.plot_variable("a")
-    assert pw2.get_solo_action("a") == ("solo", "仅显示此变量")
+    assert pw2.can_solo("a") is False
+    assert pw2.can_show_all() is False
+
+    # 单曲线被左键隐藏：两项重新可点
+    pw2.toggle_curve_visibility_by_name("a")
+    assert pw2.can_solo("a") is True
+    assert pw2.can_show_all() is True
+
+
+# ---------- T7b 菜单结构：两项并列 + 分隔线位置 ----------
+
+def test_t7b_menu_layout_and_separators(plot_factory, monkeypatch):
+    pw = plot_factory()
+    for n in ("a", "b"):
+        assert pw.plot_variable(n)
+
+    menus = _fake_menu_env(monkeypatch)
+    pw.legend_label._exec_var_menu("a", QPoint(0, 0))
+
+    acts = menus[0].actions()
+    # "" 为分隔线占位：仅显隐组与操作组之间一条，复制变量名/变量信息无分隔线
+    assert [a.text for a in acts] == [
+        "仅显示此变量",
+        "显示全部变量",
+        "",
+        "删除变量",
+        "复制变量名",
+        "变量信息",
+    ]
+    # 全可见态：solo 可点、显示全部置灰
+    assert acts[0].enabled is True
+    assert acts[1].enabled is False
+
+
+# ---------- T7c 置灰项不可触发 ----------
+
+def test_t7c_disabled_item_not_triggerable(plot_factory, monkeypatch):
+    pw = plot_factory()
+    for n in ("a", "b"):
+        assert pw.plot_variable(n)
+    assert pw.solo_curve_visibility("a") is True
+
+    _fake_menu_env(monkeypatch, choose_text="仅显示此变量")
+    pw.legend_label._exec_var_menu("a", QPoint(0, 0))
+
+    # 已处于 solo a 态 → 该项置灰，选中后可见性无任何变化
+    assert pw.curves["a"].visible is True
+    assert pw.curves["b"].visible is False
+    assert pw.curves["b"].curve.isVisible() is False
 
 
 # ---------- T8 陈旧防御：菜单打开期间曲线被删 ----------
