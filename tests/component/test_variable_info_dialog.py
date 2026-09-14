@@ -2358,6 +2358,36 @@ class TestFilePathCopy:
         assert text.startswith(var_info.ROW_KEY_FILE_PATH + "\t")
         assert text.split("\t")[1] == '"' + self.WIN + '"'
 
+    def test_placeholder_path_is_not_promoted_to_a_fake_path(self, page):
+        r"""值为占位符 ``-`` 时，三条复制出口一律原样给出 ``-``。
+
+        反向验证：缺守卫时 ``display_path("-")`` 会把它当相对路径按当前工作
+        目录绝对化，复制出 ``<cwd>/-`` —— 一条看着能用、实际打不开的假路径，
+        而状态栏照样提示「已复制」，用户无从察觉。右键菜单此前已在调用点
+        守了这条，本用例盯的是守卫进唯一出口后三条路径口径一致。
+        """
+        _, pg = page
+        dash = self._add_path_row(pg, "-")
+
+        # 唯一出口本身：三种风格一律不得改写占位符，空串同样原样返回
+        for style in (None, "windows", "posix"):
+            assert pg._format_path("-", style) == "-"
+        assert pg._format_path("", None) == ""
+
+        # Ctrl+C：此前唯一可达的漏口（行尾按钮被 is_copyable 拦在绘制层）
+        pg.tree.clearSelection()
+        dash.setSelected(True)
+        QApplication.clipboard().setText(_SENTINEL)
+
+        pg._on_copy_selection()
+
+        assert QApplication.clipboard().text() == var_info.ROW_KEY_FILE_PATH + "\t-"
+
+        # 行尾按钮的回调直调：is_copyable 只挡绘制，挡不住未来新增的 emit 方
+        QApplication.clipboard().setText(_SENTINEL)
+        pg._on_copy_field(dash)
+        assert QApplication.clipboard().text() == "-"
+
     def test_tree_has_custom_context_menu_policy(self, page):
         """接线闸：菜单策略没改成 CustomContextMenu 时槽函数永不被调。"""
         _, pg = page
