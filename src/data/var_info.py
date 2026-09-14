@@ -29,6 +29,7 @@ from src.data.metadata import (
     is_mdf3_version,
     is_range_text_conversion,
 )
+from src.utils.paths import display_path
 
 logger = get_logger(__name__)
 
@@ -150,6 +151,11 @@ def format_size(num_bytes) -> str:
             return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return "-"
+
+
+#: 「文件路径」行的键名。UI 层（变量信息窗口的复制 / 右键菜单）与导出都按这个
+#: 键识别，字面量不得再各处手写
+ROW_KEY_FILE_PATH = "文件路径"
 
 
 def _fmt(value, suffix: str = "", dash: str = "-") -> str:
@@ -337,7 +343,9 @@ def _from_tabular(loader, var_name, generation, kind) -> VarInfoSnapshot:
 
 
 def _tabular_file_rows(loader) -> list:
-    rows = [("文件路径", _fmt(getattr(loader, "path", None)))]
+    # 路径统一走 display_path：入口已 normalize 过，此处幂等；但脚本/测试直接
+    # 构造 loader 时传的常是相对路径，不在这里兜一次就会把不可用的串送进快照
+    rows = [(ROW_KEY_FILE_PATH, _fmt(display_path(getattr(loader, "path", None))))]
     size = getattr(loader, "file_size", None)
     if size is None:
         try:
@@ -490,7 +498,7 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     hd_text = attr.repair_text(attr.extract_tx(header.get("comment")))
     file_rows = [
         ("MDF 版本", _fmt(version)),
-        ("文件路径", _fmt(fi.get("path"))),
+        (ROW_KEY_FILE_PATH, _fmt(display_path(fi.get("path")))),
         ("文件大小", format_size(fi.get("size"))),
         ("通道组数", _fmt(fi.get("group_count"))),
         ("变量总数", _fmt(fi.get("var_count"))),
@@ -914,7 +922,7 @@ def snapshot_to_markdown(snap: VarInfoSnapshot, stats: Optional[VarStats] = None
     lines.append("| 指标 | 值 |")
     lines.append("|---|---|")
     for k, v in stats_to_rows(stats):
-        lines.append(f"| {k} | {_md_escape(v)} |")
+        lines.append(f"| {k} | {_md_value(k, v)} |")
     lines.append("")
 
     for title, rows in snap.sections.items():
@@ -924,7 +932,7 @@ def snapshot_to_markdown(snap: VarInfoSnapshot, stats: Optional[VarStats] = None
         lines.append("| 属性 | 值 |")
         lines.append("|---|---|")
         for k, v in rows:
-            lines.append(f"| {k} | {_md_escape(v)} |")
+            lines.append(f"| {k} | {_md_value(k, v)} |")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
@@ -940,3 +948,18 @@ def _md_escape(text) -> str:
     """转义 Markdown 表格中的破坏性字符：竖线与换行。"""
     s = str(text) if text is not None else "-"
     return s.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ")
+
+
+def _md_value(key, value) -> str:
+    r"""表格「值」列单元格。
+
+    「文件路径」用反引号包成代码：实测我们的数据文件名里成串出现 ``_``
+    （``Demo_20%SOC``、``20260101new ECU_old SW0001``），Windows 路径还
+    成串出现 ``\``；``_`` 会被 Markdown 渲染器当斜体标记、``\`` 在部分渲染器
+    里是转义符 —— 不包裹的话粘进评审报告/缺陷单路径就失真了。
+    值本身含反引号时无法安全包裹，退回普通转义。
+    """
+    if key == ROW_KEY_FILE_PATH:
+        s = str(value if value is not None else "-")
+        return f"`{s}`" if "`" not in s else _md_escape(s)
+    return _md_escape(value)

@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -63,6 +64,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.config import (
+    PATH_COPY_QUOTE,
+    PATH_COPY_STYLE,
     VAR_INFO_COL0_MIN_WIDTH,
     VAR_INFO_COPY_BTN_MARGIN,
     VAR_INFO_COPY_BTN_SIZE,
@@ -73,6 +76,7 @@ from src.core.config import (
 from src.core.logger import get_logger
 from src.data import var_info
 from src.data.metadata import VALID, CONST, INVALID
+from src.utils.paths import STYLE_POSIX, STYLE_WINDOWS, format_for_copy
 from src.ui.variable_actions import (
     add_variables_to_blank_plot,
     add_variables_to_data_table,
@@ -593,6 +597,9 @@ class VarInfoPage(QWidget):
         header.setStretchLastSection(False)
         header.sectionResized.connect(self._on_section_resized)
         self.tree.copy_requested.connect(self._on_copy_field)
+        # 「文件路径」行的跨平台复制靠右键菜单（见 _on_tree_context_menu）
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         layout.addWidget(self.tree, 1)
 
         layout.addLayout(self._build_toolbar())
@@ -843,22 +850,76 @@ class VarInfoPage(QWidget):
         长路径会被视图用省略号截断显示，复制到的是全量 —— 与 tooltip
         一致，正是想要的。
 
+        例外是「文件路径」：按 PATH_COPY_STYLE / PATH_COPY_QUOTE 转写法与
+        包引号，因为这一行的用途就是在另一台机器 / 命令行里打开该文件。
+
         状态栏只报键名、不回显数值：一条完整文件路径 120+ 字符，回显
         出来既读不出新信息（刚点的就是它），又会把底部标签顶长。
         """
         key = item.text(0)
-        QApplication.clipboard().setText(item.text(1))
+        value = item.text(1)
+        if key == var_info.ROW_KEY_FILE_PATH:
+            value = self._format_path(value, None)
+        QApplication.clipboard().setText(value)
         self._dialog._notify(f"已复制「{key}」")
 
+    # -- 文件路径的跨平台复制 ------------------------------------------------
+
+    def _format_path(self, raw: str, style: str | None) -> str:
+        """按风格与引号策略格式化路径；``style=None`` 用配置里的默认风格。"""
+        return format_for_copy(
+            raw, style or PATH_COPY_STYLE, PATH_COPY_QUOTE
+        )
+
+    def _copy_path_variant(self, raw: str, style: str | None, label: str) -> None:
+        QApplication.clipboard().setText(self._format_path(raw, style))
+        self._dialog._notify(f"已复制文件路径（{label}）")
+
+    def _on_tree_context_menu(self, pos) -> None:
+        r"""「文件路径」行的右键菜单：挑目标平台的写法复制。
+
+        入口已把路径统一成当前平台的绝对写法，但跨平台协作时还需要另一种
+        分隔符：实测 Windows 拖拽产出的 ``//host/share/x.csv`` 粘回 Windows
+        会被 Shell 当 URL 交给浏览器（跳 Edge），只有 ``\\host\share`` 能跳转
+        网盘；macOS 上复制给 Windows 侧同理。其他行不提供菜单：它们的
+        复制语义就是“原样取走”，多一层转换反而不可预期。
+        """
+        item = self.tree.itemAt(pos)
+        if item is None or item.text(0) != var_info.ROW_KEY_FILE_PATH:
+            return
+        raw = item.text(1)
+        if not raw or raw == "-":
+            return
+        menu = QMenu(self.tree)
+        # 闭包必须用默认参数绑定循环变量（增量删行后陈旧值误删的老坑同源）
+        for label, style in (
+            ("当前平台", None),
+            (r"Windows \host\share", STYLE_WINDOWS),
+            ("POSIX //host/share", STYLE_POSIX),
+        ):
+            action = menu.addAction(f"复制为 {label}")
+            action.triggered.connect(
+                lambda _checked=False, s=style, lab=label: self._copy_path_variant(raw, s, lab)
+            )
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
     def _on_copy_selection(self) -> None:
-        """Ctrl+C 复制树中选中的行（tab 分隔，可直接粘贴进表格）。"""
+        """Ctrl+C 复制树中选中的行（tab 分隔，可直接粘贴进表格）。
+
+        「文件路径」的值列同样走跨平台格式化，与行尾复制按钮口径一致。
+        """
         items = self.tree.selectedItems()
         if not items:
             return
-        lines = [
-            "\t".join(it.text(c) for c in range(self.tree.columnCount()))
-            for it in items
-        ]
+        lines = []
+        for it in items:
+            cells = []
+            for c in range(self.tree.columnCount()):
+                text = it.text(c)
+                if c == 1 and it.text(0) == var_info.ROW_KEY_FILE_PATH:
+                    text = self._format_path(text, None)
+                cells.append(text)
+            lines.append("\t".join(cells))
         QApplication.clipboard().setText("\n".join(lines))
 
 
