@@ -12,6 +12,7 @@ from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
 
 from src.core.config import UI_DEBOUNCE_DELAY_MS
+from src.utils.paths import normalize_input_path
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
@@ -539,15 +540,22 @@ class LayoutManager(MainWindowBaseManager):
         self.mw._drop_event_filter_registered = False
 
     def _is_supported_drop(self, mime_data) -> bool:
-        """检查 MIME 数据是否包含支持的文件类型 URL"""
+        """检查 MIME 数据是否包含支持的文件类型 URL
+
+        先 normalize 再判后缀：Windows 上拖拽的 UNC 路径经 Qt 会变成
+        ``//host/share/x.csv``，不规范化会让判定与后续加载用两种形态。
+        """
         if not mime_data.hasUrls():
             return False
         urls = mime_data.urls()
         return any(
-            u.toLocalFile().lower().endswith(
+            normalize_input_path(u.toLocalFile()).lower().endswith(
                 (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
             )
-            or self.mw.file_loader_manager._extract_file_extension(u.toLocalFile()) is not None
+            or self.mw.file_loader_manager._extract_file_extension(
+                normalize_input_path(u.toLocalFile())
+            )
+            is not None
             for u in urls
         )
 
@@ -586,7 +594,10 @@ class LayoutManager(MainWindowBaseManager):
             if event.mimeData().hasUrls():
                 urls = event.mimeData().urls()
                 for u in urls:
-                    path = u.toLocalFile()
+                    # 拖拽是本次路径报障的唯一源头：Qt 的 toLocalFile() 在 Windows
+                    # 上把 UNC 产出成 "//host/share/x.csv"（正斜杠 + 主机名小写），
+                    # 不规范化就会一路原样存进 loader.path 并被用户复制出去
+                    path = normalize_input_path(u.toLocalFile())
                     if (
                         path.lower().endswith(
                             (".csv", ".txt", ".mfile", ".t00", ".t01", ".t10", ".t11", ".xlsx", ".xlsm")
