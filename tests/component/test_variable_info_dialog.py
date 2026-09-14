@@ -1967,3 +1967,201 @@ class TestRowHeightAndColumnWidth:
         _, pg = page
         tree = pg.tree
         assert tree.columnWidth(0) > VAR_INFO_COL0_MIN_WIDTH
+
+
+class _FakeAction:
+    """QAction 替身：只记录 triggered 的接线，可手动 fire。"""
+
+    def __init__(self, text: str):
+        self.text = text
+        self._slots = []
+
+    @property
+    def triggered(self):
+        return self
+
+    def connect(self, slot):
+        self._slots.append(slot)
+
+    def fire(self):
+        for slot in self._slots:
+            slot()
+
+
+class _FakeMenu:
+    """QMenu 替身：记录每次弹出的菜单与其中的项，不真画出来。
+
+    offscreen 下 ``exec()`` 会阻塞等用户，而菜单内容本身（有哪几项、每项
+    复制出什么）才是被测对象，因此直接拦掉渲染。``created`` 同时用于
+    断言“不该弹的时候不弹”。
+    """
+
+    def __init__(self, parent=None):
+        self._items = []
+        _FakeMenu.created.append(self)
+
+    def addAction(self, text):  # noqa: N802 - 跟 Qt 同名
+        action = _FakeAction(text)
+        self._items.append(action)
+        return action
+
+    def exec(self, pos):  # noqa: N802 - 跟 Qt 同名
+        return None
+
+    @property
+    def items(self):
+        return list(self._items)
+
+
+@pytest.fixture()
+def fake_menu(monkeypatch):
+    _FakeMenu.created = []
+    monkeypatch.setattr(vid_mod, "QMenu", _FakeMenu)
+    yield _FakeMenu
+
+
+class TestFilePathCopy:
+    r"""「文件路径」行的写法风格 / 引号 / 右键菜单（跨平台复制）。
+
+    背景（用户实测报障）：Windows 上拖拽进主窗口的网盘文件，路径形如
+    ``//fileserver/team-share/… TC01_ EU7 Calibration/…1am=0.8_Map.csv``
+    —— 正斜杠 UNC + 空格 + ``=``，粘回 Windows 被 Shell 当 URL 交给浏览器
+    （实测跳 Edge），只有 ``\\host\share`` 加引号才能直接用。本组用例盯的就是
+    “复制出去能不能用”，以及风格开关是否真的在调用时生效。
+    """
+
+    #: 报障原串（已按用户提供的结构简化，保留空格、``=`` 与两层前导斜杠）
+    RAW = (
+        "//fileserver/team-share/PRJ-0000-00_Demo_ENG01_TC01_ EU7 Calibration"
+        "/20260101_DEMO_ENG01_1am=0.8_Map.csv"
+    )
+    WIN = RAW.replace("/", "\\")
+
+    def _add_path_row(self, pg, value=RAW):
+        """手工注入一行「文件路径」并滚入视口（同长路径用例的做法）。"""
+        tree = pg.tree
+        item = QTreeWidgetItem(tree, [var_info.ROW_KEY_FILE_PATH, value])
+        tree.scrollToItem(item)
+        pump(10)
+        return item
+
+    def _click_copy_button(self, pg, item):
+        tree = pg.tree
+        QApplication.clipboard().setText(_SENTINEL)
+        btn = copy_button_rect(_value_cell_rect(tree, item))
+        QTest.mouseClick(
+            tree.viewport(), Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier, btn.center(),
+        )
+        pump(20)
+        return QApplication.clipboard().text()
+
+    def test_row_key_is_the_literal_ui_and_data_agree_on(self):
+        """键名是 UI 查行的依据，被改字面就会静默失效（菜单与引号全不生效）。"""
+        assert var_info.ROW_KEY_FILE_PATH == "文件路径"
+
+    def test_button_follows_windows_style_from_config(self, page, monkeypatch):
+        r"""PATH_COPY_STYLE=windows → 反斜杠 + UNC 两层前导保留 + 自动加引号。
+
+        反向验证两处：旧写法（直接 ``setText(item.text(1))``）会原样给出
+        正斜杠串 —— 就是报障里跳浏览器的那一条；而把风格常量绑在 def
+        默认参数上时，monkeypatch 不生效，拿到的仍是 native。
+        """
+        dlg, pg = page
+        monkeypatch.setattr(vid_mod, "PATH_COPY_STYLE", "windows")
+        item = self._add_path_row(pg)
+
+        copied = self._click_copy_button(pg, item)
+
+        assert copied == '"' + self.WIN + '"'
+        # 拆写避免转义看错：前导必为两个反斜杠（UNC），其后各段单反斜杠
+        unc_prefix = '"' + "\\\\" + "fileserver" + "\\"
+        assert copied.startswith(unc_prefix)
+        assert dlg.status_label.text() == "已复制「文件路径」"
+
+    def test_default_native_style_adds_quotes_but_keeps_slashes(self, page):
+        """默认 native：macOS 上保持正斜杠，但含空格/``=`` 必须已被引号保护。"""
+        _, pg = page
+        item = self._add_path_row(pg)
+
+        assert self._click_copy_button(pg, item) == '"' + self.RAW + '"'
+
+    def test_quote_never_config_disables_wrapping(self, page, monkeypatch):
+        """PATH_COPY_QUOTE=never → 粘进 Excel 单元格时不带引号。"""
+        _, pg = page
+        monkeypatch.setattr(vid_mod, "PATH_COPY_QUOTE", "never")
+        item = self._add_path_row(pg)
+
+        assert self._click_copy_button(pg, item) == self.RAW
+
+    def test_quote_always_wraps_a_clean_path(self, page, monkeypatch):
+        """PATH_COPY_QUOTE=always → 无特殊字符也包引号（对齐 Explorer）。"""
+        _, pg = page
+        monkeypatch.setattr(vid_mod, "PATH_COPY_STYLE", "windows")
+        monkeypatch.setattr(vid_mod, "PATH_COPY_QUOTE", "always")
+        clean = r"D:\Messung\x.dat"
+        item = self._add_path_row(pg, clean)
+
+        assert self._click_copy_button(pg, item) == '"' + clean + '"'
+
+    def test_other_rows_are_copied_verbatim(self, page):
+        """只有路径行参与转换：其余行必须原样取走（多一层处理反而不可预期）。"""
+        _, pg = page
+        item = _find_row(pg.tree, "变量名")
+
+        assert self._click_copy_button(pg, item) == "speed"
+
+    def test_context_menu_offers_three_styles(self, page, fake_menu, monkeypatch):
+        """右键路径行 → 三项菜单，逐项得到各自写法（默认项跟配置走）。"""
+        _, pg = page
+        monkeypatch.setattr(vid_mod, "PATH_COPY_QUOTE", "never")
+        item = self._add_path_row(pg)
+        pos = _value_cell_rect(pg.tree, item).center()
+
+        pg._on_tree_context_menu(pos)
+
+        assert len(fake_menu.created) == 1
+        actions = fake_menu.created[0].items
+        assert len(actions) == 3
+        assert [a.text for a in actions] == [
+            "复制为 当前平台",
+            "复制为 Windows \\host\\share",
+            "复制为 POSIX //host/share",
+        ]
+        QApplication.clipboard().setText(_SENTINEL)
+        actions[2].fire()
+        assert QApplication.clipboard().text() == self.RAW
+        actions[1].fire()
+        assert QApplication.clipboard().text() == self.WIN
+
+    def test_context_menu_skipped_for_other_rows_and_placeholder(
+        self, page, fake_menu
+    ):
+        """非路径行不弹菜单；路径行的值为占位符 ``-`` 时也不弹。"""
+        _, pg = page
+        other = _find_row(pg.tree, "变量名")
+        pg._on_tree_context_menu(_value_cell_rect(pg.tree, other).center())
+        assert fake_menu.created == [], "非路径行不得弹菜单"
+
+        dash = self._add_path_row(pg, "-")
+        pg._on_tree_context_menu(_value_cell_rect(pg.tree, dash).center())
+        assert fake_menu.created == [], "空路径无内容可复制，不得弹菜单"
+
+    def test_ctrl_c_uses_the_same_formatting(self, page, monkeypatch):
+        """Ctrl+C 与行尾按钮口径一致，否则会得到两种写法。"""
+        _, pg = page
+        monkeypatch.setattr(vid_mod, "PATH_COPY_STYLE", "windows")
+        item = self._add_path_row(pg)
+        pg.tree.clearSelection()
+        item.setSelected(True)
+
+        pg._on_copy_selection()
+
+        text = QApplication.clipboard().text()
+        assert text.startswith(var_info.ROW_KEY_FILE_PATH + "\t")
+        assert text.split("\t")[1] == '"' + self.WIN + '"'
+
+    def test_tree_has_custom_context_menu_policy(self, page):
+        """接线闸：菜单策略没改成 CustomContextMenu 时槽函数永不被调。"""
+        _, pg = page
+        assert pg.tree.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu

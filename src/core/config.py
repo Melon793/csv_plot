@@ -122,6 +122,18 @@ VAR_INFO_ROW_HEIGHT = 28
 # 隔开，避免长文件路径的末尾字符贴着图标
 VAR_INFO_COPY_BTN_SIZE = 16
 VAR_INFO_COPY_BTN_MARGIN = 4
+# 「文件路径」行送进剪贴板时的写法风格：native（当前平台，默认）| windows | posix。
+# 背景（实测）：Windows 上从 Explorer 把文件拖进主窗口时，Qt 的
+# QUrl.toLocalFile() 会把 UNC 网盘路径产出成 "//host/share/x.csv"（正斜杠）。
+# 这种串粘回 Windows 会被 Shell 当 URL 交给浏览器（实测跳到 Edge），只有
+# "\\host\\share" 才能跳转网盘；文件对话框给的是原生反斜杠，所以症状是
+# “有时能用有时不能用”。入口已统一 normalize（见 paths.normalize_input_path），
+# 本开关只决定展示/复制的写法；跨平台协作（Mac 上复制给 Windows 用）时手动选
+PATH_COPY_STYLE = "native"
+# 复制路径时是否包双引号（CMD / PowerShell 里含空格的路径必需）：
+# auto（含空白或 &()#!^"'%<>,;=$`*? 才包）| always（对齐 Explorer「复制为路径」）
+# | never（粘进 Excel 单元格 / 程序输入框时更干净）
+PATH_COPY_QUOTE = "auto"
 # MDF 后台统计的分块点数。v1.1 实测（tmp/bench_chunk_size_tuning.py，
 # 慢转换通道 174k 点）：1<<19 时单块持锁最高 65 ms，UI 线程 get_series
 # 等锁 max 达 131.7 ms；调小至 1<<15 后单块 ≤6 ms，且整条统计总耗时
