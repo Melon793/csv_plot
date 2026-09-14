@@ -866,7 +866,15 @@ class VarInfoPage(QWidget):
     # -- 文件路径的跨平台复制 ------------------------------------------------
 
     def _format_path(self, raw: str, style: str | None) -> str:
-        """按风格与引号策略格式化路径；``style=None`` 用配置里的默认风格。"""
+        """按风格与引号策略格式化路径；``style=None`` 用配置里的默认风格。
+
+        值为占位符 ``-``（``var_info._fmt`` 在路径缺失时给的）时必须原样返回：
+        ``display_path`` 只认“非空串即路径”，喂它会得到 ``<工作目录>/-`` ——
+        一条看着能用、实际打不开的假路径。守卫放在这个唯一出口，行尾按钮 /
+        Ctrl+C / 右键菜单三条路径一并覆盖，不必各自在调用点重复一份。
+        """
+        if not raw or raw == _DASH_PLACEHOLDER:
+            return raw
         return format_for_copy(
             raw, style or PATH_COPY_STYLE, PATH_COPY_QUOTE
         )
@@ -889,6 +897,7 @@ class VarInfoPage(QWidget):
             return
         raw = item.text(1)
         if not raw or raw == "-":
+            # 空路径没有内容可复制，不必弹菜单（_format_path 另有同一守卫）
             return
         menu = QMenu(self.tree)
         # 闭包必须用默认参数绑定循环变量（增量删行后陈旧值误删的老坑同源）
