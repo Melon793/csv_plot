@@ -21,6 +21,7 @@ from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING, safe_qt_op
 from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
 from src.data.mdf_lazy_loader import MDFLazyLoader
+from src.utils.paths import normalize_input_path
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.core.logger import get_logger
 
@@ -695,6 +696,10 @@ class FileLoaderManager(MainWindowBaseManager):
             self._post_reload_cursor_refreshing = False
 
     def load_csv_file(self, file_path: str):
+        # 入口唯一规范化点：文件对话框、拖拽（Qt 会把 UNC 产出成 "//host/share"）、
+        # 命令行位置参数、重新加载全部经这里，之后下游看到的都是当前平台的
+        # 绝对写法（幂等，不抛异常）。
+        file_path = normalize_input_path(file_path)
         logger.info("开始加载文件: %s", file_path)
 
         if getattr(self.mw, "_is_loading_new_data", False):

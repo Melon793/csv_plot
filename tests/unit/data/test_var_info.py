@@ -560,6 +560,24 @@ class TestTabularSnapshot:
         assert rows["行数"] == "3"
         assert rows["列数"] == "4"
 
+    def test_relative_loader_path_is_absolutized(self):
+        """相对路径进快照必须是绝对写法（用户会直接复制这一行）。
+
+        入口 normalize 只覆盖 GUI（对话框 / 拖拽 / 命令行）；脚本与测试直接
+        构造 loader 时传的就是 ``data/a.csv`` 这种串，不兜一次就会把在别的
+        目录下打不开的相对路径送进剪贴板。
+        """
+        import os
+
+        rows = dict(var_info._tabular_file_rows(SimpleNamespace(path="data/a.csv")))
+        assert os.path.isabs(rows["文件路径"])
+        assert rows["文件路径"].endswith(os.path.join("data", "a.csv"))
+
+    def test_missing_path_stays_placeholder(self):
+        """无路径的替身 loader 仍得 `-`：display_path 不得把空串变成 cwd。"""
+        rows = dict(var_info._tabular_file_rows(SimpleNamespace(path=None)))
+        assert rows[var_info.ROW_KEY_FILE_PATH] == "-"
+
     def test_unknown_column_raises_keyerror(self, csv_loader):
         with pytest.raises(KeyError):
             var_info.build_snapshot(csv_loader, "nope")
@@ -1346,6 +1364,33 @@ class TestMarkdownExport:
         assert var_info._md_escape("a\nb") == "a b"
         assert var_info._md_escape("a\r\nb") == "a b"
         assert var_info._md_escape(None) == "-"
+
+    def test_md_value_wraps_file_path_in_backticks(self):
+        r"""「文件路径」包反引号：实测文件名里成串出现 ``_`` 与 ``\``。
+
+        ``EGR_new_20%SOC``、``07-05-2026new ECU_old SW0009`` 这类名字里的 `_`
+        会被 Markdown 渲染器当斜体标记吃掉、`\` 在部分渲染器里是转义符 ——
+        粘进评审/缺陷单的路径就与真值不一致了。其他键一律不参与包裹。
+        """
+        win = r"D:\Messung\EGR_new_20%SOC\CMP21_1am=0.8_Map.dat"
+        assert var_info._md_value(var_info.ROW_KEY_FILE_PATH, win) == f"`{win}`"
+        assert var_info._md_value("变量名", "a|b") == "a\\|b"
+
+    def test_md_value_falls_back_when_path_contains_backtick(self):
+        """值自身含反引号时包裹不安全 → 退回普通转义（不包、也不静默删字符）。"""
+        out = var_info._md_value(var_info.ROW_KEY_FILE_PATH, "a`b_c")
+        assert not out.startswith("`")
+        assert out == "a`b_c"
+
+    def test_exported_markdown_path_row_is_a_code_span(self, csv_loader):
+        """端到端：导出的表里路径行整格被反引号包住，路径本体逐字保留。"""
+        import os
+
+        snap = var_info.build_snapshot(csv_loader, "speed")
+        md = var_info.snapshot_to_markdown(snap)
+        line = next(ln for ln in md.splitlines() if ln.startswith("| 文件路径 |"))
+        expect = os.path.abspath(str(csv_loader.path))
+        assert line == f"| 文件路径 | `{expect}` |"
 
     def test_comment_with_pipe_survives_export(self, mdf4_loader):
         """端到端确认转义生效：导出的每行表格都恰好有 3 个未转义竖线。"""
