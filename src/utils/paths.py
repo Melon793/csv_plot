@@ -114,7 +114,11 @@ def to_posix(path: str) -> str:
 
 
 def display_path(path: str, style: str = STYLE_NATIVE) -> str:
-    """按风格输出路径；``native`` 走当前平台规范化（幂等，不抛异常）。"""
+    """按风格输出路径；``native`` 走当前平台规范化（幂等，不抛异常）。
+
+    未知风格一律按 native 处理：这两个值来自配置文件，写错一个字不能
+    把信息窗打不开或复制出一个四不像。
+    """
     s = str(path or "")
     if not s.strip():
         return s
@@ -135,11 +139,14 @@ def quote_for_shell(path: str, mode: str = QUOTE_AUTO) -> str:
 
     自身已含 ``"`` 时**不包**：CMD 与 PowerShell 的内嵌引号转义规则不兼容，
     猜错比不加更糟，交回用户处理。
+
+    未知模式按 ``auto`` 处理（与 ``display_path`` 同一考虑：配置写错不得
+    静默变成“永远包引号”）。
     """
     s = str(path or "")
     if mode == QUOTE_NEVER or not s or '"' in s:
         return s
-    if mode == QUOTE_AUTO and not needs_shell_quoting(s):
+    if mode != QUOTE_ALWAYS and not needs_shell_quoting(s):
         return s
     return f'"{s}"'
 

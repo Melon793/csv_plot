@@ -169,6 +169,11 @@ class TestShellQuoting:
         assert quote_for_shell(r"D:\ab\x.csv", QUOTE_ALWAYS) == '"' + r"D:\ab\x.csv" + '"'
         assert quote_for_shell(r"D:\a b\x.csv", QUOTE_NEVER) == r"D:\a b\x.csv"
 
+    def test_unknown_mode_falls_back_to_auto(self):
+        """配置里把引号策略写错 → 当 auto 用，不得静默变成“永远包引号”。"""
+        assert quote_for_shell(r"D:\ab\x.csv", "win") == r"D:\ab\x.csv"
+        assert quote_for_shell(r"D:\a b\x.csv", "win") == '"D:\\a b\\x.csv"'
+
     def test_path_containing_double_quote_is_not_wrapped(self):
         weird = r'D:\a b\x"y.csv'
         assert quote_for_shell(weird, QUOTE_ALWAYS) == weird
