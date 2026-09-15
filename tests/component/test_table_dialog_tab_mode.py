@@ -25,11 +25,13 @@ import pandas as pd
 import pytest
 
 from PySide6.QtCore import Qt, QItemSelectionModel, QCoreApplication, QPoint
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QMenu,
     QMessageBox,
+    QTableView,
 )
 
 from tests.fixtures.data_factory import write_mdf
@@ -844,3 +846,50 @@ def test_locate_time_selects_target_variable_column(tab_dialog):
         (i.row(), i.column()) for i in state.view.selectionModel().selectedIndexes()
     }
     assert sel == {(5, 0)}, "变量不在本 tab 时回退 time 列"
+
+
+# ---------- R18：行号列宽度跟着行位数走（线上截图发现） ----------
+
+def test_row_header_width_grows_with_row_count(qapp):
+    """行号表头右对齐，宽度不足被裁的是高位数字（固定 48px 只容 5 位）。"""
+    font = QTableView().font()
+    fm = QFontMetrics(font)
+
+    narrow = DataTableDialog._row_header_width(999, font)
+    wide = DataTableDialog._row_header_width(1_000_000, font)
+
+    assert narrow == 48, "小表维持原有 48px 观感，不得变宽"
+    assert wide > narrow
+    # 断言相对关系而非绝对像素：offscreen 与真机字体不同
+    assert wide >= fm.horizontalAdvance("999999") + 2, "6 位行号不得被裁切"
+    assert DataTableDialog._row_header_width(0, font) == 48, "空表不得算出 0 位"
+
+
+def test_tab_row_header_width_matches_row_count(tab_dialog):
+    """建 tab 时必须按该 group 的行数定宽，而不是写死 48px。"""
+    state = tab_dialog._add_variable_to_tab("Press_G0", 0)
+    vh = state.view.verticalHeader()
+    expect = DataTableDialog._row_header_width(len(state.df), state.view.font())
+
+    assert vh.minimumWidth() == vh.maximumWidth() == expect
+    assert vh.width() >= QFontMetrics(state.view.font()).horizontalAdvance(
+        str(len(state.df))
+    ), "行号文本宽度必须小于列宽"
+
+
+def test_tab_row_header_widens_for_six_digit_rows(tab_dialog, mdf_loader, monkeypatch):
+    """6 位行号的长时程文件：行号列必须自动变宽（旧写法锁 48px 会裁掉高位）。"""
+    n = 120_000
+    monkeypatch.setattr(
+        mdf_loader, "get_group_time_array", lambda gi: np.arange(n) * 0.01
+    )
+    monkeypatch.setattr(mdf_loader, "get_series", lambda name: pd.Series(np.zeros(n)))
+
+    state = tab_dialog._add_variable_to_tab("Press_G0", 0)
+    vh = state.view.verticalHeader()
+
+    assert len(state.df) == n
+    assert vh.maximumWidth() > 48, "仍被锁在 48px → 高位数字会被裁"
+    assert vh.maximumWidth() >= QFontMetrics(state.view.font()).horizontalAdvance(
+        str(n)
+    ) + 2
