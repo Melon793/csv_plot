@@ -954,18 +954,32 @@ def _tab_menu_pick(menu_stub, prefix: str) -> int:
     raise AssertionError(f"菜单缺少以 {prefix} 开头的项：{[a.text() for a in acts]}")
 
 
-def _stub_answer(monkeypatch, answer) -> list:
-    """把确认框固定答成 answer，并记下 (标题, 正文) 便于断言文案。"""
-    asked: list = []
+def _forbid_confirmation(monkeypatch) -> None:
+    """把确认框打成“调用即失败”，信息框静默：用于钉住“这条路径不该弹框”。"""
 
-    def fake(*args, **kwargs):
-        asked.append((args[1], args[2]))
-        return answer
+    def forbidden(*args, **kwargs):
+        raise AssertionError(f"不该弹确认框：{args[1] if len(args) > 1 else args}")
 
-    monkeypatch.setattr(QMessageBox, "question", fake)
-    # 避免取数失败/超上限分支弹出模态信息框挂住 offscreen 测试
+    monkeypatch.setattr(QMessageBox, "question", forbidden)
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
-    return asked
+
+
+class _NoCancelProgress:
+    """不取消的 QProgressDialog 替身（测试里不想真弹一个窗口）。"""
+
+    instances: list = []
+
+    def __init__(self, *args, **kwargs):
+        _NoCancelProgress.instances.append(self)
+
+    def setWindowTitle(self, *a): ...
+    def setWindowModality(self, *a): ...
+    def setAutoClose(self, *a): ...
+    def setMinimumDuration(self, *a): ...
+    def show(self): ...
+    def setValue(self, v): ...
+    def wasCanceled(self): return False
+    def close(self): ...
 
 
 def test_tab_bar_context_menu_is_wired(shown_tab_dialog, menu_stub):
@@ -1044,7 +1058,9 @@ def test_add_group_remaining_from_tab_menu_adds_all_missing_columns(
     dlg = shown_tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     pump(50)
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    # 不只打桩 information：question 不打桩的话，一旦有人加回确认框，本用例会
+    # 在 offscreen 下挂死而不是失败（改前的变异验证就是这么卡满 15 分钟的）
+    _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
     menu_stub.pick = _tab_menu_pick(menu_stub, "添加本组其余变量")
@@ -1094,11 +1110,16 @@ def test_no_tab_menu_while_single_table(tab_dialog, menu_stub):
     assert menu_stub.menus == []
 
 
-def test_add_group_remaining_adds_all_missing_columns(tab_dialog, mdf_loader):
-    """一次加完整组：列集合对齐 loader 的组内变量，行数不变。"""
+def test_add_group_remaining_adds_all_missing_columns(tab_dialog, mdf_loader, monkeypatch):
+    """一次加完整组：列集合对齐 loader 的组内变量，行数不变。
+
+    本组所有进入批量添加的用例都要 _forbid_confirmation：不只是断言“不该弹框”，
+    更是 offscreen 下的自保——真弹一个模态框会挂死整个测试进程而不是失败。
+    """
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     rows = len(state.df)
+    _forbid_confirmation(monkeypatch)
 
     dlg._add_group_remaining_variables(state)
 
@@ -1108,10 +1129,13 @@ def test_add_group_remaining_adds_all_missing_columns(tab_dialog, mdf_loader):
     assert dlg._var_locator.count() == 3
 
 
-def test_add_group_remaining_is_idempotent_and_greys_out(shown_tab_dialog, menu_stub):
+def test_add_group_remaining_is_idempotent_and_greys_out(
+    shown_tab_dialog, menu_stub, monkeypatch
+):
     """连点两次列数不变；已全加时菜单项变“已全部添加”并置灰。"""
     dlg = shown_tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
+    _forbid_confirmation(monkeypatch)
     dlg._add_group_remaining_variables(state)
     cols = list(state.df.columns)
 
@@ -1136,7 +1160,7 @@ def test_add_group_remaining_rebuilds_model_once(tab_dialog, monkeypatch):
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr("src.ui.table_dialog.PandasTableModel", CountingModel)
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    _forbid_confirmation(monkeypatch)
 
     dlg._add_group_remaining_variables(state)  # 本次要补 2 列
 
@@ -1157,6 +1181,8 @@ def test_add_group_remaining_skips_unreadable_channel(tab_dialog, mdf_loader, mo
 
     info: list = []
     monkeypatch.setattr(mdf_loader, "get_series", boom)
+    # 顺序不能倒：先 _forbid_confirmation 再盖 information，否则本用例拿不到正文
+    _forbid_confirmation(monkeypatch)
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
 
     dlg._add_group_remaining_variables(state)
@@ -1167,89 +1193,71 @@ def test_add_group_remaining_skips_unreadable_channel(tab_dialog, mdf_loader, mo
     assert state.model.columnCount() == len(state.df.columns)
 
 
-def test_add_group_remaining_asks_confirmation_above_threshold(tab_dialog, monkeypatch):
-    """超静默阈值 → 先确认；答 No 则一列不加。"""
+def test_add_group_remaining_never_asks_confirmation(tab_dialog, mdf_loader, monkeypatch):
+    """批量添加不弹确认框（用户要求）：进度框路径上也必须直接开工。
+
+    右键标签本身就是明确的页级意图，多点一次“确定”只会挡住结果，还会把
+    激活交给主窗口。这里把 question 打成抛错，任何退回确认框的写法会立即变红。
+    """
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
-    asked = _stub_answer(monkeypatch, QMessageBox.StandardButton.No)
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
+    _forbid_confirmation(monkeypatch)
+    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_PROGRESS_COLS", 0)
+    _NoCancelProgress.instances.clear()
+    monkeypatch.setattr("src.ui.table_dialog.QProgressDialog", _NoCancelProgress)
 
     dlg._add_group_remaining_variables(state)
 
-    assert len(asked) == 1 and asked[0][0] == "添加本组其余变量"
-    assert "尚未添加" in asked[0][1]
-    assert list(state.df.columns) == ["time", "Press_G0"], "取消后不得有副作用"
+    assert len(_NoCancelProgress.instances) == 1, "进度框仍是唯一的进度反馈"
+    assert set(state.df.columns) == {"time"} | set(mdf_loader.get_group_variables(0))
 
 
 def test_add_group_remaining_refuses_above_hard_cap(tab_dialog, monkeypatch):
     """超硬上限：一个都不加、也不走确认框，只提示改用逐个拖拽。
 
-    这是分级保护的最外层（计划设计决定 6）：误点一个 5000 列的组不应该
-    变成“确认一下然后卡死 3 分钟”，而是直接拒绝并给出替代路径。
+    上限是取消确认框后唯一保留的护栏：误点一个几千列的组不应该变成
+    “先卡死三分钟”，而是直接拒绝并给出替代路径。
     """
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     msgs: list = []
+    restored: list = []
     monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_COLS", 1)
-
-    def no_question(*args, **kwargs):
-        raise AssertionError("超上限应直接拒绝，不该再走确认框")
-
-    monkeypatch.setattr(QMessageBox, "question", no_question)
+    _forbid_confirmation(monkeypatch)
     monkeypatch.setattr(
         QMessageBox, "information", lambda *a, **k: msgs.append((a[1], a[2]))
     )
+    monkeypatch.setattr(DataTableDialog, "_restore_foreground", lambda self: restored.append(1))
 
     dlg._add_group_remaining_variables(state)
 
     assert list(state.df.columns) == ["time", "Press_G0"], "超上限不得有任何副作用"
     assert msgs and msgs[0][0] == "本组变量过多"
     assert "拖拽" in msgs[0][1], "必须告诉用户改用逐个添加"
+    assert restored == [1], "弹过信息框也必须把窗口拉回前台"
 
 
-def test_bulk_add_time_estimate_comes_from_measured_probe(tab_dialog, monkeypatch):
-    """确认框里的耗时预估必须先实测单列取数，不能用固定常数。
-
-    实测同一文件里单列成本相差 15 倍（G310 32 ms/列 vs G158 2.2 ms/列），
-    拿常数去乘会把 0.4 秒的操作说成 7 秒，不准的读数会让人忽略所有提醒。
-    """
-    dlg = tab_dialog
-    state = dlg._add_variable_to_tab("Press_G0", 0)
-    probed: list = []
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
+def test_restore_foreground_raises_and_activates(tab_dialog, monkeypatch):
+    """两个调用缺一不可：raise_ 管窗口叠序，activateWindow 管键盘焦点。"""
+    calls: list = []
+    monkeypatch.setattr(DataTableDialog, "raise_", lambda self: calls.append("raise"))
     monkeypatch.setattr(
-        DataTableDialog,
-        "_probe_series_seconds",
-        staticmethod(lambda loader, name: probed.append(name) or 0.0005),
+        DataTableDialog, "activateWindow", lambda self: calls.append("activate")
     )
-    asked = _stub_answer(monkeypatch, QMessageBox.StandardButton.Yes)
 
-    dlg._add_group_remaining_variables(state)
+    tab_dialog._restore_foreground()
 
-    assert probed == ["State"], "预估必须先试取第一列"
-    assert "不到 1 秒" in asked[0][1], "不足 1 秒不得写成“约 0 秒”"
-
-
-def test_add_group_remaining_confirmation_yes_adds_all(tab_dialog, mdf_loader, monkeypatch):
-    """同一阈值下答 Yes → 全组入列。"""
-    dlg = tab_dialog
-    state = dlg._add_variable_to_tab("Press_G0", 0)
-    _stub_answer(monkeypatch, QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
-
-    dlg._add_group_remaining_variables(state)
-
-    assert set(state.df.columns) == {"time"} | set(mdf_loader.get_group_variables(0))
+    assert calls == ["raise", "activate"]
 
 
 def test_add_group_remaining_cancel_keeps_added_columns(tab_dialog, monkeypatch):
     """进度框取消：保留已插入的列、照常重建一次模型，不整批回滚。"""
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
     monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_PROGRESS_COLS", 0)
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    _forbid_confirmation(monkeypatch)
+    restored: list = []
+    monkeypatch.setattr(DataTableDialog, "_restore_foreground", lambda self: restored.append(1))
 
     class _FakeProgress:
         """够用的 QProgressDialog 替身：第一次 setValue 之后就算被取消。"""
@@ -1279,22 +1287,48 @@ def test_add_group_remaining_cancel_keeps_added_columns(tab_dialog, monkeypatch)
     progress = _FakeProgress.instances[0]
     assert progress.closed, "退出批量必须关掉进度框"
     assert state.model.columnCount() == 3, "取消路径也要补上一次性重建的模型"
+    assert restored == [1], "进度框关掉后必须把表格拉回前台（实测 Qt 会交给主窗口）"
 
 
-def test_add_group_remaining_below_threshold_adds_silently(tab_dialog, mdf_loader, monkeypatch):
-    """默认阈值下（3 列 x 12 行）绝不弹确认框：“不打扰绝大多数组”的核心验收点。"""
+def test_small_bulk_add_touches_no_modal_or_foreground(tab_dialog, mdf_loader, monkeypatch):
+    """默认阈值下（2 列待加）全程零模态框：既不弹框也不动窗口叠序。"""
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError(f"小批量不应弹确认框：{args[2] if len(args) > 2 else args}")
-
-    monkeypatch.setattr(QMessageBox, "question", forbidden)
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    _forbid_confirmation(monkeypatch)
+    restored: list = []
+    monkeypatch.setattr(DataTableDialog, "_restore_foreground", lambda self: restored.append(1))
 
     dlg._add_group_remaining_variables(state)
 
     assert set(state.df.columns) == {"time"} | set(mdf_loader.get_group_variables(0))
+    assert restored == [], "没弹模态框就不该 raise/activate，避免无谓改窗口叠序"
+
+
+def test_bulk_add_250_columns_touches_no_modal(tab_dialog, mdf_loader, monkeypatch):
+    """用户那个量级（135~250 列）在默认阈值下必须零模态框。
+
+    真实文件实测 200 列 x 107,001 行只要 0.25 s，旧阈值 30 列却会为它弹一个
+    进度框；而模态框关闭时 Qt 会把窗口叠序交给主窗口，就是“点完确定窗口不
+    见了”的根源。阈值抬到 300 后这条路径上一个框都不弹，从根本上不会丢前台。
+    """
+    dlg = tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    names = [f"Sig{i}" for i in range(250)]
+    _forbid_confirmation(monkeypatch)
+    monkeypatch.setattr(mdf_loader, "get_group_variables", lambda gi: names)
+    monkeypatch.setattr(mdf_loader, "get_series", lambda name: pd.Series(np.zeros(12)))
+
+    def no_progress(*a, **k):
+        raise AssertionError("默认阈值下 250 列的快批量不该弹进度框")
+
+    monkeypatch.setattr("src.ui.table_dialog.QProgressDialog", no_progress)
+    restored: list = []
+    monkeypatch.setattr(DataTableDialog, "_restore_foreground", lambda self: restored.append(1))
+
+    dlg._add_group_remaining_variables(state)
+
+    assert len(state.df.columns) == 2 + 250
+    assert restored == [], "全程没弹框，不需要也不应该去动窗口叠序"
 
 
 def test_close_tab_removes_only_target_tab(shown_tab_dialog, menu_stub, monkeypatch):
@@ -1303,7 +1337,7 @@ def test_close_tab_removes_only_target_tab(shown_tab_dialog, menu_stub, monkeypa
     s0 = dlg._add_variable_to_tab("Press_G0", 0)
     s1 = dlg._add_variable_to_tab("Press_G1", 1)
     pump(50)
-    asked = _stub_answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
     menu_stub.pick = _tab_menu_pick(menu_stub, "关闭此标签页")
@@ -1313,25 +1347,40 @@ def test_close_tab_removes_only_target_tab(shown_tab_dialog, menu_stub, monkeypa
     assert dlg._group_state_by_view(s0.view) is None
     assert s1.widget_index == 0, "前移后未重映射 → 切页/锚点会查到错的 state"
     assert dlg._tab_widget.widget(0) is s1.view
-    assert asked[0][0].startswith("关闭标签页 ")
-    assert "Press_G0" in asked[0][1], "确认框必须列出将被移除的变量名"
 
 
-def test_close_tab_cancel_keeps_everything(shown_tab_dialog, menu_stub, monkeypatch):
-    """确认框答 No → 页、列、定位框全部保持原样。"""
+def test_closing_tabs_never_asks_confirmation(shown_tab_dialog, menu_stub, monkeypatch):
+    """三个关闭项全部直连：确认框原本要拦三道，用户要求一律去掉。
+
+    去掉确认框后，“重载数据不会自动恢复”这条后果必须仍活在菜单 tooltip 里 ——
+    信息可以从弹框挪走，不能凭空消失；这也是本用例存在的另一半理由。
+    """
     dlg = shown_tab_dialog
     dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
     pump(50)
-    asked = _stub_answer(monkeypatch, QMessageBox.StandardButton.No)
+    _forbid_confirmation(monkeypatch)
 
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 1))
+    tips = {
+        a.text(): a.toolTip() for a in menu_stub.menus[-1].actions() if not a.isSeparator()
+    }
+    for text, tip in tips.items():
+        if text.startswith("关闭"):
+            assert "曲线不受影响" in tip and "不会自动恢复" in tip, f"{text} 缺少后果说明：{tip}"
+
+    menu_stub.pick = _tab_menu_pick(menu_stub, "关闭其他标签页")
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 1))
+    assert list(dlg._group_tabs) == [1]
+
+    # 只剩一页时不再给“关闭其他/所有”，用“关闭此标签页”收尾（同样不弹框）
+    # pick 不清零的话“查看菜单”的那一次右键会直接执行上一次的动作
+    menu_stub.pick = None
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
+    assert not any(t.startswith("关闭其他") for t in _tab_menu_texts(menu_stub))
     menu_stub.pick = _tab_menu_pick(menu_stub, "关闭此标签页")
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
-
-    assert list(dlg._group_tabs) == [0, 1]
-    assert len(asked) == 1
-    assert "已绘制的曲线不受影响" in asked[0][1], "必须写清关闭的后果"
+    assert dlg._group_tabs == {}
 
 
 def test_close_others_keeps_target(shown_tab_dialog, menu_stub, monkeypatch):
@@ -1340,7 +1389,7 @@ def test_close_others_keeps_target(shown_tab_dialog, menu_stub, monkeypatch):
     s0 = dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
     pump(50)
-    _stub_answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
     menu_stub.pick = _tab_menu_pick(menu_stub, "关闭其他标签页")
@@ -1357,14 +1406,13 @@ def test_close_all_tabs_returns_to_single_table_ui(shown_tab_dialog, menu_stub, 
     dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
     pump(50)
-    asked = _stub_answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 1))
     menu_stub.pick = _tab_menu_pick(menu_stub, "关闭所有标签页")
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 1))
     pump(50)
 
-    assert "将关闭 2 个标签页，共移除 2 个变量列" in asked[0][1]
     assert dlg._group_tabs == {} and dlg._tab_mode is False
     assert dlg.model is not None, "退回单表后必须补回空模型"
     assert dlg.main_view.model() is dlg.model
@@ -1372,7 +1420,7 @@ def test_close_all_tabs_returns_to_single_table_ui(shown_tab_dialog, menu_stub, 
     assert dlg.has_table_content() is False
 
 
-def test_close_tab_refreshes_locator_and_column_names(shown_tab_dialog, monkeypatch):
+def test_close_tab_refreshes_locator_and_column_names(shown_tab_dialog, menu_stub, monkeypatch):
     """关闭页后对外口径同步：列名快照与定位框条目一起减少。"""
     dlg = shown_tab_dialog
     s0 = dlg._add_variable_to_tab("Press_G0", 0)
@@ -1381,9 +1429,11 @@ def test_close_tab_refreshes_locator_and_column_names(shown_tab_dialog, monkeypa
     pump(50)
     assert dlg.get_column_names() == ["Press_G0", "State", "Press_G1"]
     assert dlg._var_locator.count() == 3
-    _stub_answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    _forbid_confirmation(monkeypatch)
 
-    dlg._close_tab(s0)
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
+    menu_stub.pick = _tab_menu_pick(menu_stub, "关闭此标签页")
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
 
     assert dlg.get_column_names() == ["Press_G1"]
     assert dlg._var_locator.count() == 1
