@@ -556,7 +556,7 @@ class TestGroupLevelAccess:
 
     # -- get_group_variables ------------------------------------------------
 
-    def test_get_group_variables_returns_aggregated_display_names(self, loader4):
+    def test_get_group_variables_returns_display_names(self, loader4):
         """必须返回聚合后显示名 Press_G0，而不是文件里的原始通道名 Press。
 
         表格列名用的就是显示名，调用方拿原始名去 get_series 会 KeyError；
