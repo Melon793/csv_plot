@@ -1181,6 +1181,32 @@ def test_add_group_remaining_asks_confirmation_above_threshold(tab_dialog, monke
     assert list(state.df.columns) == ["time", "Press_G0"], "取消后不得有副作用"
 
 
+def test_add_group_remaining_refuses_above_hard_cap(tab_dialog, monkeypatch):
+    """超硬上限：一个都不加、也不走确认框，只提示改用逐个拖拽。
+
+    这是分级保护的最外层（计划设计决定 6）：误点一个 5000 列的组不应该
+    变成“确认一下然后卡死 3 分钟”，而是直接拒绝并给出替代路径。
+    """
+    dlg = tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    msgs: list = []
+    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_COLS", 1)
+
+    def no_question(*args, **kwargs):
+        raise AssertionError("超上限应直接拒绝，不该再走确认框")
+
+    monkeypatch.setattr(QMessageBox, "question", no_question)
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *a, **k: msgs.append((a[1], a[2]))
+    )
+
+    dlg._add_group_remaining_variables(state)
+
+    assert list(state.df.columns) == ["time", "Press_G0"], "超上限不得有任何副作用"
+    assert msgs and msgs[0][0] == "本组变量过多"
+    assert "拖拽" in msgs[0][1], "必须告诉用户改用逐个添加"
+
+
 def test_bulk_add_time_estimate_comes_from_measured_probe(tab_dialog, monkeypatch):
     """确认框里的耗时预估必须先实测单列取数，不能用固定常数。
 
