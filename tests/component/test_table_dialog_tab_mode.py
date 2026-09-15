@@ -1,4 +1,4 @@
-"""数值变量表 MDF tab 模式改进的 component 测试（offscreen）。
+"""变量数值表 MDF tab 模式改进的 component 测试（offscreen）。
 
 对应 tmp/mdf_table_tab_improvement_plan.md v2 的验收点：
 - P0 单例：closeEvent 必须经类名清除 DataTableDialog._instance（旧写法
@@ -207,7 +207,7 @@ class SwappedGroupLoader:
 # ---------- 审查回归 R1（P0）：重建后自关闭不得让调用方解引用 None ----------
 
 def test_refresh_table_dialog_survives_self_close(qapp, app_settings, monkeypatch):
-    """数值表开着 → 重载一个变量名完全不重叠的文件。
+    """变量数值表开着 → 重载一个变量名完全不重叠的文件。
 
     update_data 会因表空自行 close()，closeEvent 经类名把 _instance 置
     None；旧版调用方继续解引用 DataTableDialog._instance → AttributeError

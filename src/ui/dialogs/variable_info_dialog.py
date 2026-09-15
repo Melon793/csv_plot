@@ -635,7 +635,7 @@ class VarInfoPage(QWidget):
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
-        btn_table = QPushButton("添加至数值变量表")
+        btn_table = QPushButton("添加至变量数值表")
         btn_table.setToolTip("把本变量加入「变量数值表」窗口")
         btn_table.clicked.connect(self._on_add_to_table)
         bar.addWidget(btn_table)
