@@ -39,6 +39,7 @@ from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.file_loader_manager import FileLoaderManager
 from src.ui.table_dialog import (
     DataTableDialog,
+    PandasTableModel,
     _nearest_time_row,
     _state_time_array,
 )
@@ -717,6 +718,43 @@ def test_clear_all_columns_in_tab_mode(tab_dialog, monkeypatch):
     assert dlg._group_tabs == {} and dlg._tab_mode is False
     assert dlg._table_vars_snapshot == [] and dlg._tab_vars_snapshot == {}
     assert dlg.has_table_content() is False
+
+
+# ---------- R19：删空退回单表时的空态观感 ----------
+
+def test_reset_to_single_table_shows_empty_table_not_blank_panels(tab_dialog):
+    """删空最后一个 tab 退回单表：必须是一个空表，而不是左右两块白板。
+
+    进 tab 模式时单表模型被置 None，退回时若不补回空模型，_update_views 会直接
+    return → 两个视图都没内容、frozen_view 也得不到隐藏（线上截图里就是两块白板）。
+    """
+    dlg = tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+
+    dlg._remove_tab_column(state, "Press_G0")
+
+    assert dlg.model is not None, "退回单表后必须补回空模型"
+    assert dlg.model.columnCount() == 0 and dlg.model.rowCount() == 0
+    assert dlg.main_view.model() is dlg.model
+    assert dlg.frozen_view.model() is dlg.model
+    assert dlg.frozen_view.isHidden(), "无冻结列时 frozen_view 必须隐藏"
+    assert not dlg.main_view.isHidden()
+
+
+def test_reset_to_single_table_keeps_existing_model(tab_dialog):
+    """单表原本有内容时退回（_switch_to_group_mode 路径）不得被空模型覆盖。"""
+    dlg = tab_dialog
+    df = pd.DataFrame({"Press_G0": np.arange(12.0)})
+    dlg._df = df
+    dlg.model = PandasTableModel(df, dlg.units)
+    dlg.main_view.setModel(dlg.model)
+    dlg.frozen_view.setModel(dlg.model)
+
+    dlg._reset_tab_mode()
+
+    assert dlg.model is not None
+    assert dlg.model.rowCount() == 12, "退回不得抹掉已有单表内容"
+    assert dlg.main_view.model() is dlg.model
 
 
 # ---------- R8：tab 不得钉住 loader 的时间轴缓存 ----------

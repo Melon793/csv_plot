@@ -1035,8 +1035,16 @@ class DataTableDialog(QMainWindow):
         if self._tab_container_widget is not None:
             self._tab_container_widget.setVisible(False)
         self.splitter.setVisible(True)
-        if self.model is not None:
-            self._update_views()
+        if self.model is None:
+            # 进 tab 模式时 _switch_to_tab_mode 把单表模型置了 None；删空最后一个
+            # tab 退回时若不补一个空模型，_update_views 会直接 return，窗口就是
+            # 左右两块白板（frozen_view 也得不到隐藏）
+            self._df = pd.DataFrame()
+            self.model = PandasTableModel(self._df, self.units)
+            self.main_view.setModel(self.model)
+            self.frozen_view.setModel(self.model)
+            self._connect_signals()
+        self._update_views()
 
     @staticmethod
     def _align_len(values: np.ndarray, n: int) -> np.ndarray:
