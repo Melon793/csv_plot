@@ -466,3 +466,131 @@ class TestGetSamplesChunked:
         loader4.clear_cache()
         loader4.get_samples_chunked("Press_G0", 0, -1)
         assert len(loader4._signal_cache) == 0
+
+
+# ---------------------------------------------------------------------------
+# Group-level access：数值变量表 tab 模式所需的 group 级接口
+# ---------------------------------------------------------------------------
+
+
+class TestGroupLevelAccess:
+    """覆盖 ``get_var_group_index`` / ``get_group_time_array`` /
+    ``get_group_label`` / ``search_variables`` 四个新方法。
+
+    合成文件结构（write_mdf n=12, with_single_shot_group=True,
+    with_empty_group=True）：
+    - Group 0 (NormalGroup,  comment="synthetic test group")
+        → Press_G0, State, Label
+    - Group 1 (DupGroup,     comment="duplicate channel name group")
+        → Press_G1
+    - Group 2 (SingleShotGroup, comment="SingleShotGroup") — 被 loader 跳过
+    - Group 3 (EmptyGroup,   comment="empty reserved group")
+        → EmptyCh（0 采样点）
+    """
+
+    # -- get_var_group_index -----------------------------------------------
+
+    def test_get_var_group_index_first_group(self, loader4):
+        """Group 0 中的变量应返回 group_index=0。"""
+        assert loader4.get_var_group_index("Press_G0") == 0
+        assert loader4.get_var_group_index("State") == 0
+        assert loader4.get_var_group_index("Label") == 0
+
+    def test_get_var_group_index_second_group(self, loader4):
+        """Group 1 中的变量应返回 group_index=1。"""
+        assert loader4.get_var_group_index("Press_G1") == 1
+
+    def test_get_var_group_index_empty_group(self, loader4):
+        """空组中的变量也应正确返回其 group 索引。"""
+        assert loader4.get_var_group_index("EmptyCh") == 3
+
+    def test_get_var_group_index_nonexistent_raises(self, loader4):
+        """不存在的变量应抛 KeyError。"""
+        with pytest.raises(KeyError, match="不存在"):
+            loader4.get_var_group_index("NoSuchVariable")
+
+    # -- get_group_time_array -----------------------------------------------
+
+    def test_get_group_time_array_first_group(self, loader4):
+        """Group 0：12 点、间隔 0.1 s → [0.0, 0.1, ..., 1.1]。"""
+        t = loader4.get_group_time_array(0)
+        assert t.dtype == np.float64
+        assert len(t) == 12
+        np.testing.assert_allclose(t, np.arange(12) * 0.1)
+
+    def test_get_group_time_array_second_group(self, loader4):
+        """Group 1：6 点、间隔 0.2 s → [0.0, 0.2, ..., 1.0]。"""
+        t = loader4.get_group_time_array(1)
+        assert len(t) == 6
+        np.testing.assert_allclose(t, np.arange(6) * 0.2)
+
+    def test_get_group_time_array_cached(self, loader4):
+        """第二次调用同一 group 应命中缓存（返回同一数组对象）。"""
+        t1 = loader4.get_group_time_array(0)
+        t2 = loader4.get_group_time_array(0)
+        assert t1 is t2
+
+    def test_get_group_time_array_different_groups_differ(self, loader4):
+        """不同 group 的时间数组应不同（长度和内容均不同）。"""
+        t0 = loader4.get_group_time_array(0)
+        t1 = loader4.get_group_time_array(1)
+        assert len(t0) != len(t1)
+        assert not np.array_equal(t0[:6], t1)
+
+    # -- get_group_label ----------------------------------------------------
+
+    def test_get_group_label_with_acq_name(self, loader4):
+        """有 acq_name 时标签格式为 '{acq_name} (G{index})'。"""
+        assert loader4.get_group_label(0) == "NormalGroup (G0)"
+        assert loader4.get_group_label(1) == "DupGroup (G1)"
+
+    def test_get_group_label_unknown_index(self, loader4):
+        """不存在的 group 索引应兜底为 'G{index}'。"""
+        assert loader4.get_group_label(999) == "G999"
+
+    def test_get_group_label_empty_group(self, loader4):
+        """EmptyGroup 有 acq_name='EmptyGroup'。"""
+        label = loader4.get_group_label(3)
+        assert "G3" in label
+        assert "EmptyGroup" in label
+
+    # -- search_variables ---------------------------------------------------
+
+    def test_search_variables_matches_press(self, loader4):
+        """搜索 'press' 应匹配 Press_G0 和 Press_G1（大小写不敏感）。"""
+        results = loader4.search_variables("press")
+        names = [r[0] for r in results]
+        assert "Press_G0" in names
+        assert "Press_G1" in names
+
+    def test_search_variables_returns_group_info(self, loader4):
+        """搜索结果应包含正确的 group_index 和 group_label。"""
+        results = loader4.search_variables("Press_G0")
+        assert len(results) >= 1
+        name, gi, label = results[0]
+        assert name == "Press_G0"
+        assert gi == 0
+        assert "NormalGroup" in label
+
+    def test_search_variables_case_insensitive(self, loader4):
+        """搜索 'STATE' 应匹配 State。"""
+        results = loader4.search_variables("STATE")
+        names = [r[0] for r in results]
+        assert "State" in names
+
+    def test_search_variables_no_match(self, loader4):
+        """无匹配时返回空列表。"""
+        results = loader4.search_variables("zzz_nonexistent")
+        assert results == []
+
+    def test_search_variables_respects_limit(self, loader4):
+        """limit=1 时最多返回 1 条结果。"""
+        results = loader4.search_variables("press", limit=1)
+        assert len(results) == 1
+
+    def test_search_variables_empty_keyword_matches_all(self, loader4):
+        """空关键词应匹配所有变量。"""
+        results = loader4.search_variables("")
+        all_names = loader4.var_names
+        # 空关键词匹配所有非时间通道
+        assert len(results) >= len(all_names) - 2  # 减去可能的时间通道

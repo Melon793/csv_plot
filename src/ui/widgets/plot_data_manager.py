@@ -11,6 +11,7 @@ PlotDataManager - 绘图和数据管理（统一版）
 """
 
 from __future__ import annotations
+from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
@@ -30,6 +31,18 @@ from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
 
 logger = get_logger("widget.plot_data")
+
+_VALUE_CACHE_MAX = 128
+
+
+def _lru_cache_put(cache: OrderedDict, key: str, value: tuple) -> None:
+    """OrderedDict LRU 写入：已存在则移到末尾，超限则淘汰最旧条目。"""
+    if key in cache:
+        cache.move_to_end(key)
+    else:
+        if len(cache) >= _VALUE_CACHE_MAX:
+            cache.popitem(last=False)
+    cache[key] = value
 
 if TYPE_CHECKING:
     from src.ui.widgets.axis_manager import AxisManager
@@ -460,6 +473,7 @@ class PlotDataManager:
         if not pw.plot_context:
             return None, None
         if var_name in pw.plot_context.value_cache:
+            pw.plot_context.value_cache.move_to_end(var_name)
             return pw.plot_context.value_cache[var_name]
 
         if hasattr(pw.plot_context, "loader") and pw.plot_context.loader is not None:
@@ -486,7 +500,7 @@ class PlotDataManager:
                         if hasattr(pw.plot_context, "_enum_text_maps"):
                             pw.plot_context._enum_text_maps[var_name] = text_map
                         if hasattr(pw.plot_context, "value_cache"):
-                            pw.plot_context.value_cache[var_name] = (y_values, y_format)
+                            _lru_cache_put(pw.plot_context.value_cache, var_name, (y_values, y_format))
                     return y_values, y_format
             except KeyError:
                 pass  # var_name 无枚举映射，继续正常取值流程
@@ -537,7 +551,7 @@ class PlotDataManager:
 
         if pw.plot_context:
             if hasattr(pw.plot_context, "value_cache"):
-                pw.plot_context.value_cache[var_name] = (y_values, y_format)
+                _lru_cache_put(pw.plot_context.value_cache, var_name, (y_values, y_format))
         return y_values, y_format
 
     def update_time_correction(self, new_factor: float, new_offset: float):

@@ -13,6 +13,7 @@ import re
 import sys
 import time
 import warnings
+from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QStandardPaths, QTimer, QSignalBlocker
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
@@ -982,10 +983,6 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.var_names = []
             self.mw.units = {}
             self.mw.data_validity = {}
-            # 枚举文本映射：由 plot_data_manager 与 value_cache 成对写入，
-            # 此前却无任何清理点，reload 后残留的旧文本表会让同名变量
-            # 在新数据上显示陈旧标签（新数据该通道可能已不是枚举）。
-            self.mw._enum_text_maps = {}
 
             # 3) 清理 table dialog 的独立 _df
             from src.ui.table_dialog import DataTableDialog
@@ -1027,6 +1024,15 @@ class FileLoaderManager(MainWindowBaseManager):
             logger.debug("清理旧数据时属性/类型错误（对象可能已销毁）")
         except Exception:
             logger.warning("清理旧数据时发生异常", exc_info=True)
+        finally:
+            # 无条件清空 value_cache 和 _enum_text_maps：即使上方清理步骤异常，
+            # 这两处缓存也不能残留旧数据引用，否则 reload 后 cursor 会显示
+            # 陈旧的枚举文本标签或数值。
+            try:
+                self.mw.value_cache = OrderedDict()
+                self.mw._enum_text_maps = {}
+            except Exception:
+                pass
 
     def _post_load_actions(self, file_path: str, is_reload: bool = False):
         self.mw.loaded_path = file_path
@@ -1302,7 +1308,9 @@ class FileLoaderManager(MainWindowBaseManager):
 
         if DataTableDialog._instance is not None:
             DataTableDialog._instance.update_data(self.mw.loader)
-            if not DataTableDialog._instance._df.empty:
+            # tab 模式下 _df 恒空，必须用 has_table_content 统一判据，
+            # 否则重建好的 tab 窗口会被误判为空而直接关闭
+            if DataTableDialog._instance.has_table_content():
                 DataTableDialog._instance.show()
                 DataTableDialog._instance.raise_()
                 DataTableDialog._instance.activateWindow()

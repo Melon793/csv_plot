@@ -131,13 +131,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         strategy = self.curve_strategy
         if not strategy.has_data():
             return
-
+    
         var_names = strategy.get_curve_names()
-
+    
         main_window = self.window()
         if not hasattr(main_window, 'loader') or main_window.loader is None:
             return
-
+    
         # a. 打开/激活数值变量表，并添加所有变量
         is_mdf_loader = getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
         dlg = None
@@ -152,54 +152,78 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             else:
                 series = main_window.loader.df[var_name]
             dlg = DataTableDialog.popup(var_name, series, parent=main_window)
-
+    
         # 如果没有成功打开任何dialog，直接返回
         if dlg is None:
             return
-
-        # 判断"数值变量表"窗口是否被最小化了，如果是，则恢复正常状态
+    
+        # 判断“数值变量表”窗口是否被最小化了，如果是，则恢复正常状态
         if dlg.isMinimized():
             dlg.showNormal()
-            
-        # b. popup 已处理：如果已在（冻结或非冻结），不添加；否则添加到非冻结区域
-
-        # c. 计算行索引（0-based）
+    
+        # b. MDF tab 模式：使用每个变量自己的时间轴做二分查找
+        if is_mdf_loader and dlg._tab_mode:
+            self._jump_to_data_mdf_tab(dlg, var_names, x, main_window.loader)
+            return
+    
+        # c. 非 MDF 数据：原有单表逻辑
         if self.factor == 0:
             return  # 避免除零
-
+    
         index = (x - self.offset) / self.factor
         index = int(round(index)) - 1  # 转换为 0-based 行索引
         index = max(0, min(index, main_window.loader.datalength - 1))
-
+    
         # 使用第一个变量来定位和选中
         first_var_name = var_names[0]
-        
+            
         # 获取模型和列索引
         model = dlg.model
         col_idx = dlg._df.columns.get_loc(first_var_name)  # 逻辑列索引
-
+    
         # 确定使用哪个视图（冻结或主视图）
         if first_var_name in dlg.frozen_columns:
             view = dlg.frozen_view
         else:
             view = dlg.main_view
-
+    
         # 获取视觉列索引（因为列可拖动）
         header = view.horizontalHeader()
         visual_col = header.visualIndex(col_idx)
-
+    
         # 创建 QModelIndex
         qindex = model.index(index, col_idx)
-
+    
         # 跳转并居中，使用 QTimer 确保在窗口显示后执行
         QTimer.singleShot(0, lambda: safe_qt_op(
             view.scrollTo, qindex, QAbstractItemView.ScrollHint.PositionAtCenter
         ))
-
+    
         # 选中该单元格
         QTimer.singleShot(0, lambda: safe_qt_op(
             lambda: view.selectionModel().select(qindex, QItemSelectionModel.SelectionFlag.ClearAndSelect)
         ))
+    
+    def _jump_to_data_mdf_tab(self, dlg, var_names, x, loader):
+        """MDF tab 模式下的 jump to data：委托 dlg.locate_time 统一定位。
+
+        锚点设置、tab 切换、延时滚动、单元格选中均由 locate_time 内部处理
+        （含代际令牌，防止对话框重置后过期回调访问已释放的 tab）。
+        """
+        if self.factor == 0:
+            return
+    
+        # 反算目标时间（MDF 场景下通常为 offset=0, factor=1，x 即时间）
+        target_time = (x - self.offset) / self.factor
+    
+        # 使用第一个变量确定目标 group
+        first_var = var_names[0]
+        try:
+            group_index = loader.get_var_group_index(first_var)
+        except KeyError:
+            return
+    
+        dlg.locate_time(group_index, float(target_time))
 
     def auto_range(self, external_xmin: float | None = None, external_xmax: float | None = None):
         """自动调整视图范围 → 委托到 AxisManager"""

@@ -99,7 +99,7 @@ UI_DEBOUNCE_DELAY_MS = 50  # UI事件防抖延迟时间
 # 变量信息窗口（变量列表右键"变量信息"）
 VAR_INFO_MAX_TABS = 50  # 单次提交的最大标签页数，超出截断并提示
 VAR_INFO_ENUM_DISPLAY_LIMIT = 200  # 枚举文本表在信息页最多展示条目数
-VAR_INFO_STATS_CACHE_MAX = 256  # 统计缓存上限（单条约150字节，共约38KB）
+VAR_INFO_STATS_CACHE_MAX = 512  # 统计缓存上限（单条约150字节，共约77KB）
 # 信息页「属性」列的最小宽度：该列可手动拖动（Interactive），下限用于
 # 防止用户拖到几乎为零后标签全部被省略号截断、又找不到拖回来的把手。
 # 注意它实际传给 QHeaderView.setMinimumSectionSize()，约束的是**所有列**
@@ -264,7 +264,31 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     import pandas as pd
 
     try:
-        if isinstance(values, pd.Series):
+        if isinstance(values, np.ndarray):
+            # 快速路径：已经是 numpy 数组，避免冗余 float64 拷贝
+            if values.dtype == np.float32:
+                if values.size == 0:
+                    return True, 0.0
+                # float32 输入：只需检查是否有 inf/nan
+                finite_mask = np.isfinite(values)
+                if not finite_mask.any():
+                    return False, None
+                abs_max = float(np.max(np.abs(values[finite_mask])))
+                # float32 值必然 <= FLOAT32_REPRESENTABLE_MAX，但保留统一比较
+                return abs_max <= FLOAT32_REPRESENTABLE_MAX, abs_max
+            elif values.dtype == np.float64:
+                if values.size == 0:
+                    return True, 0.0
+                # float64 输入：检查 max abs 是否超出 float32 范围
+                finite_mask = np.isfinite(values)
+                if not finite_mask.any():
+                    return False, None
+                abs_max = float(np.max(np.abs(values[finite_mask])))
+                return abs_max <= FLOAT32_REPRESENTABLE_MAX, abs_max
+            else:
+                # 其他 dtype（int 等），转 float64 检查
+                arr = values.astype(np.float64)
+        elif isinstance(values, pd.Series):
             arr = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
         else:
             try:
