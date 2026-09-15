@@ -9,7 +9,10 @@
   locate_time 跳转
 - T3 行号：tab 视图行号表头可见且定宽
 - T4 定位器：条目与表内变量一致、只定位不添加、MatchContains
-- T0 守卫：tab 右键分析自带 df/model、复制透传 tab df（旧版直接崩溃）
+- T0 右键/复制守卫：tab 右键分析自带 df/model、复制透传 tab df（旧版直接崩溃）
+- 审查后续项：R7 表头右键菜单（删除列/置灰反馈）、R8 tab 不钉住 loader 时间缓存、
+  R10 嵌套程序化滚动的锚点抑制、R11 短缺数据补空值而非伪造平线、
+  locate_time/jump_to_data 按真正入表的变量定位并选中目标列
 
 替身策略（同 test_table_dialog_blink.py）：直接构造 DataTableDialog 并
 实例级替换 _resolve_loader，不走 popup/add_variables，避免污染类级单例。
@@ -22,12 +25,21 @@ import pandas as pd
 import pytest
 
 from PySide6.QtCore import Qt, QItemSelectionModel, QCoreApplication, QPoint
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QMenu,
+    QMessageBox,
+)
 
 from tests.fixtures.data_factory import write_mdf
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.file_loader_manager import FileLoaderManager
-from src.ui.table_dialog import DataTableDialog, _nearest_time_row
+from src.ui.table_dialog import (
+    DataTableDialog,
+    _nearest_time_row,
+    _state_time_array,
+)
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
 
 
@@ -579,3 +591,256 @@ def test_new_tab_aligns_anchor_on_creation(shown_tab_dialog):
     assert float(state1.df["time"].iloc[first.row()]) == pytest.approx(0.4), (
         "新 tab 首可见行时刻应等于当前锚点"
     )
+
+
+# ---------- R7：表头右键菜单（删除列 / 置灰反馈 / 清空） ----------
+
+class _NoExecMenu(QMenu):
+    """替身菜单：记录构造出的实例，按 pick 序号直接返回某个动作。
+
+    QMenu.exec 是阻塞模态调用，offscreen 下会挂住测试；而 PySide6 里在
+    基类上 setattr("exec") 不生效（实例查找绕过类字典），只能把
+    src.ui.table_dialog.QMenu 换成这个重写了 exec 的子类。
+    """
+
+    menus: list[QMenu] = []
+    pick: int | None = None
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        _NoExecMenu.menus.append(self)
+
+    def exec(self, *args, **kwargs):
+        acts = self.actions()
+        return None if _NoExecMenu.pick is None else acts[_NoExecMenu.pick]
+
+
+@pytest.fixture()
+def menu_stub(monkeypatch):
+    _NoExecMenu.menus.clear()
+    _NoExecMenu.pick = None
+    monkeypatch.setattr("src.ui.table_dialog.QMenu", _NoExecMenu)
+    yield _NoExecMenu
+
+
+def _header_hit(view, logical_col: int) -> QPoint:
+    """取该逻辑列表头在 header 坐标系里的一个命中点（供菜单入口直接调用）。"""
+    header = view.horizontalHeader()
+    return QPoint(header.sectionViewportPosition(logical_col) + 2, header.height() // 2)
+
+
+def test_tab_header_context_menu_is_wired(tab_dialog):
+    """tab 视图表头必须挂上右键菜单：删除列/复制变量名/清空列表以只单表可达。"""
+    state = tab_dialog._add_variable_to_tab("Press_G0", 0)
+    assert (
+        state.view.horizontalHeader().contextMenuPolicy()
+        == Qt.ContextMenuPolicy.CustomContextMenu
+    )
+
+
+def test_tab_header_menu_items_and_enabled(tab_dialog, menu_stub):
+    """变量列：删除可用、冻结置灰（不再静默无效）；time 列：删除置灰。"""
+    state = tab_dialog._add_variable_to_tab("Press_G0", 0)
+
+    tab_dialog._on_header_right_click(_header_hit(state.view, 1), state.view)
+    acts = menu_stub.menus[-1].actions()
+    assert [a.text() for a in acts] == [
+        '删除列 "Press_G0"',
+        "冻结列（tab 模式不支持）",
+        "复制变量名",
+        "清空列表",
+    ]
+    assert acts[0].isEnabled() and not acts[1].isEnabled()
+
+    tab_dialog._on_header_right_click(_header_hit(state.view, 0), state.view)
+    acts = menu_stub.menus[-1].actions()
+    assert acts[0].text() == '删除列 "time"' and not acts[0].isEnabled()
+
+
+def test_tab_header_menu_deletes_column(shown_tab_dialog, menu_stub):
+    """菜单项选中删除后：只影响本 tab 的列与定位框条目，时间列仍在。"""
+    dlg = shown_tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    dlg._add_variable_to_tab("State", 0)
+    assert list(state.df.columns) == ["time", "Press_G0", "State"]
+
+    menu_stub.pick = 0  # 选中第一项：删除列
+    dlg._on_header_right_click(_header_hit(state.view, 2), state.view)
+
+    assert list(state.df.columns) == ["time", "Press_G0"]
+    assert state.model.columnCount() == 2
+    assert dlg.get_column_names() == ["Press_G0"]
+    assert dlg._var_locator.count() == 1
+
+
+def test_removing_last_var_closes_tab_and_remaps_index(tab_dialog):
+    """删到该组无变量列 → 整页移除；后续页的 widget_index 必须重映射。"""
+    dlg = tab_dialog
+    state0 = dlg._add_variable_to_tab("Press_G0", 0)
+    state1 = dlg._add_variable_to_tab("Press_G1", 1)
+    assert (state0.widget_index, state1.widget_index) == (0, 1)
+
+    dlg._remove_tab_column(state0, "Press_G0")
+
+    assert dlg._tab_widget.count() == 1
+    assert list(dlg._group_tabs) == [1]
+    assert state1.widget_index == 0, "页序前移后未重映射 → 反查会拿到别的 state"
+    assert dlg._group_state_by_widget_index(0) is state1
+    assert dlg._tab_widget.widget(0) is state1.view
+    assert dlg.get_column_names() == ["Press_G1"]
+
+
+def test_removing_final_tab_falls_back_to_single_table_ui(tab_dialog):
+    """最后一个 tab 被删空：退回单表 UI，不留一个空标签栏。"""
+    dlg = tab_dialog
+    state0 = dlg._add_variable_to_tab("Press_G0", 0)
+
+    dlg._remove_tab_column(state0, "Press_G0")
+
+    assert dlg._tab_mode is False and dlg._group_tabs == {}
+    assert dlg.has_table_content() is False
+    assert not dlg.splitter.isHidden()  # 单表视图重新可见（对话框本身未 show）
+
+
+def test_clear_all_columns_in_tab_mode(tab_dialog, monkeypatch):
+    """tab 模式“清空列表”：旧写法用 self.model（单表模为 None）直接 AttributeError。"""
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    dlg = tab_dialog
+    dlg._add_variable_to_tab("Press_G0", 0)
+
+    dlg._clear_all_columns()
+
+    assert dlg._group_tabs == {} and dlg._tab_mode is False
+    assert dlg._table_vars_snapshot == [] and dlg._tab_vars_snapshot == {}
+    assert dlg.has_table_content() is False
+
+
+# ---------- R8：tab 不得钉住 loader 的时间轴缓存 ----------
+
+def test_tab_does_not_pin_loader_time_cache(tab_dialog, mdf_loader):
+    """时间轴必须只存于 tab 自己的 df：另存一份缓存数组本体会让 LRU 形同虚设。"""
+    dlg = tab_dialog
+    t_cached = mdf_loader.get_group_time_array(0)
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+
+    assert not hasattr(state, "time_array"), "state 不得另存时间轴副本"
+    assert not np.shares_memory(state.df["time"].to_numpy(), t_cached)
+
+    mdf_loader._time_cache.clear()  # 模拟 LRU 逐出该 group
+
+    assert np.array_equal(_state_time_array(state), t_cached)
+
+
+# ---------- R10：嵌套程序化滚动的锚点抑制 ----------
+
+def test_nested_programmatic_scroll_keeps_anchor_suppression(tab_dialog):
+    """守卫必须是深度计数：内层 finally 把 bool 复位会提前解除外层抑制。"""
+    dlg = tab_dialog
+    dlg._add_variable_to_tab("Press_G0", 0)
+    state1 = dlg._add_variable_to_tab("Press_G1", 1)  # 0.2s 步长，当前页
+
+    dlg._tab_sync_depth = 1  # 模拟外层正在程序化滚动
+    try:
+        dlg._on_tab_switched(1)
+        assert dlg._tab_sync_depth == 1, "内层不得把外层抑制清零"
+        dlg._update_time_anchor(state1, 3)
+        assert dlg._current_time_anchor is None, "抑制期内不得回写锚点"
+    finally:
+        dlg._tab_sync_depth = 0
+
+    dlg._update_time_anchor(state1, 3)
+    assert dlg._current_time_anchor == pytest.approx(0.6)
+
+
+# ---------- R11：短缺数据补空值，不伪造平线 ----------
+
+def test_align_len_pads_missing_tail_with_empty_values():
+    """旧写法用尾值填充，会在数据缺失区间伪造一条平线且长度看起来正常。"""
+    f = DataTableDialog._align_len
+
+    out = f(np.array([1.0, 2.0]), 5)
+    assert out[0] == 1.0 and out[1] == 2.0
+    assert np.isnan(out[2:]).all()
+
+    ints = f(np.array([1, 2], dtype=np.int64), 4)
+    assert list(ints[:2]) == [1, 2]
+    assert ints[2] is None and ints[3] is None  # 整型无法承载 NaN
+
+    assert list(f(np.array([1.0, 2.0, 3.0]), 2)) == [1.0, 2.0]  # 过长仍截断
+
+
+def test_short_series_shows_empty_cells(tab_dialog, mdf_loader, monkeypatch):
+    """整列变短时表里必须是空格子（模型渲染为 ""），不是重复的末值。"""
+    dlg = tab_dialog
+    real = mdf_loader.get_series("Press_G0")
+    short = real.iloc[: len(real) // 2]
+    monkeypatch.setattr(mdf_loader, "get_series", lambda name: short)
+
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    vals = state.df["Press_G0"].to_numpy()
+
+    assert len(vals) == len(real) == 12
+    assert not pd.isna(vals[: len(short)]).any()
+    assert pd.isna(vals[len(short):]).all()
+    assert (
+        state.model.data(state.model.index(11, 1), Qt.ItemDataRole.DisplayRole) == ""
+    )
+
+
+# ---------- 定位目标列：jump_to_data / locate_time ----------
+
+def test_jump_to_data_targets_first_var_present_in_table(tab_dialog, mdf_loader, monkeypatch):
+    """曲线名全集里被跳过的那个会让 var_names[0] 在表里查不到（旧版 KeyError）。"""
+    dlg = tab_dialog
+    dlg._add_variable_to_tab("Press_G1", 1)
+    calls = []
+    monkeypatch.setattr(
+        dlg,
+        "locate_time",
+        lambda gi, t, var_name=None: calls.append((gi, t, var_name)),
+    )
+
+    class FakePlot:
+        factor = 1.0
+        offset = 0.0
+
+    DraggableGraphicsLayoutWidget._jump_to_data_mdf_tab(
+        FakePlot(), dlg, ["NoSuchCurve", "Press_G1"], 0.55, mdf_loader
+    )
+    assert calls == [(1, 0.55, "Press_G1")]
+
+    calls.clear()
+    DraggableGraphicsLayoutWidget._jump_to_data_mdf_tab(
+        FakePlot(), dlg, ["NoSuchCurve"], 0.55, mdf_loader
+    )
+    assert calls == [], "没有变量入表时不得盲目跳转"
+
+
+def test_locate_time_selects_target_variable_column(tab_dialog):
+    """locate_time 传入 var_name 时选中该变量列，而非总落在第 0 列 time。"""
+    dlg = tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    dlg._add_variable_to_tab("State", 0)
+
+    assert dlg.locate_time(0, 0.5, var_name="State") is True
+    pump(80)
+    sel = {
+        (i.row(), i.column()) for i in state.view.selectionModel().selectedIndexes()
+    }
+    assert sel == {(5, 2)}
+
+    assert dlg.locate_time(0, 0.5) is True
+    pump(80)
+    sel = {
+        (i.row(), i.column()) for i in state.view.selectionModel().selectedIndexes()
+    }
+    assert sel == {(5, 0)}, "未指定变量时回退 time 列"
+
+    assert dlg.locate_time(0, 0.5, var_name="NotInThisTab") is True
+    pump(80)
+    sel = {
+        (i.row(), i.column()) for i in state.view.selectionModel().selectedIndexes()
+    }
+    assert sel == {(5, 0)}, "变量不在本 tab 时回退 time 列"
