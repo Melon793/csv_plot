@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import numpy as np
+from collections import OrderedDict
 
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QMessageBox
@@ -58,6 +59,8 @@ class CursorSyncManager(MainWindowBaseManager):
             if self.mw.mark_region_btn.isChecked():
                 self.mw.mark_region_btn.setChecked(False)
                 self.mw.layout_manager.toggle_mark_region(False)
+
+            self.mw._enum_text_maps = {}
 
         finally:
             for container in self.mw.plot_widgets:
@@ -378,7 +381,10 @@ class CursorSyncManager(MainWindowBaseManager):
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             widget.clear_plot_item()
+            widget.clear_value_cache()
             widget.reset_pin_state()
+        self.mw.value_cache = OrderedDict()
+        self.mw._enum_text_maps = {}
         self.mw.saved_mark_range = None
         self.mw.layout_manager.request_mark_stats_refresh(immediate=True)
 
@@ -565,7 +571,7 @@ class CursorSyncManager(MainWindowBaseManager):
                         x_min, x_max, reason="insufficient valid vars"
                     )
                 else:
-                    self.mw.value_cache = {}
+                    self.mw.value_cache = OrderedDict()
                     # 与 value_cache 成对失效：两者在 plot_data_manager 中是
                     # 同一处代码成对写入的（枚举通道同时写文本表与值缓存），
                     # 只清一个会让 cursor 读到旧数据的枚举文本标签。

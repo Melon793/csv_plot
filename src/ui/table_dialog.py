@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 import weakref
+from dataclasses import dataclass, field
 from threading import Lock
 
+import numpy as np
 import pandas as pd
 
-from PySide6.QtCore import Qt, QTimer, QEvent, QObject, QAbstractTableModel, QModelIndex
-from PySide6.QtGui import QFontMetrics, QColor, QAction, QFont
+from PySide6.QtCore import (
+    Qt,
+    QTimer,
+    QEvent,
+    QObject,
+    QAbstractTableModel,
+    QModelIndex,
+    QItemSelectionModel,
+    QPoint,
+)
+from PySide6.QtGui import QFontMetrics, QColor, QAction, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QAbstractItemView,
     QLabel,
     QTableView,
@@ -21,9 +33,55 @@ from PySide6.QtWidgets import (
     QDialog,
     QSplitter,
     QMenu,
+    QTabWidget,
+    QComboBox,
+    QCompleter,
 )
 from src.core.config import FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE
 from src.ui.drag_drop import parse_var_names_from_mimedata
+from src.core.logger import get_logger
+
+logger = get_logger("ui.table_dialog")
+
+
+@dataclass
+class _GroupTabState:
+    """MDF tab 模式下，每个 channel group 对应的 tab 状态。"""
+
+    group_index: int
+    view: QTableView
+    df: pd.DataFrame
+    model: PandasTableModel | None = None
+    time_array: np.ndarray = field(default_factory=lambda: np.array([]))
+    scroll_pos: int = 0
+    widget_index: int = -1  # 在 QTabWidget 中的索引
+
+
+def _nearest_time_row(time_array: np.ndarray, target_time: float) -> int:
+    """二分查找 time_array 中与 target_time 最接近的行号。
+
+    tab 切换的时间锚点同步与 jump_to_data 共用同一实现，避免两处取整
+    逻辑漂移。端点钳制由调用方处理（空数组会抛 IndexError）。
+    """
+    row = int(np.searchsorted(time_array, target_time, side="left"))
+    row = max(0, min(row, len(time_array) - 1))
+    if row > 0 and abs(time_array[row - 1] - target_time) < abs(
+        time_array[row] - target_time
+    ):
+        row -= 1
+    return row
+
+
+def _state_time_array(state: _GroupTabState) -> np.ndarray:
+    """从 state.df 的 'time' 列取时间轴，保证与 df 行数一致。
+
+    state.time_array 在 tab 创建时从 loader 取一次，但后续 df 行数可能
+    因 _align_len 填充或 update_data 重建而变化，导致行→时刻映射错位。
+    此函数优先从 df 取，保证行→时刻映射正确。
+    """
+    if "time" in state.df.columns and len(state.df) > 0:
+        return state.df["time"].to_numpy()
+    return state.time_array
 
 
 class DropOverlay(QWidget):
@@ -260,15 +318,23 @@ class DataTableDialog(QMainWindow):
             cls._instance._update_owner_from_widget(parent)
 
         dlg = cls._instance
+        dlg._ensure_loader_consistent()
         dlg.save_geom()
         if dlg.has_column(var_name):
+            # 变量已存在：在 tab 模式下切换到对应 tab
+            if dlg._tab_mode:
+                for state in dlg._group_tabs.values():
+                    if var_name in state.df.columns and dlg._tab_widget:
+                        dlg._tab_widget.setCurrentIndex(state.widget_index)
+                        break
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
-            # return dlg
         else:
             cls._saved_scroll_pos = (
-                dlg.main_view.verticalScrollBar().value() if dlg.main_view else None
+                dlg.main_view.verticalScrollBar().value()
+                if (dlg.main_view and not dlg._tab_mode)
+                else None
             )
             dlg.load_geom()
             dlg._add_variable_to_table(var_name, data)  # 使用内部函数
@@ -306,6 +372,7 @@ class DataTableDialog(QMainWindow):
             cls._instance._update_owner_from_widget(parent)
 
         dlg = cls._instance
+        dlg._ensure_loader_consistent()
         dlg.save_geom()
         dlg.load_geom()
         dlg.show()
@@ -489,6 +556,21 @@ class DataTableDialog(QMainWindow):
         self.main_view.viewport().installEventFilter(self.drop_filter)
         self.frozen_view.viewport().installEventFilter(self.drop_filter)
 
+        # ---- MDF tab 模式 UI（初始隐藏，首次添加 MDF 变量时激活）----
+        self._tab_mode = False
+        self._tab_widget: QTabWidget | None = None
+        self._group_tabs: dict[int, _GroupTabState] = {}
+        self._var_locator: QComboBox | None = None  # 已添加变量的定位下拉框
+        self._tab_container_widget: QWidget | None = None
+        self._current_time_anchor: float | None = None  # 当前可见首行时刻
+        self._tab_sync_guard = False  # 程序化滚动时抑制锚点回写
+        self._prev_tab_index = -1  # 上一个当前 tab 的 widget 索引
+        self._gen = 0  # 代际令牌：重置后作废在途 QTimer 回调
+        self._tab_loader_key: tuple | None = None  # 建 tab 时的数据源标识
+        self._table_vars_snapshot: list[str] = []  # 重载前的单表变量清单
+        self._tab_vars_snapshot: dict[int, list[str]] = {}  # 重载前的 tab 变量清单
+        self._setup_tab_mode_ui()
+
         if (
             self.parent()
             and hasattr(self.parent(), "data_table_geometry")
@@ -525,6 +607,573 @@ class DataTableDialog(QMainWindow):
                     event.acceptProposedAction()
                     return True
             return super().eventFilter(obj, event)
+
+    # ------------------------------------------------------------------
+    # MDF tab 模式：UI 创建与切换
+    # ------------------------------------------------------------------
+
+    def _setup_tab_mode_ui(self):
+        """创建 tab 模式 UI 组件（变量定位下拉框 + QTabWidget），初始隐藏。"""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # 变量定位下拉框：只列出已添加到表中的变量，选中仅定位不添加。
+        # 默认 completer 是前缀匹配（MatchStartsWith），必须改成 MatchContains
+        # 才能实现“输入任意子串即过滤”；caseSensitivity 另设，两开关独立。
+        self._var_locator = QComboBox()
+        self._var_locator.setEditable(True)
+        self._var_locator.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        completer = self._var_locator.completer()
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._var_locator.setMaxVisibleItems(15)
+        self._var_locator.lineEdit().setPlaceholderText("定位变量... (Ctrl+F)")
+        self._var_locator.setToolTip(
+            "列出已添加到数值表的变量；输入关键字过滤，回车或点击选中项定位到对应列。"
+        )
+        self._var_locator.activated.connect(self._on_var_locator_activated)
+        loc_layout = QHBoxLayout()
+        loc_layout.setContentsMargins(0, 0, 0, 0)
+        loc_layout.addWidget(self._var_locator)
+        layout.addLayout(loc_layout)
+
+        # Ctrl+F 快捷键
+        shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        shortcut.activated.connect(self._focus_search)
+
+        # Tab widget
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setUsesScrollButtons(True)
+        self._tab_widget.setTabsClosable(False)
+        self._tab_widget.setMovable(False)
+        self._tab_widget.currentChanged.connect(self._on_tab_switched)
+        layout.addWidget(self._tab_widget)
+
+        # 添加到主布局（在 splitter 之后）
+        main_layout = self.centralWidget().layout()
+        main_layout.addWidget(container)
+        container.setVisible(False)
+        self._tab_container_widget = container
+
+    @staticmethod
+    def _loader_identity(loader):
+        """数据源身份标识：类型+路径+变量数。用于检测 tab 建立后 loader 被替换。"""
+        if loader is None:
+            return None
+        return (
+            getattr(loader, "LOADER_TYPE", ""),
+            str(getattr(loader, "path", "") or ""),
+            len(getattr(loader, "var_names", None) or ()),
+        )
+
+    def _ensure_loader_consistent(self):
+        """数据源已变更但未走过置路径时，在入口处重置 tab 状态。
+
+        正常重载路径由 update_data 负责重置；但存在绕过它的入口
+        （如直接拖拽/双击），若不拦截会把新数据的变量往旧数据的 tab 里
+        添加（group 索引语义不同，行对齐错乱）。
+        """
+        if not self._tab_mode and not self._group_tabs:
+            return
+        loader = self._resolve_loader()
+        if (
+            self._tab_loader_key is not None
+            and self._loader_identity(loader) != self._tab_loader_key
+        ):
+            logger.info("DataTableDialog 检测到数据源变更，重置 tab 状态")
+            self._reset_tab_mode()
+
+    def has_table_content(self) -> bool:
+        """表内是否有数据（单表或 tab 模式），作为 show/关闭判据的统一口径。
+
+        旧判据只看 `_df.empty`：tab 模式下 `_df` 恒空，会把刚重建好的 tab
+        窗口直接关掉（file_loader_manager）或误判弹窗内容已清空。
+        """
+        if self._group_tabs:
+            return True
+        return self._df is not None and not self._df.empty
+
+    def _switch_to_tab_mode(self):
+        """从单表模式切换到 MDF tab 模式。"""
+        if self._tab_mode:
+            return
+        # 进入 tab 模式前清空单表残留（旧 CSV/Excel 列会以隐藏表形式滞留）
+        if not self._df.empty:
+            self._df = pd.DataFrame()
+            self.model = None
+            self.frozen_columns = []
+            self.main_view.setModel(None)
+            self.frozen_view.setModel(None)
+        self._tab_mode = True
+        loader = self._resolve_loader()
+        self._tab_loader_key = self._loader_identity(loader)
+        # units 供定位框/复制头行查单位；旧单表分支不会在 tab 模式下刷新它
+        if loader is not None and hasattr(loader, "units"):
+            self.units = loader.units
+
+        # 隐藏单表模式 UI
+        self.splitter.setVisible(False)
+
+        # 显示 tab 模式 UI
+        if self._tab_container_widget:
+            self._tab_container_widget.setVisible(True)
+
+        logger.debug("DataTableDialog 切换到 MDF tab 模式")
+
+    def _focus_search(self):
+        """聚焦变量定位下拉框并全选，便于直接输入过滤。"""
+        if self._tab_mode and self._var_locator:
+            self._var_locator.setFocus()
+            self._var_locator.lineEdit().selectAll()
+
+    def _refresh_var_locator_items(self):
+        """按表内已添加变量重建定位下拉框条目（只定位，不添加新变量）。"""
+        combo = self._var_locator
+        if combo is None:
+            return
+        text = combo.lineEdit().text()
+        combo.clear()
+        loader = self._resolve_loader()
+        units = getattr(loader, "units", {}) or {} if loader is not None else {}
+        for gi in sorted(self._group_tabs.keys()):
+            state = self._group_tabs[gi]
+            for col in state.df.columns:
+                if col == "time":
+                    continue
+                unit = units.get(col, "")
+                unit_text = f" [{unit}]" if unit and unit != "-" else ""
+                combo.addItem(f"{col}{unit_text} — G{gi}", (col, gi))
+        combo.lineEdit().setText(text)
+
+    def _on_var_locator_activated(self, index: int):
+        """选中定位条目（点选或回车）：切换到对应 tab 并滚动到该列。"""
+        if index < 0 or self._var_locator is None:
+            return
+        data = self._var_locator.itemData(index)
+        if not data:
+            return
+        var_name, group_index = data
+        state = self._group_tabs.get(group_index)
+        if state is None:
+            return
+        if self._tab_widget:
+            self._tab_widget.setCurrentIndex(state.widget_index)
+        self._scroll_tab_to_column(state, var_name)
+        self._var_locator.setCurrentIndex(-1)
+        self._var_locator.lineEdit().setText("")
+
+    def _scroll_tab_to_column(
+        self, tab_state: _GroupTabState, var_name: str, blink: bool = True
+    ):
+        """在指定 tab 中水平滚动到目标列，保持垂直位置不动，可选闪烁高亮。"""
+        if var_name not in tab_state.df.columns:
+            return
+        col_idx = tab_state.df.columns.get_loc(var_name)
+        if tab_state.model:
+            # scrollTo 的 PositionAtCenter 是二维的：若用第 0 行构造 index，
+            # 垂直方向也会被拉回 0（实测 value 12345→0），毁掉时间锚点。
+            # 改用"当前首可见行 + 半页"的行居中：居中后新 value == 原 value，
+            # 垂直零位移。
+            # 取首可见行行号，计算视口中间行，构造 index 做 scrollTo
+            top_idx = tab_state.view.indexAt(QPoint(0, 0))
+            top_row = top_idx.row() if top_idx.isValid() else 0
+            page_rows = max(1, tab_state.view.viewport().height() // max(1, tab_state.view.rowHeight(0)))
+            center_row = min(top_row + page_rows // 2, tab_state.model.rowCount() - 1)
+            qindex = tab_state.model.index(center_row, col_idx)
+            tab_state.view.scrollTo(
+                qindex, QAbstractItemView.ScrollHint.PositionAtCenter
+            )
+        if not blink:
+            return
+        # 闪烁高亮（代际令牌：重置后 tab_state 已释放，过期回调自杀）
+        gen = self._gen
+
+        def _do_blink():
+            if gen == self._gen:
+                self._blink_tab_column(tab_state, var_name)
+
+        QTimer.singleShot(100, _do_blink)
+
+    def _blink_tab_column(
+        self, tab_state: _GroupTabState, var_name: str, pulse: int = 800
+    ):
+        """在 tab 模式中闪烁高亮指定列。"""
+        if var_name not in tab_state.df.columns:
+            return
+        col_idx = tab_state.df.columns.get_loc(var_name)
+        if tab_state.model is None:
+            return
+        delegate = tab_state.view.itemDelegate()
+        if isinstance(delegate, CustomDelegate):
+            self._blink_step_on(delegate, col_idx, tab_state.view)
+            QTimer.singleShot(
+                pulse,
+                lambda: self._blink_step_off(delegate, col_idx, tab_state.view),
+            )
+
+    def _group_state_by_widget_index(self, widget_index: int):
+        if widget_index < 0:
+            return None
+        for state in self._group_tabs.values():
+            if state.widget_index == widget_index:
+                return state
+        return None
+
+    def _bind_tab_scroll_sync(self, state: _GroupTabState):
+        """监听tab 视图垂直滚动，实时更新全局时间锚点。
+    
+        Qt6/PySide6 QTableView 默认 ScrollPerPixel，
+        verticalScrollBar().value() 返回像素位置而非行号，
+        必须用 view.rowAt() 转换为行号后再传给 _update_time_anchor。
+        """
+        gen = self._gen
+    
+        def on_scroll(_pixel: int, st=state, g=gen):
+            if g != self._gen:
+                return  # tab 已重置，过期回调自杀
+            # 取首可见行行号：indexAt(QPoint(0,0)) 返回视口左上角处的模型索引
+            idx = st.view.indexAt(QPoint(0, 0))
+            row = idx.row() if idx.isValid() else 0
+            self._update_time_anchor(st, row)
+
+        state.view.verticalScrollBar().valueChanged.connect(on_scroll)
+
+    def _update_time_anchor(self, state: _GroupTabState, row: int):
+        """记录"当前可见首行时刻"作为切 tab 同步锚点。
+    
+        调用方负责将滚动位置转换为行号（Qt6 ScrollPerPixel 下
+        scrollbar value 是像素，需用 indexAt 转换）。
+        程序化滚动（guard 生效中）不回写，避免跳变覆盖用户真实视线。
+        只认当前可见 tab 的滚动：隐藏 tab 的 valueChanged（hide/show 时
+        viewport 尺寸变化引发的范围重算/值钳制微调、残留程序化滚动）会把
+        全局锚点污染成其停留位置的时刻（实测：G0 滚到 150s 后切 G1，
+        锚点被隐藏 G1 的滚动信号覆写为其末尾时刻 → 切换直接跳末尾）。
+        """
+        if self._tab_sync_guard:
+            logger.debug(
+                state.group_index,
+                row,
+                self._current_time_anchor,
+            )
+            return
+        _cur = (
+            self._group_state_by_widget_index(self._tab_widget.currentIndex())
+            if self._tab_widget is not None
+            else None
+        )
+        if _cur is not state:
+            return
+        t = _state_time_array(state)
+        if len(t) == 0:
+            return
+        _idx = min(row, len(t) - 1)
+        self._current_time_anchor = float(t[_idx])
+
+    def _on_tab_switched(self, index: int):
+        """tab 切换：保存旧 tab 行位置，目标 tab 对齐到当前时间锚点。
+
+        锚点存在且被目标时间轴覆盖时按时间二分映射到目标 tab 的行
+        （不同 group 采样率不同，相同的行号不等于相同的时刻）；目标
+        时间轴不覆盖锚点（该表没有对应时刻的数据）时恢复其自己上次
+        位置、锚点不动——旧实现钳到最近端点，表首/表尾行的大时刻
+        在用户视角就是“莫名跳到表末尾”。
+        """
+        if not self._tab_mode:
+            self._prev_tab_index = index
+            return
+        # 只保存上一个 tab 的位置（全量覆写会把新 tab 当前值误存为其历史位置）
+        prev = self._group_state_by_widget_index(self._prev_tab_index)
+        if prev is not None and prev.view is not None:
+            prev.scroll_pos = prev.view.verticalScrollBar().value()
+
+        target = self._group_state_by_widget_index(index)
+        self._prev_tab_index = index
+        if target is None or target.view is None or target.model is None:
+            logger.debug(
+                index,
+                target is not None,
+            )
+            return
+
+        anchor = self._current_time_anchor
+        _sb = target.view.verticalScrollBar()
+        self._tab_sync_guard = True
+        try:
+            in_range = False
+            if anchor is not None and len(_state_time_array(target)) > 0:
+                t = _state_time_array(target)
+                # 用 min/max 而非 t[0]/t[-1] 判覆盖：对单调轴两者等价，
+                # 还能兼容 asammdf 跨块拼装出的非单调轴
+                in_range = float(t.min()) <= anchor <= float(t.max())
+            else:
+                logger.debug(
+                    len(_state_time_array(target)),
+                )
+            if in_range:
+                row = _nearest_time_row(_state_time_array(target), anchor)
+                # scrollTo 而非 sb.setValue：后者在尾部 pageStep-1 行被钓制，
+                # 且页面首次布局时 max 会抖动
+                target.view.scrollTo(
+                    target.model.index(row, 0),
+                    QAbstractItemView.ScrollHint.PositionAtTop,
+                )
+                logger.debug(
+                    row,
+                    target.view.verticalScrollBar().value(),
+                    target.view.verticalScrollBar().maximum(),
+                )
+            else:
+                # 锚点越界（或无锚点）：保持该表自己的历史位置
+                target.view.verticalScrollBar().setValue(target.scroll_pos)
+                logger.debug(
+                    target.scroll_pos,
+                    target.view.verticalScrollBar().value(),
+                    target.view.verticalScrollBar().maximum(),
+                )
+        finally:
+            self._tab_sync_guard = False
+
+    def locate_time(self, group_index: int, target_time: float) -> bool:
+        """跳转到指定 group 的 tab 并定位到 target_time 最近行（jump_to_data 用）。
+
+        返回是否成功找到目标 tab。先把锚点设为 target_time 并用 guard 拑住
+        程序化滚动的回写，避免切换瞬间旧锚点把本次跳转目标覆盖。
+        """
+        state = self._group_tabs.get(group_index)
+        if (
+            state is None
+            or state.view is None
+            or state.model is None
+            or len(_state_time_array(state)) == 0
+        ):
+            return False
+        row = _nearest_time_row(_state_time_array(state), target_time)
+        self._current_time_anchor = float(target_time)
+        if self._tab_widget:
+            self._tab_sync_guard = True
+            try:
+                self._tab_widget.setCurrentIndex(state.widget_index)
+            finally:
+                self._tab_sync_guard = False
+        qindex = state.model.index(row, 0)
+        gen = self._gen
+
+        def _do():
+            if gen != self._gen or state.model is None:
+                return
+            self._tab_sync_guard = True
+            try:
+                state.view.scrollTo(
+                    qindex, QAbstractItemView.ScrollHint.PositionAtCenter
+                )
+                sm = state.view.selectionModel()
+                if sm is not None:
+                    sm.select(
+                        qindex,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                    )
+            finally:
+                self._tab_sync_guard = False
+                # scroll_pos 统一存像素值（与 _on_tab_switched 一致）
+                state.scroll_pos = state.view.verticalScrollBar().value()
+                logger.debug(
+                    group_index,
+                    row,
+                    state.view.verticalScrollBar().value(),
+                    state.view.verticalScrollBar().maximum(),
+                    self._current_time_anchor,
+                )
+
+        QTimer.singleShot(0, _do)
+        return True
+
+    def _reset_tab_mode(self):
+        """退出 tab 模式并完整释放所有 group tab 的视图/模型/数据。
+
+        顺序敏感：先降级 _tab_mode 并摘走 _group_tabs（使信号回调看到一致的
+        空态），断开 currentChanged 防止 clear() 触发 index=-1 回灌，升代际
+        令牌作废在途 QTimer 闭包，再逐个摘事件过滤器、解绑模型、deleteLater
+        视图，最后释放大数组引用（time_array 直接引用旧 loader 的 _time_cache
+        数组本体，不置空会把旧 MDF 文件钉在内存里）。定位下拉框是容器
+        复用控件，只清条目不销毁。
+        """
+        if not self._tab_mode and not self._group_tabs:
+            return
+        self._tab_mode = False
+        tabs, self._group_tabs = self._group_tabs, {}
+        self._gen += 1
+        self._current_time_anchor = None
+        self._prev_tab_index = -1
+        self._tab_loader_key = None
+        if self._tab_widget is not None:
+            try:
+                self._tab_widget.currentChanged.disconnect(self._on_tab_switched)
+            except (RuntimeError, TypeError):
+                pass
+        for state in tabs.values():
+            try:
+                state.view.viewport().removeEventFilter(self.drop_filter)
+            except RuntimeError:
+                pass
+            state.view.setModel(None)
+            state.view.deleteLater()
+            state.df = pd.DataFrame()
+            state.time_array = np.array([])
+            state.model = None
+            state.scroll_pos = 0
+        if self._tab_widget is not None:
+            self._tab_widget.clear()
+            self._tab_widget.currentChanged.connect(self._on_tab_switched)
+        if self._var_locator is not None:
+            self._var_locator.clear()
+        if self._tab_container_widget is not None:
+            self._tab_container_widget.setVisible(False)
+        self.splitter.setVisible(True)
+        if self.model is not None:
+            self._update_views()
+        logger.debug("DataTableDialog 退出 MDF tab 模式，已释放 %d 个 tab", len(tabs))
+
+    @staticmethod
+    def _align_len(values: np.ndarray, n: int) -> np.ndarray:
+        """列数据长度对齐时间轴：过长截断、过短用尾值填充、空列填 None。
+
+        MDF 重载/异常数据下 y 长度与 master 时间轴可能不一致，旧写法
+        `y[:n]` 只防变长不防变短，赋列时抛 ValueError。
+        """
+        if n <= 0:
+            return values[:0]
+        if len(values) >= n:
+            return values[:n]
+        if len(values) == 0:
+            return np.full(n, None, dtype=object)
+        pad = np.full(n - len(values), values[-1], dtype=values.dtype)
+        return np.concatenate([values, pad])
+
+    def _add_variable_to_tab(
+        self, var_name: str, group_index: int
+    ) -> _GroupTabState | None:
+        """将变量添加到指定 group 的 tab。返回对应的 _GroupTabState。
+
+        由 _add_variable_to_table（MDF 分支）与 update_data 重建路径调用，
+        内部自带 _switch_to_tab_mode，保证任何入口下 _tab_mode 与
+        _group_tabs 一致（旧版存在“建了 tab 但未切模式→加了看不见”的缝）。
+        """
+        loader = self._resolve_loader()
+        if loader is None:
+            return None
+        if not self._tab_mode:
+            self._switch_to_tab_mode()
+
+        # 获取 group 时间数组
+        try:
+            time_array = loader.get_group_time_array(group_index)
+        except Exception:
+            logger.warning("获取 group %d 时间数组失败", group_index, exc_info=True)
+            return None
+
+        # 获取变量数据
+        try:
+            series = loader.get_series(var_name)
+        except KeyError:
+            logger.warning("变量 '%s' 不存在", var_name)
+            return None
+
+        y_data = series.to_numpy()
+
+        if group_index in self._group_tabs:
+            # 已有 tab，添加列
+            state = self._group_tabs[group_index]
+            if var_name in state.df.columns:
+                return state  # 已存在
+            _rows_before = len(state.df)
+            _len_time = len(_state_time_array(state))
+            state.df[var_name] = self._align_len(y_data, len(state.df))
+            state.model = PandasTableModel(state.df, self.units)
+            state.view.setModel(state.model)
+            self._refresh_var_locator_items()
+            return state
+        else:
+            # 创建新 tab，time 作为首列（列名避开变量命名空间）
+            tab_df = pd.DataFrame({"time": np.asarray(time_array)})
+            tab_df[var_name] = self._align_len(y_data, len(time_array))
+            tab_model = PandasTableModel(tab_df, self.units)
+
+            tab_view = QTableView()
+            tab_view.setModel(tab_model)
+            # 行号列：PandasTableModel.headerData 的 Vertical 分支提供 1-based
+            # 行号，打开内建表头即可，不要 ResizeToContents（万行表测量代价大）
+            vh = tab_view.verticalHeader()
+            vh.setVisible(True)
+            vh.setMinimumWidth(48)
+            vh.setMaximumWidth(48)
+            vh.setDefaultAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            tab_view.setSelectionBehavior(
+                QAbstractItemView.SelectionBehavior.SelectItems
+            )
+            tab_view.horizontalHeader().setSectionsMovable(True)
+            tab_view.horizontalHeader().setDragEnabled(True)
+            tab_view.horizontalHeader().setDragDropMode(
+                QAbstractItemView.DragDropMode.InternalMove
+            )
+            tab_view.horizontalHeader().setDragDropOverwriteMode(False)
+            tab_view.horizontalHeader().setDefaultAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+            tab_view.setWordWrap(False)
+            tab_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            tab_view.customContextMenuRequested.connect(
+                self._show_table_context_menu
+            )
+            tab_view.setAcceptDrops(True)
+            tab_view.viewport().installEventFilter(self.drop_filter)
+
+            # 表头字体加粗
+            font = tab_view.horizontalHeader().font()
+            font.setBold(True)
+            tab_view.horizontalHeader().setFont(font)
+
+            # 行高
+            fm = QFontMetrics(tab_view.font())
+            safe_height = int(fm.height() * 1.6)
+            tab_view.verticalHeader().setDefaultSectionSize(safe_height)
+
+            # 委托
+            delegate = CustomDelegate(tab_view)
+            delegate.highlighted_rows = set()
+            tab_view.setItemDelegate(delegate)
+
+            # 添加到 tab widget
+            if self._tab_widget is None:
+                return None
+            widget_index = self._tab_widget.addTab(tab_view, f"G{group_index}")
+            # 新 tab 自动切换为当前页（旧版不切页：双击新 group 变量时
+            # 闪烁打在隐藏页，用户视角“加了看不见”）
+            self._tab_widget.setCurrentIndex(widget_index)
+            # 设置 tooltip
+            try:
+                label = loader.get_group_label(group_index)
+                self._tab_widget.setTabToolTip(widget_index, label)
+            except Exception:
+                self._tab_widget.setTabToolTip(widget_index, f"Group {group_index}")
+
+            state = _GroupTabState(
+                group_index=group_index,
+                view=tab_view,
+                df=tab_df,
+                model=tab_model,
+                time_array=time_array,
+                widget_index=widget_index,
+            )
+            self._group_tabs[group_index] = state
+            self._bind_tab_scroll_sync(state)
+            self._refresh_var_locator_items()
+            _t = np.asarray(time_array)
+            return state
 
     def _update_user_left_width(self, pos, index):
         if index == 1:  # Handle for the first splitter section
@@ -597,6 +1246,14 @@ class DataTableDialog(QMainWindow):
         view.viewport().update()
 
     def _blink_column(self, var_name, pulse: int = 800):
+        if self._tab_mode:
+            # tab 模式：在对应 tab 中闪烁
+            for state in self._group_tabs.values():
+                if var_name in state.df.columns:
+                    self._blink_tab_column(state, var_name, pulse)
+                    break
+            return
+
         if self.has_column(var_name):
             # 启动闪烁动画：淡蓝色底色闪烁2次，频率1次/秒（每个周期1s：高亮0.5s + 正常0.5s）
             col_idx = self._df.columns.get_loc(var_name)  # 获取逻辑列索引
@@ -628,6 +1285,7 @@ class DataTableDialog(QMainWindow):
         if not var_names:
             return
 
+        self._ensure_loader_consistent()
         if len(var_names) == 1:
             # 单个变量：使用原有逻辑
             self._handle_dropped_variable(var_names[0])
@@ -711,6 +1369,7 @@ class DataTableDialog(QMainWindow):
         Args:
             var_name: 要添加的变量名称
         """
+        self._ensure_loader_consistent()
         # 检查变量是否已存在
         if self.has_column(var_name):
             self.scroll_to_column(var_name)
@@ -747,20 +1406,41 @@ class DataTableDialog(QMainWindow):
     # 内部函数：添加变量到表格
     def _add_variable_to_table(self, var_name: str, data: pd.Series):
         """
-        内部函数：将变量添加到表格的非冻结区
+        内部函数：将变量添加到表格
 
-        将新变量添加到数据表格中，更新模型和视图
-        保持滚动位置和焦点状态
+        MDF 数据自动切换到 tab 模式，按 channel group 分 tab 展示。
+        CSV/Excel 数据保持原有单表行为。
 
         Args:
             var_name: 变量名称
             data: 变量数据序列
         """
+        loader = self._resolve_loader()
+        is_mdf = loader is not None and getattr(loader, "LOADER_TYPE", "") == "mdf"
+
+        if is_mdf:
+            # MDF 数据：切换到 tab 模式并按 group 添加（数据获取在
+            # _add_variable_to_tab 内部完成，不消费 data 参数）
+            try:
+                group_index = loader.get_var_group_index(var_name)
+            except KeyError:
+                logger.warning("MDF 变量 '%s' 无法获取 group 信息", var_name)
+                return
+
+            logger.debug(
+                var_name,
+                group_index,
+                self._tab_mode,
+                sorted(self._group_tabs),
+            )
+            self._add_variable_to_tab(var_name, group_index)
+            return
+
+        # ---- 非 MDF 数据：原有单表逻辑 ----
         self._df[var_name] = data.reset_index(drop=True)
         max_len = max(len(self._df), len(data))
         if len(self._df) < max_len:
             self._df = self._df.reindex(range(max_len))
-        loader = self._resolve_loader()
 
         if loader:
             self.units = loader.units
@@ -887,7 +1567,19 @@ class DataTableDialog(QMainWindow):
 
     def _analyze_selection(self, view):
         """分析当前视图及另一视图的选中内容，返回分析结果字典；无选中时返回 None。"""
-        selected_indexes = view.selectionModel().selectedIndexes()
+        # tab 模式的每个 tab 有独立 df/model、无冻结区概念，单独分析。
+        # （旧版直接引用无 model 的 main_view/_df，tab 模式右键直接崩溃）
+        if self._tab_mode or self._group_tabs:
+            state = next(
+                (st for st in self._group_tabs.values() if st.view is view), None
+            )
+            if state is not None:
+                return self._analyze_tab_selection(state, view)
+
+        sm = view.selectionModel()
+        if sm is None:
+            return None
+        selected_indexes = sm.selectedIndexes()
         if not selected_indexes:
             return None
 
@@ -897,8 +1589,9 @@ class DataTableDialog(QMainWindow):
         else:
             other_view = self.main_view
 
-        other_selected = other_view.selectionModel().selectedIndexes()
-        all_selected = selected_indexes + other_selected
+        other_sm = other_view.selectionModel()
+        other_selected = other_sm.selectedIndexes() if other_sm else []
+        all_selected = list(selected_indexes) + list(other_selected)
 
         # 构建每列的选中行集合（基于两侧合并选择）
         rows_per_col_all: dict[int, set[int]] = {}
@@ -973,6 +1666,62 @@ class DataTableDialog(QMainWindow):
             "plot_rows": plot_rows,
         }
 
+    def _analyze_tab_selection(self, state: _GroupTabState, view):
+        """tab 视图的选中分析：单视图、无冻结区，结果附带 df/model 供消费方透传。"""
+        sm = view.selectionModel()
+        if sm is None:
+            return None
+        selected = sm.selectedIndexes()
+        if not selected:
+            return None
+
+        rows_per_col: dict[int, set[int]] = {}
+        for idx in selected:
+            rows_per_col.setdefault(idx.column(), set()).add(idx.row())
+        total_cols = set(rows_per_col.keys())
+        header = view.horizontalHeader()
+
+        can_copy = False
+        ordered_cols: list[int] = []
+        rows_order: list[int] = []
+        if len(total_cols) == 1:
+            only = next(iter(total_cols))
+            ordered_cols = [only]
+            rows_order = sorted(rows_per_col[only])
+            can_copy = bool(rows_order)
+        elif len(total_cols) >= 2:
+            cols_list = list(total_cols)
+            base = rows_per_col[cols_list[0]]
+            if base and all(rows_per_col[c] == base for c in cols_list[1:]):
+                ordered_cols = sorted(cols_list, key=lambda c: header.visualIndex(c))
+                rows_order = sorted(base)
+                can_copy = True
+
+        plot_enabled = False
+        x_col = y_col = None
+        plot_rows: list[int] = []
+        all_rows: set[int] = set()
+        for rows in rows_per_col.values():
+            all_rows.update(rows)
+        if len(total_cols) == 2 and len(all_rows) >= 2:
+            ordered2 = sorted(total_cols, key=lambda c: header.visualIndex(c))
+            x_col, y_col = ordered2[0], ordered2[1]
+            plot_rows = sorted(all_rows)
+            plot_enabled = True
+
+        return {
+            "total_cols": total_cols,
+            "can_copy": can_copy,
+            "ordered_cols": ordered_cols,
+            "rows_order": rows_order,
+            "plot_enabled": plot_enabled,
+            "x_col": x_col,
+            "y_col": y_col,
+            "plot_rows": plot_rows,
+            "df": state.df,
+            "model": state.model,
+        }
+
     def _build_plot_menu(self, menu, analysis):
         """构建绘图子菜单。返回是否已添加可用的散点图动作。"""
         total_cols = analysis["total_cols"]
@@ -989,10 +1738,14 @@ class DataTableDialog(QMainWindow):
             x_show, y_show = x_col, y_col
         else:
             x_show, y_show = cols_list[0], cols_list[1]
-        x_name = self.model.headerData(
+        # 模型路由：tab 分析结果自带 model，单表回退 self.model
+        model = analysis.get("model") or self.model
+        if model is None:
+            return False
+        x_name = model.headerData(
             x_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
         ).replace("\n", " ")
-        y_name = self.model.headerData(
+        y_name = model.headerData(
             y_show, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
         ).replace("\n", " ")
 
@@ -1004,13 +1757,15 @@ class DataTableDialog(QMainWindow):
         act2 = QAction(f"绘制x/y图，x={y_name}，y={x_name}", menu)
         if plot_enabled and x_col is not None and y_col is not None:
             act1.triggered.connect(
-                lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(
-                    x, y, rows
+                lambda _checked=False, rows=plot_rows, x=x_col, y=y_col,
+                d=analysis.get("df"), m=analysis.get("model"): self._plot_xy_scatter(
+                    x, y, rows=rows, df=d, model=m
                 )
             )
             act2.triggered.connect(
-                lambda _checked=False, rows=plot_rows, x=x_col, y=y_col: self._plot_xy_scatter(
-                    y, x, rows
+                lambda _checked=False, rows=plot_rows, x=x_col, y=y_col,
+                d=analysis.get("df"), m=analysis.get("model"): self._plot_xy_scatter(
+                    y, x, rows=rows, df=d, model=m
                 )
             )
             act1.setEnabled(True)
@@ -1034,16 +1789,22 @@ class DataTableDialog(QMainWindow):
         act_copy_selected.setEnabled(can_copy)
         if can_copy:
             act_copy_selected.triggered.connect(
-                lambda: self._copy_selected_to_clipboard(ordered_cols, rows_order)
+                lambda checked=False, cols=ordered_cols, rows=rows_order,
+                d=analysis.get("df"): self._copy_selected_to_clipboard(cols, rows, d)
             )
 
         act_copy_all = QAction("复制表内所有数据到剪贴板", menu)
+        cur_df = analysis.get("df")
+        if cur_df is None:
+            cur_df = self._df
         enable_all = (
-            self._df is not None and self._df.shape[0] > 0 and self._df.shape[1] > 0
+            cur_df is not None and cur_df.shape[0] > 0 and cur_df.shape[1] > 0
         )
         act_copy_all.setEnabled(enable_all)
         if enable_all:
-            act_copy_all.triggered.connect(self._copy_all_to_clipboard)
+            act_copy_all.triggered.connect(
+                lambda checked=False, d=cur_df: self._copy_all_to_clipboard(d)
+            )
 
         if scatter_added:
             menu.addSeparator()
@@ -1064,12 +1825,26 @@ class DataTableDialog(QMainWindow):
                 menu.addAction(act2)
 
     def _plot_xy_scatter(
-        self, x_col_idx, y_col_idx, rows=None, start_row=None, num_rows=None
+        self,
+        x_col_idx,
+        y_col_idx,
+        rows=None,
+        start_row=None,
+        num_rows=None,
+        df=None,
+        model=None,
     ):
         """
         接收已按视觉顺序确定的逻辑列索引进行绘图。
+
+        df/model 由右键分析结果透传（tab 模式指向对应 tab 的数据）；
+        省略时回退单表 self._df/self.model。
         """
         try:
+            if df is None:
+                df = self._df
+            if model is None:
+                model = self.model
             if rows is None:
                 if start_row is None or num_rows is None:
                     return
@@ -1079,10 +1854,10 @@ class DataTableDialog(QMainWindow):
 
             # 直接使用正确的逻辑索引提取数据
             x_data_series = pd.to_numeric(
-                self._df.iloc[row_indexer, x_col_idx], errors="coerce"
+                df.iloc[row_indexer, x_col_idx], errors="coerce"
             )
             y_data_series = pd.to_numeric(
-                self._df.iloc[row_indexer, y_col_idx], errors="coerce"
+                df.iloc[row_indexer, y_col_idx], errors="coerce"
             )
 
             # 验证1：检查是否有非数值数据
@@ -1093,10 +1868,10 @@ class DataTableDialog(QMainWindow):
                 return
 
             # 获取清理后的列标题
-            x_header = self.model.headerData(
+            x_header = model.headerData(
                 x_col_idx, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
             ).replace("\n", " ")
-            y_header = self.model.headerData(
+            y_header = model.headerData(
                 y_col_idx, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
             ).replace("\n", " ")
 
@@ -1115,16 +1890,19 @@ class DataTableDialog(QMainWindow):
             QMessageBox.critical(self, "未知错误", f"绘图时发生错误: {e}")
 
     def _copy_selected_to_clipboard(
-        self, ordered_cols: list[int], rows_order: list[int]
+        self, ordered_cols: list[int], rows_order: list[int], df=None
     ):
         """将选中区域的数据复制到剪贴板。
 
         第一行：变量名；第二行：单位；第三行开始为数据。
+        df 省略时用单表 self._df（tab 模式由右键分析结果透传）。
         """
         if not ordered_cols or not rows_order:
             return
+        if df is None:
+            df = self._df
         # 变量名与单位
-        var_names = [str(self._df.columns[c]) for c in ordered_cols]
+        var_names = [str(df.columns[c]) for c in ordered_cols]
         units = [self.units.get(name, "") for name in var_names]
 
         # 组装数据（按行）
@@ -1135,7 +1913,7 @@ class DataTableDialog(QMainWindow):
         for r in rows_order:
             row_vals = []
             for c in ordered_cols:
-                val = self._df.iloc[r, c]
+                val = df.iloc[r, c]
                 if pd.isna(val):
                     row_vals.append("")
                 else:
@@ -1145,35 +1923,46 @@ class DataTableDialog(QMainWindow):
         text = "\n".join(lines)
         QApplication.clipboard().setText(text)
 
-    def _copy_all_to_clipboard(self):
-        """复制表内所有数据到剪贴板，列顺序按可视顺序（先冻结区再主区）。"""
-        if self._df is None or self._df.shape[0] == 0 or self._df.shape[1] == 0:
+    def _copy_all_to_clipboard(self, df=None):
+        """复制表内所有数据到剪贴板，列顺序按可视顺序（先冻结区再主区）。
+
+        tab 模式传入的 df 属于单个 tab，无冻结区概念，按 df 列序直接复制。
+        """
+        if df is None:
+            df = self._df
+        if df is None or df.shape[0] == 0 or df.shape[1] == 0:
             return
 
-        # 计算可视列顺序：先冻结区，再主区
-        frozen_cols = set(self._df.columns.get_loc(col) for col in self.frozen_columns)
-        frozen_header = self.frozen_view.horizontalHeader()
-        main_header = self.main_view.horizontalHeader()
+        if df is not self._df:
+            # tab 模式：单视图无冻结分割，按当前 tab 的表头视觉顺序
+            ordered_cols = list(range(df.shape[1]))
+        else:
+            # 计算可视列顺序：先冻结区，再主区
+            frozen_cols = set(
+                self._df.columns.get_loc(col) for col in self.frozen_columns
+            )
+            frozen_header = self.frozen_view.horizontalHeader()
+            main_header = self.main_view.horizontalHeader()
 
-        all_cols = list(range(self._df.shape[1]))
-        frozen_list = [c for c in all_cols if c in frozen_cols]
-        main_list = [c for c in all_cols if c not in frozen_cols]
-        frozen_list.sort(key=lambda c: frozen_header.visualIndex(c))
-        main_list.sort(key=lambda c: main_header.visualIndex(c))
-        ordered_cols = frozen_list + main_list
+            all_cols = list(range(df.shape[1]))
+            frozen_list = [c for c in all_cols if c in frozen_cols]
+            main_list = [c for c in all_cols if c not in frozen_cols]
+            frozen_list.sort(key=lambda c: frozen_header.visualIndex(c))
+            main_list.sort(key=lambda c: main_header.visualIndex(c))
+            ordered_cols = frozen_list + main_list
 
         # 变量名与单位
-        var_names = [str(self._df.columns[c]) for c in ordered_cols]
+        var_names = [str(df.columns[c]) for c in ordered_cols]
         units = [self.units.get(name, "") for name in var_names]
 
         lines = []
         lines.append("\t".join(var_names))
         lines.append("\t".join(units))
 
-        for r in range(self._df.shape[0]):
+        for r in range(df.shape[0]):
             row_vals = []
             for c in ordered_cols:
-                val = self._df.iloc[r, c]
+                val = df.iloc[r, c]
                 if pd.isna(val):
                     row_vals.append("")
                 else:
@@ -1218,7 +2007,19 @@ class DataTableDialog(QMainWindow):
             self.restoreGeometry(geom)
 
     def clear_all_columns(self):
-        """重载数据时：清空 _df，释放持有的所有 numpy 数组。"""
+        """重载数据时：先快照当前变量清单，再清空表格数据与 tab 状态。
+
+        快照必须先于清空：file_loader_manager 在调 update_data 前会经本
+        方法清掉 _df，若不留清单，update_data 无从得知该用新数据重建哪些
+        变量（旧版因此在全路径上提前 return，tab 数据原样残留界面）。
+        """
+        self._table_vars_snapshot = self.get_column_names()
+        self._tab_vars_snapshot = {
+            gi: [c for c in st.df.columns if c != "time"]
+            for gi, st in self._group_tabs.items()
+        }
+        if self._group_tabs or self._tab_mode:
+            self._reset_tab_mode()
         if hasattr(self, "_df") and self._df is not None and not self._df.empty:
             self._df = pd.DataFrame()
         if hasattr(self, "model"):
@@ -1233,7 +2034,7 @@ class DataTableDialog(QMainWindow):
             except RuntimeError:
                 # 窗口已经被删除，跳过
                 pass
-        if not (self._skip_close_confirmation) and (len(self._df.columns) >= 4):
+        if not self._skip_close_confirmation and self._count_table_vars() >= 4:
             reply = QMessageBox.question(
                 self,
                 "确认关闭",
@@ -1251,12 +2052,18 @@ class DataTableDialog(QMainWindow):
         self.scatter_plot_windows.clear()
 
         # 其他清理代码保持不变...
+        self._reset_tab_mode()
+        self._table_vars_snapshot = []
+        self._tab_vars_snapshot = {}
         self.save_geom()
         self._df = pd.DataFrame()
         self.main_view.setModel(None)
         self.frozen_view.setModel(None)
-        self._instance = None
-        self._saved_scroll_pos = None
+        # 必须经类名赋值：旧写法 self._instance = None 只创建了遮蔽类属性的
+        # 实例属性，DataTableDialog._instance 永远指着已关闭窗口，导致单例
+        # 泄漏且下次 popup 复用陈旧窗口（跨文件数据串显）。
+        DataTableDialog._instance = None
+        DataTableDialog._saved_scroll_pos = None
         self.frozen_columns = []
         self.hide()
         event.accept()
@@ -1264,11 +2071,29 @@ class DataTableDialog(QMainWindow):
     def set_skip_close_confirmation(self, status: bool):
         self._skip_close_confirmation = status
 
+    def _count_table_vars(self) -> int:
+        """表内变量数（tab 模式不含 time 列），用于关闭确认门槛。"""
+        return len(self.get_column_names())
+
     def has_column(self, var_name: str) -> bool:
+        # 判据用 `_tab_mode or _group_tabs` 而非只看 _tab_mode：重置中间态
+        # 或两者不一致时，只看 _tab_mode 会去查空的 _df 导致误判“变量不存在”
+        if self._tab_mode or self._group_tabs:
+            return any(
+                var_name in state.df.columns
+                for state in self._group_tabs.values()
+            )
         return var_name in self._df.columns
 
     def get_column_names(self) -> list[str]:
-        """返回 DataFrame 中所有列名（公开接口，避免外部访问私有属性）。"""
+        """返回表内全部变量名（公开接口）；tab 模式聚合各 tab 并排除 time 列。"""
+        if self._tab_mode or self._group_tabs:
+            names: list[str] = []
+            for state in self._group_tabs.values():
+                names.extend(
+                    c for c in state.df.columns if c != "time" and c not in names
+                )
+            return names
         return self._df.columns.tolist()
 
     def add_series(self, var_name: str, data: pd.Series):
@@ -1369,6 +2194,9 @@ class DataTableDialog(QMainWindow):
         return new_order
 
     def freeze_column(self, logical_col):
+        # tab 模式无冻结区概念（time 首列常驻，水平滚动即可），直接拒绝
+        if self._tab_mode or self._group_tabs:
+            return
         var_name = self._df.columns[logical_col]
 
         if var_name not in self.frozen_columns:
@@ -1410,6 +2238,8 @@ class DataTableDialog(QMainWindow):
             )
 
     def unfreeze_column(self, logical_col):
+        if self._tab_mode or self._group_tabs:
+            return
         var_name = self._df.columns[logical_col]
 
         if var_name in self.frozen_columns:
@@ -1528,7 +2358,19 @@ class DataTableDialog(QMainWindow):
         self._update_views()
 
     def scroll_to_column(self, var_name: str):
-        """滚动到指定变量名的列（可能在冻结区或普通区），不影响垂直滚动位置"""
+        """滚动到指定变量名的列，不影响垂直滚动位置。
+
+        tab 模式：切到变量所在 tab 并水平滚动（旧版只查 _df，tab 模式下
+        恒为静默 no-op，variable_list 双击定位失效）。
+        """
+        if self._tab_mode or self._group_tabs:
+            for state in self._group_tabs.values():
+                if var_name in state.df.columns:
+                    if self._tab_widget:
+                        self._tab_widget.setCurrentIndex(state.widget_index)
+                    self._scroll_tab_to_column(state, var_name, blink=False)
+                    return True
+            return False
         if var_name not in self._df.columns:
             return False
 
@@ -1609,69 +2451,84 @@ class DataTableDialog(QMainWindow):
         self._update_views()
 
     def update_data(self, loader):
-        """
-        当主窗口重载数据时，更新此对话框中的数据
+        """主窗口加载/重载新数据后，用新 loader 重建本对话框内容。
 
-        同步数据表格与主窗口的数据状态
-        保持用户界面的一致性和数据完整性
+        重建依据是 clear_all_columns 留下的变量清单快照（旧版以 `_df` 为
+        唯一真相，而 `_df` 在本方法前已被清掉 → 全路径提前 return，成为
+        死代码，tab 模式状态残留界面）。
+
+        - 新数据 MDF：逐变量经 _add_variable_to_tab 重建 tab（内部自动切
+          tab 模式；旧 group 索引在新文件里语义可能不同，按名反查归位）
+        - 新数据 CSV/Excel：单表逐列重建
+        新数据中不存在的列计入 removed 并提示。
 
         Args:
             loader: 数据加载器实例
         """
-        if self.model is None or self._df.empty:
+        if loader is None:
             return
+        logger.debug(
+            self._loader_identity(loader),
+            self._tab_mode,
+            sorted(self._group_tabs),
+            self._current_time_anchor,
+        )
+        old_flat = self._table_vars_snapshot or self.get_column_names()
+        old_by_group = self._tab_vars_snapshot or {}
+        self._table_vars_snapshot = []
+        self._tab_vars_snapshot = {}
 
-        scroll_pos = self.main_view.verticalScrollBar().value()
-        frozen_cols = self.frozen_columns.copy()
-        current_cols = list(self._df.columns)
+        if self._tab_mode or self._group_tabs:
+            self._reset_tab_mode()
 
-        # --- BUG修复 START ---
+        is_mdf = getattr(loader, "LOADER_TYPE", "") == "mdf"
+        removed: list[str] = []
 
-        # 创建一个新的DataFrame来保存更新后的数据
-        new_df = pd.DataFrame()
-        removed = []
-
-        # 遍历当前表中的列
-        is_mdf_loader = getattr(loader, "LOADER_TYPE", "") == "mdf"
-        for col in current_cols:
-            if is_mdf_loader:
+        if is_mdf:
+            for gi in sorted(old_by_group):
+                for col in old_by_group[gi]:
+                    if self._add_variable_to_tab(col, gi) is None:
+                        removed.append(col)
+            # 清单未覆盖的变量（如快照缺失）按名反查 group 归位
+            covered = {c for cols in old_by_group.values() for c in cols}
+            for col in old_flat:
+                if col in covered:
+                    continue
                 try:
-                    series = loader.get_series(col)
-                    new_df[col] = series.reset_index(drop=True)
+                    gi = loader.get_var_group_index(col)
                 except KeyError:
                     removed.append(col)
-            elif col in loader.df.columns:
-                # 从新的加载器数据中复制完整的列
-                # 这是关键修复：确保新DataFrame获得完整行数
-                new_df[col] = loader.df[col]
-            else:
-                # 该列已从源文件中移除
-                removed.append(col)
+                    continue
+                if self._add_variable_to_tab(col, gi) is None:
+                    removed.append(col)
+        else:
+            new_df = pd.DataFrame()
+            for col in old_flat:
+                if loader.df is not None and col in loader.df.columns:
+                    new_df[col] = loader.df[col]
+                else:
+                    removed.append(col)
+            self._df = new_df
+            self.units = loader.units
+            if not self._df.empty:
+                self.model = PandasTableModel(self._df, self.units)
+                self.main_view.setModel(self.model)
+                self.frozen_view.setModel(self.model)
+                self._connect_signals()
+            self.frozen_columns = [
+                c for c in self.frozen_columns if c in self._df.columns
+            ]
+            if self.model is not None:
+                self._update_views()
 
-        # 用新的、行数正确的DataFrame替换旧的
-        self._df = new_df
-
-        # --- BUG修复 END ---
-
-        self.units = loader.units
-        self.model = PandasTableModel(self._df, self.units)
-        self.main_view.setModel(self.model)
-        self.frozen_view.setModel(self.model)
-        self._connect_signals()
-
-        # 重新应用冻结列，确保它们仍然存在
-        self.frozen_columns = [col for col in frozen_cols if col in self._df.columns]
-
-        self._update_views()
-        QTimer.singleShot(
-            0, lambda: self.main_view.verticalScrollBar().setValue(scroll_pos)
-        )
+        self._tab_loader_key = self._loader_identity(loader)
+        self._refresh_var_locator_items()
 
         if removed:
-            msg = f"以下变量已从数据中移除：{', '.join(removed)}"
-            QMessageBox.information(self, "更新通知", msg)
+            shown = ", ".join(removed[:10]) + (" …" if len(removed) > 10 else "")
+            QMessageBox.information(self, "更新通知", f"以下变量已从数据中移除：{shown}")
 
-        if self._df.empty:
-            # 增加这行，避免在表格变空并关闭时弹出烦人的确认框
+        if not self.has_table_content():
+            # 表已空：直接关闭，不弹确认框
             self.set_skip_close_confirmation(True)
             self.close()

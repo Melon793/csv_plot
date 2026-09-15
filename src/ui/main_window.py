@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sys
 import os
+from collections import OrderedDict
 
 from src.utils.platform_setup import setup_platform
 
@@ -169,12 +170,12 @@ class MainWindow(QMainWindow):
         self._last_template_name = ""
         self._last_template_desc = ""
 
-        self.value_cache = {}
+        self.value_cache: OrderedDict = OrderedDict()
         self._enum_text_maps: dict = {}
         # 变量信息窗口的统计结果缓存（min/max/mean/std 及 NaN/Inf/有效样本计数）。
         # 只缓存统计不缓存元数据：实测元数据六组全属性仅 98.9 μs（纯内存零 I/O），
         # 而统计需 18.8 ms（776 MB .mf4 的 428k 点通道），相差 190 倍。
-        # 单条约 150 字节，上限 256 条共 38 KB，相比 _signal_cache 单条 1.7 MB 可忽略。
+        # 单条约 150 字节，上限 512 条共 77 KB，相比 _signal_cache 单条 1.7 MB 可忽略。
         # 失效双保险：_release_old_data 显式清空 + 每条自带 generation 校验。
         self.var_stats_cache: dict = {}
 
@@ -462,6 +463,13 @@ class MainWindow(QMainWindow):
             self.plot_config_manager.save_auto_save(self)
         self._shutdown_var_info_worker()
         self.layout_manager._handle_close()
+        # 退出前释放 loader 资源（文件句柄、内存映射等）
+        try:
+            if self.loader is not None:
+                if hasattr(self.loader, 'close'):
+                    self.loader.close()
+        except Exception:
+            self._logger.debug("退出时释放 loader 资源失败", exc_info=True)
         super().closeEvent(event)
 
     def _shutdown_var_info_worker(self):

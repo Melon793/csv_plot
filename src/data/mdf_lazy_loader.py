@@ -51,6 +51,10 @@ class MDFLazyLoader:
     LOADER_TYPE = "mdf"
 
     MAX_CACHE_SIZE = 256
+    # 时间戳缓存上限。每个通道组一条时间轴，超限时淘汰最久未用的条目。
+    # Trade-off: >64 组的 MDF 文件在频繁切换绘图时会产生时间戳重读（asammdf 元数据级 I/O），
+    # 但避免了无界内存增长（每条时间轴可达数 MB）。实测 64 组覆盖绝大多数 MDF 文件。
+    MAX_TIME_CACHE_SIZE = 64
 
     _ASAMMDF_IMPORT_ERROR = "asammdf 库未安装。请运行: pip install asammdf>=7.4.0"
 
@@ -77,7 +81,7 @@ class MDFLazyLoader:
         # __del__ → close() 会因 _signal_cache 缺失再抛
         # AttributeError（在 GC 路径上表现为 "Exception ignored in __del__"）。
         self._signal_cache: OrderedDict[str, np.ndarray] = OrderedDict()
-        self._time_cache: dict[int, np.ndarray] = {}
+        self._time_cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._enum_cache: dict[str, dict[int, str]] = {}
         self._metadata: list[VarMetadata] = []
         self._var_to_meta: dict[str, VarMetadata] = {}
@@ -527,7 +531,12 @@ class MDFLazyLoader:
                     group=gi,
                     index=master_ci,
                 )
+                # LRU 淘汰：超限则淘汰最早插入的条目
+                if len(self._time_cache) >= self.MAX_TIME_CACHE_SIZE:
+                    self._time_cache.popitem(last=False)
                 self._time_cache[gi] = master_signal.timestamps.astype(np.float64)
+            else:
+                self._time_cache.move_to_end(gi)
 
             x = self._time_cache[gi]
 
@@ -550,6 +559,115 @@ class MDFLazyLoader:
             unit = meta.unit
 
         return x, y, unit, enum_map or {}
+
+    # ------------------------------------------------------------------
+    # Group-level access (供数值变量表 tab 模式使用)
+    #
+    # 这组接口为 UI 层提供 channel group 维度的数据访问能力，
+    # 使 DataTableDialog 可按 group 分 tab 展示不同时间轴的变量。
+    # ------------------------------------------------------------------
+
+    def get_var_group_index(self, display_name: str) -> int:
+        """返回变量所属的 channel group 索引。
+
+        Args:
+            display_name: 变量的显示名称（可能含 _G{gi} 后缀）
+
+        Returns:
+            int: channel group 索引
+
+        Raises:
+            KeyError: 变量不存在
+        """
+        meta = self._var_to_meta.get(display_name)
+        if meta is None:
+            raise KeyError(f"变量 '{display_name}' 不存在")
+        return meta.group_index
+
+    def get_group_time_array(self, group_index: int) -> np.ndarray:
+        """返回指定 group 的 master 时间戳数组。
+
+        复用已有 _time_cache（LRU 淘汰），与 get_value_from_name 共享缓存。
+
+        Args:
+            group_index: channel group 索引
+
+        Returns:
+            np.ndarray: float64 时间戳数组
+        """
+        with self._access_lock:
+            self._ensure_open()
+            if group_index not in self._time_cache:
+                master_ci = self._group_master_ci.get(group_index, 0)
+                master_signal = self._mdf.get(
+                    name=None,
+                    group=group_index,
+                    index=master_ci,
+                )
+                # LRU 淘汰：超限则淘汰最早插入的条目
+                if len(self._time_cache) >= self.MAX_TIME_CACHE_SIZE:
+                    self._time_cache.popitem(last=False)
+                self._time_cache[group_index] = (
+                    master_signal.timestamps.astype(np.float64)
+                )
+            else:
+                self._time_cache.move_to_end(group_index)
+            return self._time_cache[group_index]
+
+    def get_group_label(self, group_index: int) -> str:
+        """返回 group 的可读标签。
+
+        优先使用 acq_name，其次 comment 前 20 字符，兜底 "G{index}"。
+        用于 tooltip 和搜索栏候选列表。
+
+        Args:
+            group_index: channel group 索引
+
+        Returns:
+            str: 可读标签（如 "ECU1 (G0)" 或 "G5"）
+        """
+        with self._access_lock:
+            self._ensure_open()
+            if group_index not in self._raw_metadata:
+                return f"G{group_index}"
+            group_obj = self._mdf.groups[group_index]
+            cg = getattr(group_obj, "channel_group", None)
+            acq_name = getattr(cg, "acq_name", "") or ""
+            if acq_name.strip():
+                return f"{acq_name.strip()} (G{group_index})"
+            comment = getattr(cg, "comment", "") or ""
+            if comment.strip():
+                short = comment.strip()[:20]
+                return f"{short} (G{group_index})"
+            return f"G{group_index}"
+
+    def search_variables(
+        self, keyword: str, limit: int = 50
+    ) -> list[tuple[str, int, str]]:
+        """跨所有 group 搜索变量名（大小写不敏感子串匹配）。
+
+        用于 DataTableDialog 搜索栏的候选列表。
+
+        Args:
+            keyword: 搜索关键词
+            limit: 最大返回数量
+
+        Returns:
+            list[tuple[str, int, str]]: [(display_name, group_index, group_label), ...]
+        """
+        keyword_lower = keyword.lower()
+        results: list[tuple[str, int, str]] = []
+        # 缓存已查过的 group_label，避免重复加锁访问
+        label_cache: dict[int, str] = {}
+        for meta in self._metadata:
+            if keyword_lower in meta.name.lower():
+                gi = meta.group_index
+                if gi not in label_cache:
+                    label_cache[gi] = self.get_group_label(gi)
+                results.append((meta.name, gi, label_cache[gi]))
+                if len(results) >= limit:
+                    break
+        return results
 
     # ------------------------------------------------------------------
     # Read-only metadata access (供变量信息窗口使用)
