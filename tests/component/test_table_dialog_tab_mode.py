@@ -1079,6 +1079,21 @@ def test_tab_bar_blank_area_right_click_shows_no_menu(shown_tab_dialog, menu_stu
     assert menu_stub.menus == []
 
 
+def test_no_tab_menu_while_single_table(tab_dialog, menu_stub):
+    """单表期：容器被 setVisible(False) 收起、一个 tab 也没有 → 右键不弹菜单。
+
+    “单表天然无此菜单”的判据不是 _tab_widget 为 None（它已在 __init__ 里建好），
+    而是根本没有页可命中：tabAt 返回 -1 → 反查不到 state → 直接 return。
+    """
+    dlg = tab_dialog
+    assert dlg._tab_container_widget.isHidden()
+    assert dlg._tab_widget.count() == 0 and dlg._group_tabs == {}
+
+    dlg._on_tab_bar_right_click(QPoint(5, 5))
+
+    assert menu_stub.menus == []
+
+
 def test_add_group_remaining_adds_all_missing_columns(tab_dialog, mdf_loader):
     """一次加完整组：列集合对齐 loader 的组内变量，行数不变。"""
     dlg = tab_dialog
