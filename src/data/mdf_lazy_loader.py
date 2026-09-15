@@ -646,7 +646,9 @@ class MDFLazyLoader:
     ) -> list[tuple[str, int, str]]:
         """跨所有 group 搜索变量名（大小写不敏感子串匹配）。
 
-        用于 DataTableDialog 搜索栏的候选列表。
+        当前无 UI 调用方：数值表定位框只列“已加入表格”的变量（见
+        DataTableDialog._refresh_var_locator_items），本方法作为 loader 的
+        通用元数据接口保留，供后续全文件搜索类需求直接使用。
 
         Args:
             keyword: 搜索关键词
@@ -657,16 +659,21 @@ class MDFLazyLoader:
         """
         keyword_lower = keyword.lower()
         results: list[tuple[str, int, str]] = []
-        # 缓存已查过的 group_label，避免重复加锁访问
-        label_cache: dict[int, str] = {}
-        for meta in self._metadata:
-            if keyword_lower in meta.name.lower():
-                gi = meta.group_index
-                if gi not in label_cache:
-                    label_cache[gi] = self.get_group_label(gi)
-                results.append((meta.name, gi, label_cache[gi]))
-                if len(results) >= limit:
-                    break
+        # 加锁统一元数据读取纪律（_access_lock 是 RLock，内部 get_group_label
+        # 可重入）；_ensure_open 要求调用方已持锁，且 close() 后还能给出
+        # 明确报错而不是拿着已释放的句柄报意外异常
+        with self._access_lock:
+            self._ensure_open()
+            # 缓存已查过的 group_label，避免重复加锁访问
+            label_cache: dict[int, str] = {}
+            for meta in self._metadata:
+                if keyword_lower in meta.name.lower():
+                    gi = meta.group_index
+                    if gi not in label_cache:
+                        label_cache[gi] = self.get_group_label(gi)
+                    results.append((meta.name, gi, label_cache[gi]))
+                    if len(results) >= limit:
+                        break
         return results
 
     # ------------------------------------------------------------------

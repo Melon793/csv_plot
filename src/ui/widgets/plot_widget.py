@@ -141,6 +141,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # a. 打开/激活数值变量表，并添加所有变量
         is_mdf_loader = getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
         dlg = None
+        # 实际入表的变量名：上面两个 continue 会跳过取数失败/列不存在的曲线，
+        # 而 var_names[0] 正是这类情况下最容易被跳过的那个
+        opened: list[str] = []
         for var_name in var_names:
             if is_mdf_loader:
                 try:
@@ -152,6 +155,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             else:
                 series = main_window.loader.df[var_name]
             dlg = DataTableDialog.popup(var_name, series, parent=main_window)
+            opened.append(var_name)
 
         # 如果没有成功打开任何dialog，直接返回
         if dlg is None:
@@ -163,7 +167,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         # b. MDF tab 模式：使用每个变量自己的时间轴做二分查找
         if is_mdf_loader and dlg._tab_mode:
-            self._jump_to_data_mdf_tab(dlg, var_names, x, main_window.loader)
+            self._jump_to_data_mdf_tab(dlg, opened, x, main_window.loader)
             return
 
         # c. 非 MDF 数据：原有单表逻辑
@@ -174,8 +178,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         index = int(round(index)) - 1  # 转换为 0-based 行索引
         index = max(0, min(index, main_window.loader.datalength - 1))
 
-        # 使用第一个变量来定位和选中
-        first_var_name = var_names[0]
+        # 用真正入表的第一个变量定位（取数失败被跳过的曲线会让
+        # var_names[0] 在表里找不到，get_loc 直接抛 KeyError）
+        first_var_name = next((v for v in opened if dlg.has_column(v)), None)
+        if first_var_name is None or dlg.model is None:
+            return
 
         # 获取模型和列索引
         model = dlg.model
@@ -209,6 +216,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         锚点设置、tab 切换、延时滚动、单元格选中均由 locate_time 内部处理
         （含代际令牌，防止对话框重置后过期回调访问已释放的 tab）。
+
+        Args:
+            var_names: 实际已入表的变量名列表（不是曲线名全集）；取第一个
+                能在表里找到的变量定位——多曲线跳转时它们通常同组。
         """
         if self.factor == 0:
             return
@@ -216,14 +227,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 反算目标时间（MDF 场景下通常为 offset=0, factor=1，x 即时间）
         target_time = (x - self.offset) / self.factor
 
-        # 使用第一个变量确定目标 group
-        first_var = var_names[0]
+        target_var = next((v for v in var_names if dlg.has_column(v)), None)
+        if target_var is None:
+            return
         try:
-            group_index = loader.get_var_group_index(first_var)
+            group_index = loader.get_var_group_index(target_var)
         except KeyError:
             return
 
-        dlg.locate_time(group_index, float(target_time))
+        dlg.locate_time(group_index, float(target_time), var_name=target_var)
 
     def auto_range(self, external_xmin: float | None = None, external_xmax: float | None = None):
         """自动调整视图范围 → 委托到 AxisManager"""
