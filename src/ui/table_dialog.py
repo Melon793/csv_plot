@@ -721,7 +721,6 @@ class DataTableDialog(QMainWindow):
         if self._tab_container_widget:
             self._tab_container_widget.setVisible(True)
 
-        logger.debug("DataTableDialog 切换到 MDF tab 模式")
 
     def _focus_search(self):
         """聚焦变量定位下拉框并全选，便于直接输入过滤。"""
@@ -853,11 +852,6 @@ class DataTableDialog(QMainWindow):
         锚点被隐藏 G1 的滚动信号覆写为其末尾时刻 → 切换直接跳末尾）。
         """
         if self._tab_sync_guard:
-            logger.debug(
-                state.group_index,
-                row,
-                self._current_time_anchor,
-            )
             return
         _cur = (
             self._group_state_by_widget_index(self._tab_widget.currentIndex())
@@ -892,10 +886,6 @@ class DataTableDialog(QMainWindow):
         target = self._group_state_by_widget_index(index)
         self._prev_tab_index = index
         if target is None or target.view is None or target.model is None:
-            logger.debug(
-                index,
-                target is not None,
-            )
             return
 
         anchor = self._current_time_anchor
@@ -908,10 +898,6 @@ class DataTableDialog(QMainWindow):
                 # 用 min/max 而非 t[0]/t[-1] 判覆盖：对单调轴两者等价，
                 # 还能兼容 asammdf 跨块拼装出的非单调轴
                 in_range = float(t.min()) <= anchor <= float(t.max())
-            else:
-                logger.debug(
-                    len(_state_time_array(target)),
-                )
             if in_range:
                 row = _nearest_time_row(_state_time_array(target), anchor)
                 # scrollTo 而非 sb.setValue：后者在尾部 pageStep-1 行被钓制，
@@ -920,19 +906,9 @@ class DataTableDialog(QMainWindow):
                     target.model.index(row, 0),
                     QAbstractItemView.ScrollHint.PositionAtTop,
                 )
-                logger.debug(
-                    row,
-                    target.view.verticalScrollBar().value(),
-                    target.view.verticalScrollBar().maximum(),
-                )
             else:
                 # 锚点越界（或无锚点）：保持该表自己的历史位置
                 target.view.verticalScrollBar().setValue(target.scroll_pos)
-                logger.debug(
-                    target.scroll_pos,
-                    target.view.verticalScrollBar().value(),
-                    target.view.verticalScrollBar().maximum(),
-                )
         finally:
             self._tab_sync_guard = False
 
@@ -979,13 +955,6 @@ class DataTableDialog(QMainWindow):
                 self._tab_sync_guard = False
                 # scroll_pos 统一存像素值（与 _on_tab_switched 一致）
                 state.scroll_pos = state.view.verticalScrollBar().value()
-                logger.debug(
-                    group_index,
-                    row,
-                    state.view.verticalScrollBar().value(),
-                    state.view.verticalScrollBar().maximum(),
-                    self._current_time_anchor,
-                )
 
         QTimer.singleShot(0, _do)
         return True
@@ -1034,7 +1003,6 @@ class DataTableDialog(QMainWindow):
         self.splitter.setVisible(True)
         if self.model is not None:
             self._update_views()
-        logger.debug("DataTableDialog 退出 MDF tab 模式，已释放 %d 个 tab", len(tabs))
 
     @staticmethod
     def _align_len(values: np.ndarray, n: int) -> np.ndarray:
@@ -1427,12 +1395,6 @@ class DataTableDialog(QMainWindow):
                 logger.warning("MDF 变量 '%s' 无法获取 group 信息", var_name)
                 return
 
-            logger.debug(
-                var_name,
-                group_index,
-                self._tab_mode,
-                sorted(self._group_tabs),
-            )
             self._add_variable_to_tab(var_name, group_index)
             return
 
@@ -2467,12 +2429,6 @@ class DataTableDialog(QMainWindow):
         """
         if loader is None:
             return
-        logger.debug(
-            self._loader_identity(loader),
-            self._tab_mode,
-            sorted(self._group_tabs),
-            self._current_time_anchor,
-        )
         old_flat = self._table_vars_snapshot or self.get_column_names()
         old_by_group = self._tab_vars_snapshot or {}
         self._table_vars_snapshot = []
