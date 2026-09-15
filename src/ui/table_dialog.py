@@ -1068,6 +1068,18 @@ class DataTableDialog(QMainWindow):
         pad = np.full(n - len(values), None, dtype=object)
         return np.concatenate([values.astype(object), pad])
 
+    @staticmethod
+    def _row_header_width(n_rows: int, font: QFont) -> int:
+        """行号列定宽：按最大行号的位数估算，下限 48px。
+
+        行号表头右对齐，宽度不够时被裁的是左边的**高位**数字：实测 48px 只
+        容得下 5 位，100Hz 长时程文件的 6 位行号会显示成“03580”（实为 103580），
+        用户无从察觉。不用 ResizeToContents：万行表逐节测量代价大。
+        取 "9"×位数而非 str(n_rows)：“9” 是最宽的字形，估计偏保守。
+        """
+        digits = max(4, len(str(max(1, n_rows))))
+        return max(48, QFontMetrics(font).horizontalAdvance("9" * digits) + 10)
+
     def _add_variable_to_tab(
         self,
         var_name: str,
@@ -1157,8 +1169,10 @@ class DataTableDialog(QMainWindow):
             # 行号，打开内建表头即可，不要 ResizeToContents（万行表测量代价大）
             vh = tab_view.verticalHeader()
             vh.setVisible(True)
-            vh.setMinimumWidth(48)
-            vh.setMaximumWidth(48)
+            # 宽度跟着该 group 的行数走：固定 48px 在 6 位以上行号会裁掉高位
+            vh_width = self._row_header_width(len(tab_df), tab_view.font())
+            vh.setMinimumWidth(vh_width)
+            vh.setMaximumWidth(vh_width)
             vh.setDefaultAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
