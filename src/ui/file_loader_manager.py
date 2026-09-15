@@ -1032,7 +1032,33 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw.value_cache = OrderedDict()
                 self.mw._enum_text_maps = {}
             except Exception:
-                pass
+                logger.debug("清空 value_cache/_enum_text_maps 失败", exc_info=True)
+
+    def _refresh_table_dialog(self, loader):
+        """数值表窗口开着时就地重建内容，并按重建结果决定 show / 关闭。
+
+        单独成方法有两个理由：
+        1. update_data 在表空时会自行 close()，而 closeEvent 经类名把
+           DataTableDialog._instance 置 None —— 必须取本地引用并先比对
+           身份，继续解引用类属性会抛 AttributeError 并中断加载后续步骤；
+        2. tab 模式下 _df 恒空，必须用 has_table_content 统一判据，
+           否则重建好的 tab 窗口会被误判为空而直接关闭。
+        """
+        from src.ui.table_dialog import DataTableDialog
+
+        dlg = DataTableDialog._instance
+        if dlg is None:
+            return
+        dlg.update_data(loader)
+        if DataTableDialog._instance is not dlg:
+            logger.debug("数值表重建后无内容，已自行关闭")
+        elif dlg.has_table_content():
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        else:
+            dlg.set_skip_close_confirmation(True)
+            dlg.close()
 
     def _post_load_actions(self, file_path: str, is_reload: bool = False):
         self.mw.loaded_path = file_path
@@ -1304,19 +1330,7 @@ class FileLoaderManager(MainWindowBaseManager):
         # v5.11: reload 场景下跳过 pin 状态重置，保留 _restore_cursor_state_after_reload 恢复的 cursor 状态
         self.mw.cursor_sync_manager.replots_after_loading(skip_pin_reset=is_reload)
 
-        from src.ui.table_dialog import DataTableDialog
-
-        if DataTableDialog._instance is not None:
-            DataTableDialog._instance.update_data(self.mw.loader)
-            # tab 模式下 _df 恒空，必须用 has_table_content 统一判据，
-            # 否则重建好的 tab 窗口会被误判为空而直接关闭
-            if DataTableDialog._instance.has_table_content():
-                DataTableDialog._instance.show()
-                DataTableDialog._instance.raise_()
-                DataTableDialog._instance.activateWindow()
-            else:
-                DataTableDialog._instance.set_skip_close_confirmation(True)
-                DataTableDialog._instance.close()
+        self._refresh_table_dialog(self.mw.loader)
 
         # 就地更新打开的绘图变量编辑器（搜索栏数据源）：
         # 编辑器为非模态多实例（不能用单例模式），逐个通知；

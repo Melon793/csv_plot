@@ -693,7 +693,9 @@ class DataTableDialog(QMainWindow):
         窗口直接关掉（file_loader_manager）或误判弹窗内容已清空。
         """
         if self._group_tabs:
-            return True
+            # 空 group（cycles_nr=0）也会生成 tab，只判 dict 非空会把 0 行
+            # 的空 tab 误判为“有内容”，重载后弹出一个空白窗口而非自动关闭
+            return any(len(st.df) > 0 for st in self._group_tabs.values())
         return self._df is not None and not self._df.empty
 
     def _switch_to_tab_mode(self):
@@ -808,9 +810,15 @@ class DataTableDialog(QMainWindow):
         delegate = tab_state.view.itemDelegate()
         if isinstance(delegate, CustomDelegate):
             self._blink_step_on(delegate, col_idx, tab_state.view)
+            # off 回调同样需要代际令牌：闪烁窗口期（800ms）内若发生
+            # _reset_tab_mode，该 view 已被 deleteLater，过期回调访问
+            # 已销毁的 C++ 对象会抛 RuntimeError
+            gen = self._gen
             QTimer.singleShot(
                 pulse,
-                lambda: self._blink_step_off(delegate, col_idx, tab_state.view),
+                lambda g=gen, d=delegate, c=col_idx, v=tab_state.view: (
+                    self._blink_step_off(d, c, v) if g == self._gen else None
+                ),
             )
 
     def _group_state_by_widget_index(self, widget_index: int):
@@ -889,7 +897,6 @@ class DataTableDialog(QMainWindow):
             return
 
         anchor = self._current_time_anchor
-        _sb = target.view.verticalScrollBar()
         self._tab_sync_guard = True
         try:
             in_range = False
@@ -1021,19 +1028,49 @@ class DataTableDialog(QMainWindow):
         return np.concatenate([values, pad])
 
     def _add_variable_to_tab(
-        self, var_name: str, group_index: int
+        self,
+        var_name: str,
+        group_index: int,
+        loader=None,
     ) -> _GroupTabState | None:
         """将变量添加到指定 group 的 tab。返回对应的 _GroupTabState。
 
         由 _add_variable_to_table（MDF 分支）与 update_data 重建路径调用，
         内部自带 _switch_to_tab_mode，保证任何入口下 _tab_mode 与
         _group_tabs 一致（旧版存在“建了 tab 但未切模式→加了看不见”的缝）。
+
+        Args:
+            var_name: 变量名
+            group_index: 目标 channel group 索引（内部会按名校正）
+            loader: 取数用的 loader；缺省回退到 owner 的当前 loader。
+                update_data 必须显式下传入参 loader，否则会出现
+                “按新 loader 查 group、按旧 loader 取数”的静默串数据。
         """
-        loader = self._resolve_loader()
+        if loader is None:
+            loader = self._resolve_loader()
         if loader is None:
             return None
         if not self._tab_mode:
             self._switch_to_tab_mode()
+
+        # group 归属以变量名为准：调用方（update_data 拿的是旧文件的 group
+        # 快照）传入的 group_index 在新数据里语义可能不同，直接沿用会把变量
+        # 塞进错误的时间轴——行数以该轴为准做截断/填充，数据看起来正常但时刻
+        # 全错，用户无从察觉
+        get_gi = getattr(loader, "get_var_group_index", None)
+        if callable(get_gi):
+            try:
+                real_gi = get_gi(var_name)
+            except KeyError:
+                real_gi = group_index  # 变量不存在，交给下方 get_series 报错
+            if real_gi != group_index:
+                logger.warning(
+                    "变量 '%s' 实属 G%d，却请求加入 G%d tab，已按名归位",
+                    var_name,
+                    real_gi,
+                    group_index,
+                )
+                group_index = real_gi
 
         # 获取 group 时间数组
         try:
@@ -1056,11 +1093,13 @@ class DataTableDialog(QMainWindow):
             state = self._group_tabs[group_index]
             if var_name in state.df.columns:
                 return state  # 已存在
-            _rows_before = len(state.df)
-            _len_time = len(_state_time_array(state))
             state.df[var_name] = self._align_len(y_data, len(state.df))
             state.model = PandasTableModel(state.df, self.units)
             state.view.setModel(state.model)
+            # 与新 tab 分支对齐：切到该列所在页。否则向非当前 tab 加列时
+            # “加了看不见”，且调用方随后打在隐藏页上的闪烁用户完全看不到
+            if self._tab_widget is not None:
+                self._tab_widget.setCurrentIndex(state.widget_index)
             self._refresh_var_locator_items()
             return state
         else:
@@ -1119,9 +1158,6 @@ class DataTableDialog(QMainWindow):
             if self._tab_widget is None:
                 return None
             widget_index = self._tab_widget.addTab(tab_view, f"G{group_index}")
-            # 新 tab 自动切换为当前页（旧版不切页：双击新 group 变量时
-            # 闪烁打在隐藏页，用户视角“加了看不见”）
-            self._tab_widget.setCurrentIndex(widget_index)
             # 设置 tooltip
             try:
                 label = loader.get_group_label(group_index)
@@ -1137,10 +1173,16 @@ class DataTableDialog(QMainWindow):
                 time_array=time_array,
                 widget_index=widget_index,
             )
+            # 注册与滚动监听必须先于切页：setCurrentIndex 同步触发
+            # _on_tab_switched，而它第一步就按 widget_index 反查 state，
+            # 查不到直接 return → 新建 tab 停在第 0 行、时间锚点同步失效
+            # （_bind 前置也安全：程序化滚动仍被 _tab_sync_guard 抑制）
             self._group_tabs[group_index] = state
             self._bind_tab_scroll_sync(state)
             self._refresh_var_locator_items()
-            _t = np.asarray(time_array)
+            # 新 tab 自动切换为当前页（旧版不切页：双击新 group 变量时
+            # 闪烁打在隐藏页，用户视角“加了看不见”）
+            self._tab_widget.setCurrentIndex(widget_index)
             return state
 
     def _update_user_left_width(self, pos, index):
@@ -2419,8 +2461,9 @@ class DataTableDialog(QMainWindow):
         唯一真相，而 `_df` 在本方法前已被清掉 → 全路径提前 return，成为
         死代码，tab 模式状态残留界面）。
 
-        - 新数据 MDF：逐变量经 _add_variable_to_tab 重建 tab（内部自动切
-          tab 模式；旧 group 索引在新文件里语义可能不同，按名反查归位）
+        - 新数据 MDF：逐变量先按名反查 group、再经 _add_variable_to_tab 重建
+          tab（内部自动切 tab 模式；旧 group 索引在新文件里语义可能不同，
+          不可沿用）
         - 新数据 CSV/Excel：单表逐列重建
         新数据中不存在的列计入 removed 并提示。
 
@@ -2441,21 +2484,25 @@ class DataTableDialog(QMainWindow):
         removed: list[str] = []
 
         if is_mdf:
-            for gi in sorted(old_by_group):
-                for col in old_by_group[gi]:
-                    if self._add_variable_to_tab(col, gi) is None:
-                        removed.append(col)
-            # 清单未覆盖的变量（如快照缺失）按名反查 group 归位
-            covered = {c for cols in old_by_group.values() for c in cols}
-            for col in old_flat:
-                if col in covered:
-                    continue
+            # 一律按名反查 group：快照里的 gi 属于旧文件，新文件里同一序号
+            # 可能指向另一个 channel group（换设备/换工步很常见），沿用会
+            # 把变量对齐到错误时间轴。合并两个来源后按新 group 排序，
+            # 保证 tab 创建顺序仍按 group 递增
+            rebuild_vars = [*old_flat]
+            seen = set(rebuild_vars)
+            for cols in old_by_group.values():
+                for col in cols:
+                    if col not in seen:
+                        seen.add(col)
+                        rebuild_vars.append(col)
+            keyed: list[tuple[int, str]] = []
+            for col in rebuild_vars:
                 try:
-                    gi = loader.get_var_group_index(col)
+                    keyed.append((loader.get_var_group_index(col), col))
                 except KeyError:
                     removed.append(col)
-                    continue
-                if self._add_variable_to_tab(col, gi) is None:
+            for gi, col in sorted(keyed):
+                if self._add_variable_to_tab(col, gi, loader=loader) is None:
                     removed.append(col)
         else:
             new_df = pd.DataFrame()
