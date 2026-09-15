@@ -987,7 +987,7 @@ def test_tab_bar_context_menu_is_wired(shown_tab_dialog, menu_stub):
     assert menu_stub.menus, "信号未接通 handler → 右键不会弹菜单"
 
 
-def test_tab_bar_context_menu_items_and_counts(shown_tab_dialog, menu_stub):
+def test_tab_bar_context_menu_items(shown_tab_dialog, menu_stub):
     """菜单四项的文本必须带准确数量（构建菜单时就算，不靠事后“猜”）。"""
     dlg = shown_tab_dialog
     dlg._add_variable_to_tab("Press_G0", 0)
@@ -1005,6 +1005,53 @@ def test_tab_bar_context_menu_items_and_counts(shown_tab_dialog, menu_stub):
     acts = menu_stub.menus[-1].actions()
     assert acts[2].isSeparator(), "“添加”与“关闭”两组之间必须有分隔线"
     assert all(a.isEnabled() for a in acts if not a.isSeparator())
+    # tooltip 必须同时给出页号与组名：标签上只写 G0，组名只存在于 tab tooltip
+    tip = acts[0].toolTip()
+    assert "G0" in tip and "尚未添加的 2 个变量加入本页" in tip, tip
+
+
+def test_add_group_item_greys_out_when_loader_lacks_group_api(
+    shown_tab_dialog, menu_stub
+):
+    """CSV/Excel 的 loader 没有 get_group_variables → 置灰并说明原因。
+
+    这走的是 _pending_group_var_count 的 -1 分支：不能错报成“+0 列”，也不能“点了
+    没反应”：静默无效是这类菜单最糟糕的失败模式。
+    """
+    dlg = shown_tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    dlg._resolve_loader = lambda: FakeCsvLoader(state.df)
+    pump(50)
+
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
+
+    add_act = next(a for a in menu_stub.menus[-1].actions() if "本组其余变量" in a.text())
+    assert add_act.text() == "添加本组其余变量（数据源不可用）"
+    assert not add_act.isEnabled()
+    assert dlg._pending_group_var_count(state) == -1
+    # 关闭系项与数据源无关，必须照常可用
+    assert "关闭此标签页（移除 1 个变量）" in _tab_menu_texts(menu_stub)
+
+
+def test_add_group_remaining_from_tab_menu_adds_all_missing_columns(
+    shown_tab_dialog, mdf_loader, menu_stub, monkeypatch
+):
+    """从菜单项进批量添加的完整派发路径（其余用例都是直调 method）。
+
+    handler 里“选中 act_add_group → _add_group_remaining_variables”这一行分发
+    写错（归错动作、或 DRY 下用 is 比较包装对象失配）时，只有从菜单入口才能发现。
+    """
+    dlg = shown_tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    pump(50)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
+    menu_stub.pick = _tab_menu_pick(menu_stub, "添加本组其余变量")
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
+
+    assert set(state.df.columns) == {"time"} | set(mdf_loader.get_group_variables(0))
+    assert dlg._var_locator.count() == 3
 
 
 def test_single_tab_menu_hides_close_others(shown_tab_dialog, menu_stub):
@@ -1110,7 +1157,7 @@ def test_add_group_remaining_asks_confirmation_above_threshold(tab_dialog, monke
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     asked = _stub_answer(monkeypatch, QMessageBox.StandardButton.No)
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 0)
+    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
 
     dlg._add_group_remaining_variables(state)
 
@@ -1128,7 +1175,7 @@ def test_bulk_add_time_estimate_comes_from_measured_probe(tab_dialog, monkeypatc
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     probed: list = []
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 0)
+    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
     monkeypatch.setattr(
         DataTableDialog,
         "_probe_series_seconds",
@@ -1147,7 +1194,7 @@ def test_add_group_remaining_confirmation_yes_adds_all(tab_dialog, mdf_loader, m
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     _stub_answer(monkeypatch, QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 0)
+    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
 
     dlg._add_group_remaining_variables(state)
 
@@ -1158,7 +1205,7 @@ def test_add_group_remaining_cancel_keeps_added_columns(tab_dialog, monkeypatch)
     """进度框取消：保留已插入的列、照常重建一次模型，不整批回滚。"""
     dlg = tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
-    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 0)
+    monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_SILENT_COLS", 1)
     monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_PROGRESS_COLS", 0)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
