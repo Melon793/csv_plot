@@ -1,6 +1,7 @@
 """变量数值表对话框 —— DataTableDialog + 相关辅助类"""
 
 from __future__ import annotations
+import time
 import weakref
 from dataclasses import dataclass
 from threading import Lock
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QComboBox,
     QCompleter,
+    QProgressDialog,
 )
 from src.core.config import FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE
 from src.ui.drag_drop import parse_var_names_from_mimedata
@@ -58,6 +60,20 @@ class _GroupTabState:
 
 # 无时间轴时的共用空数组（避免每次判定都新建 ndarray）
 _EMPTY_TIME = np.array([], dtype=np.float64)
+
+# 「添加本组其余变量」的分级保护阈值（集中在模块级，便于按实际文件规模调整）。
+# 静默档的选取依据：实测某 776MB/317 组的 mf4，315 个非空组里 260 个 ≤ 20 列，
+# 这些组一次加完只占几十 MB、不到 1 秒，弹框纯属打扰。
+_BULK_ADD_SILENT_COLS = 30
+_BULK_ADD_SILENT_MB = 50
+# 超过风险档后确认框的默认焦点改到「取消」：734 列 x 17 万行要 1 GB 内存、26 秒
+_BULK_ADD_RISK_COLS = 150
+_BULK_ADD_RISK_MB = 200
+# 硬上限：再多就不可能是“看一眼本组”的意图，引导用户改用逐个拖拽
+_BULK_ADD_MAX_COLS = 2000
+_BULK_ADD_PROGRESS_COLS = 30
+# 实测单通道 get_series 平均 34.8 ms（同上文件），用于确认框里的耗时预估
+_BULK_ADD_SEC_PER_COL = 0.035
 
 
 def _nearest_time_row(time_array: np.ndarray, target_time: float) -> int:
@@ -656,6 +672,11 @@ class DataTableDialog(QMainWindow):
         self._tab_widget.setTabsClosable(False)
         self._tab_widget.setMovable(False)
         self._tab_widget.currentChanged.connect(self._on_tab_switched)
+        # 标签栏右键＝页级操作（批量添加本组变量/关闭标签页）。与表头右键菜单
+        # 分工：表头面向“某一列”，标签面向“整页”
+        tab_bar = self._tab_widget.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._on_tab_bar_right_click)
         layout.addWidget(self._tab_widget)
 
         # 添加到主布局（在 splitter 之后）
@@ -2493,6 +2514,279 @@ class DataTableDialog(QMainWindow):
             # 删的是当前页：补做一次切页，让顶上来的页对齐全局时间锚点
             self._on_tab_switched(tw.currentIndex())
         self._refresh_var_locator_items()
+
+    # ---------- tab 标签右键菜单：页级操作 ----------
+
+    def _tab_var_count(self, state: _GroupTabState) -> int:
+        """页内变量列数（不含 time 首列），用于菜单与确认框里的数量文案。"""
+        return sum(1 for c in state.df.columns if c != "time")
+
+    def _group_tab_label(self, state: _GroupTabState) -> str:
+        """标签的可读名：优先用 loader 的 group 标签，取不到回落 G{gi}。"""
+        loader = self._resolve_loader()
+        getter = getattr(loader, "get_group_label", None)
+        if getter is not None:
+            try:
+                return str(getter(state.group_index))
+            except Exception:
+                logger.debug("get_group_label(%s) 失败", state.group_index, exc_info=True)
+        return f"G{state.group_index}"
+
+    def _pending_group_var_count(self, state: _GroupTabState) -> int:
+        """本组尚未加入本页的变量数；返回 -1 表示数据源不提供该能力。
+
+        CSV/Excel 的 loader 没有 get_group_variables，测试替身也可能没有，
+        统一用 -1 让菜单把该项置灰而不是抛异常或静默无效。
+        """
+        loader = self._resolve_loader()
+        getter = getattr(loader, "get_group_variables", None)
+        if getter is None:
+            return -1
+        try:
+            names = getter(state.group_index)
+        except Exception:
+            logger.warning("get_group_variables(%s) 失败", state.group_index, exc_info=True)
+            return -1
+        return len([n for n in names if n not in state.df.columns])
+
+    @staticmethod
+    def _fmt_mem(mb: float) -> str:
+        """内存预估的可读写法：确认框里“0.05 GB”这种读数不如 MB 直观。"""
+        return f"{mb / 1000:.2f} GB" if mb >= 1000 else f"{mb:,.0f} MB"
+
+    @staticmethod
+    def _fmt_secs(sec: float) -> str:
+        """耗时预估的读法：不足 1 秒写成“不到 1 秒”，否则带上“约”字。"""
+        return "不到 1 秒" if sec < 1 else f"约 {sec:.0f} 秒"
+
+    @staticmethod
+    def _probe_series_seconds(loader, name) -> float:
+        """实测单列取数耗时，用于确认框里的耗时预估（失败时回落常数）。
+
+        不能直接用固定常数：同一文件里单列成本实测相差 15 倍（G310 32 ms/列、
+        G158 2.2 ms/列，差异来自通道转换复杂度，与行数无关），拿 35 ms/列去
+        预计 G158 会把它说成 7 秒（实际 0.4 秒），一个不准的读数会让用户
+        索性忽略所有提醒。该列进 loader 缓存，后面循环里再取一次几乎零成本。
+        """
+        t0 = time.perf_counter()
+        try:
+            loader.get_series(name)
+        except Exception:
+            logger.debug("批量添加前预估耗时的试探取数失败，改用常数估计", exc_info=True)
+            return _BULK_ADD_SEC_PER_COL
+        return max(0.001, time.perf_counter() - t0)
+
+    def _on_tab_bar_right_click(self, pos):
+        """tab 标签右键菜单：添加本组其余变量 / 关闭本页 / 关闭其他 / 关闭所有。
+
+        页序变动时 widget_index 会陈旧，所以命中后一律用 view 对象身份反查
+        state：PySide6 的 QTabBar 不暴露 logicalIndexFromTabIndex，tabAt 拿到
+        的是视觉索引，只能靠 setMovable(False) 保证两者一致，反查是最后一道闸。
+        """
+        tw = self._tab_widget
+        if tw is None:
+            return
+        tab_bar = tw.tabBar()
+        idx = tab_bar.tabAt(pos)
+        state = self._group_state_by_view(tw.widget(idx)) if idx >= 0 else None
+        if state is None:
+            # 落在标签右侧空白、或反查不到 state：宁可不弹，也不能对错误的 tab 动手
+            return
+
+        menu = QMenu(self)
+        pending = self._pending_group_var_count(state)
+        if pending > 0:
+            act_add_group = menu.addAction(f"添加本组其余变量（+{pending} 列）")
+            act_add_group.setToolTip(
+                f"把 {self._group_tab_label(state)} 中尚未添加的 {pending} 个变量加入本页"
+            )
+        elif pending == 0:
+            act_add_group = menu.addAction("本组变量已全部添加")
+            act_add_group.setEnabled(False)
+        else:
+            act_add_group = menu.addAction("添加本组其余变量（数据源不可用）")
+            act_add_group.setEnabled(False)
+
+        n_vars = self._tab_var_count(state)
+        act_close = menu.addAction(
+            f"关闭此标签页（移除 {n_vars} 个变量）" if n_vars else "关闭此标签页"
+        )
+
+        others = [st for gi, st in self._group_tabs.items() if gi != state.group_index]
+        act_close_others = act_close_all = None
+        if others:
+            menu.addSeparator()
+            act_close_others = menu.addAction(
+                f"关闭其他标签页（{len(others)} 页 / "
+                f"{sum(self._tab_var_count(st) for st in others)} 个变量）"
+            )
+            all_states = list(self._group_tabs.values())
+            act_close_all = menu.addAction(
+                f"关闭所有标签页（{len(all_states)} 页 / "
+                f"{sum(self._tab_var_count(st) for st in all_states)} 个变量）"
+            )
+
+        selected = menu.exec(tab_bar.mapToGlobal(pos))
+        if selected is None:
+            return
+        # 用 == 而非 is：从 actions()/exec() 取回的可能是同一 C++ QAction 的
+        # 另一个 Python 包装对象（测试里的 _NoExecMenu 就是这样返回动作的）
+        if selected == act_add_group and pending > 0:
+            self._add_group_remaining_variables(state)
+        elif selected == act_close:
+            self._close_tab(state)
+        elif selected == act_close_others:
+            self._close_tabs([st.group_index for st in others], len(others))
+        elif selected == act_close_all:
+            indexes = list(self._group_tabs.keys())
+            self._close_tabs(indexes, len(indexes))
+
+    def _add_group_remaining_variables(self, state: _GroupTabState):
+        """把本组尚未添加的变量一次性加进当前页。
+
+        与 _add_variable_to_tab 的关键差别：后者每列都重建 model + setModel +
+        刷新定位框，逐列调 N 次在 700+ 列的组上必然假死；这里逐列只写进 df，
+        结束时一次性重建。不做 df.copy() 去碎片：实测碎片化对 iloc 取值只有
+        +7% 开销（一屏约 600 格 = 2.8 ms），而 copy 会让峰值内存翻倍。
+        """
+        loader = self._resolve_loader()
+        getter = getattr(loader, "get_group_variables", None)
+        if getter is None:
+            return
+        names = list(getter(state.group_index))
+        todo = [n for n in names if n not in state.df.columns]
+        if not todo:
+            return
+
+        rows = len(state.df)
+        est_mb = len(todo) * max(rows, 1) * 8 / 1e6
+
+        if len(todo) > _BULK_ADD_MAX_COLS:
+            QMessageBox.information(
+                self,
+                "本组变量过多",
+                f"本组尚有 {len(todo)} 个变量未添加，预计占用约 {self._fmt_mem(est_mb)} 内存。\n"
+                "请改用变量列表按需拖拽添加。",
+            )
+            return
+
+        need_gate = len(todo) > _BULK_ADD_SILENT_COLS or est_mb > _BULK_ADD_SILENT_MB
+        est_sec = len(todo) * self._probe_series_seconds(loader, todo[0]) if need_gate else 0.0
+
+        if need_gate:
+            risky = len(todo) > _BULK_ADD_RISK_COLS or est_mb > _BULK_ADD_RISK_MB
+            reply = QMessageBox.question(
+                self,
+                "添加本组其余变量",
+                f"本组（{self._group_tab_label(state)}）共 {len(names)} 个变量，"
+                f"其中 {len(todo)} 个尚未添加。\n"
+                f"当前时间轴 {rows:,} 行，预计占用约 {self._fmt_mem(est_mb)} 内存、"
+                f"耗时{self._fmt_secs(est_sec)}。\n"
+                "继续将把整组变量加入同一个标签页，期间可取消（已添加的列会保留）。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No if risky
+                else QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        progress = None
+        if len(todo) > _BULK_ADD_PROGRESS_COLS:
+            progress = QProgressDialog("正在添加本组变量…", "取消", 0, len(todo), self)
+            progress.setWindowTitle("添加本组其余变量")
+            progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            progress.setAutoClose(False)
+            progress.setMinimumDuration(0)
+            progress.show()
+
+        added: list[str] = []
+        skipped: list[str] = []
+        try:
+            for i, name in enumerate(todo):
+                if progress is not None and progress.wasCanceled():
+                    break
+                try:
+                    arr = loader.get_series(name).to_numpy()
+                except Exception:
+                    skipped.append(name)
+                    logger.warning("批量添加取数失败，跳过变量 %s", name, exc_info=True)
+                else:
+                    state.df[name] = self._align_len(arr, rows)
+                    added.append(name)
+                if progress is not None:
+                    progress.setValue(i + 1)
+                    QApplication.processEvents()
+                elif (i + 1) % 50 == 0:
+                    # 无进度框时也让界面能重绘/响应，否则大组取数期间窗口无响应
+                    QApplication.processEvents()
+        finally:
+            if progress is not None:
+                progress.close()
+
+        if added:
+            state.model = PandasTableModel(state.df, self.units)
+            state.view.setModel(state.model)
+            self._refresh_var_locator_items()
+            # 定位到第一个新列、不闪烁：734 列时闪烁既无意义又拖时间；
+            # 垂直零位移由 _scroll_tab_to_column 内部保证，不必再存取滚动位置
+            self._scroll_tab_to_column(state, added[0], blink=False)
+
+        if skipped:
+            shown = ", ".join(skipped[:10]) + (" …" if len(skipped) > 10 else "")
+            logger.warning("批量添加本组变量：跳过 %d 个取数失败的通道（%s）", len(skipped), shown)
+            if added:
+                QMessageBox.information(
+                    self,
+                    "部分变量未添加",
+                    f"{len(added)} 个变量已加入本页；{len(skipped)} 个取数失败已跳过：{shown}",
+                )
+            else:
+                QMessageBox.information(
+                    self, "添加失败", f"{len(skipped)} 个变量取数失败，本页未发生变化：{shown}"
+                )
+
+    def _close_tab(self, state: _GroupTabState):
+        """关闭一个标签页（含页内全部变量列），确认后复用 _remove_tab。"""
+        cols = [str(c) for c in state.df.columns if c != "time"]
+        shown = ", ".join(cols[:10]) + (" …" if len(cols) > 10 else "")
+        reply = QMessageBox.question(
+            self,
+            f"关闭标签页 {self._group_tab_label(state)}",
+            f"将关闭该标签页并移除本页 {len(cols)} 个变量列（{shown}）。\n"
+            "已绘制的曲线不受影响；但重载数据后这些变量不会自动恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._remove_tab(state)
+
+    def _close_tabs(self, group_indexes: list[int], pages: int):
+        """批量关闭标签页（其他/所有）：一次确认，不逐页弹框。
+
+        循环里按 group_index 重新取 state：_remove_tab 会改 _group_tabs（最后一个
+        被删空时还会 _reset_tab_mode），拿循环前的 state 对象引用会越用越陈旧。
+        """
+        targets = set(group_indexes)
+        n_vars = sum(
+            self._tab_var_count(st)
+            for gi, st in self._group_tabs.items()
+            if gi in targets
+        )
+        reply = QMessageBox.question(
+            self,
+            "关闭标签页",
+            f"将关闭 {pages} 个标签页，共移除 {n_vars} 个变量列。\n"
+            "已绘制的曲线不受影响；但重载数据后这些变量不会自动恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for gi in group_indexes:
+            st = self._group_tabs.get(gi)
+            if st is not None:
+                self._remove_tab(st)
 
     def _clear_all_columns(self):
         reply = QMessageBox.question(

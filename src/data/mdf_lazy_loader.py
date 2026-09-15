@@ -112,10 +112,13 @@ class MDFLazyLoader:
         self._build_aggregated_properties()
 
         self._notify_progress(100)
+        # 旧写法打印 self._current_group_index + 1（当前查看的组序号+1），未加载
+        # 任何组之前恒为 1，日志里那句“1 组”与真实组数无关，排查 tab 问题时
+        # 严重误导（实测 776MB 文件 317 组被记成 1 组）。
         logger.info(
-            "MDF 加载完成: %d 个信号, %d 组",
+            "MDF 加载完成: %d 个信号, %d 个 channel group",
             len(self._metadata),
-            self._current_group_index + 1,
+            self.group_count,
         )
 
     def __del__(self):
@@ -640,6 +643,27 @@ class MDFLazyLoader:
                 short = comment.strip()[:20]
                 return f"{short} (G{group_index})"
             return f"G{group_index}"
+
+    def get_group_variables(self, group_index: int) -> list[str]:
+        """列出指定 channel group 内的全部变量名（聚合后显示名，按通道顺序）。
+
+        必须读 self._metadata（聚合后）而不是 _raw_metadata：后者存的是文件里的
+        原始通道名，跨组重名时表格列名是 Press_G0/Press_G1（见
+        _build_aggregated_properties 的 conflict_names 分支），用原始名去
+        get_series 会 KeyError。时间通道在聚合时已被排除，无需再过滤。
+
+        未知 group 返回空列表（与 get_group_time_array 对越界 group 的宽容处理
+        一致，UI 侧不必 try/except）。
+
+        Args:
+            group_index: channel group 索引
+
+        Returns:
+            list[str]: 该组的变量显示名，顺序与文件内通道顺序一致
+        """
+        with self._access_lock:
+            self._ensure_open()
+            return [m.name for m in self._metadata if m.group_index == group_index]
 
     def search_variables(
         self, keyword: str, limit: int = 50

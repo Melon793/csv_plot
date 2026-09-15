@@ -475,7 +475,7 @@ class TestGetSamplesChunked:
 
 class TestGroupLevelAccess:
     """覆盖 ``get_var_group_index`` / ``get_group_time_array`` /
-    ``get_group_label`` / ``search_variables`` 四个新方法。
+    ``get_group_label`` / ``get_group_variables`` / ``search_variables`` 五个新方法。
 
     合成文件结构（write_mdf n=12, with_single_shot_group=True,
     with_empty_group=True）：
@@ -553,6 +553,39 @@ class TestGroupLevelAccess:
         label = loader4.get_group_label(3)
         assert "G3" in label
         assert "EmptyGroup" in label
+
+    # -- get_group_variables ------------------------------------------------
+
+    def test_get_group_variables_returns_aggregated_display_names(self, loader4):
+        """必须返回聚合后显示名 Press_G0，而不是文件里的原始通道名 Press。
+
+        表格列名用的就是显示名，调用方拿原始名去 get_series 会 KeyError；
+        而 _raw_metadata 恰好存的也是原始名，这一步读错来源不会报错、只会在
+        跨组重名的真实文件上静默加错列。
+        """
+        assert loader4.get_group_variables(0) == ["Press_G0", "State", "Label"]
+        assert loader4.get_group_variables(1) == ["Press_G1"]
+        assert "Press" not in loader4.get_group_variables(0)
+
+    def test_get_group_variables_excludes_time_channel(self, loader4):
+        """时间通道（master）不得混进来：tab 的 time 首列就是它，再加一次会得到两个同义列。"""
+        for gi in (0, 1, 3):
+            assert "time" not in loader4.get_group_variables(gi)
+
+    def test_get_group_variables_matches_var_names_membership(self, loader4):
+        """各组变量不重叠、且都是 var_names 的完整子集。"""
+        grouped = [n for gi in range(loader4.group_count)
+                   for n in loader4.get_group_variables(gi)]
+        assert len(grouped) == len(set(grouped))
+        assert set(grouped) <= set(loader4.var_names)
+
+    def test_get_group_variables_single_shot_group_is_absent(self, loader4):
+        """被 loader 跳过的 SingleShotGroup（gi=2）无元数据 → 空列表。"""
+        assert loader4.get_group_variables(2) == []
+
+    def test_get_group_variables_unknown_index(self, loader4):
+        """未知组返回空列表，与 get_group_time_array 的宽容处理一致（UI 侧不必 try）。"""
+        assert loader4.get_group_variables(999) == []
 
     # -- search_variables ---------------------------------------------------
 
