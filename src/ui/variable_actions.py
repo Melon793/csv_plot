@@ -31,7 +31,7 @@ def normalize_var_list(var_names) -> list[str]:
 
 
 def add_variables_to_data_table(var_names, main_window) -> None:
-    """添加至数值变量表（非模态单例窗口，内部会跳过已存在的列）"""
+    """添加至变量数值表（非模态单例窗口，内部会跳过已存在的列）"""
     var_list = normalize_var_list(var_names)
     if not var_list:
         return

@@ -68,7 +68,7 @@ def build_legend_var_mimedata(var_names: list[str], source_plot: Any) -> QMimeDa
     """legend 来源的 MIME：text/plain 兼容层 + 自定义格式携带源 plot id。
 
     text/plain 保持与变量列表拖拽一致，兼容所有现有 drop 目标
-    （数据表弹窗/变量编辑器等）；自定义格式仅供 plot drop 端识别来源。
+    （变量数值表/变量编辑器等）；自定义格式仅供 plot drop 端识别来源。
     """
     mime = build_var_mimedata(var_names)
     mime.setData(LEGEND_MIME_FORMAT, str(id(source_plot)).encode())

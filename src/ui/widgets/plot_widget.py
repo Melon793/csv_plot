@@ -138,7 +138,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not hasattr(main_window, 'loader') or main_window.loader is None:
             return
 
-        # a. 打开/激活数值变量表，并添加所有变量
+        # a. 打开/激活变量数值表，并添加所有变量
         is_mdf_loader = getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
         dlg = None
         # 实际入表的变量名：上面两个 continue 会跳过取数失败/列不存在的曲线，
@@ -161,7 +161,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if dlg is None:
             return
 
-        # 判断“数值变量表”窗口是否被最小化了，如果是，则恢复正常状态
+        # 判断“变量数值表”窗口是否被最小化了，如果是，则恢复正常状态
         if dlg.isMinimized():
             dlg.showNormal()
 

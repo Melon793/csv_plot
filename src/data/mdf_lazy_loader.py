@@ -561,7 +561,7 @@ class MDFLazyLoader:
         return x, y, unit, enum_map or {}
 
     # ------------------------------------------------------------------
-    # Group-level access (供数值变量表 tab 模式使用)
+    # Group-level access (供变量数值表 tab 模式使用)
     #
     # 这组接口为 UI 层提供 channel group 维度的数据访问能力，
     # 使 DataTableDialog 可按 group 分 tab 展示不同时间轴的变量。
@@ -646,7 +646,7 @@ class MDFLazyLoader:
     ) -> list[tuple[str, int, str]]:
         """跨所有 group 搜索变量名（大小写不敏感子串匹配）。
 
-        当前无 UI 调用方：数值表定位框只列“已加入表格”的变量（见
+        当前无 UI 调用方：变量数值表定位框只列“已加入表格”的变量（见
         DataTableDialog._refresh_var_locator_items），本方法作为 loader 的
         通用元数据接口保留，供后续全文件搜索类需求直接使用。
 

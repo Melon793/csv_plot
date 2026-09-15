@@ -1,4 +1,4 @@
-"""数据表格对话框 —— DataTableDialog + 相关辅助类"""
+"""变量数值表对话框 —— DataTableDialog + 相关辅助类"""
 
 from __future__ import annotations
 import weakref
@@ -307,8 +307,8 @@ class XYScatterPlotDialog(QDialog):
 
 class DataTableDialog(QMainWindow):
     """
-    数据表格对话框类
-    以独立窗口形式显示完整的数据表格
+    变量数值表对话框类
+    以独立窗口形式显示完整的变量数值表
     支持数据查看、搜索、排序和导出功能
     使用单例模式确保只有一个表格窗口实例
     """
@@ -354,7 +354,7 @@ class DataTableDialog(QMainWindow):
 
     @classmethod
     def add_variables(cls, var_names, parent=None):
-        """批量添加变量至数值变量表，复用拖拽逻辑"""
+        """批量添加变量至变量数值表，复用拖拽逻辑"""
         if isinstance(var_names, str):
             candidates = [var_names]
         else:
@@ -638,7 +638,7 @@ class DataTableDialog(QMainWindow):
         self._var_locator.setMaxVisibleItems(15)
         self._var_locator.lineEdit().setPlaceholderText("定位变量... (Ctrl+F)")
         self._var_locator.setToolTip(
-            "列出已添加到数值表的变量；输入关键字过滤，回车或点击选中项定位到对应列。"
+            "列出已添加到变量数值表的变量；输入关键字过滤，回车或点击选中项定位到对应列。"
         )
         self._var_locator.activated.connect(self._on_var_locator_activated)
         loc_layout = QHBoxLayout()
@@ -2112,7 +2112,7 @@ class DataTableDialog(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 "确认关闭",
-                "是否清除所有列表，并关闭数值变量表窗口？",
+                "是否清除所有列表，并关闭变量数值表窗口？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )

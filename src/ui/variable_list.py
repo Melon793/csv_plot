@@ -177,7 +177,7 @@ class MyTableWidget(QTableWidget):
     """
     自定义表格控件类
     扩展QTableWidget功能，支持拖拽、右键菜单等自定义交互
-    提供数据表格的增强显示和操作功能
+    提供变量列表表格的增强显示和操作功能
     """
 
     def __init__(self, parent=None):
@@ -379,8 +379,8 @@ class MyTableWidget(QTableWidget):
 
         menu = QMenu(self)
 
-        # a. 添加至数值变量表
-        act_add_table = QAction("添加至数值变量表", menu)
+        # a. 添加至变量数值表
+        act_add_table = QAction("添加至变量数值表", menu)
         act_add_table.triggered.connect(
             lambda: self._add_to_data_table(selected_var_names)
         )
@@ -443,7 +443,7 @@ class MyTableWidget(QTableWidget):
         VariableInfoDialog.popup(var_list, parent=main_window)
 
     def _add_to_data_table(self, var_names):
-        """添加至数值变量表 → 委托到 variable_actions"""
+        """添加至变量数值表 → 委托到 variable_actions"""
         add_variables_to_data_table(var_names, self.window())
 
     def _add_to_blank_plot(self, var_names):
@@ -534,7 +534,7 @@ class MyTableWidget(QTableWidget):
                 logger.warning("CSV 变量 '%s' 在 DataFrame 中不存在", var_name)
                 return
 
-        # 弹出数值变量表
+        # 弹出变量数值表
         from src.ui.table_dialog import DataTableDialog
 
         dlg = DataTableDialog.popup(var_name, series, parent=main_window)

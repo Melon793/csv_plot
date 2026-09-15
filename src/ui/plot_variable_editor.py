@@ -169,7 +169,7 @@ class PlotVariableEditorDialog(QDialog):
         layout.addLayout(button_layout)
 
         # 说明文本
-        info_label = QLabel("提示：从变量表拖拽变量到此窗口可添加新变量")
+        info_label = QLabel("提示：从变量列表拖拽变量到此窗口可添加新变量")
         info_label.setStyleSheet("color: gray; font-size: 12px; margin-top: 10px;")
         layout.addWidget(info_label)
 

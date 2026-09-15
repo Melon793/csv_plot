@@ -13,7 +13,7 @@ import pyqtgraph as pg
 # 右键菜单中文文案：创建与「判重 / 移除旧项」比对必须共用这些常量——
 # getMenu 返回的是 pyqtgraph 缓存的同一个 QMenu，两处文案不一致会导致
 # 每次右键都重复插入一份（菜单项成对翻倍）。
-ZH_JUMP_TO_DATA = "跳转至数据表"
+ZH_JUMP_TO_DATA = "跳转至变量数值表"
 ZH_AUTO_Y_IN_X = "按 X 范围调节 Y 轴"
 ZH_CURSOR_MODE = "游标模式"
 ZH_SHOW_CURSOR_VALUE = "显示游标数值"

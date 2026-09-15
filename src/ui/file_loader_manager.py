@@ -1035,7 +1035,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 logger.debug("清空 value_cache/_enum_text_maps 失败", exc_info=True)
 
     def _refresh_table_dialog(self, loader):
-        """数值表窗口开着时就地重建内容，并按重建结果决定 show / 关闭。
+        """变量数值表窗口开着时就地重建内容，并按重建结果决定 show / 关闭。
 
         单独成方法有两个理由：
         1. update_data 在表空时会自行 close()，而 closeEvent 经类名把
@@ -1051,7 +1051,7 @@ class FileLoaderManager(MainWindowBaseManager):
             return
         dlg.update_data(loader)
         if DataTableDialog._instance is not dlg:
-            logger.debug("数值表重建后无内容，已自行关闭")
+            logger.debug("变量数值表重建后无内容，已自行关闭")
         elif dlg.has_table_content():
             dlg.show()
             dlg.raise_()
