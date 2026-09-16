@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QTimer,
     QEvent,
     QObject,
+    QEventLoop,
     QAbstractTableModel,
     QModelIndex,
     QItemSelectionModel,
@@ -2624,6 +2625,13 @@ class DataTableDialog(QMainWindow):
         selected = menu.exec(tab_bar.mapToGlobal(pos))
         if selected is None:
             return
+        # exec 自己跑嵌套事件循环，菜单打开期间后台重载可以完成并重建 tab。
+        # 此时 state 已是死页：_remove_tab/_close_tabs 按 group_index pop，
+        # 放行会误摘同键的新页（用户没点过它），批量则把列全写进僵尸 df。
+        # 不一致时宁可不执行，让用户重右键一次。
+        if self._group_tabs.get(state.group_index) is not state:
+            logger.info("菜单打开期间 tab 已重建，放弃执行动作 %r", selected.text())
+            return
         # 用 == 而非 is：从 actions()/exec() 取回的可能是同一 C++ QAction 的
         # 另一个 Python 包装对象（测试里的 _NoExecMenu 就是这样返回动作的）
         if selected == act_add_group and pending > 0:
@@ -2646,6 +2654,12 @@ class DataTableDialog(QMainWindow):
         不弹确认框（用户要求：右键标签就是明确的页级意图）；仅保留硬上限拒绝。
         凡是弹过模态框的分支（上限提示 / 进度框 / 跳过提示）收尾都要把窗口拉回
         前台，否则模态框关闭时的激活转交会把它压到主窗口后面。
+
+        循环里的 processEvents 会把事件循环让给其它槽：后台重载完成
+        （update_data → _reset_tab_mode）或用户关窗（closeEvent 同样重置 tab）
+        都可能随时销毁本页。因此每轮开头用代际令牌 + 本页在位双重判定，失效
+        即中止，收尾前再判一次——否则整批列写进僵尸 df 静默丢失，余下列对已
+        关闭的 loader 逐个 KeyError、被计入 skipped 后弹出完全误导的错误框。
         """
         loader = self._resolve_loader()
         getter = getattr(loader, "get_group_variables", None)
@@ -2680,9 +2694,18 @@ class DataTableDialog(QMainWindow):
 
         added: list[str] = []
         skipped: list[str] = []
+        gen = self._gen
+
+        def tab_alive() -> bool:
+            # _remove_tab 不升 _gen（单页关闭），光看令牌会漏掉"整页被单独移除"，
+            # 必须同时按 group_index 反查身份
+            return self._gen == gen and self._group_tabs.get(state.group_index) is state
+
         try:
             for i, name in enumerate(todo):
                 if progress is not None and progress.wasCanceled():
+                    break
+                if not tab_alive():
                     break
                 try:
                     arr = loader.get_series(name).to_numpy()
@@ -2694,14 +2717,27 @@ class DataTableDialog(QMainWindow):
                     added.append(name)
                 if progress is not None:
                     progress.setValue(i + 1)
+                    # 进度框路径保持放行输入：它是 app-modal，本就只收"取消"点击，
+                    # 挡掉输入会让取消失效；timer 类重入由 tab_alive 兜底
                     QApplication.processEvents()
                 elif (i + 1) % 50 == 0:
-                    # 无进度框时也让界面能重绘/响应，否则大组取数期间窗口无响应
-                    QApplication.processEvents()
+                    # 无进度框时也让界面能重绘，否则大组取数期间窗口无响应。
+                    # 但排除用户输入事件：重绘等待期不能让人点 ✕ 关窗/删列进来重入
+                    QApplication.processEvents(
+                        QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                    )
         finally:
             if progress is not None:
                 progress.close()
                 self._restore_foreground()
+
+        if not tab_alive():
+            logger.info(
+                "批量添加中途 tab 已失效（数据重载或窗口关闭），已中止：%d/%d 列已写入",
+                len(added),
+                len(todo),
+            )
+            return
 
         if added:
             state.model = PandasTableModel(state.df, self.units)
