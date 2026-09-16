@@ -1715,6 +1715,9 @@ class TestExportAndGeometry:
         两个平台约束必须避开，否则断言的是约束而非几何逻辑：
         offscreen 默认屏幕仅 800x600（超屏尺寸会被夹住），且布局的
         minimumSizeHint 会把过小的 resize 顶回去（实测 400 宽被顶到 489）。
+
+        load_geom 对可见窗口是 no-op（restoreGeometry 非幂等，开着时
+        当前几何即最新状态），因此恢复断言需先 hide 走不可见路径。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
         dlg.resize(700, 500)
@@ -1728,6 +1731,12 @@ class TestExportAndGeometry:
         pump(20)
         assert (dlg.width(), dlg.height()) != saved, "前置条件：尺寸确实被改小了"
 
+        # 可见状态下 load_geom 被守卫拦截，不应重置当前几何
+        dlg.load_geom()
+        pump(20)
+        assert (dlg.width(), dlg.height()) != saved, "可见窗口 load_geom 应 no-op"
+
+        dlg.hide()
         dlg.load_geom()
         pump(20)
         assert (dlg.width(), dlg.height()) == saved

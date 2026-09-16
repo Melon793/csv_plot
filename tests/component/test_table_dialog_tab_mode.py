@@ -1473,6 +1473,36 @@ def test_add_group_remaining_aborts_when_tab_reset_midway(
     assert info == [], "不能对已不存在的页弹误导性的取数失败提示"
 
 
+def test_add_group_remaining_degrades_when_group_api_raises(
+    tab_dialog, mdf_loader, monkeypatch
+):
+    """P2-2：数据源在菜单构建后死掉，批量入口必须与 _pending_group_var_count 同口径降级。
+
+    loader 已 close 时 _ensure_open 抛 KeyError（"未知组返空列表"只对越界组
+    成立），旧写法裸调会把异常以未捕获形式抛给 Qt 槽，用户视角是"点了菜单
+    没反应"。现在入口 try/except：零副作用 + 一条提示 + 拉回前台。
+    """
+    dlg = tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+
+    def boom(gi):
+        raise KeyError("MDF 数据源已关闭")
+
+    msgs: list = []
+    restored: list = []
+    monkeypatch.setattr(mdf_loader, "get_group_variables", boom)
+    _forbid_confirmation(monkeypatch)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: msgs.append(a[2]))
+    monkeypatch.setattr(DataTableDialog, "_restore_foreground", lambda self: restored.append(1))
+
+    dlg._add_group_remaining_variables(state)
+
+    assert list(state.df.columns) == ["time", "Press_G0"], "中止入口不得有任何副作用"
+    assert msgs and "数据源不可用" in msgs[0], "必须告知失败原因而非静默无效"
+    assert restored == [1], "弹过提示框也要把窗口拉回前台"
+    assert dlg._pending_group_var_count(state) == -1, "菜单侧同口径降级仍在位"
+
+
 def test_tab_menu_action_skipped_when_tab_died_during_exec(
     shown_tab_dialog, menu_stub, monkeypatch
 ):

@@ -343,7 +343,13 @@ class TestCloseHardening:
         assert loader._closed is True
 
     @pytest.mark.parametrize(
-        "method", ["get_channel_info", "get_metadata", "get_samples_chunked"]
+        "method",
+        [
+            "get_channel_info",
+            "get_metadata",
+            "get_samples_chunked",
+            "get_group_variables",
+        ],
     )
     def test_closed_loader_raises_keyerror(self, mdf4_path, method):
         """关闭后所有数据访问统一抛 ``KeyError``。
@@ -352,6 +358,8 @@ class TestCloseHardening:
         ``except KeyError`` 即可降级，不必同时兜住 AttributeError。
         改动前 ``del self._mdf`` 会让并发方拿到
         ``AttributeError('NoneType' object has no attribute 'get')``。
+        本用例同时是 get_group_variables docstring 里"close 后仍抛
+        KeyError"的口径凭据（table_dialog 两个调用方据此做 try/except 降级）。
         """
         loader = MDFLazyLoader(str(mdf4_path))
         name = loader.var_names[0]  # 必须在 close 前取：close 会清空 _metadata
@@ -359,6 +367,8 @@ class TestCloseHardening:
         with pytest.raises(KeyError):
             if method == "get_samples_chunked":
                 loader.get_samples_chunked(name, 0, 4)
+            elif method == "get_group_variables":
+                loader.get_group_variables(0)
             else:
                 getattr(loader, method)(name)
 
