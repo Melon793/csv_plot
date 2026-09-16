@@ -1439,3 +1439,70 @@ def test_close_tab_refreshes_locator_and_column_names(shown_tab_dialog, menu_stu
     assert dlg._var_locator.count() == 1
     assert dlg._group_state_by_view(s0.view) is None
 
+
+def test_add_group_remaining_aborts_when_tab_reset_midway(
+    tab_dialog, mdf_loader, monkeypatch
+):
+    """批量途中后台重载完成（_reset_tab_mode）：立即中止，不写僵尸页、不弹误导框。
+
+    P1-1 回归：旧实现里循环只判 wasCanceled，tab 被重置后仍把余下列写进已清空
+    的 state.df，对已摘除的 view 重建模型；若 loader 同时被 close，余下列全部
+    KeyError 计入 skipped，最后弹“N 个取数失败”——真实原因（页已不存在）被完全
+    掩盖。现在每轮开头与收尾前都用代际令牌 + 在位双重判定。
+    """
+    dlg = tab_dialog
+    state = dlg._add_variable_to_tab("Press_G0", 0)
+    real_get_series = mdf_loader.get_series
+    info: list = []
+
+    def reload_then(name):
+        # 取第一列（State）时模拟"重载完成回调抵达"：整个 tab 模式被重置
+        if name == "State":
+            dlg._reset_tab_mode()
+        return real_get_series(name)
+
+    monkeypatch.setattr(mdf_loader, "get_series", reload_then)
+    _forbid_confirmation(monkeypatch)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
+
+    dlg._add_group_remaining_variables(state)  # 本组还差 State / Label 两列
+
+    assert dlg._group_tabs == {} and dlg._tab_mode is False
+    assert state.model is None, "失效后不得再给死页重建模型"
+    assert "Label" not in state.df.columns, "失效后不得继续往僵尸 df 写列"
+    assert info == [], "不能对已不存在的页弹误导性的取数失败提示"
+
+
+def test_tab_menu_action_skipped_when_tab_died_during_exec(
+    shown_tab_dialog, menu_stub, monkeypatch
+):
+    """菜单 exec 的嵌套事件循环里发生重载重建：exec 返回后动作必须作废。
+
+    不加闸时 _remove_tab(state) 按 group_index pop，会把重建后的同键新页
+    （用户根本没右键过它）连坐关掉；正确行为是什么都不做。
+    """
+    dlg = shown_tab_dialog
+    s0 = dlg._add_variable_to_tab("Press_G0", 0)
+    pump(50)
+    _forbid_confirmation(monkeypatch)
+
+    real_exec = menu_stub.exec
+
+    def exec_then_reload(self, *args, **kwargs):
+        picked = real_exec(self, *args, **kwargs)
+        if picked is not None:
+            # 模拟"菜单打开期间重载完成并重新建了同组的一页"
+            dlg._reset_tab_mode()
+            dlg._add_variable_to_tab("Press_G0", 0)
+        return picked
+
+    monkeypatch.setattr(menu_stub, "exec", exec_then_reload)
+
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))  # 先看一眼菜单（pick=None）
+    menu_stub.pick = _tab_menu_pick(menu_stub, "关闭此标签页")
+    dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
+
+    assert list(dlg._group_tabs) == [0], "陈旧 state 放行会误摘重建后的同键新页"
+    assert dlg._group_tabs[0] is not s0
+    assert dlg._tab_widget.count() == 1
+
