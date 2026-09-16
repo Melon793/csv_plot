@@ -1,14 +1,15 @@
 # CSV Plot (PySide6)
 
-一个基于 PySide6 + pyqtgraph 的高性能交互式数据可视化工具，支持 CSV 和 MDF（ASAM MDF4/DAT）格式文件，专为快速加载、浏览和分析时序数据而设计。支持百万级数据点的流畅绘制和多曲线模式。
+一个基于 PySide6 + pyqtgraph 的高性能交互式数据可视化工具，支持 CSV、MDF（ASAM MDF4/DAT）与 BLF（Vector 总线日志，搭配 DBC / ARXML 解码）格式文件，专为快速加载、浏览和分析时序数据而设计。支持百万级数据点的流畅绘制和多曲线模式。
 
 ![软件截图](docs/snapshot1.png)
 
 ## 主要特性
 
 ### 数据加载与显示
-- **多格式支持**: CSV / MDF（.mf4 / .mdf / .dat）、TSV 及兼容格式
+- **多格式支持**: CSV / MDF（.mf4 / .mdf / .dat）、BLF（.blf）、TSV 及兼容格式
 - **MDF 专属**: 枚举类型通道自动映射文本标签、多 Channel Group 聚合、跨 Group 同名变量智能后缀
+- **BLF 专属**: 搭配 DBC / ARXML 数据库把原始报文解码成信号；多总线通道、Intel/Motorola 字节序、有符号、IEEE float、多路复用、`VAL_` 枚举表；换数据库不重新扫描报文（ms 级重绑）
 - **拖拽加载**: 直接将文件拖拽到窗口中即可加载
 - **智能解析**: CSV 自动检测编码、分隔符、标题行/单位行；MDF 自动识别枚举通道
 - **大数据支持**: 后台线程加载，进度显示，支持百万级数据点
@@ -101,6 +102,9 @@ csv_plot/
     │   ├── excel_loader.py      # ExcelDataLoader Excel 加载（calamine / openpyxl）
     │   ├── base_loader.py       # BaseDataLoader 基础加载器父类
     │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
+    │   ├── blf_loader.py        # BLFLazyLoader BLF 报文扫描分桶 + 按需解码
+    │   ├── can_database.py      # CanDatabaseSet DBC / ARXML 语义层（canmatrix）
+    │   ├── can_decode.py        # numpy 向量化位段解码（含 float / 补码 / mux）
     │   └── metadata.py          # VarMetadata 数据类 + 有效性分类工具
     ├── utils/
     │   ├── paths.py             # resource_path 资源路径解析
@@ -125,6 +129,8 @@ csv_plot/
         │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
         │   ├── sheet_selector.py  # SheetSelectorDialog Excel 工作表选择
         │   ├── log_window.py    # LogWindow 日志窗口
+        │   ├── can_db_selector.py  # CanDatabaseSelectorDialog 指定 DBC / ARXML（可调优先级）
+        │   ├── can_unmatched_dialog.py  # CanUnmatchedDialog 未在数据库中定义的报文 ID
         │   ├── template_editor_dialog.py  # TemplateEditorDialog 模板编辑器
         │   └── template_manager_dialog.py # TemplateManagerDialog 模板管理器
         └── widgets/
@@ -141,6 +147,7 @@ csv_plot/
             ├── mark_region_manager.py # MarkRegionManager 标记区域管理器
             ├── event_handler.py # EventHandler 事件处理器
             ├── log_viewer.py    # LogViewer 日志查看器
+            ├── can_db_banner.py # CanDbBanner BLF 数据库状态条（三态非阻塞反馈）
             └── variable_search_bar.py # VariableSearchBar 绘图变量编辑器内嵌搜索栏
 ```
 
@@ -166,7 +173,7 @@ csv_plot/
 
    或使用 pip：
    ```bash
-   pip install pyside6 pyqtgraph pandas numpy asammdf charset-normalizer ujson openpyxl python-calamine pyyaml
+   pip install pyside6 pyqtgraph pandas numpy asammdf charset-normalizer ujson openpyxl python-calamine pyyaml python-can "canmatrix[arxml,dbc]"
    ```
 
 3. **运行程序**
@@ -214,6 +221,23 @@ uv run scripts/build_win.py
 | 时间序列 | 自动提取时间通道作为 X 轴（`t` / `time` / `timestamp`） |
 | asammdf 兼容 | 支持 7.x 和 8.x 两种 API |
 
+### BLF 文件特别说明
+
+BLF 为 Vector 总线日志格式，只存原始报文，必须搭配 DBC 或 ARXML 数据库才能解码出信号。
+
+| BLF 环节 | 行为 |
+|----------|------|
+| 首次导入 | 弹出「指定 CAN 数据库」对话框，可多选 DBC / ARXML 并调优先级（同一报文 ID 取靠前的库） |
+| 后续导入 | 默认自动复用上次列表（可在对话框里取消勾选）；记忆文件缺失/解不开时仍弹窗并标红 |
+| 扫描过程 | 后台线程逐块扫描（可量化进度 + 可取消），**只扫报文不解码信号**，无中间文件 |
+| 变量粒度 | 1 个（总线通道, CAN ID）报文桶 = 1 个 Group；信号按帧时间戳对齐，多路复用非本路采样点为缺口 |
+| 未匹配的报文 ID | 不生成信号，仅由左栏黄色状态条非阻塞提醒，点「查看」列出明细 |
+| 换数据库 | 点「CAN 数据库…」重绑即可，**不重新扫描报文**，ms 级完成 |
+| 错误帧 / 远程帧 | 跳过，不产生采样点 |
+| 上限保护 | 报文数超过 3000 万时停止扫描并在状态条上明示（只扫到的那一段可用） |
+
+当前仅覆盖 CAN / CAN-FD 报文信号；LIN / FlexRay / 以太网对象、ENV/SYS 变量、报文级通道状态（总线负载/ID 计数）、J1939 PGN 与 UDS 诊断帧不在 v1 范围内。
+
 
 ## 技术栈
 
@@ -222,6 +246,8 @@ uv run scripts/build_win.py
 - **pandas** — 数据分析库
 - **numpy** — 数值计算基础库
 - **asammdf** — ASAM MDF 文件解析
+- **python-can** — BLF 二进制层读取（`BLFReader`，LGPL-3.0 许可，打包产物内附许可证）
+- **canmatrix** — DBC / ARXML 数据库解析（MIT 许可）
 - **openpyxl** — Excel (.xlsx) 文件读写
 - **python-calamine** — Rust 引擎 Excel 解析（比 openpyxl 快 10-20 倍）
 - **charset-normalizer** — 字符编码检测
