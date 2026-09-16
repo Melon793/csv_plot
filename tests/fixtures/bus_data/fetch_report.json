@@ -1,0 +1,15 @@
+{
+  "mode": "check",
+  "requested": 27,
+  "fetched": 27,
+  "total_bytes": 184882,
+  "missing": [],
+  "licenses": {
+    "blf-viewer": "tests/fixtures/bus_data/licenses/blf-viewer-LICENSE",
+    "canmatrix": "tests/fixtures/bus_data/licenses/canmatrix-LICENSE",
+    "cantools": "tests/fixtures/bus_data/licenses/cantools-LICENSE",
+    "python-can": "tests/fixtures/bus_data/licenses/python-can-LICENSE.txt",
+    "vblf": "tests/fixtures/bus_data/licenses/vblf-LICENSE"
+  },
+  "python": "3.12.11"
+}

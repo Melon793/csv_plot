@@ -1,0 +1,275 @@
+{
+  "_comment": "第三方公开夹具清单。由 scripts/fetch_blf_fixtures.py --lock 生成，请勿手改 sha256。测试用例读这份表：文件缺失或哈希不符即 skip。",
+  "files": {
+    "blfviewer_two-channel.blf": {
+      "bytes": 10324,
+      "license": "MIT",
+      "purpose": "双通道 BLF：group = (bus 通道, CAN ID) 分桶的直接证据",
+      "repo": "mrafatpanah/blf-viewer",
+      "repo_path": "src/test/fixtures/two-channel.blf",
+      "sha256": "77748eadd4ae53ef7f2a3878b7c1973beb40307f6055ab70314dded492ff96d4",
+      "url": "https://raw.githubusercontent.com/mrafatpanah/blf-viewer/main/src/test/fixtures/two-channel.blf"
+    },
+    "blfviewer_two-channel.dbc": {
+      "bytes": 2277,
+      "license": "MIT",
+      "purpose": "与上一行配对的真实 DBC：端到端「导入 → 选库 → 出信号」闭环",
+      "repo": "mrafatpanah/blf-viewer",
+      "repo_path": "src/test/fixtures/two-channel.dbc",
+      "sha256": "f40a70c65bfd2a1ce1b6fa5a1f4ceaf4e1cd280a805fbd8c2c9525e85f1a4a9a",
+      "url": "https://raw.githubusercontent.com/mrafatpanah/blf-viewer/main/src/test/fixtures/two-channel.dbc"
+    },
+    "ct_big_numbers.dbc": {
+      "bytes": 3303,
+      "license": "MIT",
+      "purpose": "> 32 bit 大整数位段的向量化边界",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/dbc/big_numbers.dbc",
+      "sha256": "9335158afda4cff0572dc5bbd1d406c57b4cf79a946a9bd20eacb28308435d8c",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/dbc/big_numbers.dbc"
+    },
+    "ct_bus_comment.dbc": {
+      "bytes": 2728,
+      "license": "MIT",
+      "purpose": "总线级注释（非报文注释），canmatrix 属性读取兜底",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/dbc/bus_comment.dbc",
+      "sha256": "680c43dcae5644be89562f3be2bdfe7d030db8a753775394ddbdb5bb621efe57",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/dbc/bus_comment.dbc"
+    },
+    "ct_choices.dbc": {
+      "bytes": 766,
+      "license": "MIT",
+      "purpose": "VAL_ 枚举表 → is_enum + enum_map",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/dbc/choices.dbc",
+      "sha256": "30a760dcbd3ddf6b737274f4164cd702c25e4906acc3e13d80de8bbc9617c0b5",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/dbc/choices.dbc"
+    },
+    "ct_cp1252.dbc": {
+      "bytes": 694,
+      "license": "MIT",
+      "purpose": "cp1252 注释编码：单文件解析失败只 warning 不中断",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/dbc/cp1252.dbc",
+      "sha256": "cdd06bd74b6e8e8d4fbff4176f0c6ed5b3242cddd77c54a2c0b890dd3216fc22",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/dbc/cp1252.dbc"
+    },
+    "ct_ecu-extract-4.2.arxml": {
+      "bytes": 18249,
+      "license": "MIT",
+      "purpose": "ECU extract：单对象而非 cluster 的返回形态",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/arxml/ecu-extract-4.2.arxml",
+      "sha256": "415aca333d9f724f5f8ef98fc8b21d7cf69891429b266830e915b0a2b6ab4356",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/arxml/ecu-extract-4.2.arxml"
+    },
+    "ct_floating_point.dbc": {
+      "bytes": 891,
+      "license": "MIT",
+      "purpose": "IEEE float32/64 信号的 view 解码与大小端",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/dbc/floating_point.dbc",
+      "sha256": "b50c9bbf22bcdd899e91668007b235103fd897d844170b96e4bfcd932fda09b4",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/dbc/floating_point.dbc"
+    },
+    "ct_multiplex.dbc": {
+      "bytes": 2355,
+      "license": "MIT",
+      "purpose": "多路复用：先解 mux 选择器再按值掩码，非本 mux 值填 NaN",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/dbc/multiplex.dbc",
+      "sha256": "2b34c7ade5bb1e0f3f4ae512d78b41a49adb23a2e9f870d3f48054865ae30293",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/dbc/multiplex.dbc"
+    },
+    "ct_system-3.2.3.arxml": {
+      "bytes": 37616,
+      "license": "MIT",
+      "purpose": "AUTOSAR 3.2 ARXML 导入",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/arxml/system-3.2.3.arxml",
+      "sha256": "ca9f5d128d17420cec526d3d5a8b1d7463d31f145607823a2fa0cf25f3ac4fbc",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/arxml/system-3.2.3.arxml"
+    },
+    "ct_system-4.2.arxml": {
+      "bytes": 71059,
+      "license": "MIT",
+      "purpose": "AUTOSAR 4.2 ARXML 导入（主路径）",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/arxml/system-4.2.arxml",
+      "sha256": "c6bf5671279bc7ec4f81ebbe48f430d5a7049abd04fbf279c8080a193c973fb2",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/arxml/system-4.2.arxml"
+    },
+    "ct_system-float-values.arxml": {
+      "bytes": 30885,
+      "license": "MIT",
+      "purpose": "ARXML 侧浮点 + 物理值上下限",
+      "repo": "cantools/cantools",
+      "repo_path": "tests/files/arxml/system-float-values.arxml",
+      "sha256": "95af032ad40b5d2d8992802254ad4376a20618e8ca8d90208344223645f6b9bd",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/tests/files/arxml/system-float-values.arxml"
+    },
+    "pcan_issue_1905.blf": {
+      "bytes": 524,
+      "license": "LGPL-3.0-or-later",
+      "purpose": "历史回归：valid_bytes 大于实际数据长度",
+      "repo": "hardbyte/python-can",
+      "repo_path": "test/data/issue_1905.blf",
+      "sha256": "192b89141ff35aeb5b09ea7dd39aca8eddd174ddefcde6873208ba7ccf1811ba",
+      "url": "https://raw.githubusercontent.com/hardbyte/python-can/main/test/data/issue_1905.blf"
+    },
+    "pcan_test_CanErrorFrameExt.blf": {
+      "bytes": 452,
+      "license": "LGPL-3.0-or-later",
+      "purpose": "扩展错误帧：扫描期必须跳过、不产生采样点",
+      "repo": "hardbyte/python-can",
+      "repo_path": "test/data/test_CanErrorFrameExt.blf",
+      "sha256": "d45c5f0debd642b2354a2ab0f0e837d1240b2fe7557906a6cfc915a5a0c4f4f8",
+      "url": "https://raw.githubusercontent.com/hardbyte/python-can/main/test/data/test_CanErrorFrameExt.blf"
+    },
+    "pcan_test_CanFdMessage.blf": {
+      "bytes": 564,
+      "license": "LGPL-3.0-or-later",
+      "purpose": "CAN FD 报文（8 B 码率切换）",
+      "repo": "hardbyte/python-can",
+      "repo_path": "test/data/test_CanFdMessage.blf",
+      "sha256": "5ee6a21f3eba6f82aad0b9964a1e75e30cc38edc1b65e53f98617e7529bb1e13",
+      "url": "https://raw.githubusercontent.com/hardbyte/python-can/main/test/data/test_CanFdMessage.blf"
+    },
+    "pcan_test_CanFdMessage64.blf": {
+      "bytes": 612,
+      "license": "LGPL-3.0-or-later",
+      "purpose": "CAN FD 报文（64 B payload，决定桶 stride 上限）",
+      "repo": "hardbyte/python-can",
+      "repo_path": "test/data/test_CanFdMessage64.blf",
+      "sha256": "d6c4551541fd9ce76bc002275e88969d52d5a0e1bb1dd79f16b4e27ac5d1de9c",
+      "url": "https://raw.githubusercontent.com/hardbyte/python-can/main/test/data/test_CanFdMessage64.blf"
+    },
+    "pcan_test_CanMessage.blf": {
+      "bytes": 420,
+      "license": "LGPL-3.0-or-later",
+      "purpose": "经典 CAN 报文基线样本",
+      "repo": "hardbyte/python-can",
+      "repo_path": "test/data/test_CanMessage.blf",
+      "sha256": "c04d0cb0ed2a34668e643687d9e815e0d5e395746702d2e0b82e286ca6529415",
+      "url": "https://raw.githubusercontent.com/hardbyte/python-can/main/test/data/test_CanMessage.blf"
+    },
+    "pcan_test_CanMessage2.blf": {
+      "bytes": 436,
+      "license": "LGPL-3.0-or-later",
+      "purpose": "经典 CAN 报文（第二种产出工具）",
+      "repo": "hardbyte/python-can",
+      "repo_path": "test/data/test_CanMessage2.blf",
+      "sha256": "ef135387f6f5b4bc13c1de2336468cc83f1c346b8d296d2d3b5c82fa4890354a",
+      "url": "https://raw.githubusercontent.com/hardbyte/python-can/main/test/data/test_CanMessage2.blf"
+    },
+    "vblf_APP_TEXT.lobj": {
+      "bytes": 97,
+      "license": "MIT",
+      "purpose": "单对象：APP 文本（v1 明确不解析）",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/APP_TEXT.lobj",
+      "sha256": "b0cf8089d215d7d3493237b016e64478b50f1246bdc77b47e37a4326b5f6858b",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/APP_TEXT.lobj"
+    },
+    "vblf_CAN_ERROR_EXT.lobj": {
+      "bytes": 64,
+      "license": "MIT",
+      "purpose": "单对象：扩展错误帧",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/CAN_ERROR_EXT.lobj",
+      "sha256": "e5f62672f053cba7ff8784838a81501bea9e684883e897f623ea289d25be4903",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/CAN_ERROR_EXT.lobj"
+    },
+    "vblf_CAN_FD_MESSAGE.lobj": {
+      "bytes": 120,
+      "license": "MIT",
+      "purpose": "单对象：CAN FD",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/CAN_FD_MESSAGE.lobj",
+      "sha256": "a6379b07174b3d5196741d2d263cc3acc201d467ca01a156edf3a65f750c2f28",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/CAN_FD_MESSAGE.lobj"
+    },
+    "vblf_CAN_FD_MESSAGE_64.lobj": {
+      "bytes": 88,
+      "license": "MIT",
+      "purpose": "单对象：CAN FD 64 B",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/CAN_FD_MESSAGE_64.lobj",
+      "sha256": "9c83420c21904df54bb015e7d4a38ca1c42d0410dddfb8e57dc02ad1632ef90a",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/CAN_FD_MESSAGE_64.lobj"
+    },
+    "vblf_CAN_MESSAGE.lobj": {
+      "bytes": 48,
+      "license": "MIT",
+      "purpose": "单对象：经典 CAN",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/CAN_MESSAGE.lobj",
+      "sha256": "8acce3461c34f57919ef903f0b392bb43c45089b791116fd0e5ec0a6393bd204",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/CAN_MESSAGE.lobj"
+    },
+    "vblf_CAN_MESSAGE2.lobj": {
+      "bytes": 56,
+      "license": "MIT",
+      "purpose": "单对象：经典 CAN（第二种）",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/CAN_MESSAGE2.lobj",
+      "sha256": "295cee512d055b85e2e61bcf1061f43e02a9526d5f96f5b080c90f07949bc845",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/CAN_MESSAGE2.lobj"
+    },
+    "vblf_ENV_DOUBLE.lobj": {
+      "bytes": 59,
+      "license": "MIT",
+      "purpose": "单对象：ENV 变量（v1 明确不解析）",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/ENV_DOUBLE.lobj",
+      "sha256": "e22287c12b3cacb7aa3e83f70e4f0cf186cd651a588fc81b76049d1f667c40f9",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/ENV_DOUBLE.lobj"
+    },
+    "vblf_LOG_CONTAINER.lobj": {
+      "bytes": 120,
+      "license": "MIT",
+      "purpose": "单对象：日志容器（v1 明确不解析）",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/LOG_CONTAINER.lobj",
+      "sha256": "d21cc522073fe9f656c6492bfa413e8832b79fd6d28204bc89036dace1e278f0",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/LOG_CONTAINER.lobj"
+    },
+    "vblf_SYS_VARIABLE__DOUBLE.lobj": {
+      "bytes": 75,
+      "license": "MIT",
+      "purpose": "单对象：SYS 变量（v1 明确不解析）",
+      "repo": "zariiii9003/vblf",
+      "repo_path": "tests/data/SYS_VARIABLE__DOUBLE.lobj",
+      "sha256": "61d3540c6fa60cd18216d668128ca7f1d96e7018ee46b4670a2d61e2ddfd91d1",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/tests/data/SYS_VARIABLE__DOUBLE.lobj"
+    }
+  },
+  "licenses": {
+    "blf-viewer": {
+      "file": "tests/fixtures/bus_data/licenses/blf-viewer-LICENSE",
+      "sha256": "0662df6789798f59822338b64d3d3aaef0e205d08fd033823c69071b0c96fa73",
+      "url": "https://raw.githubusercontent.com/mrafatpanah/blf-viewer/main/LICENSE"
+    },
+    "canmatrix": {
+      "file": "tests/fixtures/bus_data/licenses/canmatrix-LICENSE",
+      "sha256": "a2b7dba3236b61a0dd16ced6005078bd8ff1728141c15897344e8872f5f15e37",
+      "url": "https://raw.githubusercontent.com/ebroecker/canmatrix/master/LICENSE"
+    },
+    "cantools": {
+      "file": "tests/fixtures/bus_data/licenses/cantools-LICENSE",
+      "sha256": "ed3d93b4e2ffa21ef96f74325a3789bbeeaa30e4292579885b485d7712752fe9",
+      "url": "https://raw.githubusercontent.com/cantools/cantools/master/LICENSE"
+    },
+    "python-can": {
+      "file": "tests/fixtures/bus_data/licenses/python-can-LICENSE.txt",
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+      "url": "https://raw.githubusercontent.com/hardbyte/python-can/main/LICENSE.txt"
+    },
+    "vblf": {
+      "file": "tests/fixtures/bus_data/licenses/vblf-LICENSE",
+      "sha256": "cb057b278b7dd0d0463096ee84a0803cb3d436f53f68df50d95fa30ef9354b41",
+      "url": "https://raw.githubusercontent.com/zariiii9003/vblf/main/LICENSE"
+    }
+  }
+}

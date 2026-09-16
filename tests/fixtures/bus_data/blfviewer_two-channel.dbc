@@ -1,0 +1,60 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: ECU1 TCU BRK BMS TESTER
+
+BO_ 256 EngineStatus: 8 ECU1
+ SG_ EngineSpeed  : 0|16@1+ (0.1,0)    [0|6553.5]  "rpm"  TESTER
+ SG_ CoolantTemp  : 16|8@1+  (1,-40)   [-40|215]   "degC" TESTER
+ SG_ EngineLoad   : 24|8@1+  (0.5,0)   [0|127.5]   "%"    TESTER
+ SG_ ThrottlePos  : 32|8@1+  (0.4,0)   [0|100]     "%"    TESTER
+
+BO_ 512 TransmissionData: 8 TCU
+ SG_ GearPosition : 0|4@1+   (1,0)     [0|15]      ""     TESTER
+ SG_ TransTemp    : 8|8@1+   (1,-40)   [-40|215]   "degC" TESTER
+ SG_ TorqueReq    : 16|8@1+  (0.5,0)   [0|127.5]   "%"    TESTER
+
+BO_ 768 BrakeSystem: 8 BRK
+ SG_ BrakePressure : 0|8@1+  (0.5,0)   [0|127.5]   "bar"  TESTER
+ SG_ WheelSpeedFL  : 8|16@1+ (0.01,0)  [0|655.35]  "km/h" TESTER
+ SG_ WheelSpeedFR  : 24|16@1+(0.01,0)  [0|655.35]  "km/h" TESTER
+
+BO_ 1536 BatteryStatus: 8 BMS
+ SG_ BattVoltage   : 0|16@1+ (0.01,0)  [0|655.35]  "V"    TESTER
+ SG_ BattCurrent   : 16|16@1-(0.1,0)   [-3276.8|3276.7] "A" TESTER
+ SG_ StateOfCharge : 32|8@1+ (0.4,0)   [0|100]     "%"    TESTER
+ SG_ BattTemp      : 40|8@1+ (1,-40)   [-40|215]   "degC" TESTER
+
+BO_ 2016 Tester_ECU1_Req: 8 TESTER
+ SG_ ServiceID    : 0|8@1+   (1,0)     [0|255]     ""     ECU1
+ SG_ DataIdentHi  : 8|8@1+   (1,0)     [0|255]     ""     ECU1
+ SG_ DataIdentLo  : 16|8@1+  (1,0)     [0|255]     ""     ECU1
+
+BO_ 2024 ECU1_Response: 8 ECU1
+ SG_ ResponseSID  : 0|8@1+   (1,0)     [0|255]     ""     TESTER
+ SG_ RespIdentHi  : 8|8@1+   (1,0)     [0|255]     ""     TESTER
+ SG_ RespIdentLo  : 16|8@1+  (1,0)     [0|255]     ""     TESTER
+
+VAL_ 512 GearPosition
+  0 "Park"
+  1 "Neutral"
+  2 "Drive"
+  3 "Reverse"
+  4 "1st"
+  5 "2nd"
+  6 "3rd"
+  7 "4th" ;
+
+CM_ BO_ 256  "Engine management ECU — 50 ms broadcast";
+CM_ BO_ 512  "Transmission control unit — 200 ms broadcast";
+CM_ BO_ 768  "Brake control module — 20 ms broadcast";
+CM_ BO_ 1536 "Battery management system — 500 ms CAN FD broadcast";
+CM_ BO_ 2016 "Tester to ECU1 UDS request (ISO 14229 service 0x22 ReadDataByIdentifier)";
+CM_ BO_ 2024 "ECU1 to tester UDS positive response (service 0x62)";
+CM_ SG_ 256 EngineSpeed  "Crankshaft speed in revolutions per minute";
+CM_ SG_ 512 GearPosition "Current selected gear; see VAL_ for enum labels";
+CM_ SG_ 1536 StateOfCharge "High-voltage battery state of charge";
+
