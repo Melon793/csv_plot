@@ -653,7 +653,10 @@ class MDFLazyLoader:
         get_series 会 KeyError。时间通道在聚合时已被排除，无需再过滤。
 
         未知 group 返回空列表（与 get_group_time_array 对越界 group 的宽容处理
-        一致，UI 侧不必 try/except）。
+        一致）。但注意：数据源已 close 时 _ensure_open 仍抛 KeyError，"不必
+        try/except"仅指越界组这一种情况；UI 侧调用方（_pending_group_var_count
+        / 批量添加入口）按"会抛"口径做降级，口径以测试
+        test_closed_loader_raises_keyerror 为准。
 
         Args:
             group_index: channel group 索引

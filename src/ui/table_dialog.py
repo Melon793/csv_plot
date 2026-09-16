@@ -1364,9 +1364,16 @@ class DataTableDialog(QMainWindow):
 
             # 步骤1: 高亮 (持续0.5s)
             self._blink_step_on(delegate, col_idx, view)
-            QTimer.singleShot(
-                pulse, lambda: self._blink_step_off(delegate, col_idx, view)
-            )
+
+            def _off(d=delegate, c=col_idx, v=view):
+                # pulse 窗口内对话框可能已随主窗口退出/关闭销毁（新 e2e
+                # 用例实测复现）：这是动画的已知终点，静默收尾即可
+                try:
+                    self._blink_step_off(d, c, v)
+                except RuntimeError:
+                    logger.debug("闪烁 off 回调跳过：视图已销毁", exc_info=True)
+
+            QTimer.singleShot(pulse, _off)
         return
 
     # 内部函数：处理拖放的多个变量
@@ -2087,7 +2094,17 @@ class DataTableDialog(QMainWindow):
 
         从父窗口的几何信息中恢复窗口的位置和大小
         提供用户界面状态的持久化
+
+        仅对当前不可见的窗口生效：restoreGeometry 对已显示窗口不是幂等操作
+        （offscreen 实测连续 restore 会把 frame margin 反复计入、窗口逐次内缩
+        漂移；真实 WM 下也会按保存时的 frame 偏移重摆位置），而窗口开着时
+        当前几何就是最新状态，本就不需要恢复。否则双击/添加新变量走 popup
+        的 load_geom 会把手动调好的位置大小重置回旧快照，用户视角是"跳回默认"。
+        另：closeEvent 先 save 后 hide，存的是关闭前正确值，hide 之后不在
+        此路径，不受本守卫影响。
         """
+        if self.isVisible():
+            return
         if (
             self.parent()
             and hasattr(self.parent(), "data_table_geometry")
@@ -2665,7 +2682,21 @@ class DataTableDialog(QMainWindow):
         getter = getattr(loader, "get_group_variables", None)
         if getter is None:
             return
-        names = list(getter(state.group_index))
+        try:
+            names = list(getter(state.group_index))
+        except Exception:
+            # 与 _pending_group_var_count 同一口径：loader 已 close 时
+            # _ensure_open 抛 KeyError，"未知组返空列表"只对越界组成立。
+            # 裸调会把异常以未捕获形式抛给 Qt 槽，用户视角是"点了没反应"；
+            # 降级为一条提示，并按惯例把弹过框的窗口拉回前台
+            logger.warning(
+                "get_group_variables(%s) 失败，批量添加中止", state.group_index, exc_info=True
+            )
+            QMessageBox.information(
+                self, "添加失败", "数据源不可用，无法读取本组变量列表。\n若刚重载过数据，请重新打开本页。"
+            )
+            self._restore_foreground()
+            return
         todo = [n for n in names if n not in state.df.columns]
         if not todo:
             return

@@ -1143,6 +1143,13 @@ class VariableInfoDialog(QDialog):
             mw.var_info_geometry = self.saveGeometry()
 
     def load_geom(self) -> None:
+        # 仅对不可见窗口生效：restoreGeometry 对已显示窗口非幂等（会把
+        # frame margin 反复计入导致逐次漂移），而窗口开着时当前几何就是
+        # 最新状态。popup 每次都对复用实例 load_geom，若不设守卫，用户
+        # 调好的位置大小会在下一次右键"变量信息"时被旧快照重置。
+        # 与 DataTableDialog.load_geom 的守卫同口径。
+        if self.isVisible():
+            return
         mw = self._get_main_window()
         if mw is None or not hasattr(mw, "var_info_geometry"):
             return
