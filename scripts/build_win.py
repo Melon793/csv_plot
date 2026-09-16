@@ -87,6 +87,38 @@ def discover_asammdf_deps():
     return include_packages, include_modules, hidden_excludes
 
 
+def third_party_license_args():
+    """把第三方许可证文件一并装进产物（方案 §9 R3：LGPL-3.0 的 python-can）。
+
+    只要产物存在就附；没找到时给一句 WARN 而不是阻断构建（发版前人工兼顾）。
+    """
+    args = []
+    wanted = ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "COPYING.LESSER")
+    for dist_name, target in (("python-can", "python-can-LICENSE.txt"),
+                              ("canmatrix", "canmatrix-LICENSE")):
+        try:
+            dist = importlib.metadata.distribution(dist_name)
+        except importlib.metadata.PackageNotFoundError:
+            print(f"[Build][WARN] 未安装 {dist_name}，跳过许可证附带")
+            continue
+        base = str(dist.locate_file(""))
+        found = None
+        for f in dist.files or ():
+            name = str(f).replace("\\", "/")
+            if name.rpartition("/")[2] not in wanted or ".dist-info" not in name:
+                continue
+            src = os.path.join(base, *name.split("/"))
+            if os.path.isfile(src):
+                found = src
+                break
+        if found is None:
+            print(f"[Build][WARN] 未找到 {dist_name} 的 LICENSE，发布前需手工补附")
+            continue
+        args.append(f"--include-data-file={found}=licenses/{target}")
+        print(f"[Build] 附带第三方许可证: {dist_name} -> licenses/{target}")
+    return args
+
+
 def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
     pyside6_excludes = [
         "PySide6.QtWebEngineWidgets",
@@ -186,6 +218,17 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         "--include-module=src.ui.main_window",
         "--include-module=src.ui.widgets.plot_widget",
         "--include-module=src.core.curve_strategy",
+        # BLF / CAN 数据库（方案 §4）：python-can 不是 asammdf 的传递依赖，
+        # 下面的依赖扫描追不到它，必须点名；canmatrix 虽然能被扫到，但它只在
+        # 元数据可读时才会进来，而漏打包的代价是「BLF 导入后一个信号也没有」
+        # （canmatrix.formats 把 ImportError 吞成 debug 日志），所以也显式写死。
+        # can.interfaces.<后端> 无需排除：它们只在 BACKENDS 字典里以名字存在、
+        # 按需 import，而 can/util.py 有 `from .interfaces import VALID_INTERFACES`。
+        "--include-package=can",
+        "--include-package=can.io",
+        "--include-package=canmatrix",
+        "--include-package=canmatrix.formats",
+        "--include-package=lxml",
         "--include-package=numexpr",
         "--include-module=numpy",
         "--include-module=pandas",
@@ -196,6 +239,7 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         f"--include-data-file={README_FILE}={README_FILE}",
         "--include-data-file=docs/help.md=docs/help.md",
         "--include-data-file=docs/template.yaml=docs/template.yaml",
+        *third_party_license_args(),
         "--follow-imports",
         "--no-deployment-flag=excluded-module-usage",
         "--lto=yes",

@@ -28,18 +28,55 @@ ICON_PNG = str(PROJECT_DIR / "assets" / "icon.png")
 
 is_win = sys.platform == "win32"
 
+
+def _dist_license(dist_name, target_name):
+    """取第三方包自带的许可证文件，产 ``(源, 包内目标)``；找不到则 None。
+
+    LGPL-3.0 的 python-can（方案 §9 R3）要求分发产物附许可证，且用户能替换
+    该包；前者靠这里的 datas，后者由 onedir 产物天然满足。放到 licenses/ 下而
+    不是包目录，是为了不打乱包自身的文件布局。
+    """
+    try:
+        import importlib.metadata as _md
+
+        dist = _md.distribution(dist_name)
+    except Exception:
+        return None
+    base = str(dist.locate_file(""))
+    # PEP 639 新式包写在 ``*.dist-info/licenses/LICENSE.txt``，旧式直接是
+    # ``*.dist-info/LICENSE``（canmatrix 就是），两种都兼容。
+    wanted = ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "COPYING.LESSER")
+    for f in dist.files or ():
+        name = str(f).replace("\\", "/")
+        if name.rpartition("/")[2] not in wanted or ".dist-info" not in name:
+            continue
+        src = os.path.join(base, *name.split("/"))
+        if os.path.isfile(src):
+            return (src, f"licenses/{target_name}")
+    return None
+
+
+_datas = [
+    (str(PROJECT_DIR / "assets" / "icon.ico"), "assets"),
+    (str(PROJECT_DIR / "assets" / "icon.icns"), "assets"),
+    (str(PROJECT_DIR / "assets" / "icon.png"), "assets"),
+    (str(PROJECT_DIR / "README.md"), "."),
+    (str(PROJECT_DIR / "docs" / "help.md"), "docs"),
+]
+for _dist, _as in (("python-can", "python-can-LICENSE.txt"),
+                   ("canmatrix", "canmatrix-LICENSE")):
+    _lic = _dist_license(_dist, _as)
+    if _lic:
+        _datas.append(_lic)
+    else:
+        print(f"[spec][WARN] 未找到 {_dist} 的 LICENSE，发布前需手工补附")
+
 # ── Analysis ───────────────────────────────────────────────────
 a = Analysis(
     [ENTRY],
     pathex=[],
     binaries=[],
-    datas=[
-        (str(PROJECT_DIR / "assets" / "icon.ico"), "assets"),
-        (str(PROJECT_DIR / "assets" / "icon.icns"), "assets"),
-        (str(PROJECT_DIR / "assets" / "icon.png"), "assets"),
-        (str(PROJECT_DIR / "README.md"), "."),
-        (str(PROJECT_DIR / "docs" / "help.md"), "docs"),
-    ],
+    datas=_datas,
     hiddenimports=[
         # 本项目需要手动声明的隐藏导入
         "src",
@@ -62,6 +99,14 @@ a = Analysis(
         "src.data",
         "src.data.loader",
         "src.data.mdf_lazy_loader",
+        # BLF 链路（§4）：blf_loader 里对 `can` 是函数内惰性 import（启动性能
+        # 约束），三个对话框 / banner 也都在函数内 import，一律点名保底。
+        "src.data.blf_loader",
+        "src.data.can_database",
+        "src.data.can_decode",
+        "src.ui.dialogs.can_db_selector",
+        "src.ui.dialogs.can_unmatched_dialog",
+        "src.ui.widgets.can_db_banner",
         "src.data.metadata",
         "src.ui",
         "src.ui.main_window_base_manager",
@@ -102,6 +147,22 @@ a = Analysis(
         "src.ui.widgets.log_viewer",
         # 第三方库中可能自动检测漏掉的
         "asammdf",
+        # ── BLF / CAN 数据库（§4）───────────────────────────────
+        # 只用到 BLFReader，但 `import can` 会拉起 can.io 整层；点名到
+        # can.io.blf，避免产物里“能启动但导入 BLF 时 ModuleNotFoundError”。
+        "can",
+        "can.io",
+        "can.io.blf",
+        "canmatrix",
+        "canmatrix.formats",
+        # canmatrix.formats 用 importlib.import_module("canmatrix.formats." + 名字)
+        # 动态装载解析器，静态分析跟不到；而它自己把 ImportError 吞成一条 debug
+        # 日志 —— 漏打包时产物表现为“BLF 导入后一个信号也没有”，极难归因。
+        "canmatrix.formats.dbc",
+        "canmatrix.formats.arxml",
+        # arxml 解析器硬依赖 lxml（canmatrix[arxml] extra）
+        "lxml",
+        "lxml.etree",
         "chardet",
         "charset_normalizer",
         "ujson",
@@ -158,6 +219,35 @@ a = Analysis(
         "http.server",
         "socketserver",
         "webbrowser",
+        # ── python-can 的硬件后端 ──
+        # 读 BLF 只需 can.io.blf；can/ 下的 23 个接口模块都是纯硬件库封装。
+        # 但只能逐个排除后端**子模块**：can/util.py 有一句
+        # `from .interfaces import VALID_INTERFACES`，把 can.interfaces 整个排掉
+        # 会让 `import can` 直接报错（实测：只排子模块时 BLFReader 正常可用，
+        # 且零个后端被加载 —— 它们只在 BACKENDS 字典里以名字存在，延迟导入）。
+        "can.interfaces.canalystii",
+        "can.interfaces.cantact",
+        "can.interfaces.etas",
+        "can.interfaces.gs_usb",
+        "can.interfaces.ics_neovi",
+        "can.interfaces.iscan",
+        "can.interfaces.ixxat",
+        "can.interfaces.kvaser",
+        "can.interfaces.neousys",
+        "can.interfaces.nican",
+        "can.interfaces.nixnet",
+        "can.interfaces.pcan",
+        "can.interfaces.robotell",
+        "can.interfaces.seeedstudio",
+        "can.interfaces.serial",
+        "can.interfaces.slcan",
+        "can.interfaces.socketcan",
+        "can.interfaces.socketcand",
+        "can.interfaces.systec",
+        "can.interfaces.udp_multicast",
+        "can.interfaces.usb2can",
+        "can.interfaces.vector",
+        "can.interfaces.virtual",
         # ── PySide6 中大概率未使用的子模块 ──
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtWebEngineCore",
