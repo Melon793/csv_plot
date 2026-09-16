@@ -25,6 +25,11 @@ class ConfigKey(StrEnum):
     LOG_WINDOW_GEOMETRY = "log_window/geometry"
     TEMPLATE_LAST_ID = "template/last_id"
     TEMPLATE_LAST_NAME = "template/last_name"
+    # BLF 只存原始报文，必须搭配 DBC / ARXML 才能解出信号。记住上次选中的
+    # 数据库列表（os.pathsep 连接）与「是否自动复用」，让批量导入同一个台架
+    # 的多份 BLF 时不必每次重选。
+    BLF_LAST_DB_PATHS = "blf/last_db_paths"
+    BLF_AUTO_USE_LAST = "blf/auto_use_last"
 
 
 class AppSettings:
@@ -189,3 +194,29 @@ class AppSettings:
 
     def set_last_template_name(self, name: str | None) -> None:
         self._settings.setValue(ConfigKey.TEMPLATE_LAST_NAME, name)
+
+    # ------------------------------------------------------------------
+    # BLF / CAN 数据库记忆
+    #
+    # 刻意以「单个字符串 + os.pathsep 连接」而非 QStringList 存储：QSettings 的
+    # ini 后端对列表值会写成带计数的复合键，跨平台读取时的类型不稳定（实测
+    # 单元素列表返回 str、多元素返回 list[str]）。pathsep 方案与 PATH 语义一致，
+    # 且 Windows 下的盘符反斜杠不会破坏 ini。
+    # ------------------------------------------------------------------
+
+    def get_blf_last_db_paths(self) -> list[str]:
+        raw = self._settings.value(ConfigKey.BLF_LAST_DB_PATHS, "", type=str) or ""
+        return [p for p in raw.split(os.pathsep) if p.strip()]
+
+    def set_blf_last_db_paths(self, paths: list[str]) -> None:
+        self._settings.setValue(
+            ConfigKey.BLF_LAST_DB_PATHS, os.pathsep.join(str(p) for p in paths)
+        )
+
+    def is_blf_auto_use_last(self) -> bool:
+        return bool(
+            self._settings.value(ConfigKey.BLF_AUTO_USE_LAST, False, type=bool)
+        )
+
+    def set_blf_auto_use_last(self, enabled: bool) -> None:
+        self._settings.setValue(ConfigKey.BLF_AUTO_USE_LAST, bool(enabled))

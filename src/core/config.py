@@ -209,6 +209,83 @@ MDF_ATTRIBUTION_ENABLED = True
 # 按 cp1252/latin-1 解码 → “82ºÅµ¥ÌåµçÑ¹”）。见 mdf_attribution.repair_text
 # 的四条保守条件，正常中文与纯 ASCII 不受影响；如出现误回转可置 False 回退。
 MDF_GBK_TEXT_REPAIR = True
+# ---------------------------------------------------------------------------
+# BLF（Vector 总线报文日志）
+#
+# python-can 的 BLFReader 是逐条构造 Message 对象的 Python 生成器，实测吞吐
+# 3-8 万条/秒，百万帧量级需要十几秒到几分钟，因此扫描必须分块 + 让出 GIL。
+# ---------------------------------------------------------------------------
+# 每读多少条报文做一次「让出 GIL + 检查取消」。太小会让进度回调与
+# time.sleep(0) 的固定开销占比上升，太大则取消响应与进度刷新变迟钝。
+BLF_SCAN_CHUNK_MESSAGES = 20_000
+# 报文总量硬上限。超限即停止扫描并置 truncated=True（payload 常驻内存，
+# 不设上限时一个 8 GB 的 BLF 会直接把进程打爆）。
+BLF_MAX_MESSAGES = 30_000_000
+# 未匹配 ID 详情表最多展示的行数，其余只进日志（完整列表可达数万条）。
+BLF_UNMATCHED_REPORT_LIMIT = 30
+# 左侧常驻 banner 的高度与其中文件名的省略阈值（超过则 elide）。
+BLF_BANNER_HEIGHT = 44
+BLF_BANNER_NAME_ELLIDE_AT = 46
+# 选择对话框的行配色（与 docs/help 里的状态列文案一一对应）
+BLF_DB_COLOR_OK = "#1b5e20"
+BLF_DB_COLOR_WARN = "#b8860b"
+BLF_DB_COLOR_ERROR = "#c0392b"
+# 左侧常驻 banner 的三态底色/文字色（§5.3）。刻意用（背景, 文字）二元组，
+# 避免样式串在 UI 里就地拼 —— 三态文案与颜色必须一处可改。
+BLF_BANNER_STYLE_NORMAL = ("#e8f5e9", "#1b5e20")
+BLF_BANNER_STYLE_TRUNCATED = ("#fff8e1", "#8d6e00")
+BLF_BANNER_STYLE_UNMATCHED = ("#fff3e0", "#b26a00")
+# CAN 数据库选择对话框尺寸（遵循「UI 容器需显式设置尺寸」规范）
+BLF_DB_DIALOG_MIN_SIZE = (640, 420)
+BLF_DB_DIALOG_SIZE = (680, 460)
+# 表格列宽：优先级 / 文件名(Stretch) / 类型 / 报文·信号 / 状态
+BLF_DB_COL_WIDTHS = {"priority": 44, "type": 64, "counts": 150, "status": 56}
+# ---------------------------------------------------------------------------
+# BLF 统一文案（§5.8）
+#
+# 集中定义的原因：这些串同时被 UI 断言与 docs/help.md 引用，散在控件里
+# 改一处就会让测试与帮手日誌失同步。
+# ---------------------------------------------------------------------------
+BLF_TEXT_FILTER = "BLF Files (*.blf)"
+BLF_TEXT_NO_DB_SELECTED = "未选择 CAN 数据库，已取消导入。"
+BLF_TEXT_NO_SIGNAL = (
+    "所选数据库与该 BLF 的报文 ID 完全不匹配，未生成任何信号。\n"
+    "请确认是否选错数据库，或补充 DBC / ARXML 文件。"
+)
+BLF_TEXT_TRUNCATED = (
+    f"BLF 报文数超过上限 {BLF_MAX_MESSAGES:,}，已停止扫描（其余报文不生成信号）。"
+)
+BLF_TEXT_CANCELLED = "已取消 BLF 扫描: {path}"
+BLF_TEXT_DB_MISSING = (
+    "上次使用的数据库文件不存在或无法读取：\n{paths}\n请重新选择。"
+)
+BLF_TEXT_HELP = (
+    "BLF 为 Vector 总线日志格式，只存原始报文，必须搭配 DBC 或 ARXML "
+    "数据库才能解码出信号。"
+)
+BLF_TEXT_AUTO_USED = "已自动使用上次数据库"
+# ---------------------------------------------------------------------------
+# 「分组数据源」判定
+#
+# MDF 的 channel group 与 BLF 的 (总线通道, CAN ID) 报文桶在 UI 语义上同构：
+# 一个组 = 一条独立时间轴 = 变量数值表的一个 tab。原先 12 处
+# ``LOADER_TYPE == "mdf"`` 的硬判定会让 BLF 掉进「表格模式 + loader.df」分支，
+# 而惰性 loader 的 df 恒为 None —— 直接 AttributeError。收敛成一个谓词后，
+# 新增同类数据源只需改这一张表。
+# ---------------------------------------------------------------------------
+GROUPED_LOADER_TYPES = frozenset({"mdf", "blf"})
+
+
+def is_grouped_loader(loader) -> bool:
+    """数据源是否提供「组」语义（按组独立时间轴 + 无全局 DataFrame）。
+
+    对 CSV / Excel 这类表格型 loader 返回 False；loader 为 None 时同样返回
+    False，使调用方可以直接 ``if is_grouped_loader(loader):`` 而不必先判空。
+    """
+    if loader is None:
+        return False
+    return getattr(loader, "LOADER_TYPE", "") in GROUPED_LOADER_TYPES
+
 # 默认绘图布局配置
 PLOT_ROW_MAX_DEFAULT = 4
 PLOT_COL_MAX_DEFAULT = 3
@@ -288,7 +365,7 @@ def compute_global_x_limits(
     if loader is None:
         return None
 
-    if getattr(loader, "LOADER_TYPE", "") == "mdf" and hasattr(loader, "global_time_range"):
+    if is_grouped_loader(loader) and hasattr(loader, "global_time_range"):
         raw_min, raw_max = loader.global_time_range
     elif getattr(loader, "datalength", 0) > 0:
         raw_min, raw_max = 1.0, float(loader.datalength)

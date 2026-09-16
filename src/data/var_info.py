@@ -244,6 +244,8 @@ def build_snapshot(loader, var_name: str, generation: int = 0) -> VarInfoSnapsho
     kind = getattr(loader, "LOADER_TYPE", "") or ""
     if kind == "mdf":
         return _from_mdf(loader, var_name, generation)
+    if kind == "blf":
+        return _from_blf(loader, var_name, generation)
     return _from_tabular(loader, var_name, generation, kind or "tabular")
 
 
@@ -392,6 +394,51 @@ def _hd_attribution_rows(header_comment) -> list[tuple[str, str]]:
 
 
 def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
+    return _from_channel_info(loader, var_name, generation, source_kind="mdf")
+
+
+def _from_blf(loader, var_name, generation) -> VarInfoSnapshot:
+    """BLF 信号的快照：复用 MDF 骨架 + 多一个「CAN 报文」分区（§5.7）。
+
+    BLFLazyLoader.get_channel_info() 刻意返回与 MDF 同构的 dict（并把
+    factor/offset 填进 ``conversion`` 的 a/b、把位宽/上下限填进
+    ``channel``），所以这里不需要重写一份骨架，只多插一段 CAN 语义。
+    """
+    return _from_channel_info(loader, var_name, generation, source_kind="blf")
+
+
+def _can_message_rows(can: dict) -> list:
+    """§5.7「CAN 报文」分区：两列键/值，悬停复制沿用现有机制。"""
+    cycle = can.get("cycle_time_s")
+    # 周期标题跟着**读数来源**走：单帧桶算不出实测均值，数据层会退成数据库
+    # 声明值（DBC 的 GenMsgCycleTime）。两者本该能互相揭示偏差，把声明值挂
+    # 在「实测均值」上等于把注释当成测量结果。
+    if cycle is None:
+        cycle_label = "周期"
+    elif can.get("cycle_time_measured"):
+        cycle_label = "周期（实测均值）"
+    else:
+        cycle_label = "周期（数据库声明）"
+    return [
+        ("报文名", _fmt(can.get("message_name"))),
+        ("CAN ID", _fmt(can.get("can_id_hex"))),
+        ("总线通道", _fmt(can.get("bus_channel"))),
+        ("DLC (字节)", _fmt(can.get("dlc"))),
+        ("起始位 (DBC)", _fmt(can.get("start_bit"))),
+        ("位长", _fmt(can.get("bit_size"), " bit")),
+        ("字节序", _fmt(can.get("byte_order"))),
+        ("有符号", "是" if can.get("is_signed") else "否"),
+        ("浮点信号", "是" if can.get("is_float") else "否"),
+        ("factor", _fmt(can.get("factor"))),
+        ("offset", _fmt(can.get("offset"))),
+        (cycle_label, _fmt(cycle, " s")),
+        ("接收节点", _fmt(can.get("receivers"))),
+        ("多路复用", _fmt(can.get("mux_text"))),
+        ("数据库文件", _fmt(display_path(can.get("db_file")))),
+    ]
+
+
+def _from_channel_info(loader, var_name, generation, source_kind="mdf") -> VarInfoSnapshot:
     # get_channel_info 全部取自加载期已解析的内存块结构，零磁盘 I/O
     info = loader.get_channel_info(var_name)
     meta = info["meta"]
@@ -482,13 +529,25 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
 
     sections: dict[str, list[tuple[str, str]]] = {"基本信息": basic}
 
+    # CAN 语义紧跟基本信息：BLF 变量最常被追问的是“它在哪条报文、哪个位”，
+    # MDF 侧没有这一段，故仅在 loader 交出 ``can`` 子 dict 时创建。
+    can = info.get("can") or {}
+    if can:
+        sections["CAN 报文"] = _can_message_rows(can)
+
     # 归属信息紧跟基本信息；一行都没提取到时**不建空块**（D3），
     # 因此 CSV/Excel 路径与无归属信息的 MDF 变量完全不受影响。
-    attribution_rows = attr.build_attribution_rows(info)
+    # BLF 走不了这套机制：它没有 HD 注释与 SI 源块，而
+    # split_name_device 会按通道名后缀去猜设备，对 CAN 信号名纯属误匹配。
+    attribution_rows = (
+        [] if source_kind == "blf" else attr.build_attribution_rows(info)
+    )
     if attribution_rows:
         sections["归属信息"] = attribution_rows
 
-    sections["转换规则 (CCBLOCK)"] = _conversion_rows(version, conv, meta)
+    sections[
+        "转换规则" if source_kind == "blf" else "转换规则 (CCBLOCK)"
+    ] = _conversion_rows(version, conv, meta)
 
     # 文件注释同样不得直出 XML：先抽 TX + 乱码回转，再把
     # 其中的 Key: Value 拆成独立行（见 _hd_attribution_rows）。
@@ -497,10 +556,16 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
     # 截了就再也看不到；列宽不受内容影响（值列 Stretch）。
     hd_text = attr.repair_text(attr.extract_tx(header.get("comment")))
     file_rows = [
-        ("MDF 版本", _fmt(version)),
+        (
+            "数据格式" if source_kind == "blf" else "MDF 版本",
+            _fmt(version),
+        ),
         (ROW_KEY_FILE_PATH, _fmt(display_path(fi.get("path")))),
         ("文件大小", format_size(fi.get("size"))),
-        ("通道组数", _fmt(fi.get("group_count"))),
+        (
+            "报文桶数" if source_kind == "blf" else "通道组数",
+            _fmt(fi.get("group_count")),
+        ),
         ("变量总数", _fmt(fi.get("var_count"))),
         ("作者", _fmt(header.get("author"))),
         ("部门", _fmt(header.get("department"))),
@@ -510,15 +575,19 @@ def _from_mdf(loader, var_name, generation) -> VarInfoSnapshot:
         ("文件注释", _fmt(_one_line(hd_text))),
     ]
     file_rows += _hd_attribution_rows(header.get("comment"))
-    sections["文件信息 (HDBLOCK)"] = file_rows
+    sections[
+        "文件信息" if source_kind == "blf" else "文件信息 (HDBLOCK)"
+    ] = file_rows
 
     enum_map = info.get("enum_map") or meta.enum_map
     if enum_map:
-        sections["枚举映射 (CCBLOCK)"] = _enum_rows(enum_map)
+        sections[
+            "枚举映射" if source_kind == "blf" else "枚举映射 (CCBLOCK)"
+        ] = _enum_rows(enum_map)
 
     return VarInfoSnapshot(
         name=var_name,
-        source_kind="mdf",
+        source_kind=source_kind,
         original_name=original,
         dtype=_fmt(info["dtype"], dash=""),
         length=int(meta.sample_count or 0),
@@ -607,6 +676,8 @@ def compute_stats(
     try:
         if kind == "mdf":
             return _stats_mdf(loader, var_name, should_cancel)
+        if kind == "blf":
+            return _stats_blf(loader, var_name, should_cancel)
         return _stats_tabular(loader, var_name)
     except Exception as e:  # noqa: BLE001 - 后台线程须把任何异常转成可展示的错误
         logger.debug("计算 %s 统计失败", var_name, exc_info=True)
@@ -704,7 +775,8 @@ def _stats_from_array(a: np.ndarray) -> VarStats:
     )
 
 
-def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
+def _stats_mdf(loader, var_name, should_cancel, *,
+               enum_section: str = "枚举映射 (CCBLOCK)") -> VarStats:
     """分块流式统计 MDF 通道。
 
     恒定 ``raw=False`` 取物理值：绘图路径用 ``raw=is_enum``（枚举取码值配合
@@ -787,7 +859,7 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
                 return VarStats(
                     error="枚举通道：物理值为文本标签（"
                           f"{arr.dtype}），不适用数值统计；"
-                          "码值含义请见「枚举映射 (CCBLOCK)」"
+                          f"码值含义请见「{enum_section}」"
                 )
             return VarStats(error=f"字符串通道（{arr.dtype}），不适用统计")
         if arr.dtype.kind not in _NUMERIC_KINDS:
@@ -867,6 +939,18 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
         finite_count=n,
         computed=True,
         note=note,
+    )
+
+
+def _stats_blf(loader, var_name, should_cancel) -> VarStats:
+    """BLF 信号统计：与 MDF 同为「惰性数据源 + ``get_samples_chunked`` 流式
+    累加」，所以循环体直接复用 :func:`_stats_mdf`（含
+    ``MDF_STATS_CHUNK_SIZE`` 分块与逐块取消检查），只换掉枚举提示里的
+    分区名 —— BLF 的枚举来自 DBC ``VAL_`` / ARXML 状态表，没有 CC 块。
+    """
+    return _stats_mdf(
+        loader, var_name, should_cancel,
+        enum_section="枚举映射（VAL_ / 状态表）",
     )
 
 
