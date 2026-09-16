@@ -109,6 +109,7 @@ class TestGuardDoesNotOverReject:
             "book.xlsx",
             "data.mfile",
             "wave.t01",
+            "run.blf",  # 白名单漏登记 .blf 即入口被拦（BLF 全功能失效）
             "split.csv.3",  # 分卷：扩展名在末尾序号之前
             "mdf.part.MDF.12",
         ],

@@ -16,7 +16,7 @@ from src.ui.drag_drop import (
     get_active_legend_drag_source,
     is_legend_drag_active,
 )
-from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -154,7 +154,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
 
         # a. 打开/激活变量数值表，并添加所有变量
-        is_mdf_loader = getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
+        is_mdf_loader = is_grouped_loader(main_window.loader)
         dlg = None
         # 实际入表的变量名：上面两个 continue 会跳过取数失败/列不存在的曲线，
         # 而 var_names[0] 正是这类情况下最容易被跳过的那个

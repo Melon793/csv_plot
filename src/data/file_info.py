@@ -33,7 +33,12 @@ KEY_FILE_NAME = "文件名"
 KEY_FOLDER = "所在文件夹"
 
 #: LOADER_TYPE → 可读格式名。未登记的值回落到按扩展名判断
-_FORMAT_NAME = {"csv": "CSV 文本", "excel": "Excel 工作簿", "mdf": "MDF 二进制"}
+_FORMAT_NAME = {
+    "csv": "CSV 文本",
+    "excel": "Excel 工作簿",
+    "mdf": "MDF 二进制",
+    "blf": "BLF 二进制",
+}
 
 
 def build_file_rows(loader, elapsed_s: float | None = None) -> list:
@@ -135,7 +140,10 @@ def _format_notes(loader) -> list:
 
     groups = _positive_int(loader, "group_count")
     if groups:
-        notes.append(f"通道组：{groups}")
+        # 同一个 group_count，叫法必须与变量信息窗口统一：BLF 的桶是逐
+        # 报文 ID 聚出来的「报文桶」，不是 MDF 的通道组
+        key = "报文桶数" if getattr(loader, "LOADER_TYPE", "") == "blf" else "通道组"
+        notes.append(f"{key}：{groups}")
     return notes
 
 
@@ -166,6 +174,10 @@ def _size_rows(loader, elapsed_s: float | None) -> list:
             # MDF 的行数取自最大通道组的 cycles_nr，不是全文件总点数，也不是
             # CSV 那种"实际读到的行数"，标签必须把这个口径写出来
             rows.append(("记录数", f"{count} 行（最大通道组的声明记录数）"))
+        elif getattr(loader, "LOADER_TYPE", "") == "blf":
+            # BLF 的行数是最大报文桶的样本数（逐桶解码后最长的信号长度），
+            # 同样不能冒充 CSV 那种"实际读到的行数"
+            rows.append(("记录数", f"{count} 行（最大报文桶的样本数）"))
         else:
             rows.append(("数据行数", f"{count} 行"))
 

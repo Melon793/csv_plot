@@ -20,6 +20,7 @@ from src.ui.variable_list import MyTableWidget  # noqa: E402
 from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
+from src.ui.widgets.can_db_banner import CanDbBanner  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal  # noqa: E402
@@ -328,6 +329,12 @@ class MainWindow(QMainWindow):
 
         left_layout.addLayout(title_layout)
 
+        # BLF 数据库状态横幅：必须插在变量过滤框之上，且**一开始就建好**
+        # —— 后续只靠 setVisible 切换，不动态增删控件，否则左列 splitter
+        # 会在每次导入 BLF 时跳一下高度。信号在 Manager 建好后才接。
+        self.can_db_banner = CanDbBanner(left_widget)
+        left_layout.addWidget(self.can_db_banner)
+
         self.filter_input = QLineEdit(left_widget)
         self.filter_input.setPlaceholderText("输入变量名关键词（空格分隔）")
         self.filter_input.textChanged.connect(self.filter_variables)
@@ -346,8 +353,13 @@ class MainWindow(QMainWindow):
 
         self.reload_btn = QPushButton("重载", left_widget)
 
+        # 仅 BLF 数据源可见：重选 DBC / ARXML 不需要重新扫描报文
+        self.can_db_btn = QPushButton("CAN 数据库…", left_widget)
+        self.can_db_btn.setToolTip("重新指定 DBC / ARXML（无需重新扫描报文）")
+
         button_layout.addWidget(self.load_btn, 4)
         button_layout.addWidget(self.reload_btn, 1)
+        button_layout.addWidget(self.can_db_btn, 1)
 
         left_layout.addLayout(button_layout)
         self.list_widget = MyTableWidget(left_widget)
@@ -888,6 +900,19 @@ class MainWindow(QMainWindow):
         self._grid_layout_shortcut.activated.connect(self._on_grid_layout_shortcut)
         self.load_btn.clicked.connect(self.file_loader_manager.load_btn_click)
         self.reload_btn.clicked.connect(self.file_loader_manager.reload_data)
+        # BLF 专有：banner 与「CAN 数据库…」按钮都指向重选入口，
+        # 「查看」则打开未匹配 ID 详情。默认隐藏，由 file_loader_manager
+        # 根据 LOADER_TYPE 统一控显隐。
+        self.can_db_btn.setVisible(False)
+        self.can_db_btn.clicked.connect(
+            self.file_loader_manager.reselect_can_database
+        )
+        self.can_db_banner.reselect_requested.connect(
+            self.file_loader_manager.reselect_can_database
+        )
+        self.can_db_banner.view_unmatched_requested.connect(
+            self.file_loader_manager.show_can_unmatched
+        )
         self.clear_all_plots_btn.clicked.connect(self.cursor_sync_manager.clear_all_plots)
         self.auto_range_btn.clicked.connect(self.cursor_sync_manager.auto_range_all_plots)
         self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
@@ -923,6 +948,7 @@ class MainWindow(QMainWindow):
         if self.loader is not None:
             self.plot_config_manager.save_auto_save(self)
         self._shutdown_var_info_worker()
+        self._shutdown_data_load_thread()
         self.layout_manager._handle_close()
         # 退出前释放 loader 资源（文件句柄、内存映射等）
         try:
@@ -951,6 +977,26 @@ class MainWindow(QMainWindow):
             dlg.shutdown_worker()
         except Exception:
             self._logger.debug("终止变量信息统计线程失败", exc_info=True)
+
+    def _shutdown_data_load_thread(self):
+        """退出前收尾后台数据加载线程（与 _shutdown_var_info_worker 同一理由）。
+
+        ``self._thread`` 是运行中 DataLoadThread 的唯一强引用，窗口销毁会连同
+        它一起解引用 —— 线程还在跑时 Python 包装器归零即析构 C++ 对象，Qt 直接
+        std::terminate（实测 SIGABRT）。BLF 扫描可取消且取消后刻意不 wait，
+        所以「点取消 → 立即关窗口」是会踩到的路径。
+        """
+        thread = getattr(self, "_thread", None)
+        if thread is None:
+            return
+        try:
+            if thread.isRunning():
+                if hasattr(thread, "request_cancel"):
+                    thread.request_cancel()
+                if not thread.wait(3000):
+                    self._logger.warning("后台数据加载线程 3s 内未退出")
+        except (RuntimeError, TypeError):
+            self._logger.debug("收尾后台数据加载线程失败", exc_info=True)
 
     def show_log_window(self):
         log_window = LogWindow.get_instance(self)

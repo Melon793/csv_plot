@@ -149,6 +149,11 @@ def test_drawer_gate_blocks_click_without_data_and_while_loading(
     assert getattr(mw, drawer_attr) is None, "加载期不该创建抽屉"
     assert mw._message_label.text() == f"正在加载数据，请稍候再{action}"
 
+    # 替身只建模了 isRunning；closeEvent 现在会收尾运行中的加载线程
+    # （_shutdown_data_load_thread → request_cancel()+wait(3000)），
+    # 留着它会在用例收尾关窗时炸。与 test_busy_gate 的收尾方式一致。
+    del mw._thread
+
 
 def test_hover_paints_a_full_cell_block(main_window, qapp):
     """hover 反馈是整块底色（照 VS Code 的 item cell），不是 1 px 下划线。

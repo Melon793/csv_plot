@@ -26,6 +26,7 @@ from src.core.config import (
     _evaluate_float32_safety,
     compute_global_x_limits,
     safe_qt_op,
+    is_grouped_loader,
 )
 from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
@@ -232,7 +233,7 @@ class PlotDataManager:
             and pw.plot_context.loader is not None
         ):
             loader = pw.plot_context.loader
-            if getattr(loader, "LOADER_TYPE", "") == "mdf":
+            if is_grouped_loader(loader):
                 return True, ""
 
         if not hasattr(pw, "data") or pw.data is None:
@@ -478,7 +479,7 @@ class PlotDataManager:
 
         if hasattr(pw.plot_context, "loader") and pw.plot_context.loader is not None:
             loader = pw.plot_context.loader
-            if getattr(loader, "LOADER_TYPE", "") == "mdf":
+            if is_grouped_loader(loader):
                 raw_values = loader.get_series(var_name)
             else:
                 raw_values = pw.data[var_name]
@@ -489,7 +490,7 @@ class PlotDataManager:
             hasattr(pw.plot_context, "loader")
             and pw.plot_context.loader is not None
             and hasattr(pw.plot_context.loader, "get_value_from_name")
-            and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
+            and is_grouped_loader(pw.plot_context.loader)
         ):
             try:
                 _, _, _, text_map = pw.plot_context.loader.get_value_from_name(var_name)

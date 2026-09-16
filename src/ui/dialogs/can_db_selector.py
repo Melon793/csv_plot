@@ -1,0 +1,413 @@
+"""CanDatabaseSelectorDialog - 指定 CAN 数据库（DBC / ARXML）（方案 §5.2）
+
+BLF 只有原始报文，必须搭配数据库才能还原出信号，所以「导入 BLF」这一步必须
+先把数据库定下来。本对话框承担三件事：
+
+1. 让用户增删 / 排序多个 DBC、ARXML 文件；**列表顺序即优先级**（同一报文 ID
+   在多库中重复时靠前的库生效，见 :meth:`CanDatabaseSet.find_frame`）；
+2. 逐文件预解析并把结果直接摊在状态列里（✔ / ⚠ / ✖），避免「导入了才发现
+   一个库都没读进去」；
+3. 记忆选择（勾选后由调用方写入 QSettings），使连续分析多份 BLF 不必重选。
+
+单个文件解析失败**不阻断**其余行：真实的整车数据库工程里总有几个 canmatrix
+读不动的历史文件。
+"""
+
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from src.core.config import (
+    BLF_DB_COL_WIDTHS,
+    BLF_DB_COLOR_ERROR,
+    BLF_DB_COLOR_OK,
+    BLF_DB_COLOR_WARN,
+    BLF_DB_DIALOG_MIN_SIZE,
+    BLF_DB_DIALOG_SIZE,
+)
+from src.data.can_database import SUPPORTED_DB_EXTS, CanDatabaseSet, import_type_for
+from src.core.logger import get_logger
+from src.utils.paths import normalize_input_path
+
+logger = get_logger("ui.can_db_selector")
+
+_COLUMNS = ("优先级", "文件", "类型", "报文数 / 信号数", "状态")
+
+#: 状态列的四种取值 → (文字, 颜色)。⚠ 与 ✔ 用黄绿、✖ 用红，与 banner 三态
+#: 同一套色觉约定，用户不必二次学习「红色 = 这个库没生效」。
+_STATUS_OK = ("✔ 已加载", BLF_DB_COLOR_OK)
+_STATUS_NO_FRAME = ("⚠ 无 CAN 报文", BLF_DB_COLOR_WARN)
+_STATUS_ERROR = ("✖ 解析失败: {reason}", BLF_DB_COLOR_ERROR)
+_STATUS_MISSING = ("✖ 文件不存在", BLF_DB_COLOR_ERROR)
+
+
+class _Row:
+    """一行 = 一个数据库文件及其预解析结果。"""
+
+    __slots__ = ("path", "ok", "frame_count", "signal_count", "error", "missing")
+
+    def __init__(self, path: str):
+        self.path = path
+        self.ok = False
+        self.frame_count = 0
+        self.signal_count = 0
+        self.error = ""
+        self.missing = False
+
+    @property
+    def type_text(self) -> str:
+        itype = import_type_for(self.path)
+        return itype.upper() if itype else "?"
+
+    def status(self) -> tuple[str, str]:
+        if self.missing:
+            return _STATUS_MISSING
+        if self.ok:
+            if self.frame_count == 0:
+                return _STATUS_NO_FRAME
+            return _STATUS_OK
+        reason = (self.error or "未知错误").splitlines()[0]
+        return _STATUS_ERROR[0].format(reason=reason[:48]), _STATUS_ERROR[1]
+
+
+class CanDatabaseSelectorDialog(QDialog):
+    """模态选择对话框。``exec()`` 返回 Accepted 后用 :meth:`get_selected_paths`。"""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        data_file: str = "",
+        initial_paths: list[str] | None = None,
+        missing_paths: list[str] | None = None,
+        estimated_messages: int | None = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("指定 CAN 数据库（DBC / ARXML）")
+        self.setAcceptDrops(True)
+        self.setMinimumSize(*BLF_DB_DIALOG_MIN_SIZE)
+        self.resize(*BLF_DB_DIALOG_SIZE)
+
+        self._rows: list[_Row] = []
+        self._missing = {normalize_input_path(p) for p in (missing_paths or [])}
+        self._data_file = data_file
+        self._estimated_messages = estimated_messages
+
+        self._build_ui()
+        if initial_paths:
+            self.add_paths(initial_paths)
+        self._refresh_buttons()
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        title = QLabel(
+            "BLF 只记录原始报文，需数据库才能还原出信号。"
+        )
+        title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        self.subtitle = QLabel(self._subtitle_text())
+        self.subtitle.setStyleSheet("color: #666; font-size: 12px;")
+        self.subtitle.setWordWrap(True)
+        layout.addWidget(self.subtitle)
+
+        # 路径记忆命中但有文件缺失（§5.1 的 C 路径）时的黄条说明
+        self.notice = QLabel("")
+        self.notice.setWordWrap(True)
+        self.notice.setTextFormat(Qt.TextFormat.RichText)
+        self.notice.setStyleSheet(
+            f"background-color: #fff8e1; color: {BLF_DB_COLOR_WARN};"
+            " padding: 4px 6px; border-radius: 3px;"
+        )
+        self.notice.setVisible(False)
+        layout.addWidget(self.notice)
+
+        self.table = QTableWidget(0, len(_COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(_COLUMNS))
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, BLF_DB_COL_WIDTHS["priority"])
+        self.table.setColumnWidth(2, BLF_DB_COL_WIDTHS["type"])
+        self.table.setColumnWidth(3, BLF_DB_COL_WIDTHS["counts"])
+        self.table.setColumnWidth(4, BLF_DB_COL_WIDTHS["status"])
+        self.table.setMinimumHeight(180)
+        self.table.currentCellChanged.connect(lambda *_: self._refresh_buttons())
+        layout.addWidget(self.table, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self.add_btn = QPushButton("添加文件…")
+        self.add_btn.clicked.connect(self._on_add_files)
+        btn_row.addWidget(self.add_btn)
+        self.remove_btn = QPushButton("移除")
+        self.remove_btn.clicked.connect(self._on_remove)
+        btn_row.addWidget(self.remove_btn)
+        self.up_btn = QPushButton("↑ 提高优先级")
+        self.up_btn.clicked.connect(lambda: self._move_current(-1))
+        btn_row.addWidget(self.up_btn)
+        self.down_btn = QPushButton("↓ 降低优先级")
+        self.down_btn.clicked.connect(lambda: self._move_current(1))
+        btn_row.addWidget(self.down_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        hint = QLabel("ℹ 同一报文 ID 在多库中重复时，排在上面的库生效。")
+        hint.setStyleSheet("color: #666;")
+        layout.addWidget(hint)
+
+        self.remember_check = QCheckBox("记住并按此列表自动导入后续 BLF 文件")
+        self.remember_check.setChecked(True)
+        layout.addWidget(self.remember_check)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel
+        )
+        # 语义是「导入」而不是「打开」；按钮文案直接决定用户是否明白下一步
+        self.button_box.button(QDialogButtonBox.StandardButton.Open).setText("导 入")
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("取 消")
+        self.button_box.accepted.connect(self._on_accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+    def _subtitle_text(self) -> str:
+        from src.data.var_info import format_size
+
+        if not self._data_file:
+            return "请选择一个或多个 DBC / ARXML 文件。"
+        parts = [f"数据文件：{os.path.basename(self._data_file)}"]
+        try:
+            parts.append(format_size(os.path.getsize(self._data_file)))
+        except OSError:
+            pass
+        if self._estimated_messages:
+            parts.append(f"预计 {self._estimated_messages / 1_000_000:.1f} M 帧")
+        return "   ".join(parts)
+
+    def set_notice(self, text: str) -> None:
+        """C 路径：告诉用户「为什么上次的库不能直接用」。"""
+        if text:
+            self.notice.setText(text)
+            self.notice.setVisible(True)
+        else:
+            self.notice.setText("")
+            self.notice.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # 行管理
+    # ------------------------------------------------------------------
+
+    def add_paths(self, paths: list[str]) -> int:
+        """加入文件并逐份预解析。返回真正新增的行数。"""
+        added = 0
+        existing = {r.path for r in self._rows}
+        missing_names: list[str] = []
+        for raw in paths or []:
+            path = normalize_input_path(str(raw))
+            if not path or path in existing:
+                continue
+            if import_type_for(path) is None:
+                logger.info("忽略非 CAN 数据库文件: %s", path)
+                continue
+            row = _Row(path)
+            if not os.path.isfile(path):
+                row.missing = True
+                row.error = "文件不存在"
+                missing_names.append(os.path.basename(path))
+            else:
+                self._probe(row)
+            self._rows.append(row)
+            existing.add(path)
+            added += 1
+        if missing_names:
+            self.set_notice(
+                "上次使用的数据库中有 "
+                f"{len(missing_names)} 个文件不存在或无法读取，已标红："
+                + "、".join(missing_names)
+            )
+        self._rebuild_table()
+        return added
+
+    @staticmethod
+    def _probe(row: _Row) -> None:
+        """逐文件预解析：只关心「能不能读、多少报文/信号」，不做跨库合并。"""
+        report = CanDatabaseSet().load([row.path]).reports[0]
+        row.ok = bool(report.ok)
+        row.frame_count = int(report.frame_count)
+        row.signal_count = int(report.signal_count)
+        row.error = str(report.error or "")
+
+    def _rebuild_table(self) -> None:
+        self.table.blockSignals(True)
+        self.table.setRowCount(len(self._rows))
+        for r, row in enumerate(self._rows):
+            text, color = row.status()
+            cells = (
+                str(r + 1),
+                os.path.basename(row.path),
+                row.type_text,
+                f"{row.frame_count} / {row.signal_count}"
+                if not row.missing
+                else "— / —",
+                text,
+            )
+            for c, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                if c == 0:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 1:
+                    item.setToolTip(row.path)
+                if c == 4:
+                    item.setForeground(_qcolor(color))
+                    item.setToolTip(row.error or text)
+                self.table.setItem(r, c, item)
+        self.table.blockSignals(False)
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        has_row = self.table.currentRow() >= 0
+        self.remove_btn.setEnabled(has_row)
+        self.up_btn.setEnabled(has_row and self.table.currentRow() > 0)
+        self.down_btn.setEnabled(
+            has_row and 0 <= self.table.currentRow() < len(self._rows) - 1
+        )
+        importable = [r for r in self._rows if r.ok and r.frame_count > 0]
+        self.button_box.button(QDialogButtonBox.StandardButton.Open).setEnabled(
+            bool(importable)
+        )
+        if not importable:
+            tip = (
+                "至少选择一个可解析的数据库文件"
+                if self._rows
+                else "请先添加 DBC / ARXML 文件"
+            )
+        else:
+            tip = ""
+        self.button_box.button(QDialogButtonBox.StandardButton.Open).setToolTip(tip)
+
+    def _move_current(self, delta: int) -> None:
+        r = self.table.currentRow()
+        dst = r + delta
+        if r < 0 or dst < 0 or dst >= len(self._rows):
+            return
+        self._rows[r], self._rows[dst] = self._rows[dst], self._rows[r]
+        self._rebuild_table()
+        self.table.selectRow(dst)
+
+    def _on_remove(self) -> None:
+        r = self.table.currentRow()
+        if 0 <= r < len(self._rows):
+            del self._rows[r]
+            self._rebuild_table()
+
+    def _on_add_files(self) -> None:
+        initial_dir = (
+            os.path.dirname(self._rows[-1].path) if self._rows else ""
+        )
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "添加 CAN 数据库",
+            initial_dir,
+            "CAN Database (*.dbc *.arxml);;DBC Files (*.dbc);;ARXML Files (*.arxml)",
+        )
+        if files:
+            self.add_paths(files)
+
+    def _on_accept(self) -> None:
+        importable = [r for r in self._rows if r.ok and r.frame_count > 0]
+        if not importable:
+            QMessageBox.warning(
+                self,
+                "没有可用的数据库",
+                "所选文件全部无法解析出 CAN 报文。\n"
+                "请确认文件是 DBC 或 ARXML，且内容与本工具支持的格式一致。",
+            )
+            return  # 对话框保持打开
+        self.accept()
+
+    # ------------------------------------------------------------------
+    # 结果
+    # ------------------------------------------------------------------
+
+    def get_selected_paths(self) -> list[str]:
+        """按优先级返回可用数据库路径（跳过缺失/解析失败的行）。"""
+        return [r.path for r in self._rows if r.ok and r.frame_count > 0]
+
+    def all_paths(self) -> list[str]:
+        """含失败行的完整列表，供调用方写日志。"""
+        return [r.path for r in self._rows]
+
+    def remember_choice(self) -> bool:
+        return self.remember_check.isChecked()
+
+    @property
+    def rows(self) -> list[_Row]:
+        return self._rows
+
+    # ------------------------------------------------------------------
+    # 拖拽：把 .dbc / .arxml 直接拖进列表
+    # ------------------------------------------------------------------
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if self._drag_candidate_paths(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        paths = self._drag_candidate_paths(event)
+        if paths:
+            self.add_paths(paths)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    @staticmethod
+    def _drag_candidate_paths(event) -> list[str]:
+        """只收 .dbc / .arxml；其余后缀直接忽略（不给错误框，避免打断）。"""
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+        out = []
+        for url in mime.urls():
+            local = url.toLocalFile()
+            if not local:
+                continue
+            if os.path.splitext(local)[1].lower() in SUPPORTED_DB_EXTS:
+                out.append(local)
+        return out
+
+
+def _qcolor(hex_text: str) -> QColor:
+    return QColor(hex_text) if hex_text else QColor("#000000")

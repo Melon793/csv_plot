@@ -17,9 +17,18 @@ import warnings
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QStandardPaths, QTimer, QSignalBlocker
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
 
-from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING, safe_qt_op
+from src.core.config import (
+    BLF_MAX_MESSAGES,
+    BLF_TEXT_CANCELLED,
+    BLF_TEXT_DB_MISSING,
+    BLF_TEXT_NO_DB_SELECTED,
+    BLF_TEXT_NO_SIGNAL,
+    BLF_TEXT_TRUNCATED,
+    FILE_SIZE_LIMIT_BACKGROUND_LOADING,
+    safe_qt_op,
+)
 from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
 from src.data.mdf_lazy_loader import MDFLazyLoader
@@ -41,6 +50,7 @@ SUPPORTED_EXTENSIONS = (
     ".mf4",
     ".mdf",
     ".dat",
+    ".blf",
     ".xlsx",
     ".xlsm",
 )
@@ -64,6 +74,22 @@ class FileLoaderManager(MainWindowBaseManager):
     @property
     def _current_data_length(self) -> int:
         return self.mw.loader.datalength if self._has_valid_loader else 0
+
+    # BLF / CAN 数据库状态（§5）。在 __init__ 之外声明类级默认值，避免
+    # 未走过 BLF 路径时 getattr 一路传默认值、也让单能直接断言初始态。
+    _blf_progress = None
+    _blf_db_paths: list | None = None
+    # 取消标记按**代次**记录而不是一个全局布尔：进度框的 canceled 是同步落地，
+    # 而旧线程的 cancelled/finished 会在后来的事件循环里迟到（见 _start_blf_load
+    # 的保活注释），单布尔会被旧线程把新一轮导入误杀。
+    _blf_load_version = -1
+    # ``None`` = 本轮没取消过。不能用 -1 当哨兵：-1 也是「直接调用不传代次」
+    # 的默认形参，两者混淆会让取消恢复一次也不跑。
+    _blf_cancelled_version = None
+    _blf_thread_refs: list | None = None
+    _blf_auto_used = False
+    _blf_force_dialog = False
+    _blf_preset_db_paths = None
 
     @staticmethod
     def load_dict(path: str, *, default=None) -> dict:
@@ -101,6 +127,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 "All Files (*.*);;"
                 "CSV/TXT Files (*.csv *.txt *.mfile *.t00 *.t01 *.t10 *.t11);;"
                 "MDF Files (*.mf4 *.mdf *.dat);;"
+                "BLF Files (*.blf);;"
                 "Excel Files (*.xlsx *.xlsm)"
             )
 
@@ -380,6 +407,24 @@ class FileLoaderManager(MainWindowBaseManager):
         self._safety_timer.start(3000)
 
         QTimer.singleShot(0, self.mw, self._restore_cursor_state_after_reload)
+
+    def _schedule_delayed(self, msec: int, slot):
+        """在 ``msec`` 毫秒后把 ``slot`` 投递到 GUI 线程；窗口销毁即取消。
+
+        不用 ``QTimer.singleShot``：三参重载在 Nuitka 打包形态下重载解析
+        不稳定（PySide6 post-load 补丁只保活两参形态的槽）会抛 TypeError；
+        两参重载又没有 context，窗口销毁后回调还会打到已删控件。QTimer 实例
+        的 parent 归 ``mw``，窗口销毁时定时器随之销毁、回调不再投递，与三参
+        重载语义等价；``timeout.connect(slot)`` 会保活槽对象。
+        """
+        timer = QTimer(self.mw)
+        timer.setSingleShot(True)
+        timer.timeout.connect(slot)
+        # 与静态 singleShot 语义对齐：触发后自毁，否则每次调用都会在 mw 上
+        # 留下一个闲置定时器
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(max(0, int(msec)))
+        return timer
 
     def _restore_cursor_state_after_reload(self):
         """延迟恢复 cursor 状态（在 UI 稳定后调用）"""
@@ -862,6 +907,7 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.load_btn.setEnabled(True)
             return
         is_mdf_file = file_ext in (".mf4", ".mdf", ".dat")
+        is_blf_file = file_ext == ".blf"
         is_excel_file = file_ext in (".xlsx", ".xlsm")
 
         delimiter_typ = None
@@ -872,6 +918,19 @@ class FileLoaderManager(MainWindowBaseManager):
         sheet_name: str | None = None
 
         if is_mdf_file:
+            delimiter_typ = ","
+            desc_rows = 0
+            has_unit = False
+            config_used = True
+
+        if is_blf_file:
+            # §5.1：BLF 必须先拿到 CAN 数据库才能导入。拿不到（用户取消）
+            # 就回到导入前状态，**不进入空数据态**。
+            db_paths = self._resolve_can_databases(file_path, is_reload=is_reload)
+            if db_paths is None:
+                self._cancel_pending_reload(is_reload)
+                return
+            self._blf_db_paths = db_paths
             delimiter_typ = ","
             desc_rows = 0
             has_unit = False
@@ -893,7 +952,7 @@ class FileLoaderManager(MainWindowBaseManager):
             desc_rows = None
             config_used = True
 
-        if not is_mdf_file and not is_excel_file:
+        if not is_mdf_file and not is_blf_file and not is_excel_file:
             config_path = self._resolve_config_path("config_dict.json")
             if config_path is not None and os.path.isfile(config_path):
                 try:
@@ -940,7 +999,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 )
                 return
 
-        if not is_excel_file and (delimiter_typ is None or desc_rows is None or has_unit is None):
+        if not is_excel_file and not is_blf_file and (delimiter_typ is None or desc_rows is None or has_unit is None):
             QMessageBox.critical(
                 self.mw,
                 "数据解析失败",
@@ -970,6 +1029,26 @@ class FileLoaderManager(MainWindowBaseManager):
         self.set_button_status(False)
         started_async = False
         _Threshold_Size_Mb = FILE_SIZE_LIMIT_BACKGROUND_LOADING
+
+        if is_blf_file:
+            # BLF 一律走后台线程：扫描是逐条构造 Message 的分钟级循环，
+            # 文件再小也不该让 UI 等（且只有在线程里才能做可取消）。
+            try:
+                self._start_blf_load(
+                    file_path,
+                    getattr(self, "_blf_db_paths", []) or [],
+                    is_reload=is_reload,
+                )
+                started_async = True
+            except Exception:
+                self.mw.end_load_feedback("加载失败", level="error")
+                self._end_data_reload()
+                self.mw.load_btn.setEnabled(True)
+                if is_reload:
+                    self._reload_in_progress = False
+                    self.mw.reload_btn.setEnabled(True)
+                raise
+            return
 
         try:
             if file_size < _Threshold_Size_Mb * 1024 * 1024:
@@ -1042,6 +1121,450 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw.end_load_feedback("加载失败", level="error")
                 self._end_data_reload()
             raise
+
+    # ------------------------------------------------------------------
+    # BLF / CAN 数据库集成（§5）
+    # ------------------------------------------------------------------
+
+    def _is_blf_source(self) -> bool:
+        """当前数据源是否 BLF（决定 banner 与「CAN 数据库…」按钮显隐）。"""
+        return getattr(getattr(self.mw, "loader", None), "LOADER_TYPE", "") == "blf"
+
+    def _cancel_pending_reload(self, is_reload: bool) -> None:
+        """§5.1「取消选择」：不进入空数据态，只把按钮恢复原状。"""
+        self.mw.load_btn.setEnabled(True)
+        if is_reload:
+            self._reload_in_progress = False
+            self.mw.reload_btn.setEnabled(True)
+
+    def _usable_db_paths(self, paths):
+        """把数据库路径预检后切成 ``(可用, 不可用)``。
+
+        §5.1 的 A 路径（不弹窗直接扫）只有在**全部记忆文件都还能解出报文**时
+        才成立：否则一个被移走/改坏的老库会被静默丢弃，用户看到的是「少了很
+        多信号」而不是「文件读不到」，比弹窗烦人得多。
+        """
+        from src.data.can_database import CanDatabaseSet
+
+        normalized = [normalize_input_path(str(p)) for p in (paths or []) if str(p)]
+        if not normalized:
+            return [], []
+        try:
+            reports = CanDatabaseSet().load(normalized).reports
+        except Exception as e:  # 预检本身绝不该打断导入
+            logger.warning("CAN 数据库预检失败: %s", e)
+            return [], normalized
+        usable, bad = [], []
+        # load() 对每个输入路径恰好产出一条 report，顺序一致
+        for path, report in zip(normalized, reports):
+            if report.ok and report.frame_count > 0:
+                usable.append(path)
+            else:
+                bad.append(path)
+        return usable, bad
+
+    def _resolve_can_databases(self, file_path: str, is_reload: bool = False):
+        """§5.1 的 A / B / C / F 前置路径。返回 ``db_paths``；``None`` = 中止导入。"""
+        from src.core.settings import AppSettings
+
+        self._blf_auto_used = False
+        remembered = [normalize_input_path(p)
+                      for p in AppSettings().get_blf_last_db_paths()]
+
+        if is_reload and self._is_blf_source():
+            # 「重载」始终复用上次 db_paths，绝不主动弹窗；只有真读不到才走 C
+            current = [normalize_input_path(p)
+                       for p in (getattr(self.mw.loader, "db_paths", None) or [])]
+            usable, bad = self._usable_db_paths(current)
+            if usable and not bad:
+                return usable
+            return self._ask_can_databases(
+                file_path, initial=current, missing=bad,
+                notice=BLF_TEXT_DB_MISSING.format(paths="\n".join(bad) or "（无）"),
+            )
+
+        if getattr(self, "_blf_force_dialog", False):
+            # F 路径：扫完 0 个信号，warning 后直接重开对话框（回到 B）
+            self._blf_force_dialog = False
+            preset = getattr(self, "_blf_preset_db_paths", None) or remembered
+            self._blf_preset_db_paths = None
+            return self._ask_can_databases(file_path, initial=preset)
+
+        if remembered and AppSettings().is_blf_auto_use_last():
+            usable, bad = self._usable_db_paths(remembered)
+            if usable and not bad:
+                # A：不弹窗，banner 上说明「已自动使用上次数据库」
+                self._blf_auto_used = True
+                logger.info("BLF 自动使用上次数据库: %s", ", ".join(usable))
+                return usable
+            if usable:
+                # C：记忆命中但个别文件缺失/解析失败 → 标红 + 黄条说明
+                return self._ask_can_databases(
+                    file_path, initial=remembered, missing=bad,
+                    notice=BLF_TEXT_DB_MISSING.format(paths="\n".join(bad)),
+                )
+
+        # B：首次导入（无记忆，或记忆已全部不可用）
+        return self._ask_can_databases(file_path, initial=remembered)
+
+    def _ask_can_databases(self, file_path: str, initial=None, missing=None,
+                           notice: str = ""):
+        """弹 §5.2 的选择对话框。取消/未选中任何可用库 → ``None``。"""
+        from src.core.settings import AppSettings
+        from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
+
+        dialog = CanDatabaseSelectorDialog(
+            self.mw,
+            data_file=file_path,
+            initial_paths=list(initial or []),
+            missing_paths=list(missing or []),
+        )
+        if notice:
+            dialog.set_notice(notice)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            logger.info(BLF_TEXT_NO_DB_SELECTED)
+            return None
+        paths = dialog.get_selected_paths()
+        if not paths:
+            logger.info(BLF_TEXT_NO_DB_SELECTED)
+            return None
+        # 记忆写入时机：「导入」成功后才写；取消不写（§5.2）。此处先记住列表，
+        # 扫描失败（异常路径）时不会回滚 —— 下次导入仍能在对话框里看到它们。
+        settings = AppSettings()
+        settings.set_blf_last_db_paths(paths)
+        settings.set_blf_auto_use_last(bool(dialog.remember_choice()))
+        self._blf_auto_used = False
+        return paths
+
+    def _close_blf_progress(self) -> None:
+        dialog = getattr(self, "_blf_progress", None)
+        self._blf_progress = None
+        if dialog is None:
+            return
+        try:
+            # 实测 Qt 的 ``QProgressDialog.close()`` **也会** emit ``canceled()``
+            # （不只用户点取消才发）。先收线再关闭，否则正常扫完的 BLF 会在这
+            # 一步被 ``_on_blf_cancel`` 打上取消标记，紧接着 ``_on_blf_done``
+            # 把刚扫好的 loader 当过期结果丢弃 —— 表现是「导入完但变量列表空」。
+            dialog.canceled.disconnect()
+        except (RuntimeError, TypeError):  # 本就没接线 / 已被 Qt 销毁
+            pass
+        try:
+            dialog.close()
+        except RuntimeError:  #已被 Qt 销毁
+            pass
+
+    def _start_blf_load(self, file_path: str, db_paths, is_reload: bool = False):
+        """§5.4：后台扫描 + 可量化进度 + **必须有取消按钮**。"""
+        name = os.path.basename(file_path)
+        thread = DataLoadThread(file_path, db_paths=list(db_paths))
+        # QThread 的 Python 包装器一丢最后一条强引用就当场析构 C++ 对象，Qt 直接
+        # std::terminate（实测：丢掉运行中线程的唯一引用后继续跑事件循环 →
+        # ``QThread: Destroyed while thread is still running`` + SIGABRT）。
+        # 取消路径刻意不 wait()（不能让 UI 等一个可能还在写大块内存的线程），
+        # 而 ``mw._thread`` 是旧线程的唯一强引用 —— 用户在取消后点「重载」（无
+        # 对话框、按钮已被恢复）就会在这一行覆盖它。先把还在跑的旧线程挂进保活
+        # 列表，等它真正跑完再丢。与 MainWindow._shutdown_var_info_worker
+        # 对变量信息统计线程做的兜底是同一条纪律。
+        refs = self._blf_thread_refs
+        if refs is None:
+            refs = self._blf_thread_refs = []
+        refs[:] = [t for t in refs if t.isRunning()]
+        old = getattr(self.mw, "_thread", None)
+        if old is not None and old is not thread and old.isRunning():
+            refs.append(old)
+        self.mw._thread = thread
+
+        dialog = QProgressDialog(f"正在扫描 BLF 报文… [{name}]", "取消", 0, 100, self.mw)
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        # 不用 autoClose/autoReset：进度会停在 90%（生成信号列表）再跳到 100%，
+        # 自动复位会在扫描结束前先把框收掉。关闭一律走 _close_blf_progress。
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(0)
+        dialog.setValue(0)
+        dialog.show()
+
+        self._blf_progress = dialog
+        load_version = self.mw._data_version
+        self._blf_load_version = load_version
+        self._blf_cancelled_version = None
+
+        thread.progress.connect(self._on_blf_progress)
+        dialog.canceled.connect(thread.request_cancel)
+        dialog.canceled.connect(lambda: self._on_blf_cancel(file_path, load_version))
+        thread.finished.connect(
+            lambda loader: self._on_blf_done(loader, file_path, load_version, is_reload)
+        )
+        thread.error.connect(
+            lambda msg: self._on_blf_error(msg, is_reload, load_version)
+        )
+        thread.cancelled.connect(
+            lambda path: self._on_blf_cancelled(path, is_reload, load_version)
+        )
+        thread.start()
+
+    def _on_blf_progress(self, value: int) -> None:
+        dialog = getattr(self, "_blf_progress", None)
+        if dialog is None:
+            return
+        value = max(0, min(100, int(value)))
+        try:
+            if value < 90:
+                stats = getattr(self.mw._thread, "scan_stats", None) or {}
+                read = int(stats.get("messages", 0))
+                dialog.setLabelText(f"正在扫描 BLF 报文… {value}%（已读 {read:,} 帧）")
+            else:
+                dialog.setLabelText("正在生成信号列表…")
+            dialog.setValue(value)
+        except RuntimeError:
+            self._blf_progress = None
+
+    def _on_blf_cancel(self, file_path: str, load_version: int = -1) -> None:
+        """G 路径：立刻静默恢复，后台线程在下个分块边界抛 InterruptedError。"""
+        if load_version >= 0 and load_version != self._blf_load_version:
+            # 旧线程迟到的取消：新一轮导入已经开始，不能拿它来收新导入的线
+            return
+        if self._blf_cancelled_version == load_version:
+            return
+        self._blf_cancelled_version = load_version
+        logger.info(BLF_TEXT_CANCELLED.format(path=file_path))
+        thread = getattr(self.mw, "_thread", None)
+        if thread is not None and hasattr(thread, "request_cancel"):
+            thread.request_cancel()
+        self._close_blf_progress()
+        # 「恢复原数据」必须含曲线：_begin_data_reload 已经把 item 从 scene 摘了，
+        # 而取消路径不调 _release_old_data —— 旧 loader 还在、widget.curves 里的
+        # 名字/颜色/可见性也还在，所以能原地重建。不重建的话，用户点一下取消
+        # 就白白丢掉整张画布，只能重新拖变量。
+        self._restore_curves_after_abort()
+        self._end_data_reload()
+        self.mw.end_load_feedback("已取消导入")
+        self.mw.load_btn.setEnabled(True)
+        self._reload_in_progress = False
+        self.mw.reload_btn.setEnabled(True)
+
+    def _on_blf_cancelled(self, file_path: str, is_reload: bool = False,
+                          load_version: int = -1) -> None:
+        # 取消在进度框已关闭之后才落地（极小概率竞态）：同样走静默恢复
+        if self._blf_cancelled_version != load_version:
+            self._on_blf_cancel(file_path, load_version)
+
+    def _restore_curves_after_abort(self) -> None:
+        """取消 / 0 信号回环后把已绘曲线画回来（§5.1 G「恢复原数据」）。"""
+        loader = getattr(self.mw, "loader", None)
+        if loader is None or not getattr(loader, "var_names", None):
+            return  # 还没有任何数据源，画布本就是空的
+        try:
+            self.mw.cursor_sync_manager.replots_after_loading(skip_pin_reset=True)
+        except Exception:
+            logger.debug("取消 BLF 导入后恢复原曲线失败", exc_info=True)
+
+    def _discard_loader(self, loader) -> None:
+        if loader is None:
+            return
+        try:
+            if hasattr(loader, "close"):
+                loader.close()
+        except Exception:
+            logger.debug("丢弃 loader 时释放资源失败", exc_info=True)
+
+    def _on_blf_done(self, new_loader, file_path: str, load_version: int = -1,
+                     is_reload: bool = False):
+        self._close_blf_progress()
+        if self._blf_cancelled_version == load_version:
+            # 取消与完成撞在一起：以取消为准，丢掉扫好的 loader
+            self._discard_loader(new_loader)
+            return
+        if load_version >= 0 and load_version != self.mw._data_version:
+            logger.warning(
+                "数据版本不匹配，丢弃过期 BLF 加载结果 (expected=%d, got=%d)",
+                self.mw._data_version, load_version,
+            )
+            self._discard_loader(new_loader)
+            return
+
+        if not new_loader.var_names:
+            # F 路径：库与报文完全不通 → warning 后重开对话框，不进空数据态
+            db_paths = list(getattr(new_loader, "db_paths", None) or [])
+            self._discard_loader(new_loader)
+            # 与 G 路径同理：这轮导入根本没成立，没理由把用户原有的画布留空
+            self._restore_curves_after_abort()
+            self._end_data_reload()
+            self.mw.end_load_feedback()
+            self.mw.load_btn.setEnabled(True)
+            self._reload_in_progress = False
+            self.mw.reload_btn.setEnabled(True)
+            QMessageBox.warning(self.mw, "未生成任何信号", BLF_TEXT_NO_SIGNAL)
+            self._blf_force_dialog = True
+            self._blf_preset_db_paths = db_paths
+            self._schedule_delayed(0, lambda: self._restart_blf_import(file_path))
+            return
+
+        for err in getattr(new_loader, "load_errors", None) or []:
+            logger.warning("CAN 数据库: %s", err)
+        if getattr(new_loader, "truncated", False):
+            QMessageBox.warning(self.mw, "报文数超上限", BLF_TEXT_TRUNCATED)
+
+        self._swap_loader(new_loader, is_reload=is_reload)
+        self._end_data_reload()
+        self.set_button_status(True)
+        self.mw.load_btn.setEnabled(True)
+        self._reload_in_progress = False
+        self.mw.reload_btn.setEnabled(True)
+        # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
+        self._schedule_delayed(
+            0, lambda: self._post_load_actions(file_path, is_reload=is_reload)
+        )
+
+    def _on_blf_error(self, msg: str, is_reload: bool = False,
+                      load_version: int = -1) -> None:
+        if self._blf_cancelled_version == load_version:
+            # 已走静默恢复的取消路径，不能再弹一个错误框打扰用户
+            self._close_blf_progress()
+            return
+        logger.error("BLF 后台加载失败: %s", msg)
+        self._close_blf_progress()
+        self.mw.end_load_feedback(f"加载失败：{msg}", level="error")
+        QMessageBox.critical(self.mw, "读取失败", msg)
+        self._end_data_reload()
+        self.mw.load_btn.setEnabled(True)
+        self._reload_in_progress = False
+        self.mw.reload_btn.setEnabled(True)
+
+    def _restart_blf_import(self, file_path: str, attempt: int = 0) -> None:
+        """F 路径重开导入：等上一轮 reload 生命周期完全收尾后再走。
+
+        这是一条纯 ``QTimer`` 延迟回调链（``_schedule_delayed``，窗口销毁即自动
+        取消），而 ``mw`` 是弱引用 ——
+        重试期间窗口可能被回收（取属性直接抛 RuntimeError，且因为异常落在 Qt
+        事件循环里只会被 sys.excepthook 记成一条无人认领的日志），所以任何
+        一个退出口都必须把两个临时标志擦干净：否则下一次任意 BLF 导入会被
+        ``_blf_force_dialog`` 残留值强制弹窗（表现是「明明记住了数据库却还弹」）。
+        """
+        try:
+            still_loading = bool(getattr(self.mw, "_is_loading_new_data", False))
+        except RuntimeError:  # MainWindow 已被回收
+            self._give_up_blf_restart()
+            logger.info("BLF 重开导入已中止：主窗口正在销毁")
+            return
+        if not still_loading:
+            self.load_csv_file(file_path)
+            return
+        if attempt < 50:
+            self._schedule_delayed(
+                20, lambda: self._restart_blf_import(file_path, attempt + 1)
+            )
+            return
+        self._give_up_blf_restart()
+        logger.info("BLF 重开导入被放弃：上一轮加载 1s 后仍未收尾")
+
+    def _give_up_blf_restart(self) -> None:
+        """放弃 F 路径重开时必须把两个标志复位（它们只对这一轮导入有意义）。"""
+        self._blf_force_dialog = False
+        self._blf_preset_db_paths = None
+
+    def _update_can_db_ui(self) -> None:
+        """按当前数据源刷新 banner 三态与「CAN 数据库…」按钮（§5.3 / §5.6）。"""
+        banner = getattr(self.mw, "can_db_banner", None)
+        button = getattr(self.mw, "can_db_btn", None)
+        loader = getattr(self.mw, "loader", None)
+        if banner is None:
+            return
+        if not self._is_blf_source():
+            banner.hide_banner()
+            if button is not None:
+                button.setVisible(False)
+            return
+        if button is not None:
+            button.setVisible(True)
+
+        database = loader.database
+        db_names = [os.path.basename(p) for p in database.source_files]
+        # 「已自动使用上次数据库」是来源说明，与三态正交（§5.1 A + §5.3），
+        # 所以三个分支都要带；漏在未匹配分支上就会丢掉最常见的场景。
+        auto_used = bool(getattr(self, "_blf_auto_used", False))
+        if getattr(loader, "truncated", False):
+            banner.show_truncated(
+                limit=BLF_MAX_MESSAGES, scanned=loader.total_messages,
+                db_count=len(db_names), db_names=db_names,
+                auto_used=auto_used,
+            )
+            return
+        unmatched = len(getattr(loader, "unmatched_ids", None) or [])
+        if unmatched:
+            banner.show_unmatched(
+                unmatched_count=unmatched, db_count=len(db_names),
+                frame_count=database.frame_count,
+                signal_count=database.signal_count, db_names=db_names,
+                auto_used=auto_used,
+            )
+        else:
+            banner.show_normal(
+                db_count=len(db_names), frame_count=database.frame_count,
+                signal_count=database.signal_count, db_names=db_names,
+                auto_used=auto_used,
+            )
+
+    def reselect_can_database(self) -> None:
+        """§5.6：重选 DBC / ARXML。原始 payload 与数据库解耦，**不重扫报文**，
+        所以 ms 级完成、不需要进度条。"""
+        loader = getattr(self.mw, "loader", None)
+        if not self._is_blf_source():
+            return
+        paths = self._ask_can_databases(
+            loader.path, initial=list(getattr(loader, "db_paths", None) or [])
+        )
+        if not paths:
+            return
+        try:
+            stats = loader.bind_databases(paths)
+        except Exception as e:
+            logger.error("重选 CAN 数据库失败: %s", e, exc_info=True)
+            QMessageBox.critical(
+                self.mw, "重选失败", f"重新绑定 CAN 数据库时出错：\n{e}"
+            )
+            return
+        if not stats.get("var_count"):
+            QMessageBox.warning(self.mw, "未生成任何信号", BLF_TEXT_NO_SIGNAL)
+        for err in loader.load_errors:
+            logger.warning("CAN 数据库: %s", err)
+        self._blf_auto_used = False
+        # 换库后同名变量可能指向完全不同的信号，统计缓存必须整体作废。
+        self.mw.var_stats_cache = {}
+        # 已画出的曲线引用的也是作废名字，一律清除（沿用 _release_old_data 纪律）。
+        try:
+            self.mw.cursor_sync_manager.clear_all_plots()
+        except Exception:
+            logger.debug("重选数据库后清除曲线失败", exc_info=True)
+        # 剩下的「变量集变了」下游收敛全部交回 _apply_loader：它是这条链路上
+        # 的唯一入口，含 per-widget units、X 轴量程、数值表重建、绘图变量编辑器
+        # 搜索候选、变量信息窗刷新、过滤器重放、banner 三态。手写一份精简版
+        # 会漏掉后半：开着的数值表继续按旧变量集建模、变量信息窗拿旧名字去新
+        # 库要样本，统计任务直接返回错误文本。不调 _swap_loader 是因为它
+        # 会 _release_old_data —— 正在用的 loader 不能释放。
+        self._apply_loader(is_reload=True)
+        logger.info(
+            "CAN 数据库已重绑: %d 库 / %d 变量 / %d 未匹配 ID（未重扫报文）",
+            len(paths), stats.get("var_count", 0), stats.get("unmatched", 0),
+        )
+
+    def show_can_unmatched(self) -> None:
+        """§5.5：banner 状态③「查看」入口。"""
+        loader = getattr(self.mw, "loader", None)
+        if not self._is_blf_source():
+            return
+        unmatched = list(getattr(loader, "unmatched_ids", None) or [])
+        if not unmatched:
+            return
+        from src.ui.dialogs.can_unmatched_dialog import CanUnmatchedDialog
+
+        dialog = CanUnmatchedDialog(
+            unmatched, total_messages=loader.total_messages, parent=self.mw
+        )
+        dialog.exec()
+        if dialog.reselect_requested:
+            self.reselect_can_database()
 
     def _release_old_data(self):
         """显式释放所有对旧 DataFrame 的引用（仅在新 loader 成功后调用）。"""
@@ -1255,9 +1778,12 @@ class FileLoaderManager(MainWindowBaseManager):
             return base_ext
 
         base_name = os.path.basename(file_path).lower()
+        # BLF 不分卷：把 .blf 排除出分卷后缀，避免 xxx.blf.2 这类不存在的
+        # 文件被认成 .blf 送进分钟级扫描（分卷只适用于文本型记录）
+        volume_exts = [ext for ext in SUPPORTED_EXTENSIONS if ext != ".blf"]
         pattern = (
             r"("
-            + "|".join(re.escape(ext) for ext in SUPPORTED_EXTENSIONS)
+            + "|".join(re.escape(ext) for ext in volume_exts)
             + r")\.\d+$"
         )
         match = re.search(pattern, base_name)
@@ -1290,6 +1816,7 @@ class FileLoaderManager(MainWindowBaseManager):
         sheet_name: str | None = None,
         is_excel: bool = False,
         is_reload: bool = False,
+        db_paths: list[str] | None = None,
     ):
         if not is_excel:
             is_valid, error_msg = self._validate_load_parameters(
@@ -1306,6 +1833,17 @@ class FileLoaderManager(MainWindowBaseManager):
             ext = os.path.splitext(file_path)[1].lower()
             if ext in (".mf4", ".mdf", ".dat"):
                 new_loader = MDFLazyLoader(file_path)
+            elif ext == ".blf":
+                # 正常导入路径下 BLF 一律走后台线程（§5.4），这里保留同步
+                # 入口只为给单测 / 脚本一个能直接拿到 loader 的等价通道。
+                from src.data.blf_loader import BLFLazyLoader
+
+                if not db_paths:
+                    QMessageBox.warning(
+                        self.mw, "未选择数据库", BLF_TEXT_NO_DB_SELECTED
+                    )
+                    return False
+                new_loader = BLFLazyLoader(file_path, db_paths=db_paths)
             elif ext in (".xlsx", ".xlsm") or is_excel:
                 from src.data.excel_loader import ExcelDataLoader
                 new_loader = ExcelDataLoader(
@@ -1434,6 +1972,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
         self.mw.cursor_sync_manager._compute_baseline_density()
         self.mw.cursor_sync_manager._sync_min_xrange()
+        # BLF：banner 与「CAN 数据库…」按钮跟数据源走（非 BLF 时自动隐去）
+        self._update_can_db_ui()
 
         # v5.11: reload 场景下跳过 pin 状态重置，保留 _restore_cursor_state_after_reload 恢复的 cursor 状态
         self.mw.cursor_sync_manager.replots_after_loading(skip_pin_reset=is_reload)
