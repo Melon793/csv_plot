@@ -310,6 +310,7 @@ dependencies = [
     { name = "pyside6" },
     { name = "python-calamine" },
     { name = "pyyaml" },
+    { name = "shiboken6" },
     { name = "ujson" },
 ]
 
@@ -333,6 +334,7 @@ requires-dist = [
     { name = "pyside6", specifier = ">=6.11.1" },
     { name = "python-calamine", specifier = ">=0.3.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "shiboken6", specifier = ">=6.11.1" },
     { name = "ujson", specifier = ">=5.11.0" },
 ]
 

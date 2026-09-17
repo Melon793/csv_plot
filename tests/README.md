@@ -157,7 +157,7 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 | 3 | 默认值断言**偶发失败** | 会话内共享同一测试配置目录，ini 持久化使前面的用例改写了默认值 | 断言默认值前显式 `settings.set(...)` 置位；涉及持久的用例互相不要依赖顺序 |
 | 4 | 用例卡死在**任何模态对话框** | QMessageBox / QFileDialog 在 offscreen 下阻塞等待用户输入 | 统一 monkeypatch 静态方法为记录器替身（参考 `silent_dialogs` fixture） |
 | 5 | e2e 构造 MainWindow 时**把 pytest 参数当数据文件加载** | `MainWindow._handle_cli_args` 读取 `sys.argv[1:]`，pytest 的命令行参数被当作文件路径，弹模态框永久阻塞 | `main_window` 夹具构造前 `monkeypatch.setattr("sys.argv", [...])` 重置 |
-| 6 | e2e 用例后**随机出现不相关用例失败/报错** | 加载链路调度的 `QTimer.singleShot` 延迟回调在窗口销毁后触发，槽函数异常经 `sys.excepthook` 进入 pytest-qt 异常池，被错误归因给其他用例 | `e2e/conftest.py` 的 `main_window` 夹具包装 `sys.excepthook` 过滤已知清理竞态（`_KNOWN_TEARDOWN_RACE_MARKERS`）；收尾先 `qtbot.wait` 排空定时器再 close |
+| 6 | e2e 用例后**随机出现不相关用例失败/报错** | 加载链路调度的 `QTimer.singleShot` 延迟回调在窗口销毁后触发，槽函数异常经 `sys.excepthook` 进入 pytest-qt 异常池，被错误归因给其他用例 | `e2e/conftest.py` 的 `main_window` 夹具包装 `sys.excepthook` 过滤已知清理竞态（`_KNOWN_TEARDOWN_RACE_MARKERS`）；收尾先 `qtbot.wait` 排空定时器再 close。**新撞到的回调优先在源码侧收口**（延迟回调先问 `_widget_alive`，见 `layout_manager.py` 与 `test_xlink_sync_dead_containers.py`）：往 marker 里加名字实测无效——`monkeypatch` 自身还原钩子的 teardown 更晚，过滤器会提前失效 |
 | 7 | pyqtgraph 范围/autoRange 断言与预期不符 | `vb.state` 中的值是 numpy float，`is True` 断言必败；auto-range 重算依赖宿主窗口 show（有效视图尺寸非零） | 断言用 `bool(...)`；需要真实布局计算的夹具必须 `widget.window().show()` |
 | 8 | 临时诊断脚本中 monkeypatch 类方法**污染后续用例** | 直接改 `ClassName.method` 而不走 pytest monkeypatch，不会自动还原 | 一律用 `monkeypatch.setattr(Class, "method", ...)`；诊断脚本用后即删 |
 
