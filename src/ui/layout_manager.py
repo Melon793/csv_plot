@@ -10,6 +10,7 @@ import numpy as np
 
 from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
+from shiboken6 import isValid as _shiboken_is_valid
 
 from src.core.config import UI_DEBOUNCE_DELAY_MS
 from src.utils.paths import normalize_input_path
@@ -24,6 +25,22 @@ from src.ui.widgets.plot_container import PlotContainerWidget
 from src.app.plot_context import PlotContext
 
 logger = get_logger(__name__)
+
+
+def _widget_alive(widget) -> bool:
+    """Qt C++ 对象是否还在——延迟回调摸控件前的必要前置判断。
+
+    ``QTimer.singleShot`` 持有的是 Manager 的普通 Python 方法，窗口/tab 销毁
+    不会取消它；届时 ``plot_widgets`` 里残留的 container 只剩 Python 包装器，
+    按属性名取值照常（命中的是 ``__dict__``），直到真调到 ``isVisible()`` /
+    ``geometry()`` 才抛 ``RuntimeError: Internal C++ object already deleted``。
+    所以 ``not container`` 和 ``hasattr(...)`` 这类弱守卫挡不住，必须先问一句。
+
+    ``isValid`` 对非 Qt 对象（component 测试里的普通 Python 替身）返回 True，
+    替身因此不会被误杀；但它对 ``None`` 同样返回 True，判空必须由前置的
+    ``widget is not None`` 兜住。
+    """
+    return widget is not None and _shiboken_is_valid(widget)
 
 
 class LayoutManager(MainWindowBaseManager):
@@ -46,6 +63,9 @@ class LayoutManager(MainWindowBaseManager):
         mw = self._mw_ref()
         if mw is None:
             return
+        if not _widget_alive(mw):
+            # 窗口 C++ 侧已销毁：既不能摸 main_splitter，也不该再续排 50ms
+            return
         if not hasattr(mw, "main_splitter"):
             return
         sizes = mw.main_splitter.sizes()
@@ -56,7 +76,7 @@ class LayoutManager(MainWindowBaseManager):
 
     def _apply_fixed_splitter_width(self):
         mw = self._mw_ref()
-        if mw is None:
+        if mw is None or not _widget_alive(mw):
             return
         mw._pending_splitter_adjustment = False
         if (
@@ -100,14 +120,23 @@ class LayoutManager(MainWindowBaseManager):
         self._schedule_xlink_sync()
 
     def _sync_linked_x_ranges(self):
-        self.mw._pending_xlink_sync = False
-        if not self.mw.plot_widgets:
+        mw = self._mw_ref()
+        if mw is None or not _widget_alive(mw):
+            # 窗口已随事件循环销毁：残留的 plot_widgets 无从同步，静默返回。
+            # 注意不能先摸 self.mw —— 弱引用断开时那个 property 本身就抛 RuntimeError。
+            return
+        mw._pending_xlink_sync = False
+        if not mw.plot_widgets:
             return
 
         # === X-link 健康检查：丢失 link 的 plot 自动重建 ===
-        master_vb = self.mw.plot_widgets[0].plot_widget.view_box
-        for idx, container in enumerate(self.mw.plot_widgets):
-            if idx == 0 or not container or not hasattr(container, "plot_widget"):
+        if not _widget_alive(mw.plot_widgets[0]):
+            return  # 首块都没了 = 整窗正在销毁，后面的同步无从谈起
+        master_vb = mw.plot_widgets[0].plot_widget.view_box
+        for idx, container in enumerate(mw.plot_widgets):
+            if idx == 0 or not _widget_alive(container):
+                continue
+            if not hasattr(container, "plot_widget"):
                 continue
             vb = container.plot_widget.view_box
             if vb.linkedView(0) is None and container.isVisible():
@@ -116,8 +145,8 @@ class LayoutManager(MainWindowBaseManager):
                 )
                 vb.setXLink(master_vb)
 
-        first_container = self.mw.plot_widgets[0]
-        if not first_container or not hasattr(first_container, "plot_widget"):
+        first_container = mw.plot_widgets[0]
+        if not hasattr(first_container, "plot_widget"):
             return
         first_pw = first_container.plot_widget
         if not hasattr(first_pw, "view_box"):
@@ -148,8 +177,8 @@ class LayoutManager(MainWindowBaseManager):
             first_geom.x(), first_geom.y(), first_geom.width(), first_geom.height(),
         )
 
-        for container in self.mw.plot_widgets[1:]:
-            if not container or not hasattr(container, "plot_widget"):
+        for container in mw.plot_widgets[1:]:
+            if not _widget_alive(container) or not hasattr(container, "plot_widget"):
                 continue
             pw = container.plot_widget
             if not hasattr(pw, "view_box"):

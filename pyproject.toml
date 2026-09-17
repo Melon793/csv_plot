@@ -14,6 +14,7 @@ dependencies = [
     "pyqtgraph>=0.14.0",
     "pyside6>=6.11.1",
     "pyyaml>=6.0.0",
+    "shiboken6>=6.11.1",
     "ujson>=5.11.0",
 ]
 
