@@ -110,3 +110,41 @@ class TestProperties:
         loader = self._loaded()
         loader.release_memory()
         assert loader.df.empty
+
+
+class TestReleaseMemoryContract:
+    """release 后属性契约：容器仍是容器，同时旧对象必须真的被回收"""
+
+    @staticmethod
+    def _loaded() -> BaseDataLoader:
+        loader = _make_loader(
+            pd.DataFrame({"time": [0.0, 0.1], "a": [1.0, 2.0]})
+        )
+        loader.time_column_name = "time"
+        loader._units = {"time": "s", "a": "V"}
+        loader._df_validity = {"time": 1, "a": 1}
+        return loader
+
+    def test_container_properties_stay_readable(self):
+        loader = self._loaded()
+        loader.release_memory()
+        assert loader.units == {}
+        assert loader.df_validity == {}
+        assert loader.var_names == []
+        # 单位字典置 None 会让 .get() 抛 AttributeError
+        assert loader.time_axis_label == "time"
+
+    def test_old_containers_lose_their_loader_reference(self):
+        """置 None 与换空容器都能断引用，但只有后者保住契约 —— 这里断内存侧收益仍在"""
+        import sys
+
+        loader = self._loaded()
+        old_units = loader._units
+        old_validity = loader._df_validity
+        before = (sys.getrefcount(old_units), sys.getrefcount(old_validity))
+
+        loader.release_memory()
+
+        after = (sys.getrefcount(old_units), sys.getrefcount(old_validity))
+        assert after[0] == before[0] - 1
+        assert after[1] == before[1] - 1

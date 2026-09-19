@@ -164,25 +164,24 @@ class BaseDataLoader:
         if hasattr(self, "_df") and self._df is not None:
             self._df = pd.DataFrame()
 
-        # 清理其他可能占内存的属性
-        for attr in ("_var_names", "_units", "_df_validity"):
+        # 复位为 __init__ 初值而不是置 None：units / df_validity / time_axis_label
+        # 的返回契约都是容器，置 None 后读一次就 TypeError；旧容器失去引用同样回收
+        for attr, empty in (
+            ("_var_names", list),
+            ("_units", dict),
+            ("_df_validity", dict),
+        ):
             if hasattr(self, attr):
-                try:
-                    setattr(self, attr, None)
-                except Exception:
-                    logger.debug("清理属性 '%s' 失败", attr)
+                setattr(self, attr, empty())
 
         # Excel loader: 关闭 workbook（如果存在）
         if hasattr(self, "_wb") and self._wb is not None:
             try:
                 self._wb.close()
             except Exception:
-                logger.debug("关闭 workbook 失败")
+                logger.debug("关闭 workbook 失败", exc_info=True)
         if hasattr(self, "_ws"):
-            try:
-                self._ws = None
-            except Exception:
-                logger.debug("清理 worksheet 引用失败")
+            self._ws = None
 
     # ---- 公共属性接口 ----
     @property
