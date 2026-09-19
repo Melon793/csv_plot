@@ -193,3 +193,57 @@ class TestFastDataLoaderLoad:
         FastDataLoader(str(simple_csv), has_unit=True, sep=",", _progress=progress.append)
         assert progress[-1] == 100
         assert all(0 <= p <= 100 for p in progress)
+
+
+class TestEncodingFallbackChain:
+    """编码回退链必须真正生效（V6.0 P0-5：旧实现用 errors="replace" 永不抛错，
+    首轮即 break → 整条链是死代码，误判编码被静默采纳）。"""
+
+    @staticmethod
+    def _fake_detect(encoding: str, coherence: float):
+        """把 charset_normalizer 的探测结果钉成指定编码（模拟误判）"""
+
+        class _Match:
+            def __init__(self):
+                self.encoding = encoding
+                self.coherence = coherence
+
+        class _Result:
+            def best(self):
+                return _Match()
+
+        return lambda raw: _Result()
+
+    def test_auto_detect_falls_through_wrong_candidate(self, tmp_path, monkeypatch):
+        """探测链误判 utf-8（高置信度）时，严格解码须筛掉它并选中 gb18030"""
+        f = write_csv(
+            tmp_path / "gbk.csv",
+            header=["时间", "速度", "转速"], units=["s", "km/h", "rpm"],
+            rows=[[0.0, 10.5, 800], [0.1, 11.0, 810]],
+            encoding="gb18030",
+        )
+        monkeypatch.setattr(
+            "charset_normalizer.from_bytes", self._fake_detect("utf-8", 0.95)
+        )
+
+        fmt = FastDataLoader.auto_detect(str(f))
+
+        assert fmt.encoding == "gb18030"
+        assert fmt.sep == ","
+        assert fmt.has_unit is True
+
+    def test_header_units_falls_back_to_gb18030(self, tmp_path):
+        """表头/单位链须含 gb18030：上游误传 utf-8 时不得退化成 cp1252 乱码"""
+        f = write_csv(
+            tmp_path / "gbk2.csv",
+            header=["时间", "速度", "转速"], units=["s", "km/h", "rpm"],
+            rows=[[0.0, 10.5, 800], [0.1, 11.0, 810]],
+            encoding="gb18030",
+        )
+
+        loader = FastDataLoader(str(f), has_unit=True, sep=",", encoding="utf-8")
+
+        assert loader.var_names == ["时间", "速度", "转速"]
+        assert loader.encoding_used == "gb18030"
+        assert loader.units["速度"] == "km/h"
+        assert loader.datalength == 2
