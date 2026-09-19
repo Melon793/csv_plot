@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from types import SimpleNamespace
 
 import openpyxl
 import pandas as pd
@@ -107,6 +108,41 @@ class TestGetSheetInfo:
         assert info[0]["name"] == "Sheet1"
         assert info[0]["rows"] == 5  # 标题 + 单位 + 3 数据行
         assert info[0]["cols"] == 3
+
+    class _FakeWB:
+        """read_only 工作簿替身：底层是个活文件句柄，close() 必须被调用到。"""
+
+        def __init__(self, names, explode_on=None):
+            self.sheetnames = list(names)
+            self.closed = 0
+            self._explode = explode_on
+
+        def __getitem__(self, name):
+            if name == self._explode:
+                raise RuntimeError("dimension 损坏")
+            return SimpleNamespace(max_row=7, max_column=2)
+
+        def close(self):
+            self.closed += 1
+
+    def test_closes_the_workbook_after_listing(self, monkeypatch):
+        wb = self._FakeWB(["a", "b"])
+        monkeypatch.setattr(openpyxl, "load_workbook", lambda *a, **k: wb)
+
+        info = ExcelDataLoader.get_sheet_info("whatever.xlsx")
+
+        assert [s["name"] for s in info] == ["a", "b"], "正向对照：确实走完了循环"
+        assert wb.closed == 1
+
+    def test_closes_the_workbook_even_when_metadata_raises(self, monkeypatch):
+        """P2-32：`wb.close()` 原先不在 finally 里，中途抛错就把句柄漏在进程里。"""
+        wb = self._FakeWB(["a", "b"], explode_on="b")
+        monkeypatch.setattr(openpyxl, "load_workbook", lambda *a, **k: wb)
+
+        with pytest.raises(RuntimeError):
+            ExcelDataLoader.get_sheet_info("broken.xlsx")
+
+        assert wb.closed == 1, "异常路径同样要关掉工作簿"
 
 
 class TestTimeChannelColumns:
