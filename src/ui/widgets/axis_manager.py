@@ -229,6 +229,38 @@ class AxisManager:
         set_y_autorange(pw.view_box)
         pw.axis_y.setTicks(None)
 
+    def _xlink_target(self, vb: pg.ViewBox) -> pg.ViewBox:
+        """X 范围应该写入的 ViewBox：本视图被 XLink 接管时必须是源视图。
+
+        ``ViewBox.linkView`` 在重连末尾会无条件回调 ``linkedViewChanged``，用源
+        的 range 覆盖子视图，所以「unlink → setXRange → relink」只要目标范围与
+        源不同就会被静默回收（表现为第 2~N 个子图滚轮无反应）。写源则由 XLink
+        原生向整组广播，既生效又保持共享 X 轴一致。
+        """
+        linked = vb.linkedView(0)
+        return vb if linked is None else linked
+
+    def _map_x_to_viewbox(
+        self, vb: pg.ViewBox, target: pg.ViewBox, x: float
+    ) -> float:
+        """把 ``vb`` 视图坐标 x 换算成 ``target`` 的视图坐标，按屏幕像素对齐。
+
+        各子图是各自独立的 GraphicsLayoutWidget（scene 不共用），因此不能走
+        mapToScene；这里用 ``screenGeometry`` + ``viewRect`` 做线性映射，与
+        pyqtgraph ``linkedViewChanged`` 的 XLink 像素映射同源。
+        """
+        own = vb.screenGeometry()
+        dest = target.screenGeometry()
+        src_rect = vb.viewRect()
+        dst_rect = target.viewRect()
+        if own is None or dest is None:
+            return x
+        if min(own.width(), dest.width(), src_rect.width(), dst_rect.width()) <= 0:
+            return x
+        frac = (x - src_rect.left()) / src_rect.width()
+        global_x = own.left() + frac * own.width()
+        return dst_rect.left() + (global_x - dest.left()) * dst_rect.width() / dest.width()
+
     def zoom_x(self, factor: float, center_x: float) -> None:
         """以 center_x 为中心把 X 轴缩放 factor 倍，且不触碰 Y 轴 autoRange。
 
@@ -236,8 +268,13 @@ class AxisManager:
         导致 Ctrl+Y 开启的「Y 跟随可见段」在一次滚轮后被静默废除。
         """
         vb = self.pw.view_box
-        left, right = vb.viewRange()[0]
-        with y_autorange_preserved(vb):
+        target = self._xlink_target(vb)
+        if target is not vb:
+            # center_x 是鼠标所在子图的视图坐标，而缩放写进的是 XLink 源；
+            # 不换算锚点的话，跨列/不等宽时缩放中心会按像素映射整体偏移。
+            center_x = self._map_x_to_viewbox(vb, target, center_x)
+        left, right = target.viewRange()[0]
+        with y_autorange_preserved(target):
             self.set_xrange_with_link_handling(
                 center_x - (center_x - left) * factor,
                 center_x + (right - center_x) * factor,
@@ -249,32 +286,17 @@ class AxisManager:
         xmax: float,
         padding: float = 0,
     ) -> None:
-        pw = self.pw
-        plot = pw.plot_item
+        """设置 X 范围；本视图被 XLink 接管时写入源视图，由其广播到整组。"""
+        vb = self.pw.view_box
+        target = self._xlink_target(vb)
 
-        linked = plot.getViewBox().linkedView(0)
-
-        if linked is not None:
-            plot.setXLink(None)
-            logger.debug(
-                "[XLINK] plot=%s temp unlink for setXRange (%.4f, %.4f)",
-                getattr(pw, 'y_name', '?'), xmin, xmax,
-            )
-
-        try:
-            plot.getViewBox().enableAutoRange(x=False)
-            plot.setXRange(xmin, xmax, padding=max(0, padding))
-        finally:
-            if linked is not None:
-                plot.setXLink(linked)
-                logger.debug(
-                    "[XLINK] plot=%s link restored after setXRange",
-                    getattr(pw, 'y_name', '?'),
-                )
+        target.enableAutoRange(x=False)
+        target.setXRange(xmin, xmax, padding=max(0, padding))
 
         logger.debug(
-            "[AXIS] set_xrange_with_link_handling: (%.4f, %.4f) padding=%.4f had_link=%s",
-            xmin, xmax, max(0, padding), linked is not None,
+            "[AXIS] set_xrange_with_link_handling: (%.4f, %.4f) padding=%.4f "
+            "link_source=%s",
+            xmin, xmax, max(0, padding), target is not vb,
         )
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
