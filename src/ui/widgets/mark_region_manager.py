@@ -22,6 +22,21 @@ if TYPE_CHECKING:
     from src.ui.widgets.cursor_manager import CursorManager
 
 
+def _nearest_index(x_data: np.ndarray, value: float) -> int:
+    """升序 `x_data` 上离 `value` 最近的下标，与 `argmin(abs(x - value))` 严格等价。
+
+    平手取左侧、重复 x 回退到该值首次出现处，都是在复刻 `argmin` 的「首个最小值」
+    语义 —— 同一重复段里 `y_data` 各不相同，下标差了就等于换了个采样点算 slope。
+    """
+    idx = int(np.searchsorted(x_data, value, side="left"))
+    if idx <= 0:
+        return 0
+    if idx < len(x_data) and (value - x_data[idx - 1]) > (x_data[idx] - value):
+        return idx
+    best = idx - 1
+    return int(np.searchsorted(x_data, x_data[best], side="left"))
+
+
 class MarkRegionManager:
     """负责标记区域的管理和统计计算"""
 
@@ -131,8 +146,8 @@ class MarkRegionManager:
                 y_dtype = np.float32 if safe_y else np.float64
                 y_data = y_data.astype(y_dtype)
 
-            idx_left = np.argmin(np.abs(x_data - min_x))
-            idx_right = np.argmin(np.abs(x_data - max_x))
+            idx_left = _nearest_index(x_data, min_x)
+            idx_right = _nearest_index(x_data, max_x)
             x1 = x_data[idx_left]
             y1 = y_data[idx_left]
             x2 = x_data[idx_right]
