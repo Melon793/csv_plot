@@ -183,6 +183,11 @@ class LogManager:
     def get_logger(self, name: str) -> logging.Logger:
         return logging.getLogger(name)
 
+    @property
+    def ui_handler(self) -> "QSignalLogHandler":
+        """UI 日志信号处理器（只读）——供日志窗口订阅 new_log"""
+        return self._ui_handler
+
     def set_ui_log_level(self, level: int):
         self._ui_handler.setLevel(level)
 
