@@ -2500,16 +2500,32 @@ class DataTableDialog(QMainWindow):
         act_clear.triggered.connect(self._clear_all_columns)
 
         selected = menu.exec(header.mapToGlobal(pos))
-        if selected == act_delete:
-            if state is not None:
+        if selected is None or selected not in (act_delete, act_freeze):
+            return
+        if state is not None:
+            if selected == act_delete:
                 self._remove_tab_column(state, var_name)
-            else:
-                self._remove_column(logical_col)
-        elif state is None and selected == act_freeze:
-            if var_name in self.frozen_columns:
-                self.unfreeze_column(logical_col)
-            else:
-                self.freeze_column(logical_col)
+            return
+        # menu.exec 跑的是嵌套事件循环：期间后台重载（update_data）可能已增删列，
+        # exec 之前捕获的 logical_col 届时指向的是别的列甚至越界，只能按列名重查
+        col = self._column_index_of(var_name)
+        if col is None:
+            logger.debug("表头菜单收尾时列 %s 已不在表内，跳过", var_name)
+            return
+        if selected == act_delete:
+            self._remove_column(col)
+        elif var_name in self.frozen_columns:
+            self.unfreeze_column(col)
+        else:
+            self.freeze_column(col)
+
+    def _column_index_of(self, var_name: str) -> int | None:
+        """按列名取当前 logical 列号；不在表内或有重名（无从判定）时返回 None。"""
+        try:
+            loc = self._df.columns.get_loc(var_name)
+        except KeyError:
+            return None
+        return loc if isinstance(loc, (int, np.integer)) else None
 
     def _remove_tab_column(self, state: _GroupTabState, var_name: str):
         """tab 模式删除一列；该组已无变量列时整页移除。"""
