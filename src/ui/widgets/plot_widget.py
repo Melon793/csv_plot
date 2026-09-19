@@ -29,6 +29,7 @@ logger = get_logger("widget.plot")
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView,
     QMessageBox,
+    QWidget,
 )
 import pyqtgraph as pg
 
