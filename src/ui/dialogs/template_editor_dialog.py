@@ -215,8 +215,11 @@ class TemplateEditorDialog(QDialog):
     def _connect_signals(self):
         """连接信号"""
         self._yaml_edit.textChanged.connect(self._update_preview)
-        self._save_btn.clicked.connect(self._on_save_clicked)
-        self._saveas_btn.clicked.connect(self._on_saveas_clicked)
+        # 显式包一层：clicked(bool) 的 checked 不能落到 save_as 形参上
+        self._save_btn.clicked.connect(lambda checked=False: self._on_save_clicked())
+        self._saveas_btn.clicked.connect(
+            lambda checked=False: self._on_save_clicked(save_as=True)
+        )
         self._cancel_btn.clicked.connect(self.reject)
 
     def _update_preview(self):
@@ -321,8 +324,14 @@ class TemplateEditorDialog(QDialog):
                 item.widget().deleteLater()
         self._stats_label.setText("cells: 0 × 0 | vars: 0 | plots: 0")
 
-    def _on_save_clicked(self):
-        """保存按钮点击"""
+    def _on_save_clicked(self, save_as: bool = False):
+        """保存按钮点击
+
+        `save_as` 只决定**本次**写入哪个模板：编辑目标走局部 `edit_id`，
+        名称为空 / YAML 校验失败 / 冲突框选「取消」而 return 时，实例上的
+        `_edit_template_id` 保持原样，之后的「保存」仍更新原模板。
+        """
+        edit_id = None if save_as else self._edit_template_id
         try:
             name = self._name_edit.text().strip()
             if not name:
@@ -344,51 +353,39 @@ class TemplateEditorDialog(QDialog):
             session_config = PlotSessionConfig.from_dict(config)
 
             # 同名冲突检查：由用户选择覆盖 / 另存新名 / 取消
-            conflict = self._find_conflict_template(name)
+            conflict = self._find_conflict_template(name, edit_id)
+            success_message = None
             if conflict is not None:
-                action = self._ask_conflict_resolution(name)
+                action = self._ask_conflict_resolution(name, edit_id)
                 if action == "cancel":
                     return
                 if action == "overwrite":
-                    template = self._template_manager.save_template(
-                        session_config,
-                        name,
-                        self._desc_edit.text().strip(),
-                        conflict.metadata.id,
-                    )
-                    QMessageBox.information(self, "成功", f"已覆盖模板 [{name}]")
-                    try:
-                        self.template_saved.emit(template.metadata.id)
-                    finally:
-                        self.accept()
-                    return
-                # action == "rename"：自动改用不冲突的新名称继续保存
-                name = self._suggest_unique_name(name)
-                self._name_edit.setText(name)
+                    edit_id = conflict.metadata.id
+                    success_message = f"已覆盖模板 [{name}]"
+                else:
+                    # action == "rename"：自动改用不冲突的新名称继续保存
+                    name = self._suggest_unique_name(name)
+                    self._name_edit.setText(name)
 
-            if self._edit_template_id:
-                template = self._template_manager.save_template(
-                    session_config,
-                    name,
-                    self._desc_edit.text().strip(),
-                    self._edit_template_id,
-                )
-                QMessageBox.information(self, "成功", "模板已更新")
-                try:
-                    self.template_saved.emit(template.metadata.id)
-                finally:
-                    self.accept()
-            else:
-                template = self._template_manager.save_template(
-                    session_config,
-                    name,
-                    self._desc_edit.text().strip(),
-                )
-                QMessageBox.information(self, "成功", "模板已保存")
-                try:
-                    self.template_saved.emit(template.metadata.id)
-                finally:
-                    self.accept()
+            template = self._template_manager.save_template(
+                session_config,
+                name,
+                self._desc_edit.text().strip(),
+                template_id=edit_id,
+            )
+            if save_as:
+                # 写盘成功后才把编辑目标切到新模板（并丢弃载入表单用的旧快照）
+                self._edit_template_id = template.metadata.id
+                self._template = None
+            QMessageBox.information(
+                self,
+                "成功",
+                success_message or ("模板已更新" if edit_id else "模板已保存"),
+            )
+            try:
+                self.template_saved.emit(template.metadata.id)
+            finally:
+                self.accept()
 
         except TemplateNameConflictError:
             QMessageBox.warning(self, "警告", "模板名称已存在")
@@ -398,10 +395,10 @@ class TemplateEditorDialog(QDialog):
             logger.error(f"Save error: {e}")
             QMessageBox.critical(self, "错误", f"保存失败: {str(e)}")
 
-    def _find_conflict_template(self, name: str):
-        """查找同名模板（排除正在编辑的模板自身），无冲突返回 None"""
+    def _find_conflict_template(self, name: str, edit_id: str | None = None):
+        """查找同名模板（排除本次写入的模板自身），无冲突返回 None"""
         for t in self._template_manager.get_all_templates():
-            if t.metadata.name == name and t.metadata.id != self._edit_template_id:
+            if t.metadata.name == name and t.metadata.id != edit_id:
                 return t
         return None
 
@@ -414,7 +411,7 @@ class TemplateEditorDialog(QDialog):
             new_name = f"{base} ({i})"
         return new_name
 
-    def _ask_conflict_resolution(self, name: str) -> str:
+    def _ask_conflict_resolution(self, name: str, edit_id: str | None = None) -> str:
         """同名冲突时的选择：overwrite / rename / cancel
 
         编辑模式下不提供覆盖选项，避免误覆盖另一个模板。
@@ -423,7 +420,7 @@ class TemplateEditorDialog(QDialog):
         box.setWindowTitle("模板名称冲突")
         box.setIcon(QMessageBox.Icon.Warning)
         overwrite_btn = None
-        if self._edit_template_id:
+        if edit_id:
             box.setText(f"已存在同名模板 [{name}]，请另存为新名称或取消后修改名称")
         else:
             box.setText(f"已存在同名模板 [{name}]，如何处理？")
@@ -440,11 +437,3 @@ class TemplateEditorDialog(QDialog):
         if clicked is rename_btn:
             return "rename"
         return "cancel"
-
-    def _on_saveas_clicked(self):
-        """另存为按钮点击"""
-        # 清除编辑 ID，作为新模板保存
-        self._edit_template_id = None
-        self._template = None
-        self.setWindowTitle("💾 另存为模板")
-        self._on_save_clicked()
