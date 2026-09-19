@@ -754,6 +754,10 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
     total_sum = 0.0
     total_sumsq = 0.0
     n = 0
+    # 中心化参考点：首块均值。方差公式 E[x²]-E[x]² 在绝对时间戳（~1.7e9）这类
+    # 大均值通道上会把两个 1e18 量级的量相减，float64 只剩 ~16 位有效数字，
+    # 结果直接抵成 0 或负数（详见累加处）
+    ref: float | None = None
     nan_count = 0
     inf_count = 0
     offset = 0
@@ -810,8 +814,13 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
         if f.size:
             mn = min(mn, float(f.min()))
             mx = max(mx, float(f.max()))
-            total_sum += float(f.sum())
-            total_sumsq += float((f * f).sum())
+            if ref is None:
+                ref = float(np.mean(f))
+            # 减掉参考点后再累加：跨块方差因此变成「小量级上的 E[y²]-E[y]²」，
+            # 与 _stats_from_array 的 np.nanstd 同精度口径
+            g = f - ref
+            total_sum += float(g.sum())
+            total_sumsq += float((g * g).sum())
             n += int(f.size)
 
         # 按**实际返回量**推进：按请求量 count 推进会在 asammdf 返回不足
@@ -837,9 +846,10 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
             error="全部为 NaN/Inf，无有效样本",
         )
 
-    mean = total_sum / n
-    # 方差用 E[x²]-E[x]²，浮点舍入可能得到极小负数，需夹到 0
-    variance = max(total_sumsq / n - mean * mean, 0.0)
+    centered_mean = total_sum / n
+    mean = ref + centered_mean
+    # 方差用 E[y²]-E[y]²（y = x - ref），浮点舍入仍可能得到极小负数，夹到 0
+    variance = max(total_sumsq / n - centered_mean * centered_mean, 0.0)
     note = ""
     if truncated_at is not None:
         # 结果仍然有效，但适用范围小于页面宣称的 total，必须告知
