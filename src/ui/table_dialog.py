@@ -39,7 +39,11 @@ from PySide6.QtWidgets import (
     QCompleter,
     QProgressDialog,
 )
-from src.core.config import FROZEN_VIEW_WIDTH_DEFAULT, BLINK_PULSE
+from src.core.config import (
+    FROZEN_VIEW_WIDTH_DEFAULT,
+    BLINK_PULSE,
+    widget_alive,
+)
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.core.logger import get_logger
 
@@ -362,7 +366,7 @@ class DataTableDialog(QMainWindow):
             dlg.activateWindow()
 
         # 闪烁
-        QTimer.singleShot(100, lambda: dlg._blink_column(var_name, pulse=BLINK_PULSE))
+        dlg._later(100, lambda: dlg._blink_column(var_name, pulse=BLINK_PULSE))
         return dlg
 
     @classmethod
@@ -824,7 +828,7 @@ class DataTableDialog(QMainWindow):
             if gen == self._gen:
                 self._blink_tab_column(tab_state, var_name)
 
-        QTimer.singleShot(100, _do_blink)
+        self._later(100, _do_blink)
 
     def _blink_tab_column(
         self, tab_state: _GroupTabState, var_name: str, pulse: int = 800
@@ -1018,7 +1022,7 @@ class DataTableDialog(QMainWindow):
                 # scroll_pos 统一存像素值（与 _on_tab_switched 一致）
                 state.scroll_pos = state.view.verticalScrollBar().value()
 
-        QTimer.singleShot(0, _do)
+        self._later(0, _do)
         return True
 
     def _reset_tab_mode(self):
@@ -1355,6 +1359,22 @@ class DataTableDialog(QMainWindow):
         delegate.highlighted_cols.discard(col_idx)
         view.viewport().update()
 
+    def _later(self, ms: int, fn) -> None:
+        """排一个「窗口可能已先被销毁」的延迟回调。
+
+        closeEvent 会真 `deleteLater()`：届时在途回调只剩 Python 包装器，摸任何
+        Qt 方法都抛 RuntimeError（timer 回调里的异常不冒泡到调用方，只经
+        excepthook 打 stderr，但会淹没日志且行为不可控）。统一先问存活。
+        """
+
+        def _cb():
+            if not widget_alive(self):
+                logger.debug("延迟回调跳过：DataTableDialog 已销毁")
+                return
+            fn()
+
+        QTimer.singleShot(ms, _cb)
+
     def _blink_column(self, var_name, pulse: int = 800):
         if self._tab_mode:
             # tab 模式：在对应 tab 中闪烁
@@ -1450,8 +1470,8 @@ class DataTableDialog(QMainWindow):
         if added_vars:
             # 滚动到最后添加的变量
             last_var = added_vars[-1]
-            QTimer.singleShot(100, lambda: self.scroll_to_column(last_var))
-            QTimer.singleShot(
+            self._later(100, lambda: self.scroll_to_column(last_var))
+            self._later(
                 100, lambda: self._blink_column(last_var, pulse=BLINK_PULSE)
             )
 
@@ -1517,8 +1537,8 @@ class DataTableDialog(QMainWindow):
         self._add_variable_to_table(var_name, series)
 
         # 滚动到新添加的列
-        QTimer.singleShot(100, lambda: self.scroll_to_column(var_name))
-        QTimer.singleShot(100, lambda: self._blink_column(var_name, pulse=BLINK_PULSE))
+        self._later(100, lambda: self.scroll_to_column(var_name))
+        self._later(100, lambda: self._blink_column(var_name, pulse=BLINK_PULSE))
 
     # 内部函数：添加变量到表格
     def _add_variable_to_table(self, var_name: str, data: pd.Series):
@@ -1566,7 +1586,7 @@ class DataTableDialog(QMainWindow):
             # 属性若被别的调用方改写就会恢复错位置），不把陈旧值留给下一个调用方
             pos = self._saved_scroll_pos
             self._saved_scroll_pos = None
-            QTimer.singleShot(
+            self._later(
                 0,
                 lambda p=pos: self.main_view.verticalScrollBar().setValue(p),
             )
@@ -2186,6 +2206,10 @@ class DataTableDialog(QMainWindow):
         DataTableDialog._instance = None
         self.frozen_columns = []
         self.hide()
+        # 只 hide 不销毁 = C++ 骨架（2×QTableView + tab widget + delegates）
+        # 一直挂在主窗口上，反复开关线性泄漏。实例已由类名从单例摘除，
+        # 在途延迟回调统一走 _later() 的存活判定收尾。
+        self.deleteLater()
         event.accept()
 
     def set_skip_close_confirmation(self, status: bool):

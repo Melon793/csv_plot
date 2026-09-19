@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from tests.fixtures.data_factory import write_mdf
+from src.core.config import widget_alive
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.file_loader_manager import FileLoaderManager
 from src.ui.table_dialog import (
@@ -67,8 +68,11 @@ def tab_dialog(qapp, mdf_loader, monkeypatch):
     dlg = DataTableDialog()
     dlg._resolve_loader = lambda: mdf_loader
     yield dlg
-    dlg.hide()
-    dlg.deleteLater()
+    # closeEvent 现在会 deleteLater()：自关闭的用例（空表自动关闭）走到这里时
+    # C++ 骨架可能已被销毁，收尾必须先问存活。
+    if widget_alive(dlg):
+        dlg.hide()
+        dlg.deleteLater()
     pump(20)
 
 
@@ -111,7 +115,7 @@ def test_close_clears_class_singleton(qapp, app_settings):
     # 滚动位置是实例状态：关窗不需要（也不应该）去清类属性
     assert DataTableDialog._saved_scroll_pos is None
     monkey_dlg.deleteLater()
-    pump(20)
+    pump(20)  # closeEvent 已 deleteLater，这里只推进事件循环收尾
 
 
 def test_saved_scroll_pos_is_instance_scoped_and_consumed(qapp, app_settings):
