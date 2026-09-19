@@ -225,3 +225,81 @@ class TestTimeChannelColumns:
         import inspect
         source = inspect.getsource(MDFLazyLoader.var_names.fget)
         assert 'time_column_name' not in source  # 不引用 time_column_name
+
+
+class TestObjectColumnNumericFallback:
+    """object 列的数值兜底转换不得销毁文本列（V6.0 P0-6）。
+
+    旧实现对所有非时间 object 列无条件 `to_numeric(errors="coerce")`，
+    状态/枚举/备注列整列变 NaN 且无日志，与 CSV 路径（保留 category）不一致。
+    兜底只为救「数字被存成文本」的列，故按可解析比例判定。
+    """
+
+    HEADER = ["time", "speed", "status", "note"]
+    UNITS = ["s", "km/h", "-", "-"]
+    ROWS = [
+        [0.0, "10.5", "OK", "first"],
+        [0.1, "11.0", "FAIL", "second"],
+        [0.2, "11.5", "OK", "third"],
+    ]
+
+    def _assert_kept_text_and_rescued_numbers(self, loader):
+        assert loader.df["status"].tolist() == ["OK", "FAIL", "OK"]
+        assert loader.df["note"].tolist() == ["first", "second", "third"]
+        # 数字被存成文本的列仍被兜底救回
+        assert pd.api.types.is_numeric_dtype(loader.df["speed"])
+        assert loader.df["speed"].tolist() == pytest.approx([10.5, 11.0, 11.5])
+
+    def test_calamine_path(self, tmp_path):
+        path = _write_xlsx(
+            tmp_path / "text_cols.xlsx", self.HEADER, self.UNITS, self.ROWS
+        )
+        loader = ExcelDataLoader(
+            str(path), sheet_name=0, desc_rows=0, has_unit=True
+        )
+        self._assert_kept_text_and_rescued_numbers(loader)
+
+    def test_openpyxl_fallback_path(self, tmp_path, monkeypatch):
+        path = _write_xlsx(
+            tmp_path / "text_cols2.xlsx", self.HEADER, self.UNITS, self.ROWS
+        )
+
+        def boom(*args, **kwargs):
+            raise ImportError("calamine 不可用")
+
+        monkeypatch.setattr(ExcelDataLoader, "_read_with_calamine", boom)
+        loader = ExcelDataLoader(
+            str(path), sheet_name=0, desc_rows=0, has_unit=True
+        )
+        self._assert_kept_text_and_rescued_numbers(loader)
+
+    def test_mixed_object_column_text_is_preserved(self, tmp_path):
+        """object dtype 列（数值与文本混排）不得被无条件 to_numeric 销毁。
+
+        与 dtype 判断直接挂钩，pandas 2（文本列 → object）与 pandas 3
+        （文本列 → str）下均为回归红线。
+        """
+        mixed = [1, 2, 3, 4, 5, 6, 7, "OK", "FAIL", "WARN"]
+        rows = [[float(i), "10.5", val, "x"] for i, val in enumerate(mixed)]
+        path = _write_xlsx(tmp_path / "mixed.xlsx", self.HEADER, self.UNITS, rows)
+
+        loader = ExcelDataLoader(
+            str(path), sheet_name=0, desc_rows=0, has_unit=True
+        )
+
+        assert loader.df["status"].dtype == object
+        assert loader.df["status"].tolist() == mixed
+        assert loader.df["status"].isna().sum() == 0
+
+    def test_below_threshold_column_is_not_converted(self, tmp_path):
+        """可解析比例低于阈值的混合列保留原文，不得产出半 NaN 结果"""
+        mixed = ["1", "2", "3", "4", "5", "6", "7", "OK", "FAIL", "WARN"]
+        rows = [[float(i), "10.5", status, "x"] for i, status in enumerate(mixed)]
+        path = _write_xlsx(tmp_path / "mixed.xlsx", self.HEADER, self.UNITS, rows)
+
+        loader = ExcelDataLoader(
+            str(path), sheet_name=0, desc_rows=0, has_unit=True
+        )
+
+        assert loader.df["status"].tolist() == mixed
+        assert not pd.api.types.is_numeric_dtype(loader.df["status"])
