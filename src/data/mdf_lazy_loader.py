@@ -51,10 +51,14 @@ class MDFLazyLoader:
     LOADER_TYPE = "mdf"
 
     MAX_CACHE_SIZE = 256
+    # 信号缓存字节预算。单条就是整通道数组：776 MB 级 .mf4 的单通道可达数十至上百
+    # MB，只限 256 条时理论峰值是 GB 级，故再按 nbytes 压一道上限。
+    MAX_CACHE_BYTES = 256 * 1024 * 1024
     # 时间戳缓存上限。每个通道组一条时间轴，超限时淘汰最久未用的条目。
     # Trade-off: >64 组的 MDF 文件在频繁切换绘图时会产生时间戳重读（asammdf 元数据级 I/O），
     # 但避免了无界内存增长（每条时间轴可达数 MB）。实测 64 组覆盖绝大多数 MDF 文件。
     MAX_TIME_CACHE_SIZE = 64
+    MAX_TIME_CACHE_BYTES = 64 * 1024 * 1024
 
     _ASAMMDF_IMPORT_ERROR = "asammdf 库未安装。请运行: pip install asammdf>=7.4.0"
 
@@ -82,6 +86,9 @@ class MDFLazyLoader:
         # AttributeError（在 GC 路径上表现为 "Exception ignored in __del__"）。
         self._signal_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._time_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        # 两份缓存各自的 nbytes 总量，与容器同步维护（插入累加、逐出递减、清空归零）
+        self._signal_cache_bytes = 0
+        self._time_cache_bytes = 0
         self._enum_cache: dict[str, dict[int, str]] = {}
         self._metadata: list[VarMetadata] = []
         self._var_to_meta: dict[str, VarMetadata] = {}
@@ -430,13 +437,53 @@ class MDFLazyLoader:
             return self._signal_cache[name]
         return None
 
+    def _enforce_cache_budget(
+        self,
+        cache: OrderedDict,
+        byte_total: int,
+        *,
+        max_entries: int,
+        max_bytes: int,
+    ) -> int:
+        """LRU 逐出到「条数 + 字节」双双达标，返回逐出后的字节总量。
+
+        调用方必须已持有 self._access_lock。至少保留一条：单通道数组本身就可能超过
+        预算，把它也逐出等于刚读出来就丢，下次同一通道再读一遍。
+        """
+        while len(cache) > 1 and (
+            len(cache) > max_entries or byte_total > max_bytes
+        ):
+            _, dropped = cache.popitem(last=False)
+            byte_total -= dropped.nbytes
+        return byte_total
+
     def _cache_put(self, name: str, data: np.ndarray):
         if name in self._signal_cache:
             self._signal_cache.move_to_end(name)
         else:
-            if len(self._signal_cache) >= self.MAX_CACHE_SIZE:
-                self._signal_cache.popitem(last=False)
             self._signal_cache[name] = data
+            self._signal_cache_bytes += data.nbytes
+            self._signal_cache_bytes = self._enforce_cache_budget(
+                self._signal_cache,
+                self._signal_cache_bytes,
+                max_entries=self.MAX_CACHE_SIZE,
+                max_bytes=self.MAX_CACHE_BYTES,
+            )
+
+    def _cache_put_time(self, group_index: int, timestamps: np.ndarray) -> np.ndarray:
+        """写入时间轴 LRU 缓存（调用方持锁），返回入缓存的那份数组"""
+        if group_index in self._time_cache:
+            self._time_cache.move_to_end(group_index)
+            return self._time_cache[group_index]
+        self._time_cache[group_index] = timestamps
+        self._time_cache_bytes += timestamps.nbytes
+        self._time_cache_bytes = self._enforce_cache_budget(
+            self._time_cache,
+            self._time_cache_bytes,
+            max_entries=self.MAX_TIME_CACHE_SIZE,
+            max_bytes=self.MAX_TIME_CACHE_BYTES,
+        )
+        return timestamps
 
     def _ensure_open(self):
         """调用方必须已持有 self._access_lock。
@@ -450,16 +497,21 @@ class MDFLazyLoader:
         if self._closed or getattr(self, "_mdf", None) is None:
             raise KeyError("MDF 数据源已关闭")
 
+    def _clear_lru_caches(self):
+        """清空两份 LRU 缓存并归零字节账（调用方持锁）"""
+        self._signal_cache.clear()
+        self._time_cache.clear()
+        self._signal_cache_bytes = 0
+        self._time_cache_bytes = 0
+
     def clear_cache(self):
         with self._access_lock:
-            self._signal_cache.clear()
-            self._time_cache.clear()
+            self._clear_lru_caches()
 
     def release_memory(self):
         """清空 LRU 缓存（信号数据可以按需重新加载）。"""
         with self._access_lock:
-            self._signal_cache.clear()
-            self._time_cache.clear()
+            self._clear_lru_caches()
 
     def close(self):
         # getattr 兜底：__init__ 极端早期失败时 __del__ 仍可能调用到这里。
@@ -482,6 +534,10 @@ class MDFLazyLoader:
                 container = getattr(self, attr, None)
                 if container is not None:
                     container.clear()
+            # 上面只清容器，两份 LRU 的字节账要单独归零（直接赋值：__del__ 走到
+            # 早期构造失败态时这两个属性可能还不存在）
+            self._signal_cache_bytes = 0
+            self._time_cache_bytes = 0
             self._cached_max_samples = 0
             self._cached_global_time_range = (0.0, 1.0)
             if getattr(self, "_mdf", None) is not None:
@@ -527,21 +583,19 @@ class MDFLazyLoader:
                 raise KeyError(f"变量 '{display_name}' 不存在")
 
             gi = meta.group_index
-            if gi not in self._time_cache:
+            x = self._time_cache.get(gi)
+            if x is None:
                 master_ci = self._group_master_ci.get(gi, 0)
                 master_signal = self._mdf.get(
                     name=None,
                     group=gi,
                     index=master_ci,
                 )
-                # LRU 淘汰：超限则淘汰最早插入的条目
-                if len(self._time_cache) >= self.MAX_TIME_CACHE_SIZE:
-                    self._time_cache.popitem(last=False)
-                self._time_cache[gi] = master_signal.timestamps.astype(np.float64)
+                x = self._cache_put_time(
+                    gi, master_signal.timestamps.astype(np.float64)
+                )
             else:
                 self._time_cache.move_to_end(gi)
-
-            x = self._time_cache[gi]
 
             y = self._cache_get(display_name)
             if y is None:
@@ -600,22 +654,20 @@ class MDFLazyLoader:
         """
         with self._access_lock:
             self._ensure_open()
-            if group_index not in self._time_cache:
+            timestamps = self._time_cache.get(group_index)
+            if timestamps is None:
                 master_ci = self._group_master_ci.get(group_index, 0)
                 master_signal = self._mdf.get(
                     name=None,
                     group=group_index,
                     index=master_ci,
                 )
-                # LRU 淘汰：超限则淘汰最早插入的条目
-                if len(self._time_cache) >= self.MAX_TIME_CACHE_SIZE:
-                    self._time_cache.popitem(last=False)
-                self._time_cache[group_index] = (
-                    master_signal.timestamps.astype(np.float64)
+                timestamps = self._cache_put_time(
+                    group_index, master_signal.timestamps.astype(np.float64)
                 )
             else:
                 self._time_cache.move_to_end(group_index)
-            return self._time_cache[group_index]
+            return timestamps
 
     def get_group_label(self, group_index: int) -> str:
         """返回 group 的可读标签。
