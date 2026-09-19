@@ -28,6 +28,22 @@ from src.core.logger import get_logger
 
 logger = get_logger("ui.file_loader")
 
+# 可加载的后缀白名单：分卷文件（data.csv.0）由 _extract_file_extension 的正则单独识别
+SUPPORTED_EXTENSIONS = (
+    ".csv",
+    ".mfile",
+    ".t00",
+    ".t01",
+    ".t10",
+    ".t11",
+    ".txt",
+    ".mf4",
+    ".mdf",
+    ".dat",
+    ".xlsx",
+    ".xlsm",
+)
+
 
 class FileLoaderManager(MainWindowBaseManager):
     """负责文件加载相关功能"""
@@ -799,6 +815,19 @@ class FileLoaderManager(MainWindowBaseManager):
     def _load_file(self, file_path: str, is_reload: bool = False,
                    cached_sheet_name: str | None = None):
         file_ext = self._extract_file_extension(file_path)
+        if file_ext is None:
+            # 白名单外此前会一路走到 config_dict 分支，抛 'NoneType' object is not
+            # subscriptable，并被 load_csv_file 的兜底 except 判定为加载失败而清掉
+            # 当前已加载的数据。
+            QMessageBox.warning(
+                self.mw,
+                "不支持的文件类型",
+                f"无法识别文件类型：{os.path.basename(file_path)}\n\n"
+                f"支持的扩展名：{'、'.join(SUPPORTED_EXTENSIONS)}\n"
+                "（分卷文件按末尾 .0/.1 之前的那段扩展名识别）",
+            )
+            self.mw.load_btn.setEnabled(True)
+            return
         is_mdf_file = file_ext in (".mf4", ".mdf", ".dat")
         is_excel_file = file_ext in (".xlsx", ".xlsm")
 
@@ -1154,29 +1183,16 @@ class FileLoaderManager(MainWindowBaseManager):
                 return path
         return ""
 
-    def _extract_file_extension(self, file_path: str) -> str:
-        supported_extensions = [
-            ".csv",
-            ".mfile",
-            ".t00",
-            ".t01",
-            ".t10",
-            ".t11",
-            ".txt",
-            ".mf4",
-            ".mdf",
-            ".dat",
-            ".xlsx",
-            ".xlsm",
-        ]
-
+    def _extract_file_extension(self, file_path: str) -> str | None:
         base_ext = os.path.splitext(file_path)[1].lower()
-        if base_ext in supported_extensions:
+        if base_ext in SUPPORTED_EXTENSIONS:
             return base_ext
 
         base_name = os.path.basename(file_path).lower()
         pattern = (
-            r"(" + "|".join(re.escape(ext) for ext in supported_extensions) + r")\.\d+$"
+            r"("
+            + "|".join(re.escape(ext) for ext in SUPPORTED_EXTENSIONS)
+            + r")\.\d+$"
         )
         match = re.search(pattern, base_name)
 
