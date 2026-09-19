@@ -101,15 +101,35 @@ def test_close_clears_class_singleton(qapp, app_settings):
     monkey_dlg = DataTableDialog()
     DataTableDialog._instance = monkey_dlg
     monkey_dlg._add_variable_to_table("a", pd.Series([1.0, 2.0, 3.0], name="a"))
-    DataTableDialog._saved_scroll_pos = 7
+    monkey_dlg._saved_scroll_pos = 7
     monkey_dlg.set_skip_close_confirmation(True)
 
     monkey_dlg.close()
 
     # 旧写法 self._instance = None 只设实例属性，这里必须看到类属性被清空
     assert DataTableDialog._instance is None
+    # 滚动位置是实例状态：关窗不需要（也不应该）去清类属性
     assert DataTableDialog._saved_scroll_pos is None
     monkey_dlg.deleteLater()
+    pump(20)
+
+
+def test_saved_scroll_pos_is_instance_scoped_and_consumed(qapp, app_settings):
+    """P2-8：滚动位置统一走实例属性，且消费一次后立即复位"""
+    dlg = DataTableDialog()
+    dlg._add_variable_to_table("a", pd.Series([1.0, 2.0, 3.0], name="a"))
+    assert DataTableDialog._saved_scroll_pos is None, "类属性只做默认值，不得被写入"
+
+    dlg._saved_scroll_pos = 12
+    dlg._add_variable_to_table("b", pd.Series([1.0, 2.0, 3.0], name="b"))
+    assert dlg._saved_scroll_pos is None, "消费后必须复位，否则下一个调用方拿到陈旧值"
+    pump(20)
+
+    # 未显式保存位置的调用方不受上一个调用方的残留影响
+    dlg._add_variable_to_table("c", pd.Series([1.0, 2.0, 3.0], name="c"))
+    assert dlg._saved_scroll_pos is None
+    dlg.hide()
+    dlg.deleteLater()
     pump(20)
 
 
