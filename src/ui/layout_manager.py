@@ -29,7 +29,20 @@ logger = get_logger(__name__)
 class LayoutManager(MainWindowBaseManager):
     """布局管理器：splitter 调节、plot 矩阵、mark region 同步、事件过滤等"""
 
+    def _mark_all_plots_being_destroyed(self):
+        """把所有在架 plot 标成销毁期
+
+        deleteLater/setParent(None) 到骨架真正析构之间隔着一轮事件循环，期间
+        排着的定时器、防抖回调仍会打到旧 plot；`destroyed` 对 QWidget 派生类
+        不会回调 Python，只能在这里显式置位。
+        """
+        for container in getattr(self.mw, "plot_widgets", []):
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is not None:
+                plot_widget.mark_being_destroyed()
+
     def _handle_close(self):
+        self._mark_all_plots_being_destroyed()
         if DataTableDialog._instance is not None:
             DataTableDialog._instance.set_skip_close_confirmation(True)
         self._unregister_global_event_filter()
@@ -636,6 +649,8 @@ class LayoutManager(MainWindowBaseManager):
     def create_subplots_matrix(self, m: int, n: int):
         from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
 
+        # 清空前先标记：新矩阵建好之前，旧 plot 上的在途回调必须短路
+        self._mark_all_plots_being_destroyed()
         for i in reversed(range(self.mw.plot_layout.count())):
             w = self.mw.plot_layout.itemAt(i).widget()
             if w:

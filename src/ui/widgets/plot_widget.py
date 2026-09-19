@@ -57,6 +57,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.pinned_index_values = []
         self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
         self._is_being_destroyed = False  # 标志：对象正在被销毁
+        # C++ 侧析构一开始就置位，覆盖所有不经过显式拆卸点的路径（如主窗口
+        # 退出时的子对象析构）。必须用 lambda 连：连到绑定方法上时 PySide6 在
+        # 包装器失效时会丢掉这条连接，实测不再回调。
+        self.destroyed.connect(
+            lambda *_: setattr(self, "_is_being_destroyed", True)
+        )
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self._cursor_label_busy = False
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
@@ -74,7 +80,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.plot_context = None  # 由 layout_manager 赋值为 PlotContext 实例
         self._init_manager_chain()
         self.setup_ui(units_dict, dataframe, time_channels_info, synchronizer)
-        
+
+    def mark_being_destroyed(self):
+        """提前进入销毁期：从「决定拆掉这个 plot」到 C++ 骨架真析构之间就生效
+
+        `destroyed` 兜底要等到析构那一刻，而 `deleteLater()` 与析构之间还隔着
+        一轮事件循环，期间排着的定时器/防抖回调仍会打到这个 plot。
+        """
+        self._is_being_destroyed = True
+
     def setup_ui(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
             time_channels_info = {}

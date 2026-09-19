@@ -149,6 +149,9 @@ class MainWindow(QMainWindow):
         self.data = None
         self.data_validity = None
         self._is_loading_new_data = False
+        # file_loader_manager._restore_cursor_state_after_reload 等延迟回调靠它
+        # 判断主窗口是否已在退出：缺这行时 getattr(..., False) 恒假，守卫空转
+        self._is_being_destroyed = False
 
         self._data_version = 0
         self._pending_crosshair_x = None
@@ -459,6 +462,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._logger.info("CSV Plot 应用程序退出")
+        # 必须先置位再收尾：下面的清理会开嵌套事件循环（等线程退出、存盘），
+        # 期间排着的 singleShot/防抖回调还会打到正在退出的窗口
+        self._is_being_destroyed = True
         if self.loader is not None:
             self.plot_config_manager.save_auto_save(self)
         self._shutdown_var_info_worker()
