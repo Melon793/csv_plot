@@ -202,6 +202,22 @@ class AxisManager:
         vb.enableAutoRange(axis=vb.YAxis, enable=True)
         pw.axis_y.setTicks(None)
 
+    def zoom_x(self, factor: float, center_x: float) -> None:
+        """以 center_x 为中心把 X 轴缩放 factor 倍，且不触碰 Y 轴 autoRange。
+
+        pyqtgraph 的 ViewBox.scaleBy 会经 setRange 同时关掉两轴 autoRange，
+        导致 Ctrl+Y 开启的「Y 跟随可见段」在一次滚轮后被静默废除。
+        """
+        vb = self.pw.view_box
+        y_auto = bool(vb.state["autoRange"][1])
+        left, right = vb.viewRange()[0]
+        self.set_xrange_with_link_handling(
+            center_x - (center_x - left) * factor,
+            center_x + (right - center_x) * factor,
+        )
+        if y_auto:
+            vb.enableAutoRange(axis=vb.YAxis, enable=True)
+
     def set_xrange_with_link_handling(
         self,
         xmin: float,

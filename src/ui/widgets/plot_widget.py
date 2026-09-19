@@ -537,10 +537,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 scene_pos = self.mapToScene(mouse_pos)
                 view_pos = vb.mapSceneToView(scene_pos)
                 mouse_x = view_pos.x()
-                mouse_y = view_pos.y()
 
                 factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
-                vb.scaleBy((factor, 1), center=(mouse_x, mouse_y))
+                self._axis_manager.zoom_x(factor, mouse_x)
                 ev.accept()  # 确保事件被处理
             else:
                 super().wheelEvent(ev)
