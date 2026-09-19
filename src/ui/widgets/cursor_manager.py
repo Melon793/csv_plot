@@ -598,6 +598,8 @@ class CursorManager:
                         "var_name": var_name,
                         "x_data": ci.x_data,
                         "y_data": ci.y_data,
+                        "x_min": ci.x_min,
+                        "x_max": ci.x_max,
                         "color": ci.color,
                         "y_format": ci.y_format,
                         "unit": self.pw.units.get(var_name, ""),
@@ -616,7 +618,7 @@ class CursorManager:
             for cursor_id, x in enumerate(x_positions):
                 # anchored cursor 的 x 位置是用户固定的，不应因 view range
                 # 变化而被过滤（例如添加 item 后触发的 auto-range 会改变 view）。
-                # 数据范围的有效性已由下方的 x_data.min()/max() 检查保证。
+                # 数据范围的有效性已由下方的 CurveInfo.x_min/x_max 检查保证。
                 if mode not in ("1 anchored cursor", "2 anchored cursor"):
                     if x < x_min or x > x_max:
                         continue
@@ -629,7 +631,9 @@ class CursorManager:
 
                     if x_data is None or len(x_data) == 0:
                         continue
-                    if x < x_data.min() or x > x_data.max():
+                    # CurveInfo 已缓存数据端点（x_data 变更处必调 update_x_range）：
+                    # 这里再 min()/max() 就是每帧对每条曲线做两次全量扫描
+                    if x < curve_data["x_min"] or x > curve_data["x_max"]:
                         continue
 
                     try:
