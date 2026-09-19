@@ -23,6 +23,24 @@ class TestMakeUnique:
     def test_no_duplicates_unchanged(self):
         assert BaseDataLoader._make_unique(["x", "y", "z"]) == ["x", "y", "z"]
 
+    def test_generated_name_does_not_collide_with_literal_after_it(self):
+        """旧实现把第二个 A 改名成 A_1，正好撞上后面那个字面 A_1"""
+        result = BaseDataLoader._make_unique(["A", "A", "A_1"])
+        assert len(set(result)) == 3
+        assert result == ["A", "A_2", "A_1"]
+
+    def test_generated_name_does_not_collide_with_literal_before_it(self):
+        assert BaseDataLoader._make_unique(["A_1", "A", "A"]) == ["A_1", "A", "A_2"]
+
+    def test_chained_collisions_all_resolve(self):
+        names = ["A", "A", "A_1", "A_1", "A_1_1", "A", "A_2"]
+        result = BaseDataLoader._make_unique(names)
+        assert len(result) == len(names)
+        assert len(set(result)) == len(names)
+        # 每个字面名都由它首次出现的那一列保留
+        for name in set(names):
+            assert result[names.index(name)] == name
+
 
 class TestPostprocessValidity:
     def test_float_varying_is_valid(self):
