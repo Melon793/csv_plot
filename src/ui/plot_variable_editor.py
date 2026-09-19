@@ -219,7 +219,9 @@ class PlotVariableEditorDialog(QDialog):
         pw = self.plot_widget
         if pw is None:
             return
-        main_window = self.window()
+        # 本对话框是顶层 Tool 窗口（见 __init__ 的 setWindowFlag），
+        # self.window() 返回自身而非主窗口，必须经 plot_widget 取宿主
+        main_window = pw.window()
         loader = getattr(main_window, "loader", None)
         if loader is None:
             return
