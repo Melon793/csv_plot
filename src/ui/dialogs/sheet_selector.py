@@ -20,15 +20,7 @@ class SheetSelectorDialog(QDialog):
         self.file_path = file_path
         self.selected_sheet: str | None = None
 
-        # 异常处理：文件损坏或密码保护时给出友好提示
-        try:
-            from src.data.excel_loader import ExcelDataLoader
-            self.sheet_info = ExcelDataLoader.get_sheet_info(file_path)
-        except Exception as e:
-            self.sheet_info = []
-            self._load_error = str(e)
-        else:
-            self._load_error = None
+        self.sheet_info, self._load_error = self._probe(file_path)
 
         self._build_ui()
 
@@ -38,10 +30,38 @@ class SheetSelectorDialog(QDialog):
                 f"文件可能已损坏或受密码保护。\n\n错误详情: {self._load_error}"
             )
 
-        # 单 Sheet 快捷路径：自动选择，跳过对话框
-        if not self._load_error and len(self.sheet_info) == 1:
-            self.selected_sheet = self.sheet_info[0]['name']
-            self.accept()
+    @staticmethod
+    def _probe(file_path: str) -> tuple[list[dict], str | None]:
+        """读 Sheet 元数据，返回 (sheet_info, 错误信息)。
+
+        文件损坏或受密码保护时第一项为空列表、第二项为异常文本。
+        """
+        try:
+            from src.data.excel_loader import ExcelDataLoader
+            return ExcelDataLoader.get_sheet_info(file_path), None
+        except Exception as e:
+            return [], str(e)
+
+    @classmethod
+    def pick_sheet(cls, file_path: str, parent=None) -> str | None:
+        """取要导入的 sheet 名；用户取消或读取失败返回 None。
+
+        单 Sheet 直接返回、不弹框。构造函数里调 `accept()` 拦不住调用方随后的
+        `exec()`（QDialog::exec 会重置 result 并重新 show），所以短路必须发生在
+        弹框之前。
+        """
+        sheet_info, error = cls._probe(file_path)
+        if not error and len(sheet_info) == 1:
+            return sheet_info[0]['name']
+
+        dialog = cls(file_path, parent)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            # get_selected_sheet() 读的是弹窗内控件，必须在 deleteLater 之前取
+            return dialog.get_selected_sheet()
+        finally:
+            dialog.deleteLater()
 
     def _build_ui(self):
         self.setWindowTitle("选择要导入的 Sheet")
