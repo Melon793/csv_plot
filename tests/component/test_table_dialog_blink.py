@@ -110,3 +110,73 @@ def test_frozen_column_blinks_frozen_delegate(dialog, qt_errors):
     pump(900)
     assert dialog.delegate_frozen.highlighted_cols == set()
     assert not qt_errors, f"冻结列闪烁不应抛异常：{qt_errors}"
+
+
+# ---------- B5 tab 模式 off 回调：视图销毁 / 整页移除都要静默 ----------
+
+def _make_tab_state(dialog, group_index=0):
+    """造一个最小 tab 状态：真 QTableView + CustomDelegate + PandasTableModel"""
+    from PySide6.QtWidgets import QTableView
+
+    from src.ui.table_dialog import PandasTableModel, _GroupTabState
+
+    df = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
+    view = QTableView(dialog)
+    delegate = CustomDelegate()
+    view.setItemDelegate(delegate)
+    model = PandasTableModel(df, {})
+    view.setModel(model)
+    state = _GroupTabState(
+        group_index=group_index, view=view, df=df, model=model, widget_index=0
+    )
+    dialog._group_tabs[group_index] = state
+    return state, delegate
+
+
+def _delete_view(view) -> None:
+    """模拟 _remove_tab 的 view.deleteLater()：必须真把 C++ 对象删掉"""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    view.deleteLater()
+    QCoreApplication.sendPostedEvents(view, QEvent.Type.DeferredDelete)
+    QCoreApplication.processEvents()
+
+
+def test_tab_blink_off_callback_survives_destroyed_view(dialog, qt_errors):
+    """回归 P1-6：闪烁窗口内 tab 视图被销毁，off 回调不得抛 RuntimeError"""
+    state, delegate = _make_tab_state(dialog)
+
+    dialog._blink_tab_column(state, "a", pulse=300)
+    assert delegate.highlighted_cols == {0}
+
+    _delete_view(state.view)
+    pump(900)
+
+    assert not qt_errors, f"tab 视图销毁后 off 回调抛了异常：{qt_errors}"
+
+
+def test_tab_blink_off_callback_skips_removed_tab(dialog, qt_errors):
+    """整页被单独移除（_remove_tab 不升 _gen）：按身份判定跳过，不碰旧 delegate"""
+    state, delegate = _make_tab_state(dialog)
+
+    dialog._blink_tab_column(state, "a", pulse=300)
+    assert delegate.highlighted_cols == {0}
+
+    dialog._group_tabs.pop(state.group_index)
+    pump(900)
+
+    assert delegate.highlighted_cols == {0}, "身份已失效的 tab 不应被 off 回调改写"
+    assert not qt_errors, f"tab 移除后 off 回调抛了异常：{qt_errors}"
+
+
+def test_tab_blink_off_callback_respects_generation_token(dialog, qt_errors):
+    """_reset_tab_mode 升令牌：过期回调作废"""
+    state, delegate = _make_tab_state(dialog)
+
+    dialog._blink_tab_column(state, "a", pulse=300)
+    dialog._gen += 1
+    pump(900)
+
+    assert delegate.highlighted_cols == {0}, "令牌已作废，off 回调不应执行"
+    assert not qt_errors, f"过期回调抛了异常：{qt_errors}"
+

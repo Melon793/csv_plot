@@ -836,16 +836,26 @@ class DataTableDialog(QMainWindow):
         delegate = tab_state.view.itemDelegate()
         if isinstance(delegate, CustomDelegate):
             self._blink_step_on(delegate, col_idx, tab_state.view)
-            # off 回调同样需要代际令牌：闪烁窗口期（800ms）内若发生
-            # _reset_tab_mode，该 view 已被 deleteLater，过期回调访问
-            # 已销毁的 C++ 对象会抛 RuntimeError
+            # off 回调需要令牌 + 身份双判，并兜住 RuntimeError：
+            # - _reset_tab_mode 会升 _gen，过期回调直接作废；
+            # - _remove_tab 不升 _gen（单页关闭），只看令牌会漏掉「整页已被
+            #   单独移除」，届时 :2516 的 view.deleteLater() 已把视图销毁；
+            # - 对话框整体销毁（关窗/退出）同样只剩 Python 包装器。
+            # 单表路径（:1368）早已按这套契约静默收尾，这里是漏网的一处。
             gen = self._gen
-            QTimer.singleShot(
-                pulse,
-                lambda g=gen, d=delegate, c=col_idx, v=tab_state.view: (
-                    self._blink_step_off(d, c, v) if g == self._gen else None
-                ),
-            )
+
+            def _off(g=gen, d=delegate, c=col_idx, v=tab_state.view, st=tab_state):
+                if g != self._gen:
+                    return
+                if self._group_tabs.get(st.group_index) is not st:
+                    logger.debug("闪烁 off 回调跳过：tab 页已移除")
+                    return
+                try:
+                    self._blink_step_off(d, c, v)
+                except RuntimeError:
+                    logger.debug("闪烁 off 回调跳过：视图已销毁", exc_info=True)
+
+            QTimer.singleShot(pulse, _off)
 
     def _group_state_by_widget_index(self, widget_index: int):
         if widget_index < 0:
