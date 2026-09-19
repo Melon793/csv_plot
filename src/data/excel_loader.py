@@ -672,13 +672,17 @@ class ExcelDataLoader(BaseDataLoader):
         """
         import openpyxl
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-        result = []
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            result.append({
-                'name': sheet_name,
-                'rows': ws.max_row or 0,
-                'cols': ws.max_column or 0,
-            })
-        wb.close()
-        return result
+        try:
+            result = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                result.append({
+                    'name': sheet_name,
+                    'rows': ws.max_row or 0,
+                    'cols': ws.max_column or 0,
+                })
+            return result
+        finally:
+            # read_only 的工作簿底层是活着的 zip 文件句柄；取元数据中途抛错
+            # （dimension 缺失、块损坏）时不能把它留在进程里
+            wb.close()
