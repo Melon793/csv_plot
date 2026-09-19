@@ -325,7 +325,9 @@ class DataTableDialog(QMainWindow):
     """
 
     _instance = None
-    _saved_scroll_pos = None  # 类级变量存储滚动位置
+    # 只是默认值：滚动位置一律走实例属性（类级写入会造成实例/类两套状态混用，
+    # 见 closeEvent 里 DataTableDialog._saved_scroll_pos = None 清不掉实例属性）
+    _saved_scroll_pos = None
 
     @classmethod
     def popup(cls, var_name: str, data, parent=None):
@@ -348,7 +350,7 @@ class DataTableDialog(QMainWindow):
             dlg.raise_()
             dlg.activateWindow()
         else:
-            cls._saved_scroll_pos = (
+            dlg._saved_scroll_pos = (
                 dlg.main_view.verticalScrollBar().value()
                 if (dlg.main_view and not dlg._tab_mode)
                 else None
@@ -1560,11 +1562,13 @@ class DataTableDialog(QMainWindow):
         self._connect_signals()
         self._update_views()
         if self._saved_scroll_pos is not None:
+            # 消费即复位：值捕获进默认参数（回调延后到下一个事件循环，届时
+            # 属性若被别的调用方改写就会恢复错位置），不把陈旧值留给下一个调用方
+            pos = self._saved_scroll_pos
+            self._saved_scroll_pos = None
             QTimer.singleShot(
                 0,
-                lambda: self.main_view.verticalScrollBar().setValue(
-                    self._saved_scroll_pos
-                ),
+                lambda p=pos: self.main_view.verticalScrollBar().setValue(p),
             )
 
     def eventFilter(self, obj, event):
@@ -2180,7 +2184,6 @@ class DataTableDialog(QMainWindow):
         # 实例属性，DataTableDialog._instance 永远指着已关闭窗口，导致单例
         # 泄漏且下次 popup 复用陈旧窗口（跨文件数据串显）。
         DataTableDialog._instance = None
-        DataTableDialog._saved_scroll_pos = None
         self.frozen_columns = []
         self.hide()
         event.accept()
