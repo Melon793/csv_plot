@@ -1265,15 +1265,27 @@ class FileLoaderManager(MainWindowBaseManager):
         logger.info("后台加载完成: %s", file_path)
         self.mw._progress.close()
 
-        # —— 释放旧数据 → 应用新 loader
-        self._swap_loader(new_loader, is_reload=is_reload)
-
-        self._end_data_reload()
-        self.set_button_status(True)
-        self.mw.load_btn.setEnabled(True)
-        # v5.12: 异步 reload 完成，释放互斥锁
-        self._reload_in_progress = False
-        self.mw.reload_btn.setEnabled(True)
+        # P0-3: _swap_loader → _apply_loader → replots_after_loading 链上任一异常
+        # 都不得跳过解锁，否则 _is_loading_new_data / _reload_in_progress 永久卡死
+        # （_end_data_reload 未执行 → safety timer 也不会启动，只能重启应用）。
+        # 与同步路径（_load_file 的 finally: _end_data_reload()）保持一致。
+        applied = True
+        try:
+            # —— 释放旧数据 → 应用新 loader
+            self._swap_loader(new_loader, is_reload=is_reload)
+        except Exception as e:
+            applied = False
+            logger.error("应用后台加载结果失败: %s", e, exc_info=True)
+            QMessageBox.critical(self.mw, "读取失败", f"应用数据时发生错误: {str(e)}")
+        finally:
+            self._end_data_reload()
+            self.set_button_status(True)
+            self.mw.load_btn.setEnabled(True)
+            # v5.12: 异步 reload 完成，释放互斥锁
+            self._reload_in_progress = False
+            self.mw.reload_btn.setEnabled(True)
+        if not applied:
+            return
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
         QTimer.singleShot(0, lambda: self._post_load_actions(file_path, is_reload=is_reload))
 
