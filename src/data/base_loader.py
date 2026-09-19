@@ -46,16 +46,31 @@ class BaseDataLoader:
     # ---- 公共静态方法 ----
     @staticmethod
     def _make_unique(names: list[str]) -> list[str]:
-        """确保列名唯一"""
-        seen: dict[str, int] = {}
+        """确保列名唯一。
+
+        改名结果同样要占位，否则 `["A","A","A_1"]` 会把第二个 A 改成 `A_1`，与后面
+        那个字面 `A_1` 撞名（重复列名让 `df[col]` 返回 DataFrame 而非 Series）。
+        字面出现过的名字优先保号：被占用的是重复项，而不是用户写的表头。
+        """
+        reserved = set(names)
+        taken: set[str] = set()
+        counters: dict[str, int] = {}
         unique_names: list[str] = []
+
         for name in names:
-            if name in seen:
-                seen[name] += 1
-                unique_names.append(f"{name}_{seen[name]}")
-            else:
-                seen[name] = 0
+            if name not in taken:
+                taken.add(name)
                 unique_names.append(name)
+                continue
+            counters[name] = counters.get(name, 0) + 1
+            while True:
+                candidate = f"{name}_{counters[name]}"
+                if candidate not in taken and candidate not in reserved:
+                    break
+                counters[name] += 1
+            taken.add(candidate)
+            unique_names.append(candidate)
+
         return unique_names
 
     def _postprocess_columns(self, downcast: bool = True) -> dict[str, int]:
