@@ -73,6 +73,10 @@ _EMPTY_TIME = np.array([], dtype=np.float64)
 # 734 列 x 17 万行、要 23 秒的长批量，那时进度条和「取消」才真正有用。
 _BULK_ADD_MAX_COLS = 2000
 _BULK_ADD_PROGRESS_COLS = 300
+# 只卡列数不卡内存，护栏恰好在大文件上失效：1999 列 × 17 万行 ≈ 2.7 GB 照样放行。
+# 1200 MB 是「按 float64 上界估算」的内存闸门（17 万行时约对应 880 列），
+# 给 model/视图与后续绘图留余量；实测降转换后真实占用约为该估算的一半
+_BULK_ADD_MAX_EST_MB = 1200.0
 
 
 def _nearest_time_row(time_array: np.ndarray, target_time: float) -> int:
@@ -2758,12 +2762,21 @@ class DataTableDialog(QMainWindow):
 
         rows = len(state.df)
 
-        if len(todo) > _BULK_ADD_MAX_COLS:
-            est_mb = len(todo) * max(rows, 1) * 8 / 1e6
+        est_mb = len(todo) * max(rows, 1) * 8 / 1e6
+        if est_mb > _BULK_ADD_MAX_EST_MB or len(todo) > _BULK_ADD_MAX_COLS:
+            # 只报真正触发的那条轴：列数超标时内存估算往往小得离谱，
+            # 一起写出来只会得到「约占用 0 MB 内存」这种没用的读数
+            if est_mb > _BULK_ADD_MAX_EST_MB:
+                reason = (
+                    f"按 {rows} 行估算约需 {self._fmt_mem(est_mb)} 内存，"
+                    f"超过 {self._fmt_mem(_BULK_ADD_MAX_EST_MB)} 的批量上限"
+                )
+            else:
+                reason = f"待补 {len(todo)} 列，超过 {_BULK_ADD_MAX_COLS} 列的批量上限"
             QMessageBox.information(
                 self,
-                "本组变量过多",
-                f"本组尚有 {len(todo)} 个变量未添加，预计占用约 {self._fmt_mem(est_mb)} 内存。\n"
+                "本组数据量过大",
+                f"本组尚有 {len(todo)} 个变量未添加，{reason}。\n"
                 "请改用变量列表按需拖拽添加。",
             )
             self._restore_foreground()

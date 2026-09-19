@@ -1256,7 +1256,8 @@ def test_add_group_remaining_refuses_above_hard_cap(tab_dialog, monkeypatch):
     dlg._add_group_remaining_variables(state)
 
     assert list(state.df.columns) == ["time", "Press_G0"], "超上限不得有任何副作用"
-    assert msgs and msgs[0][0] == "本组变量过多"
+    # P2-5 后标题改为「本组数据量过大」：护栏不止列数一条轴，列数不够格时也会因内存被拦
+    assert msgs and msgs[0][0] == "本组数据量过大"
     assert "拖拽" in msgs[0][1], "必须告诉用户改用逐个添加"
     assert restored == [1], "弹过信息框也必须把窗口拉回前台"
 
@@ -1560,3 +1561,85 @@ def test_tab_menu_action_skipped_when_tab_died_during_exec(
     assert dlg._group_tabs[0] is not s0
     assert dlg._tab_widget.count() == 1
 
+
+class TestBulkAddMemoryGuard:
+    """P2-5：批量添加护栏要看内存估算，不能只数格子。
+
+    阈值直接改 monkeypatch，而不是造 150 万行的表：本项要钉的是「哪条轴该触发」
+    这个判定，不是估算公式的浮点行为。
+    """
+
+    @staticmethod
+    def _info_sink(monkeypatch):
+        info: list = []
+        monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a[2]))
+        return info
+
+    def test_memory_axis_blocks_below_the_column_cap(self, tab_dialog, monkeypatch):
+        dlg = tab_dialog
+        state = dlg._add_variable_to_tab("Press_G0", 0)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_EST_MB", 0.0001)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_COLS", 2000)
+        info = self._info_sink(monkeypatch)
+
+        dlg._add_group_remaining_variables(state)
+
+        assert len(info) == 1, f"该被内存轴拦下: {info}"
+        assert "内存" in info[0]
+        assert list(state.df.columns) == ["time", "Press_G0"], "拦下时一列都不该进表"
+
+    def test_column_axis_still_blocks_a_tiny_table(self, tab_dialog, monkeypatch):
+        """列数上限独立生效：行数极少、内存估算近乎 0 时也不许一次灌进来。"""
+        dlg = tab_dialog
+        state = dlg._add_variable_to_tab("Press_G0", 0)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_EST_MB", 1e9)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_COLS", 1)
+        info = self._info_sink(monkeypatch)
+
+        dlg._add_group_remaining_variables(state)
+
+        assert len(info) == 1
+        assert list(state.df.columns) == ["time", "Press_G0"]
+
+    def test_batch_within_both_limits_still_adds_everything(self, tab_dialog, monkeypatch):
+        """正向对照：两轴都宽松时必须照常补齐，否则前两条是在测空跑。"""
+        dlg = tab_dialog
+        state = dlg._add_variable_to_tab("Press_G0", 0)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_EST_MB", 1e9)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_COLS", 2000)
+        info = self._info_sink(monkeypatch)
+
+        dlg._add_group_remaining_variables(state)
+
+        assert info == []
+        assert {"State", "Label"} <= set(state.df.columns)
+
+    def test_memory_axis_message_quotes_rows_and_estimate(self, tab_dialog, monkeypatch):
+        dlg = tab_dialog
+        state = dlg._add_variable_to_tab("Press_G0", 0)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_EST_MB", 0.0001)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_COLS", 2000)
+        info = self._info_sink(monkeypatch)
+
+        dlg._add_group_remaining_variables(state)
+
+        text = info[0]
+        assert "12 行" in text, f"要让用户知道按多少行估的: {text}"
+        assert "内存" in text
+        assert "列的批量上限" not in text, "报的应是真正触发的那条轴"
+
+    def test_column_axis_message_does_not_quote_a_zero_memory_estimate(
+        self, tab_dialog, monkeypatch
+    ):
+        """列数触发时不提内存：2 列 × 12 行的估算只有 0.0002 MB，写出来是噪声。"""
+        dlg = tab_dialog
+        state = dlg._add_variable_to_tab("Press_G0", 0)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_EST_MB", 1e9)
+        monkeypatch.setattr("src.ui.table_dialog._BULK_ADD_MAX_COLS", 1)
+        info = self._info_sink(monkeypatch)
+
+        dlg._add_group_remaining_variables(state)
+
+        text = info[0]
+        assert "超过 1 列的批量上限" in text, text
+        assert "内存" not in text
