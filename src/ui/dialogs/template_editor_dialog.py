@@ -41,6 +41,9 @@ class TemplateEditorDialog(QDialog):
 
     template_saved = Signal(str)  # template_id
 
+    # 预览网格上限（行列乘积）：YAML 编辑区逐键触发预览渲染，超限只提示不渲染
+    PREVIEW_MAX_CELLS = 144
+
     DEFAULT_TEMPLATE_CONFIG = {
         "layout_rows": 2,
         "layout_cols": 2,
@@ -234,6 +237,25 @@ class TemplateEditorDialog(QDialog):
             rows = config.get("layout_rows", 1)
             cols = config.get("layout_cols", 1)
             plots = config.get("plots", []) or []
+
+            # P0-7: 预览挂在 textChanged 上逐键触发，必须先钳制网格规模 ——
+            # 用户把 layout_rows 多打一个 0 就会同步创建 rows×cols 个
+            # QFrame+QVBoxLayout+QLabel（1000×1000 = 100 万控件）冻结 UI
+            # 线程甚至 OOM，只能强杀进程。保存路径有 PlotSessionConfig
+            # 校验，但预览发生在保存之前，此处不兜住就无人兜。
+            if (
+                not isinstance(rows, int)
+                or not isinstance(cols, int)
+                or rows <= 0
+                or cols <= 0
+                or rows * cols > self.PREVIEW_MAX_CELLS
+            ):
+                self._clear_preview()
+                self._stats_label.setText(
+                    f"⚠️ 布局过大或非法（{rows} × {cols}），"
+                    f"仅保存时校验，不渲染预览"
+                )
+                return
 
             # 清除现有预览
             self._clear_preview()
