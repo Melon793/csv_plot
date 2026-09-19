@@ -1407,3 +1407,83 @@ class TestMarkdownExport:
         rows = var_info._enum_rows(big)
         assert len(rows) == VAR_INFO_ENUM_DISPLAY_LIMIT + 1
         assert "仅显示前" in rows[-1][1]
+
+
+class TestCrossChunkVariance:
+    """P2-31：跨块方差必须先中心化，再套 E[x²]-E[x]²。
+
+    绝对时间戳通道（1.7e9 量级、真实波动不到 1）下，`E[x²]` 与 `E[x]²` 都是
+    1e18 量级，float64 只有 ~16 位有效数字：实测旧实现把 std 抵成 **0**（被
+    `max(..., 0.0)` 夹住），带噪声的那条则抵出 **22.6**（真值 0.498）。而单数组
+    路径走 `np.nanstd`（内部先减均值）没这问题 —— 同一个变量两条路径结论不同。
+    """
+
+    class _SeriesLoader:
+        def __init__(self, data):
+            self.data = np.asarray(data, dtype=np.float64)
+
+        def get_metadata(self, var_name):
+            return SimpleNamespace(sample_count=self.data.size, is_enum=False)
+
+        def get_samples_chunked(self, var_name, offset, count):
+            return self.data[offset : offset + count]
+
+    @pytest.fixture(autouse=True)
+    def small_chunk(self, monkeypatch):
+        """块压到 1000，20000 点要走 20 次跨块累加。"""
+        monkeypatch.setattr("src.core.config.MDF_STATS_CHUNK_SIZE", 1000)
+
+    def _std(self, data):
+        stats = var_info._stats_mdf(self._SeriesLoader(data), "ch", None)
+        assert stats.computed is True
+        return stats
+
+    def test_timestamp_channel_keeps_its_real_std(self):
+        data = 1.7e9 + np.arange(20000) * 0.001
+        stats = self._std(data)
+
+        assert stats.std == pytest.approx(float(np.nanstd(data)), rel=1e-9)
+        assert stats.std > 1.0, "旧实现这里是 0：方差被整体抵消掉了"
+        assert stats.mean == pytest.approx(float(np.mean(data)), rel=1e-12)
+
+    def test_noisy_timestamp_channel_not_inflated(self):
+        data = 1.7e9 + np.random.default_rng(0).standard_normal(20000) * 0.5
+        stats = self._std(data)
+
+        assert stats.std == pytest.approx(float(np.nanstd(data)), rel=1e-6)
+        assert stats.std < 1.0, f"旧实现给出 22.6（真值 ≈0.498）: {stats.std}"
+
+    def test_chunked_path_agrees_with_single_array_path(self):
+        """两条统计路径的精度口径必须一致，否则切不分块会看到数字跳变。"""
+        data = 1.7e9 + np.arange(5000) * 0.002
+
+        chunked = self._std(data)
+        single = var_info._stats_from_array(data)
+
+        assert chunked.std == pytest.approx(single.std, rel=1e-9)
+        assert chunked.mean == pytest.approx(single.mean, rel=1e-12)
+
+    def test_constant_channel_with_large_offset_is_still_exactly_zero(self):
+        """中心化不能把别名义值算出来：常量通道 std 仍须严格为 0。"""
+        stats = self._std(np.full(20000, 1.7e9))
+
+        assert stats.std == 0.0
+        assert stats.mean == pytest.approx(1.7e9)
+
+    def test_ordinary_magnitude_channel_is_unchanged(self):
+        data = 800.0 + np.arange(20000) % 97
+        stats = self._std(data)
+
+        assert stats.std == pytest.approx(float(np.nanstd(data)), rel=1e-12)
+
+    def test_nan_and_inf_samples_still_excluded(self):
+        """参考点取的是首块均值，必须建立在剔除非有限值之后。"""
+        data = 1.7e9 + np.arange(3000) * 0.001
+        data[7] = np.nan
+        data[1500] = np.inf
+
+        stats = self._std(data)
+
+        assert (stats.nan_count, stats.inf_count) == (1, 1)
+        clean = np.delete(data, [7, 1500])
+        assert stats.std == pytest.approx(float(np.std(clean)), rel=1e-9)
