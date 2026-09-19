@@ -402,8 +402,11 @@ class LayoutManager(MainWindowBaseManager):
                 mark = getattr(container.plot_widget, "mark_region", None)
                 if not (container.isVisible() and mark and mark is not region_item):
                     continue
-                QSignalBlocker(mark)
-                mark.setRegion([min_x, max_x])
+                # P1-3: 必须用 with —— QSignalBlocker(mark) 作为临时对象语句，
+                # 语句结束即析构并解除阻塞，setRegion 照常发射 sigRegionChanged，
+                # 阻塞完全无效（同文件 :101 是正确写法）。
+                with QSignalBlocker(mark):
+                    mark.setRegion([min_x, max_x])
             self.request_mark_stats_refresh()
         finally:
             self.mw._is_syncing_mark_region = False
