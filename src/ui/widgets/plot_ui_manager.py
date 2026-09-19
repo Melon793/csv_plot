@@ -34,6 +34,7 @@ from src.core.config import (
     DEFAULT_SHOW_X_AXIS_LABEL,
     UI_DEBOUNCE_DELAY_MS,
     XRANGE_THRESHOLD_FOR_SYMBOLS,
+    widget_alive,
 )
 from src.core.logger import get_logger
 from src.ui.drag_drop import (
@@ -178,6 +179,12 @@ class LegendTextBrowser(QTextBrowser):
         legend HTML）。首行 + 分发前双查 var_name in pw.curves
         （§6 R3：菜单打开期间曲线可能被 reload/编辑器删除）。
         """
+        # 调用方是 singleShot(0) 的 lambda：事件循环转回来之前 legend 可能已
+        # 随 plot 关闭/重载销毁，只剩 Python 包装器（与 2a86e94 修的 X-link
+        # 防抖同类）。先问存活，再去摸 pw.curves / 建 QMenu(pw)。
+        if not widget_alive(self) or not widget_alive(self._pw):
+            logger.debug("legend 变量菜单跳过：控件已销毁")
+            return
         pw = self._pw
         if var_name not in pw.curves:
             return
