@@ -11,7 +11,12 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 from src.data.base_loader import BaseDataLoader
-from src.core.config import _UNIT_KEYWORDS, UNIT_KEYWORD_RATIO_THRESHOLD, EXCEL_MAX_SCAN_ROWS
+from src.core.config import (
+    _UNIT_KEYWORDS,
+    UNIT_KEYWORD_RATIO_THRESHOLD,
+    EXCEL_MAX_SCAN_ROWS,
+    EXCEL_NUMERIC_FALLBACK_RATIO,
+)
 from src.core.logger import get_logger
 
 logger = get_logger("data.excel_loader")
@@ -33,6 +38,34 @@ def _time_objs_to_str_series(series: pd.Series) -> pd.Series:
     )
     fmt = "%H:%M:%S.%f" if has_subsec else "%H:%M:%S"
     return series.map(lambda v: v.strftime(fmt) if isinstance(v, _dt.time) else v)
+
+
+def _numeric_fallback_convert(df: pd.DataFrame, cols: list[str]) -> None:
+    """把「几乎全部可解析为数值」的 object 列就地转数值，文本列保持原样。
+
+    无条件 `to_numeric(errors="coerce")` 会把状态列（"OK"/"FAIL"）、枚举文本、
+    备注整列静默销毁成 NaN 且无任何日志，与 CSV 路径（非数值列保留 category）
+    行为不一致。数值兜底只为救「数字被存成文本」的列，故按可解析比例判定。
+    """
+    if not cols:
+        return
+
+    converted = df[cols].apply(pd.to_numeric, errors="coerce")
+    kept_text: list[str] = []
+    for col in cols:
+        source = df[col]
+        non_null = int(source.notna().sum())
+        parsed = int(converted[col].notna().sum())
+        if non_null and parsed / non_null >= EXCEL_NUMERIC_FALLBACK_RATIO:
+            df[col] = converted[col]
+        else:
+            kept_text.append(col)
+
+    if kept_text:
+        logger.info(
+            "以下列数值可解析比例低于 %.2f，保留原始文本: %s",
+            EXCEL_NUMERIC_FALLBACK_RATIO, kept_text,
+        )
 
 
 class ExcelDataLoader(BaseDataLoader):
@@ -326,10 +359,7 @@ class ExcelDataLoader(BaseDataLoader):
             c for c in df.columns
             if c not in datetime_cols and c not in time_cols and df[c].dtype == object
         ]
-        if obj_cols:
-            df[obj_cols] = df[obj_cols].apply(
-                pd.to_numeric, errors='coerce'
-            )
+        _numeric_fallback_convert(df, obj_cols)
         for col in datetime_cols:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -485,8 +515,7 @@ class ExcelDataLoader(BaseDataLoader):
             c for c in df.columns
             if df[c].dtype == object and c not in time_col_set
         ]
-        if obj_cols:
-            df[obj_cols] = df[obj_cols].apply(pd.to_numeric, errors='coerce')
+        _numeric_fallback_convert(df, obj_cols)
 
         # —— 阶段 4.6：复用 _detect_datetime_cols() 做二次确认
         datetime_cols = self._detect_datetime_cols(df)

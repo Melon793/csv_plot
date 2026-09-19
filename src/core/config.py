@@ -164,6 +164,10 @@ VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判�
 # Excel 自动检测：最大扫描行数
 EXCEL_MAX_SCAN_ROWS = 30
 
+# Excel object 列数值兜底阈值：非空值中可解析为数值的比例须达到此值才转数值，
+# 否则保留原文本（状态/枚举/备注列不得被静默销毁成 NaN）
+EXCEL_NUMERIC_FALLBACK_RATIO = 0.9
+
 # 单位关键字列表（子字符串匹配，用于自动检测标题行下方的单位行）
 _UNIT_KEYWORDS = [
     "m",
