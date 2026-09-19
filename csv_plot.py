@@ -12,11 +12,15 @@ def main():
 
     初始化 Qt 应用、设置 pyqtgraph 全局配置、创建主窗口并启动事件循环。
     """
+    from src.core.crash_handler import install_crash_logging
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QFont, QIcon
     from PySide6.QtWidgets import QApplication
     import pyqtgraph as pg
     import time
+
+    # 打包版无控制台，未处理异常必须先落盘，否则闪退零线索
+    install_crash_logging()
 
     pg.setConfigOptions(antialias=False, crashWarning=False)
 
