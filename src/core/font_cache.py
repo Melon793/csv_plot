@@ -27,6 +27,23 @@ _FONT_PRIORITY_WIN = [
     "Arial Unicode MS",
 ]
 
+_installed_families: frozenset[str] | None = None
+
+
+def installed_font_families() -> frozenset[str]:
+    """进程级「已安装字体族」快照，问一次记下来。
+
+    `QFontDatabase.families()` 在 Windows 上要枚举全部字体（~50-100 ms），而它过去
+    被放在缓存命中的校验里（等于把缓存要省的时间原样花回去）以及 splash 的绘制
+    路径上（每帧一次）。一次运行里字体表不会变，成员判断用它即可。
+    """
+    global _installed_families
+    if _installed_families is None:
+        from PySide6.QtGui import QFontDatabase
+
+        _installed_families = frozenset(QFontDatabase.families())
+    return _installed_families
+
 
 def _detect_font(priority_list: list[str]) -> str:
     """按优先级列表检测第一个可用的字体名。
@@ -37,9 +54,7 @@ def _detect_font(priority_list: list[str]) -> str:
     Returns:
         第一个可用的字体名，或空字符串
     """
-    from PySide6.QtGui import QFontDatabase
-
-    available = QFontDatabase.families()
+    available = installed_font_families()
     for name in priority_list:
         if name in available:
             return name
@@ -80,14 +95,13 @@ def get_monospace_font_cached() -> str:
     搭配 QFont(name, pixel_size) 使用。
     返回空字符串则回退到 QFont("monospace") 默认行为。
     """
-    from PySide6.QtGui import QFontDatabase
     from src.core.settings import AppSettings
 
     settings = AppSettings()
     cached_version = settings.get_mono_font_cache_version()
     if cached_version == _MONO_CACHE_VERSION:
         cached_name = settings.get_mono_font_name()
-        if cached_name and cached_name in QFontDatabase.families():
+        if cached_name and cached_name in installed_font_families():
             return cached_name
 
     detected = _detect_mono_font()
@@ -108,14 +122,13 @@ def get_windows_chinese_font_cached() -> str:
 
     返回空字符串时调用方应回退到 QApplication.font()。
     """
-    from PySide6.QtGui import QFontDatabase
     from src.core.settings import AppSettings
 
     settings = AppSettings()
     cached_version = settings.get_font_cache_version()
     if cached_version == CACHE_VERSION:
         cached_name = settings.get_font_name()
-        if cached_name and cached_name in QFontDatabase.families():
+        if cached_name and cached_name in installed_font_families():
             return cached_name
 
     detected = _detect_font_win()
