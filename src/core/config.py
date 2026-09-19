@@ -1,6 +1,7 @@
 """全局配置常量和工具函数
 
 包含项目共用的配置常量、安全回调装饰器和数值安全检测函数：
+- widget_alive: 延迟回调摸控件前的 Qt C++ 对象存活判定
 - safe_callback: C++ 对象已销毁时的异常保护装饰器
 - safe_qt_op: 安全执行 Qt 对象操作，忽略 C++ 对象已销毁的异常
 - _evaluate_float32_safety: float32 安全表示范围检测
@@ -14,11 +15,29 @@ from typing import Any
 import logging
 from functools import wraps
 
+from shiboken6 import isValid as _shiboken_is_valid
+
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 DEFAULT_SHOW_X_AXIS_LABEL = False
+
+
+def widget_alive(widget) -> bool:
+    """Qt C++ 对象是否还在——延迟回调摸控件前的必要前置判断。
+
+    ``QTimer.singleShot`` 持有的是普通 Python 方法/lambda，窗口或 tab 销毁不会
+    取消它；届时残留的控件只剩 Python 包装器，按属性名取值照常（命中的是
+    ``__dict__``），直到真调到 ``isVisible()`` / ``geometry()`` 才抛
+    ``RuntimeError: Internal C++ object already deleted``。所以 ``not widget``
+    和 ``hasattr(...)`` 这类弱守卫挡不住，必须先问一句。
+
+    ``isValid`` 对非 Qt 对象（component 测试里的普通 Python 替身）返回 True，
+    替身因此不会被误杀；但它对 ``None`` 同样返回 True，判空必须由前置的
+    ``widget is not None`` 兜住。
+    """
+    return widget is not None and _shiboken_is_valid(widget)
 
 
 def safe_callback(func):

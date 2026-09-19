@@ -10,9 +10,8 @@ import numpy as np
 
 from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
-from shiboken6 import isValid as _shiboken_is_valid
 
-from src.core.config import UI_DEBOUNCE_DELAY_MS
+from src.core.config import UI_DEBOUNCE_DELAY_MS, widget_alive as _widget_alive
 from src.utils.paths import normalize_input_path
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -25,22 +24,6 @@ from src.ui.widgets.plot_container import PlotContainerWidget
 from src.app.plot_context import PlotContext
 
 logger = get_logger(__name__)
-
-
-def _widget_alive(widget) -> bool:
-    """Qt C++ 对象是否还在——延迟回调摸控件前的必要前置判断。
-
-    ``QTimer.singleShot`` 持有的是 Manager 的普通 Python 方法，窗口/tab 销毁
-    不会取消它；届时 ``plot_widgets`` 里残留的 container 只剩 Python 包装器，
-    按属性名取值照常（命中的是 ``__dict__``），直到真调到 ``isVisible()`` /
-    ``geometry()`` 才抛 ``RuntimeError: Internal C++ object already deleted``。
-    所以 ``not container`` 和 ``hasattr(...)`` 这类弱守卫挡不住，必须先问一句。
-
-    ``isValid`` 对非 Qt 对象（component 测试里的普通 Python 替身）返回 True，
-    替身因此不会被误杀；但它对 ``None`` 同样返回 True，判空必须由前置的
-    ``widget is not None`` 兜住。
-    """
-    return widget is not None and _shiboken_is_valid(widget)
 
 
 class LayoutManager(MainWindowBaseManager):
