@@ -890,11 +890,24 @@ class FileLoaderManager(MainWindowBaseManager):
             )
             return
 
+        # P0-4: 取尺寸必须在 _begin_data_reload() 上锁之前 —— 文件在 isfile 校验之后、
+        # getsize 之前被删除/占用（网盘同步、Excel 独占、误操作）时 OSError 若逃出
+        # _load_file，锁已置位而 _end_data_reload 永不执行，后续所有加载被静默拒绝。
+        try:
+            file_size = os.path.getsize(file_path)
+        except OSError as e:
+            logger.error("读取文件大小失败: %s", e, exc_info=True)
+            QMessageBox.critical(
+                self.mw,
+                "文件不可读",
+                f"无法读取文件大小，文件可能已被移动或删除：\n{file_path}\n\n错误详情: {e}",
+            )
+            return
+
         self._begin_data_reload()
         started_async = False
         _Threshold_Size_Mb = FILE_SIZE_LIMIT_BACKGROUND_LOADING
 
-        file_size = os.path.getsize(file_path)
         try:
             if file_size < _Threshold_Size_Mb * 1024 * 1024:
                 logger.info("同步加载文件 (%.1f MB)", file_size / 1024 / 1024)
