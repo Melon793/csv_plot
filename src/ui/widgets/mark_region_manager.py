@@ -42,7 +42,9 @@ class MarkRegionManager:
         return cm.pw
 
     def add_mark_region(self, min_x: float, max_x: float):
-        """添加标记区域"""
+        """添加标记区域（已存在时先拆干净，避免留下拖不动也关不掉的幽灵区域）"""
+        self._teardown_mark_region()
+
         self.pw.mark_region = pg.LinearRegionItem([min_x, max_x], movable=True)
         for line in self.pw.mark_region.lines:
             line.setHoverPen(pg.mkPen(color="r", width=10))
@@ -54,11 +56,33 @@ class MarkRegionManager:
                 window.layout_manager.sync_mark_regions
             )
 
+    def _teardown_mark_region(self):
+        """断开信号 → 摘出场景 → 销毁 C++ 对象。
+
+        连接挂在 region item（发送端）上，只 `removeItem` + 置 None 时一旦还有
+        引用（例如紧接着又 add 了一次），旧区域会继续留在图里响应拖拽并回调
+        `sync_mark_regions` 去改写新区域。
+        """
+        region = self.pw.mark_region
+        if region is None:
+            return
+        window = self.pw.window()
+        if window is not None and hasattr(window, "layout_manager"):
+            try:
+                region.sigRegionChanged.disconnect(
+                    window.layout_manager.sync_mark_regions
+                )
+            except (RuntimeError, TypeError):
+                # 构造期窗口尚无 layout_manager / 连接本就不存在
+                pass
+        if region.scene() is not None:
+            self.pw.plot_item.removeItem(region)
+        region.deleteLater()
+        self.pw.mark_region = None
+
     def remove_mark_region(self):
         """移除标记区域"""
-        if self.pw.mark_region and self.pw.mark_region.scene() is not None:
-            self.pw.plot_item.removeItem(self.pw.mark_region)
-        self.pw.mark_region = None
+        self._teardown_mark_region()
 
     def get_mark_stats(self) -> list | None:
         """获取标记区域的统计信息（统一版：始终走 curves 字典路径）
