@@ -427,6 +427,9 @@ class FastDataLoader(BaseDataLoader):
             sep=self.sep,
             na_values=self._NA_VALUES,
             keep_default_na=True,
+            # 与 _read_chunks 同口径：坏行跳过而不是整次加载失败。正式读取本来就
+            # 会跳过它们，样本这里卡住只会让文件「打不开」而非「少一行」
+            on_bad_lines="skip",
         )
 
         # 推断schema（包含时间格式）

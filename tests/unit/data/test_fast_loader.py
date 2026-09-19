@@ -247,3 +247,51 @@ class TestEncodingFallbackChain:
         assert loader.encoding_used == "gb18030"
         assert loader.units["速度"] == "km/h"
         assert loader.datalength == 2
+
+
+class TestBadLineTolerance:
+    """dtype 推断样本必须与正式分块读取同口径跳过坏行（V6.0 P2-36）。
+
+    样本读取少一个 `on_bad_lines="skip"`，后果不是「少一行」而是整个文件打不开：
+    首 200 行内一条列数超标的行就抛 `ParserError: Expected 3 fields in line 4, saw 4`，
+    而这些行在正式读取里本来就会被跳过。
+    """
+
+    @staticmethod
+    def _csv(tmp_path, n: int, corrupt_at: list[int]):
+        rows = []
+        for i in range(n):
+            row = [float(i), 10.0 + i, 800 + i]
+            if i in corrupt_at:
+                row.append("JUNK")  # 多出一列 → 该行列数超标
+            rows.append(row)
+        return write_csv(
+            tmp_path / "bad_line.csv",
+            header=["time", "speed", "rpm"],
+            units=["s", "km/h", "rpm"],
+            rows=rows,
+        )
+
+    def test_bad_line_inside_sample_window_still_loads(self, tmp_path):
+        loader = FastDataLoader(
+            str(self._csv(tmp_path, 300, [5])), has_unit=True, sep=","
+        )
+        assert loader.datalength == 299
+
+    def test_sample_window_and_rest_now_behave_alike(self, tmp_path):
+        """窗口外的坏行本来就只丢一行 —— 修复后窗口内也是同样结果。"""
+        inside = FastDataLoader(
+            str(self._csv(tmp_path, 300, [5])), has_unit=True, sep=","
+        )
+        outside = FastDataLoader(
+            str(self._csv(tmp_path, 300, [250])), has_unit=True, sep=","
+        )
+        assert inside.datalength == outside.datalength == 299
+
+    def test_skipping_the_line_does_not_shift_the_remaining_rows(self, tmp_path):
+        loader = FastDataLoader(
+            str(self._csv(tmp_path, 300, [5])), has_unit=True, sep=","
+        )
+        times = [float(v) for v in loader.df["time"].iloc[:8]]
+        assert times == [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0], "只丢第 5 行，其余不得错位"
+        assert loader.df["speed"].iloc[5] == pytest.approx(16.0)
