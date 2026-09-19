@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import subprocess
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -24,6 +25,25 @@ from src.ui.widgets.plot_container import PlotContainerWidget
 from src.app.plot_context import PlotContext
 
 logger = get_logger(__name__)
+
+
+@contextmanager
+def _sync_guard(*plot_widgets):
+    """程序化改范围期间屏蔽子图的 ``_on_range_changed``。
+
+    少了这层保护，XLink 同步发出的 ``sigRangeChanged`` 会让子图误入「用户交互」
+    态（置 ``_is_interacting`` 并起防抖定时器）：既白跑一轮 immediate 刷新 + 兄弟
+    广播，又在这段窗口里让真正的交互源被 ``_sibling_is_interaction_source()``
+    当成级联结果跳过收尾。退出时按原值复原，嵌套调用拆不掉外层守卫。
+    """
+    saved = [(pw, getattr(pw, "_is_syncing_range", False)) for pw in plot_widgets]
+    for pw, _ in saved:
+        pw._is_syncing_range = True
+    try:
+        yield
+    finally:
+        for pw, was in saved:
+            pw._is_syncing_range = was
 
 
 class LayoutManager(MainWindowBaseManager):
@@ -139,7 +159,9 @@ class LayoutManager(MainWindowBaseManager):
                 logger.warning(
                     "[XLINK_SYNC] plot idx=%d lost X-link, re-establishing", idx
                 )
-                vb.setXLink(master_vb)
+                # linkView 末尾会用子图自己的 sigRangeChanged 回报新范围，不守卫就会让该子图入交互态
+                with _sync_guard(container.plot_widget):
+                    vb.setXLink(master_vb)
 
         first_container = mw.plot_widgets[0]
         if not hasattr(first_container, "plot_widget"):
@@ -191,22 +213,23 @@ class LayoutManager(MainWindowBaseManager):
                 )
                 continue
             linked = vb.linkedView(0)
-            if linked is not None:
-                vb.setXLink(None)
-                logger.debug(
-                    "[XLINK] plot=%s temp unlink for sync (%.4f, %.4f)",
-                    getattr(pw, 'y_name', '?'), xmin, xmax,
-                )
-            try:
-                vb.enableAutoRange(x=False)
-                vb.setXRange(xmin, xmax, padding=0)
-            finally:
+            with _sync_guard(pw):
                 if linked is not None:
-                    vb.setXLink(linked)
+                    vb.setXLink(None)
                     logger.debug(
-                        "[XLINK] plot=%s link restored after sync",
-                        getattr(pw, 'y_name', '?'),
+                        "[XLINK] plot=%s temp unlink for sync (%.4f, %.4f)",
+                        getattr(pw, 'y_name', '?'), xmin, xmax,
                     )
+                try:
+                    vb.enableAutoRange(x=False)
+                    vb.setXRange(xmin, xmax, padding=0)
+                finally:
+                    if linked is not None:
+                        vb.setXLink(linked)
+                        logger.debug(
+                            "[XLINK] plot=%s link restored after sync",
+                            getattr(pw, 'y_name', '?'),
+                        )
 
             cur_geom = container.geometry()
             try:
