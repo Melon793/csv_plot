@@ -20,6 +20,10 @@ from src.data.base_loader import BaseDataLoader
 
 logger = get_logger("data.loader")
 
+# 编码回退链（格式探测与表头/单位读取共用，顺序即优先级）。
+# gb18030 覆盖中文 Windows 导出文件；cp1252/latin-1 收尾保证链末位必然可解码。
+ENCODING_FALLBACKS: tuple[str, ...] = ("utf-8", "gb18030", "cp1252", "latin-1")
+
 
 class DataLoadThread(QThread):
     """
@@ -267,40 +271,37 @@ class FastDataLoader(BaseDataLoader):
             raw_sample = f.read(sample_size)
 
         result = from_bytes(raw_sample).best()
-        if result and result.encoding:
-            detected_encoding = result.encoding
-            coherence = result.coherence
-        else:
-            detected_encoding = "utf-8"
-            coherence = 0.0
+        detected_encoding = (
+            result.encoding if (result and result.encoding) else "utf-8"
+        )
+        # 回退链一律用严格解码筛选（见下方 P0-5 注释），因此把候选全部列出
+        # 比按 coherence 截断更安全：错误候选会自己失败并让位。
+        encodings_to_try = list(dict.fromkeys([detected_encoding, *ENCODING_FALLBACKS]))
 
-        if coherence > 0.8:
-            encodings_to_try = list(dict.fromkeys([detected_encoding, "utf-8"]))
-        else:
-            encodings_to_try = list(
-                dict.fromkeys(
-                    [detected_encoding, "utf-8", "gb18030", "cp1252", "latin-1"]
-                )
-            )
-
-        lines = []
+        lines: list[str] = []
         final_encoding = None
         for enc in encodings_to_try:
+            # P0-5: 必须 errors="strict"。errors="replace" 下解码永不抛
+            # UnicodeDecodeError → 首轮必然 break，整条回退链沦为死代码，
+            # 误判的编码被静默采纳，后续分隔符/标题行/单位行检测全在
+            # U+FFFD 乱码上进行。
             try:
-                with open(file_path, "r", encoding=enc, errors="replace") as f:
+                decoded: list[str] = []
+                with open(file_path, "r", encoding=enc, errors="strict") as f:
                     for _ in range(50):
                         line = f.readline()
                         if not line:
                             break
                         stripped = line.rstrip("\n\r")
                         if stripped.strip():
-                            lines.append(stripped)
-                        if len(lines) >= 40:
+                            decoded.append(stripped)
+                        if len(decoded) >= 40:
                             break
-                final_encoding = enc
-                break
-            except (UnicodeDecodeError, UnicodeError):
+            except (UnicodeDecodeError, UnicodeError, LookupError):
                 continue
+            lines = decoded
+            final_encoding = enc
+            break
 
         if final_encoding is None:
             return FormatInfo(encoding=None, sep=None, header_row=0, has_unit=False)
@@ -498,7 +499,9 @@ class FastDataLoader(BaseDataLoader):
 
         if encoding is not None:
             # 上游已检测编码，直接使用并追加回退链兜底
-            encodings_to_try = list(dict.fromkeys([encoding, "utf-8", "cp1252"]))
+            # P0-5: 与探测链共用 ENCODING_FALLBACKS（旧链缺 gb18030，
+            # 中文 Windows 文件在两条链上会得出不同结论）
+            encodings_to_try = list(dict.fromkeys([encoding, *ENCODING_FALLBACKS]))
         else:
             # 自行检测编码
             from charset_normalizer import from_bytes
@@ -514,7 +517,9 @@ class FastDataLoader(BaseDataLoader):
             else:
                 detected_enc = "utf-8"
 
-            encodings_to_try = list(dict.fromkeys([detected_enc, "utf-8", "cp1252"]))
+            encodings_to_try = list(
+                dict.fromkeys([detected_enc, *ENCODING_FALLBACKS])
+            )
 
         for enc in encodings_to_try:
             try:
