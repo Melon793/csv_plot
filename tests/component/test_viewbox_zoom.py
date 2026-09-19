@@ -14,7 +14,7 @@ QWheelEvent/QMouseEvent 手工构造后直接调用对应事件方法。
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 
 from src.core.config import FACTOR_SCROLL_ZOOM
@@ -207,6 +207,136 @@ def test_xlink_sync_on_wheel_zoom(plot_factory, qapp):
     assert x2[1] == pytest.approx(x1[1], abs=1e-6)
     # 确实发生了缩放（范围比初始 1..100 窄）
     assert x1[1] - x1[0] < 99
+
+
+def _two_linked_plots(plot_factory, qapp):
+    """首图 + 一个 XLink 子图，两者 X 范围一致 (1, 100)"""
+    df = pd.DataFrame({"a": [float(i) for i in range(100)]})
+    master = plot_factory(df)
+    child = plot_factory(df)
+    for pw in (master, child):
+        pw.resize(800, 300)
+        pw.show()
+        assert pw.plot_variable("a")
+        pw.view_box.setXRange(1, 100, padding=0)
+    qapp.processEvents()
+    child.view_box.setXLink(master.view_box)
+    qapp.processEvents()
+    return master, child
+
+
+def test_wheel_zoom_on_linked_child_shrinks_group(plot_factory, qapp):
+    """在 XLink 子图（第 2~N 个）上滚轮：整组 X 范围必须真的被缩放。
+
+    AxisManager 若走 unlink→setXRange→relink，relink 末尾 pyqtgraph 会用源的
+    range 回调 linkedViewChanged → 子图 setXRange，把刚写入的新范围按源的旧
+    范围静默覆盖，用户看到的就是「滚轮没反应」。
+    """
+    master, child = _two_linked_plots(plot_factory, qapp)
+    before = child.view_box.viewRange()[0]
+    assert (before[0], before[1]) == pytest.approx((1, 100), abs=1e-6)
+
+    child.wheelEvent(_wheel_event(child, QPoint(400, 150), 120))
+    qapp.processEvents()
+
+    after = child.view_box.viewRange()[0]
+    assert after[1] - after[0] < before[1] - before[0], "子图滚轮被 XLink relink 快照回收"
+    # 整组一致：子图缩放后与首图同源
+    assert after[0] == pytest.approx(master.view_box.viewRange()[0][0], abs=1e-6)
+    assert after[1] == pytest.approx(master.view_box.viewRange()[0][1], abs=1e-6)
+
+
+def test_wheel_zoom_equivalent_on_master_and_child(plot_factory, qapp):
+    """共享 X 轴的语义：在子图上滚轮应与在首图上滚轮得到同一结果"""
+    master_a, child_a = _two_linked_plots(plot_factory, qapp)
+    master_b, _child_b = _two_linked_plots(plot_factory, qapp)
+    pos = QPoint(400, 150)
+
+    child_a.wheelEvent(_wheel_event(child_a, pos, 120))
+    master_b.wheelEvent(_wheel_event(master_b, pos, 120))
+    qapp.processEvents()
+
+    got = child_a.view_box.viewRange()[0]
+    expected = master_b.view_box.viewRange()[0]
+    assert got[0] == pytest.approx(expected[0], abs=1e-6)
+    assert got[1] == pytest.approx(expected[1], abs=1e-6)
+
+
+def test_wheel_zoom_on_linked_child_keeps_y_autorange(plot_factory, qapp):
+    """滚轮委托给 XLink 源后，子图自己的「Y 跟随可见段」仍不得被废掉。
+
+    子图滚轮会经 XLink 级联收到 linkedViewChanged → setXRange，此路径只关 X 轴
+    autoRange；一旦有人改回 rect 形式的 setRange，Y autoRange 会整组被关掉。
+    """
+    master, child = _two_linked_plots(plot_factory, qapp)
+    child.auto_y_in_x_range()
+    qapp.processEvents()
+    assert bool(child.view_box.state["autoRange"][1]) is True
+
+    child.wheelEvent(_wheel_event(child, QPoint(400, 150), 120))
+    qapp.processEvents()
+
+    assert bool(child.view_box.state["autoRange"][1]) is True
+    assert child.view_box.viewRange()[0][1] - child.view_box.viewRange()[0][0] < 99
+
+
+class _FakeVB:
+    """ViewBox 替身：只提供 _map_x_to_viewbox 用到的 screenGeometry / viewRect"""
+
+    def __init__(self, global_left: int, global_width: int,
+                 view_left: float, view_width: float):
+        self._geom = QRect(global_left, 0, global_width, 100)
+        self._rect = QRectF(view_left, 0.0, view_width, 1.0)
+
+    def screenGeometry(self):
+        return self._geom
+
+    def viewRect(self):
+        return self._rect
+
+
+def test_map_x_to_viewbox_across_unequal_geometry(shown_plot):
+    """锚点换算：按屏幕像素把子图视图 x 映射到 XLink 源视图坐标"""
+    am = shown_plot._axis_manager
+    # 源：屏幕 [0,100) 显示视图 [0,10]；子图：屏幕 [50,150) 显示视图 [100,120]
+    src = _FakeVB(0, 100, 0.0, 10.0)
+    child = _FakeVB(50, 100, 100.0, 20.0)
+
+    # 子图视图 105 → 屏内 25% → 全局 x=75 → 源屏内 75% → 源视图 7.5
+    assert am._map_x_to_viewbox(child, src, 105.0) == pytest.approx(7.5)
+    # 线性对应（子图右边缘在屏幕上也超出源，故 120 映射到 15 而非 10）
+    assert am._map_x_to_viewbox(child, src, 100.0) == pytest.approx(5.0)
+    assert am._map_x_to_viewbox(child, src, 120.0) == pytest.approx(15.0)
+    # 几何完全重合时映射应等价于恒等
+    same = _FakeVB(0, 100, 0.0, 10.0)
+    assert am._map_x_to_viewbox(same, src, 3.25) == pytest.approx(3.25)
+
+
+def test_map_x_to_viewbox_degrades_on_zero_width_geometry(shown_plot):
+    """几何未就绪（宽度 0）时退化为原值，而不是抛除零或返回垃圾坐标"""
+    am = shown_plot._axis_manager
+    src = _FakeVB(0, 100, 0.0, 10.0)
+    zero_view = _FakeVB(0, 100, 0.0, 0.0)
+    zero_screen = _FakeVB(0, 0, 0.0, 10.0)
+
+    assert am._map_x_to_viewbox(zero_view, src, 5.0) == 5.0
+    assert am._map_x_to_viewbox(src, zero_screen, 5.0) == 5.0
+
+
+def test_set_xrange_from_linked_child_writes_link_source(plot_factory, qapp):
+    """set_xrange_with_link_handling 在有 XLink 时必须写源视图，而不是子图自身"""
+    master, child = _two_linked_plots(plot_factory, qapp)
+
+    child.set_xrange_with_link_handling(20, 40, padding=0)
+    qapp.processEvents()
+
+    assert master.view_box.viewRange()[0][0] == pytest.approx(20, abs=1e-6)
+    assert master.view_box.viewRange()[0][1] == pytest.approx(40, abs=1e-6)
+    assert child.view_box.viewRange()[0] == pytest.approx(
+        master.view_box.viewRange()[0], abs=1e-6
+    )
+    # 不得残留临时 unlink/重连造成的 link 丢失
+    assert child.view_box.linkedView(0) is master.view_box
 
 
 # ---------- 框选缩放（Shift + 左键拖拽） ----------
