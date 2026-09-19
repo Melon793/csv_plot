@@ -509,7 +509,9 @@ class PlotUIManager(BasePlotManager):
         pw._legend_axis_last_w = None
 
         pw._is_interacting = False
-        pw._interaction_timer = QTimer()
+        # 必须挂 parent：无父 QTimer 在 pw 销毁后仍存活，超时会对已销毁的
+        # C++ 对象调用 _end_interaction（RuntimeError / 崩溃）
+        pw._interaction_timer = QTimer(pw)
         pw._interaction_timer.setSingleShot(True)
         pw._interaction_timer.timeout.connect(pw._end_interaction)
         pw._is_syncing_range = False
