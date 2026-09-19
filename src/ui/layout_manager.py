@@ -281,7 +281,10 @@ class LayoutManager(MainWindowBaseManager):
 
     def show_help(self):
         dlg = HelpDialog(self.mw)
-        dlg.exec()
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def _get_plot_container(self, plot_widget) -> PlotContainerWidget | None:
         parent = plot_widget.parentWidget()
@@ -447,6 +450,7 @@ class LayoutManager(MainWindowBaseManager):
             self.set_plots_visible(r, c)
             if hasattr(self.mw, 'plot_config_manager'):
                 self.mw.plot_config_manager.save_auto_save(self.mw)
+        dlg.deleteLater()
 
     def open_time_correction_dialog(self):
         self.mw._is_time_correction_active = False
@@ -454,8 +458,11 @@ class LayoutManager(MainWindowBaseManager):
         dialog = TimeCorrectionDialog(self.mw.factor, self.mw.offset, self.mw)
         if dialog.window_geometry:
             dialog.restoreGeometry(dialog.window_geometry)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_factor, new_offset = dialog.values()
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        # values() 读的是弹窗里的控件，必须在 deleteLater 之前取完
+        new_factor, new_offset = dialog.values() if accepted else (None, None)
+        dialog.deleteLater()
+        if accepted:
             if new_factor <= 0:
                 QMessageBox.warning(self.mw, "错误", "Factor 必须是正数")
                 return

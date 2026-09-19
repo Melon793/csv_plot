@@ -1061,11 +1061,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 优先检测X轴标签区域（最具体）
             if x_axis_label_rect.contains(scene_pos):
                 dialog = AxisDialog(self.axis_x, self.view_box, "X", self)
-                if dialog.exec():
-                    min_val, max_val = self.view_box.viewRange()[0]
-                    for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
-                        view.set_xrange_with_link_handling(xmin=min_val, xmax=max_val, padding=DEFAULT_PADDING_VAL_X)
-                        view.plot_item.update()
+                try:
+                    if dialog.exec():
+                        min_val, max_val = self.view_box.viewRange()[0]
+                        for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
+                            view.set_xrange_with_link_handling(xmin=min_val, xmax=max_val, padding=DEFAULT_PADDING_VAL_X)
+                            view.plot_item.update()
+                finally:
+                    dialog.deleteLater()
                 return
             # 然后检测绘图区域（在检测Y轴之前）
             elif view_box_rect_scene.contains(scene_pos):
@@ -1075,8 +1078,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 最后检测Y轴区域（最后兜底）
             elif y_axis_rect_scene.contains(scene_pos):
                 dialog = AxisDialog(self.axis_y, self.view_box, "Y", self)
-                if dialog.exec():
-                    self.plot_item.update()
+                try:
+                    if dialog.exec():
+                        self.plot_item.update()
+                finally:
+                    dialog.deleteLater()
                 return
         return super().mouseDoubleClickEvent(event)
 

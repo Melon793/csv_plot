@@ -822,13 +822,16 @@ class FileLoaderManager(MainWindowBaseManager):
             else:
                 from src.ui.dialogs.sheet_selector import SheetSelectorDialog
                 dialog = SheetSelectorDialog(file_path, self.mw)
-                if dialog.exec() != QDialog.DialogCode.Accepted:
+                try:
+                    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                    # get_selected_sheet() 读弹窗控件，取完再销毁
+                    selected = dialog.get_selected_sheet() if accepted else None
+                finally:
+                    dialog.deleteLater()
+                if not selected:
                     self.mw.load_btn.setEnabled(True)
                     return
-                sheet_name = dialog.get_selected_sheet()
-                if not sheet_name:
-                    self.mw.load_btn.setEnabled(True)
-                    return
+                sheet_name = selected
 
             # Excel 不需要分隔符/编码检测，desc_rows=None 触发自动检测
             delimiter_typ = ","

@@ -550,7 +550,10 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dialog.template_saved.connect(self._on_template_saved)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _on_template_saved(self, template_id: str):
         from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
@@ -600,7 +603,13 @@ class MainWindow(QMainWindow):
             parent=self
         )
         dialog.template_applied.connect(self.apply_template)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            # 带 parent 的 exec 对话框在 Python 引用消失后仍作为主窗口子对象
+            # 存活，而且与长寿命的 TemplateManager 保持连接：每开一次，之后
+            # 一次模板变更就多触发一份 _refresh_template_list
+            dialog.deleteLater()
     
     def apply_template(self, template_id: str):
         template = self.plot_config_manager.template_manager.get_template(template_id)
@@ -667,8 +676,11 @@ class MainWindow(QMainWindow):
         force_btn = box.addButton("仍然加载", QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
+        clicked = box.clickedButton()
+        # 与主窗口同寿命的 QMessageBox 同样是带 parent 的 exec 弹窗，用完即弃
+        box.deleteLater()
 
-        if box.clickedButton() == force_btn:
+        if clicked == force_btn:
             self._persist_last_template(self._last_template_id, name)
             self.plot_config_manager.apply_config(self, config)
             self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
