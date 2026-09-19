@@ -87,8 +87,11 @@ class LayoutManager(MainWindowBaseManager):
         sizes = mw.main_splitter.sizes()
         if len(sizes) >= 2 and all(size > 0 for size in sizes):
             mw._splitter_ready = True
-        else:
+        elif getattr(mw, "_plot_area_visible", True):
             QTimer.singleShot(50, self._ensure_splitter_ready)
+        #  else: 绘图区被用户主动隐藏时右 pane 恒为 0，这是预期状态而非「还没
+        # 布局好」—— 再续排就是整段隐藏期的 20Hz 空转，由 toggle_plot_area
+        # 恢复可见时重新起一次
 
     def _apply_fixed_splitter_width(self):
         mw = self._mw_ref()
@@ -301,6 +304,10 @@ class LayoutManager(MainWindowBaseManager):
             self.mw._was_maximized = False
             self.mw._was_fullscreen = False
             self.mw._plot_area_visible = True
+            if not getattr(self.mw, "_splitter_ready", False):
+                # 隐藏期间没有续排轮询，这里补起一次；否则「就绪」标记永久
+                # 停在 False，_apply_fixed_splitter_width/_handle_resize 再也不工作
+                QTimer.singleShot(0, self._ensure_splitter_ready)
 
     def show_help(self):
         dlg = HelpDialog(self.mw)
