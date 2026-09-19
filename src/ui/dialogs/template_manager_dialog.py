@@ -315,6 +315,7 @@ class TemplateManagerDialog(QDialog):
             "删除模板",
             f"确定要删除模板 '{template.metadata.name}' 吗?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
             try:
