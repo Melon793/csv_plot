@@ -163,3 +163,43 @@ def test_cursor_mode_signal_still_emits_internal_identifier(view_box):
     by_label["关闭游标"].trigger()
 
     assert received == ["2 anchored cursor", "off"]
+
+
+def _flush_deferred_deletes(qapp):
+    """deleteLater 要等 DeferredDelete 事件投递才真正销毁 C++ 对象"""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qapp.processEvents()
+
+
+def _live_object_counts(menu):
+    from PySide6.QtGui import QAction, QActionGroup
+    from PySide6.QtWidgets import QMenu
+
+    return {
+        "QAction": len(menu.findChildren(QAction)),
+        "QMenu": len(menu.findChildren(QMenu)),
+        "QActionGroup": len(menu.findChildren(QActionGroup)),
+    }
+
+
+def test_repeated_get_menu_does_not_accumulate_objects(view_box, qapp):
+    """连续右键不累积 QObject：removeAction 之后必须真正销毁
+
+    基线取第一轮 getMenu（此时 pyqtgraph 自身项与我们的自定义项都已建好），
+    再连点 5 次；游标模式子菜单与「调整高度」子菜单每轮都会重建，
+    旧对象若只 remove 不 delete 就会一直挂在缓存菜单的 children 上。
+    """
+    menu = view_box.getMenu(_FakeMenuEvent())
+    _flush_deferred_deletes(qapp)
+    baseline = _live_object_counts(menu)
+    visible_baseline = len(menu.actions())
+
+    for _ in range(5):
+        view_box.getMenu(_FakeMenuEvent())
+        _flush_deferred_deletes(qapp)
+
+    assert _live_object_counts(menu) == baseline
+    assert len(menu.actions()) == visible_baseline
+
