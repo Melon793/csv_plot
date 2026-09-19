@@ -13,7 +13,8 @@ AxisManager - 坐标轴管理
 
 from __future__ import annotations
 import logging
-from typing import Any, TYPE_CHECKING
+from contextlib import contextmanager
+from typing import Any, Iterator, TYPE_CHECKING
 
 import pyqtgraph as pg
 from src.core.config import (
@@ -29,6 +30,33 @@ logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_ui_manager import PlotUIManager
+
+
+def set_y_autorange(vb: pg.ViewBox) -> None:
+    """开启「Y 轴跟随当前 X 可见段」，并保证这一帧就重算。
+
+    autoVisibleOnly 的配对原本只在 ``plot_ui_manager._setup_plot_area`` 里设过一次，
+    少这一步就是靠别处的默认值成立：配对一旦丢了，Y 会按全量数据 autoRange，
+    Ctrl+Y 静默退化成「缩放到全部」。重算同理不能指望 ``enableAutoRange`` —— 标记
+    已经是真时它整段跳过，什么都不做。
+    """
+    vb.setAutoVisible(x=False, y=True)
+    vb.enableAutoRange(axis=vb.YAxis, enable=True)
+    vb.queueUpdateAutoRange()
+
+
+@contextmanager
+def y_autorange_preserved(vb: pg.ViewBox) -> Iterator[None]:
+    """程序化改范围期间保住用户显式开启的 Y autoRange。
+
+    只复原标记、不强制重算：滚轮每一步都排队 auto-range 会平白多出重绘。
+    """
+    was_on = bool(vb.state["autoRange"][1])
+    try:
+        yield
+    finally:
+        if was_on:
+            vb.enableAutoRange(axis=vb.YAxis, enable=True)
 
 
 class AxisManager:
@@ -196,10 +224,9 @@ class AxisManager:
         return 0, 1
 
     def auto_y_in_x_range(self) -> None:
-        """在当前 X 范围内自动调整 Y 轴"""
+        """在当前 X 范围内自动调整 Y 轴（Ctrl+Y 的唯一入口）"""
         pw = self.pw
-        vb = pw.view_box
-        vb.enableAutoRange(axis=vb.YAxis, enable=True)
+        set_y_autorange(pw.view_box)
         pw.axis_y.setTicks(None)
 
     def zoom_x(self, factor: float, center_x: float) -> None:
@@ -209,14 +236,12 @@ class AxisManager:
         导致 Ctrl+Y 开启的「Y 跟随可见段」在一次滚轮后被静默废除。
         """
         vb = self.pw.view_box
-        y_auto = bool(vb.state["autoRange"][1])
         left, right = vb.viewRange()[0]
-        self.set_xrange_with_link_handling(
-            center_x - (center_x - left) * factor,
-            center_x + (right - center_x) * factor,
-        )
-        if y_auto:
-            vb.enableAutoRange(axis=vb.YAxis, enable=True)
+        with y_autorange_preserved(vb):
+            self.set_xrange_with_link_handling(
+                center_x - (center_x - left) * factor,
+                center_x + (right - center_x) * factor,
+            )
 
     def set_xrange_with_link_handling(
         self,
