@@ -1568,10 +1568,12 @@ class DataTableDialog(QMainWindow):
             return
 
         # ---- 非 MDF 数据：原有单表逻辑 ----
-        self._df[var_name] = data.reset_index(drop=True)
-        max_len = max(len(self._df), len(data))
-        if len(self._df) < max_len:
-            self._df = self._df.reindex(range(max_len))
+        data = data.reset_index(drop=True)
+        # 必须先按新列长度扩容再赋列：`df[col] = series` 是按现有索引对齐的，
+        # 长于当前表的 series 会被就地截断，随后的 reindex 只会把尾部补成 NaN
+        if len(self._df) < len(data):
+            self._df = self._df.reindex(range(len(data)))
+        self._df[var_name] = data
 
         if loader:
             self.units = loader.units
