@@ -122,6 +122,17 @@ class ExcelDataLoader(BaseDataLoader):
                 ws_name = sheet_name
             self._ws = self._wb[ws_name]
 
+            # read_only 模式全程按 <dimension> 声明裁剪行列，部分导出工具只写 A1，
+            # 表头扫描与数据行会一起被削平。声明明显不可信时先作废它，让 iter_rows
+            # 依实际内容定界。
+            if not self._ws.max_row or self._ws.max_row <= 1:
+                logger.warning(
+                    "sheet '%s' 的 dimension 声明不可信（max_row=%s, max_column=%s），"
+                    "已作废改按实际内容定界: %s",
+                    ws_name, self._ws.max_row, self._ws.max_column, file_path,
+                )
+                self._ws.reset_dimensions()
+
             if self._progress_cb:
                 self._progress_cb(5)
 
@@ -348,7 +359,10 @@ class ExcelDataLoader(BaseDataLoader):
         if self._progress_cb:
             self._progress_cb(90)
 
-        # 后处理：类型转换（对象列→数值，跳过 calamine 已推断的类型）
+        return self._apply_inferred_types(df)
+
+    def _apply_inferred_types(self, df: pd.DataFrame) -> pd.DataFrame:
+        """引擎自行推断列类型后的统一后处理（calamine 与 dimension 兜底路径共用）"""
         datetime_cols = self._detect_datetime_cols(df)
         time_cols = self._detect_time_cols(df)
         # 纯 time 单元格先转字符串（pd.to_datetime 不支持 time 对象，直接转换会整列 NaT）
@@ -376,7 +390,13 @@ class ExcelDataLoader(BaseDataLoader):
         total_rows = max_row - data_start + 1
 
         if total_rows <= 0:
-            return pd.DataFrame(columns=self._var_names)
+            # dimension 声明装不下数据区（构造期只对 max_row<=1 作废过声明，这里还
+            # 覆盖「声明有值但偏小到起始行之前」那一类），不能判定为空表。
+            logger.warning(
+                "sheet '%s' 的 max_row=%s 早于数据起始行 %s，改用无界流式读取: %s",
+                self._ws.title, self._ws.max_row, data_start, self._path,
+            )
+            return self._read_rows_streaming(data_start)
 
         from src.core.config import FLOAT32_REPRESENTABLE_MAX
 
@@ -524,6 +544,28 @@ class ExcelDataLoader(BaseDataLoader):
                 df[col] = pd.to_datetime(df[col], errors="coerce")
 
         return df
+
+    def _read_rows_streaming(self, data_start: int) -> pd.DataFrame:
+        """dimension 失真时的兜底读取：一次无界解析，列类型交给 pandas 推断。
+
+        正常文件仍走 `_read_chunks` 的预分配路径；这里只在「按声明读会读成空表」时
+        进入，用 ~2× 内存峰值（行 tuple + 转换后的列）换数据不丢。
+        """
+        self._ws.reset_dimensions()
+        rows = list(self._ws.iter_rows(min_row=data_start, values_only=True))
+
+        if self._progress_cb:
+            self._progress_cb(90)
+
+        if not rows:
+            logger.warning(
+                "sheet '%s' 第 %s 行起确实无数据，返回空表: %s",
+                self._ws.title, data_start, self._path,
+            )
+            return pd.DataFrame(columns=self._var_names)
+
+        df = pd.DataFrame(rows, columns=self._var_names)
+        return self._apply_inferred_types(df)
 
     @staticmethod
     def _detect_datetime_cols(df_chunk: pd.DataFrame) -> set[str]:
