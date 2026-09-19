@@ -719,16 +719,8 @@ class CursorManager:
                 pw.multi_cursor_items.append(x_info_item)
 
             # 所有 cursor 可视化元素（labels + circles + x-labels）设置完毕后，
-            # 强制触发 ViewBox 重绘。Qt GraphicsView 框架在某些情况下不会
-            # 自动调度 paint event（尤其在 reload/批量创建 item 后），
-            # 导致部分 TextItem / ScatterPlotItem 不可见，
-            # 直到用户交互（拖动 cursor / 缩放）才恢复。
-            #
-            # v5.3: 用 QSignalBlocker 阻断 sigRangeChanged 等级联信号，
-            # 防止 view_box.update() 触发的级联回调重新进入 update_cursor_label
-            # 导致 BSP 树在多个回调中交叉修改 → SIGSEGV
-            with QSignalBlocker(view_box):
-                view_box.update()
+            # 强制触发 ViewBox 重绘（v5.3：需阻断级联信号，见 _repaint_view_box）
+            self._repaint_view_box(view_box)
 
         except Exception:
             logger.warning("更新多曲线光标标签失败", exc_info=True)
@@ -1263,10 +1255,25 @@ class CursorManager:
 
             # 所有 cursor 可视化元素设置完毕后，
             # 强制触发 ViewBox 重绘，避免部分 item 不可见
-            view_box.update()
+            # （P0-2：默认游标路径同样必须阻断级联信号，与多曲线路径对齐）
+            self._repaint_view_box(view_box)
 
         except Exception:
             logger.debug("更新 anchored cursor 可视化失败", exc_info=True)
+
+    def _repaint_view_box(self, view_box) -> None:
+        """强制触发 ViewBox 重绘，且阻断级联信号。
+
+        Qt GraphicsView 在某些情况下不会自动调度 paint event（尤其在
+        reload / 批量创建 item 后），导致部分 TextItem / ScatterPlotItem
+        不可见，直到用户交互才恢复。
+
+        v5.3: 必须用 QSignalBlocker 阻断 sigRangeChanged 等级联信号 ——
+        强制重绘触发的级联回调会重新进入 update_cursor_label，
+        使 BSP 树在多个回调中交叉修改 → SIGSEGV（不可被 except 捕获）。
+        """
+        with QSignalBlocker(view_box):
+            view_box.update()
 
     def _has_visible_curve_data(self) -> bool:
         """判断当前 plot 是否有可见且有数据的曲线（统一版）"""
