@@ -16,7 +16,7 @@ import warnings
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QStandardPaths, QTimer, QSignalBlocker
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 
 from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING, safe_qt_op
 from src.core.data_types import AutoDetectError
@@ -821,17 +821,10 @@ class FileLoaderManager(MainWindowBaseManager):
                 sheet_name = cached_sheet_name
             else:
                 from src.ui.dialogs.sheet_selector import SheetSelectorDialog
-                dialog = SheetSelectorDialog(file_path, self.mw)
-                try:
-                    accepted = dialog.exec() == QDialog.DialogCode.Accepted
-                    # get_selected_sheet() 读弹窗控件，取完再销毁
-                    selected = dialog.get_selected_sheet() if accepted else None
-                finally:
-                    dialog.deleteLater()
-                if not selected:
+                sheet_name = SheetSelectorDialog.pick_sheet(file_path, self.mw)
+                if not sheet_name:
                     self.mw.load_btn.setEnabled(True)
                     return
-                sheet_name = selected
 
             # Excel 不需要分隔符/编码检测，desc_rows=None 触发自动检测
             delimiter_typ = ","
