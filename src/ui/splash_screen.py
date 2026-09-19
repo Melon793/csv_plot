@@ -7,12 +7,13 @@ from PySide6.QtGui import (
     QColor,
     QLinearGradient,
     QFont,
-    QFontDatabase,
     QPen,
     QBrush,
     QPainterPath,
 )
 from PySide6.QtWidgets import QWidget
+
+from src.core.font_cache import installed_font_families
  
 ICON_SIZE = 115
  
@@ -181,8 +182,9 @@ class SplashScreen(QWidget):
         painter.restore()
  
     def draw_text(self, painter: QPainter):
+        # 逐帧枚举系统字体（Windows 上 50-100 ms/次）会把动画直接拖成幻灯片
         font_family = "Space Grotesk"
-        if font_family not in QFontDatabase.families():
+        if font_family not in installed_font_families():
             font_family = "Arial"
  
         title_font = QFont(font_family, 34, QFont.Weight.Bold)
