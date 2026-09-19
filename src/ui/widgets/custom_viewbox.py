@@ -115,8 +115,7 @@ class CustomViewBox(pg.ViewBox):
             # "Pin Cursor" / "Free Cursor" 是 pyqtgraph 历史项名，保持英文原样
             if action.text() in ["Pin Cursor", "Free Cursor", ZH_CURSOR_MODE]:
                 actions_to_remove.append(action)
-        for action in actions_to_remove:
-            menu.removeAction(action)
+        self._discard_actions(menu, actions_to_remove)
 
         cursor_enabled = self._get_cursor_enabled()
 
@@ -169,8 +168,7 @@ class CustomViewBox(pg.ViewBox):
         for action in menu.actions():
             if action.text() in [ZH_SHOW_CURSOR_VALUE, ZH_HIDE_CURSOR_VALUE]:
                 actions_to_remove.append(action)
-        for action in actions_to_remove:
-            menu.removeAction(action)
+        self._discard_actions(menu, actions_to_remove)
 
         values_hidden = self._get_cursor_values_hidden()
         if values_hidden:
@@ -219,8 +217,7 @@ class CustomViewBox(pg.ViewBox):
         for action in menu.actions():
             if action.text() == ZH_ADJUST_HEIGHT:
                 actions_to_remove.append(action)
-        for action in actions_to_remove:
-            menu.removeAction(action)
+        self._discard_actions(menu, actions_to_remove)
 
         row = self._get_plot_row_index()
         adjust_height_menu = QMenu(ZH_ADJUST_HEIGHT, menu)
@@ -266,6 +263,22 @@ class CustomViewBox(pg.ViewBox):
             menu.addAction(clear_act)
 
         return menu
+
+    @staticmethod
+    def _discard_actions(menu: QMenu, actions: list[QAction]) -> None:
+        """摘掉并在事件循环空闲时销毁旧菜单项。
+
+        ``removeAction`` 只解除挂载、不销毁 QObject：被摘下的 QAction 连同其
+        子 QMenu（parent 仍是这个缓存菜单）继续存活，每次右键累积一整棵子树
+        （实测 4 轮后 QAction 9→965）。子菜单是其 menuAction 的父对象，必须
+        一起 deleteLater，否则只删 action 仍漏掉子菜单与其中的项。
+        """
+        for action in actions:
+            submenu = action.menu()
+            menu.removeAction(action)
+            action.deleteLater()
+            if submenu is not None:
+                submenu.deleteLater()
 
     def _emit_jump_to_data(self):
         self.signals.request_jump_to_data.emit(self.plot_widget, self.context_x)
