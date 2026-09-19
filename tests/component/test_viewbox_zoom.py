@@ -146,7 +146,7 @@ def test_wheel_with_modifier_delegates_to_pyqtgraph_default(shown_plot, qapp):
 
 
 def test_wheel_zoom_preserves_y_range(shown_plot, qapp):
-    """滚轮仅缩放 X 轴：Y 范围不受影响（scaleBy factor=(f, 1)）"""
+    """滚轮仅缩放 X 轴：Y 范围不受影响"""
     pw = shown_plot
     assert pw.plot_variable("a")
     vb = pw.view_box
@@ -158,6 +158,27 @@ def test_wheel_zoom_preserves_y_range(shown_plot, qapp):
     pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 120))
 
     assert vb.viewRange()[1] == list(y_before)
+
+
+def test_wheel_zoom_keeps_y_autorange_enabled(shown_plot, qapp):
+    """P0-1 防回归：Ctrl+Y 开启「Y 跟随可见段」后，滚轮缩放 X 轴
+    不得静默关掉 Y 轴 autoRange（用户显式开启的交互模式必须存活）。"""
+    pw = shown_plot
+    assert pw.plot_variable("a")
+    vb = pw.view_box
+    vb.enableAutoRange(x=False)
+    vb.setYRange(-10, 120, padding=0)
+    pw.auto_y_in_x_range()
+    qapp.processEvents()
+
+    assert bool(vb.state["autoRange"][1]) is True
+
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 120))
+    qapp.processEvents()
+
+    assert bool(vb.state["autoRange"][1]) is True, "滚轮缩放静默废掉了 Y 轴 autoRange"
+    # X 仍按 factor 缩放
+    assert vb.viewRange()[0][1] - vb.viewRange()[0][0] < 99
 
 
 # ---------- XLink 同步 ----------
