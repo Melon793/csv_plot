@@ -303,3 +303,78 @@ class TestObjectColumnNumericFallback:
 
         assert loader.df["status"].tolist() == mixed
         assert not pd.api.types.is_numeric_dtype(loader.df["status"])
+
+
+def _break_dimension(path, ref="A1"):
+    """改写 sheet1.xml 的 <dimension>，模拟只写 A1（或压根不写）的导出工具"""
+    import re
+    import zipfile
+
+    with zipfile.ZipFile(path) as zf:
+        entries = [(i.filename, zf.read(i.filename)) for i in zf.infolist()]
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, payload in entries:
+            if name.startswith("xl/worksheets/"):
+                xml = payload.decode("utf-8")
+                if re.search(r"<dimension\b", xml):
+                    xml = re.sub(r"<dimension\b[^>]*/>", f'<dimension ref="{ref}"/>', xml)
+                else:
+                    xml = xml.replace(
+                        "<sheetData>", f'<dimension ref="{ref}"/><sheetData>', 1
+                    )
+                payload = xml.encode("utf-8")
+            zf.writestr(name, payload)
+    return path
+
+
+class TestBrokenSheetDimension:
+    """dimension 声明失真时，openpyxl 回退路径不得静默读成空表"""
+
+    @staticmethod
+    def _load_openpyxl(path, monkeypatch):
+        monkeypatch.setattr(
+            ExcelDataLoader, "_read_with_calamine",
+            lambda self: (_ for _ in ()).throw(ImportError("测试强制 openpyxl")),
+        )
+        return ExcelDataLoader(str(path), sheet_name=0, desc_rows=0, has_unit=True)
+
+    def test_a1_dimension_keeps_all_columns_and_rows(self, tmp_path, monkeypatch):
+        path = _write_xlsx(tmp_path / "dim.xlsx", HEADER, UNITS, ROWS)
+        _break_dimension(path, "A1")
+
+        loader = self._load_openpyxl(path, monkeypatch)
+
+        assert loader.var_names == HEADER
+        assert loader.datalength == len(ROWS)
+        assert loader.df["rpm"].tolist() == [800, 810, 820]
+
+    def test_undersized_dimension_warns_instead_of_returning_empty(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        path = _write_xlsx(tmp_path / "empty.xlsx", HEADER, UNITS, [])
+        _break_dimension(path, "A1")
+
+        with caplog.at_level("WARNING"):
+            loader = self._load_openpyxl(path, monkeypatch)
+
+        assert loader.datalength == 0
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "dimension" in messages or "无数据" in messages
+
+    def test_sound_dimension_still_uses_preallocation_path(self, tmp_path, monkeypatch):
+        path = _write_xlsx(tmp_path / "ok.xlsx", HEADER, UNITS, ROWS)
+        streamed = []
+        monkeypatch.setattr(
+            ExcelDataLoader, "_read_with_calamine",
+            lambda self: (_ for _ in ()).throw(ImportError("测试强制 openpyxl")),
+        )
+        monkeypatch.setattr(
+            ExcelDataLoader, "_read_rows_streaming",
+            lambda self, data_start: streamed.append(data_start),
+        )
+
+        loader = ExcelDataLoader(str(path), sheet_name=0, desc_rows=0, has_unit=True)
+
+        assert streamed == []
+        assert loader.datalength == len(ROWS)
