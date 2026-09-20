@@ -963,6 +963,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._plot_data_manager.clear_plot_item()
         self.curves_changed.emit()
 
+    def clear_current_plot(self) -> None:
+        """清当前子图 + 播报（右键菜单与双击中键两个用户入口共用）。
+
+        与 clear_plot_item 的分工：只有"用户主动清当前子图"才走这里；模板应用
+        （plot_config_manager）、Shift 拖入替换、重载重建仍直接调
+        clear_plot_item，那些路径各有自己的说法，不该被这句播报认领。
+        标记统计刷新仍由各调用点自理（本函数只管清 + 播报）。
+        """
+        cleared = len(self.curves)  # 必须在清之前取
+        self.clear_plot_item()
+        if self.plot_context:
+            self.plot_context.announce_cleared("已清除绘图", cleared)
+
     def remove_variable_from_plot(self, var_name: str, *, emit_changed: bool = True) -> bool:
         """从 plot 移除单个变量 → 委托到 PlotDataManager"""
         return self._plot_data_manager.remove_variable_from_plot(
@@ -1055,7 +1068,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         from src.ui.dialogs.axis import AxisDialog
         
         if event.button() == Qt.MouseButton.MiddleButton:
-            self.clear_plot_item()
+            self.clear_current_plot()
             self.window().layout_manager.request_mark_stats_refresh(immediate=True)
             return
 

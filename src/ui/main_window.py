@@ -1124,6 +1124,16 @@ class MainWindow(QMainWindow):
         else:
             self._broadcast(text)
 
+    def _announce_cleared_plots(self, label: str, curves: int) -> None:
+        """清除绘图之后的播报，三条入口共用（顶部按钮 / 右键菜单 / 双击中键）。
+
+        只在真有曲线被清掉时出声 —— 清一遍本来就没曲线的子图，屏上什么都没变，
+        不该占消息区（这条守卫顺带保证文案里的数目 ≥1）。
+        """
+        if curves <= 0:
+            return
+        self._broadcast(f"{label} · {curves} 条曲线")
+
     def _check_and_apply_template(self, template, template_id: str, name: str):
         from src.core.plot_config import PlotSessionConfig
         if self.loader is None:

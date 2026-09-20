@@ -17,6 +17,10 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 
 from tests.fixtures.data_factory import make_simple_rows, write_csv
 
+# 保活容器：offscreen 下手工构造的 QMimeData 不受 Qt 事件系统接管，
+# 局部变量被 GC 后 dropEvent 内访问 mimeData 会 SIGSEGV（README 陷阱 #2）
+_drop_alive: list = []
+
 
 def _pump_until(qapp, qtbot, predicate, timeout=8000):
     """轮询等待 + 显式泵事件：异步加载的回调靠事件循环投递。"""
@@ -414,3 +418,99 @@ def test_status_bar_suppresses_style_item_borders(main_window):
 
     assert "QStatusBar::item" in sheet, "样式表被删了：Windows 上会长出多余竖线"
     assert "border:none" in sheet.replace(" ", ""), sheet
+
+
+# ---------------- 清除绘图：三条入口同一套播报 ----------------
+
+def _plot_variables(mw, var_names, qapp, plot_index=0):
+    """拖入变量到指定子图（照 test_load_and_plot.py 的 dropEvent 手法）"""
+    from PySide6.QtGui import QDropEvent
+
+    from src.ui.drag_drop import build_var_mimedata
+
+    mime = build_var_mimedata(var_names)
+    _drop_alive.append(mime)  # offscreen 下手工 QMimeData 需防 GC（陷阱 #2）
+    pw = mw.plot_widgets[plot_index].plot_widget
+    pw.dropEvent(
+        QDropEvent(
+            QPointF(50.0, 50.0),
+            Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    qapp.processEvents()
+    return pw
+
+
+def test_clear_all_button_announces_total_curves(loaded_window, qapp, qtbot):
+    """顶部「清除绘图」：清的是全部子图，播报给总数（且数目在清之前取）。
+
+    数目取在清之后的话这里会是 0 条 —— 一条只为"报个数字"的用例。
+    """
+    mw = loaded_window
+    pw = _plot_variables(mw, ["speed", "rpm"], qapp)
+    total = sum(len(c.plot_widget.curves) for c in mw.plot_widgets)
+    assert total == 2, "前置条件：只往第一个子图画了 2 条曲线"
+
+    qtbot.mouseClick(mw.clear_all_plots_btn, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+
+    assert list(pw.curves) == []
+    assert mw._message_text == "已清除全部绘图 · 2 条曲线"
+    assert mw._message_level == "info", "清成功不是问题，不该用 warn 粘在屏上"
+
+
+def test_right_click_clear_announces_current_plot(loaded_window, qapp):
+    """子图右键菜单「清除绘图」：只清当前子图，播报走同一条文案函数。"""
+    from src.ui.widgets.custom_viewbox import ZH_CLEAR_PLOT
+
+    mw = loaded_window
+    pw = _plot_variables(mw, ["speed"], qapp)
+
+    class _FakeMenuEvent:
+        def scenePos(self):
+            return QPointF(0.0, 0.0)
+
+    menu = pw.view_box.getMenu(_FakeMenuEvent())
+    clear_act = next(a for a in menu.actions() if a.text() == ZH_CLEAR_PLOT)
+    clear_act.trigger()
+    qapp.processEvents()
+
+    assert list(pw.curves) == []
+    assert mw._message_text == "已清除绘图 · 1 条曲线"
+
+
+def test_middle_double_click_announces_current_plot(loaded_window, qapp):
+    """双击中键清当前子图：最容易误触的入口，播报必须给（本操作无撤销）。"""
+    from PySide6.QtGui import QMouseEvent
+
+    mw = loaded_window
+    pw = _plot_variables(mw, ["speed", "rpm"], qapp)
+
+    ev = QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        QPointF(10.0, 10.0),
+        QPointF(10.0, 10.0),
+        Qt.MouseButton.MiddleButton,
+        Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    pw.mouseDoubleClickEvent(ev)
+    qapp.processEvents()
+
+    assert list(pw.curves) == []
+    assert mw._message_text == "已清除绘图 · 2 条曲线"
+
+
+def test_clear_with_nothing_drawn_stays_silent(loaded_window, qapp):
+    """数据加载了但一条曲线都没画：清除是空操作，屏上不该出现"已清除"字样。"""
+    mw = loaded_window
+    mw.clear_status_message()
+    assert all(not c.plot_widget.curves for c in mw.plot_widgets)
+
+    mw.cursor_sync_manager.clear_all_plots()
+    qapp.processEvents()
+
+    assert mw._message_text == "", "清了个空图还报一条，等于占着消息区说废话"

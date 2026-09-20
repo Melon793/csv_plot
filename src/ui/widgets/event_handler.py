@@ -207,9 +207,9 @@ class EventHandler:
             pw.jump_to_data_impl(ctx_x)
 
     def _on_vb_clear(self, pw):
-        """ViewBox 信号：清除绘图"""
+        """ViewBox 信号：清除绘图（右键菜单，与双击中键同落点）"""
         if pw:
-            pw.clear_plot_item()
+            pw.clear_current_plot()
             if pw.plot_context:
                 pw.plot_context.request_mark_stats_refresh(immediate=True)
 

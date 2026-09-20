@@ -18,9 +18,14 @@ class FakePlotContext:
         self.value_cache = {}
         self.loader = None
         self._enum_text_maps = {}
+        # 清除绘图播报落点：记录 (label, curves)，用例断言"报了什么、报了几条"
+        self.cleared_announces = []
 
     def request_mark_stats_refresh(self, immediate: bool = False):
         pass
+
+    def announce_cleared(self, label: str, curves: int) -> None:
+        self.cleared_announces.append((label, curves))
 
 
 class FakeLayoutManager:
