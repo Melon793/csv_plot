@@ -734,7 +734,7 @@ def _stats_mdf(loader, var_name, should_cancel) -> VarStats:
     total = int(meta.sample_count or 0)
     if total <= 0:
         # sample_count 依赖 CGBLOCK 的 cycles_nr。实测部分 MDF3 文件（如
-        # Demo .dat 的 AI50 组）的 cycles_nr 在文件头里就是 0 且
+        # 某供应商 .dat 的 AI50 组）的 cycles_nr 在文件头里就是 0 且
         # data_blocks 为空，即采集时未写入数据的预留组。此时退回
         # 一次性读取做最后确认，并把结论如实告知用户。
         try:

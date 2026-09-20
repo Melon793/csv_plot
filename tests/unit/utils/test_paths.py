@@ -26,7 +26,8 @@ from src.utils.paths import (
     to_windows,
 )
 
-#: 用户实测报障的原始串（Windows 拖拽后 Qt 产出的形态）：正斜杠 UNC + 空格 + ``=``
+#: 报障场景的结构复刻（Windows 拖拽后 Qt 产出的形态）：正斜杠 UNC + 空格 + ``=``。
+#: 主机名/共享名/项目号/客户名均为虚构标识符，请勿改回真实内网路径。
 UNC_POSIX = (
     "//fileserver/team-share/PRJ-0000-00_Demo_ENG01_TC01_ EU7 Calibration"
     "/b_Technics/c_Testing/04_Test_Result/OBM_Mapping"

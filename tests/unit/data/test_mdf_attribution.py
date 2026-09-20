@@ -35,6 +35,9 @@ def make_info(
     }
 
 
+#: 真实 mf4 文件头的结构复刻（保留 Database/Experiment/Devices/Program
+#: Description/WP-RP 成对等被解析的字段形状）。其中库名、试验名、程序描述与
+#: WP/RP 基名均为虚构标识符，请勿填入真实项目/客户信息。
 HD_TEXT = (
     "<HDcomment><TX>Database: DEMO_DB01\r\n"
     "Experiment: Demo_2\r\n"
