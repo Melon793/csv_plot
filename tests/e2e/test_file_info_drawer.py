@@ -254,9 +254,81 @@ def test_key_column_is_muted_and_right_aligned(loaded_window, qapp):
         assert key_label.alignment() & Qt.AlignmentFlag.AlignRight
         assert key_label.styleSheet() == theme.muted_text()
 
-    value = labels[dict(drawer._rows)[ROW_KEY_FILE_PATH]]
+    value = drawer._labels[ROW_KEY_FILE_PATH]
     assert theme.TEXT_PRIMARY in value.styleSheet()
     assert "font-size" not in value.styleSheet()
+
+
+def test_only_path_rows_get_the_hover_field(loaded_window, qapp):
+    """三行路径字段挂 hover 框（暗示"这块能拉选"），数值行不挂。
+
+    框是 FieldLabel 在 paintEvent 里画的（样式表 :hover 合成事件下实测涂不出
+    像素，见该类文档串），所以既断言类型也断言"投一个 Enter 之后真的多出墨"。
+    """
+    from src.ui.widgets.status_drawer import _FIELD_KEYS, FieldLabel
+
+    drawer = _open(loaded_window, qapp)
+
+    for key, label in drawer._labels.items():
+        hoverable = key in _FIELD_KEYS
+        assert isinstance(label, FieldLabel) is hoverable, key
+        # 透明描边 + 内边距对所有行常驻，否则值列会出现两条文字左沿
+        assert "padding: 0 4px" in label.styleSheet(), key
+
+    target = drawer._labels[ROW_KEY_FILE_PATH]
+    before = target.grab().toImage()
+    # 必须投真的 QEnterEvent：投一个类型是 Enter 的裸 QEvent，QWidget::event 会
+    # 把它 static_cast 成 QEnterEvent，实测直接 SIGSEGV（Leave 不转，裸事件安全）
+    from PySide6.QtGui import QEnterEvent
+
+    QApplication.sendEvent(
+        target, QEnterEvent(QPointF(4, 4), QPointF(4, 4), QPointF(4, 4))
+    )
+    qapp.processEvents()
+    after = target.grab().toImage()
+    painted = sum(
+        1
+        for x in range(after.width())
+        for y in range(after.height())
+        if before.pixelColor(x, y) != after.pixelColor(x, y)
+    )
+    # 框铺满整块（值列宽 × 行高，数千像素），只画一条边不可能到这个数
+    assert painted >= 2000, f"hover 框没画出来：只有 {painted} 个像素变了"
+
+    QApplication.sendEvent(target, QEvent(QEvent.Type.Leave))
+    qapp.processEvents()
+    back = target.grab().toImage()
+    assert sum(
+        1
+        for x in range(back.width())
+        for y in range(back.height())
+        if back.pixelColor(x, y) != before.pixelColor(x, y)
+    ) == 0, "离开后框没收回"
+
+
+def test_long_path_is_elided_but_full_value_stays_reachable(
+    loaded_window, qapp, qapp_clipboard
+):
+    """放不下的路径要裁成 …，全文仍拿得到：tooltip + 行尾「复制」。
+
+    钉的是"不许把字切在半笔上"：Qt 6.11 的 QLabel 压窄后不画省略号（实测
+    Ignored / Preferred × 可选 / 不可选 四种配置一律硬裁），省略号得自己算。
+    """
+    drawer = _open(loaded_window, qapp)
+    label = drawer._labels[ROW_KEY_FILE_PATH]
+    full = drawer._values[ROW_KEY_FILE_PATH]
+
+    if label.fontMetrics().horizontalAdvance(full) <= label.width():
+        pytest.skip("这条测试路径本来就放得下，测不到截断")
+
+    assert "…" in label.text(), f"没裁出省略号：{label.text()!r}"
+    assert label.toolTip() == full, "tooltip 必须是全文"
+    assert drawer._values[ROW_KEY_FILE_PATH] == full, "原值不许被显示串污染"
+
+    _button_for(drawer, ROW_KEY_FILE_PATH).click()
+    qapp.processEvents()
+    assert "…" not in qapp_clipboard.text(), "剪贴板里不许出现省略号"
+    assert qapp_clipboard.text().endswith("e2e_demo.csv")
 
 
 def test_footer_states_how_to_close_and_get_full_values(loaded_window, qapp):

@@ -122,7 +122,12 @@ def test_hover_paints_a_full_cell_block(main_window, qapp):
     assert seg.width() - text_w >= 8, "格子几乎等于文字宽：内边距丢了，命中区回到\"必须点到字\""
 
     before = seg.grab().toImage()
-    QApplication.sendEvent(seg, QEvent(QEvent.Type.Enter))
+    # 投真的 QEnterEvent：类型是 Enter 的裸 QEvent 会被 QWidget::event 当成
+    # QEnterEvent 来 static_cast，是未定义行为（同目录抽屉用例实测崩过）
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QEnterEvent
+
+    QApplication.sendEvent(seg, QEnterEvent(QPointF(2, 2), QPointF(2, 2), QPointF(2, 2)))
     after = seg.grab().toImage()
     tinted = [
         (x, y)

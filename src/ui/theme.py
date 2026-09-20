@@ -29,6 +29,8 @@ BTN_PRESS_BG = "#E6E9ED"
 
 # === 度量 ===
 R_CHIP = 6  # 方片圆角半径：与网格单元格同一档，两处一起看才像一家人
+R_FIELD = 4  # 值列字段框的圆角：框比按钮大一号，用更小一档才不显肿
+FIELD_INSET_PX = 5  # 字段框吃掉的横向空间：1px 描边 + 4px padding
 F_MUTED_PX = 12  # 次级文字（标签、页脚提示、副文案）
 F_RESULT_PX = 18  # 大号结果行：网格选择器用 22px，抽屉要矮一档
 
@@ -53,6 +55,24 @@ def value_text() -> str:
 def result_text(px: int = F_RESULT_PX) -> str:
     """大号结果行（预览）：与网格选择器的 "4 × 1" 同一层级。"""
     return f"color: {TEXT_PRIMARY}; font-size: {px}px; font-weight: 600;"
+
+
+def field_style() -> str:
+    """值列的"字段框"占位：透明描边 + 4 px 内边距，所有行一律带上。
+
+    为什么连不做 hover 的行也要留描边：只给部分行加 padding 会让它们的文字左沿
+    比别的行缩进 5 px，一张表两条基线。
+
+    hover 那一档**不在这里**：样式表的 ``:hover`` 在合成事件下实测涂不出任何像素
+    （变化=0），无法证明真机会亮；改由 ``status_drawer.FieldLabel`` 在 paintEvent
+    里自己画，与状态栏可点击段同一套做法，可测。
+    """
+    return (
+        f"QLabel {{ {value_text()}"
+        f"border: 1px solid transparent;"
+        f"border-radius: {R_FIELD}px;"
+        f"padding: 0 4px; }}"
+    )
 
 
 def separator_style() -> str:

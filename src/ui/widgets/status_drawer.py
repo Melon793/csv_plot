@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -55,10 +56,12 @@ from src.utils.paths import format_for_copy
 
 logger = get_logger(__name__)
 
-#: 值会被列宽省略号截断、需要一键取全文的两行
+#: 值会被列宽裁掉、需要一键取全文的两行
 _COPY_KEYS = {KEY_FILE_NAME, ROW_KEY_FILE_PATH}
 #: 值是目录、交给系统文件管理器打开的那行
 _REVEAL_KEYS = {KEY_FOLDER}
+#: 三行路径字段：长到会截断，因此带 hover 框（暗示可拉选）与手工省略号
+_FIELD_KEYS = {KEY_FILE_NAME, ROW_KEY_FILE_PATH, KEY_FOLDER}
 #: 路径缺失时 file_info 给的占位符，复制它等于复制一个无意义的横杠
 _PLACEHOLDER = "-"
 
@@ -232,6 +235,44 @@ class StatusDrawer(QFrame):
         return owner if hasattr(owner, "loader") else None
 
 
+class FieldLabel(QLabel):
+    """值列里"可以拉选"的那几行：hover 时给自己画一圈字段框。
+
+    为什么不用样式表的 ``:hover``：合成事件下实测涂不出任何像素（变化=0），
+    没法证明真机会亮；``enterEvent/leaveEvent`` + ``paintEvent`` 这条路在状态栏
+    可点击段上已经量到是亮的（见 ``main_window._StatusSegment``）。
+
+    框只在 hover 时出现：常态保持裸文本，免得整张表看起来像一排被禁用的输入框；
+    鼠标扫到才描边，是为了把"这块文字能选中"这件事传达出去。
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self._hovered = False
+
+    def paintEvent(self, event):
+        if self._hovered:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor(theme.CHIP_CUR_BD)))
+            painter.setBrush(QColor(theme.CHIP_OFF_BG))
+            painter.drawRoundedRect(
+                self.rect().adjusted(0, 0, -1, -1), theme.R_FIELD, theme.R_FIELD
+            )
+            painter.end()
+        super().paintEvent(event)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+
 class _BodyScroll(QScrollArea):
     """按内容报 sizeHint 的滚动区。
 
@@ -268,6 +309,7 @@ class FileInfoDrawer(StatusDrawer):
         super().__init__(parent)
         self._rows: list = []
         self._values: dict = {}
+        self._labels: dict = {}  # key → 值列 QLabel，重算省略号与测试都要用它
         self._file_path = ""
         self._folder = ""
 
@@ -282,14 +324,23 @@ class FileInfoDrawer(StatusDrawer):
 
         self._rows = rows
         self._values = dict(rows)
-        # 「打开」动作直接复用表里显示的那两个路径：按钮打开的东西必须与用户
-        # 看到的一模一样，另算一遍就会出现"显示 A 打开 B"
+        # 「打开」动作复用表里那两行的**原值**（不是屏上显示串）：按钮打开的东西
+        # 必须与用户看到的那条路径同源，另算一遍就会出现"显示 A 打开 B"；显示串
+        # 可能被裁成 …，原值与它同源，只是少了中间一段
         self._file_path = self._plain(ROW_KEY_FILE_PATH)
         self._folder = self._plain(KEY_FOLDER)
 
         self.hide()  # 见 set_body：可见状态下换 body 会把 sizeHint 量塌
         self.set_body(self._build_body())
-        return self.open_above(mw.statusBar())
+        opened = self.open_above(mw.statusBar())
+        if opened:
+            self._refit_elide()
+        return opened
+
+    def reposition(self) -> None:
+        # 窗口缩放会改抽屉宽度（窄窗口下抽屉跟着变窄），省略号必须跟着重算
+        super().reposition()
+        self._refit_elide()
 
     def _plain(self, key: str) -> str:
         """取该行的真实路径，占位符与空值一律当"没有"。"""
@@ -306,7 +357,7 @@ class FileInfoDrawer(StatusDrawer):
         layout.addWidget(self._build_table(), 1)
         layout.addWidget(
             self._footer(
-                "点抽屉外任意处或按 Esc 收起 · 值被 … 截断时走行尾「复制」取全文"
+                "点抽屉外任意处或按 Esc 收起 · 路径行可拉选 · 行尾「复制」取全文"
             )
         )
         return body
@@ -326,9 +377,12 @@ class FileInfoDrawer(StatusDrawer):
         grid.setVerticalSpacing(3)
         grid.setColumnStretch(1, 1)
 
+        self._labels = {}
         for row, (key, value) in enumerate(self._rows):
             grid.addWidget(self._key_label(key), row, 0)
-            grid.addWidget(self._value_label(value), row, 1)
+            label = self._value_label(value, hoverable=key in _FIELD_KEYS)
+            self._labels[key] = label
+            grid.addWidget(label, row, 1)
             button = self._action_button(key, value)
             if button is not None:
                 grid.addWidget(button, row, 2)
@@ -343,6 +397,33 @@ class FileInfoDrawer(StatusDrawer):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll
 
+    def _refit_elide(self) -> None:
+        """按值列实得宽度，把三行路径字段裁成带 … 的显示串。
+
+        为什么自己做：Qt 6.11 的 QLabel 在被压窄时**不会**画省略号，只会把字形
+        切在半笔上（实测 Ignored / Preferred × 可选 / 不可选 四种配置都一样），
+        而字段框一出现，这个断口就被框线标出来了，比裸文本更扎眼。
+
+        用 ElideMiddle：路径头部（/Users/…）是噪音、尾部是身份信息，裁中间才
+        留得住有用的那段。代价是被裁掉的字符不在屏上、也就拉不选，全文出口是
+        tooltip 与行尾「复制」。
+        """
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()  # 不手动激活的话，刚 resize 完读到的还是旧宽度
+        for key, label in self._labels.items():
+            if key not in _FIELD_KEYS:
+                continue
+            full = self._values.get(key, "")
+            available = label.width() - 2 * theme.FIELD_INSET_PX
+            if not full or available <= 0:
+                continue
+            label.setText(
+                label.fontMetrics().elidedText(
+                    full, Qt.TextElideMode.ElideMiddle, available
+                )
+            )
+
     @staticmethod
     def _key_label(key: str) -> QLabel:
         label = QLabel(key)
@@ -353,16 +434,18 @@ class FileInfoDrawer(StatusDrawer):
         return label
 
     @staticmethod
-    def _value_label(value: str) -> QLabel:
-        label = QLabel(value)
-        label.setStyleSheet(theme.value_text())
+    def _value_label(value: str, hoverable: bool = False) -> QLabel:
+        # 三行路径字段用 FieldLabel（hover 出框），其余行是普通 QLabel
+        label = FieldLabel(value) if hoverable else QLabel(value)
+        # 字段框对所有行生效：只给部分行加内边距会让整列出现两条文字左沿
+        label.setStyleSheet(theme.field_style())
         label.setToolTip(value)
         label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         # Ignored：QLabel 的 minimumSizeHint 等于整串文本宽度，长绝对路径会把
         # 抽屉顶得比窗口还宽（状态栏上同一件事已修过一次，见 _ElideStatusBar）。
-        # 这里让宽度完全交给布局，放不下就省略号
+        # 这里让宽度完全交给布局，放不下由 _refit_elide 补省略号
         label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
