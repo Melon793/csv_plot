@@ -764,7 +764,12 @@ class MainWindow(QMainWindow):
             elapsed_s,
         )
 
-    def _axis_segment_text(self, factor: float, offset: float) -> str:
+    def _axis_segment_text(
+        self,
+        factor: float,
+        offset: float,
+        always_show_correction: bool = False,
+    ) -> str:
         """按**给定**的 factor/offset 算出 x 轴段该显示什么。
 
         单独一层是给抽屉的预览行用的：预览必须在不动 ``self.factor`` 的前提
@@ -775,11 +780,20 @@ class MainWindow(QMainWindow):
         读它不如去读抽屉。只有真的修正过，才把**生效**的比例系数与偏移量摆
         出来 —— 这一句要回答的是"现在横轴被折成了什么"，所以系数与偏移同时
         给出，只改其一也两句都给，避免同一位置文案长度随改动类型抖动。
+
+        ``always_show_correction`` 给抽屉的预览行用（作者定）：状态栏是常驻段，
+        默认值写出来是噪音；抽屉是正在编辑基准的地方，``系数 1 / 偏移 0`` 本身
+        就是"我还没改"的确认，空着反而像这里没数据。两处仍共用同一套格式，
+        非默认时两句话**逐字相同**。
         """
         loader = getattr(self, "loader", None)
         axis_label = (getattr(loader, "time_axis_label", "") or "Index") if loader else "Index"
         factor = factor or 1.0
-        corrected = abs(factor - self._factor_default) > 1e-12 or abs(offset) > 1e-12
+        corrected = (
+            always_show_correction
+            or abs(factor - self._factor_default) > 1e-12
+            or abs(offset) > 1e-12
+        )
         if not corrected:
             return f"x轴：{axis_label}"
         return f"x轴：{axis_label}（比例系数:{factor:g}, 偏移量:{offset:g}）"

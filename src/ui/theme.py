@@ -7,6 +7,14 @@
 已知代价（选它而不是 ``palette()`` 自动跟随的理由）：这是一份**浅色主题**的
 写死色板，网格选择器今天也是这样。同一屏上出现两套灰阶比深色主题下不一致更
 刺眼，所以两处必须继续用同一份值。
+
+**这里刻意不放按钮样式**（作者定）：抽屉那 9 枚方片与网格选择器的「取消」原先
+各带一份 QSS，实测一带 ``border``/``background-color`` 就被 ``QStyleSheetStyle``
+接管 —— 同一枚按钮在 macOS / Windows / Fusion 下尺寸一律 106x31、深浅 palette
+两态像素不变，而顶栏原生按钮三档各不相同（78x33 / 100x30 / 80x27）且跟着变，
+于是全应用只剩这两枚不跟随系统，成了第三套灰阶。现在它们都退回平台绘制。
+唯一保留自定义绘制的是「修改布局」那 12 枚网格方块：三态色是那扇对话框唯一的
+信息通道，原生布尔态表达不了"当前布局"与"将要切换"同框。
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ SEP = "#EAECEF"
 # "可见线列数 = 0"，等于没有线。这一档深到 #C9CDD4（对比度 13）。
 SEP_ON_BAR = "#C9CDD4"
 
-# 方片（单元格 / 小按钮）三态：未选浅灰、当前淡蓝、新值实心蓝
+# 网格方片三态（只有「修改布局」那 12 格用）：未选浅灰、当前淡蓝、新值实心蓝
 CHIP_OFF_BG = "#F2F4F7"
 CHIP_OFF_BD = "#DFE3E8"
 CHIP_CUR_BG = "#E8F1FD"
@@ -30,10 +38,8 @@ CHIP_CUR_BD = "#8FBBEA"
 CHIP_SEL_BG_TOP = "#5AA2E6"
 CHIP_SEL_BG_BOT = "#3B82D0"
 CHIP_SEL_BD = "#2F6FB4"
-BTN_PRESS_BG = "#E6E9ED"
 
 # === 度量 ===
-R_CHIP = 6  # 方片圆角半径：与网格单元格同一档，两处一起看才像一家人
 R_FIELD = 4  # 值列字段框的圆角：框比按钮大一号，用更小一档才不显肿
 F_MUTED_PX = 12  # 次级文字（标签、页脚提示、副文案）
 F_RESULT_PX = 18  # 大号结果行：网格选择器用 22px，抽屉要矮一档
@@ -120,37 +126,6 @@ def panel_style(selector: str) -> str:
         f"border: 1px solid {CHIP_OFF_BD};"
         f"}}"
     )
-
-
-def chip_style(selector: str, bg: str = BG, border: str = CHIP_OFF_BD) -> str:
-    """小方片按钮：细边 + 圆角 + hover/pressed 两级反馈。
-
-    ``selector`` 传控件类型（``QToolButton`` / ``QPushButton``）：Qt 样式表里
-    一个 widget 只能有一份样式串，后设的整份覆盖前者，所以选中态必须由调用方
-    重设整串（见 status_drawer 里的 _refresh_preset_states）。
-    """
-    return (
-        f"{selector} {{"
-        f"padding: 2px 8px;"
-        f"border: 1px solid {border};"
-        f"border-radius: {R_CHIP}px;"
-        f"background-color: {bg};"
-        f"color: {TEXT_PRIMARY};"
-        f"}}"
-        f"{selector}:hover {{ background-color: {CHIP_OFF_BG}; }}"
-        f"{selector}:pressed {{ background-color: {BTN_PRESS_BG}; }}"
-        # 禁用态必须写：一旦给了 background-color，Qt 就不再自动压灰，
-        # 不写会出现"看着可点、点了没反应"的假可用按钮
-        f"{selector}:disabled {{"
-        f"background-color: {CHIP_OFF_BG};"
-        f"color: {TEXT_MUTED};"
-        f"}}"
-    )
-
-
-def chip_style_selected(selector: str) -> str:
-    """方片的"当前生效"态：淡蓝底 + 蓝描边，与网格选择器的当前布局同色。"""
-    return chip_style(selector, CHIP_CUR_BG, CHIP_CUR_BD)
 
 
 def transparent_scroll_style() -> str:

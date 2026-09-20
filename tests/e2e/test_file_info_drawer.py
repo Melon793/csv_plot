@@ -10,7 +10,7 @@
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent
-from PySide6.QtWidgets import QApplication, QLabel, QToolButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolButton
 
 from src.core.config import STATUS_DRAWER_EDGE_MARGIN, STATUS_DRAWER_WIDTH
 from src.data.file_info import KEY_FILE_NAME, KEY_FOLDER
@@ -70,7 +70,7 @@ def _button_for(drawer, key):
     center_y = labels[0].geometry().center().y()
     buttons = [
         b
-        for b in drawer.findChildren(QToolButton)
+        for b in drawer.findChildren(QPushButton)
         if abs(b.geometry().center().y() - center_y) <= 2
     ]
     assert len(buttons) == 1, f"「{key}」行尾按钮数异常: {[b.text() for b in buttons]}"
@@ -120,7 +120,7 @@ def test_no_copy_all_button_and_no_validity_rows(loaded_window, qapp):
     """本轮定稿：撤掉「复制全部」按钮与有效性/变量数行，用例钉住防回潮。"""
     drawer = _open(loaded_window, qapp)
 
-    assert {b.text() for b in drawer.findChildren(QToolButton)} == {"打开", "复制"}
+    assert {b.text() for b in drawer.findChildren(QPushButton)} == {"打开", "复制"}
     keys = {key for key, _ in drawer._rows}
     for banned in ("有效变量", "常量变量", "无效变量", "变量数", "有效性", "数据质量"):
         assert banned not in keys
@@ -350,7 +350,7 @@ def test_folder_row_keeps_only_open(loaded_window, qapp):
     assert _button_for(drawer, KEY_FOLDER).text() == "打开"
     row_buttons = [
         b
-        for b in drawer.findChildren(QToolButton)
+        for b in drawer.findChildren(QPushButton)
         if abs(b.geometry().center().y()
                - drawer._labels[KEY_FOLDER].geometry().center().y()) <= 2
     ]
@@ -385,3 +385,18 @@ def test_body_scroll_does_not_paint_its_own_background(loaded_window, qapp):
     assert "QScrollArea { background: transparent" in sheet
     # 视口是滚动区的直接子 QWidget，漏掉这条链就只透边框、内容照旧铺灰
     assert "QScrollArea > QWidget > QWidget { background: transparent; }" in sheet
+
+
+def test_action_buttons_are_platform_native(loaded_window, qapp):
+    """行尾动作按钮（打开 / 复制）一律不带 QSS，交给平台绘制。
+
+    一带样式表就被 QStyleSheetStyle 接管、退出平台绘制，与主窗口顶栏按钮成了
+    两套灰阶（作者定：普通按钮回原生，见 src/ui/theme.py 的模块 docstring）。
+    类也得对：QPushButton 而非 QToolButton —— 两个类的"原生"长得不一样。
+    """
+    drawer = _open(loaded_window, qapp)
+    buttons = drawer.findChildren(QPushButton)
+
+    assert buttons, "行尾动作按钮不见了"
+    assert all(b.styleSheet() == "" for b in buttons), "有按钮自带样式表"
+    assert not drawer.findChildren(QToolButton), "抽屉按钮退回 QToolButton 了"

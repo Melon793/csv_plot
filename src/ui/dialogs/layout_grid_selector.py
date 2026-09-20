@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
 # 改名会波及 tests/component/test_layout_grid_selector_visual.py 与下面的样式串
 from src.ui.theme import (
     BG as _BG,
-    BTN_PRESS_BG as _BTN_PRESS_BG,
     CHIP_CUR_BD as _CELL_CUR_BD,
     CHIP_CUR_BG as _CELL_CUR_BG,
     CHIP_OFF_BD as _CELL_OFF_BD,
@@ -43,7 +42,6 @@ _CELL_SIZE = 38
 _CELL_SPACING = 5
 _RULER_THICK = 16  # 标尺行/列的最小厚度（cocoa 上 mac 样式仍会给网格行额外加高，见下方说）
 _R_CELL = 6  # 单元格圆角半径
-_R_BTN = 6  # 取消按钮圆角半径（与单元格独立调优）
 _SWATCH_SIZE = 10  # 图例色块边长
 _F_HINT_MAIN_PX = 22  # 大号结果文案的像素字号
 
@@ -64,18 +62,12 @@ _STYLE_RULER = f"color: {_TEXT_MUTED}; font-size: 11px;"
 _STYLE_HINT_MAIN = (
     f"color: {_TEXT_PRIMARY}; font-size: {_F_HINT_MAIN_PX}px; font-weight: 600;"
 )
-_STYLE_CANCEL_BTN = f"""
-    QPushButton {{
-        min-width: 72px;
-        padding: 6px 16px;
-        border: 1px solid {_CELL_OFF_BD};
-        border-radius: {_R_BTN}px;
-        background-color: transparent;
-        color: {_TEXT_PRIMARY};
-    }}
-    QPushButton:hover {{ background-color: {_CELL_OFF_BG}; }}
-    QPushButton:pressed {{ background-color: {_BTN_PRESS_BG}; }}
-"""
+# 「取消」按钮**刻意不给样式表**（作者定）：全应用的普通按钮都不带 QSS，一给
+# 就被 QStyleSheetStyle 接管、退出平台绘制 —— 实测同一枚原生按钮在 macOS /
+# Windows / Fusion 下是 78x33 / 100x30 / 80x27 且跟着 palette 变深浅，而这枚
+# 带 QSS 的「取消」三档一律 106x31、深浅两态像素不变，于是和顶栏按钮成了两套。
+# 上面那 12 枚网格方块不在此列：三态色是这扇对话框唯一的信息通道（浅灰=未选 /
+# 淡蓝=当前 / 实心蓝=将要切换，且"当前"与"将要"要同框），原生布尔态表达不了。
 
 
 class CellButton(QPushButton):
@@ -324,7 +316,6 @@ class LayoutGridSelector(QDialog):
         footer.addWidget(self.static_hint)
         footer.addStretch(1)
         self.cancel_btn = QPushButton("取消")
-        self.cancel_btn.setStyleSheet(_STYLE_CANCEL_BTN)
         self.cancel_btn.clicked.connect(self.reject)
         footer.addWidget(self.cancel_btn)
         layout.addLayout(footer)

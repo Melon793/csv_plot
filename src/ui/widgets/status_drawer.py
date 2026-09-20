@@ -31,9 +31,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -44,6 +44,7 @@ from src.core.config import (
     STATUS_DRAWER_EDGE_MARGIN,
     STATUS_DRAWER_MIN_HEIGHT,
     STATUS_DRAWER_WIDTH,
+    STATUS_DRAWER_WIDTH_AXIS,
     X_AXIS_FACTOR_MAX,
     X_AXIS_FACTOR_MIN,
     X_AXIS_FREQUENCY_PRESETS,
@@ -106,6 +107,9 @@ def reveal_in_file_manager(file_path: str, folder: str) -> str:
 class StatusDrawer(QFrame):
     """抽屉外壳：贴在状态栏正上方的 Popup 面板。"""
 
+    #: 宽度上限。两扇抽屉的内容宽度差得远，各自定一档（见 config 的实测说明）
+    width_cap = STATUS_DRAWER_WIDTH
+
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Popup)
         # 白底 + 发丝描边：与「修改布局」网格选择器共用一份色板（src/ui/theme.py）。
@@ -159,17 +163,28 @@ class StatusDrawer(QFrame):
         layout.addLayout(row)
         return box
 
-    def _chip(self, text: str, tip: str = "") -> QToolButton:
-        """细边圆角小按钮：与网格选择器的「取消」同一形状语言。
+    def _chip(self, text: str, tip: str = "") -> QPushButton:
+        """抽屉里的小按钮。两个刻意的选择：
 
-        不再用 ``setAutoRaise``：一旦样式表给了背景，Qt 的扁平/悬停绘制就被
-        样式表接管，autoRaise 只剩装饰作用。
+        - **不带样式表**（作者定，见 ``theme`` 模块 docstring）：一带 QSS 就被
+          ``QStyleSheetStyle`` 接管、退出平台绘制。
+        - **用 ``QPushButton`` 而不是 ``QToolButton``**：两者都是"原生"，但各自
+          的原生长得不一样 —— 实测同一份文字在 macOS 下 QPushButton 是 56x32 的
+          aqua 白胶囊、QToolButton 是 36x22 的灰色斜面方块（Windows 75x26 vs
+          33x18，Fusion 80x24 vs 34x19）。主窗口顶栏全是 QPushButton，抽屉跟着
+          用同一类才谈得上"和系统一致"。
+
+        尺寸策略钉成 Fixed：QPushButton 的水平策略是 Minimum（可长大），而页脚
+        那行没有 addStretch（label 是 Ignored，见 ``_footer``），不钉死就会被
+        拉去吃掉整行余量 —— 实测「恢复默认」「应用」会被撑到一屏宽。
         """
-        button = QToolButton()
+        button = QPushButton()
         button.setText(text)
+        button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         if tip:
             button.setToolTip(tip)
-        button.setStyleSheet(theme.chip_style("QToolButton"))
         return button
 
     # -- 内容 ---------------------------------------------------------------
@@ -207,7 +222,7 @@ class StatusDrawer(QFrame):
             return False
 
         # 先定宽再量高：值列的省略与行数都按最终宽度算
-        width = min(STATUS_DRAWER_WIDTH, max(200, status_bar.width() - 2 * gap))
+        width = min(self.width_cap, max(200, status_bar.width() - 2 * gap))
         self.resize(width, min(self.sizeHint().height(), room))
         self.move(bar_top_left.x() + gap, bar_top_left.y() - self.height() - gap)
         self.show()
@@ -409,7 +424,7 @@ class FileInfoDrawer(StatusDrawer):
         field.end(False)  # 视口滚到末尾，露文件名那一截
         return field
 
-    def _action_button(self, key: str, value: str) -> QToolButton | None:
+    def _action_button(self, key: str, value: str) -> QPushButton | None:
         """行尾动作：文件名与路径行给「复制」，所在文件夹行给「打开」。
 
         一行只放一个动作：动作列每多一枚方片，值列就少 53 px（实测 368 → 315），
@@ -464,12 +479,21 @@ class XAxisDrawer(StatusDrawer):
     以及 3 Hz ↔ 0.333333 这类往返舍入漂移（实测 3M 点会漂出约 1 s）。
     """
 
+    #: 这扇抽屉最紧的一行是页脚（提示 + 恢复默认 + 应用），实测 440 就够；
+    #: 沿用文件抽屉的 520 会在右侧白留 ~80 px 空
+    width_cap = STATUS_DRAWER_WIDTH_AXIS
+
+    #: 当前档的标记：只用圆点，不加粗（作者定）。选 U+25CF 而不是 U+2022 ——
+    #: 实测前者在本机两套 style 下字宽 12 px、墨迹足，后者只有 6 px，
+    #: 孤零零一个小点摆在按钮里太弱
+    _MARK = "●"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._syncing = False
         self._by_factor = False
         self._preset_buttons: list = []
-        self._preset_on: list = []  # 与 _preset_buttons 同序的渲染签名
+        self._marked_index = -1  # 当前被标记的档位下标，-1 = 哪档都不对
         self._build()
 
     # -- 打开 ---------------------------------------------------------------
@@ -515,12 +539,17 @@ class XAxisDrawer(StatusDrawer):
 
         grid.addWidget(self._field_label("采样频率"), 0, 0)
         grid.addWidget(self.freq_spin, 0, 1)
-        grid.addLayout(self._build_presets(), 0, 2)
-        grid.addWidget(self._field_label("系数"), 1, 0)
-        grid.addWidget(self.factor_spin, 1, 1)
-        grid.addWidget(self.manual_check, 1, 2, Qt.AlignmentFlag.AlignLeft)
-        grid.addWidget(self._field_label("偏移"), 2, 0)
-        grid.addWidget(self.offset_spin, 2, 1)
+        # 档位单独一行，且从**第 1 列**起（与频率框左沿对齐）：它们就是"给上面
+        # 那个框填值"的快捷入口，对齐到框下面才读得出这层从属关系。
+        # 不再挤在频率框右侧 —— QPushButton 在 Fusion 下有 ~80 px 最小宽度，四枚
+        # 329 px 放右侧会把抽屉自然宽从 450 顶到 600，超过 STATUS_DRAWER_WIDTH
+        # =520（mac 下 233 px 刚好卡住，但布局不能只按一台机器定）。
+        grid.addLayout(self._build_presets(), 1, 1, 1, 2)
+        grid.addWidget(self._field_label("系数"), 2, 0)
+        grid.addWidget(self.factor_spin, 2, 1)
+        grid.addWidget(self.manual_check, 2, 2, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(self._field_label("偏移"), 3, 0)
+        grid.addWidget(self.offset_spin, 3, 1)
 
         # 结果区照网格选择器的双层写法：大号"会变成什么" + 小号"改动的范围"。
         # 整行通栏：原先只占前两列（输入区宽度），18px 的预览被挤到裁字
@@ -542,7 +571,7 @@ class XAxisDrawer(StatusDrawer):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         texts.addWidget(scope)
-        grid.addLayout(texts, 3, 0, 1, 3)
+        grid.addLayout(texts, 4, 0, 1, 3)
 
         self.reset_btn = self._chip("恢复默认", "填回默认系数并立即应用（撤销本次修正）")
         self.reset_btn.clicked.connect(self._on_reset)
@@ -601,31 +630,52 @@ class XAxisDrawer(StatusDrawer):
             )
             row.addWidget(button)
             self._preset_buttons.append(button)
-            self._preset_on.append(False)
+
+        # 四枚钉成等宽：标记是往文字前面加一个圆点，不钉的话每换一档整行都抖
+        # 一次（实测 macOS 下 55 → 71 px）。宽度按"被标记那一枚"取最大值，
+        # 所以抖动一次都不会有
+        probes = [
+            self._chip(self._marked_text(label))
+            for _hz, label in X_AXIS_FREQUENCY_PRESETS
+        ]
+        pin = max(probe.sizeHint().width() for probe in probes)
+        for probe in probes:
+            probe.deleteLater()
+        for button in self._preset_buttons:
+            button.setFixedWidth(pin)
+
         row.addStretch(1)
         return row
 
-    def _refresh_preset_states(self) -> None:
-        """把与当前基准相等的那一档预设标成"淡蓝=当前"，其余回到浅边。
+    @staticmethod
+    def _marked_text(label: str) -> str:
+        return f"{XAxisDrawer._MARK} {label}"
 
-        与网格选择器的"当前布局"同一颜色语义，用户一眼能看出现在落在哪一档；
-        哪一档都不等（手写出来的 0.0015 s 之类）就没有高亮，这本身也是信息。
-        签名缓存照 CellButton.set_visual：每敲一个字符都会刷一次，而绝大多数
-        按钮的态没变，重设样式串只是白付一次解析。
+    def _refresh_preset_states(self) -> None:
+        """把与当前基准相等的那一档前缀一个圆点，其余回到普通文字。
+
+        哪一档都不等（手写出来的 0.0015 s 之类）就没有任何一档被标记，这本身
+        也是信息。
+
+        刻意**不借 checked 态**：实测 macOS style 把选中按钮的文字画成白字压在
+        白底上（深色像素 266 → 0），palette 改 ButtonText / Button 四种设法全都
+        救不回来，字直接看不见；Fusion 与 Windows 虽可读，但同一处三平台两种
+        结果，不如统一用文字标。也不加粗 —— 作者定：单一个圆点就够认。
         """
         factor, _offset = self.candidate()
         hz = 1.0 / factor if factor else 0.0
+        marked = -1
+        for index, (preset_hz, _label) in enumerate(X_AXIS_FREQUENCY_PRESETS):
+            if abs(preset_hz - hz) <= 1e-9 * max(preset_hz, hz):
+                marked = index
+                break
+        if marked == self._marked_index:
+            # 每敲一个字符都会刷一次，绝大多数时候落在同一档，重设文字是白折腾
+            return
+        self._marked_index = marked
         for index, button in enumerate(self._preset_buttons):
-            preset_hz = X_AXIS_FREQUENCY_PRESETS[index][0]
-            on = abs(preset_hz - hz) <= 1e-9 * max(preset_hz, hz)
-            if on == self._preset_on[index]:
-                continue
-            self._preset_on[index] = on
-            button.setStyleSheet(
-                theme.chip_style_selected("QToolButton")
-                if on
-                else theme.chip_style("QToolButton")
-            )
+            label = X_AXIS_FREQUENCY_PRESETS[index][1]
+            button.setText(self._marked_text(label) if index == marked else label)
 
     # -- 输入同步 -----------------------------------------------------------
 
@@ -689,12 +739,17 @@ class XAxisDrawer(StatusDrawer):
         return factor, self.offset_spin.value()
 
     def _refresh_preview(self) -> None:
-        """预览行 = 落地后状态栏中段会显示的那句原文（同一函数算的）。"""
+        """预览行 = 落地后状态栏中段会显示的那句原文（同一函数、同一套格式）。
+
+        唯一差别是 ``always_show_correction=True``（作者定）：抽屉里即使还在
+        默认基准上，也要把"比例系数 1 / 偏移量 0"写出来 —— 这一行是"你现在要
+        落地成什么"的回执，空着像没数据；状态栏是常驻段，默认值写出来才是噪音。
+        """
         mw = self._mw()
         if mw is None:
             return
         factor, offset = self.candidate()
-        text = mw._axis_segment_text(factor, offset)
+        text = mw._axis_segment_text(factor, offset, always_show_correction=True)
         self.preview.setText(text)
         self.preview.setToolTip(f"应用后状态栏显示：{text}")
         self._refresh_preset_states()

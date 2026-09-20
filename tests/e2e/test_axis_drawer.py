@@ -11,9 +11,13 @@
 import pytest
 from PySide6.QtCore import QEvent, QPointF, QPoint, Qt
 from PySide6.QtGui import QDropEvent, QMouseEvent
-from PySide6.QtWidgets import QToolButton
+from PySide6.QtWidgets import QPushButton
 
 from src.ui.drag_drop import build_var_mimedata
+from src.ui.widgets.status_drawer import XAxisDrawer
+
+#: 当前档的圆点标记，直接取生产常量：改了标记这条测试跟着走，不会假绿
+_MARK = XAxisDrawer._MARK
 
 # README 陷阱 #2：QDropEvent 不持有 mimeData 的所有权，局部变量被 GC 后
 # dropEvent 内访问它就是 SIGSEGV，必须由模块级容器续命
@@ -60,7 +64,36 @@ def _open(loaded_window, qapp):
 
 
 def _button(drawer, text):
-    return next(b for b in drawer.findChildren(QToolButton) if b.text() == text)
+    # 抽屉按钮是 QPushButton 不是 QToolButton：两个类的"原生"长得不一样（macOS
+    # 下 56x32 白胶囊 vs 36x22 灰方块），与顶栏同框必须是同一类。
+    # 比对前先去掉当前档的圆点标记，否则被标记那一枚按原文查不到
+    return next(
+        b
+        for b in drawer.findChildren(QPushButton)
+        if b.text().removeprefix(f"{_MARK} ") == text
+    )
+
+
+def test_axis_drawer_uses_its_own_narrower_width(loaded_window, qapp):
+    """x 轴抽屉用自己的宽度上限：共用文件抽屉那 520 会在右侧白留一块空。
+
+    440 是扫出来的：最紧的一行是页脚（提示文字 + 恢复默认 + 应用），实测宽度
+    420 时 Fusion 只剩 1 px（222/221），440 剩 21 px。这里同时钉住页脚与预览
+    行都不被裁 —— 收窄的唯一硬约束就是这两行。
+    """
+    from PySide6.QtWidgets import QLabel
+
+    from src.core.config import STATUS_DRAWER_WIDTH, STATUS_DRAWER_WIDTH_AXIS
+
+    mw = loaded_window
+    drawer = _open(mw, qapp)
+
+    assert STATUS_DRAWER_WIDTH_AXIS < STATUS_DRAWER_WIDTH
+    assert drawer.width() <= STATUS_DRAWER_WIDTH_AXIS, "x 轴抽屉比设计宽度更宽"
+
+    hint = next(l for l in drawer.findChildren(QLabel) if "Esc" in l.text())
+    assert hint.width() >= hint.sizeHint().width(), f"页脚提示被裁：{hint.width()}"
+    assert drawer.preview.width() >= drawer.preview.sizeHint().width()
 
 
 def test_drawer_sits_above_status_bar(loaded_window, qapp):
@@ -74,12 +107,24 @@ def test_drawer_sits_above_status_bar(loaded_window, qapp):
 
 
 def test_seeded_from_current_base(loaded_window, qapp):
-    """打开时输入框反映当前全局基准，预览与状态栏中段是同一句话。"""
+    """打开时输入框反映当前全局基准；两处文案同一套格式，只差默认值那一段。
+
+    状态栏是常驻段，默认基准只报轴身份；抽屉预览是"要落地成什么"的回执，
+    默认值也写全（作者定）。非默认时两处必须逐字相同，否则就成了预览一个说法、
+    落地另一个说法。
+    """
     mw = loaded_window
     drawer = _open(mw, qapp)
 
     assert drawer.candidate() == (1.0, 0.0)
+    assert drawer.preview.text() == "x轴：Index（比例系数:1, 偏移量:0）"
+    assert mw._axis_segment.text() == "x轴：Index"
+
+    mw.factor, mw.offset = 0.01, 5.0
+    mw._update_axis_segment()
+    drawer._load_from(0.01, 5.0)
     assert drawer.preview.text() == mw._axis_segment.text()
+    assert drawer.preview.text() == "x轴：Index（比例系数:0.01, 偏移量:5）"
 
 
 def test_preset_sets_frequency_and_derives_factor(loaded_window, qapp):
@@ -102,7 +147,8 @@ def test_preset_row_matches_config(loaded_window, qapp):
     drawer = _open(loaded_window, qapp)
     labels = [label for _hz, label in X_AXIS_FREQUENCY_PRESETS]
 
-    assert [b.text() for b in drawer._preset_buttons] == labels
+    # 去掉当前档的圆点前缀再比：抽屉一开就有一枚带着标记
+    assert [b.text().removeprefix(f"{_MARK} ") for b in drawer._preset_buttons] == labels
     assert labels == ["1Hz", "5Hz", "10Hz", "100Hz"]
 
 
@@ -120,29 +166,35 @@ def test_preview_line_is_not_clipped(loaded_window, qapp):
     assert drawer.preview.width() >= drawer.preview.sizeHint().width()
 
 
-def test_active_preset_is_marked_current(loaded_window, qapp):
-    """生效那一档预设显示"淡蓝=当前"，与网格选择器同一颜色语义。
+def test_active_preset_is_marked_with_a_dot(loaded_window, qapp):
+    """当前档前缀一个圆点，其余普通文字；四枚等宽，切档时整行不抖。
 
-    手写出来的非常规值（0.002 → 500 Hz）哪档都不对，此时**不高亮任何一档** ——
-    这本身就是"当前不在预设档位上"的信息，不能拿最近的一档糊过去。
+    刻意不用 checked 态：实测 macOS style 把选中按钮的文字画成白字压白底（深色
+    像素 266 → 0，palette 四种设法都救不回来）。也不加粗（作者定：单一个点够认）。
+    手写出来的非常规值（0.002 → 500 Hz）哪档都不对，此时**一枚都不标** —— 这本身
+    就是"当前不在预设档位上"的信息，不能拿最近的一档糊过去。
     """
     from src.core.config import X_AXIS_FREQUENCY_PRESETS
-    from src.ui import theme
 
+    labels = [label for _hz, label in X_AXIS_FREQUENCY_PRESETS]
     drawer = _open(loaded_window, qapp)
-    plain = theme.chip_style("QToolButton")
+    buttons = drawer._preset_buttons
 
-    assert _button(drawer, "1Hz").styleSheet() != plain, "默认 1 Hz 就该标成当前"
+    assert all(not b.styleSheet() for b in buttons), "按钮又自带样式表就退出平台绘制了"
+    assert all(not b.isCheckable() for b in buttons), (
+        "别退回 checked：mac 上选中态的文字是白字压白底，看不见"
+    )
+    assert len({b.width() for b in buttons}) == 1, "四枚不等宽，切档会抖行"
+
+    assert [b.text() for b in buttons] == [f"{_MARK} 1Hz", "5Hz", "10Hz", "100Hz"]
+    assert not any(b.font().bold() for b in buttons), "作者只要圆点，不加粗"
+
     _button(drawer, "100Hz").click()
-    assert _button(drawer, "100Hz").styleSheet() != plain
-    assert _button(drawer, "1Hz").styleSheet() == plain
+    assert [b.text() for b in buttons] == ["1Hz", "5Hz", "10Hz", f"{_MARK} 100Hz"]
 
     drawer.manual_check.setChecked(True)
     drawer.factor_spin.setValue(0.002)
-    assert all(
-        _button(drawer, label).styleSheet() == plain
-        for _hz, label in X_AXIS_FREQUENCY_PRESETS
-    )
+    assert [b.text() for b in buttons] == labels
 
 
 def test_enter_applies_without_clicking(loaded_window, qapp, qtbot):
