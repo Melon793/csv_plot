@@ -181,6 +181,10 @@ class TemplateManagerDialog(QDialog):
         keyword = self._search_edit.text()
         templates = self._template_manager.search(keyword=keyword)
 
+        # setRowCount 砍到更短的行数会连带砍掉"选中的行号"，那一次
+        # itemSelectionChanged 会把 id 抹成 None，末尾对账就没对象可对
+        previous_id = self._selected_template_id
+
         self._table.setRowCount(len(templates))
         for row, template in enumerate(templates):
             name_item = QTableWidgetItem(template.metadata.name)
@@ -195,6 +199,36 @@ class TemplateManagerDialog(QDialog):
 
             updated_at = template.metadata.updated_at[:16]  # 只显示日期和时间
             self._table.setItem(row, 3, QTableWidgetItem(updated_at))
+
+        self._selected_template_id = previous_id
+        self._reconcile_selection_with_view()
+
+    def _reconcile_selection_with_view(self):
+        """重建列表不发 itemSelectionChanged，选中态得自己回到新视图上。
+
+        行号是 Qt 存选中的依据，而重建后同一行号已经换了模板：不收回来的话
+        高亮、_selected_template_id、按钮 enabled 三者会各说各话。
+        """
+        selected_row = None
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if (
+                item is not None
+                and item.data(Qt.ItemDataRole.UserRole) == self._selected_template_id
+            ):
+                selected_row = row
+                break
+
+        if selected_row is None:
+            self._selected_template_id = None
+            self._table.clearSelection()
+            self._details_label.setText("选中: -")
+            self._refresh_selection_actions()
+            return
+
+        self._table.selectRow(selected_row)
+        # 行号没变时 selectRow 不发信号，原地改名就没人刷新详情
+        self._on_selection_changed()
 
     def _on_selection_changed(self):
         """选择变化时更新详情"""
@@ -338,8 +372,9 @@ class TemplateManagerDialog(QDialog):
         )
         if reply == QMessageBox.StandardButton.Yes:
             try:
+                # 删除会同步触发 template_list_changed → 列表重建 → 选中态由
+                # _reconcile_selection_with_view 统一收口，此处不再单独清 id
                 self._template_manager.delete_template(self._selected_template_id)
-                self._selected_template_id = None
             except TemplateNotFoundError:
                 QMessageBox.warning(self, "警告", "模板不存在")
             except Exception as e:
@@ -350,10 +385,8 @@ class TemplateManagerDialog(QDialog):
     def _on_template_edited(self, template_id):
         """模板编辑完成"""
         self._selected_template_id = template_id
+        # 重建末尾的对账会把高亮挪到新 id 所在的行，顺带同步按钮与详情
         self._refresh_template_list()
-        # 这里的选中是代码给的，不一定伴随一次 itemSelectionChanged
-        # （行数没变时 setRowCount 不清选择态），所以要手动同步一次按钮
-        self._refresh_selection_actions()
 
     def _on_load_clicked(self):
         """加载选中的模板"""
