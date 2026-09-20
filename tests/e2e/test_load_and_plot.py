@@ -35,7 +35,7 @@ def test_buttons_enabled_after_load(loaded_window):
     """加载后：分析类按钮全部启用"""
     mw = loaded_window
     for btn in (
-        mw.time_correction_btn,
+        mw.clear_all_plots_btn,
         mw.auto_range_btn,
         mw.auto_y_btn,
         mw.cursor_btn,

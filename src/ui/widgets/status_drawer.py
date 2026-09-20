@@ -513,12 +513,6 @@ class XAxisDrawer(StatusDrawer):
         self.offset_spin.setDecimals(6)
         self.offset_spin.valueChanged.connect(self._refresh_preview)
 
-        self.align_btn = self._chip(
-            "对齐首样本",
-            "把偏移填成 -首样本 x，使横轴从 0 开始（按全局最左样本）",
-        )
-        self.align_btn.clicked.connect(self._on_align_first_sample)
-
         grid.addWidget(self._field_label("采样频率"), 0, 0)
         grid.addWidget(self.freq_spin, 0, 1)
         grid.addLayout(self._build_presets(), 0, 2)
@@ -527,7 +521,6 @@ class XAxisDrawer(StatusDrawer):
         grid.addWidget(self.manual_check, 1, 2, Qt.AlignmentFlag.AlignLeft)
         grid.addWidget(self._field_label("偏移"), 2, 0)
         grid.addWidget(self.offset_spin, 2, 1)
-        grid.addWidget(self.align_btn, 2, 2, Qt.AlignmentFlag.AlignLeft)
 
         # 结果区照网格选择器的双层写法：大号"会变成什么" + 小号"改动的范围"。
         # 整行通栏：原先只占前两列（输入区宽度），18px 的预览被挤到裁字
@@ -601,7 +594,8 @@ class XAxisDrawer(StatusDrawer):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(3)
         for hz, label in X_AXIS_FREQUENCY_PRESETS:
-            button = self._chip(label, f"采样频率 {label} Hz（系数 {1.0 / hz:g}）")
+            # 单位取 hz 而不是 label：label 已自带 "Hz"，再拼一次就成了 "1Hz Hz"
+            button = self._chip(label, f"采样频率 {hz:g} Hz（系数 {1.0 / hz:g}）")
             button.clicked.connect(
                 lambda _checked=False, value=hz: self._pick_preset(value)
             )
@@ -706,19 +700,6 @@ class XAxisDrawer(StatusDrawer):
         self._refresh_preset_states()
 
     # -- 动作 ---------------------------------------------------------------
-
-    def _on_align_first_sample(self) -> None:
-        loader = getattr(self._mw(), "loader", None)
-        if loader is None:
-            self._notify("尚未加载数据文件", level="warn")
-            return
-        try:
-            first_x = float(loader.global_time_range[0])
-        except (TypeError, ValueError, IndexError):
-            self._notify("取不到首样本位置，请手工填偏移", level="warn")
-            return
-        factor, _offset = self.candidate()
-        self.offset_spin.setValue(-first_x * factor)
 
     def _on_apply(self) -> None:
         mw = self._mw()

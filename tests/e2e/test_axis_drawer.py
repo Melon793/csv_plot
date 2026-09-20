@@ -85,21 +85,25 @@ def test_seeded_from_current_base(loaded_window, qapp):
 def test_preset_sets_frequency_and_derives_factor(loaded_window, qapp):
     drawer = _open(loaded_window, qapp)
 
-    _button(drawer, "100").click()
+    _button(drawer, "100Hz").click()
 
     assert drawer.freq_spin.value() == 100.0
     assert drawer.candidate()[0] == 0.01
-    assert drawer.preview.text() == "x轴：Index · 系数 0.01（已修正）"
+    assert drawer.preview.text() == "x轴：Index（比例系数:0.01, 偏移量:0）"
 
 
 def test_preset_row_matches_config(loaded_window, qapp):
-    """档位由 config 决定（作者定的 1/5/10/100 Hz），抽屉不得自带一份列表。"""
+    """档位由 config 决定（作者定的 1/5/10/100 Hz），抽屉不得自带一份列表。
+
+    按钮文字自带单位：这一行没有别的线索说明"1"是 Hz 还是系数。
+    """
     from src.core.config import X_AXIS_FREQUENCY_PRESETS
 
     drawer = _open(loaded_window, qapp)
     labels = [label for _hz, label in X_AXIS_FREQUENCY_PRESETS]
 
     assert [b.text() for b in drawer._preset_buttons] == labels
+    assert labels == ["1Hz", "5Hz", "10Hz", "100Hz"]
 
 
 def test_preview_line_is_not_clipped(loaded_window, qapp):
@@ -110,7 +114,7 @@ def test_preview_line_is_not_clipped(loaded_window, qapp):
     """
     drawer = _open(loaded_window, qapp)
 
-    drawer.freq_spin.setValue(3.0)  # → "x轴：Index · 系数 0.333333（已修正）"
+    drawer.freq_spin.setValue(3.0)  # → "x轴：Index（比例系数:0.333333, 偏移量:0）"
     qapp.processEvents()
 
     assert drawer.preview.width() >= drawer.preview.sizeHint().width()
@@ -128,10 +132,10 @@ def test_active_preset_is_marked_current(loaded_window, qapp):
     drawer = _open(loaded_window, qapp)
     plain = theme.chip_style("QToolButton")
 
-    assert _button(drawer, "1").styleSheet() != plain, "默认 1 Hz 就该标成当前"
-    _button(drawer, "100").click()
-    assert _button(drawer, "100").styleSheet() != plain
-    assert _button(drawer, "1").styleSheet() == plain
+    assert _button(drawer, "1Hz").styleSheet() != plain, "默认 1 Hz 就该标成当前"
+    _button(drawer, "100Hz").click()
+    assert _button(drawer, "100Hz").styleSheet() != plain
+    assert _button(drawer, "1Hz").styleSheet() == plain
 
     drawer.manual_check.setChecked(True)
     drawer.factor_spin.setValue(0.002)
@@ -150,7 +154,7 @@ def test_enter_applies_without_clicking(loaded_window, qapp, qtbot):
     mw = loaded_window
     drawer = _open(mw, qapp)
 
-    _button(drawer, "10").click()
+    _button(drawer, "10Hz").click()
     qtbot.keyClick(drawer, Qt.Key.Key_Return)
 
     assert mw.factor == 0.1
@@ -180,20 +184,6 @@ def test_manual_toggle_moves_authority_between_fields(loaded_window, qapp):
     assert drawer.candidate()[0] == 0.002
 
 
-def test_align_first_sample_puts_x_at_zero(loaded_window, qapp):
-    """对齐首样本：offset = -首样本 x × 系数，使最左样本落在 0。"""
-    mw = loaded_window
-    drawer = _open(mw, qapp)
-    first_x = mw.loader.global_time_range[0]
-
-    drawer.freq_spin.setValue(500.0)
-    _button(drawer, "对齐首样本").click()
-
-    factor, offset = drawer.candidate()
-    assert offset == pytest.approx(-first_x * factor)
-    assert first_x * factor + offset == pytest.approx(0.0)
-
-
 def test_apply_writes_global_base_and_recomputes_curve_x(loaded_window, qapp):
     """应用：全局基准、状态栏中段、消息区、抽屉四处同步，且曲线横轴真的重算了。"""
     mw = loaded_window
@@ -201,11 +191,11 @@ def test_apply_writes_global_base_and_recomputes_curve_x(loaded_window, qapp):
     qapp.processEvents()
     drawer = _open(mw, qapp)
 
-    _button(drawer, "100").click()
+    _button(drawer, "100Hz").click()
     _button(drawer, "应用").click()
 
     assert mw.factor == 0.01 and mw.offset == 0.0
-    assert mw._axis_segment.text() == "x轴：Index · 系数 0.01（已修正）"
+    assert mw._axis_segment.text() == "x轴：Index（比例系数:0.01, 偏移量:0）"
     assert not drawer.isVisible()
     assert mw._message_label.text() == "已应用 x 轴基准：系数 0.01，偏移 0"
 
@@ -223,7 +213,7 @@ def test_reset_returns_to_the_original_axis(loaded_window, qapp):
     drawer = _open(mw, qapp)
     before = pw.view_box.viewRange()[0]
 
-    _button(drawer, "100").click()
+    _button(drawer, "100Hz").click()
     _button(drawer, "应用").click()
     assert mw.factor == 0.01
 
@@ -231,7 +221,7 @@ def test_reset_returns_to_the_original_axis(loaded_window, qapp):
     _button(drawer, "恢复默认").click()
 
     assert mw.factor == mw._factor_default and mw.offset == mw._offset_default
-    assert mw._axis_segment.text() == "x轴：Index · 系数 1"
+    assert mw._axis_segment.text() == "x轴：Index"
     assert pw.view_box.viewRange()[0] == pytest.approx(before, rel=1e-6)
 
 

@@ -58,29 +58,28 @@ def test_title_and_segments_after_load(loaded_window):
     assert mw._message_label.text() == ""
 
 
-def test_axis_segment_reports_axis_and_frequency(loaded_window):
-    """x 轴段：轴身份 + 由 factor 反推的采样频率，改过基准要标注。"""
+def test_axis_segment_reports_axis_then_the_active_correction(loaded_window):
+    """x 轴段：常态只报轴身份，修正过才把生效的系数与偏移摆出来。"""
     mw = loaded_window
 
-    # 合成 CSV 没有可识别的时间列 → 段上如实显示 Index 与系数
+    # 合成 CSV 没有可识别的时间列 → 轴身份如实是 Index，未修正时不带系数
     mw._update_axis_segment()
-    assert mw._axis_segment.text() == "x轴：Index · 系数 1"
-    assert "已修正" not in mw._axis_segment.text()
+    assert mw._axis_segment.text() == "x轴：Index"
 
     mw.factor = 0.01
     mw._update_axis_segment()
-    assert mw._axis_segment.text() == "x轴：Index · 系数 0.01（已修正）"
+    assert mw._axis_segment.text() == "x轴：Index（比例系数:0.01, 偏移量:0）"
 
-    # 有时间列时改显轴名(单位) + 反推频率：1/factor
+    # 有时间列时轴身份换成轴名(单位)；系数不再反推成 Hz，统一走括号那一截
     mw.factor = 1
     mw.loader.time_column_name = "time"
     mw._update_axis_segment()
-    assert mw._axis_segment.text() == "x轴：time (s) · 采样 1 Hz"
+    assert mw._axis_segment.text() == "x轴：time (s)"
 
     mw.factor = 0.01
     mw.offset = 5.0
     mw._update_axis_segment()
-    assert mw._axis_segment.text() == "x轴：time (s) · 采样 100 Hz（已修正）"
+    assert mw._axis_segment.text() == "x轴：time (s)（比例系数:0.01, 偏移量:5）"
 
 
 def test_segments_are_clickable(main_window):

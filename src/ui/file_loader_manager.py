@@ -749,7 +749,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def set_button_status(self, status: bool):
         if status is not None:
-            self.mw.time_correction_btn.setEnabled(status)
+            # 「时间修正」按钮已撤，入口换成状态栏中段的 x 轴抽屉（抽屉自己按
+            # loader/加载中状态把关），这里不再列它
             self.mw.clear_all_plots_btn.setEnabled(status)
             self.mw.auto_range_btn.setEnabled(status)
             self.mw.auto_y_btn.setEnabled(status)

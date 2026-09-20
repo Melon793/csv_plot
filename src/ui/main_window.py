@@ -174,6 +174,10 @@ class MainWindow(QMainWindow):
 
     def _load_window_context(self):
         _read_status = False
+        # 绘图区的隐藏态**刻意不再从配置恢复**（作者定）：「隐藏绘图区」按钮已
+        # 从主界面撤下入口，照旧读 hide_plot_area 就会出现"窗口开在绘图区看不见、
+        # 界面上又没有按钮能显回来"的死路（只剩拖变量进图那条自动恢复）。
+        # 机制本身留着：toggle_plot_btn / toggle_plot_area 全在，入口换地方即可。
         _hide_plot_area = False
 
         from src.ui.file_loader_manager import FileLoaderManager
@@ -188,15 +192,11 @@ class MainWindow(QMainWindow):
                 _max_col = int(layout_config_dict.get("max_col", 0))
                 _default_row = int(layout_config_dict.get("default_row", 0))
                 _default_col = int(layout_config_dict.get("default_col", 0))
-                # hide_plot_area 缺键时回退 False，不纳入 _read_status
-                _hide_plot_area = bool(layout_config_dict.get("hide_plot_area", False))
                 _read_status = all(
                     x > 0 for x in (
                         _width, _height, _max_row, _max_col, _default_row, _default_col
                     )
                 )
-                if "hide_plot_area" in layout_config_dict:
-                    _widget_logger.debug("layout_config: hide_plot_area=%s", _hide_plot_area)
             except Exception as e:
                 _widget_logger.warning("配置文件读取失败: %s", e)
 
@@ -232,7 +232,6 @@ class MainWindow(QMainWindow):
             self._plot_col_max_default = PLOT_COL_MAX_DEFAULT
             self._plot_row_current = PLOT_ROW_CURRENT_DEFAULT
             self._plot_col_current = PLOT_COL_CURRENT_DEFAULT
-            _hide_plot_area = False
 
         self._hide_plot_area = _hide_plot_area
 
@@ -353,16 +352,16 @@ class MainWindow(QMainWindow):
         self.list_widget = MyTableWidget(left_widget)
         left_layout.addWidget(self.list_widget)
 
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(2)
-        self.log_btn = QPushButton("日志", left_widget)
-        self.log_btn.clicked.connect(self.show_log_window)
-        bottom_row.addWidget(self.log_btn)
-
+        # 原先这一行还有「日志」按钮，已撤（作者定）：底部状态栏右端有同名的
+        # 日志段，两个入口指向同一个 show_log_window。
+        #
+        # 「隐藏绘图区」按作者定的口径**只撤入口、留功能**：控件照建、toggled
+        # 照接（见 _connect_signals），但不进布局也不显示，将来安到别处只需
+        # addWidget + setVisible(True)。刻意不"塞进布局再 hide"：整行即便高度
+        # 归零，left_layout 那 2 px 间距仍会为它排一排，变量列表白少一行的位置。
         self.toggle_plot_btn = QPushButton("隐藏绘图区", left_widget)
         self.toggle_plot_btn.setCheckable(True)
-        bottom_row.addWidget(self.toggle_plot_btn)
-        left_layout.addLayout(bottom_row)
+        self.toggle_plot_btn.setVisible(False)
         left_layout.setSpacing(2)
         self.left_widget = left_widget
 
@@ -381,9 +380,10 @@ class MainWindow(QMainWindow):
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 5, 5)
 
-        self.time_correction_btn = QPushButton("时间修正", self.plot_widget)
-        top_bar.addWidget(self.time_correction_btn)
-
+        # 「时间修正」按钮已撤（作者定）：它与状态栏中段的 x 轴抽屉共用
+        # layout_manager.apply_time_correction，对绘图的作用完全同源，而抽屉还
+        # 多频率输入、预设档位与应用前预览。对话框本体
+        # （layout_manager.open_time_correction_dialog）按口径留着，只是暂无入口。
         self.clear_all_plots_btn = QPushButton("清除绘图", self.plot_widget)
         top_bar.addWidget(self.clear_all_plots_btn)
 
@@ -770,19 +770,22 @@ class MainWindow(QMainWindow):
         单独一层是给抽屉的预览行用的：预览必须在不动 ``self.factor`` 的前提
         下算出"改完会长什么样"，两处共用一套文案才不会预览一个说法、落地
         另一个说法。
+
+        常态只报轴身份：没修正过时那串系数是恒等的 1 / 反推出来的采样率，
+        读它不如去读抽屉。只有真的修正过，才把**生效**的比例系数与偏移量摆
+        出来 —— 这一句要回答的是"现在横轴被折成了什么"，所以系数与偏移同时
+        给出，只改其一也两句都给，避免同一位置文案长度随改动类型抖动。
         """
         loader = getattr(self, "loader", None)
         axis_label = (getattr(loader, "time_axis_label", "") or "Index") if loader else "Index"
         factor = factor or 1.0
-        if axis_label == "Index":
-            text = f"x轴：Index · 系数 {factor:g}"
-        else:
-            text = f"x轴：{axis_label} · 采样 {1.0 / factor:g} Hz"
         corrected = abs(factor - self._factor_default) > 1e-12 or abs(offset) > 1e-12
-        return f"{text}（已修正）" if corrected else text
+        if not corrected:
+            return f"x轴：{axis_label}"
+        return f"x轴：{axis_label}（比例系数:{factor:g}, 偏移量:{offset:g}）"
 
     def _update_axis_segment(self):
-        """x 轴段：轴身份取自 loader，采样频率由全局 factor 反推。
+        """x 轴段：轴身份取自 loader，被修正过时补上生效的系数与偏移。
 
         轴标题被 DEFAULT_SHOW_X_AXIS_LABEL=False 关掉了，这一段是全软件唯一
         能看出"横轴是时间还是样本序号、时间基准是多少"的地方。
@@ -862,8 +865,9 @@ class MainWindow(QMainWindow):
         # 信号连接（需要 Manager 已初始化）
         self.clone_btn.clicked.connect(self.layout_manager.spawn_clone_window)
         self.help_btn_small.clicked.connect(self.layout_manager.show_help)
+        # 按钮不显示，接线照旧：拖变量进图时 variable_actions 靠 setChecked(False)
+        # 唤回绘图区，走的就是这一路 toggled
         self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
-        self.time_correction_btn.clicked.connect(self.layout_manager.open_time_correction_dialog)
         self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
         self._grid_layout_shortcut = QShortcut(QKeySequence("Ctrl+L"), self.plot_widget)
         self._grid_layout_shortcut.activated.connect(self._on_grid_layout_shortcut)
