@@ -306,3 +306,18 @@ def test_log_separator_follows_the_message(main_window, qtbot):
 
     mw.clear_status_message()
     qtbot.waitUntil(lambda: not mw._log_separator.isVisible(), timeout=2000)
+
+
+def test_status_bar_suppresses_style_item_borders(main_window):
+    """状态栏必须自己掐掉样式给 item 画的边框，否则 Windows 上会长出多余竖线。
+
+    样式在 item 之间的 6 px 间隙里画一对明暗边框，会把我们那一根
+    ``_vline_separator`` 夹在中间，实测（Qt legacy Windows 样式代理）
+    "变量 ↔ x轴" 区间有 3 条比背景暗的线、"csv" 左边还有 2 条；加
+    ``QStatusBar::item { border: none; }`` 后收敛到 1 / 0 条。
+    macOS/Fusion 本来就不画，所以这条在 mac 上是无副作用的保险。
+    """
+    sheet = main_window.statusBar().styleSheet()
+
+    assert "QStatusBar::item" in sheet, "样式表被删了：Windows 上会长出多余竖线"
+    assert "border:none" in sheet.replace(" ", ""), sheet

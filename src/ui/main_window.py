@@ -529,6 +529,18 @@ class MainWindow(QMainWindow):
     def _init_status_bar(self):
         status_bar = _ElideStatusBar(self)
         status_bar.setSizeGripEnabled(False)
+        # 关掉样式给状态栏每个 item 画的边框。
+        #
+        # Windows 样式会在 item 之间的 6 px 间隙里画一对明暗边框（实测：
+        # "变量 ↔ x轴" 那 15 px 间隙里有 5 列墨迹、其中 3 条比背景暗，
+        # "csv" 左边还有 2 条），于是我们那一根 _vline_separator 被夹在中间，
+        # 看起来像三条竖线。``QStatusBar::item { border: none; }`` 是治这个
+        # 症状的惯用规则，实测三个区间收敛到 0 / 1 / 1 条。
+        #
+        # 作用域只有这条状态栏；macOS/Fusion 本来就不画这些边框，实测加与不加
+        # 整条栏 0 像素变化。代价是这里从此带一份样式表，P2-6 全局色板
+        # token 化时要一并收编。
+        status_bar.setStyleSheet("QStatusBar::item { border: none; }")
         self.setStatusBar(status_bar)
 
         status_bar.addWidget(self._edge_spacer())
