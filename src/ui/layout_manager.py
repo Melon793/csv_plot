@@ -468,6 +468,8 @@ class LayoutManager(MainWindowBaseManager):
             self.mw.mark_stats_window.update_stats(stats_list)
 
     def open_layout_dialog(self):
+        if self.mw.reject_when_loading("修改布局"):
+            return
         dlg = LayoutGridSelector(
             max_rows=self.mw._plot_row_max_default,
             max_cols=self.mw._plot_col_max_default,
@@ -492,81 +494,100 @@ class LayoutManager(MainWindowBaseManager):
         # values() 读的是弹窗里的控件，必须在 deleteLater 之前取完
         new_factor, new_offset = dialog.values() if accepted else (None, None)
         dialog.deleteLater()
-        if accepted:
-            if new_factor <= 0:
-                QMessageBox.warning(self.mw, "错误", "Factor 必须是正数")
-                return
-            old_factor = self.mw.factor
-            old_offset = self.mw.offset
-            self.mw.factor = new_factor
-            self.mw.offset = new_offset
-            self.mw._is_time_correction_active = True
-            self.mw._time_correction_pinned_index_values = []
-            try:
-                if self.mw.cursor_btn.isChecked():
-                    mode = getattr(self.mw, "cursor_mode", "1 free cursor")
-                    if (
-                        mode != "1 free cursor"
-                        and old_factor != 0
-                        and self.mw.pinned_x_values
-                    ):
-                        for x_val in self.mw.pinned_x_values:
-                            if x_val is None or not np.isfinite(x_val):
-                                continue
-                            index_pos = (x_val - old_offset) / old_factor
-                            if np.isfinite(index_pos):
-                                self.mw._time_correction_pinned_index_values.append(
-                                    index_pos
-                                )
-            except Exception:
-                logger.warning(
-                    "时间修正 pin 值反算失败，重置为空列表",
-                    exc_info=True,
-                )
-                self.mw._time_correction_pinned_index_values = []
-
-            try:
-                if self.mw.plot_widgets:
-                    curr_min, curr_max = self.mw.plot_widgets[
-                        0
-                    ].plot_widget.view_box.viewRange()[0]
-                else:
-                    curr_min, curr_max = 0, 1
-
-                for container in self.mw.plot_widgets:
-                    container.plot_widget.update_time_correction(
-                        new_factor, new_offset
-                    )
-
-                if old_factor != 0:
-                    index_min = (curr_min - old_offset) / old_factor
-                    index_max = (curr_max - old_offset) / old_factor
-                    new_min = new_offset + new_factor * index_min
-                    new_max = new_offset + new_factor * index_max
-                else:
-                    datalength = (
-                        self.mw.loader.datalength
-                        if hasattr(self.mw, "loader")
-                        else 1
-                    )
-                    new_min = new_offset + new_factor * 1
-                    new_max = new_offset + new_factor * datalength
-
-                if self.mw.plot_widgets:
-                    first_plot = self.mw.plot_widgets[0].plot_widget
-                    first_plot.view_box.enableAutoRange(x=False)
-                    first_plot.view_box.setXRange(new_min, new_max, padding=0)
-                    self.mw.cursor_sync_manager._realign_pinned_cursor_after_time_correction(
-                        old_factor, old_offset, new_factor, new_offset
-                    )
-
-                self.request_mark_stats_refresh(immediate=True)
-            finally:
-                self.mw._is_time_correction_active = False
-                self.mw._time_correction_pinned_index_values = []
-            return
         self.mw._is_time_correction_active = False
         self.mw._time_correction_pinned_index_values = []
+        if not accepted:
+            return
+        # 校验与落地都在 apply_time_correction 里：状态栏中段的 x 轴抽屉走的是
+        # 同一条，对话框这里只负责用模态框报错
+        if not self.apply_time_correction(new_factor, new_offset):
+            QMessageBox.warning(self.mw, "错误", "Factor 必须是正数")
+
+    def apply_time_correction(self, new_factor: float, new_offset: float) -> bool:
+        """把全局 x 轴基准改成 factor/offset，并重画所有已开子图。
+
+        顶部「时间修正」对话框与状态栏中段的 x 轴抽屉**共用这一条**：改基准
+        顺带要保住当前可视 x 范围、反算已固定游标的位置、刷新标记区统计，两处
+        各写一份必然漂移。返回 False 表示 factor 非法，由调用方按自己的方式提示
+        （对话框弹模态、抽屉走状态栏播报）。
+        """
+        if not np.isfinite(new_factor) or new_factor <= 0:
+            return False
+
+        old_factor = self.mw.factor
+        old_offset = self.mw.offset
+        self.mw.factor = new_factor
+        self.mw.offset = new_offset
+        self.mw._is_time_correction_active = True
+        self.mw._time_correction_pinned_index_values = []
+        try:
+            if self.mw.cursor_btn.isChecked():
+                mode = getattr(self.mw, "cursor_mode", "1 free cursor")
+                if (
+                    mode != "1 free cursor"
+                    and old_factor != 0
+                    and self.mw.pinned_x_values
+                ):
+                    for x_val in self.mw.pinned_x_values:
+                        if x_val is None or not np.isfinite(x_val):
+                            continue
+                        index_pos = (x_val - old_offset) / old_factor
+                        if np.isfinite(index_pos):
+                            self.mw._time_correction_pinned_index_values.append(
+                                index_pos
+                            )
+        except Exception:
+            logger.warning(
+                "时间修正 pin 值反算失败，重置为空列表",
+                exc_info=True,
+            )
+            self.mw._time_correction_pinned_index_values = []
+
+        try:
+            if self.mw.plot_widgets:
+                curr_min, curr_max = self.mw.plot_widgets[
+                    0
+                ].plot_widget.view_box.viewRange()[0]
+            else:
+                curr_min, curr_max = 0, 1
+
+            for container in self.mw.plot_widgets:
+                container.plot_widget.update_time_correction(
+                    new_factor, new_offset
+                )
+
+            if old_factor != 0:
+                index_min = (curr_min - old_offset) / old_factor
+                index_max = (curr_max - old_offset) / old_factor
+                new_min = new_offset + new_factor * index_min
+                new_max = new_offset + new_factor * index_max
+            else:
+                datalength = (
+                    self.mw.loader.datalength
+                    if hasattr(self.mw, "loader")
+                    else 1
+                )
+                new_min = new_offset + new_factor * 1
+                new_max = new_offset + new_factor * datalength
+
+            if self.mw.plot_widgets:
+                first_plot = self.mw.plot_widgets[0].plot_widget
+                first_plot.view_box.enableAutoRange(x=False)
+                first_plot.view_box.setXRange(new_min, new_max, padding=0)
+                self.mw.cursor_sync_manager._realign_pinned_cursor_after_time_correction(
+                    old_factor, old_offset, new_factor, new_offset
+                )
+
+            self.request_mark_stats_refresh(immediate=True)
+        finally:
+            self.mw._is_time_correction_active = False
+            self.mw._time_correction_pinned_index_values = []
+
+        self.mw._update_axis_segment()
+        self.mw._broadcast(
+            f"已应用 x 轴基准：系数 {new_factor:g}，偏移 {new_offset:g}"
+        )
+        return True
 
     def update_mark_regions_on_layout_change(self):
         if self.mw.mark_region_btn.isChecked():

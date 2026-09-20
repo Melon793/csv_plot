@@ -377,6 +377,8 @@ class CursorSyncManager(MainWindowBaseManager):
             container.plot_widget.reset_pin_state()
 
     def clear_all_plots(self):
+        if self.mw.reject_when_loading("清除绘图"):
+            return
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             widget.clear_plot_item()
@@ -494,11 +496,13 @@ class CursorSyncManager(MainWindowBaseManager):
                     external_xmin=global_min_x,
                     external_xmax=global_max_x,
                 )
+        self.mw._show_status_message("已按全部可见曲线自动缩放 XY 轴")
 
     def auto_y_in_x_range(self):
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
             widget.auto_y_in_x_range()
+        self.mw._show_status_message("已按当前 x 范围调节各子图 Y 轴")
 
     def replots_after_loading(self, skip_pin_reset: bool = False):
         # 防止 QGraphicsView 在 items 清空/重建期间处理 paint 事件导致

@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
 )
 
+from src.core.config import X_AXIS_FACTOR_MAX, X_AXIS_FACTOR_MIN
+
 
 class TimeCorrectionDialog(QDialog):
     """
@@ -26,7 +28,8 @@ class TimeCorrectionDialog(QDialog):
         form = QFormLayout(self)
 
         self.factor_spin = QDoubleSpinBox()
-        self.factor_spin.setRange(0.0001, 1e6)
+        # 范围与状态栏 x 轴抽屉同源，见 config.X_AXIS_FACTOR_MIN 的说明
+        self.factor_spin.setRange(X_AXIS_FACTOR_MIN, X_AXIS_FACTOR_MAX)
         self.factor_spin.setValue(cur_factor)
         self.factor_spin.setDecimals(6)
 

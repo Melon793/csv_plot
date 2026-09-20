@@ -177,6 +177,18 @@ def test_cell_style_sheet_carries_radius(selector):
     assert f"border-radius: {_R_CELL}px;" in css
 
 
+def test_cancel_button_is_platform_native(selector):
+    """「取消」必须**不带**任何 QSS —— 与上面那 12 格正好相反。
+
+    一带样式表就被 QStyleSheetStyle 接管、退出平台绘制：实测同一枚原生按钮在
+    macOS / Windows / Fusion 下是 78x33 / 100x30 / 80x27 且跟 palette 变深浅，
+    而曾带 QSS 的那版三档一律 106x31、深浅两态像素不变，于是和顶栏按钮成了两
+    套灰阶。作者定的口径是普通按钮回原生，只有网格方块保留自绘（三态色是那扇
+    对话框唯一的信息通道）。
+    """
+    assert selector.cancel_btn.styleSheet() == ""
+
+
 def test_size_is_owned_by_layout_constraint(selector):
     """尺寸交给 QLayout.SetFixedSize，不得在构造期用 sizeHint 锁死。
 

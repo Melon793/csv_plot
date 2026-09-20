@@ -121,6 +121,10 @@ class ExcelDataLoader(BaseDataLoader):
             else:
                 ws_name = sheet_name
             self._ws = self._wb[ws_name]
+            # 解析后的**名字**另存公开属性：入参可能是索引 0，而 workbook 在
+            # finally 里已 close、_ws 也会被 release_memory 清掉，事后从这两
+            # 处都取不回"当初打开的是哪张表"。文件信息抽屉要用它。
+            self.sheet_name = ws_name
 
             # read_only 模式全程按 <dimension> 声明裁剪行列，部分导出工具只写 A1，
             # 表头扫描与数据行会一起被削平。声明明显不可信时先作废它，让 iter_rows
