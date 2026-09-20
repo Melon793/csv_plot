@@ -293,8 +293,10 @@ class PlotUIManager(BasePlotManager):
         pw.x_name = ""
         pw.x_format = ""
 
-        pw.xMin: int = 0
-        pw.xMax: int = 1
+        # 游标 X 域的唯一权威源是 AxisManager.cursor_x_domain()（随 factor/offset
+        # 现算）。这里曾有一对 pw.xMin/pw.xMax 快照字段：只在 reset_plot 里按当时
+        # 的 factor 换算一次，时间修正后再不更新，被 bounds 回退分支读到就会把空
+        # plot 的游标钉在旧时间轴上，故删除。
 
         # 曲线统一管理
         pw.curves = {}

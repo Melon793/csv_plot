@@ -157,6 +157,13 @@ def _bounds(pw) -> list:
     return list(pw.vline.bounds())
 
 
+def test_snapshot_fields_retired(pw_factory):
+    """陈旧快照字段必须已退役：不再有 pw.xMin / pw.xMax"""
+    pw = pw_factory()
+    assert not hasattr(pw, "xMin")
+    assert not hasattr(pw, "xMax")
+
+
 def test_empty_plot_reset_uses_global_domain(pw_factory):
     """I2：空 plot 的 reset_plot 之后游标域 = 全局数据域，而不是无界"""
     pw = pw_factory()

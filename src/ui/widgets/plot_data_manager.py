@@ -803,9 +803,6 @@ class PlotDataManager:
         # 游标域回到全局数据域（按当前 factor/offset 现算）。这里曾经是
         # _set_vline_bounds([None, None])：无界会让空 plot 的游标能拖到数据之外。
         self._axis_manager.apply_cursor_x_domain()
-
-        pw.xMin = xMin
-        pw.xMax = xMax
         pw._clear_cursor_items(hide_only=False)
         self._safe_clear_plot_items()
         pw.axis_y.setLabel(text="")
