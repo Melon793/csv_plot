@@ -41,11 +41,30 @@ def _click_segment(widget, qapp):
     qapp.processEvents()
 
 
-def _button_for(drawer, key, text=None):
-    """按行取行尾按钮：同一次网格排布里，键标签与按钮的垂直中心一致。
+def _drag_select(widget, start_x, end_x):
+    """按住左键从 start_x 拖到 end_x（可以拖出控件外）：走 QLineEdit 自己的
+    mousePressEvent/mouseMoveEvent，和真实拖选的代码路径一致。"""
+    for kind, x, buttons in (
+        (QEvent.Type.MouseButtonPress, start_x, Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseMove, end_x, Qt.MouseButton.LeftButton),
+    ):
+        local = QPointF(x, widget.height() // 2)
+        ev = QMouseEvent(
+            kind,
+            local,
+            QPointF(widget.mapToGlobal(local.toPoint())),
+            Qt.MouseButton.LeftButton,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        if kind is QEvent.Type.MouseButtonPress:
+            widget.mousePressEvent(ev)
+        else:
+            widget.mouseMoveEvent(ev)
 
-    ``text`` 用来在一行有多个动作时点名（所在文件夹行是 复制 + 打开）。
-    """
+
+def _button_for(drawer, key):
+    """按行取行尾按钮：同一次网格排布里，键标签与按钮的垂直中心一致。"""
     labels = [lb for lb in drawer.findChildren(QLabel) if lb.text() == key]
     assert labels, f"抽屉里没有「{key}」这一行"
     center_y = labels[0].geometry().center().y()
@@ -53,7 +72,6 @@ def _button_for(drawer, key, text=None):
         b
         for b in drawer.findChildren(QToolButton)
         if abs(b.geometry().center().y() - center_y) <= 2
-        and (text is None or b.text() == text)
     ]
     assert len(buttons) == 1, f"「{key}」行尾按钮数异常: {[b.text() for b in buttons]}"
     return buttons[0]
@@ -134,7 +152,7 @@ def test_open_button_asks_system_file_manager(loaded_window, qapp, monkeypatch):
     )
     drawer = _open(loaded_window, qapp)
 
-    _button_for(drawer, KEY_FOLDER, "打开").click()
+    _button_for(drawer, KEY_FOLDER).click()
     qapp.processEvents()
 
     assert len(calls) == 1
@@ -155,7 +173,7 @@ def test_open_button_when_file_moved_says_so(loaded_window, qapp, monkeypatch):
     drawer = _open(mw, qapp)
     drawer._file_path = "/nowhere/e2e_demo.csv"
 
-    _button_for(drawer, KEY_FOLDER, "打开").click()
+    _button_for(drawer, KEY_FOLDER).click()
     qapp.processEvents()
 
     assert calls == []
@@ -263,116 +281,80 @@ def test_key_column_is_muted_and_right_aligned(loaded_window, qapp):
     assert "font-size" not in value.styleSheet()
 
 
-def test_only_path_rows_get_the_hover_field(loaded_window, qapp):
-    """三行路径字段挂 hover 框（暗示"这块能拉选"），数值行不挂。
+def test_path_rows_are_read_only_scrollable_fields(loaded_window, qapp):
+    """三行路径字段是只读 QLineEdit：有视口，框外的字才选得到。
 
-    框是 FieldLabel 在 paintEvent 里画的（样式表 :hover 合成事件下实测涂不出
-    像素，见该类文档串），所以既断言类型也断言"投一个 Enter 之后真的多出墨"。
+    QLabel 没有视口 —— 文本按控件宽度排一次版，超出部分根本没参与排版，拖选
+    永远走不到尾部。ClickFocus 是"别看起来能编辑"的补偿（不点就没有光标）。
     """
-    from src.ui.widgets.status_drawer import _COPY_KEYS, FieldLabel
+    from PySide6.QtWidgets import QLineEdit
+
+    from src.ui.widgets.status_drawer import _CLIP_KEYS
 
     drawer = _open(loaded_window, qapp)
 
-    for key, label in drawer._labels.items():
-        hoverable = key in _COPY_KEYS
-        assert isinstance(label, FieldLabel) is hoverable, key
-        # 透明描边 + 内边距对所有行常驻，否则值列会出现两条文字左沿
-        assert "padding: 0 4px" in label.styleSheet(), key
-
-    target = drawer._labels[ROW_KEY_FILE_PATH]
-    before = target.grab().toImage()
-    # 必须投真的 QEnterEvent：投一个类型是 Enter 的裸 QEvent，QWidget::event 会
-    # 把它 static_cast 成 QEnterEvent，实测直接 SIGSEGV（Leave 不转，裸事件安全）
-    from PySide6.QtGui import QEnterEvent
-
-    QApplication.sendEvent(
-        target, QEnterEvent(QPointF(4, 4), QPointF(4, 4), QPointF(4, 4))
-    )
-    qapp.processEvents()
-    after = target.grab().toImage()
-    painted = sum(
-        1
-        for x in range(after.width())
-        for y in range(after.height())
-        if before.pixelColor(x, y) != after.pixelColor(x, y)
-    )
-    # 框铺满整块（值列宽 × 行高，数千像素），只画一条边不可能到这个数
-    assert painted >= 2000, f"hover 框没画出来：只有 {painted} 个像素变了"
-
-    QApplication.sendEvent(target, QEvent(QEvent.Type.Leave))
-    qapp.processEvents()
-    back = target.grab().toImage()
-    assert sum(
-        1
-        for x in range(back.width())
-        for y in range(back.height())
-        if back.pixelColor(x, y) != before.pixelColor(x, y)
-    ) == 0, "离开后框没收回"
+    for key, widget in drawer._labels.items():
+        path_row = key in _CLIP_KEYS
+        assert isinstance(widget, QLineEdit) is path_row, key
+        if path_row:
+            assert widget.isReadOnly(), key
+            assert widget.focusPolicy() == Qt.FocusPolicy.ClickFocus, key
+        # 两列共用同一档内边距，否则值列出现两条文字左沿
+        assert "padding: 0 " in widget.styleSheet(), key
 
 
-def test_long_path_is_clipped_not_elided(loaded_window, qapp, qapp_clipboard):
-    """放不下的路径只许硬切：拉选拿到的必须是真路径里的连续片段。
+def test_hidden_part_of_long_path_is_laid_out_and_selectable(loaded_window, qapp):
+    """放不下的那半截路径必须还在：视口滚得到、拖选/全选拿到的都是真路径。
 
-    回归的是上一版：用 elidedText 裁中间后，省略号是写进 text() 的真字符，会被
-    一起拉选复制 —— 作者实测（Win11）粘出来 "Users/demo/Data…/demo_50pts"，
-    不是任何真实路径。现在改成硬切 + FieldLabel 右缘渐隐。
+    作者报的真问题，前两版都不行 —— elidedText 把 … 写进 text()，粘出来不是真
+    路径；硬切的 QLabel 没有视口，框外的字符压根没参与排版，拖多远都只到可见的
+    末字符。这里量的是"光标从文末走回头，位移比整框还宽"（实测 675 px > 框宽
+    363 px）：看不见的字符也排了版，视口走得完全程。
+
+    全程不 pump 事件：offscreen 弹窗拿不到键盘（"This plugin does not support
+    grabbing the keyboard"），一次 processEvents 就发回 FocusOut，把选区清成
+    -1/-1（实测），cocoa 上不会。所以本用例只钉数据口径，像素表现见 tmp 截图。
     """
-    from PySide6.QtGui import QMouseEvent
-
     drawer = _open(loaded_window, qapp)
-    label = drawer._labels[ROW_KEY_FILE_PATH]
+    field = drawer._labels[ROW_KEY_FILE_PATH]
     full = drawer._values[ROW_KEY_FILE_PATH]
 
-    assert label.text() == full, "显示串不许被改写"
-    if label.fontMetrics().horizontalAdvance(full) <= label.width():
-        pytest.skip("这条测试路径本来就放得下，测不到截断")
-    assert label._is_clipped(), "该出现渐隐时没判定为裁切"
-    assert not drawer._labels[KEY_FILE_NAME]._is_clipped(), "短值不该被判定为裁切"
+    assert field.text() == full, "显示串不许被改写"
+    if field.fontMetrics().horizontalAdvance(full) <= field.width():
+        pytest.skip("这条测试路径本来就放得下，测不到视口")
 
-    def drag(kind, x):
-        pos = QPointF(x, label.height() / 2)
-        return QMouseEvent(
-            kind,
-            pos,
-            label.mapToGlobal(pos.toPoint()),
-            Qt.MouseButton.LeftButton,
-            Qt.MouseButton.LeftButton,
-            Qt.KeyboardModifier.NoModifier,
-        )
-
-    QApplication.sendEvent(label, drag(QEvent.Type.MouseButtonPress, 6))
-    QApplication.sendEvent(label, drag(QEvent.Type.MouseMove, label.width() - 6))
-    QApplication.sendEvent(
-        label, drag(QEvent.Type.MouseButtonRelease, label.width() - 6)
+    # 露尾＝文末光标的矩形落在框内。不写 `cursorPosition() == len(full)`：
+    # 新建 QLineEdit 的光标本来就在末尾（实测 109），那是条空断言
+    tail_x = field.cursorRect().x()
+    assert 0 <= tail_x <= field.width(), f"默认没露出尾部：cursorX={tail_x}"
+    field.setCursorPosition(0)
+    assert tail_x - field.cursorRect().x() > field.width(), (
+        "光标位移不足一屏：说明根本没有可滚的视口"
     )
-    qapp.processEvents()
 
-    selected = label.selectedText()
-    assert selected, "拉选没选中任何字符"
-    assert "…" not in selected
-    assert selected in full, f"选中片段不是真路径的一部分: {selected!r}"
+    field.selectAll()
+    assert field.selectedText() == full, "全选必须拿到完整真路径"
+    assert "…" not in field.selectedText()
 
-    _button_for(drawer, ROW_KEY_FILE_PATH).click()
-    qapp.processEvents()
-    assert qapp_clipboard.text() == full or "…" not in qapp_clipboard.text()
+    field.end(False)  # 前面 setCursorPosition(0) 把视口滚到开头了，拨回用户看到的尾部姿态
+    _drag_select(field, field.width() - 30, field.width() + 200)
+    assert field.selectionEnd() == len(full), "拖过右缘选不到真正的结尾"
+    assert field.selectedText() == full[field.selectionStart():]
 
 
-def test_folder_row_copies_as_well_as_opens(loaded_window, qapp, qapp_clipboard):
-    """所在文件夹行必须两个动作都有：只有「打开」时，被裁掉的尾部没有出口。"""
-    from src.core.config import PATH_COPY_QUOTE, PATH_COPY_STYLE
-    from src.utils.paths import format_for_copy
-
+def test_folder_row_keeps_only_open(loaded_window, qapp):
+    """「所在文件夹」行只留「打开」：多一枚方片，值列就少 53 px（实测 368→315），
+    而值列才是这扇抽屉要读的东西。作者定的取舍，钉住防回潮。"""
     drawer = _open(loaded_window, qapp)
-    expected = format_for_copy(
-        drawer._values[KEY_FOLDER], PATH_COPY_STYLE, PATH_COPY_QUOTE
-    )
 
-    _button_for(drawer, KEY_FOLDER, "复制").click()
-    qapp.processEvents()
-
-    assert qapp_clipboard.text() == expected
-    assert "…" not in qapp_clipboard.text()
-    assert loaded_window._message_label.text() == "已复制「所在文件夹」"
+    assert _button_for(drawer, KEY_FOLDER).text() == "打开"
+    row_buttons = [
+        b
+        for b in drawer.findChildren(QToolButton)
+        if abs(b.geometry().center().y()
+               - drawer._labels[KEY_FOLDER].geometry().center().y()) <= 2
+    ]
+    assert [b.text() for b in row_buttons] == ["打开"]
 
 
 def test_footer_states_how_to_close_and_get_full_values(loaded_window, qapp):

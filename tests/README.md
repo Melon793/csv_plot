@@ -162,6 +162,7 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 | 8 | 临时诊断脚本中 monkeypatch 类方法**污染后续用例** | 直接改 `ClassName.method` 而不走 pytest monkeypatch，不会自动还原 | 一律用 `monkeypatch.setattr(Class, "method", ...)`；诊断脚本用后即删 |
 | 9 | 合成 Enter 事件**段错误（SIGSEGV，exit 139）** | `QEvent(QEvent.Type.Enter)` 会被 `QWidget::event` 按 `QEnterEvent` 做 static_cast 读字段，裸事件没有那些字段；`HoverEnter` 同理（按 `QHoverEvent` 转）。实测 offscreen 投 Enter、cocoa 投 HoverEnter 都直接崩进程（exit 139） | 投 `QtGui.QEnterEvent(local, scene, global)`；`Leave` 不做转换，裸 `QEvent` 仍然安全 |
 | 10 | 全量 e2e **偶发永久挂起**（`-q` 下撞到 4 次，`-v` 下 4 次都跑完） | pytest-qt 的 `WaitSignal` 在 Python 侧开嵌套 `QEventLoop.exec()`（`pytestqt/wait_signal.py:26`），其间 Shiboken 的 `mainThreadDeletionHandler` 等一把别的线程持有的锁 → 死锁。进程表现为 STAT=S、CPU ~0.1% | 定位：`sample <pid>` 看栈是否为 `Sbk_QEventLoopFunc_exec → mainThreadDeletionHandler → QBasicMutex::lockInternal`。临时规避是换 `-v` 跑；根治方向（未做）：少用 `qtbot.wait` 轮询（`_pump_until` 每 10 ms 一次）或给 Popup 这类跨窗口对象显式收口 |
+| 11 | 抽屉里 `QLineEdit.selectAll()` 后**一 pump 事件选区就没了**（`selectionStart/End` 变 `-1`，`selectedText()` 返回空串） | offscreen 弹窗拿不到键盘（stderr 直说 `This plugin does not support grabbing the keyboard`），`processEvents()` 期间补发一次 FocusOut，`QLineEdit` 随之清空选区；cocoa 上实测不会清 | 选区断言在 `selectAll()`/拖选**当拍**做，中间不要 `processEvents()`；要验像素表现就去 cocoa 截图（`tmp/_p02_hover_shot.py`） |
 
 ## 7. tmp/ 脚本转正流程（五步法）
 

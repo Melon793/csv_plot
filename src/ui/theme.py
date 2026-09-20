@@ -57,20 +57,44 @@ def result_text(px: int = F_RESULT_PX) -> str:
 
 
 def field_style() -> str:
-    """值列的"字段框"占位：透明描边 + 4 px 内边距，所有行一律带上。
+    """值列普通行（不可滚的短值）的字段框占位：透明描边 + 4 px 内边距。
 
-    为什么连不做 hover 的行也要留描边：只给部分行加 padding 会让它们的文字左沿
-    比别的行缩进 5 px，一张表两条基线。
+    存在的唯一理由是对齐：三行路径字段用的是只读 QLineEdit（能拉选到框外，见
+    ``path_field_style``），它的文本左沿天然不在 0；这一列要是没有同一套内边距，
+    表格就会出现两条文字左沿。
 
-    hover 那一档**不在这里**：样式表的 ``:hover`` 在合成事件下实测涂不出任何像素
-    （变化=0），无法证明真机会亮；改由 ``status_drawer.FieldLabel`` 在 paintEvent
-    里自己画，与状态栏可点击段同一套做法，可测。
+    声明值 1px 描边 + 4px padding，实测每侧吃掉 5 px（``contentsRect`` 报
+    ``(5,1,w-10,h-2)``），与声明一致。
     """
     return (
         f"QLabel {{ {value_text()}"
         f"border: 1px solid transparent;"
         f"border-radius: {R_FIELD}px;"
         f"padding: 0 4px; }}"
+    )
+
+
+def path_field_style() -> str:
+    """三行路径字段：只读 QLineEdit 的底色、描边与内边距。
+
+    用 QLineEdit 而不是 QLabel，是因为 QLabel **没有视口**：文本按控件宽度排一次
+    版，超出部分根本没参与排版，所以框外那几个字符既看不见也选不到（实测同一条
+    103 字符路径，只读 QLineEdit 的 home/end 两态差 12408 个像素 = 有视口能滚，
+    QLabel 是 0）。
+
+    ``padding`` 取 7 不是随手写的：QLabel 那列的首个墨列实测在第 9 px，QLineEdit
+    原生在第 2 px，补 7 才能让整列文字左沿对齐。
+    """
+    return (
+        f"QLineEdit {{ {value_text()}"
+        f"background-color: {BG};"
+        f"border: 1px solid transparent;"
+        f"border-radius: {R_FIELD}px;"
+        f"padding: 0 7px; }}"
+        f"QLineEdit:hover {{ background-color: {CHIP_OFF_BG};"
+        f"border: 1px solid {CHIP_CUR_BD}; }}"
+        f"QLineEdit:focus {{ background-color: {BG};"
+        f"border: 1px solid {CHIP_CUR_BD}; }}"
     )
 
 
