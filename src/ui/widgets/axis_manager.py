@@ -505,6 +505,22 @@ class AxisManager:
         except Exception:
             logger.debug("重置绘图限制失败", exc_info=True)
 
+    def _global_x_limits(self) -> tuple[float, float, float, float] | None:
+        """compute_global_x_limits 在本类里的唯一入口（已套当前 factor/offset）。
+
+        返回 4 元组 ``(min_x, max_x, limits_xMin, limits_xMax)``：前两个是裸数据域
+        （游标能到哪），后两个含 ±5% padding（视窗能看到哪）。padding 只在
+        compute_global_x_limits 里算一次，调用方不得再手写一遍。
+        """
+        pw = self.pw
+        ctx = pw.plot_context
+        loader = getattr(ctx, "loader", None) if ctx is not None else None
+        result = compute_global_x_limits(loader, factor=pw.factor, offset=pw.offset)
+        if result is None:
+            return None
+        min_x, max_x, limits_xmin, limits_xmax = result
+        return (float(min_x), float(max_x), float(limits_xmin), float(limits_xmax))
+
     def cursor_x_domain(self) -> tuple[float, float] | None:
         """游标可移动区间的唯一权威来源：全局数据 X 域（已套当前 factor/offset）。
 
@@ -515,13 +531,10 @@ class AxisManager:
         Returns:
             (min_x, max_x)；loader 无效 / 未加载数据时返回 None，调用方需自行回退。
         """
-        pw = self.pw
-        ctx = pw.plot_context
-        loader = getattr(ctx, "loader", None) if ctx is not None else None
-        result = compute_global_x_limits(loader, factor=pw.factor, offset=pw.offset)
-        if result is None:
+        limits = self._global_x_limits()
+        if limits is None:
             return None
-        return (float(result[0]), float(result[1]))
+        return (limits[0], limits[1])
 
     def apply_cursor_x_domain(self) -> tuple[float, float] | None:
         """按 cursor_x_domain() 设置 vline bounds。
@@ -533,6 +546,23 @@ class AxisManager:
         domain = self.cursor_x_domain()
         self._set_vline_bounds(list(domain) if domain is not None else [None, None])
         return domain
+
+    def apply_cursor_x_domain_and_limits(self) -> tuple[float, float] | None:
+        """同一次计算里同时落地游标域与 ViewBox xLimits（含 ±5% padding）。
+
+        给 reload 重建用：那里两件事本来就必须一起做，分开调会让调用方自己重算
+        padding（曾在 cursor_sync_manager 里手写第二份，与 config 那份各自漂移）。
+        无权威源时与 apply_cursor_x_domain() 同口径：bounds 放开成无界、xLimits
+        不动（保持 pyqtgraph 现状），返回 None。
+        """
+        limits = self._global_x_limits()
+        if limits is None:
+            self._set_vline_bounds([None, None])
+            return None
+        min_x, max_x, limits_xMin, limits_xMax = limits
+        self._set_vline_bounds([min_x, max_x])
+        self._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+        return (min_x, max_x)
 
     def _set_vline_bounds(self, bounds: list) -> None:
         """设置光标垂直线的边界"""

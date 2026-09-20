@@ -383,8 +383,12 @@ class FileInfoDrawer(StatusDrawer):
 
     @staticmethod
     def _value_label(value: str) -> QLabel:
-        """普通值：一行裸文本（短到不会截断，没有拉选需求）。"""
+        """普通值：一行裸文本（没有拉选需求，全文出口是 tooltip）。"""
         label = QLabel(value)
+        # 「格式」行的值没有硬上界（工作表名 + 不定长 notes，实测一条 40 个 CJK
+        # 字符 ≈ 560 px，超过值列净宽 441 px），而它既不在 _CLIP_KEYS（没有视口）
+        # 也没有行尾按钮 —— tooltip 是它唯一的全文出口
+        label.setToolTip(value)
         # 字段框占位与路径字段同一套内边距，否则整列出现两条文字左沿
         label.setStyleSheet(theme.field_style())
         label.setTextInteractionFlags(

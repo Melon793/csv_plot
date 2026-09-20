@@ -1202,9 +1202,16 @@ class MainWindow(QMainWindow):
 
         if clicked == force_btn:
             self._persist_last_template(self._last_template_id, name)
-            self.plot_config_manager.apply_config(self, config)
-            self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
-            self._announce_applied(f"已强制套用模板[{name}]", ratio, unmatched)
+            # 与正常套用路径同口径：apply_config 是 -> bool，内部整体包在 try 里，
+            # 失败返回 False。不看返回值就播报，屏上会留一句 warn 级的假成功
+            if self.plot_config_manager.apply_config(self, config):
+                self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
+                self._announce_applied(f"已强制套用模板[{name}]", ratio, unmatched)
+            else:
+                QMessageBox.warning(
+                    self, "应用失败",
+                    f"模板[{name}]应用失败，请检查数据是否已加载。"
+                )
 
     def _show_status_message(self, message: str):
         """一次性动作的全局反馈（状态栏右区播报，按级别自动回收）。"""

@@ -303,6 +303,26 @@ def test_path_rows_are_read_only_scrollable_fields(loaded_window, qapp):
         assert "padding: 0 " in widget.styleSheet(), key
 
 
+def test_plain_value_rows_keep_a_full_text_exit(loaded_window, qapp):
+    """非路径行也要有全文出口：值列会被列宽裁掉，tooltip 是它唯一的兜底。
+
+    「格式」行的值没有硬上界（工作表名 + 不定长 notes，实测一条 40 个 CJK 字符
+    ≈ 560 px，超过 config 注释给的值列净宽 441 px），而它既不在 _CLIP_KEYS
+    （没有视口）也没有行尾「复制」按钮 —— tooltip 被删掉之后全文就没有出口了。
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    from src.ui.widgets.status_drawer import _CLIP_KEYS
+
+    drawer = _open(loaded_window, qapp)
+
+    plain = {k: w for k, w in drawer._labels.items() if k not in _CLIP_KEYS}
+    assert plain, "前置条件：本抽屉至少有一行普通值"
+    for key, widget in plain.items():
+        assert not isinstance(widget, QLineEdit), key
+        assert widget.toolTip() == drawer._values[key], key
+
+
 def test_hidden_part_of_long_path_is_laid_out_and_selectable(loaded_window, qapp):
     """放不下的那半截路径必须还在：视口滚得到、拖选/全选拿到的都是真路径。
 

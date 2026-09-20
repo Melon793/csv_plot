@@ -658,6 +658,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """按权威源设置光标线边界 → 委托到 AxisManager"""
         return self._axis_manager.apply_cursor_x_domain()
 
+    def _apply_cursor_x_domain_and_limits(self):
+        """按权威源同时设置光标线边界与 X limits → 委托到 AxisManager"""
+        return self._axis_manager.apply_cursor_x_domain_and_limits()
+
     def apply_cursor_mode(self, mode, pinned_x_values):
         """应用光标模式 → 委托到 CursorManager"""
         self._cursor_manager.apply_cursor_mode(mode, pinned_x_values)

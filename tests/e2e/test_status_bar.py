@@ -14,6 +14,7 @@ import time
 
 import pytest
 from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtWidgets import QMessageBox
 
 from tests.fixtures.data_factory import make_simple_rows, write_csv
 
@@ -514,3 +515,137 @@ def test_clear_with_nothing_drawn_stays_silent(loaded_window, qapp):
     qapp.processEvents()
 
     assert mw._message_text == "", "清了个空图还报一条，等于占着消息区说废话"
+
+
+# ---------------- 模板路径：强制套用的失败反馈 + 保存信号接线 ----------------
+
+def _click_button(text=None, standard=None):
+    """把 QMessageBox.exec 换成「点掉指定那枚按钮」，按钮本身不替身化。
+
+    走真 QPushButton.click() → 真 clickedButton()，否则测的就不是
+    _show_match_low_dialog 的分支判定，而是替身自己的返回值。
+
+    标准按钮（Cancel）按 StandardButton 取而不是按文字：offscreen 下没装 Qt
+    翻译，它的 text() 是 "Cancel" 不是「取消」。
+    """
+    def fake_exec(box):
+        if standard is not None:
+            button = box.button(standard)
+        else:
+            button = next(b for b in box.buttons() if b.text() == text)
+        button.click()
+        return 1  # QDialog.DialogCode.Accepted
+
+    return fake_exec
+
+
+def _low_match_args():
+    from src.core.plot_config import PlotConfig, PlotSessionConfig
+
+    config = PlotSessionConfig(plots=[PlotConfig(curves=["speed"])])
+    return config, 0.0, set(), {"数据里没有的通道"}
+
+
+def test_forced_apply_failure_does_not_announce_success(
+    loaded_window, monkeypatch, dialog_stubs, qapp
+):
+    """点「仍然加载」而 apply_config 返回 False：不得照播「已强制套用」。
+
+    apply_config 整体包在 try 里、失败返回 False；旧实现丢弃返回值直接播报，
+    于是屏上留下一句 warn 级、要停 8 秒的假成功 —— 用户以为模板套上了。
+    """
+    mw = loaded_window
+    config, ratio, matched, unmatched = _low_match_args()
+    monkeypatch.setattr(
+        mw.plot_config_manager, "apply_config", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(QMessageBox, "exec", _click_button(text="仍然加载"))
+    mw.clear_status_message()
+
+    mw._show_match_low_dialog("台架一项", config, ratio, matched, unmatched)
+    qapp.processEvents()
+
+    assert "已强制套用" not in mw._message_text, f"失败了还播成功: {mw._message_text!r}"
+    assert [title for title, _ in dialog_stubs["warning"]] == ["应用失败"]
+
+
+def test_forced_apply_success_still_announces(
+    loaded_window, monkeypatch, dialog_stubs, qapp
+):
+    """正向对照：上一条不是把播报整个掐了 —— 真套上时照播，且与正常路径同规格。"""
+    mw = loaded_window
+    config, ratio, matched, unmatched = _low_match_args()
+    applied = []
+
+    def fake_apply(_mw, cfg):
+        applied.append(cfg)
+        return True
+
+    monkeypatch.setattr(mw.plot_config_manager, "apply_config", fake_apply)
+    monkeypatch.setattr(QMessageBox, "exec", _click_button(text="仍然加载"))
+
+    mw._show_match_low_dialog("台架一项", config, ratio, matched, unmatched)
+    qapp.processEvents()
+
+    assert applied == [config], "点「仍然加载」必须真的去套用"
+    assert mw._message_text == "已强制套用模板[台架一项] · 匹配 0%（1 个变量缺失）"
+    assert mw._message_level == "warn", "缺变量就该按 warn 停 8 秒，与正常套用一致"
+    assert not dialog_stubs["warning"], f"成功不该弹失败框: {dialog_stubs['warning']}"
+
+
+def test_cancelling_low_match_dialog_applies_nothing(
+    loaded_window, monkeypatch, dialog_stubs, qapp
+):
+    """二次确认本身没被这两条改坏：点取消既不套用也不播报。"""
+    mw = loaded_window
+    config, ratio, matched, unmatched = _low_match_args()
+    calls = []
+    monkeypatch.setattr(
+        mw.plot_config_manager,
+        "apply_config",
+        lambda *_a, **_k: calls.append(1) or True,
+    )
+    monkeypatch.setattr(
+        QMessageBox, "exec",
+        _click_button(standard=QMessageBox.StandardButton.Cancel),
+    )
+    mw.clear_status_message()
+
+    mw._show_match_low_dialog("台架一项", config, ratio, matched, unmatched)
+    qapp.processEvents()
+
+    assert calls == []
+    assert mw._message_text == ""
+
+
+def test_template_saved_signal_reaches_the_status_bar(
+    loaded_window, monkeypatch, tmp_path, qapp
+):
+    """保存模板的接线：template_saved → _on_template_saved → 状态栏那一句。
+
+    此前只有纯函数 _template_saved_text 被测；``self.sender()`` 取
+    ``dialog.saved_summary`` 这条链没人走过 —— 断掉的话屏上会退回播 uuid，
+    或者一个字都不播（保存明明成功了）。
+    """
+    from src.core.template_manager import TemplateManager
+    from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
+
+    mw = loaded_window
+    _plot_variables(mw, ["speed"], qapp)
+    manager = TemplateManager(storage_path=tmp_path / "templates")
+    monkeypatch.setattr(mw.plot_config_manager, "_template_manager", manager)
+
+    def fake_exec(dialog):
+        dialog._name_edit.setText("接线检查")
+        dialog._save_btn.click()
+        return 1
+
+    monkeypatch.setattr(TemplateEditorDialog, "exec", fake_exec)
+
+    mw.save_current_as_template()
+    qapp.processEvents()
+
+    assert manager.exists("接线检查"), "前置条件：保存真的落盘了"
+    assert mw._message_text == "模板已保存：接线检查 · 1 个变量 / 1 个子图"
+    template_id = next(t.metadata.id for t in manager.get_all_templates())
+    assert template_id not in mw._message_text, "uuid 短码不该出现在界面上"

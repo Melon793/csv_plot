@@ -8,7 +8,6 @@ from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QMessageBox
 
 from src.core.config import (
-    DEFAULT_PADDING_VAL_X,
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
     safe_qt_op,
@@ -296,7 +295,8 @@ class CursorSyncManager(MainWindowBaseManager):
                     [np.nanmin(combined), np.nanmax(combined)]
                 )
             else:
-                # 无权威源（loader 无效）时保持原 bounds，只重摆游标位置
+                # 本图无可见曲线：回落到全局数据 X 域（随当前 factor/offset 现算）；
+                # loader 也无效时内部会写 [None, None]，即放开成无界
                 widget._apply_cursor_x_domain()
 
             widget.apply_cursor_mode(self.mw.cursor_mode, new_display_values)
@@ -590,17 +590,10 @@ class CursorSyncManager(MainWindowBaseManager):
                         widget = container.plot_widget
 
                         # 游标域 / X limits 的唯一权威源：compute_global_x_limits
-                        # （内部含 min==max 扩展），不再在这里手写 index/时间轴换算
-                        domain = widget._apply_cursor_x_domain()
-                        if domain is None:
-                            min_x, max_x = None, None
-                        else:
-                            min_x, max_x = domain
-                            limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                            limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                            widget._set_x_limits_with_min_range(
-                                limits_xMin, limits_xMax
-                            )
+                        # （内部含 min==max 扩展与 ±5% padding），不再在这里手写
+                        # index/时间轴换算，也不在这里重算 padding
+                        domain = widget._apply_cursor_x_domain_and_limits()
+                        min_x, max_x = domain if domain is not None else (None, None)
 
                         # === 统一 reload 路径：始终从 curves 字典保存/重建 ===
                         saved_state = {
