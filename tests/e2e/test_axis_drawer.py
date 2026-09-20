@@ -75,7 +75,7 @@ def _button(drawer, text):
 
 
 def test_axis_drawer_uses_its_own_narrower_width(loaded_window, qapp):
-    """x 轴抽屉用自己的宽度上限：共用文件抽屉那 520 会在右侧白留一块空。
+    """x 轴抽屉用自己的宽度上限：共用文件抽屉那 600 会在右侧白留一块空。
 
     440 是扫出来的：最紧的一行是页脚（提示文字 + 恢复默认 + 应用），实测宽度
     420 时 Fusion 只剩 1 px（222/221），440 剩 21 px。这里同时钉住页脚与预览

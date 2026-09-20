@@ -480,7 +480,7 @@ class XAxisDrawer(StatusDrawer):
     """
 
     #: 这扇抽屉最紧的一行是页脚（提示 + 恢复默认 + 应用），实测 440 就够；
-    #: 沿用文件抽屉的 520 会在右侧白留 ~80 px 空
+    #: 沿用文件抽屉的 600 会在右侧白留 ~160 px 空
     width_cap = STATUS_DRAWER_WIDTH_AXIS
 
     #: 当前档的标记：只用圆点，不加粗（作者定）。选 U+25CF 而不是 U+2022 ——
@@ -542,8 +542,9 @@ class XAxisDrawer(StatusDrawer):
         # 档位单独一行，且从**第 1 列**起（与频率框左沿对齐）：它们就是"给上面
         # 那个框填值"的快捷入口，对齐到框下面才读得出这层从属关系。
         # 不再挤在频率框右侧 —— QPushButton 在 Fusion 下有 ~80 px 最小宽度，四枚
-        # 329 px 放右侧会把抽屉自然宽从 450 顶到 600，超过 STATUS_DRAWER_WIDTH
-        # =520（mac 下 233 px 刚好卡住，但布局不能只按一台机器定）。
+        # 329 px 放右侧会把抽屉自然宽从 450 顶到 600，远超这扇自己的上限
+        # STATUS_DRAWER_WIDTH_AXIS=440（mac 下 233 px 刚好卡住，但布局不能只按
+        # 一台机器定）。
         grid.addLayout(self._build_presets(), 1, 1, 1, 2)
         grid.addWidget(self._field_label("系数"), 2, 0)
         grid.addWidget(self.factor_spin, 2, 1)
