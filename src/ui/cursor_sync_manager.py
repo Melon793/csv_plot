@@ -286,19 +286,18 @@ class CursorSyncManager(MainWindowBaseManager):
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
 
-            # 统一版：始终从 curves 字典获取数据范围
+            # 统一版：有可见曲线时用本图曲线域，否则用全局数据 X 域（唯一权威源，
+            # 随当前 factor/offset 现算）。曾经这里手写 offset+factor*1 / datalength，
+            # 与 compute_global_x_limits 是同一公式的两份实现，容易漂移。
             x_arrays = widget._collect_visible_curve_arrays('x_data')
             if x_arrays:
                 combined = np.concatenate(x_arrays)
-                new_min_x, new_max_x = np.nanmin(combined), np.nanmax(combined)
+                widget._set_vline_bounds(
+                    [np.nanmin(combined), np.nanmax(combined)]
+                )
             else:
-                new_min_x = widget.offset + widget.factor * 1
-                new_max_x = widget.offset + widget.factor * datalength
-
-            if hasattr(widget, "_set_vline_bounds"):
-                widget._set_vline_bounds([new_min_x, new_max_x])
-            else:
-                widget.vline.setBounds([new_min_x, new_max_x])
+                # 无权威源（loader 无效）时保持原 bounds，只重摆游标位置
+                widget._apply_cursor_x_domain()
 
             widget.apply_cursor_mode(self.mw.cursor_mode, new_display_values)
             if hasattr(widget.view_box, "is_cursor_pinned"):
@@ -403,13 +402,17 @@ class CursorSyncManager(MainWindowBaseManager):
                 all_maxs.append(x_max)
 
         if not all_mins:
-            if self.mw.loader and hasattr(self.mw.loader, "global_time_range"):
-                fallback = self.mw.loader.global_time_range
-                logger.debug("[GLOBAL_X] collect_global_x_range: no visible plot data, fallback=time_range %s", fallback)
-                return fallback
-            elif self.mw.loader and self.mw.loader.datalength > 0:
-                fallback = (1.0, float(self.mw.loader.datalength))
-                logger.debug("[GLOBAL_X] collect_global_x_range: no visible plot data, fallback=datalength %s", fallback)
+            # 回退同样必须套当前 factor/offset：直接返回 index 空间（raw
+            # global_time_range / datalength）会让「全部自适应」、布局换行时的
+            # X 同步、以及 reload 的 pinned 钳制把视窗/游标钉回未修正的时间轴。
+            src = self._get_cursor_source_plot()
+            fallback = src._cursor_x_domain() if src is not None else None
+            if fallback is not None:
+                logger.debug(
+                    "[GLOBAL_X] collect_global_x_range: no visible plot data, "
+                    "fallback=cursor_x_domain %s",
+                    fallback,
+                )
                 return fallback
             logger.debug("[GLOBAL_X] collect_global_x_range: no data available")
             return (None, None)
@@ -579,24 +582,18 @@ class CursorSyncManager(MainWindowBaseManager):
                     for idx, container in enumerate(self.mw.plot_widgets):
                         widget = container.plot_widget
 
-                        if is_mdf:
-                            x_min, x_max = self.mw.loader.global_time_range
-                            min_x = widget.offset + widget.factor * x_min
-                            max_x = widget.offset + widget.factor * x_max
+                        # 游标域 / X limits 的唯一权威源：compute_global_x_limits
+                        # （内部含 min==max 扩展），不再在这里手写 index/时间轴换算
+                        domain = widget._apply_cursor_x_domain()
+                        if domain is None:
+                            min_x, max_x = None, None
                         else:
-                            original_index_x = np.arange(
-                                1, self.mw.loader.datalength + 1, dtype=np.float32
+                            min_x, max_x = domain
+                            limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
+                            limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
+                            widget._set_x_limits_with_min_range(
+                                limits_xMin, limits_xMax
                             )
-                            min_x = widget.offset + widget.factor * np.min(original_index_x)
-                            max_x = widget.offset + widget.factor * np.max(original_index_x)
-                        min_x, max_x = widget._get_safe_x_range(min_x, max_x)
-                        limits_xMin = min_x - DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                        limits_xMax = max_x + DEFAULT_PADDING_VAL_X * (max_x - min_x)
-                        widget._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-                        if hasattr(widget, "_set_vline_bounds"):
-                            widget._set_vline_bounds([min_x, max_x])
-                        else:
-                            widget.vline.setBounds([min_x, max_x])
 
                         # === 统一 reload 路径：始终从 curves 字典保存/重建 ===
                         saved_state = {
