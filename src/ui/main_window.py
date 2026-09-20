@@ -990,6 +990,12 @@ class MainWindow(QMainWindow):
         # 开关状态只体现在模板菜单按钮上：标题按 P0-2 的决定只剩
         # 「文件名 - 软件名 版本」，不再挂自动保存状态
         self._refresh_auto_restore_indicator()
+        # 那个 ✓ 只在按钮文字上，勾完就收起菜单的人看不见；这里补一句它会
+        # 对**下一次加载**做什么，而不是只重复开关名
+        if checked:
+            self._broadcast("自动恢复已开启：下次加载数据会沿用当前布局")
+        else:
+            self._broadcast("自动恢复已关闭：加载数据后不再沿用上次布局")
 
     def _refresh_auto_restore_indicator(self):
         enabled = self.plot_config_manager.auto_save_manager.is_auto_save_enabled()
@@ -1021,11 +1027,33 @@ class MainWindow(QMainWindow):
     def _on_template_saved(self, template_id: str):
         from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
         dialog = self.sender()
+        summary = "模板已保存"
         if isinstance(dialog, TemplateEditorDialog):
             self._last_template_name = dialog._name_edit.text().strip()
             self._last_template_desc = dialog._desc_edit.text().strip()
+            summary = dialog.saved_summary or summary
         self._persist_last_template(template_id, self._last_template_name or "")
-        self._show_status_message(f"模板已保存: {template_id}")
+        self._show_status_message(
+            self._template_saved_text(summary, template_id)
+        )
+
+    def _template_saved_text(self, summary: str, template_id: str) -> str:
+        """原先播的是 ``template_id``（``uuid4().hex[:8]``，屏上没人读得懂）。
+
+        变量数/子图数与模板管理器列表那两列同一套算法
+        （``count_template_variables`` / ``len(config["plots"])``），同一个模板
+        不会在两个地方给出两个说法。
+        """
+        name = self._last_template_name or template_id
+        template = self.plot_config_manager.template_manager.get_template(template_id)
+        if template is None:
+            return f"{summary}：{name}"
+        from src.core.template_models import count_template_variables
+        plot_count = len(template.config.get("plots", []) or [])
+        return (
+            f"{summary}：{name} · {count_template_variables(template.config)} 个变量"
+            f" / {plot_count} 个子图"
+        )
 
     def _persist_last_template(self, template_id: str, name: str):
         """持久化最后使用的模板信息"""
@@ -1082,6 +1110,20 @@ class MainWindow(QMainWindow):
         self._persist_last_template(template_id, template.metadata.name)
         self._check_and_apply_template(template, template_id, template.metadata.name)
 
+    def _announce_applied(self, label: str, ratio: float, unmatched) -> None:
+        """套用一套通道映射之后的播报，三条路径共用（正常套用 / 强制套用 /
+        加载后自动恢复）。
+
+        缺变量就意味着图上有注定空着的格子，所以按 warn（8s）而不是 info
+        （5s）：87% 与 100% 在图上看不出差别，只有这一句能告诉人是少了几条
+        曲线，而它 5 秒就收走等于没说。
+        """
+        text = f"{label} · 匹配 {ratio:.0%}"
+        if unmatched:
+            self._broadcast(f"{text}（{len(unmatched)} 个变量缺失）", level="warn")
+        else:
+            self._broadcast(text)
+
     def _check_and_apply_template(self, template, template_id: str, name: str):
         from src.core.plot_config import PlotSessionConfig
         if self.loader is None:
@@ -1098,6 +1140,7 @@ class MainWindow(QMainWindow):
             success = self.plot_config_manager.apply_config(self, config)
             if success:
                 self._logger.info(f"应用模板[{name}]成功，匹配度 {ratio:.0%}")
+                self._announce_applied(f"已套用模板[{name}]", ratio, unmatched)
             else:
                 QMessageBox.warning(
                     self, "应用失败",
@@ -1113,12 +1156,14 @@ class MainWindow(QMainWindow):
             return
         template = self.plot_config_manager.template_manager.get_template(tid)
         if not template:
-            QMessageBox.warning(self, "模板不存在", f"模板[{name}]已被删除")
             self._last_template_id = None
             self._last_template_name = None
             self._template_settings.set_last_template_id(None)
             self._template_settings.set_last_template_name(None)
             self._template_settings.sync()
+            # 撤了弹窗改常驻播报：这个分支下面就把快速项从设置里清掉了，
+            # 菜单再展开就没有这一项，用户只看到菜单变短 —— 得有个说法
+            self._broadcast(f"模板[{name}]已被删除", level="error")
             return
         self._check_and_apply_template(template, tid, name)
 
@@ -1149,6 +1194,7 @@ class MainWindow(QMainWindow):
             self._persist_last_template(self._last_template_id, name)
             self.plot_config_manager.apply_config(self, config)
             self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
+            self._announce_applied(f"已强制套用模板[{name}]", ratio, unmatched)
 
     def _show_status_message(self, message: str):
         """一次性动作的全局反馈（状态栏右区播报，按级别自动回收）。"""

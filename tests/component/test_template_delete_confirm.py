@@ -81,11 +81,36 @@ class TestDeleteTemplateConfirmation:
         assert manager.get_template(tid) is None
         assert dlg._selected_template_id is None
 
-    def test_no_selection_warns_without_confirming(self, dialog_with_template, monkeypatch):
+    def test_no_selection_stays_silent(self, dialog_with_template, monkeypatch):
+        """未选中不再弹「请先选择一个模板」：既不弹确认，也不弹警告。"""
         dlg, manager, _ = dialog_with_template
         dlg._selected_template_id = None
         calls = _patch_msgbox(monkeypatch, YES)
 
         dlg._on_delete_clicked()
 
-        assert [c[0] for c in calls] == ["warning"], "未选中时只提示，不该弹确认"
+        assert calls == []
+
+
+class TestSelectionGate:
+    """撤掉那五句警告之后的替代物：没选中项时按钮根本点不动。"""
+
+    def test_greyed_until_a_row_is_selected(self, qapp, tmp_path):
+        manager = TemplateManager(storage_path=tmp_path / "templates")
+        manager.save_template(
+            PlotSessionConfig(plots=[PlotConfig(curves=["a"])]), "gate"
+        )
+        dlg = TemplateManagerDialog(manager)
+        gated = (
+            dlg._load_btn,
+            dlg._edit_btn,
+            dlg._duplicate_btn,
+            dlg._delete_btn,
+            dlg._export_btn,
+        )
+        assert not any(b.isEnabled() for b in gated), "未选中时五个动作必须置灰"
+        # 不需要选中项的两个动作与「关闭」不能被一起灰掉
+        assert dlg._new_btn.isEnabled() and dlg._import_btn.isEnabled()
+
+        dlg._table.selectRow(0)
+        assert all(b.isEnabled() for b in gated), "选中后五个动作要恢复可点"

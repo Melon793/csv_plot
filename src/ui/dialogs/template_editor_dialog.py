@@ -73,6 +73,8 @@ class TemplateEditorDialog(QDialog):
         self._template = None
         self._initial_name = initial_name
         self._initial_desc = initial_desc
+        #: 保存成功时给主窗口播报用的动词，见 `_on_save_clicked`
+        self.saved_summary = ""
 
         if edit_template_id:
             self._template = self._template_manager.get_template(edit_template_id)
@@ -361,7 +363,7 @@ class TemplateEditorDialog(QDialog):
                     return
                 if action == "overwrite":
                     edit_id = conflict.metadata.id
-                    success_message = f"已覆盖模板 [{name}]"
+                    success_message = "已覆盖模板"
                 else:
                     # action == "rename"：自动改用不冲突的新名称继续保存
                     name = self._suggest_unique_name(name)
@@ -377,10 +379,11 @@ class TemplateEditorDialog(QDialog):
                 # 写盘成功后才把编辑目标切到新模板（并丢弃载入表单用的旧快照）
                 self._edit_template_id = template.metadata.id
                 self._template = None
-            QMessageBox.information(
-                self,
-                "成功",
-                success_message or ("模板已更新" if edit_id else "模板已保存"),
+            # 成功不再弹框（点 OK 只是为了关掉一个已成立的事实），改由主窗口
+            # 播到状态栏右区。这里只给动词、不带模板名：名字由那一条拼，
+            # 拼成"已覆盖模板：X · 3 个变量 / 2 个子图"
+            self.saved_summary = success_message or (
+                "模板已更新" if edit_id else "模板已保存"
             )
             try:
                 self.template_saved.emit(template.metadata.id)

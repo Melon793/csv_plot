@@ -94,3 +94,29 @@ def test_save_as_success_creates_new_template_and_leaves_original(manager, boxes
         t.metadata.id for t in manager.get_all_templates() if t.metadata.name == "copy"
     )
     assert dlg._edit_template_id == copy_id
+
+
+def test_save_success_is_quiet_and_hands_the_wording_over(manager, boxes):
+    """成功框已撤：点保存不该再有「成功」弹窗，动词交给状态栏那一句去拼。"""
+    emitted = []
+    dlg = _editor(manager, None)
+    dlg.template_saved.connect(emitted.append)
+
+    dlg._name_edit.setText("quiet")
+    dlg._save_btn.click()
+
+    assert "成功" not in boxes, f"成功框还在: {boxes}"
+    assert emitted, "撤弹窗不能把 template_saved 一起撤掉"
+    assert dlg.saved_summary == "模板已保存"
+    assert manager.exists("quiet")
+
+
+def test_edit_save_reports_update_not_save(manager, boxes):
+    """编辑已有模板时动词必须是「模板已更新」，否则状态栏会误报新建了一个。"""
+    first = manager.save_template(_config(["a"]), "tpl1", "d1")
+    dlg = _editor(manager, first.metadata.id)
+
+    dlg._save_btn.click()
+
+    assert "成功" not in boxes
+    assert dlg.saved_summary == "模板已更新"

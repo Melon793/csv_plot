@@ -307,6 +307,100 @@ def test_log_separator_follows_the_message(main_window, qtbot):
     qtbot.waitUntil(lambda: not mw._log_separator.isVisible(), timeout=2000)
 
 
+def test_auto_restore_toggle_announces_what_it_will_do(main_window):
+    """「自动恢复」勾完就收起菜单，那个 ✓ 太小：切换要在右区说一句后果。"""
+    mw = main_window
+
+    mw._on_auto_restore_toggled(True)
+    assert "已开启" in mw._message_text
+    assert "下次加载" in mw._message_text, "只重复开关名等于没说"
+
+    mw._on_auto_restore_toggled(False)
+    assert "已关闭" in mw._message_text
+
+
+def test_quick_apply_of_a_deleted_template_broadcasts_instead(
+    main_window, dialog_stubs
+):
+    """快速项指向已删模板：撤了 warning，改成 error 级常驻播报。
+
+    这一条同时钉住"不许再弹框"和"清设置"两件事 —— 清完设置菜单里就没有这一
+    项了，屏上若一个字都不留，用户只会以为菜单自己变短。
+    """
+    mw = main_window
+    mw._last_template_id = "deadbeef"
+    mw._last_template_name = "已失踪的模板"
+
+    mw._quick_apply_template()
+
+    assert not dialog_stubs["warning"], f"弹窗已撤，不该再有 warning: {dialog_stubs['warning']}"
+    assert mw._message_text == "模板[已失踪的模板]已被删除"
+    assert mw._message_level == "error", "要常驻到用户下一次动作，不能 5 秒自己没了"
+    assert mw._last_template_id is None
+
+
+def test_saved_template_announces_name_not_id(main_window, monkeypatch):
+    """保存播报从前是 uuid 短码；换成模板名 + 规模，且与列表两列同口径。"""
+    from types import SimpleNamespace
+
+    mw = main_window
+    mw._last_template_name = "台架四项"
+    monkeypatch.setattr(
+        mw.plot_config_manager.template_manager,
+        "get_template",
+        lambda _tid: SimpleNamespace(
+            config={"plots": [{"curves": ["a", "b"]}, {"curves": ["b", "c"]}]}
+        ),
+    )
+
+    text = mw._template_saved_text("模板已保存", "deadbeef")
+
+    assert "deadbeef" not in text, "uuid 短码不该出现在界面上"
+    assert text == "模板已保存：台架四项 · 3 个变量 / 2 个子图", "变量数按去重算，与列表「变量数」列一致"
+
+
+def test_apply_template_announces_match(loaded_window, qapp):
+    """套用一条通道映射不完整的模板：必须说清匹配度与缺失数，并按 warn 停留。"""
+    from types import SimpleNamespace
+
+    mw = loaded_window
+    cfg = {
+        "layout_rows": 1,
+        "layout_cols": 2,
+        "time_factor": 1.0,
+        "time_offset": 0.0,
+        "plots": [
+            {"curves": ["speed"]},
+            {"curves": ["rpm"]},
+            {"curves": ["这根通道数据里没有"]},
+        ],
+    }
+
+    mw._check_and_apply_template(SimpleNamespace(config=cfg), "abc12345", "台架三项")
+    qapp.processEvents()
+
+    assert mw._message_text == "已套用模板[台架三项] · 匹配 67%（1 个变量缺失）"
+    assert mw._message_level == "warn", "图上有空格子，5 秒就收走等于没说"
+
+
+def test_auto_restore_announces_in_the_same_shape(loaded_window):
+    """自动恢复也是套用一套通道映射，播报必须与「已套用/已强制套用」同规格。"""
+    from src.core.plot_config import PlotConfig, PlotSessionConfig
+
+    mw = loaded_window
+    config = PlotSessionConfig(
+        plots=[PlotConfig(curves=["speed"]), PlotConfig(curves=["rpm"])]
+    )
+
+    mw.file_loader_manager._announce_auto_restore(config, ["speed", "rpm"])
+    assert mw._message_text == "已自动恢复上次布局 · 匹配 100%"
+    assert mw._message_level == "info", "全对上就不该用警告色粘在屏上"
+
+    mw.file_loader_manager._announce_auto_restore(config, ["speed", "别的"])
+    assert mw._message_text == "已自动恢复上次布局 · 匹配 50%（1 个变量缺失）"
+    assert mw._message_level == "warn"
+
+
 def test_status_bar_suppresses_style_item_borders(main_window):
     """状态栏必须自己掐掉样式给 item 画的边框，否则 Windows 上会长出多余竖线。
 

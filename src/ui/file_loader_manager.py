@@ -1142,16 +1142,32 @@ class FileLoaderManager(MainWindowBaseManager):
 
                 should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(current_vars)
                 if should_apply:
-                    success = self.mw.plot_config_manager.apply_config(
-                        self.mw,
+                    saved_config = (
                         self.mw.plot_config_manager.auto_save_manager.load_auto_save()
+                    )
+                    success = self.mw.plot_config_manager.apply_config(
+                        self.mw, saved_config
                     )
                     if success:
                         logger.info("自动恢复配置成功: %s", reason)
+                        self._announce_auto_restore(saved_config, current_vars)
                     else:
                         logger.warning("自动恢复配置失败")
                 else:
                     logger.info("不应用自动保存: %s", reason)
+
+    def _announce_auto_restore(self, config, current_vars) -> None:
+        """自动恢复也是套用了一套通道映射，文案交给 ``mw._announce_applied``。
+
+        比率在这里现算而不是取 ``should_apply_auto_save`` 的 reason：那个串是
+        写给日志看的英文，而 ``check_template_match`` 的分母与它的放行判据同源
+        （都是配置里的变量数），屏上这个百分比就是刚才放行用的那一个。配置文件
+        上面已经读过，这里不再读盘。
+        """
+        ratio, _matched, unmatched = (
+            self.mw.plot_config_manager.check_template_match(config, current_vars)
+        )
+        self.mw._announce_applied("已自动恢复上次布局", ratio, unmatched)
 
     def _remember_last_open_dir(self, file_path: str):
         directory = os.path.dirname(file_path)

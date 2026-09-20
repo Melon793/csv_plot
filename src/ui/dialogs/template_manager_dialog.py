@@ -136,6 +136,27 @@ class TemplateManagerDialog(QDialog):
         button_layout.addWidget(self._close_btn)
         layout.addLayout(button_layout)
 
+        # 置灰的按钮不会解释自己为什么点不动，tooltip 是唯一那一句话
+        for button in self._selection_buttons():
+            button.setToolTip("先在列表中选中一个模板")
+        self._refresh_selection_actions()
+
+    def _selection_buttons(self) -> list:
+        """作用对象是"某一个模板"、因此必须先选中一项的按钮。"""
+        return [
+            self._load_btn,
+            self._edit_btn,
+            self._duplicate_btn,
+            self._delete_btn,
+            self._export_btn,
+        ]
+
+    def _refresh_selection_actions(self):
+        """没选中项时这几个按钮没有作用对象，直接置灰，不再"点了才弹一句警告"。"""
+        has_selection = self._selected_template_id is not None
+        for button in self._selection_buttons():
+            button.setEnabled(has_selection)
+
     def _connect_signals(self):
         """连接信号"""
         self._search_edit.textChanged.connect(self._refresh_template_list)
@@ -190,10 +211,12 @@ class TemplateManagerDialog(QDialog):
                     f"创建时间: {template.metadata.created_at[:16]}\n"
                     f"更新时间: {template.metadata.updated_at[:16]}"
                 )
+                self._refresh_selection_actions()
                 return
 
         self._selected_template_id = None
         self._details_label.setText("选中: -")
+        self._refresh_selection_actions()
 
     def _on_double_clicked(self, item):
         """双击加载模板"""
@@ -231,7 +254,6 @@ class TemplateManagerDialog(QDialog):
     def _on_export_clicked(self):
         """导出模板"""
         if not self._selected_template_id:
-            QMessageBox.warning(self, "警告", "请先选择一个模板")
             return
 
         template = self._template_manager.get_template(self._selected_template_id)
@@ -261,7 +283,6 @@ class TemplateManagerDialog(QDialog):
     def _on_edit_clicked(self):
         """编辑模板"""
         if not self._selected_template_id:
-            QMessageBox.warning(self, "警告", "请先选择一个模板")
             return
 
         dialog = TemplateEditorDialog(
@@ -275,7 +296,6 @@ class TemplateManagerDialog(QDialog):
     def _on_duplicate_clicked(self):
         """复制模板"""
         if not self._selected_template_id:
-            QMessageBox.warning(self, "警告", "请先选择一个模板")
             return
 
         template = self._template_manager.get_template(self._selected_template_id)
@@ -303,7 +323,6 @@ class TemplateManagerDialog(QDialog):
     def _on_delete_clicked(self):
         """删除模板"""
         if not self._selected_template_id:
-            QMessageBox.warning(self, "警告", "请先选择一个模板")
             return
 
         template = self._template_manager.get_template(self._selected_template_id)
@@ -332,11 +351,13 @@ class TemplateManagerDialog(QDialog):
         """模板编辑完成"""
         self._selected_template_id = template_id
         self._refresh_template_list()
+        # 这里的选中是代码给的，不一定伴随一次 itemSelectionChanged
+        # （行数没变时 setRowCount 不清选择态），所以要手动同步一次按钮
+        self._refresh_selection_actions()
 
     def _on_load_clicked(self):
         """加载选中的模板"""
         if not self._selected_template_id:
-            QMessageBox.warning(self, "警告", "请先选择一个模板")
             return
         self.template_applied.emit(self._selected_template_id)
         self.accept()
