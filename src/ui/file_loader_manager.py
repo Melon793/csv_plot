@@ -226,9 +226,10 @@ class FileLoaderManager(MainWindowBaseManager):
         """将 pinned 值钳制到全局数据 X 范围内。
 
         v5.x 修复问题 A：reload 后新数据范围可能变小，旧 pinned 值可能超出范围。
-        InfiniteLine.setPos() 不受 setBounds() 钳制，vline 会显示在数据范围之外，
-        拖动时突然跳到 bounds 边界。此处统一钳制 pinned 值，使 MainWindow 与
-        widget 的 pinned_x_values 保持一致。
+        这里显式钳制的目的不是「补 setPos 的漏」（InfiniteLine.setPos 本来就会按
+        maxRange 钳制，见 pyqtgraph InfiniteLine.setPos），而是让 MainWindow 与
+        各 widget 的 pinned_x_values 在恢复前就一致，避免把越界值写进状态后再被
+        各图 bounds 各自钳成不同数值。
         """
         if not pinned_values:
             return list(pinned_values)
@@ -424,9 +425,10 @@ class FileLoaderManager(MainWindowBaseManager):
                 return
 
             # v5.x 修复问题 A：钳制 pinned 值到新数据范围。
-            # reload 后新数据范围可能变小，旧 pinned 值可能超出范围，
-            # InfiniteLine.setPos() 不受 setBounds() 钳制会导致 vline 显示在数据范围外，
-            # 拖动时突然跳到 bounds 边界。此处统一钳制，后续代码自动使用钳制后的值。
+            # reload 后新数据范围可能变小，旧 pinned 值可能超出范围；setPos 虽会按
+            # maxRange 钳制，但各图钳完就是各图的值，先在这里统一钳一次才能让
+            # MainWindow 与各 widget 的 pinned_x_values 保持同一个基准。
+            # 此处统一钳制，后续代码自动使用钳制后的值。
             saved_pinned_x_values = self._clamp_pinned_to_global_range(saved_pinned_x_values)
 
             self.mw.cursor_mode = saved_cursor_mode

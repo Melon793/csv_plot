@@ -353,12 +353,13 @@ class CursorManager:
                 if my_version != 0 and my_version != current_version:
                     lock_reason = f"version mismatch my={my_version} current={current_version}"
 
-        # 安全网：vline bounds 为 [None, None] 时禁止 cursor 更新，
-        # 防止 vline 处于无效状态（如 reload 中间态）时触发 cursor 回调导致 SIGSEGV
-        if lock_reason is None and hasattr(self.pw, "vline"):
-            bounds = safe_qt_op(lambda: self.pw.vline.bounds)
-            if bounds is None or bounds == [None, None] or bounds == (None, None):
-                lock_reason = f"vline bounds={bounds}"
+        # 注意：不要用 vline.bounds 表达「reload 中间态 / 无数据」。bounds 的语义是
+        # pyqtgraph 的「无界」（[None, None] = 不限），全局数据源不可用时它本身就是
+        # [None, None]，拿它当状态哨兵会在未加载数据时锁死整条游标更新链。
+        # （v0.3.15 及之前这里读 self.pw.vline.bounds 这个「方法」而非 bounds()，
+        # 条件恒不成立，实际从未生效；删掉死代码而不是补括号。）
+        # 中间态防护由上面的 _is_updating_data / _is_being_destroyed /
+        # _is_loading_new_data / 数据版本号四道门承担。
 
         # 诊断日志：仅在锁定状态变化时记录，避免拖动期间日志洪泛
         if logger.isEnabledFor(logging.DEBUG):
