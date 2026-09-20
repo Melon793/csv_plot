@@ -930,6 +930,11 @@ class FileLoaderManager(MainWindowBaseManager):
             return
 
         self._begin_data_reload()
+        self._load_started_at = time.perf_counter()
+        self.mw.begin_load_feedback(file_path)
+        # 加载期禁能分析类按钮：模态框只挡鼠标点击，挡不住链路内部
+        # processEvents 触发的重入（本仓历史上多次修过这类丢列/崩溃）
+        self.set_button_status(False)
         started_async = False
         _Threshold_Size_Mb = FILE_SIZE_LIMIT_BACKGROUND_LOADING
 
@@ -972,6 +977,7 @@ class FileLoaderManager(MainWindowBaseManager):
                     sheet_name=sheet_name,
                 )
 
+                # ≥2MB 才弹：小文件同步读，弹一次模态反而比加载本身慢
                 self.mw._progress = QProgressDialog(
                     f"正在加载数据... [{os.path.basename(file_path)}]",
                     None,
@@ -992,6 +998,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 started_async = True
         except Exception:
             if not started_async:
+                self.mw.end_load_feedback("加载失败", level="error")
                 self._end_data_reload()
             raise
 
@@ -1102,14 +1109,15 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw.loaded_path = file_path
         self._remember_last_open_dir(file_path)
 
-        def truncate_string(file_path, max_length=79):
-            filename_length = len(os.path.basename(file_path))
-            if len(file_path) <= max_length:
-                return file_path
-            return "..." + file_path[min(-filename_length - 1, -(max_length - 3)) :]
-
-        self.mw.setWindowTitle(
-            f"{getattr(self.mw, 'defaultTitle', '')} ---- 数据文件: [{truncate_string(file_path)}]"
+        elapsed_s = max(
+            0.0, time.perf_counter() - getattr(self, "_load_started_at", time.perf_counter())
+        )
+        self.mw.end_load_feedback()
+        self.mw.update_file_status(
+            file_path,
+            row_count=self._current_data_length,
+            channel_count=len(self.mw.var_names or []),
+            elapsed_s=elapsed_s,
         )
         self.set_button_status(True)
         
@@ -1317,9 +1325,12 @@ class FileLoaderManager(MainWindowBaseManager):
     def _on_load_error(self, msg):
         logger.error("后台加载失败: %s", msg)
         self.mw._progress.close()
+        self.mw.end_load_feedback(f"加载失败：{msg}", level="error")
         QMessageBox.critical(self.mw, "读取失败", msg)
         self._end_data_reload()
         self.mw.load_btn.setEnabled(True)
+        # 加载期被闸门禁用的按钮要还原，否则失败一次就永久灰掉
+        self.set_button_status(self._has_valid_data)
         # v5.12: 异步 reload 失败，也要释放互斥锁
         self._reload_in_progress = False
         self.mw.reload_btn.setEnabled(True)

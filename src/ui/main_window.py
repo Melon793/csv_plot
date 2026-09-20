@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sys
 import os
+import time
 from collections import OrderedDict
 
 from src.utils.platform_setup import setup_platform
@@ -19,16 +20,103 @@ from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 
-from PySide6.QtCore import Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QColor, QIcon, QAction, QShortcut, QKeySequence  # noqa: E402
+from PySide6.QtCore import Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor,
+    QIcon,
+    QPainter,
+    QPalette,
+    QAction,
+    QShortcut,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit,
-    QMessageBox, QSplitter, QMenu, QStyle,
+    QMessageBox, QSplitter, QMenu, QStyle, QStatusBar, QFrame,
 )
 
 SCREEN_WIDTH_MARGIN = 0.3
 SCREEN_HEIGHT_MARGIN = 0.3
+# 播报文本最多占用的窗口宽度比例，超出按 … 截断（完整内容同时进日志）
+STATUS_MESSAGE_WIDTH_RATIO = 0.6
+# 右区消息停留时长：错误常驻（挡住后续播报直到被新消息替换），其余按时回收
+STATUS_MESSAGE_TIMEOUT_MS = {"info": 5000, "warn": 8000}
+
+
+class _ElideStatusBar(QStatusBar):
+    """状态栏不参与窗口最小宽度。
+
+    QLabel 的 minimumSizeHint 等于整行文本宽度，播报与段文案长度不可控；
+    若按默认行为，长文案会把 QMainWindow 的最小宽度顶起来，窗口在贴边宽度
+    下会被突然拉宽。这里只裁掉宽度维度的最小值，高度维度保持原样，
+    文本改由 MainWindow._status_elided 按可用宽度截断。
+    """
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+
+class _StatusSegment(QLabel):
+    """状态栏上的可点击段：整块 hover 底色 + 手型光标，点击发 clicked 信号。
+
+    照 VS Code 状态栏的 item cell：色块占满整行高、文字两侧留内边距，hover 换
+    底色而不是加下划线。下划线只有 1 px，实测 hover 前后仅 436 个像素不同
+    （作者据此判定"看不出能点"）；整块底色既是反馈，也顺带把命中区从"必须点
+    到字"扩成整个格子。
+
+    底色走 ``palette(Highlight)`` 而不是样式表：状态栏坐在系统窗口条上，写死
+    浅色会在深色模式里发刺；本仓样式表等 P2-6 统一 token 化，这里不新增色块。
+
+    格子高 = 文字高（实测 17 / 状态栏 22）：VS Code 那种"占满整条"做不到 ——
+    ``QStatusBar`` 给每个 item 带对齐标志地塞进布局，纵向 Expanding 实测无效，
+    硬撑会把整条状态栏顶高，影响所有平台。
+    """
+
+    clicked = Signal()
+
+    PAD_X = 6  # 左右内边距：VS Code 状态栏 item 的留白量级
+    # 30%：cocoa 实测 mac 的 Highlight 反推约 #A4CBFD（本身就浅），18% 叠在
+    # #ECECEC 上只挪动 R-13/G-6/B+3，肉眼几乎看不出；30% 得到 #D6E2F1
+    HOVER_ALPHA = 0x4D
+
+    def __init__(self, text: str = "", tip: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 内边距交给 contentsMargins，sizeHint 与绘制用同一套值：格子比文字宽，
+        # 鼠标落在字缝里也点得动
+        self.setContentsMargins(self.PAD_X, 0, self.PAD_X, 0)
+        self._hovered = False
+        if tip:
+            self.setToolTip(tip)
+
+    def paintEvent(self, event):
+        if self._hovered:
+            color = QColor(self.palette().color(QPalette.ColorRole.Highlight))
+            color.setAlpha(self.HOVER_ALPHA)
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), color)
+            painter.end()
+        super().paintEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
 
 _widget_logger = get_logger("widget")
 
@@ -38,6 +126,10 @@ class MainWindow(QMainWindow):
     应用程序的主界面，集成数据加载、图表显示、表格查看等功能
     提供完整的用户交互界面和数据处理流程
     """
+    APP_DISPLAY_NAME = "CSV Plot"
+    # 加载期间右区文案的秒表步进，只用于"还在干活吗"，不表示百分比
+    LOAD_ELAPSED_TICK_MS = 1000
+
     def __init__(self):
         super().__init__()
         self._init_basic_config()
@@ -46,13 +138,17 @@ class MainWindow(QMainWindow):
         self._init_central_widget()
         self._init_left_panel()
         self._init_right_panel()
+        self._init_status_bar()
         self._init_managers()
         self._handle_cli_args()
 
     def _init_basic_config(self):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._drop_event_filter_registered = False
-        self.defaultTitle = "数据快速查看器(PySide6), Alpha版本"
+        from src._version import get_version
+
+        self.app_version = get_version()
+        self.defaultTitle = f"{self.APP_DISPLAY_NAME} v{self.app_version}"
 
         if sys.platform == "darwin":
             if os.path.exists(ico_path):
@@ -65,7 +161,7 @@ class MainWindow(QMainWindow):
             if os.path.exists(ico_path):
                 self.setWindowIcon(QIcon(str(ico_path)))
 
-        self.setWindowTitle(self.defaultTitle)
+        self._update_title("")
         self._factor_default = 1
         self._offset_default = 0
         self.factor = self._factor_default
@@ -396,6 +492,306 @@ class MainWindow(QMainWindow):
         self._open_file_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         self._open_file_shortcut.activated.connect(self._on_open_file_shortcut)
 
+    # ------------------------------------------------------------------
+    # 状态栏：常驻四块 —— 文件段 / x 轴段（可点开抽屉）/ 消息区 / 日志入口
+    # ------------------------------------------------------------------
+    def _edge_spacer(self, width: int = 4) -> QWidget:
+        """状态栏两端留白：macOS / Win11 的窗口圆角会切掉贴边的文字。"""
+        spacer = QWidget()
+        spacer.setFixedWidth(width)
+        return spacer
+
+    def _vline_separator(self) -> QFrame:
+        """段间竖线：QFrame 的 VLine 走 palette，不需要写样式表。"""
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        return line
+
+    def _init_status_bar(self):
+        status_bar = _ElideStatusBar(self)
+        status_bar.setSizeGripEnabled(False)
+        self.setStatusBar(status_bar)
+
+        status_bar.addWidget(self._edge_spacer())
+
+        self._file_segment = _StatusSegment(
+            "未加载文件", tip="加载数据文件后，点击这里查看文件信息"
+        )
+        self._file_segment.clicked.connect(self._open_file_info_drawer)
+        status_bar.addWidget(self._file_segment)
+
+        self._axis_segment = _StatusSegment("x轴：—", tip="点击设置 x 轴采样频率与偏移")
+        self._axis_segment.clicked.connect(self._open_axis_drawer)
+        self._axis_segment.hide()
+
+        self._segment_separator = self._vline_separator()
+        self._segment_separator.hide()
+        status_bar.addWidget(self._segment_separator)
+
+        status_bar.addWidget(self._axis_segment)
+
+        self._message_text = ""
+        self._message_level = "info"
+        self._message_label = QLabel("")
+        status_bar.addPermanentWidget(self._message_label)
+
+        status_bar.addPermanentWidget(self._vline_separator())
+        self._log_segment = _StatusSegment("日志", tip="打开日志窗口")
+        self._log_segment.clicked.connect(self.show_log_window)
+        status_bar.addPermanentWidget(self._log_segment)
+
+        status_bar.addPermanentWidget(self._edge_spacer())
+
+        self._status_busy = False
+        self._cursor_overridden = False
+        self._load_elapsed_started = 0.0
+        self._loading_path = ""
+        self._last_load_elapsed = None
+        self._file_info_drawer = None
+        self._axis_drawer = None
+        self._load_elapsed_timer = QTimer(self)
+        self._load_elapsed_timer.setInterval(self.LOAD_ELAPSED_TICK_MS)
+        self._load_elapsed_timer.timeout.connect(self._tick_load_elapsed)
+        self._message_hide_timer = QTimer(self)
+        self._message_hide_timer.setSingleShot(True)
+        self._message_hide_timer.timeout.connect(self.clear_status_message)
+
+    def _open_file_info_drawer(self):
+        """左段抽屉：文件级信息 + 复制 / 打开所在文件夹。
+
+        加载期不开：抽屉里的路径、大小、有效性都来自即将被换掉的 loader，
+        弹一个正在失效的快照不如不给。
+        """
+        if self.reject_when_loading("查看文件信息"):
+            return
+        if self.loader is None:
+            self._broadcast("尚未加载数据文件", level="warn")
+            return
+
+        if self._file_info_drawer is None:
+            from src.ui.widgets.status_drawer import FileInfoDrawer
+
+            self._file_info_drawer = FileInfoDrawer(self)
+
+        self._close_status_drawers(keep=self._file_info_drawer)
+        if not self._file_info_drawer.open_for(
+            self, elapsed_s=self._last_load_elapsed
+        ):
+            self._broadcast("窗口高度不足，放大主窗口后再查看文件信息", level="warn")
+
+    def _open_axis_drawer(self):
+        """中段抽屉：按采样频率/系数/偏移设置 x 轴时间基准，带预览行。
+
+        与顶部「时间修正」对话框改的是同一份全局 factor/offset，落地都走
+        ``layout_manager.apply_time_correction``，所以这里只管输入与预览。
+        """
+        if self.reject_when_loading("改 x 轴基准"):
+            return
+        if self.loader is None:
+            self._broadcast("尚未加载数据文件", level="warn")
+            return
+
+        if self._axis_drawer is None:
+            from src.ui.widgets.status_drawer import XAxisDrawer
+
+            self._axis_drawer = XAxisDrawer(self)
+
+        self._close_status_drawers(keep=self._axis_drawer)
+        if not self._axis_drawer.open_for(self):
+            self._broadcast("窗口高度不足，放大主窗口后再设置 x 轴基准", level="warn")
+
+    def _status_drawers(self) -> list:
+        """已创建的状态栏抽屉清单（尚未创建的不出现在里面）。"""
+        return [
+            drawer
+            for drawer in (
+                getattr(self, "_file_info_drawer", None),
+                getattr(self, "_axis_drawer", None),
+            )
+            if drawer is not None
+        ]
+
+    def _close_status_drawers(self, keep=None) -> None:
+        """收起状态栏抽屉；同一时刻只留一扇。
+
+        两扇抽屉都能改/看 x 轴相关的东西，叠在一起用户分不清刚点的是哪一段。
+        """
+        for drawer in self._status_drawers():
+            if drawer is not keep and drawer.isVisible():
+                drawer.hide()
+
+    def _reposition_status_drawers(self):
+        """主窗口移动/缩放后把抽屉重新贴回状态栏上方。
+
+        用 getattr 而不是直接取属性：__init__ 里的窗口几何恢复会先发
+        resize 事件，那时状态栏和抽屉都还不存在。
+        """
+        for drawer in self._status_drawers():
+            if drawer.isVisible():
+                drawer.reposition()
+
+    def _status_elided(self, text: str) -> str:
+        """超长文案按 … 截断：状态栏不参与最小宽度，但也不该吃掉整行。"""
+        label = self._message_label
+        budget = max(120, int(self.width() * STATUS_MESSAGE_WIDTH_RATIO))
+        return label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, budget)
+
+    def _reapply_status_elision(self):
+        if not hasattr(self, "_message_label"):
+            return  # _load_window_context 里的 resize 早于状态栏构建
+        self._message_label.setText(self._status_elided(self._message_text))
+
+    def _broadcast(self, message: str, level: str = "info"):
+        """右区播报。错误常驻，其余按 STATUS_MESSAGE_TIMEOUT_MS 自动回收。"""
+        self._logger.info(message)
+        self._message_text = message
+        self._message_level = level
+        self._message_label.setText(self._status_elided(message))
+        self._message_label.setToolTip(message)
+        timeout = STATUS_MESSAGE_TIMEOUT_MS.get(level)
+        if timeout:
+            self._message_hide_timer.start(timeout)
+        else:
+            self._message_hide_timer.stop()
+
+    def clear_status_message(self):
+        """错误级消息不被自动回收，避免根因还没看清就被抹掉。"""
+        if self._message_level == "error" or self._status_busy:
+            return
+        self._message_text = ""
+        self._message_label.setText("")
+        self._message_label.setToolTip("")
+
+    def _set_busy_cursor(self, busy: bool):
+        """沙漏光标只在加载期覆盖，成对调用避免光标覆盖栈泄漏。"""
+        if busy and not self._cursor_overridden:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self._cursor_overridden = True
+        elif not busy and self._cursor_overridden:
+            QApplication.restoreOverrideCursor()
+            self._cursor_overridden = False
+
+    def is_data_loading(self) -> bool:
+        """后台加载线程是否真在跑 —— 只有这段时间旧 loader 会被换掉。
+
+        刻意不用 _is_loading_new_data：那是 UI 刷新链的锁，在新数据已就位、
+        曲线已画完之后仍会短暂持有，用它挡交互会误伤正常的拖拽与点击。
+        """
+        thread = getattr(self, "_thread", None)
+        return thread is not None and thread.isRunning()
+
+    def reject_when_loading(self, action: str) -> bool:
+        """加载期间的统一输入闸门。
+
+        模态进度框撤掉后，界面在加载期是可点的，而旧 loader 随时会被释放 ——
+        此时改布局、套模板、拖变量都会作用在即将消失的数据上（本仓历史上
+        多次修过这类重入崩溃）。返回 True 表示调用方应放弃本次操作。
+        """
+        if not self.is_data_loading():
+            return False
+        self._broadcast(f"正在加载数据，请稍候再{action}", level="warn")
+        return True
+
+    def _update_title(self, file_path: str = ""):
+        """标题只承载三件事：当前文件名、软件名、版本号。"""
+        file_name = os.path.basename(file_path) if file_path else ""
+        if file_name:
+            self.setWindowTitle(f"{file_name} - {self.defaultTitle}")
+        else:
+            self.setWindowTitle(self.defaultTitle)
+
+    def update_file_status(
+        self, file_path: str, row_count: int, channel_count: int, elapsed_s: float
+    ):
+        """加载收尾：刷新标题与左/中两段。
+
+        行数与耗时不进常驻段（对绘图不可执行），只留在日志与左段抽屉里。
+        耗时得存一份（``_last_load_elapsed``）：它是加载链路算出来的量，
+        loader 里没有，抽屉打开时才要用的话已经拿不到了。
+
+        MDF 的行数是"最大通道组的声明记录数"（cycles_nr 取 max），口径与
+        CSV/Excel 的实际行数不同，因此不在界面上冒充"N 行"。
+        """
+        self._update_title(file_path)
+        suffix = os.path.splitext(file_path)[1].lstrip(".").lower() or "?"
+        self._file_segment.setText(f"{suffix}文件 · {channel_count} 个变量")
+        self._file_segment.setToolTip(os.path.abspath(file_path))
+        self._last_load_elapsed = elapsed_s
+        self._update_axis_segment()
+        self._logger.info(
+            "加载完成: %s（%d 行 / %d 变量 / 耗时 %.2fs）",
+            os.path.basename(file_path),
+            row_count,
+            channel_count,
+            elapsed_s,
+        )
+
+    def _axis_segment_text(self, factor: float, offset: float) -> str:
+        """按**给定**的 factor/offset 算出 x 轴段该显示什么。
+
+        单独一层是给抽屉的预览行用的：预览必须在不动 ``self.factor`` 的前提
+        下算出"改完会长什么样"，两处共用一套文案才不会预览一个说法、落地
+        另一个说法。
+        """
+        loader = getattr(self, "loader", None)
+        axis_label = (getattr(loader, "time_axis_label", "") or "Index") if loader else "Index"
+        factor = factor or 1.0
+        if axis_label == "Index":
+            text = f"x轴：Index · 系数 {factor:g}"
+        else:
+            text = f"x轴：{axis_label} · 采样 {1.0 / factor:g} Hz"
+        corrected = abs(factor - self._factor_default) > 1e-12 or abs(offset) > 1e-12
+        return f"{text}（已修正）" if corrected else text
+
+    def _update_axis_segment(self):
+        """x 轴段：轴身份取自 loader，采样频率由全局 factor 反推。
+
+        轴标题被 DEFAULT_SHOW_X_AXIS_LABEL=False 关掉了，这一段是全软件唯一
+        能看出"横轴是时间还是样本序号、时间基准是多少"的地方。
+        """
+        loader = getattr(self, "loader", None)
+        if loader is None:
+            self._axis_segment.hide()
+            self._segment_separator.hide()
+            return
+
+        self._axis_segment.setText(self._axis_segment_text(self.factor, self.offset))
+        self._segment_separator.show()
+        self._axis_segment.show()
+
+    def begin_load_feedback(self, file_path: str):
+        self._status_busy = True
+        self._loading_path = file_path
+        self._load_elapsed_started = time.monotonic()
+        self._message_hide_timer.stop()
+        # 抽屉里的路径/大小/基准属于旧 loader，加载一开始就会被换掉；留着它
+        # 等于让用户对着正在失效的快照抄数据
+        self._close_status_drawers()
+        self._broadcast(f"正在加载 {os.path.basename(file_path)} … 0s")
+        self._load_elapsed_timer.start()
+        self._set_busy_cursor(True)
+
+    def _tick_load_elapsed(self):
+        """秒表只回答"还在干活吗"，不假装知道剩余百分比。"""
+        if not self._status_busy:
+            self._load_elapsed_timer.stop()
+            return
+        elapsed = int(time.monotonic() - self._load_elapsed_started)
+        name = os.path.basename(self._loading_path or "")
+        self._message_text = f"正在加载 {name} … {elapsed}s"
+        self._message_label.setText(self._status_elided(self._message_text))
+
+    def end_load_feedback(self, hint: str = "", level: str = "info"):
+        self._status_busy = False
+        self._load_elapsed_timer.stop()
+        self._set_busy_cursor(False)
+        if hint:
+            self._broadcast(hint, level=level)
+        else:
+            self._message_hide_timer.stop()
+            self.clear_status_message()
+
     def _init_managers(self):
         from src.ui.file_loader_manager import FileLoaderManager
         from src.ui.cursor_sync_manager import CursorSyncManager
@@ -465,6 +861,9 @@ class MainWindow(QMainWindow):
         # 必须先置位再收尾：下面的清理会开嵌套事件循环（等线程退出、存盘），
         # 期间排着的 singleShot/防抖回调还会打到正在退出的窗口
         self._is_being_destroyed = True
+        # 再收抽屉：状态栏抽屉是独立的 Popup 顶层窗口，主窗口销毁时若还开着，
+        # 它就会留在屏幕上，鼠标/键盘 grab 也悬在半路
+        self._close_status_drawers()
         if self.loader is not None:
             self.plot_config_manager.save_auto_save(self)
         self._shutdown_var_info_worker()
@@ -514,6 +913,8 @@ class MainWindow(QMainWindow):
     
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._reapply_status_elision()
+        self._reposition_status_drawers()
         self.layout_manager._handle_resize(event)
         if sys.platform == "win32" and self.isMaximized():
             if not getattr(self, "_in_sync_resize", False):
@@ -524,8 +925,15 @@ class MainWindow(QMainWindow):
                 finally:
                     self._in_sync_resize = False
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        # 抽屉是独立顶层窗口，不跟着主窗口走就会浮在原地
+        self._reposition_status_drawers()
+
     def _on_auto_restore_toggled(self, checked):
         self.plot_config_manager.auto_save_manager.set_auto_save_enabled(checked)
+        # 开关状态只体现在模板菜单按钮上：标题按 P0-2 的决定只剩
+        # 「文件名 - 软件名 版本」，不再挂自动保存状态
         self._refresh_auto_restore_indicator()
 
     def _refresh_auto_restore_indicator(self):
@@ -624,6 +1032,8 @@ class MainWindow(QMainWindow):
         if self.loader is None:
             QMessageBox.warning(self, "无数据", "请先加载数据文件后再应用模板")
             return
+        if self.reject_when_loading("套用模板"):
+            return
         config = PlotSessionConfig.from_dict(template.config)
         current_vars = list(self.loader.var_names)
         ratio, matched, unmatched = self.plot_config_manager.check_template_match(
@@ -686,8 +1096,8 @@ class MainWindow(QMainWindow):
             self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
 
     def _show_status_message(self, message: str):
-        """显示状态消息（在未来可以添加状态栏）"""
-        self._logger.info(message)
+        """一次性动作的全局反馈（状态栏右区播报，按级别自动回收）。"""
+        self._broadcast(message)
     
     def filter_variables(self):
         """防抖过滤：用户停止输入 180ms 后才真正执行"""

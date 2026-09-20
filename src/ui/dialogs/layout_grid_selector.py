@@ -21,20 +21,22 @@ from PySide6.QtWidgets import (
 )
 
 # === 设计令牌：色板 ===
-_BG = "#FFFFFF"
-_TEXT_PRIMARY = "#1F2329"
-_TEXT_MUTED = "#8A8F98"
-_SEP = "#EAECEF"
-_CELL_OFF_BG = "#F2F4F7"
-_CELL_OFF_BD = "#DFE3E8"
-# 当前布局：淡蓝，明显弱于"新布局预览"，两者一眼可分
-_CELL_CUR_BG = "#E8F1FD"
-_CELL_CUR_BD = "#8FBBEA"
-# 新布局预览：上浅下深的实心蓝渐变 + 深蓝描边
-_CELL_SEL_BG_TOP = "#5AA2E6"
-_CELL_SEL_BG_BOT = "#3B82D0"
-_CELL_SEL_BD = "#2F6FB4"
-_BTN_PRESS_BG = "#E6E9ED"
+# 唯一一份值在 src/ui/theme.py（与状态栏抽屉共用），这里只按本文件的旧名引入：
+# 改名会波及 tests/component/test_layout_grid_selector_visual.py 与下面的样式串
+from src.ui.theme import (
+    BG as _BG,
+    BTN_PRESS_BG as _BTN_PRESS_BG,
+    CHIP_CUR_BD as _CELL_CUR_BD,
+    CHIP_CUR_BG as _CELL_CUR_BG,
+    CHIP_OFF_BD as _CELL_OFF_BD,
+    CHIP_OFF_BG as _CELL_OFF_BG,
+    CHIP_SEL_BD as _CELL_SEL_BD,
+    CHIP_SEL_BG_BOT as _CELL_SEL_BG_BOT,
+    CHIP_SEL_BG_TOP as _CELL_SEL_BG_TOP,
+    SEP as _SEP,
+    TEXT_MUTED as _TEXT_MUTED,
+    TEXT_PRIMARY as _TEXT_PRIMARY,
+)
 
 # === 设计令牌：度量 ===
 _CELL_SIZE = 38

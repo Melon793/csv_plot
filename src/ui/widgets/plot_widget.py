@@ -815,6 +815,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def dropEvent(self, event):
         self._notify_drag_indicator(hide=True)
+        host = self.window()
+        reject = getattr(host, "reject_when_loading", None)
+        if reject is not None and reject("拖入变量"):
+            # 加载期旧 loader 随时被释放，此时建曲线会落在即将消失的数据上
+            event.ignore()
+            return
         mime = event.mimeData()
         var_names = parse_var_names_from_mimedata(mime)
 
