@@ -21,8 +21,8 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -56,12 +56,11 @@ from src.utils.paths import format_for_copy
 
 logger = get_logger(__name__)
 
-#: 值会被列宽裁掉、需要一键取全文的两行
-_COPY_KEYS = {KEY_FILE_NAME, ROW_KEY_FILE_PATH}
+#: 值会被列宽裁掉、需要一键取全文的三行。同一批行也是值列里唯一会挂 hover
+#: 字段框的（长到会截断才需要"这块能拉选"的暗示），两个用途共用一份清单
+_COPY_KEYS = {KEY_FILE_NAME, ROW_KEY_FILE_PATH, KEY_FOLDER}
 #: 值是目录、交给系统文件管理器打开的那行
 _REVEAL_KEYS = {KEY_FOLDER}
-#: 三行路径字段：长到会截断，因此带 hover 框（暗示可拉选）与手工省略号
-_FIELD_KEYS = {KEY_FILE_NAME, ROW_KEY_FILE_PATH, KEY_FOLDER}
 #: 路径缺失时 file_info 给的占位符，复制它等于复制一个无意义的横杠
 _PLACEHOLDER = "-"
 
@@ -236,7 +235,7 @@ class StatusDrawer(QFrame):
 
 
 class FieldLabel(QLabel):
-    """值列里"可以拉选"的那几行：hover 时给自己画一圈字段框。
+    """值列里"可以拉选"的那几行：hover 画字段框，被裁时右缘渐隐。
 
     为什么不用样式表的 ``:hover``：合成事件下实测涂不出任何像素（变化=0），
     没法证明真机会亮；``enterEvent/leaveEvent`` + ``paintEvent`` 这条路在状态栏
@@ -244,7 +243,14 @@ class FieldLabel(QLabel):
 
     框只在 hover 时出现：常态保持裸文本，免得整张表看起来像一排被禁用的输入框；
     鼠标扫到才描边，是为了把"这块文字能选中"这件事传达出去。
+
+    放不下时**硬切 + 右缘渐隐**，不用 ``elidedText``：省略号是写进 ``text()`` 的
+    真字符，会被一起拉选复制 —— 作者实测粘出来的是
+    ``Users/demo/Data…/demo_50pts``，不是任何真实路径。渐隐只表达"后面还有"，
+    不往文本里塞东西。
     """
+
+    FADE_PX = 8  # 右缘渐隐宽度
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
@@ -261,6 +267,27 @@ class FieldLabel(QLabel):
             )
             painter.end()
         super().paintEvent(event)
+        if self._is_clipped():
+            # 渐隐锚在**文本区右界**（contentsRect 已含样式表的描边 + 内边距，
+            # 实测 315 宽的标签给的是 (5,1,305,19)），不是控件右界：贴着控件边画
+            # 会去刷本就该留白的 padding，真正被切的字形反而盖不住
+            area = self.contentsRect()
+            base = QColor(theme.CHIP_OFF_BG if self._hovered else theme.BG)
+            fade = QLinearGradient(area.right() + 1 - self.FADE_PX, 0, area.right() + 1, 0)
+            transparent = QColor(base)
+            transparent.setAlpha(0)
+            fade.setColorAt(0, transparent)
+            fade.setColorAt(1, base)
+            painter = QPainter(self)
+            painter.fillRect(
+                QRectF(area.right() + 1 - self.FADE_PX, area.top(), self.FADE_PX, area.height()),
+                QBrush(fade),
+            )
+            painter.end()
+
+    def _is_clipped(self) -> bool:
+        """文本需不需要比文本区更宽（描边与内边距已由 contentsRect 扣掉）。"""
+        return self.fontMetrics().horizontalAdvance(self.text()) > self.contentsRect().width()
 
     def enterEvent(self, event):
         self._hovered = True
@@ -332,15 +359,7 @@ class FileInfoDrawer(StatusDrawer):
 
         self.hide()  # 见 set_body：可见状态下换 body 会把 sizeHint 量塌
         self.set_body(self._build_body())
-        opened = self.open_above(mw.statusBar())
-        if opened:
-            self._refit_elide()
-        return opened
-
-    def reposition(self) -> None:
-        # 窗口缩放会改抽屉宽度（窄窗口下抽屉跟着变窄），省略号必须跟着重算
-        super().reposition()
-        self._refit_elide()
+        return self.open_above(mw.statusBar())
 
     def _plain(self, key: str) -> str:
         """取该行的真实路径，占位符与空值一律当"没有"。"""
@@ -380,12 +399,18 @@ class FileInfoDrawer(StatusDrawer):
         self._labels = {}
         for row, (key, value) in enumerate(self._rows):
             grid.addWidget(self._key_label(key), row, 0)
-            label = self._value_label(value, hoverable=key in _FIELD_KEYS)
+            label = self._value_label(value, hoverable=key in _COPY_KEYS)
             self._labels[key] = label
             grid.addWidget(label, row, 1)
-            button = self._action_button(key, value)
-            if button is not None:
-                grid.addWidget(button, row, 2)
+            buttons = self._action_buttons(key, value)
+            if buttons:
+                # 一行最多两个动作（所在文件夹 = 复制 + 打开），用横向盒塞进同一列
+                cell = QHBoxLayout()
+                cell.setContentsMargins(0, 0, 0, 0)
+                cell.setSpacing(6)
+                for button in buttons:
+                    cell.addWidget(button)
+                grid.addLayout(cell, row, 2)
 
         content = QWidget()
         content.setLayout(grid)
@@ -396,33 +421,6 @@ class FileInfoDrawer(StatusDrawer):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll
-
-    def _refit_elide(self) -> None:
-        """按值列实得宽度，把三行路径字段裁成带 … 的显示串。
-
-        为什么自己做：Qt 6.11 的 QLabel 在被压窄时**不会**画省略号，只会把字形
-        切在半笔上（实测 Ignored / Preferred × 可选 / 不可选 四种配置都一样），
-        而字段框一出现，这个断口就被框线标出来了，比裸文本更扎眼。
-
-        用 ElideMiddle：路径头部（/Users/…）是噪音、尾部是身份信息，裁中间才
-        留得住有用的那段。代价是被裁掉的字符不在屏上、也就拉不选，全文出口是
-        tooltip 与行尾「复制」。
-        """
-        layout = self.layout()
-        if layout is not None:
-            layout.activate()  # 不手动激活的话，刚 resize 完读到的还是旧宽度
-        for key, label in self._labels.items():
-            if key not in _FIELD_KEYS:
-                continue
-            full = self._values.get(key, "")
-            available = label.width() - 2 * theme.FIELD_INSET_PX
-            if not full or available <= 0:
-                continue
-            label.setText(
-                label.fontMetrics().elidedText(
-                    full, Qt.TextElideMode.ElideMiddle, available
-                )
-            )
 
     @staticmethod
     def _key_label(key: str) -> QLabel:
@@ -445,31 +443,33 @@ class FileInfoDrawer(StatusDrawer):
         )
         # Ignored：QLabel 的 minimumSizeHint 等于整串文本宽度，长绝对路径会把
         # 抽屉顶得比窗口还宽（状态栏上同一件事已修过一次，见 _ElideStatusBar）。
-        # 这里让宽度完全交给布局，放不下由 _refit_elide 补省略号
+        # 这里让宽度完全交给布局；放不下就硬切（FieldLabel 在右缘做渐隐）——
+        # 刻意不用 elidedText：省略号是写进 text() 的真字符，会被一起拉选复制，
+        # 作者实测拉选粘出来的是 "Users/demo/Data…/demo_50pts"，不是任何真实路径
         label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         return label
 
-    def _action_button(self, key: str, value: str) -> QToolButton | None:
-        """行尾动作按钮：文件名与路径行给「复制」，所在文件夹行给「打开」。"""
-        if key not in _COPY_KEYS and key not in _REVEAL_KEYS:
-            return None
-        is_reveal = key in _REVEAL_KEYS
-        button = self._chip(
-            "打开" if is_reveal else "复制",
-            "在系统文件管理器里显示该文件"
-            if is_reveal
-            else f"复制{key}（完整值）",
-        )
-        if is_reveal:
-            button.clicked.connect(self._on_open_folder)
-        else:
-            button.clicked.connect(
+    def _action_buttons(self, key: str, value: str) -> list:
+        """行尾动作：三行路径字段都给「复制」，所在文件夹再给「打开」。
+
+        「所在文件夹」原先只有「打开」，是个漏口：值被列宽切掉时那一行拿不到
+        任何全文出口（打开只是把文件管理器弹出来，不产出字符串）。
+        """
+        buttons: list = []
+        if key in _COPY_KEYS:
+            copy_button = self._chip("复制", f"复制{key}（完整值）")
+            copy_button.clicked.connect(
                 lambda _checked=False, k=key, v=value: self._on_copy(k, v)
             )
-        return button
+            buttons.append(copy_button)
+        if key in _REVEAL_KEYS:
+            open_button = self._chip("打开", "在系统文件管理器里显示该文件")
+            open_button.clicked.connect(self._on_open_folder)
+            buttons.append(open_button)
+        return buttons
 
     # -- 动作 ---------------------------------------------------------------
 
@@ -482,7 +482,7 @@ class FileInfoDrawer(StatusDrawer):
         if not value or value == _PLACEHOLDER:
             self._notify(f"「{key}」没有可复制的内容", level="warn")
             return
-        if key == ROW_KEY_FILE_PATH:
+        if key in (ROW_KEY_FILE_PATH, KEY_FOLDER):
             # 只有整条路径才转写法/包引号：format_for_copy 内部会 display_path，
             # 喂「文件名」会被绝对化成"<当前目录>/a.csv"这种看着能用实则错的东西
             value = format_for_copy(value, PATH_COPY_STYLE, PATH_COPY_QUOTE)

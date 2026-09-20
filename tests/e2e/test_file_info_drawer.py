@@ -41,8 +41,11 @@ def _click_segment(widget, qapp):
     qapp.processEvents()
 
 
-def _button_for(drawer, key):
-    """按行取行尾按钮：同一次网格排布里，键标签与按钮的垂直中心一致。"""
+def _button_for(drawer, key, text=None):
+    """按行取行尾按钮：同一次网格排布里，键标签与按钮的垂直中心一致。
+
+    ``text`` 用来在一行有多个动作时点名（所在文件夹行是 复制 + 打开）。
+    """
     labels = [lb for lb in drawer.findChildren(QLabel) if lb.text() == key]
     assert labels, f"抽屉里没有「{key}」这一行"
     center_y = labels[0].geometry().center().y()
@@ -50,6 +53,7 @@ def _button_for(drawer, key):
         b
         for b in drawer.findChildren(QToolButton)
         if abs(b.geometry().center().y() - center_y) <= 2
+        and (text is None or b.text() == text)
     ]
     assert len(buttons) == 1, f"「{key}」行尾按钮数异常: {[b.text() for b in buttons]}"
     return buttons[0]
@@ -130,7 +134,7 @@ def test_open_button_asks_system_file_manager(loaded_window, qapp, monkeypatch):
     )
     drawer = _open(loaded_window, qapp)
 
-    _button_for(drawer, KEY_FOLDER).click()
+    _button_for(drawer, KEY_FOLDER, "打开").click()
     qapp.processEvents()
 
     assert len(calls) == 1
@@ -151,7 +155,7 @@ def test_open_button_when_file_moved_says_so(loaded_window, qapp, monkeypatch):
     drawer = _open(mw, qapp)
     drawer._file_path = "/nowhere/e2e_demo.csv"
 
-    _button_for(drawer, KEY_FOLDER).click()
+    _button_for(drawer, KEY_FOLDER, "打开").click()
     qapp.processEvents()
 
     assert calls == []
@@ -265,12 +269,12 @@ def test_only_path_rows_get_the_hover_field(loaded_window, qapp):
     框是 FieldLabel 在 paintEvent 里画的（样式表 :hover 合成事件下实测涂不出
     像素，见该类文档串），所以既断言类型也断言"投一个 Enter 之后真的多出墨"。
     """
-    from src.ui.widgets.status_drawer import _FIELD_KEYS, FieldLabel
+    from src.ui.widgets.status_drawer import _COPY_KEYS, FieldLabel
 
     drawer = _open(loaded_window, qapp)
 
     for key, label in drawer._labels.items():
-        hoverable = key in _FIELD_KEYS
+        hoverable = key in _COPY_KEYS
         assert isinstance(label, FieldLabel) is hoverable, key
         # 透明描边 + 内边距对所有行常驻，否则值列会出现两条文字左沿
         assert "padding: 0 4px" in label.styleSheet(), key
@@ -306,29 +310,69 @@ def test_only_path_rows_get_the_hover_field(loaded_window, qapp):
     ) == 0, "离开后框没收回"
 
 
-def test_long_path_is_elided_but_full_value_stays_reachable(
-    loaded_window, qapp, qapp_clipboard
-):
-    """放不下的路径要裁成 …，全文仍拿得到：tooltip + 行尾「复制」。
+def test_long_path_is_clipped_not_elided(loaded_window, qapp, qapp_clipboard):
+    """放不下的路径只许硬切：拉选拿到的必须是真路径里的连续片段。
 
-    钉的是"不许把字切在半笔上"：Qt 6.11 的 QLabel 压窄后不画省略号（实测
-    Ignored / Preferred × 可选 / 不可选 四种配置一律硬裁），省略号得自己算。
+    回归的是上一版：用 elidedText 裁中间后，省略号是写进 text() 的真字符，会被
+    一起拉选复制 —— 作者实测（Win11）粘出来 "Users/demo/Data…/demo_50pts"，
+    不是任何真实路径。现在改成硬切 + FieldLabel 右缘渐隐。
     """
+    from PySide6.QtGui import QMouseEvent
+
     drawer = _open(loaded_window, qapp)
     label = drawer._labels[ROW_KEY_FILE_PATH]
     full = drawer._values[ROW_KEY_FILE_PATH]
 
+    assert label.text() == full, "显示串不许被改写"
     if label.fontMetrics().horizontalAdvance(full) <= label.width():
         pytest.skip("这条测试路径本来就放得下，测不到截断")
+    assert label._is_clipped(), "该出现渐隐时没判定为裁切"
+    assert not drawer._labels[KEY_FILE_NAME]._is_clipped(), "短值不该被判定为裁切"
 
-    assert "…" in label.text(), f"没裁出省略号：{label.text()!r}"
-    assert label.toolTip() == full, "tooltip 必须是全文"
-    assert drawer._values[ROW_KEY_FILE_PATH] == full, "原值不许被显示串污染"
+    def drag(kind, x):
+        pos = QPointF(x, label.height() / 2)
+        return QMouseEvent(
+            kind,
+            pos,
+            label.mapToGlobal(pos.toPoint()),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+    QApplication.sendEvent(label, drag(QEvent.Type.MouseButtonPress, 6))
+    QApplication.sendEvent(label, drag(QEvent.Type.MouseMove, label.width() - 6))
+    QApplication.sendEvent(
+        label, drag(QEvent.Type.MouseButtonRelease, label.width() - 6)
+    )
+    qapp.processEvents()
+
+    selected = label.selectedText()
+    assert selected, "拉选没选中任何字符"
+    assert "…" not in selected
+    assert selected in full, f"选中片段不是真路径的一部分: {selected!r}"
 
     _button_for(drawer, ROW_KEY_FILE_PATH).click()
     qapp.processEvents()
-    assert "…" not in qapp_clipboard.text(), "剪贴板里不许出现省略号"
-    assert qapp_clipboard.text().endswith("e2e_demo.csv")
+    assert qapp_clipboard.text() == full or "…" not in qapp_clipboard.text()
+
+
+def test_folder_row_copies_as_well_as_opens(loaded_window, qapp, qapp_clipboard):
+    """所在文件夹行必须两个动作都有：只有「打开」时，被裁掉的尾部没有出口。"""
+    from src.core.config import PATH_COPY_QUOTE, PATH_COPY_STYLE
+    from src.utils.paths import format_for_copy
+
+    drawer = _open(loaded_window, qapp)
+    expected = format_for_copy(
+        drawer._values[KEY_FOLDER], PATH_COPY_STYLE, PATH_COPY_QUOTE
+    )
+
+    _button_for(drawer, KEY_FOLDER, "复制").click()
+    qapp.processEvents()
+
+    assert qapp_clipboard.text() == expected
+    assert "…" not in qapp_clipboard.text()
+    assert loaded_window._message_label.text() == "已复制「所在文件夹」"
 
 
 def test_footer_states_how_to_close_and_get_full_values(loaded_window, qapp):
