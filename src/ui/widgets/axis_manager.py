@@ -500,9 +500,39 @@ class AxisManager:
         try:
             pw.plot_item.setLimits(yMin=None, yMax=None)
             pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
-            self._set_vline_bounds([None, None])  # [None, None] 表示无边界限制
+            # 游标域回到全局数据域（而非无界）；无权威源时内部回退 [None, None]
+            self.apply_cursor_x_domain()
         except Exception:
             logger.debug("重置绘图限制失败", exc_info=True)
+
+    def cursor_x_domain(self) -> tuple[float, float] | None:
+        """游标可移动区间的唯一权威来源：全局数据 X 域（已套当前 factor/offset）。
+
+        与 ViewBox 的 xLimits 同源（都走 compute_global_x_limits），区别是本函数
+        返回不含 ±5% padding 的裸数据域：limits 管「视窗能看到哪」，本函数管
+        「游标能到哪」。
+
+        Returns:
+            (min_x, max_x)；loader 无效 / 未加载数据时返回 None，调用方需自行回退。
+        """
+        pw = self.pw
+        ctx = pw.plot_context
+        loader = getattr(ctx, "loader", None) if ctx is not None else None
+        result = compute_global_x_limits(loader, factor=pw.factor, offset=pw.offset)
+        if result is None:
+            return None
+        return (float(result[0]), float(result[1]))
+
+    def apply_cursor_x_domain(self) -> tuple[float, float] | None:
+        """按 cursor_x_domain() 设置 vline bounds。
+
+        用于「本图没有可见曲线」的所有回退场景（空 plot、删掉最后一条曲线、
+        全部隐藏、reset/clear）：域来自全局数据轴，而不是本图曲线的历史快照。
+        无权威源时回退 [None, None]（= pyqtgraph 的无界语义）。
+        """
+        domain = self.cursor_x_domain()
+        self._set_vline_bounds(list(domain) if domain is not None else [None, None])
+        return domain
 
     def _set_vline_bounds(self, bounds: list) -> None:
         """设置光标垂直线的边界"""

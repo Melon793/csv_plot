@@ -696,7 +696,8 @@ class PlotDataManager:
                 if main_window is not None and hasattr(main_window, "cursor_sync_manager"):
                     main_window.cursor_sync_manager._sync_min_xrange()
 
-            self._axis_manager._set_vline_bounds([None, None])
+            # 本图已无曲线：游标域回到全局数据域，而不是放开成无界
+            self._axis_manager.apply_cursor_x_domain()
         except Exception:
             logger.debug("清理绘图数据时异常", exc_info=True)
 
@@ -799,7 +800,9 @@ class PlotDataManager:
             pw.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
 
         pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
-        self._axis_manager._set_vline_bounds([None, None])
+        # 游标域回到全局数据域（按当前 factor/offset 现算）。这里曾经是
+        # _set_vline_bounds([None, None])：无界会让空 plot 的游标能拖到数据之外。
+        self._axis_manager.apply_cursor_x_domain()
 
         pw.xMin = xMin
         pw.xMax = xMax

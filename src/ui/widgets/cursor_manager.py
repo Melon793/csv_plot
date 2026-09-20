@@ -1472,7 +1472,14 @@ class CursorManager:
                 self.update_cursor_label()
 
     def _update_vline_bounds_from_data(self):
-        """根据当前绘制的数据更新vline bounds（统一版：始终从 curves 字典）"""
+        """根据当前绘制的数据更新vline bounds（统一版：始终从 curves 字典）
+
+        有可见曲线：用本图曲线域。
+        无曲线 / 全部隐藏：用全局数据 X 域（AxisManager.cursor_x_domain，随当前
+        factor/offset 现算）。这里曾经读 pw.xMin/pw.xMax —— 那两个字段只在
+        reset_plot 时按当时的 factor 换算过一次，时间修正后再不更新，导致空
+        plot 的游标被钉在旧时间轴上（如 factor=0.1 后仍停在 index 域的 1）。
+        """
         pw = self.pw
         try:
             if pw.curves:
@@ -1483,12 +1490,8 @@ class CursorManager:
                     pw._set_vline_bounds([min_x, max_x])
                     return min_x, max_x
 
-            if hasattr(pw, 'xMin') and hasattr(pw, 'xMax'):
-                pw._set_vline_bounds([pw.xMin, pw.xMax])
-                return pw.xMin, pw.xMax
-            else:
-                pw._set_vline_bounds([None, None])
-                return None, None
+            domain = pw._apply_cursor_x_domain()
+            return domain if domain is not None else (None, None)
         except Exception as e:
             logger.warning("Error updating vline bounds: %s", e)
             pw._set_vline_bounds([None, None])
