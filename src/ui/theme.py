@@ -17,6 +17,11 @@ TEXT_PRIMARY = "#1F2329"
 TEXT_MUTED = "#8A8F98"
 SEP = "#EAECEF"
 
+# 状态栏段间竖线。不能复用 SEP：抽屉坐在白底面板上，SEP 才有 1 px 发丝感；
+# 状态栏坐在系统窗口条上（实测底色 #efefef），SEP 与它差 5/255，量出来
+# "可见线列数 = 0"，等于没有线。这一档深到 #C9CDD4（对比度 13）。
+SEP_ON_BAR = "#C9CDD4"
+
 # 方片（单元格 / 小按钮）三态：未选浅灰、当前淡蓝、新值实心蓝
 CHIP_OFF_BG = "#F2F4F7"
 CHIP_OFF_BD = "#DFE3E8"

@@ -270,3 +270,39 @@ def test_long_message_does_not_widen_window(loaded_window, qapp):
     assert mw.width() == width_at_min, "窗口被长文案拉宽"
     assert mw._message_label.text().endswith("…"), "超长文案应截断显示"
     assert mw._message_text == long_message, "原始文案应完整缓存（tooltip/日志用）"
+
+
+def test_segment_separator_is_a_single_plain_line(main_window):
+    """段间竖线必须是"我们自绘的一条线"，不能交给样式画 3D 凹槽。
+
+    回归：``Shadow.Sunken`` 会让平台样式把它画成"暗 + 亮"两笔（实测单元格
+    x=[150,153) 里 150/151 两列都有墨迹），Windows 高 DPI 下表现为
+    "细-粗-细"三条且不居中。
+    """
+    from PySide6.QtGui import QColor
+
+    from PySide6.QtWidgets import QFrame
+
+    from src.ui import theme
+
+    for sep in (main_window._segment_separator, main_window._log_separator):
+        assert sep.frameShape() == QFrame.Shape.VLine
+        assert sep.frameShadow() == QFrame.Shadow.Plain, "Sunken 会被样式画成两笔凹槽"
+        assert sep.lineWidth() == 1
+        assert (
+            sep.palette().color(sep.foregroundRole()).name()
+            == QColor(theme.SEP_ON_BAR).name()
+        ), "竖线取色必须走 foregroundRole(WindowText)，设 Text 不生效"
+
+
+def test_log_separator_follows_the_message(main_window, qtbot):
+    """空闲时日志前不该有一条左边没有内容的孤线；有消息才出现，回收后消失。"""
+    mw = main_window
+    assert mw._message_label.text() == ""
+    assert not mw._log_separator.isVisible(), "空闲态不该留孤立分隔线"
+
+    mw._broadcast("临时播报")
+    qtbot.waitUntil(lambda: mw._log_separator.isVisible(), timeout=2000)
+
+    mw.clear_status_message()
+    qtbot.waitUntil(lambda: not mw._log_separator.isVisible(), timeout=2000)

@@ -19,6 +19,7 @@ from src.ui.variable_list import MyTableWidget  # noqa: E402
 from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
+from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
 from PySide6.QtCore import Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
@@ -502,10 +503,27 @@ class MainWindow(QMainWindow):
         return spacer
 
     def _vline_separator(self) -> QFrame:
-        """段间竖线：QFrame 的 VLine 走 palette，不需要写样式表。"""
+        """段间竖线：Plain 单笔 + 指定色，只画一条线。
+
+        ``Shadow.Sunken`` 会把这条线交给平台样式画成"暗 + 亮"两笔的 3D 凹槽：
+        实测（offscreen/Fusion）单元格 x=[150,153) 里 150=#9f9f9f、151=#ffffff
+        两列都有墨迹，且落在单元格左沿 —— 状态栏只有 22 px 高，凹槽两笔加上
+        Windows 高 DPI 缩放就是肉眼看到的"细-粗-细"三条、还不居中。
+        ``Plain`` 走 ``qDrawPlainLine``，一笔、画在单元格正中（实测间隙
+        [85,100) → 线在 x=92，与间隙中心重合）。
+
+        颜色取 ``foregroundRole()``（即 ``QPalette.WindowText``）：QFrame 画
+        Plain 线用的就是这一项，实测设 ``Text`` 无效仍是 #000000，设
+        ``WindowText`` 才生效。不用样式表是为了不把 ``QFrame`` 的选择器
+        波及到内部子控件（见 theme.panel_style 的同类说明）。
+        """
         line = QFrame()
         line.setFrameShape(QFrame.Shape.VLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
+        line.setFrameShadow(QFrame.Shadow.Plain)
+        line.setLineWidth(1)
+        palette = line.palette()
+        palette.setColor(line.foregroundRole(), QColor(theme.SEP_ON_BAR))
+        line.setPalette(palette)
         return line
 
     def _init_status_bar(self):
@@ -536,7 +554,12 @@ class MainWindow(QMainWindow):
         self._message_label = QLabel("")
         status_bar.addPermanentWidget(self._message_label)
 
-        status_bar.addPermanentWidget(self._vline_separator())
+        # 日志前的竖线与消息同进退：_message_label 空闲时是常驻空标签
+        # （实测仍占一个 7 px 单元格），线一直亮着就成了右边一条左边没内容的
+        # 孤线。跟着消息显隐，和 _segment_separator 跟着 x 轴段显隐同一套逻辑。
+        self._log_separator = self._vline_separator()
+        self._log_separator.hide()
+        status_bar.addPermanentWidget(self._log_separator)
         self._log_segment = _StatusSegment("日志", tip="打开日志窗口")
         self._log_segment.clicked.connect(self.show_log_window)
         status_bar.addPermanentWidget(self._log_segment)
@@ -649,6 +672,7 @@ class MainWindow(QMainWindow):
         self._message_level = level
         self._message_label.setText(self._status_elided(message))
         self._message_label.setToolTip(message)
+        self._log_separator.setVisible(bool(message))
         timeout = STATUS_MESSAGE_TIMEOUT_MS.get(level)
         if timeout:
             self._message_hide_timer.start(timeout)
@@ -662,6 +686,7 @@ class MainWindow(QMainWindow):
         self._message_text = ""
         self._message_label.setText("")
         self._message_label.setToolTip("")
+        self._log_separator.hide()
 
     def _set_busy_cursor(self, busy: bool):
         """沙漏光标只在加载期覆盖，成对调用避免光标覆盖栈泄漏。"""
