@@ -14,6 +14,7 @@ from src.core.config import (
     VALID_NUMERIC_RATIO_THRESHOLD,
     _evaluate_float32_safety,
 )
+from src.core.gc_guard import no_autogc
 from src.core.data_types import FormatInfo, AutoDetectError
 from src.core.logger import get_logger
 from src.data.base_loader import BaseDataLoader
@@ -61,6 +62,12 @@ class DataLoadThread(QThread):
         在后台线程中执行数据加载操作，避免阻塞主界面
         通过信号机制向主线程发送进度更新和结果
         """
+        # 整段加载都在 no_autogc() 窗口内：自动分代收集若落在本 worker 线程，
+        # 会把主线程创建的 QObject 包装器拿到这里析构（详见 src/core/gc_guard.py）。
+        with no_autogc():
+            self._load()
+
+    def _load(self):
         try:
             def _progress_cb(progress: int):
                 self.progress.emit(progress)

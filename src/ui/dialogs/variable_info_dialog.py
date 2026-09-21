@@ -74,6 +74,7 @@ from src.core.config import (
     VAR_INFO_STATS_CACHE_MAX,
 )
 from src.core.logger import get_logger
+from src.core.gc_guard import no_autogc
 from src.data import var_info
 from src.data.metadata import VALID, CONST, INVALID
 from src.utils.paths import STYLE_POSIX, STYLE_WINDOWS, format_for_copy
@@ -476,29 +477,38 @@ class VarInfoWorker(QThread):
                 var_name, loader_ref, generation = self._jobs.popleft()
                 self._current = var_name
 
-            if self._should_cancel(var_name):
-                self._cancel.discard(var_name)
-                self._finish_current()
-                continue
-
-            loader = loader_ref()
-            if loader is None:
-                # loader 已被 GC（reload 后旧数据释放），静默跳过
-                self._finish_current()
-                continue
-
-            try:
-                stats = var_info.compute_stats(loader, var_name, self._should_cancel)
-            except Exception as e:  # noqa: BLE001 - 子线程须自行兜住所有异常
-                logger.debug("统计线程异常 %s", var_name, exc_info=True)
-                stats = var_info.VarStats(error=f"{type(e).__name__}: {e}")
-
-            stats.generation = generation
-            self._finish_current()
-            self.item_ready.emit(var_name, stats)
+            # 一条任务的计算与发信号都包在 no_autogc() 窗口内：自动分代收集若
+            # 落在本 worker 线程，会把主线程创建的 QObject 包装器拿到这里析构
+            # （详见 src/core/gc_guard.py）。窗口按「单条任务」而不是整个 run()
+            # 划分——本线程与对话框同寿，长期关着 GC 会让引用环垃圾一直攒着。
+            with no_autogc():
+                self._process_job(var_name, loader_ref, generation)
 
         with self._cond:
             self._current = None
+
+    def _process_job(self, var_name: str, loader_ref, generation) -> None:
+        """算一条变量的统计并回填。调用方须已置好 ``_current``。"""
+        if self._should_cancel(var_name):
+            self._cancel.discard(var_name)
+            self._finish_current()
+            return
+
+        loader = loader_ref()
+        if loader is None:
+            # loader 已被 GC（reload 后旧数据释放），静默跳过
+            self._finish_current()
+            return
+
+        try:
+            stats = var_info.compute_stats(loader, var_name, self._should_cancel)
+        except Exception as e:  # noqa: BLE001 - 子线程须自行兜住所有异常
+            logger.debug("统计线程异常 %s", var_name, exc_info=True)
+            stats = var_info.VarStats(error=f"{type(e).__name__}: {e}")
+
+        stats.generation = generation
+        self._finish_current()
+        self.item_ready.emit(var_name, stats)
 
     def _finish_current(self) -> None:
         """结束当前任务：清空 ``_current`` 后推进本波进度。
