@@ -8,20 +8,24 @@
 
 | 层 | 用例数 | 实测耗时 | 状态 |
 |---|---|---|---|
-| unit（纯逻辑，无 Qt） | 142 | ~1.2s | 稳定运行 |
-| component（offscreen 控件级） | 62 | ~1.2s | 稳定运行 |
-| e2e（主窗口冒烟） | 10 | ~2.1s | 稳定运行 |
-| **全量** | **214** | **~4.2s** | `214 passed` |
+| unit（纯逻辑，无 Qt） | 588 | ~2.9s | 稳定运行 |
+| component（offscreen 控件级） | 456 | ~41.6s | 稳定运行 |
+| e2e（主窗口冒烟） | 83 | ~27.4s | 稳定运行 |
+| **全量** | **1127** | **~73s**（带 `--cov` 约 79s） | `1127 passed` |
+
+> 上表数字为 **2026-09-22 在 macOS arm64 / offscreen 实测**。此前记录的 214 例 / ~4.2s 是
+> Phase 1 时期的快照，已随测试扩展严重过期——改数字时请重跑，别顺手上调。
 
 覆盖率现状（`--cov=src`）：
 
-- 总体 **45%**（e2e 破冰前 31%）；
-- `src/core` 层 0%~100%（已建测试的模块 73%~100%；短板：`curve_strategy` 0%、`font_cache` 22%；
-  `template_models` / `plot_config` 为 100%，`src/utils/paths` 亦为 100%）；
-- `src/data` 层 21%~82%（短板：`mdf_lazy_loader` 21%、`excel_loader` 53%）；
-- `src/ui` 层已破冰：`main_window` 69%、`plot_widget` 61%、`layout_manager` 41%、
-  `variable_list` 40%、`file_loader_manager` 38%、`cursor_sync_manager` 28%；
-  仍为 0% 的仅剩 `splash_screen`（启动画面，待单独冒烟）。
+- 总体 **71%**（15910 语句 / 4645 未覆盖）；
+- 已建测试的模块：`main_window` 85%、`excel_loader` 87%、`mdf_lazy_loader` 80%、
+  `mark_region_manager` 77%、`font_cache` 67%、`plot_widget` 64%、`layout_manager` 60%、
+  `cursor_manager` 55%、`file_loader_manager` 49%、`curve_strategy` 47%、`variable_list` 44%；
+- 满分：`template_models` / `plot_config` / `utils.paths` 均 100%；
+- 仍是短板的两个：`splash_screen` **15%**（启动画面无冒烟用例）、`cursor_sync_manager` **8%**
+  （467 语句里 425 未中，是 `src/ui` 里最深的洞）。
+
 
 ## 2. 快速开始
 
@@ -34,12 +38,12 @@ uv sync --group dev
 
 | 命令 | 用途 | 实测结果 |
 |---|---|---|
-| `uv run pytest -m unit` | 日常开发高频回归（秒级） | 142 passed |
-| `uv run pytest -m "unit or component"` | 提交前自检 | 204 passed |
-| `uv run pytest` | CI 全量 | 214 passed |
-| `uv run pytest -m e2e` | e2e 冒烟（含真实主窗口） | 10 passed |
-| `uv run pytest --cov=src --cov-report=term-missing` | 覆盖率（含未覆盖行号） | - |
-| `uv run pytest -m component -k legend` | 精准过滤（marker + 关键字组合） | 28 passed |
+| `uv run pytest -m unit` | 日常开发高频回归（秒级） | 588 passed / ~2.9s |
+| `uv run pytest -m "unit or component"` | 提交前自检 | 1044 passed / ~46s |
+| `uv run pytest` | CI 全量 | 1127 passed / ~73s |
+| `uv run pytest -m e2e` | e2e 冒烟（含真实主窗口） | 83 passed / ~27s |
+| `uv run pytest --cov=src --cov-report=term-missing` | 覆盖率（含未覆盖行号） | 总体 71% |
+| `uv run pytest -m component -k legend` | 精准过滤（marker + 关键字组合） | 46 passed / ~0.9s |
 
 > 注：本机 `uv` 不在 PATH 时使用绝对路径 `~/.local/bin/uv`，或先将其加入 shell 配置。
 
@@ -161,6 +165,12 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 检查方式：提交前跑 `python3 .qoder/privacy/check_private_terms.py --staged`（字面量清单 +
 结构型模式双路；清单缺失时会报错退出而非放行）；改写历史或推送远端前跑 `--all`。
 
+> **盲区（会给出假的"干净"）**：检查器各模式底层都是 `git grep`，**未跟踪文件对它不可见**。
+> 新增测试文件在 `git add` 之前跑 `--staged` 一定放行。正确姿势二选一：
+> ① 先 `git add -N <新文件>` 再 `--tree HEAD`，扫完 `git reset -q -- <新文件>`；
+> ② 先真实 `git add` 再 `--staged`。只要本轮有新建文件，就必须走这两条之一。
+
+
 ## 6. 已知陷阱清单
 
 | # | 现象 | 根因 | 规避 |
@@ -174,7 +184,7 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 | 7 | pyqtgraph 范围/autoRange 断言与预期不符 | `vb.state` 中的值是 numpy float，`is True` 断言必败；auto-range 重算依赖宿主窗口 show（有效视图尺寸非零） | 断言用 `bool(...)`；需要真实布局计算的夹具必须 `widget.window().show()` |
 | 8 | 临时诊断脚本中 monkeypatch 类方法**污染后续用例** | 直接改 `ClassName.method` 而不走 pytest monkeypatch，不会自动还原 | 一律用 `monkeypatch.setattr(Class, "method", ...)`；诊断脚本用后即删 |
 | 9 | 合成 Enter 事件**段错误（SIGSEGV，exit 139）** | `QEvent(QEvent.Type.Enter)` 会被 `QWidget::event` 按 `QEnterEvent` 做 static_cast 读字段，裸事件没有那些字段；`HoverEnter` 同理（按 `QHoverEvent` 转）。实测 offscreen 投 Enter、cocoa 投 HoverEnter 都直接崩进程（exit 139） | 投 `QtGui.QEnterEvent(local, scene, global)`；`Leave` 不做转换，裸 `QEvent` 仍然安全 |
-| 10 | 全量 e2e **偶发永久挂起**（`-q` 下撞到 4 次，`-v` 下 4 次都跑完） | pytest-qt 的 `WaitSignal` 在 Python 侧开嵌套 `QEventLoop.exec()`（`pytestqt/wait_signal.py:26`），其间 Shiboken 的 `mainThreadDeletionHandler` 等一把别的线程持有的锁 → 死锁。进程表现为 STAT=S、CPU ~0.1% | 定位：`sample <pid>` 看栈是否为 `Sbk_QEventLoopFunc_exec → mainThreadDeletionHandler → QBasicMutex::lockInternal`。临时规避是换 `-v` 跑；根治方向（未做）：少用 `qtbot.wait` 轮询（`_pump_until` 每 10 ms 一次）或给 Popup 这类跨窗口对象显式收口 |
+| 10 | 全量 e2e/component **偶发永久挂起或段错误**（`-q` 下撞到，`-v` 下像"跑完了"） | pytest-qt 的 `WaitSignal` 在 Python 侧开嵌套 `QEventLoop.exec()`（`pytestqt/wait_signal.py:26`），其间 Shiboken 的 `mainThreadDeletionHandler` 等一把别的线程持有的锁 → 死锁。**崩与挂是同一条根因的两个落点**：自动分代回收在 worker 线程执行时，会把主线程创建的 `QObject` 包装器拿到 worker 上析构（分代堆是进程级的，**不需要**worker 持有 Qt 引用）；锁序成环就是整窗冻结，抢锁没成环就在主线程定时器链表留下悬垂节点、由下一个事件循环踩中 → 段错误固定停在 `QTimerInfoList::activateTimers` | **根治已落地**：`src/core/gc_guard.no_autogc()` 包住 worker 窗口（`DataLoadThread.run()` 整段、`VarInfoWorker` 按单条任务），窗口内禁自动回收、退出时若 gen-0 越阈值用 `freeze()+unfreeze()` 清零且不做任何析构；护栏 `test_worker_no_autogc.py`（`gc.callbacks` 是自动收集唯一可观测点，打桩 `gc.collect` 拦不到）+ `test_load_worker_no_full_gc.py`（钉显式 collect）。定位手法：挂起时 `sample <pid>`，看 worker 线程栈是否出现 `SbkDeallocWrapperCommon → ~QObject` 且在等 GIL、主线程是否 `mainThreadDeletionHandler → QBasicMutex::lockInternal` 在等 Qt 锁。**判断某条线程要不要包窗口的依据是"它是否让被跟踪容器净增长"**：`logging.QueueListener` 线程实测 5 万条日志、145 次自动收集，0 次落在它身上（短命 dict 自己抵消），故不包 |
 | 11 | 抽屉里 `QLineEdit.selectAll()` 后**一 pump 事件选区就没了**（`selectionStart/End` 变 `-1`，`selectedText()` 返回空串） | offscreen 弹窗拿不到键盘（stderr 直说 `This plugin does not support grabbing the keyboard`），`processEvents()` 期间补发一次 FocusOut，`QLineEdit` 随之清空选区；cocoa 上实测不会清 | 选区断言在 `selectAll()`/拖选**当拍**做，中间不要 `processEvents()`；要验像素表现就去 cocoa 截图（`tmp/_p02_hover_shot.py`） |
 
 ## 7. tmp/ 脚本转正流程（五步法）
@@ -207,12 +217,12 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 
 | 模块 | 语句数 | 覆盖率 | 破冰/深化途径 |
 |---|---|---|---|
-| `src/ui/file_loader_manager.py` | 812 | 38% | ✅ e2e 已破冰；深化：reload 全流程、错误路径 |
-| `src/ui/main_window.py` | 497 | 69% | ✅ e2e 已破冰；深化：模板菜单/快捷键全集 |
-| `src/ui/layout_manager.py` | 588 | 41% | ✅ e2e 已破冰；深化：多子图布局/拖拽重排 |
-| `src/ui/variable_list.py` | 354 | 40% | ✅ e2e 已破冰；深化：搜索/多选 |
-| `src/ui/cursor_sync_manager.py` | 467 | 28% | component：游标用例深化 |
-| `src/ui/splash_screen.py` | 141 | 0% | 唯一仍 0%：启动画面单独冒烟 |
+| `src/ui/cursor_sync_manager.py` | 460 | **8%** | `src/ui` 最深的洞：游标跨子图同步全靠 component 用例，需补链接/解链与恢复路径 |
+| `src/ui/splash_screen.py` | 142 | **15%** | 唯一从无冒烟用例的模块：`test_splash_screen.py` 起停 + 进度回调 |
+| `src/ui/variable_list.py` | 328 | 44% | ✅ 已破冰；深化：搜索/多选/拖拽出口 |
+| `src/ui/file_loader_manager.py` | 869 | 49% | ✅ 已破冰；深化：reload 全流程、错误路径 |
+| `src/ui/layout_manager.py` | 633 | 60% | ✅ 已破冰；深化：多子图布局/拖拽重排 |
+| `src/ui/main_window.py` | 780 | 85% | ✅ 已破冰；深化：模板菜单/快捷键全集 |
 
 ### Phase 3：e2e 从 0 到 1（已完成 ✅ / 剩余项）
 
@@ -220,20 +230,21 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 - ✅ `test_load_and_plot.py`：加载 CSV → 变量列表 → 拖拽绘图 → Ctrl+R/Ctrl+Y 快捷键；
 - `test_template_roundtrip.py`：保存模板 → 清空 → 应用恢复（含冲突路径）；
 - reload 全流程用例（历史 bug 密集区：游标链接、Y 轴可见性、变量搜索栏数据源）；
-- `test_splash_screen.py`：启动画面冒烟（最后 0% 模块）。
+- `test_splash_screen.py`：启动画面冒烟（15%，`src/ui` 里倒数第二深的洞）。
 
 ### unit / component 补强
 
-- `curve_strategy`（0%）与 `font_cache`（22%）：src/core 层遗留空白，纯逻辑单元测试即可覆盖；
-- `mdf_lazy_loader`（21%）：用 asammdf 合成小型 MDF 文件，测懒加载接口与通道枚举；
-- `excel_loader`（53%）：calamine 路径、多 sheet 选择；
-- component：Y 冻结转正（第 7 节清单）、游标管理（`cursor_manager` 909 语句仅 31%）、
-  区间标记（`mark_region_manager` 23%）。
+- `curve_strategy`（47%）与 `font_cache`（67%）：src/core 层遗留空白，纯逻辑单元测试即可覆盖；
+- `mdf_lazy_loader`（80%）：剩余集中在 asammdf 通道枚举与文件尾解析分支，用合成小型 MDF 补；
+- `excel_loader`（87%）：calamine 快路径已覆盖，缺的是 openpyxl 回退与多 sheet 选择分支；
+- component：Y 冻结转正（第 7 节清单）、游标管理（`cursor_manager` 904 语句 55%）、
+  区间标记（`mark_region_manager` 105 语句 77%）。
 
 ### Phase 4：护栏与 CI
 
 - GitHub Actions 三平台矩阵（macOS / Windows / Linux，offscreen 模式无需 xvfb）；
-- 覆盖率基线护栏：`--cov-fail-under=30` 防回退；
+- 覆盖率基线护栏：`--cov-fail-under=65` 防回退（2026-09-22 实测总体 71%，留 6 点余量；
+  原先计划的 30 早已低于真实值，起不到防回退作用）；
 - `pytest-benchmark` 加载/降采样基线，守护滚轮合并节流等历史优化成果；
 - `pytest-xdist` 仅对 unit 层启用并行（`-m unit -n auto`），Qt 用例保持串行；
 - 可选：`hypothesis` 属性测试覆盖 loader 边界输入。
