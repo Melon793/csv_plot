@@ -252,9 +252,7 @@ class FileLoaderManager(MainWindowBaseManager):
         # v5.8 修复：取消之前的 safety timer，防止跨 reload 的过期 timer 触发 _force_unlock_all。
         # 之前的实现仅靠版本号防污染，但 _safety_unlock_version 会被最新 _end_data_reload 覆盖，
         # 导致旧 timer 触发时版本检查通过，误执行 _force_unlock_all 清除新曲线。
-        if hasattr(self, "_safety_timer") and self._safety_timer is not None:
-            self._safety_timer.stop()
-            self._safety_timer = None
+        self._stop_safety_timer()
         self._safety_unlock_version = -1
 
         if hasattr(self.mw, "_crosshair_update_timer"):
@@ -381,7 +379,7 @@ class FileLoaderManager(MainWindowBaseManager):
         self._safety_timer.timeout.connect(self._safety_force_unlock)
         self._safety_timer.start(3000)
 
-        QTimer.singleShot(0, self._restore_cursor_state_after_reload)
+        QTimer.singleShot(0, self.mw, self._restore_cursor_state_after_reload)
 
     def _restore_cursor_state_after_reload(self):
         """延迟恢复 cursor 状态（在 UI 稳定后调用）"""
@@ -522,7 +520,34 @@ class FileLoaderManager(MainWindowBaseManager):
             # 消除锁清除与 setUpdatesEnabled 之间约 50ms 的危险窗口。
             # 在此期间 paintEvent 由 _is_loading_new_data 和 _is_updating_data 双锁拦截。
             self._post_reload_pending_version = self.mw._data_version
-            QTimer.singleShot(50, self._post_reload_ui_refresh)
+            # 必须用带 context 的三参重载：两参重载 Qt 无从知道回调归谁，窗口销毁
+            # 也不会取消它，回调将在窗口析构后才投递、打到已删的 widget
+            QTimer.singleShot(50, self.mw, self._post_reload_ui_refresh)
+
+    def _stop_safety_timer(self):
+        """停掉兜底解锁定时器（可重复调用）。
+
+        清理期窗口的 C++ 对象可能已随窗口销毁、只剩 Python 包装器，此时
+        ``stop()`` 会抛 RuntimeError；它若发生在异常处理器内部就会逃逸出槽
+        函数，被 PySide6 交给 sys.excepthook（pytest-qt 记为 teardown error）。
+        """
+        timer = getattr(self, "_safety_timer", None)
+        if timer is None:
+            return
+        self._safety_timer = None
+        try:
+            timer.stop()
+        except RuntimeError:
+            logger.debug("_stop_safety_timer: QTimer 的 C++ 对象已销毁", exc_info=True)
+
+    def _window_going_away(self) -> bool:
+        """窗口是否已进入销毁流程（closeEvent 置位）或已断链。
+
+        不能直接碰 ``self.mw``：它是弱引用 property，断链时自己就会抛
+        ``RuntimeError("MainWindow has been garbage collected")``。
+        """
+        mw = self._mw_ref()
+        return mw is None or bool(getattr(mw, "_is_being_destroyed", False))
 
     def _safety_force_unlock(self):
         """版本感知的安全解锁：仅当版本匹配时才执行解锁，防止跨 reload 污染"""
@@ -552,9 +577,7 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw.reload_btn.setEnabled(True)
         self.mw._is_loading_new_data = False
         self._safety_unlock_version = -1
-        if hasattr(self, "_safety_timer") and self._safety_timer is not None:
-            self._safety_timer.stop()
-            self._safety_timer = None
+        self._stop_safety_timer()
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget:
@@ -579,6 +602,13 @@ class FileLoaderManager(MainWindowBaseManager):
         6. 单一 QTimer.singleShot(0)（延迟 cursor 更新到下一个事件循环迭代，
            合并 13 个 per-widget 回调为 1 个，避免 BSP 树交叉修改）
         """
+        if self._window_going_away():
+            # widget 的 C++ 对象可能已删（Python 包装器还在，照属性名取值不报错、
+            # 真摸控件才炸）：只停掉兜底定时器——留着它 3 秒后还会去摸已删的
+            # reload_btn
+            self._stop_safety_timer()
+            return
+
         pending_version = getattr(self, "_post_reload_pending_version", -1)
         if pending_version != getattr(self.mw, "_data_version", 0):
             logger.debug(
@@ -600,9 +630,7 @@ class FileLoaderManager(MainWindowBaseManager):
 
             self.mw._is_loading_new_data = False
             self._safety_unlock_version = -1
-            if hasattr(self, "_safety_timer") and self._safety_timer is not None:
-                self._safety_timer.stop()
-                self._safety_timer = None
+            self._stop_safety_timer()
 
             # v5.12: reload 流程完全结束，恢复 reload 按钮
             self.mw.reload_btn.setEnabled(True)
@@ -622,15 +650,14 @@ class FileLoaderManager(MainWindowBaseManager):
             current_version = self.mw._data_version
             QTimer.singleShot(
                 0,
+                self.mw,
                 lambda: self._deferred_cursor_refresh_all(widgets_to_refresh, current_version)
             )
         except Exception:
             logger.debug("_post_reload_ui_refresh 执行失败", exc_info=True)
             self.mw._is_loading_new_data = False
             self._safety_unlock_version = -1
-            if hasattr(self, "_safety_timer") and self._safety_timer is not None:
-                self._safety_timer.stop()
-                self._safety_timer = None
+            self._stop_safety_timer()
             # v5.12: 异常路径也要恢复 reload 按钮
             self.mw.reload_btn.setEnabled(True)
 
@@ -690,6 +717,8 @@ class FileLoaderManager(MainWindowBaseManager):
         每个 widget 更新前后设置/清除 _is_cursor_modifying_scene 护栏，
         阻止异步 paint 事件访问 BSP 中间态。
         """
+        if self._window_going_away():
+            return
         if getattr(self.mw, "_data_version", 0) != ver:
             return
         if getattr(self.mw, "_is_loading_new_data", False):
@@ -962,7 +991,11 @@ class FileLoaderManager(MainWindowBaseManager):
                     self.set_button_status(True)
                     self.mw.load_btn.setEnabled(True)
                     # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-                    QTimer.singleShot(0, lambda: self._post_load_actions(file_path, is_reload=is_reload))
+                    QTimer.singleShot(
+                        0,
+                        self.mw,
+                        lambda: self._post_load_actions(file_path, is_reload=is_reload),
+                    )
                 else:
                     self.mw.load_btn.setEnabled(True)
                     # v5.12: 同步 reload 失败时也要恢复 reload 按钮
@@ -1113,6 +1146,8 @@ class FileLoaderManager(MainWindowBaseManager):
             dlg.close()
 
     def _post_load_actions(self, file_path: str, is_reload: bool = False):
+        if self._window_going_away():
+            return
         self.mw.loaded_path = file_path
         self._remember_last_open_dir(file_path)
 
@@ -1343,7 +1378,9 @@ class FileLoaderManager(MainWindowBaseManager):
         if not applied:
             return
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-        QTimer.singleShot(0, lambda: self._post_load_actions(file_path, is_reload=is_reload))
+        QTimer.singleShot(
+            0, self.mw, lambda: self._post_load_actions(file_path, is_reload=is_reload)
+        )
 
     def _on_load_error(self, msg):
         logger.error("后台加载失败: %s", msg)
