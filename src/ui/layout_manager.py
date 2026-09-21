@@ -646,9 +646,10 @@ class LayoutManager(MainWindowBaseManager):
         )
 
     def _handle_event_filter(self, obj, event):
-        if not isinstance(obj, QWidget):
+        mw = self._mw_ref()
+        if mw is None or not isinstance(obj, QWidget):
             return False
-        if obj.window() is not self.mw:
+        if obj.window() is not mw:
             return False
         etype = event.type()
         if etype == QEvent.Type.DragEnter:
