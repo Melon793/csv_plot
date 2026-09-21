@@ -93,6 +93,9 @@ class DataLoadThread(QThread):
                     encoding=self.encoding,
                     chunksize=3600,
                     _progress=_progress_cb,
+                    # 本类是 worker 线程：全量 GC 会把主线程的 QObject 包装器拿到
+                    # 本线程析构，与 Shiboken 主线程延迟删除互锁 → 整窗死锁
+                    allow_gc=False,
                 )
             self.finished.emit(loader)
         except MemoryError:
@@ -364,6 +367,7 @@ class FastDataLoader(BaseDataLoader):
         do_parse_date: bool = False,
         has_unit: bool = True,
         encoding: str | None = None,
+        allow_gc: bool = True,
     ):
         """初始化快速数据加载器
 
@@ -383,6 +387,10 @@ class FastDataLoader(BaseDataLoader):
             do_parse_date: 是否解析日期
             has_unit: 是否包含单位行
             encoding: 预检测的文件编码，为 None 时内部自动检测
+            allow_gc: 构造过程是否执行全量 GC。主线程同步加载保持 True；
+                worker 线程（DataLoadThread）必须传 False——GC 在哪个线程执行就
+                在哪个线程析构对象，在 worker 里全量回收会把主线程的 QObject
+                包装器拿到 worker 去销毁，与 Shiboken 主线程延迟删除互锁成死锁
         """
         super().__init__()
         self._path = csv_path
@@ -400,6 +408,7 @@ class FastDataLoader(BaseDataLoader):
         self._progress_cb = _progress
         self.do_parse_date = do_parse_date
         self.has_unit = has_unit
+        self._allow_gc = allow_gc
 
         self._var_names, self._units, self.encoding_used, self.has_unit = (
             self._load_header_units(
@@ -439,7 +448,8 @@ class FastDataLoader(BaseDataLoader):
         self.date_formats = date_formats
 
         del sample
-        gc.collect()
+        if self._allow_gc:
+            gc.collect()
         if self._progress_cb:
             self._progress_cb(15)
 
@@ -461,8 +471,9 @@ class FastDataLoader(BaseDataLoader):
         # 后处理：合并 downcast + validity 为单次遍历
         self._df_validity = self._postprocess_columns(downcast=downcast_float)
 
-        # 强制垃圾回收
-        gc.collect()
+        # 强制垃圾回收（worker 线程路径由 allow_gc 关闭）
+        if self._allow_gc:
+            gc.collect()
 
         if self._progress_cb:
             self._progress_cb(100)

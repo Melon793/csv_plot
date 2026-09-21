@@ -8,6 +8,7 @@
 """
 
 from __future__ import annotations
+import gc
 import os
 import re
 import sys
@@ -997,6 +998,10 @@ class FileLoaderManager(MainWindowBaseManager):
                     lambda loader: self._on_load_done(loader, file_path, _load_version, is_reload)
                 )
                 self.mw._thread.error.connect(self._on_load_error)
+                # 跨线程 GC 死锁防护：worker 内一旦发生全量 GC（显式调用或自动分代
+                # 收集），会把主线程的 QObject 包装器拿到 worker 析构，与主线程
+                # 锁序倒置。起跑前先在本线程排空引用环垃圾，使 worker 侧无对象可错。
+                gc.collect()
                 self.mw._thread.start()
                 started_async = True
         except Exception:
@@ -1007,7 +1012,6 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _release_old_data(self):
         """显式释放所有对旧 DataFrame 的引用（仅在新 loader 成功后调用）。"""
-        import gc
 
         try:
             # 0) 统计缓存必须最先、无条件清空（缺-2/缺-3 加固）。
