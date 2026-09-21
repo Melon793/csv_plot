@@ -12,6 +12,7 @@ from src.core.config import (  # noqa: E402
     PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT,
     PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
     RATIO_RESET_PLOTS,
+    widget_alive,
 )
 from src.core.settings import AppSettings  # noqa: E402
 from src.ui.table_dialog import DropOverlay  # noqa: E402
@@ -21,7 +22,7 @@ from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
-from PySide6.QtCore import Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtCore import QObject, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
     QColor,
     QIcon,
@@ -1223,6 +1224,10 @@ class MainWindow(QMainWindow):
         self._filter_debounce_timer.start(180)
 
     def eventFilter(self, obj, event):
+        # 全局过滤器会收到正在销毁的对象：obj 可能已被复用成非 QObject（实测 QWidgetItem），
+        # 或只剩失效的包装器。这类异常从 Qt 回调里逃出会污染解释器状态，判据不过就静默跳过。
+        if not isinstance(obj, QObject) or not widget_alive(obj) or not widget_alive(self):
+            return False
         if not hasattr(self, "layout_manager") or self.layout_manager is None:
             return super().eventFilter(obj, event)
         handled = self.layout_manager._handle_event_filter(obj, event)
