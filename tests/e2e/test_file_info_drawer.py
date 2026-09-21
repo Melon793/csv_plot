@@ -2,7 +2,7 @@
 
 覆盖三件事：抽屉真能弹在状态栏上方（几何量测，不是"看起来对"）、内容就是
 当前文件的真实信息（换文件后不许残留）、以及三个动作出口（复制入剪贴板、
-打开走系统文件管理器且不拼 shell、Esc/加载/换文件都能收起）。
+打开走系统文件管理器、Esc/加载/换文件都能收起）。
 
 字段口径本身在 tests/unit/data/test_file_info.py 里钉；这里只验 UI 层。
 """
@@ -144,7 +144,12 @@ def test_copy_button_writes_clipboard_and_broadcasts(loaded_window, qapp, qapp_c
 
 
 def test_open_button_asks_system_file_manager(loaded_window, qapp, monkeypatch):
-    """「打开」用 argv 列表调用系统命令，不拼 shell 字符串（路径里有空格也安全）。"""
+    """「打开」把目标交给系统文件管理器，且只交一次。
+
+    命令行的**形状**（Windows 为什么必须传 str 而不是 argv 列表）在
+    tests/unit/ui/test_status_drawer_reveal.py 里逐字符钉；这里只验 UI 接线，
+    所以两种形状都得放过 —— 在 Windows 上跑本用例时 args 就是 str。
+    """
     calls = []
     monkeypatch.setattr(
         "src.ui.widgets.status_drawer.subprocess.Popen",
@@ -157,9 +162,9 @@ def test_open_button_asks_system_file_manager(loaded_window, qapp, monkeypatch):
 
     assert len(calls) == 1
     args = calls[0]
-    assert isinstance(args, list) and all(isinstance(a, str) for a in args)
-    assert args[0] in {"open", "explorer", "xdg-open"}, args
-    assert any("e2e_demo.csv" in a for a in args[1:]), f"没把目标文件交给系统: {args}"
+    joined = " ".join(args) if isinstance(args, list) else args
+    assert joined.split(maxsplit=1)[0] in {"open", "explorer", "xdg-open"}, joined
+    assert "e2e_demo.csv" in joined, f"没把目标文件交给系统: {joined}"
 
 
 def test_open_button_when_file_moved_says_so(loaded_window, qapp, monkeypatch):

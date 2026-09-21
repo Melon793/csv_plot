@@ -76,9 +76,15 @@ def reveal_in_file_manager(file_path: str, folder: str) -> str:
     ``open -R``、Windows ``explorer /select,`` 支持"打开目录并选中该文件"，
     Linux 的 ``xdg-open`` 没有选中语义，只能开目录。
 
-    参数一律走 argv 列表、不拼 shell 字符串：文件路径里的空格、``&``、``$``
-    都是常事（本仓 paths 模块为此专门做过引号策略），拼进一条命令串就是命令
-    注入与断词两个坑。
+    macOS / Linux 走 argv 列表，不拼 shell 字符串：文件路径里的空格、``&``、
+    ``$`` 都是常事（本仓 paths 模块为此专门做过引号策略），拼进一条命令串就是
+    命令注入与断词两个坑。
+
+    Windows 是**唯一例外**，必须传单个字符串，理由见 win32 分支的实测注释。这不
+    违反上面那条：``Popen(str)`` 在 Windows 上把整串原样交给 ``CreateProcessW``
+    的 ``lpCommandLine``，中间没有 cmd.exe，所以 ``&`` ``%`` ``$`` 反引号全是普通
+    字符；而引号包不住也逃不出——上面 ``os.path.exists`` 已经保证这是条真实路径，
+    NTFS 不允许文件名含 ``"``。
     """
     target = file_path or folder
     if not target:
@@ -90,8 +96,20 @@ def reveal_in_file_manager(file_path: str, folder: str) -> str:
         args = ["open", "-R", file_path] if file_path else ["open", folder]
     elif sys.platform == "win32":
         # explorer 的 /select 必须是**一个**参数且逗号后无空格；它成功时也常
-        # 返回非零退出码，因此不看返回码
-        args = ["explorer", f"/select,{file_path}"] if file_path else ["explorer", folder]
+        # 返回非零退出码，因此不看返回码。
+        #
+        # 引号只能加在逗号**之后**，所以这里不能传 list：Popen 收到 list 会先过
+        # subprocess.list2cmdline，它的规则是"参数含空格就把整个参数包进引号"，
+        # 对 / 开头的开关参数没有例外，于是得到 ``explorer "/select,路径"``。
+        # explorer 认不出被引号包住的 /select, 前缀，回落到默认起始页。实测共享
+        # 盘目录下 8/8 中招（含空格、&、%、=、中文、全角标点全部打开"我的文档"），
+        # 而 /select,"路径" 这一支 8/8 正常定位并选中文件。
+        # 触发点往往在**目录名**里，所以这条路径下的每个文件都会中，不是只有怪
+        # 文件名才踩。
+        if file_path:
+            args = f'explorer /select,"{file_path}"'
+        else:
+            args = f'explorer "{folder}"'
     else:
         args = ["xdg-open", folder or file_path]
 
@@ -466,11 +484,18 @@ class FileInfoDrawer(StatusDrawer):
         self._notify(f"已复制「{key}」")
 
     def _on_open_folder(self) -> None:
+        """把定位请求交给系统文件管理器。
+
+        成功话术刻意用"已请求"：三平台都是 launch 型子进程、不 wait，explorer
+        失败时也照样返回 0（见 ``reveal_in_file_manager``），我们只知道"请求发
+        出去了"，不知道窗口开没开对。原先那句"已在文件管理器中显示该文件"在
+        Windows 上是句假播报——它开着"我的文档"给用户看，这边说已经显示了。
+        """
         error = reveal_in_file_manager(self._file_path, self._folder)
         if error:
             self._notify(f"打开所在文件夹失败：{error}", level="warn")
         else:
-            self._notify("已在文件管理器中显示该文件")
+            self._notify("已请求在文件管理器中显示该文件")
 
 
 class XAxisDrawer(StatusDrawer):
