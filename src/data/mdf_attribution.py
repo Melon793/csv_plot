@@ -343,7 +343,7 @@ def _clean_value(value) -> str:
 
     截断曾按 120 字符实现，理由是“不截断会把「值」列撑宽”—— 实测不成立
     （值列是 ``QHeaderView.Stretch``，3000 字符也不改变列宽，已由
-    ``tests/component/test_variable_info_dialog.py::
+    ``tests/component/test_variable_info_dialog_rendering.py::
     TestMdfAttributionPresentation`` 固化），而截断会把真值从 tooltip、
     行尾复制按钮与 Markdown 导出里一并削掉 —— 实测真实 mf4 有 141/4704
     个通道注释超 120 字符，截了就是丢数据。
