@@ -71,6 +71,53 @@ def make_simple_rows(n: int = 20) -> list[list]:
     return rows
 
 
+def write_xlsx(
+    path: Path | str,
+    *,
+    header: list[str],
+    units: list[str] | None = None,
+    rows: list[list],
+    sheet_name: str = "Sheet1",
+    extra_sheet_names: list[str] | None = None,
+) -> Path:
+    """写入合成 xlsx：标题行 + 可选单位行 + 数据行。
+
+    Args:
+        path: 目标路径
+        header: 变量名行（工作表第一行）
+        units: 单位行（None 表示不写单位行）
+        rows: 数据行。允许塞真实的 ``date`` / ``time`` / ``datetime`` 对象：
+            Excel 原生时间单元格是 loader 的一条独立分支，用字符串写不出那种
+            单元格类型
+        sheet_name: 数据所在工作表的表名
+        extra_sheet_names: 额外工作表的表名。多表用例关心的是"选中了哪张表"，
+            这些表统一写一份最小两列表（time/speed 各一行），内容不参与断言
+
+    Returns:
+        写入的 Path
+    """
+    # 懒导入：本工厂只被少数 Excel 用例使用，不必把 openpyxl 的导入成本
+    # 摊到每个 import 本模块的测试上（与 write_mdf 的处理一致）
+    import openpyxl
+
+    path = Path(path)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append(list(header))
+    if units is not None:
+        ws.append(list(units))
+    for row in rows:
+        ws.append(list(row))
+    for name in extra_sheet_names or ():
+        extra = wb.create_sheet(name)
+        extra.append(["time", "speed"])
+        extra.append([0.0, 1.0])
+    wb.save(str(path))
+    wb.close()
+    return path
+
+
 # ---------------------------------------------------------------------------
 # MDF 合成
 # ---------------------------------------------------------------------------

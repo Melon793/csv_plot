@@ -25,15 +25,21 @@ dev = [
     "pyinstaller>=6.0",
     "pytest-qt>=4.5.0",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 qt_api = "pyside6"
-addopts = "-ra"
+# --timeout：把历史上的"永久挂起"（WaitSignal 死锁、模态弹窗）变成可诊断失败
+# --durations=20：常态暴露慢用例，防止本次优化被后续提交吃回
+#   （另见 tests/conftest.py 里的 >1s 点名护栏）
+addopts = "-ra --timeout=120 --timeout-method=thread --durations=20"
 markers = [
     "unit: 纯逻辑单元测试（无 Qt 界面依赖，秒级完成）",
     "component: offscreen 控件级功能测试",
     "e2e: 主窗口端到端冒烟测试",
     "perf: 性能回归测试",
+    "full_matrix: e2e 用例要求真实默认子图矩阵（跳过 1×1 加速替身）",
 ]

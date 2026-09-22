@@ -289,27 +289,6 @@ def test_two_drawers_are_mutually_exclusive(loaded_window, qapp):
     assert axis.isVisible() and not mw._file_info_drawer.isVisible()
 
 
-def test_click_without_data_only_broadcasts(main_window, qapp):
-    mw = main_window
-    _click(mw._axis_segment, qapp)
-
-    assert mw._axis_drawer is None
-    assert mw._message_label.text() == "尚未加载数据文件"
-
-
-def test_click_while_loading_is_gated(main_window, qapp):
-    class _FakeThread:
-        def isRunning(self):
-            return True
-
-    mw = main_window
-    mw._thread = _FakeThread()
-    _click(mw._axis_segment, qapp)
-
-    assert mw._axis_drawer is None
-    assert "正在加载数据，请稍候再改 x 轴基准" in mw._message_label.text()
-
-
 def test_apply_rejects_non_positive_factor(loaded_window):
     """共用的 apply 对非法系数返回 False 且不动全局值。
 

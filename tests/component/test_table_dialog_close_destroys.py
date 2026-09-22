@@ -6,28 +6,14 @@
 """
 
 import sys
-import time
 
 import pandas as pd
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QWidget
 from shiboken6 import isValid
 
+from tests.fixtures.waits import flush_deferred_deletes, pump
 from src.ui.table_dialog import DataTableDialog
-
-
-def pump(ms: int = 50) -> None:
-    end = time.monotonic() + ms / 1000.0
-    while time.monotonic() < end:
-        QCoreApplication.processEvents()
-        time.sleep(0.002)
-
-
-def flush_deferred_deletes() -> None:
-    """deleteLater 要等 DeferredDelete 投递才真正销毁 C++ 对象"""
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    QCoreApplication.processEvents()
 
 
 @pytest.fixture()

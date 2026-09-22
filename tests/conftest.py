@@ -68,3 +68,31 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.e2e)
         elif "/perf/" in path:
             item.add_marker(pytest.mark.perf)
+
+
+# ---------------------------------------------------------------------------
+# 耗时护栏（C3）：有单例超过 SLOW_TEST_SECONDS 就在收尾时点名
+#
+# 回归口径：2026-09-22 优化后全量最慢单例 < 1.0s。若某次提交让某例越过这条线，
+# 收尾区会红字列出 —— 优化被"吃回去"时能当场看见，不必等总时长报警。
+# ---------------------------------------------------------------------------
+
+SLOW_TEST_SECONDS = 1.0
+
+_slow_tests: dict[str, float] = {}
+
+
+def pytest_runtest_logreport(report):
+    """记录超阈值用例；xdist 下控制器同样会收到各 worker 的报告。"""
+    if report.when == "call" and report.duration > SLOW_TEST_SECONDS:
+        _slow_tests[report.nodeid] = report.duration
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _slow_tests:
+        return
+    terminalreporter.write_sep(
+        "=", f"耗时护栏：{len(_slow_tests)} 例超过 {SLOW_TEST_SECONDS:.1f}s", red=True
+    )
+    for nodeid, seconds in sorted(_slow_tests.items(), key=lambda kv: -kv[1]):
+        terminalreporter.write_line(f"{seconds:6.2f}s  {nodeid}")

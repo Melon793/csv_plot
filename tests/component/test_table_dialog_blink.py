@@ -13,22 +13,19 @@ add 被去重，但仍排入等量的 off 回调 —— 旧实现 `set.remove()`
 """
 
 import sys
-import time
 
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import QCoreApplication
-
+from tests.fixtures.waits import pump
 from src.ui.table_dialog import CustomDelegate, DataTableDialog
 
 
-def pump(ms: int = 50) -> None:
-    """驱动事件循环，让 QTimer.singleShot 的延后回调落地。"""
-    end = time.monotonic() + ms / 1000.0
-    while time.monotonic() < end:
-        QCoreApplication.processEvents()
-        time.sleep(0.002)
+# 闪烁参数约定：off 回调由 `QTimer.singleShot(pulse, _off)` 调度，与 pulse 同刻。
+# 生产默认 pulse=800ms；本文件显式传 **50ms**、pump 取 3× 余量（150ms）即可
+# 稳定观测到清除（原为 pulse=300 / pump(900)，每个用例白等 0.75s）。
+_BLINK_PULSE_MS = 50
+_BLINK_WAIT_MS = 150
 
 
 @pytest.fixture()
@@ -56,10 +53,10 @@ def test_single_blink_highlights_then_clears(dialog, qt_errors):
     delegate = dialog.delegate_main
     assert delegate.highlighted_cols == set()
 
-    dialog._blink_column("a", pulse=300)
+    dialog._blink_column("a", pulse=_BLINK_PULSE_MS)
     assert delegate.highlighted_cols == {0}, "闪烁期间该列应处于高亮态"
 
-    pump(900)
+    pump(_BLINK_WAIT_MS)
     assert delegate.highlighted_cols == set(), "脉冲结束后应取消高亮"
     assert not qt_errors, f"单次闪烁不应抛异常：{qt_errors}"
 
@@ -69,11 +66,11 @@ def test_single_blink_highlights_then_clears(dialog, qt_errors):
 def test_overlapping_blinks_same_column_do_not_crash(dialog, qt_errors):
     delegate = dialog.delegate_main
 
-    dialog._blink_column("a", pulse=300)  # 第一次：add(0)
-    dialog._blink_column("a", pulse=300)  # 第二次：add(0) 被 set 去重，但再排一个 off
+    dialog._blink_column("a", pulse=_BLINK_PULSE_MS)  # 第一次：add(0)
+    dialog._blink_column("a", pulse=_BLINK_PULSE_MS)  # 第二次：add(0) 被 set 去重，但再排一个 off
     assert delegate.highlighted_cols == {0}
 
-    pump(900)
+    pump(_BLINK_WAIT_MS)
     # 旧实现在此处抛 KeyError: 0（第二个 off 回调 remove 已被删的元素）
     assert delegate.highlighted_cols == set()
     assert not qt_errors, f"重叠闪烁不应抛异常：{qt_errors}"
@@ -103,11 +100,11 @@ def test_blink_step_off_is_idempotent(dialog):
 def test_frozen_column_blinks_frozen_delegate(dialog, qt_errors):
     dialog.frozen_columns = ["a"]
 
-    dialog._blink_column("a", pulse=300)
+    dialog._blink_column("a", pulse=_BLINK_PULSE_MS)
     assert dialog.delegate_frozen.highlighted_cols == {0}
     assert dialog.delegate_main.highlighted_cols == set(), "主区 delegate 不应被点亮"
 
-    pump(900)
+    pump(_BLINK_WAIT_MS)
     assert dialog.delegate_frozen.highlighted_cols == set()
     assert not qt_errors, f"冻结列闪烁不应抛异常：{qt_errors}"
 
@@ -146,11 +143,11 @@ def test_tab_blink_off_callback_survives_destroyed_view(dialog, qt_errors):
     """回归 P1-6：闪烁窗口内 tab 视图被销毁，off 回调不得抛 RuntimeError"""
     state, delegate = _make_tab_state(dialog)
 
-    dialog._blink_tab_column(state, "a", pulse=300)
+    dialog._blink_tab_column(state, "a", pulse=_BLINK_PULSE_MS)
     assert delegate.highlighted_cols == {0}
 
     _delete_view(state.view)
-    pump(900)
+    pump(_BLINK_WAIT_MS)
 
     assert not qt_errors, f"tab 视图销毁后 off 回调抛了异常：{qt_errors}"
 
@@ -159,11 +156,11 @@ def test_tab_blink_off_callback_skips_removed_tab(dialog, qt_errors):
     """整页被单独移除（_remove_tab 不升 _gen）：按身份判定跳过，不碰旧 delegate"""
     state, delegate = _make_tab_state(dialog)
 
-    dialog._blink_tab_column(state, "a", pulse=300)
+    dialog._blink_tab_column(state, "a", pulse=_BLINK_PULSE_MS)
     assert delegate.highlighted_cols == {0}
 
     dialog._group_tabs.pop(state.group_index)
-    pump(900)
+    pump(_BLINK_WAIT_MS)
 
     assert delegate.highlighted_cols == {0}, "身份已失效的 tab 不应被 off 回调改写"
     assert not qt_errors, f"tab 移除后 off 回调抛了异常：{qt_errors}"
@@ -173,9 +170,9 @@ def test_tab_blink_off_callback_respects_generation_token(dialog, qt_errors):
     """_reset_tab_mode 升令牌：过期回调作废"""
     state, delegate = _make_tab_state(dialog)
 
-    dialog._blink_tab_column(state, "a", pulse=300)
+    dialog._blink_tab_column(state, "a", pulse=_BLINK_PULSE_MS)
     dialog._gen += 1
-    pump(900)
+    pump(_BLINK_WAIT_MS)
 
     assert delegate.highlighted_cols == {0}, "令牌已作废，off 回调不应执行"
     assert not qt_errors, f"过期回调抛了异常：{qt_errors}"

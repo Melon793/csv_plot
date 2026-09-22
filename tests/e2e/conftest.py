@@ -88,6 +88,32 @@ def dialog_stubs(monkeypatch):
     return records
 
 
+@pytest.fixture(autouse=True)
+def _small_plot_matrix(request, monkeypatch):
+    """e2e 统一缩小默认子图矩阵（4×3=12 → 1×1），每例省约 95ms。
+
+    根因：`_apply_loader` 打开文件时按 ``PLOT_ROW_MAX_DEFAULT × PLOT_COL_MAX_DEFAULT``
+    建满矩阵、再 `set_plots_visible` 隐藏多余格子；12 个 plot widget 每个约
+    8.5ms，其中 11 个随即不可见。e2e 层无任何用例依赖 >1 个子图（全部只用
+    ``plot_widgets[0]``），故这里只需替身常量，不改断言。
+
+    "默认 4×3 应建满 12 图"由 ``test_load_and_plot.py::test_default_matrix_builds_full_grid``
+    以 ``@pytest.mark.full_matrix`` 跳过本替身后显式覆盖。
+    """
+    if request.node.get_closest_marker("full_matrix"):
+        return  # 该用例要验真实默认矩阵，不打替身
+
+    import src.ui.main_window as main_window_mod
+
+    for name in (
+        "PLOT_ROW_MAX_DEFAULT",
+        "PLOT_COL_MAX_DEFAULT",
+        "PLOT_ROW_CURRENT_DEFAULT",
+        "PLOT_COL_CURRENT_DEFAULT",
+    ):
+        monkeypatch.setattr(main_window_mod, name, 1)
+
+
 @pytest.fixture()
 def main_window(qapp, app_settings, dialog_stubs, monkeypatch, qtbot):
     """真实 MainWindow 夹具（offscreen）。
@@ -108,8 +134,15 @@ def main_window(qapp, app_settings, dialog_stubs, monkeypatch, qtbot):
     # 先向 monkeypatch 注册还原点（恢复原钩子，不泄漏到后续用例），再包装。
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     _install_race_filter()
-    # 先让 pending 定时器尽量跑完再 close，减少清理期竞态窗口。
-    qtbot.wait(80)
+    # 先让 pending 定时器尽量跑完再 close，减少清理期竞态窗口：这些延迟回调
+    # （_post_reload_ui_refresh / _safety_force_unlock 等，见上方标记表）只在
+    # **加载链路**上被调度，没加载过数据的用例等这 80ms 是纯白等，故条件化。
+    try:
+        _loaded = mw.loader is not None
+    except RuntimeError:
+        _loaded = False  # WA_DeleteOnClose：用例体内已自行关闭
+    if _loaded:
+        qtbot.wait(80)
     qapp.processEvents()
     try:
         mw.close()

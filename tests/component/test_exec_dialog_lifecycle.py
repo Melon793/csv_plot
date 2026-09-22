@@ -4,21 +4,15 @@
 侧还挂在主窗口上，之后每次模板变更就会触发 N 份 `_refresh_template_list`。
 """
 
-from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QDialog, QWidget
 from shiboken6 import isValid
 
+from tests.fixtures.waits import flush_deferred_deletes
 from src.core.template_manager import TemplateManager
 from src.ui.dialogs.help import HelpDialog
 from src.ui.dialogs.template_manager_dialog import TemplateManagerDialog
 from src.ui.layout_manager import LayoutManager
 from src.ui.main_window import MainWindow
-
-
-def flush_deferred_deletes(qapp):
-    """deleteLater 要等 DeferredDelete 投递完才真销毁，processEvents 不够"""
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    qapp.processEvents()
 
 
 class _FakeConfigManager:
@@ -51,7 +45,7 @@ def test_template_manager_reopen_does_not_accumulate(qapp, tmp_path, monkeypatch
 
     for _ in range(3):
         MainWindow.open_template_manager(mw)
-        flush_deferred_deletes(qapp)
+        flush_deferred_deletes()
 
     assert _live_dialogs(mw, TemplateManagerDialog) == []
 
@@ -72,7 +66,7 @@ def test_template_list_changed_refreshes_once_after_reopen(
 
     for _ in range(3):
         MainWindow.open_template_manager(mw)
-        flush_deferred_deletes(qapp)
+        flush_deferred_deletes()
         refreshes.clear()
 
     manager.template_list_changed.emit()
@@ -86,6 +80,6 @@ def test_help_dialog_does_not_accumulate(qapp, monkeypatch):
 
     for _ in range(3):
         LayoutManager(mw).show_help()
-        flush_deferred_deletes(qapp)
+        flush_deferred_deletes()
 
     assert _live_dialogs(mw, HelpDialog) == []

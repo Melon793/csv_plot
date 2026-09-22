@@ -8,21 +8,20 @@ add_variables），窗口会被重置回旧快照——用户视角"跳回默认
 frame 偏移重摆位置，offscreen 实测连续 restore 逐次内缩漂移），
 而窗口开着时当前几何就是最新状态，本不需要恢复。修复为 load_geom
 加 isVisible 守卫；关闭后重开（新构造窗口）仍走 blob 恢复。
-"""
 
-import time
+等待策略：popup/setGeometry/close 全是同步调用（几何读写当拍生效），本文件
+唯一的异步点是 popup 内 `_later(100ms, 闪烁)` 与视图 scrollTo，都与几何断言
+无关；故用 settle()（确定性排空，不睡钟表）替代原 `_pump(50~200ms)` 固定等待
+（4 例合计约 3s）。
+"""
 
 import pytest
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QMessageBox
+
+from tests.fixtures.waits import flush_deferred_deletes, settle
 
 USER_GEOM = (152, 122, 900, 600)
-
-
-def _pump(ms: int = 60) -> None:
-    end = time.time() + ms / 1000
-    while time.time() < end:
-        QApplication.processEvents()
 
 
 def _geom(win) -> tuple[int, int, int, int]:
@@ -48,39 +47,41 @@ def _close_singleton_windows():
             dlg.close()
         except RuntimeError:
             pass  # 已随主窗口销毁
-    _pump(50)
+    # closeEvent 里 deleteLater() 的 DeferredDelete 不跑 app.exec() 不会被消化，
+    # 不显式排空就会把两个 QTableView 骨架拖进后续用例（本文件每次 close 都漏）。
+    flush_deferred_deletes()
 
 
 def test_popup_new_var_keeps_user_geometry(loaded_window, monkeypatch):
     """数值表开着时 popup 新变量（else 分支 load_geom）不得重置用户调好的几何。"""
     mw = loaded_window
-    _pump(200)
+    settle()
     from src.ui.table_dialog import DataTableDialog
 
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
     dlg = DataTableDialog.popup("speed", mw.loader.df["speed"], parent=mw)
-    _pump(200)
+    settle()
     dlg.setGeometry(*USER_GEOM)
-    _pump(50)
+    settle()
 
     DataTableDialog.popup("flag", mw.loader.df["flag"], parent=mw)
-    _pump(200)
+    settle()
     assert _geom(dlg) == USER_GEOM, "对新变量 popup 后几何被 load_geom 重置"
 
 
 def test_add_variables_keeps_user_geometry(loaded_window):
     """批量添加入口（拖拽/变量列表添加）同样不得重置已开窗口的几何。"""
     mw = loaded_window
-    _pump(200)
+    settle()
     from src.ui.table_dialog import DataTableDialog
 
     dlg = DataTableDialog.popup("speed", mw.loader.df["speed"], parent=mw)
-    _pump(200)
+    settle()
     dlg.setGeometry(*USER_GEOM)
-    _pump(50)
+    settle()
 
     DataTableDialog.add_variables(["rpm"], parent=mw)
-    _pump(200)
+    settle()
     assert _geom(dlg) == USER_GEOM, "add_variables 后几何被 load_geom 重置"
 
 
@@ -89,14 +90,14 @@ def test_variable_info_reopen_keeps_user_geometry(loaded_window):
     from src.ui.dialogs.variable_info_dialog import VariableInfoDialog
 
     mw = loaded_window
-    _pump(200)
+    settle()
     vi = VariableInfoDialog.popup(["rpm"], parent=mw)
-    _pump(100)
+    settle()
     vi.setGeometry(*USER_GEOM)
-    _pump(50)
+    settle()
 
     VariableInfoDialog.popup(["flag"], parent=mw)
-    _pump(100)
+    settle()
     assert _geom(vi) == USER_GEOM, "第二次打开变量信息时几何被 load_geom 重置"
 
 
@@ -108,22 +109,22 @@ def test_geometry_restored_after_close_and_reopen(loaded_window, monkeypatch):
     且纵向位置被 blob 带回，不钉死漂移后的具体值。
     """
     mw = loaded_window
-    _pump(200)
+    settle()
     from src.ui.table_dialog import DataTableDialog
 
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
     dlg = DataTableDialog.popup("speed", mw.loader.df["speed"], parent=mw)
-    _pump(200)
+    settle()
     dlg.setGeometry(*USER_GEOM)
-    _pump(50)
+    settle()
 
     dlg.set_skip_close_confirmation(True)
     dlg.close()
-    _pump(100)
+    settle()
     assert DataTableDialog._instance is None
 
     dlg2 = DataTableDialog.popup("speed", mw.loader.df["speed"], parent=mw)
-    _pump(200)
+    settle()
     x, y, w, h = _geom(dlg2)
     assert (w, h) != (600, 400), "重开走了 __init__ 默认尺寸 → data_table_geometry 快照链路断了"
     assert w > 700 and h == USER_GEOM[3], f"重开未从快照恢复尺寸: {_geom(dlg2)}"

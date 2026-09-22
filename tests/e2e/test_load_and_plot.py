@@ -10,6 +10,8 @@
 4️⃣ 交互操作（Ctrl+R 光标切换、Ctrl+Y 仅调节 Y 轴）
 """
 
+import pytest
+
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QDropEvent
 
@@ -17,6 +19,28 @@ from src.ui.drag_drop import build_var_mimedata
 
 # 保活容器：offscreen 下手工构造的 QMimeData 需防 GC（陷阱 #2）
 _keep_alive: list = []
+
+
+@pytest.mark.full_matrix
+def test_default_matrix_builds_full_grid(loaded_window):
+    """默认布局按 4×3 建满矩阵，并只显示默认可见区（3×1）。
+
+    e2e 其余用例由 conftest 的 `_small_plot_matrix` 替身压到 1×1 提速
+    （每例省约 95ms）；本用例以 `full_matrix` marker 跳过替身，把原先
+    "54 例顺带覆盖"的建满矩阵行为显式锁定。
+    """
+    from src.core.config import (
+        PLOT_COL_CURRENT_DEFAULT,
+        PLOT_COL_MAX_DEFAULT,
+        PLOT_ROW_CURRENT_DEFAULT,
+        PLOT_ROW_MAX_DEFAULT,
+    )
+
+    mw = loaded_window
+    assert (PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT) == (4, 3)
+    assert len(mw.plot_widgets) == PLOT_ROW_MAX_DEFAULT * PLOT_COL_MAX_DEFAULT == 12
+    visible = [c for c in mw.plot_widgets if c.isVisible()]
+    assert len(visible) == PLOT_ROW_CURRENT_DEFAULT * PLOT_COL_CURRENT_DEFAULT == 3
 
 
 def test_load_populates_variable_list(loaded_window):
