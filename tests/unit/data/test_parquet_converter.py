@@ -524,6 +524,37 @@ class TestExcelChain:
         # pandas 3.0 read_excel 文本列是新 str dtype（2.x 是 object）
         assert meta["columns"]["id"]["dtype_str"] in ("object", "str")
 
+    def test_excel_string_date_is_not_enum(self, tmp_path):
+        """D9：Excel 字符串日期列必须按文本日期存，不能落入 D8 枚举列。"""
+        import pandas as pd
+
+        from src.data.parquet_lazy_loader import ParquetLazyLoader
+        from src.data.temp_cache_dir import TempCacheDir
+
+        xlsx = write_xlsx(
+            tmp_path / "string_date.xlsx",
+            header=["date_str", "v"],
+            units=["-", "-"],
+            rows=[[f"2024-01-{(i % 28) + 1:02d}", float(i)] for i in range(12)],
+        )
+        result = convert_to_parquet(
+            str(xlsx), is_excel=True, sheet_name=0, outdir=tmp_path / "out"
+        )
+        meta = _meta(result)
+        assert meta["date_formats"] == {"date_str": "%Y-%m-%d"}
+        assert meta["columns"]["date_str"]["is_enum"] is False
+        assert meta["columns"]["date_str"]["validity"] == 1
+        assert meta["columns"]["date_str"]["dtype_str"] in ("object", "str")
+
+        loader = ParquetLazyLoader(str(xlsx), TempCacheDir(Path(result.meta_path).parent))
+        try:
+            assert str(loader.get_series("date_str").dtype) in ("object", "str")
+            _, y, _, text_map = loader.get_value_from_name("date_str")
+            assert text_map == {}
+            assert isinstance(y, pd.Series)
+        finally:
+            loader.close()
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

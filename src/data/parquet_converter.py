@@ -538,7 +538,9 @@ def _convert_excel(
 
     for name in var_names:
         s = df[name]
-        ps, entry = _pandas_series_to_polars(pl, name, s)
+        ps, entry = _pandas_series_to_polars(
+            pl, name, s, is_date_column=name in date_formats
+        )
         n_unique = int(s.nunique())
         if entry.pop("is_enum_candidate", False):
             # 低基数文本列 → 枚举码值化（D8，与 CSV 链同源规则）。
@@ -591,7 +593,9 @@ def _enum_codes_labels(pl, s):
     return codes, labels
 
 
-def _pandas_series_to_polars(pl, name: str, s: pd.Series):
+def _pandas_series_to_polars(
+    pl, name: str, s: pd.Series, *, is_date_column: bool = False
+):
     """单列 pandas → (polars Series, meta 骨架)。dtype_str 记 pandas 口径。"""
     dtype_str = str(s.dtype)
     all_empty = bool(s.isna().all())
@@ -640,7 +644,9 @@ def _pandas_series_to_polars(pl, name: str, s: pd.Series):
     ps = pl.Series(name, values, dtype=pl.String)
     entry = {"dtype_str": dtype_str, "all_empty": all_empty, "is_enum": False}
     n_unique = int(s.nunique())
-    entry["is_enum_candidate"] = 0 < n_unique <= ENUM_LABEL_MAX
+    entry["is_enum_candidate"] = (
+        not is_date_column and 0 < n_unique <= ENUM_LABEL_MAX
+    )
     return ps, entry
 
 
