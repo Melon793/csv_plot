@@ -291,10 +291,11 @@ def _read_csv_with_retry(
         logger.info("polars 直解析遇非 UTF-8 字节，按 %s 转码重试", encoding_used)
         try:
             _transcode_to_utf8(src_path, trans_path, encoding_used)
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, OSError) as e:
             raise ParquetConversionError(
-                f"源文件按 {encoding_used} 仍无法解码，转码失败"
-            ) from exc
+                f"转码失败：源文件按 {encoding_used} 无法转成 UTF-8，"
+                f"或临时目录不可写: {e}"
+            ) from e
         try:
             return _read(str(trans_path))
         finally:

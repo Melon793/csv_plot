@@ -302,6 +302,28 @@ class TestS5Encoding:
             _convert(tmp_path, csv)
         assert not (tmp_path / "out" / "_transcoded_utf8.csv").exists()
 
+    def test_transcode_disk_error_raises_conversion(self, tmp_path, monkeypatch):
+        # D10：转码中间文件写不进 outdir 也属于转换失败，必须包成
+        # ParquetConversionError 让工厂清理并回退，不能把 OSError 原样上抛。
+        csv = write_csv(
+            tmp_path / "s5d.csv",
+            header=["a", "b"],
+            units=["-", "-"],
+            rows=[[1, 2]],
+        )
+
+        def _boom(src, dst, encoding):
+            raise OSError("read-only")
+
+        import src.data.parquet_converter as pc
+
+        data = Path(csv).read_bytes()
+        Path(csv).write_bytes(data.replace(b"1,2", b"1,\xc82"))
+        monkeypatch.setattr(pc, "_transcode_to_utf8", _boom)
+        with pytest.raises(ParquetConversionError, match="转码失败"):
+            _convert(tmp_path, csv)
+        assert not (tmp_path / "out" / "_transcoded_utf8.csv").exists()
+
 
 class TestValidityRuleTable:
     """§2.1.1 有效性 8 行规则表：一行规则一个夹具一条断言。"""
