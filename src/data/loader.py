@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import gc
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 import numpy as np
@@ -24,6 +25,92 @@ logger = get_logger("data.loader")
 # 编码回退链（格式探测与表头/单位读取共用，顺序即优先级）。
 # gb18030 覆盖中文 Windows 导出文件；cp1252/latin-1 收尾保证链末位必然可解码。
 ENCODING_FALLBACKS: tuple[str, ...] = ("utf-8", "gb18030", "cp1252", "latin-1")
+
+
+@dataclass(frozen=True)
+class SchemaProbe:
+    """CSV 头部 + 样本探测结果（`probe_csv_schema` 的产物）。
+
+    只依赖文件头 + `max_rows_infer`（默认 200）行样本，不读整表。
+    这是 parquet 转换器获取 schema 的唯一合法入口——严禁在转换器里
+    构造 `FastDataLoader` 来取这些字段（那会把整表读进内存，峰值收益归零）。
+    """
+
+    var_names: list[str]  # 已 _make_unique 去重
+    units: dict[str, str]
+    encoding_used: str
+    has_unit: bool
+    dtype_map: dict[str, str]  # 列名 -> "float32" / "float64" / "category"
+    parse_dates: list[str]
+    date_formats: dict[str, str]
+
+
+def probe_csv_schema(
+    path: str,
+    *,
+    desc_rows: int = 0,
+    sep: str = ",",
+    has_unit: bool = True,
+    encoding: str | None = None,
+    max_rows_infer: int = 200,
+    usecols: list[str] | None = None,
+) -> SchemaProbe:
+    """读取 CSV 文件头 + 样本行，推断 schema（自 FastDataLoader.__init__ 抽出，行为不变）。
+
+    步骤与原 `__init__` 完全一致：
+    1. `_load_header_units` 读头部（表头/单位/编码检测）；
+    2. 按 `max_rows_infer` 行样本 `pd.read_csv`（on_bad_lines="skip" 与
+       正式读取同口径）；
+    3. `_infer_schema` 产出 dtype_map / parse_dates / date_formats。
+
+    Args:
+        path: CSV 文件路径
+        desc_rows: 表头前的描述行数量
+        sep: 分隔符
+        has_unit: 是否包含单位行
+        encoding: 预检测编码；None 时内部自动检测（回退链兜底）
+        max_rows_infer: 样本行数上限
+        usecols: 要读取的列名列表（与 FastDataLoader 同语义）
+
+    Returns:
+        SchemaProbe: 七字段探测结果
+    """
+    var_names, units, encoding_used, has_unit = FastDataLoader._load_header_units(
+        path,
+        desc_rows=desc_rows,
+        usecols=usecols,
+        sep=sep,
+        has_unit=has_unit,
+        encoding=encoding,
+    )
+
+    # 样本读取（与 _read_chunks 同口径：坏行跳过而不是整次失败）
+    sample = pd.read_csv(
+        path,
+        skiprows=(2 + desc_rows) if has_unit else (1 + desc_rows),
+        nrows=max_rows_infer,
+        names=var_names,
+        encoding=encoding_used,
+        usecols=usecols,
+        low_memory=False,
+        sep=sep,
+        na_values=BaseDataLoader._NA_VALUES,
+        keep_default_na=True,
+        on_bad_lines="skip",
+    )
+
+    dtype_map, parse_dates, date_formats, _ = FastDataLoader._infer_schema(sample)
+
+    del sample
+    return SchemaProbe(
+        var_names=var_names,
+        units=units,
+        encoding_used=encoding_used,
+        has_unit=has_unit,
+        dtype_map=dtype_map,
+        parse_dates=parse_dates,
+        date_formats=date_formats,
+    )
 
 
 class DataLoadThread(QThread):
@@ -417,44 +504,28 @@ class FastDataLoader(BaseDataLoader):
         self.has_unit = has_unit
         self._allow_gc = allow_gc
 
-        self._var_names, self._units, self.encoding_used, self.has_unit = (
-            self._load_header_units(
-                self._path,
-                desc_rows=self.desc_rows,
-                usecols=self.usecols,
-                sep=self.sep,
-                has_unit=self.has_unit,
-                encoding=encoding,
-            )
-        )
-
         if self._progress_cb:
             self._progress_cb(5)
 
-        # 推断 dtype
-        sample = pd.read_csv(
+        # 头部探测 + 样本推断（抽出为 probe_csv_schema，供 parquet 转换器复用；
+        # 逻辑与原内联版本逐行一致）
+        probe = probe_csv_schema(
             self._path,
-            skiprows=(2 + self.desc_rows) if self.has_unit else (1 + self.desc_rows),
-            nrows=self.max_rows_infer,
-            names=self._var_names,
-            encoding=self.encoding_used,
-            usecols=self.usecols,
-            low_memory=False,
+            desc_rows=self.desc_rows,
             sep=self.sep,
-            na_values=self._NA_VALUES,
-            keep_default_na=True,
-            # 与 _read_chunks 同口径：坏行跳过而不是整次加载失败。正式读取本来就
-            # 会跳过它们，样本这里卡住只会让文件「打不开」而非「少一行」
-            on_bad_lines="skip",
+            has_unit=self.has_unit,
+            encoding=encoding,
+            max_rows_infer=self.max_rows_infer,
+            usecols=self.usecols,
         )
+        self._var_names = probe.var_names
+        self._units = probe.units
+        self.encoding_used = probe.encoding_used
+        self.has_unit = probe.has_unit
+        self.date_formats = probe.date_formats
+        dtype_map = probe.dtype_map
+        parse_dates = probe.parse_dates
 
-        # 推断schema（包含时间格式）
-        dtype_map, parse_dates, date_formats, _ = self._infer_schema(
-            sample
-        )
-        self.date_formats = date_formats
-
-        del sample
         if self._allow_gc:
             gc.collect()
         if self._progress_cb:
