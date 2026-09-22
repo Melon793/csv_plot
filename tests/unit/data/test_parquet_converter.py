@@ -102,20 +102,30 @@ class TestS2RowConservation:
         assert row1["x"] == 7 and row1["y"] is None and row1["z"] is None
 
     def test_more_fields_raises(self, tmp_path):
-        # 字段过多：polars 抛错（可检测）→ 转换失败 → D10 回退
+        # 字段过多：转换链不得静默保留/截断。若畸形行落在头部探测区，允许
+        # 与内存 loader 同抛 ParserError；若越过探测区则由转换器抛
+        # ParquetConversionError 交给 D10 回退。
         csv = write_csv(
             tmp_path / "s2b.csv",
             header=["x", "y", "z"],
             units=["-", "-", "-"],
-            rows=[[1, 2, 3, 99], [4, 5, 6]],  # 首数据行 4 字段
+            rows=[["1", "2", "3", "99"], ["4", "5", "6"]],  # 首数据行 4 字段
         )
-        with pytest.raises(Exception, match=""):
+        with pytest.raises((ParquetConversionError, pd.errors.ParserError)):
             _convert(tmp_path, csv)
+        assert not (tmp_path / "out" / "data.parquet").exists()
 
     def test_blank_line_fails_oracle(self, tmp_path):
         # 唯一静默分歧：空行 pandas 跳过、polars 读成全 null 行 → oracle 拦截
         path = tmp_path / "s2c.csv"
         path.write_text("x,y,z\n-,-,-\n1,2,3\n\n4,5,6\n", encoding="utf-8")
+        with pytest.raises(ParquetConversionError, match="行数守恒"):
+            _convert(tmp_path, path)
+
+    def test_whitespace_line_fails_oracle(self, tmp_path):
+        # 纯空格行与真空行同属 pandas 跳过、polars 读成 null 行的静默分歧。
+        path = tmp_path / "s2c_ws.csv"
+        path.write_text("x,y,z\n-,-,-\n1,2,3\n   \n4,5,6\n", encoding="utf-8")
         with pytest.raises(ParquetConversionError, match="行数守恒"):
             _convert(tmp_path, path)
 
@@ -444,7 +454,7 @@ class TestNegativeGuardsAndCleanup:
         csv = write_csv(
             tmp_path / "ng.csv", header=["x", "y"], units=["-", "-"], rows=[[1, 2, 3]]
         )
-        with pytest.raises(Exception):
+        with pytest.raises((ParquetConversionError, pd.errors.ParserError)):
             _convert(tmp_path, csv)
         assert not (tmp_path / "out" / "data.parquet").exists()
 
