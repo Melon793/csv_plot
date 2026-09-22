@@ -8,6 +8,8 @@
   最久未用条目。64MB 的依据：256MB 单独就能击穿 P6 的「常驻 < 150MB」
   验收，两个数字必须自洽；parquet 单列远小于 MDF 单通道（109k 行 × 4B
   ≈ 0.44MB），64MB 约可容纳 145 列，默认 12 子图布局绰绰有余。
+- ndarray / pandas Series 用 ``nbytes``；polars Series 没有 ``nbytes``，
+  用 ``estimated_size()``。不能退到 ``sys.getsizeof``，否则缓存会严重低估。
 - 超预算的代价只是逐出后重读（实测整列 3–5ms），不是错误。
 - 单条超过 max_bytes 的值不缓存（缓存它等于立刻逐出全部其他列，
   得不偿失；调用方直接走慢路径重读即可）。
@@ -29,10 +31,14 @@ DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 def _nbytes(value: Any) -> int:
     """估算缓存值的内存占用（字节）。
 
-    ndarray / Series 都有 .nbytes（底层数组字节数，不含索引开销）；
-    兜底 sys.getsizeof。索引开销（RangeIndex 每 entry 数十字节）相对
-    列数据可忽略，不为此引入 pandas 依赖。
+    ndarray / pandas Series 用 .nbytes（底层数组字节数，不含索引开销）；
+    polars Series 用 estimated_size()，它没有 .nbytes 属性。兜底
+    sys.getsizeof 只给小对象用，不能用于数据列。索引开销（RangeIndex 每
+    entry 数十字节）相对列数据可忽略，不为此引入 pandas 依赖。
     """
+    estimated_size = getattr(value, "estimated_size", None)
+    if callable(estimated_size):
+        return int(estimated_size())
     nbytes = getattr(value, "nbytes", None)
     if isinstance(nbytes, int) and nbytes >= 0:
         return nbytes

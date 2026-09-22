@@ -114,6 +114,17 @@ class TestStatsAndNbytes:
         assert _nbytes(_arr(10)) == 80
         assert _nbytes("plain-string") > 0  # 无 nbytes 属性走 getsizeof
 
+    def test_polars_series_nbytes_uses_estimated_size(self):
+        """polars Series 没有 .nbytes；必须用 estimated_size 计入字节预算。"""
+        import polars as pl
+
+        ps = pl.Series("x", [1.5] * 1000)
+        assert _nbytes(ps) == ps.estimated_size()
+
+        cache = ColumnCache(max_entries=10, max_bytes=4_000)
+        cache.put("polars", ps)
+        assert len(cache) == 0  # 8000B 超预算，不能因 getsizeof 误判为小而缓存
+
 
 class TestThreadSafety:
     def test_concurrent_put_get_smoke(self):
