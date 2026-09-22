@@ -78,16 +78,3 @@ def wait_until(predicate, timeout_s: float = 8.0, interval_s: float = 0.01) -> b
             return True
         time.sleep(interval_s)
     return False
-
-
-def wait_idle(dlg, timeout_s: float = 10.0) -> bool:
-    """等到 ``dlg.worker`` 队列排空且无正在运行的任务，再多泵一轮让信号落地。"""
-    end = time.monotonic() + timeout_s
-    while time.monotonic() < end:
-        QCoreApplication.processEvents()
-        if dlg.worker.queue_size() == 0 and dlg.worker._current is None:
-            pump(60)
-            if dlg.worker.queue_size() == 0 and dlg.worker._current is None:
-                return True
-        time.sleep(0.005)
-    return False

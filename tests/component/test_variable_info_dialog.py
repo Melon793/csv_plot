@@ -26,7 +26,7 @@ import time
 
 import pytest
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -38,7 +38,12 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import isValid
 
-from tests.fixtures.waits import force_delete, pump, wait_idle
+from tests.fixtures.waits import (
+    force_delete,
+    flush_deferred_deletes,
+    settle,
+    wait_until,
+)
 from src.core.config import (
     VAR_INFO_COL0_MIN_WIDTH,
     VAR_INFO_COPY_BTN_MARGIN,
@@ -106,6 +111,53 @@ def fake_msgbox(asked: list, answer):
     return _Fake
 
 
+def _wait_stats(dlg, *names, require_computed: bool = False, timeout_s: float = 8.0):
+    """等到这些页的统计**回填到页面**（内容条件，不睡钟表）。
+
+    为什么不再拿"worker 队列空"当判据：``VarInfoWorker._process_job`` 先
+    ``_finish_current()``（清 ``_current``、推进进度信号）再 ``item_ready.emit()``，
+    worker 侧"空闲"与主线程拿到结果之间天然存在窗口，旧实现的固定 pump 只是赌
+    这个窗口比它短。这里等的是用例真正要断言的观测量。
+
+    Args:
+        require_computed: 再要求算成功（``computed=True``）。默认只要求"有终态"
+            —— 非数值列/全空列同样会给出带 error 的终态，那是合法结果。
+    """
+
+    def ready(name: str) -> bool:
+        page = dlg._pages.get(name)
+        stats = None if page is None else page.stats
+        if stats is None:
+            return False
+        return stats.computed if require_computed else True
+
+    return wait_until(lambda: all(ready(n) for n in names), timeout_s)
+
+
+def _wait_delivered(dlg, *names, timeout_s: float = 8.0):
+    """等到这些变量的在途结果**已回到主线程并处理完**。
+
+    判据取 ``_revalidating`` 去重标记：``_on_stats_ready`` 一进来就 discard，
+    随后（同一个 slot 调用内）才写缓存/回填页面，而这个回调在主线程上执行期间
+    测试的轮询插不进去，所以"标记已释放"等价于"这次结果已经落地"。
+    与 ``_wait_stats`` 的分工：命中缓存的页显示的是现成的旧值，只能靠标记判断
+    再验证是否已经回来。
+    """
+    return wait_until(lambda: all(n not in dlg._revalidating for n in names), timeout_s)
+
+
+def _wait_worker_idle(dlg, timeout_s: float = 8.0):
+    """等到 worker 队列排空且没有正在运行的任务。
+
+    只在**没有页面可见结果**可等时使用（例：任务被取消，worker 只走跳过分支、
+    不发 item_ready）。要等"结果已回填"请用 ``_wait_stats``。
+    """
+    return wait_until(
+        lambda: dlg.worker.queue_size() == 0 and dlg.worker._current is None,
+        timeout_s,
+    )
+
+
 @pytest.fixture()
 def env(qapp, tmp_path):
     """每个测试一套独立环境：合成 CSV + 替身主窗口 + 单例复位。
@@ -114,7 +166,9 @@ def env(qapp, tmp_path):
     异常退出未清理，本测试会继承到脏页面。
     """
     VariableInfoDialog.reset_for_tests()
-    pump(30)
+    # reset_for_tests 已 shutdown_worker（join 线程）并把窗口 deleteLater：
+    # 这里只需让删除落地，并排空它留下的投递事件
+    flush_deferred_deletes()
 
     path_a = write_csv(
         tmp_path / "a.csv",
@@ -149,13 +203,13 @@ def env(qapp, tmp_path):
     yield e
 
     VariableInfoDialog.reset_for_tests()
-    pump(50)
+    flush_deferred_deletes()
     mw.loader = None
     for attr in ("var_stats_cache",):
         setattr(mw, attr, {})
     loader_a.release_memory()
     mw.deleteLater()
-    pump(30)
+    flush_deferred_deletes()
 
 
 @pytest.fixture()
@@ -190,7 +244,7 @@ def mdf_env(qapp, tmp_path):
     否则测试会因变量不存在而降级成“错误页也能通过断言”的空转。
     """
     VariableInfoDialog.reset_for_tests()
-    pump(30)
+    flush_deferred_deletes()
 
     # 12 点与 unit 测试的 attr4_loader 一致；点数不影响归属提取（全部取自
     # 加载期已解析的块结构），只影响统计回填的数值
@@ -210,11 +264,11 @@ def mdf_env(qapp, tmp_path):
     yield e
 
     VariableInfoDialog.reset_for_tests()
-    pump(50)
+    flush_deferred_deletes()
     mw.loader = None
     loader.close()
     mw.deleteLater()
-    pump(30)
+    flush_deferred_deletes()
 
 
 @pytest.fixture()
@@ -342,7 +396,7 @@ class TestSingletonAndTabs:
         本测试只验证该入口幂等且有效，不真的去销毁宿主。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
 
         dlg.shutdown_worker()
         dlg.shutdown_worker()
@@ -378,7 +432,7 @@ class TestSingletonAndTabs:
         # 已有 1 页 → 容量仅剩 2；本次提交里 names[0] 已存在不占额度，
         # 真正新增的是 names[1:4] 共 3 个，故应截掉 1 个
         dlg.add_variables(names[:4])
-        pump(30)
+        settle()
 
         assert dlg.tabs.count() == 3
         assert set(dlg._pages) == set(names[:3])
@@ -402,7 +456,7 @@ class TestSingletonAndTabs:
 
         # 提交顺序里 v1 在最后，已存在的 v1 应被激活
         dlg.add_variables([v3, v1])
-        pump(30)
+        settle()
 
         assert dlg.tabs.count() == 3
         assert dlg.tabs.currentIndex() == dlg.tabs.indexOf(dlg._pages[v1])
@@ -432,9 +486,9 @@ class TestSingletonAndTabs:
         env.mw.loader = loader
 
         dlg = VariableInfoDialog.popup(names[:5], parent=env.mw)
-        # 充分等待：确保所有进度信号都已抵达并处理完毕
-        assert wait_idle(dlg)
-        pump(100)
+        # 等两页回填完成：进度信号由 worker 先于 item_ready 发出，结果
+        # 已落到页面即说明含终态 (0,0) 在内的进度文案都已处理过
+        assert _wait_stats(dlg, names[0], names[1])
 
         text = dlg.status_label.text()
         assert "上限 2" in text, f"提示被进度覆盖: {text!r}"
@@ -452,7 +506,7 @@ class TestSingletonAndTabs:
         assert dlg.tabs.count() == 2
 
         dlg.tabs.setCurrentIndex(0)
-        pump(20)
+        settle()
 
         assert "上限" not in dlg.status_label.text()
 
@@ -471,7 +525,7 @@ class TestSingletonAndTabs:
             VariableInfoDialog._instance = None
             dlg.shutdown_worker()
             dlg.deleteLater()
-            pump(30)
+            flush_deferred_deletes()
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +548,9 @@ class TestRendering:
 
     def test_stats_backfilled_by_worker(self, env):
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg), "统计任务未在超时内完成"
+        assert _wait_stats(dlg, "speed", require_computed=True), (
+            "统计任务未在超时内回填"
+        )
 
         page = dlg._pages["speed"]
         assert page.stats is not None
@@ -512,7 +568,7 @@ class TestRendering:
         assert env.mw.var_stats_cache == {}
 
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
 
         assert "speed" in env.mw.var_stats_cache, "空缓存字典也必须能写入"
         assert env.mw.var_stats_cache["speed"].computed is True
@@ -523,7 +579,7 @@ class TestRendering:
         否则「统计特征」会永远停在"计算中…"，让用户误以为后台仍在算。
         """
         dlg = VariableInfoDialog.popup(["note"], parent=env.mw)
-        wait_idle(dlg)
+        assert _wait_stats(dlg, "note"), "非数值列也须拿到终态"
         page = dlg._pages["note"]
 
         assert page.snapshot.is_numeric is False
@@ -548,7 +604,7 @@ class TestRendering:
         env.mw.loader = FastDataLoader(str(path), has_unit=True, sep=",")
 
         dlg = VariableInfoDialog.popup(["v"], parent=env.mw)
-        wait_idle(dlg)
+        assert _wait_stats(dlg, "v")
         page = dlg._pages["v"]
 
         assert page.snapshot.all_empty is True
@@ -587,7 +643,7 @@ class TestCache:
         """
         install, calls = submit_spy
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         assert env.mw.var_stats_cache["speed"].computed is True
 
         original = install(dlg)
@@ -601,7 +657,7 @@ class TestCache:
             assert submitted == ["speed"], (
                 f"命中缓存且成为当前页，应恰好提交一次再验证: {submitted}"
             )
-            assert wait_idle(dlg)
+            assert _wait_delivered(dlg, "speed")
 
             page = dlg._pages["speed"]
             assert page.stats is not None
@@ -613,7 +669,7 @@ class TestCache:
             # 已验证的页面不得重复触发
             calls.clear()
             dlg.add_variables(["speed"])
-            pump(30)
+            settle()
             assert calls == [], f"已验证的页面不得重复再验证: {calls}"
         finally:
             dlg.worker.submit = original
@@ -654,7 +710,7 @@ class TestCache:
     def test_stale_stats_result_is_discarded(self, env):
         """reload 期间完成的陈旧结果：既不写缓存也不回填页面。"""
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         page = dlg._pages["speed"]
         good_min = page.stats.min
         env.mw.var_stats_cache.clear()
@@ -674,7 +730,8 @@ class TestCache:
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
         # 先停掉后台线程：否则 worker 回填 "speed" 会与下面的 FIFO 断言竞争
         dlg.shutdown_worker()
-        wait_idle(dlg)
+        # shutdown 已 join 线程，此后不会再有新结果投递，只需排空队列
+        settle()
         env.mw.var_stats_cache.clear()
 
         for name in ("v1", "v2", "v3"):
@@ -697,7 +754,7 @@ class TestCache:
         finally:
             dlg.shutdown_worker()
             dlg.deleteLater()
-            pump(30)
+            flush_deferred_deletes()
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +790,7 @@ class TestVisibleRevalidation:
 
         submitted = [j[0] for j in calls]
         assert submitted == ["speed"], f"首开命中缓存应提交一次再验证: {submitted}"
-        assert wait_idle(dlg)
+        assert _wait_delivered(dlg, "speed")
 
         page = dlg._pages["speed"]
         assert page.stats.min == pytest.approx(10.0), "陈旧缓存值须被现算覆盖"
@@ -747,7 +804,7 @@ class TestVisibleRevalidation:
         看的正确数字覆盖成"已取消"。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         page = dlg._pages["speed"]
         good_min = page.stats.min
         assert good_min == pytest.approx(10.0)
@@ -760,7 +817,7 @@ class TestVisibleRevalidation:
         page.validated_this_session = False
         dlg._revalidate_page_if_needed(page)
         assert "speed" in dlg._revalidating
-        assert wait_idle(dlg)
+        assert _wait_delivered(dlg, "speed")
 
         assert page.stats.computed is True, "失败结果不得覆盖页面上的正确值"
         assert page.stats.min == good_min
@@ -776,7 +833,7 @@ class TestVisibleRevalidation:
         标记的话该变量在本会话内将永远无法再次触发再验证。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         page = dlg._pages["speed"]
         good_min = page.stats.min
 
@@ -792,7 +849,7 @@ class TestVisibleRevalidation:
     def test_revalidate_dedup_while_inflight(self, env, submit_spy):
         """R1 去重：同一变量的再验证在途时，再次触发不得重复提交。"""
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         page = dlg._pages["speed"]
         install, calls = submit_spy
         original = install(dlg)
@@ -813,7 +870,7 @@ class TestVisibleRevalidation:
         分别挡住"结果未到"与"结果已到"两个窗口期的重复提交。
         """
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         speed_page = dlg._pages["speed"]
         speed_page.validated_this_session = False  # 模拟缓存命中态
 
@@ -837,7 +894,7 @@ class TestVisibleRevalidation:
         污染成 `3.5（缓存）`。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
         # 关闭再打开：此刻页面显示的是缓存副本（from_cache=True）
         dlg._close_all_tabs()
         dlg.add_variables(["speed"])
@@ -861,19 +918,23 @@ class TestVisibleRevalidation:
         monkeypatch.setattr(vid_mod.var_info, "compute_stats", blocking_compute)
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
 
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and dlg.worker._current != "speed":
-            pump(5)
-        assert dlg.worker._current == "speed", "worker 未开始执行阻塞任务"
+        assert wait_until(lambda: dlg.worker._current == "speed", 5.0), (
+            "worker 未开始执行阻塞任务"
+        )
 
+        reached = []
+        dlg.worker.item_ready.connect(lambda name, _st: reached.append(name))
         dlg._on_tab_close(0)  # 取消在途任务
-        pump(60)  # 取消结果经 item_ready 到达 _on_stats_ready
+        # 取消结果靠跨线程信号回到主线程（普通可调用对象是队列投递，
+        # 由这里的 processEvents 送达）：item_ready 是 _process_job 的最后
+        # 一步，它到达即说明这条任务在 worker 侧已彻底跑完
+        assert wait_until(lambda: "speed" in reached, 5.0), "取消结果未回到主线程"
         release.set()
         assert "speed" not in env.mw.var_stats_cache, "「已取消」不得写入缓存"
 
         monkeypatch.undo()  # 恢复真实计算
         dlg.add_variables(["speed"])
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         page = dlg._pages["speed"]
         assert page.stats is not None
         assert page.stats.computed is True, "重开后必须自动重算，而非展示「已取消」"
@@ -887,7 +948,7 @@ class TestVisibleRevalidation:
         后再打开"将永远不再触发再验证且无任何报错。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
 
         dlg._revalidating.add("speed")
         dlg._close_all_tabs()
@@ -961,10 +1022,10 @@ class TestTabCloseAndWorker:
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
         dlg.worker.cancel_all()
         dlg.worker._cancel.add("speed")  # 强制制造残留标记
-        assert wait_idle(dlg)
+        assert _wait_worker_idle(dlg), "被取消的任务未被 worker 处理完"
 
         dlg.recompute("speed")
-        assert wait_idle(dlg)
+        assert _wait_delivered(dlg, "speed")
 
         stats = dlg._pages["speed"].stats
         assert stats is not None
@@ -979,13 +1040,13 @@ class TestTabCloseAndWorker:
 
     def test_shutdown_stops_thread(self, env):
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
         dlg.shutdown_worker()
 
         assert dlg.worker.isRunning() is False
         # shutdown 后 submit 必须被忽略，否则线程会被重新拉起
         dlg.worker.submit([("speed", lambda: env.loader_a, 0)])
-        pump(30)
+        settle()
         assert dlg.worker.isRunning() is False
         assert dlg.worker.queue_size() == 0
 
@@ -1016,8 +1077,10 @@ class TestProgressWaveSemantics:
     def _worker_with_recorder():
         w = vid_mod.VarInfoWorker(None)
         seen: list = []
-        # 普通 Python 可调用对象没有线程亲和性，Qt 用 DirectConnection，因此
-        # 记录发生在 worker 线程内、与 emit 严格同步，不会丢也不会乱序
+        # 普通 Python 可调用对象在 PySide6 里仍由「连接时所在线程」的一个内部
+        # 接收者承接（实测：emit 线程 join 后 seen 仍为空，processEvents 之后
+        # 才追加到主线程），因此记录永远不会落在 worker 线程内 —— 读 seen 前
+        # 必须先泵事件循环，_drained 的终态判据正是为此存在
         w.progress.connect(lambda d, t: seen.append((d, t)))
         return w, seen
 
@@ -1028,28 +1091,17 @@ class TestProgressWaveSemantics:
         不能只看 ``_pending_total == 0``：它是在 emit **之前**被复位的，主线程
         可能在信号抵达前就判定排空，导致断言读到不完整的 seen。
         """
-        end = time.monotonic() + timeout_s
-        while time.monotonic() < end:
-            if (
-                seen
-                and seen[-1] == (0, 0)
-                and w.queue_size() == 0
-                and w._current is None
-            ):
-                return True
-            QCoreApplication.processEvents()
-            time.sleep(0.005)
-        return False
+        return wait_until(
+            lambda: bool(seen)
+            and seen[-1] == (0, 0)
+            and w.queue_size() == 0
+            and w._current is None,
+            timeout_s,
+        )
 
     @staticmethod
     def _wait_current(w, name, timeout_s: float = 10.0) -> bool:
-        end = time.monotonic() + timeout_s
-        while time.monotonic() < end:
-            if w._current == name:
-                return True
-            QCoreApplication.processEvents()
-            time.sleep(0.005)
-        return False
+        return wait_until(lambda: w._current == name, timeout_s)
 
     def test_second_wave_denominator_restarts(self, qapp, monkeypatch):
         gate = threading.Event()
@@ -1168,7 +1220,7 @@ class TestProgressWaveSemantics:
         try:
             assert w._pending_total == 0
             w.cancel("never_submitted")
-            pump(30)
+            settle()
             assert seen == [], f"空队列上的 cancel 不应发信号: {seen}"
         finally:
             w.shutdown()
@@ -1196,11 +1248,7 @@ class TestProgressWaveSemantics:
         dlg = VariableInfoDialog.popup([v1, v2, v3], parent=env.mw)
         try:
             # 等 v1 真的进入运行态，此时 v2 / v3 仍在队列里
-            end = time.monotonic() + 10
-            while dlg.worker._current != v1 and time.monotonic() < end:
-                QCoreApplication.processEvents()
-                time.sleep(0.005)
-            assert dlg.worker._current == v1
+            assert wait_until(lambda: dlg.worker._current == v1, 10.0), "v1 未进入运行态"
             assert dlg.worker.queue_size() == 2
             assert "统计中" in dlg._progress_text
 
@@ -1208,8 +1256,9 @@ class TestProgressWaveSemantics:
             assert dlg.worker._pending_total == 2
 
             hold.set()
-            assert wait_idle(dlg)
-            pump(120)
+            # v2 的页已被关闭：只有 v1 / v3 会有结果回到页面，等它们落地
+            # 即说明本波（含 worker 最后发出的终态进度信号）已处理完
+            assert _wait_stats(dlg, v1, v3)
 
             assert dlg.worker.queue_size() == 0
             assert dlg.worker._current is None
@@ -1240,10 +1289,10 @@ class TestCloseSemantics:
         asked: list = []
         monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox(asked, self.YES))
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
 
         dlg.close()
-        pump(30)
+        flush_deferred_deletes()
 
         assert dlg.tabs.count() == 0, "关窗必须清空标签页"
         assert dlg._pages == {}
@@ -1256,10 +1305,10 @@ class TestCloseSemantics:
         asked: list = []
         monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox(asked, self.YES))
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load")
 
         dlg.close()
-        pump(30)
+        flush_deferred_deletes()
 
         assert len(asked) == 1, "多标签必须弹确认"
         assert "2 个变量标签页" in asked[0][2], "确认文案须报出标签页数量"
@@ -1270,10 +1319,10 @@ class TestCloseSemantics:
         """用户选“否”时必须完全维持原状，包括窗口可见性。"""
         monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox([], self.NO))
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load")
 
         dlg.close()
-        pump(30)
+        settle()
 
         assert dlg.isVisible() is True, "取消后窗口不得被隐藏"
         assert dlg.tabs.count() == 2
@@ -1290,11 +1339,11 @@ class TestCloseSemantics:
         asked: list = []
         monkeypatch.setattr(vid_mod, "QMessageBox", fake_msgbox(asked, self.YES))
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load")
 
         dlg.shutdown_worker()  # 主窗口 closeEvent 走的就是这条
         dlg.close()
-        pump(30)
+        flush_deferred_deletes()
 
         assert asked == [], "退出流程中不得弹确认框"
         assert dlg.tabs.count() == 0, "但标签页仍须清空"
@@ -1302,12 +1351,12 @@ class TestCloseSemantics:
     def test_reopen_after_close_starts_empty(self, env):
         """直接回归用户报告的现象。"""
         first = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(first)
+        assert _wait_stats(first, "speed")
         first.close()
-        pump(30)
+        flush_deferred_deletes()
 
         second = VariableInfoDialog.popup(["load"], parent=env.mw)
-        pump(30)
+        settle()
 
         assert second is first, "仍复用同一单例"
         assert second.tabs.count() == 1, "旧标签页必须已被清空"
@@ -1320,12 +1369,11 @@ class TestCloseSemantics:
         挂在 QStackedWidget 下就会逐次累积 QTreeWidget。
         """
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load")
         pages = [dlg._pages["speed"], dlg._pages["load"]]
 
         dlg._close_all_tabs()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        pump(30)
+        flush_deferred_deletes()
 
         assert dlg.tabs.count() == 0
         assert [isValid(p) for p in pages] == [False, False], "页面必须真正销毁"
@@ -1352,7 +1400,7 @@ class TestTreePresentation:
         同时兼职“归属块不得外溢到 CSV”，不得改成 ``>= 4``。
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
         tree = dlg._pages["speed"].tree
 
         assert tree.topLevelItemCount() == 4
@@ -1367,7 +1415,7 @@ class TestTreePresentation:
     def test_column0_is_user_resizable(self, env):
         """ResizeToContents 的定义就是“用户拖不动”，必须换成 Interactive。"""
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
         tree = dlg._pages["speed"].tree
 
         assert tree.header().sectionResizeMode(0) == QHeaderView.ResizeMode.Interactive
@@ -1385,13 +1433,13 @@ class TestTreePresentation:
         tree.setColumnWidth(0, tree.columnWidth(0) + 40)
         target = tree.columnWidth(0)
 
-        assert wait_idle(dlg)  # 统计回填在此期间发生
+        assert _wait_stats(dlg, "speed")  # 统计回填（含树重建）在此期间完成
         assert tree.columnWidth(0) == target
 
     def test_manual_width_shared_across_tabs(self, env):
         """不同步的话，切标签页会看到不同列宽，视觉上像“设置没生效”。"""
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load")
         a = dlg._pages["speed"].tree
         b = dlg._pages["load"].tree
 
@@ -1401,13 +1449,13 @@ class TestTreePresentation:
 
     def test_new_tab_inherits_shared_width(self, env):
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
         a = dlg._pages["speed"].tree
         a.setColumnWidth(0, a.columnWidth(0) + 40)
         expected = a.columnWidth(0)
 
         dlg.add_variables(["load"])
-        pump(30)
+        settle()
 
         assert dlg._pages["load"].tree.columnWidth(0) == expected
 
@@ -1444,7 +1492,7 @@ class TestMdfAttributionPresentation:
         而功能价值正好在“一眼定位”。
         """
         dlg = VariableInfoDialog.popup([ATTRIBUTION_SIGNAL_NAME], parent=mdf_env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, ATTRIBUTION_SIGNAL_NAME)
         tree = dlg._pages[ATTRIBUTION_SIGNAL_NAME].tree
 
         assert _titles(tree) == [
@@ -1473,7 +1521,7 @@ class TestMdfAttributionPresentation:
         而 MDF 里根本没有函数层级块。
         """
         dlg = VariableInfoDialog.popup([ATTRIBUTION_CHANNEL_NAME], parent=mdf_env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, ATTRIBUTION_CHANNEL_NAME)
         group = _group(dlg._pages[ATTRIBUTION_CHANNEL_NAME].tree, "归属信息")
 
         rows = _rows(group)
@@ -1493,7 +1541,7 @@ class TestMdfAttributionPresentation:
         """
         name = ATTRIBUTION_HIERARCHY_NAME
         dlg = VariableInfoDialog.popup([name], parent=mdf_env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, name)
         rows = _rows(_group(dlg._pages[name].tree, "归属信息"))
 
         assert rows[mda.LABEL_FUNCTION] == "EpmCaS_phiSegOfs_CA"
@@ -1513,7 +1561,7 @@ class TestMdfAttributionPresentation:
         宽会随垂直滚动条的有无在 712/730 间跳（实测），拿它做基准会误报。
         """
         dlg = VariableInfoDialog.popup([ATTRIBUTION_SIGNAL_NAME], parent=mdf_env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, ATTRIBUTION_SIGNAL_NAME)
         page = dlg._pages[ATTRIBUTION_SIGNAL_NAME]
         tree = page.tree
         col0_before = tree.columnWidth(0)
@@ -1523,7 +1571,7 @@ class TestMdfAttributionPresentation:
         snap = page.snapshot
         snap.sections["归属信息"] = [(mda.LABEL_DEVICE, long_value)]
         page.render(snap, page.stats)
-        pump(30)
+        settle()
 
         group = _group(tree, "归属信息")
         assert tree.columnWidth(0) == col0_before, "「属性」列不得被归属长值撑宽"
@@ -1540,7 +1588,9 @@ class TestMdfAttributionPresentation:
         信息当成权威结果递到工具外部。
         """
         dlg = VariableInfoDialog.popup([ATTRIBUTION_SIGNAL_NAME], parent=mdf_env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(
+            dlg, ATTRIBUTION_SIGNAL_NAME, require_computed=True
+        )
         page = dlg._pages[ATTRIBUTION_SIGNAL_NAME]
         # 未回填时导出会写“计算中…”，那条省略号不是截断，会干扰下面的反向断言
         assert page.stats is not None and page.stats.computed
@@ -1559,7 +1609,7 @@ class TestMdfAttributionPresentation:
 class TestReloadHooks:
     def test_refresh_rerenders_surviving_variable(self, env):
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", require_computed=True)
         assert dlg._pages["speed"].stats.min == pytest.approx(10.0)
 
         loader_b = FastDataLoader(str(env.path_b), has_unit=True, sep=",")
@@ -1568,7 +1618,7 @@ class TestReloadHooks:
             env.mw._data_version += 1
             # 不手动清缓存：重建本身就应作废旧统计
             VariableInfoDialog.refresh_after_reload(loader_b)
-            assert wait_idle(dlg)
+            assert _wait_stats(dlg, "speed", require_computed=True)
 
             page = dlg._pages["speed"]
             assert page.is_stale is False
@@ -1588,7 +1638,7 @@ class TestReloadHooks:
         2 个”变成无从解释，因此必须在状态栏报出数量。
         """
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load", require_computed=True)
         assert env.mw.var_stats_cache.get("load") is not None
 
         loader_b = FastDataLoader(str(env.path_b), has_unit=True, sep=",")
@@ -1596,7 +1646,7 @@ class TestReloadHooks:
             env.mw.loader = loader_b
             env.mw._data_version += 1
             VariableInfoDialog.refresh_after_reload(loader_b)
-            wait_idle(dlg)
+            assert _wait_stats(dlg, "speed", require_computed=True)
 
             assert "load" not in dlg._pages, "失效变量须被摘除"
             assert dlg.tabs.count() == 1
@@ -1614,7 +1664,7 @@ class TestReloadHooks:
         而不能留下一条旧数据的 min/max 供人误读。
         """
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load", require_computed=True)
         assert set(env.mw.var_stats_cache) >= {"speed", "load"}
 
         loader_b = FastDataLoader(str(env.path_b), has_unit=True, sep=",")
@@ -1622,7 +1672,7 @@ class TestReloadHooks:
             env.mw.loader = loader_b
             env.mw._data_version += 1
             VariableInfoDialog.refresh_after_reload(loader_b)
-            assert wait_idle(dlg)
+            assert _wait_stats(dlg, "speed", require_computed=True)
 
             assert "load" not in env.mw.var_stats_cache, (
                 "失效变量的旧统计必须被移除，不得残留"
@@ -1640,7 +1690,7 @@ class TestReloadHooks:
 class TestExportAndGeometry:
     def test_copy_all_writes_markdown_to_clipboard(self, env):
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load")
 
         dlg._on_copy_all()
         text = QApplication.clipboard().text()
@@ -1652,7 +1702,7 @@ class TestExportAndGeometry:
     def test_copy_all_respects_tab_order(self, env):
         """用户可拖动调整标签顺序，导出必须尊重当前顺序而非插入顺序。"""
         dlg = VariableInfoDialog.popup(["speed", "load"], parent=env.mw)
-        assert wait_idle(dlg)
+        assert _wait_stats(dlg, "speed", "load")
 
         names_before = [p.var_name for p in dlg._ordered_pages()]
         assert names_before == ["speed", "load"]
@@ -1688,32 +1738,35 @@ class TestExportAndGeometry:
         """
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
         dlg.resize(700, 500)
-        pump(20)
+        settle()
         saved = (dlg.width(), dlg.height())
         assert saved == (700, 500), "前置条件：尺寸已生效"
         dlg.save_geom()
         assert env.mw.var_info_geometry is not None
 
         dlg.resize(600, 450)
-        pump(20)
+        settle()
         assert (dlg.width(), dlg.height()) != saved, "前置条件：尺寸确实被改小了"
 
         # 可见状态下 load_geom 被守卫拦截，不应重置当前几何
         dlg.load_geom()
-        pump(20)
+        settle()
         assert (dlg.width(), dlg.height()) != saved, "可见窗口 load_geom 应 no-op"
 
         dlg.hide()
         dlg.load_geom()
-        pump(20)
+        settle()
         assert (dlg.width(), dlg.height()) == saved
 
     def test_reset_for_tests_clears_singleton(self, env):
         dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-        wait_idle(dlg)
+        assert _wait_stats(dlg, "speed")
 
         VariableInfoDialog.reset_for_tests()
-        pump(50)
+        # 这里刻意只 settle()：reset_for_tests 对窗口做过 deleteLater，
+        # 若用 flush_deferred_deletes() 会把 C++ 窗口真删掉，下面就没法
+        # 读 worker.isRunning() 了。销毁路径本身由夹具的 flush 覆盖
+        settle()
 
         assert VariableInfoDialog._instance is None
         assert dlg.worker.isRunning() is False, "线程必须停止，否则析构时崩溃"
@@ -1809,10 +1862,10 @@ def page(env):
     零尺寸，拿它测坐标等于空转。
     """
     dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
-    assert wait_idle(dlg)
+    assert _wait_stats(dlg, "speed")
     # offscreen 默认屏幕仅 800x600，超屏尺寸会被夹住，故取一个安全尺寸
     dlg.resize(700, 520)
-    pump(60)
+    settle()
 
     pg = dlg._pages["speed"]
     reserved = VAR_INFO_COPY_BTN_SIZE + 2 * VAR_INFO_COPY_BTN_MARGIN
@@ -1892,7 +1945,7 @@ class TestFieldCopyButton:
             tree.viewport(), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, btn.center(),
         )
-        pump(20)
+        settle()
 
         assert QApplication.clipboard().text() == item.text(1) == "speed"
         assert "变量名" in dlg.status_label.text()
@@ -1917,7 +1970,7 @@ class TestFieldCopyButton:
             Qt.KeyboardModifier.NoModifier,
             QPoint(btn.left() - VAR_INFO_COPY_BTN_MARGIN, btn.center().y()),
         )
-        pump(20)
+        settle()
 
         assert QApplication.clipboard().text() == _SENTINEL
         assert qt_exceptions == []
@@ -1934,7 +1987,7 @@ class TestFieldCopyButton:
             tree.viewport(), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, btn.center(),
         )
-        pump(20)
+        settle()
 
         assert tree.selectionModel().selectedRows() == []
 
@@ -1952,7 +2005,7 @@ class TestFieldCopyButton:
             Qt.KeyboardModifier.NoModifier,
             QPoint(cell.left() + 6, cell.center().y()),
         )
-        pump(20)
+        settle()
 
         assert item in tree.selectedItems()
         assert btn.contains(QPoint(cell.left() + 6, cell.center().y())) is False
@@ -1968,7 +2021,7 @@ class TestFieldCopyButton:
 
         before = _viewport_image(tree)
         QTest.mouseMove(tree.viewport(), btn.center())
-        pump(30)
+        settle()
         hovered = _viewport_image(tree)
 
         assert _region_diff(before, hovered, btn) > 0, "悬停后热区内应画出图标"
@@ -1977,7 +2030,7 @@ class TestFieldCopyButton:
         # 直接递一个 Leave 事件：offscreen 下合成“移出控件”的鼠标位不可靠，
         # 而被测的是我们自己的 leaveEvent 处理，不必依赖平台光标跟踪
         tree.leaveEvent(QEvent(QEvent.Type.Leave))
-        pump(30)
+        settle()
         left = _viewport_image(tree)
 
         assert _region_diff(left, before, btn) == 0, "离开后图标必须消失"
@@ -1994,12 +2047,12 @@ class TestFieldCopyButton:
         item = _find_row(tree, "变量名")
         btn = copy_button_rect(_value_cell_rect(tree, item))
         QTest.mouseMove(tree.viewport(), btn.center())
-        pump(20)
+        settle()
 
         snapshot = var_info.build_snapshot(env.loader_a, "speed", 0)
         old_stats = pg.stats
         pg.render(snapshot, old_stats)
-        pump(40)
+        settle()
         assert qt_exceptions == [], "重建后旧悬停索引被取用会在此报异常"
 
         new_item = _find_row(tree, "变量名")
@@ -2009,7 +2062,7 @@ class TestFieldCopyButton:
             tree.viewport(), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, new_btn.center(),
         )
-        pump(20)
+        settle()
         assert QApplication.clipboard().text() == "speed"
         assert qt_exceptions == []
 
@@ -2026,7 +2079,7 @@ class TestFieldCopyButton:
             tree.viewport(), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, btn.center(),
         )
-        pump(20)
+        settle()
 
         assert QApplication.clipboard().text() == item.text(1) == "30"
 
@@ -2046,7 +2099,7 @@ class TestFieldCopyButton:
         # 可能已经在视口外，而 visualItemRect 仍会给出一套落在其它行上的
         # 坐标，不滚上来就是点错行的误测
         tree.scrollToItem(item)
-        pump(10)
+        settle()
         btn = copy_button_rect(_value_cell_rect(tree, item))
         width_before = dlg.width()
 
@@ -2054,7 +2107,7 @@ class TestFieldCopyButton:
             tree.viewport(), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, btn.center(),
         )
-        pump(20)
+        settle()
 
         assert QApplication.clipboard().text() == long_value
         notice = dlg.status_label.text()
@@ -2078,11 +2131,10 @@ class TestFieldCopyButton:
             tree.viewport(), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, btn.center(),
         )
-        pump(20)
+        settle()
 
         dlg._on_tab_close(0)
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        pump(60)
+        flush_deferred_deletes()
 
         assert dlg._pages == {}
         assert isValid(tree) is False, "页面必须真被销毁，否则本用例是空转的"
@@ -2216,7 +2268,7 @@ class TestFilePathCopy:
         tree = pg.tree
         item = QTreeWidgetItem(tree, [var_info.ROW_KEY_FILE_PATH, value])
         tree.scrollToItem(item)
-        pump(10)
+        settle()
         return item
 
     def _click_copy_button(self, pg, item):
@@ -2227,7 +2279,7 @@ class TestFilePathCopy:
             tree.viewport(), Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier, btn.center(),
         )
-        pump(20)
+        settle()
         return QApplication.clipboard().text()
 
     def test_row_key_is_the_literal_ui_and_data_agree_on(self):
