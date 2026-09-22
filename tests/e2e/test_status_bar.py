@@ -151,12 +151,22 @@ def test_hover_paints_a_full_cell_block(main_window, qapp):
     ), "离开后底色没收回"
 
 
-def test_broadcast_expires_but_error_persists(main_window, qtbot):
+def test_broadcast_expires_but_error_persists(main_window, qtbot, monkeypatch):
     """右区消息：info 到时自动清理，error 常驻直到被新消息替换。"""
+    from src.ui.main_window import STATUS_MESSAGE_TIMEOUT_MS
+
+    # 口径守卫：真实超时配置本身是被测行为的一部分，先锁住字面值。
+    assert STATUS_MESSAGE_TIMEOUT_MS == {"info": 5000, "warn": 8000}
+
+    # 加速替身：把 info 的 5s 回收压到 50ms。本用例要验证的是
+    # "info 会过期 / error 不过期"这条语义，不是"恰好等了 5 秒"，
+    # 替身只改超时值、不改代码路径。
+    monkeypatch.setitem(STATUS_MESSAGE_TIMEOUT_MS, "info", 50)
+
     mw = main_window
     mw._broadcast("模板已保存: demo")
     assert mw._message_label.text() == "模板已保存: demo"
-    qtbot.waitUntil(lambda: mw._message_label.text() == "", timeout=8000)
+    qtbot.waitUntil(lambda: mw._message_label.text() == "", timeout=2000)
 
     mw._broadcast("加载失败：文件被占用", level="error")
     assert mw._message_label.text() == "加载失败：文件被占用"
