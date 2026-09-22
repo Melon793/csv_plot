@@ -50,6 +50,10 @@ class MDFLazyLoader:
 
     LOADER_TYPE = "mdf"
 
+    # 能力谓词（决策 D5）：MDF 惰性加载，数据不在内存，取数走 get_series /
+    # get_value_from_name，df 恒为 None。与「是否 MDF 格式」是两个维度。
+    IS_LAZY = True
+
     MAX_CACHE_SIZE = 256
     # 信号缓存字节预算。单条就是整通道数组：776 MB 级 .mf4 的单通道可达数十至上百
     # MB，只限 256 条时理论峰值是 GB 级，故再按 nbytes 压一道上限。

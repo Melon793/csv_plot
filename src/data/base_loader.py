@@ -22,6 +22,11 @@ class BaseDataLoader:
 
     LOADER_TYPE = "base"
 
+    # 能力谓词（决策 D5）：内存加载型 loader 数据常驻 df，取数直接索引。
+    # FastDataLoader / ExcelDataLoader 靠继承得到 False；若某子类真要惰性化，
+    # 必须显式覆写，且同步改造 §2.4 表里的 UI 判据点（见 loader_caps.py）。
+    IS_LAZY = False
+
     # 公共的脏数据清单（CSV 读取时作为 na_values 传入；
     # Excel 场景仅用于日志标记，openpyxl 读取的是原生类型）
     _NA_VALUES = [
