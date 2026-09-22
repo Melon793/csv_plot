@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 from src.core.logger import get_logger
 from src.core.config import VAR_INFO_MAX_TABS
+from src.data.loader_caps import is_lazy_loader
 from src.ui.drag_drop import build_var_mimedata, create_drag_pixmap
 from src.ui.variable_actions import (
     add_variables_to_blank_plot,
@@ -521,11 +522,12 @@ class MyTableWidget(QTableWidget):
         if not hasattr(main_window, "loader") or main_window.loader is None:
             return
 
-        if getattr(main_window.loader, "LOADER_TYPE", "") == "mdf":
+        # 能力谓词（D5）：惰性 loader（MDF / parquet）取数走 get_series
+        if is_lazy_loader(main_window.loader):
             try:
                 series = main_window.loader.get_series(var_name)
             except KeyError:
-                logger.warning("MDF 变量 '%s' 在 loader 中不存在", var_name)
+                logger.warning("变量 '%s' 在惰性 loader 中不存在", var_name)
                 return
         else:
             try:

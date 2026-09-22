@@ -13,6 +13,7 @@ from src.core.config import (
     safe_qt_op,
 )
 from src.core.logger import get_logger
+from src.data.loader_caps import is_lazy_loader
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
 
@@ -534,7 +535,11 @@ class CursorSyncManager(MainWindowBaseManager):
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance.get_column_names())
 
+            # is_mdf 是格式谓词：:543/:576 的 global_time_range 分支对 parquet
+            # 惰性 loader 走 else（(1, datalength) 的 CSV 语义，§2.4 #13 确认不改）。
+            # is_lazy 是能力谓词（D5）：变量存在性判据不得触碰 loader.df（恒为 None）
             is_mdf = getattr(self.mw.loader, "LOADER_TYPE", "") == "mdf"
+            is_lazy = is_lazy_loader(self.mw.loader)
 
             unique_y_names = set(all_y_names)
             skip_var_restore = False
@@ -626,7 +631,7 @@ class CursorSyncManager(MainWindowBaseManager):
                             for var_name, state in saved_state.items():
                                 var_exists = (
                                     (var_name in self.mw.loader.var_names)
-                                    if is_mdf
+                                    if is_lazy
                                     else (var_name in self.mw.loader.df.columns)
                                 )
                                 if not (

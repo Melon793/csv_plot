@@ -29,6 +29,7 @@ from src.core.config import (
 )
 from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
+from src.data.loader_caps import is_lazy_loader
 
 logger = get_logger("widget.plot_data")
 
@@ -232,7 +233,9 @@ class PlotDataManager:
             and pw.plot_context.loader is not None
         ):
             loader = pw.plot_context.loader
-            if getattr(loader, "LOADER_TYPE", "") == "mdf":
+            # 能力谓词（D5）：MDF 与 parquet 惰性 loader 的数据都不在内存，
+            # pw.data 恒为 None，下面的 df 判定对它们没有意义
+            if is_lazy_loader(loader):
                 return True, ""
 
         if not hasattr(pw, "data") or pw.data is None:
@@ -478,7 +481,8 @@ class PlotDataManager:
 
         if hasattr(pw.plot_context, "loader") and pw.plot_context.loader is not None:
             loader = pw.plot_context.loader
-            if getattr(loader, "LOADER_TYPE", "") == "mdf":
+            # 能力谓词（D5）：惰性 loader 的 df 恒为 None，取数必须走 get_series
+            if is_lazy_loader(loader):
                 raw_values = loader.get_series(var_name)
             else:
                 raw_values = pw.data[var_name]
@@ -489,12 +493,15 @@ class PlotDataManager:
             hasattr(pw.plot_context, "loader")
             and pw.plot_context.loader is not None
             and hasattr(pw.plot_context.loader, "get_value_from_name")
-            and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
+            and is_lazy_loader(pw.plot_context.loader)
         ):
             try:
-                _, _, _, text_map = pw.plot_context.loader.get_value_from_name(var_name)
+                # D8 双入口：枚举列的绘图 y 必须取 get_value_from_name 的码值。
+                # MDF 的两个入口命中同一缓存条目（值等价，此改动对 MDF 是空操作）；
+                # parquet 惰性 loader 的 get_series 返回**文本**，直接当 y 会崩。
+                _, y_enum, _, text_map = pw.plot_context.loader.get_value_from_name(var_name)
                 if text_map:
-                    y_values = raw_values
+                    y_values = y_enum
                     y_format = "enum"
                     if pw.plot_context:
                         if hasattr(pw.plot_context, "_enum_text_maps"):

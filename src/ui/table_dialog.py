@@ -46,6 +46,7 @@ from src.core.config import (
 )
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.core.logger import get_logger
+from src.data.loader_caps import is_lazy_loader
 
 logger = get_logger("ui.table_dialog")
 
@@ -1454,13 +1455,15 @@ class DataTableDialog(QMainWindow):
                 continue
 
             # 检查变量是否在数据中存在
-            is_mdf_loader = getattr(loader, "LOADER_TYPE", "") == "mdf"
-            if not is_mdf_loader and var_name not in loader.df.columns:
+            # 能力谓词（D5）：惰性 loader（MDF / parquet）的 df 恒为 None，
+            # 取数必须走 get_series；变量不存在时由 get_series 抛 KeyError 进 except
+            lazy = is_lazy_loader(loader)
+            if not lazy and var_name not in loader.df.columns:
                 invalid_vars.append(var_name)
                 continue
 
             try:
-                if is_mdf_loader:
+                if lazy:
                     series = loader.get_series(var_name)
                 else:
                     series = loader.df[var_name]
@@ -1524,8 +1527,9 @@ class DataTableDialog(QMainWindow):
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
 
-        is_mdf_loader = getattr(loader, "LOADER_TYPE", "") == "mdf"
-        if not is_mdf_loader and var_name not in loader.df.columns:  # 改为 loader
+        # 能力谓词（D5）：惰性 loader（MDF / parquet）取数走 get_series
+        lazy = is_lazy_loader(loader)
+        if not lazy and var_name not in loader.df.columns:  # 改为 loader
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
 
@@ -1534,7 +1538,7 @@ class DataTableDialog(QMainWindow):
             self.main_view.verticalScrollBar().value() if self.main_view else None
         )
 
-        if is_mdf_loader:
+        if lazy:
             series = loader.get_series(var_name)
         else:
             series = loader.df[var_name]  # 改为 loader
@@ -1557,6 +1561,9 @@ class DataTableDialog(QMainWindow):
             data: 变量数据序列
         """
         loader = self._resolve_loader()
+        # 格式谓词（§2.4 #6，刻意不改 is_lazy_loader）：tab 模式按 channel group
+        # 分 tab 是 MDF 专有特性；parquet 惰性 loader 虽 df 为 None，但必须
+        # 保持 CSV/Excel 的单表语义，走下方非 MDF 分支
         is_mdf = loader is not None and getattr(loader, "LOADER_TYPE", "") == "mdf"
 
         if is_mdf:
@@ -3047,9 +3054,17 @@ class DataTableDialog(QMainWindow):
                 if self._add_variable_to_tab(col, gi, loader=loader) is None:
                     removed.append(col)
         else:
+            # 能力谓词（D5）：parquet 惰性 loader 的 df 恒为 None，若不按
+            # get_series 取数，每一列都会落进 removed，数值表被静默清空（§2.4 #7）
+            lazy = is_lazy_loader(loader)
             new_df = pd.DataFrame()
             for col in old_flat:
-                if loader.df is not None and col in loader.df.columns:
+                if lazy:
+                    try:
+                        new_df[col] = loader.get_series(col)
+                    except KeyError:
+                        removed.append(col)
+                elif loader.df is not None and col in loader.df.columns:
                     new_df[col] = loader.df[col]
                 else:
                     removed.append(col)

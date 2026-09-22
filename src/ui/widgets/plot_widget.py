@@ -18,6 +18,7 @@ from src.ui.drag_drop import (
 )
 from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
+from src.data.loader_caps import is_lazy_loader
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
@@ -154,13 +155,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
 
         # a. 打开/激活变量数值表，并添加所有变量
+        # 格式谓词保留给 :184 的 tab 模式分支（MDF 专有）；取数用能力谓词（D5），
+        # parquet 惰性 loader 的 df 恒为 None，必须走 get_series
         is_mdf_loader = getattr(main_window.loader, 'LOADER_TYPE', '') == 'mdf'
+        is_lazy = is_lazy_loader(main_window.loader)
         dlg = None
         # 实际入表的变量名：上面两个 continue 会跳过取数失败/列不存在的曲线，
         # 而 var_names[0] 正是这类情况下最容易被跳过的那个
         opened: list[str] = []
         for var_name in var_names:
-            if is_mdf_loader:
+            if is_lazy:
                 try:
                     series = main_window.loader.get_series(var_name)
                 except KeyError:
