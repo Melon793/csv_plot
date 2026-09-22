@@ -105,6 +105,10 @@ DEFAULT_PADDING_VAL_Y = 0.1  # 默认y轴padding，单位为plot高度
 FILE_SIZE_LIMIT_BACKGROUND_LOADING = (
     2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
 )
+# 惰性转换阈值默认值（D2）：file_size >= 该值才走 CSV→parquet 转换路径。
+# 读取处必须钳到 >= FILE_SIZE_LIMIT_BACKGROUND_LOADING（D16：低于 2MB 的文件
+# 走同步路径、在 GUI 线程里加载，转换一旦落在那里就是整窗冻结）
+DEFAULT_LAZY_CONVERT_MIN_MB = 50
 RATIO_RESET_PLOTS = 0.3  # 重置plot比例，超过此比例时，重置plot
 FROZEN_VIEW_WIDTH_DEFAULT = 180  # 冻结视图宽度，默认值为180px
 XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol

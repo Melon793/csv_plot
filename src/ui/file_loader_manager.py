@@ -22,12 +22,21 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 from src.core.config import FILE_SIZE_LIMIT_BACKGROUND_LOADING, safe_qt_op
 from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
-from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.utils.paths import normalize_input_path
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.core.logger import get_logger
 
 logger = get_logger("ui.file_loader")
+
+
+def _lazy_fallback_message(reason: str) -> str:
+    """D10 回退播报文案的唯一出口。
+
+    转换只有异步一条入口（D16：同步路永不转换），单函数即满足
+    「同一动作每条入口同规格播报」的项目约定。三要素：走了回退、
+    一句话原因、本次按内存模式加载（Q6：不弹窗）。
+    """
+    return f"临时文件转换失败，本次已按内存模式加载（{reason}）"
 
 # 可加载的后缀白名单：分卷文件（data.csv.0）由 _extract_file_extension 的正则单独识别
 SUPPORTED_EXTENSIONS = (
@@ -964,6 +973,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
         self._begin_data_reload()
         self._load_started_at = time.perf_counter()
+        # 每次加载作废旧的回退播报（D10），防止串到下一次 _post_load_actions
+        self._lazy_fallback_note = None
         self.mw.begin_load_feedback(file_path)
         # 加载期禁能分析类按钮：模态框只挡鼠标点击，挡不住链路内部
         # processEvents 触发的重入（本仓历史上多次修过这类丢列/崩溃）
@@ -1154,7 +1165,13 @@ class FileLoaderManager(MainWindowBaseManager):
         elapsed_s = max(
             0.0, time.perf_counter() - getattr(self, "_load_started_at", time.perf_counter())
         )
-        self.mw.end_load_feedback()
+        note = getattr(self, "_lazy_fallback_note", None)
+        if note:
+            self._lazy_fallback_note = None
+            # D10：状态栏播报（warn 级 8s 自动回收），不弹窗（Q6）
+            self.mw.end_load_feedback(_lazy_fallback_message(note), level="warn")
+        else:
+            self.mw.end_load_feedback()
         self.mw.update_file_status(
             file_path,
             row_count=self._current_data_length,
@@ -1303,25 +1320,21 @@ class FileLoaderManager(MainWindowBaseManager):
         status = False
 
         try:
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext in (".mf4", ".mdf", ".dat"):
-                new_loader = MDFLazyLoader(file_path)
-            elif ext in (".xlsx", ".xlsm") or is_excel:
-                from src.data.excel_loader import ExcelDataLoader
-                new_loader = ExcelDataLoader(
-                    file_path,
-                    sheet_name=sheet_name or 0,
-                    desc_rows=desc_rows,
-                    has_unit=has_unit,
-                )
-            else:
-                new_loader = FastDataLoader(
-                    file_path,
-                    desc_rows=desc_rows,
-                    sep=sep,
-                    has_unit=has_unit,
-                    encoding=encoding,
-                )
+            # D18：分派逻辑收进 create_loader 工厂（与异步入口共用一份）。
+            # allow_lazy_convert=False 是硬性要求（D16）：同步路在 GUI 线程，
+            # 惰性转换落在这里就是整窗冻结。
+            from src.data.loader_factory import create_loader
+
+            new_loader = create_loader(
+                file_path,
+                desc_rows=desc_rows,
+                sep=sep,
+                has_unit=has_unit,
+                encoding=encoding,
+                sheet_name=sheet_name,
+                is_excel=is_excel,
+                allow_lazy_convert=False,
+            )
             # 新 loader 成功 → 释放旧数据 → 应用新数据
             self._swap_loader(new_loader, is_reload=is_reload)
             status = True
@@ -1355,6 +1368,10 @@ class FileLoaderManager(MainWindowBaseManager):
             return
         logger.info("后台加载完成: %s", file_path)
         self.mw._progress.close()
+
+        # D10 播报：转换失败已自动回退内存 loader（工厂挂在 loader 上的原因），
+        # 交给 _post_load_actions 在 end_load_feedback 时经状态栏播报（不弹窗）
+        self._lazy_fallback_note = getattr(new_loader, "_lazy_fallback_reason", None)
 
         # P0-3: _swap_loader → _apply_loader → replots_after_loading 链上任一异常
         # 都不得跳过解锁，否则 _is_loading_new_data / _reload_in_progress 永久卡死

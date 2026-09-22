@@ -164,33 +164,26 @@ class DataLoadThread(QThread):
                 self.error.emit("文件不存在或已被删除")
                 return
 
-            ext = os.path.splitext(self.file_path)[1].lower()
-            if ext in (".xlsx", ".xlsm"):
-                from src.data.excel_loader import ExcelDataLoader
-                loader = ExcelDataLoader(
-                    self.file_path,
-                    sheet_name=self.sheet_name or 0,
-                    desc_rows=self.desc_rows,
-                    has_unit=self.has_unit,
-                    _progress=_progress_cb,
-                )
-            elif ext in (".mf4", ".mdf", ".dat"):
-                from src.data.mdf_lazy_loader import MDFLazyLoader
+            # D18：分派逻辑收进 create_loader 工厂（与同步入口共用一份）。
+            # 本调用必须留在 run() 的 no_autogc() 窗口内（worker 线程全量 GC
+            # 会与 Shiboken 主线程延迟删除互锁，见 src/core/gc_guard.py）。
+            # allow_lazy_convert=True：转换只存在于异步 worker 线程（D16）。
+            from src.data.loader_factory import create_loader
 
-                loader = MDFLazyLoader(self.file_path, _progress=_progress_cb)
-            else:
-                loader = FastDataLoader(
-                    self.file_path,
-                    desc_rows=self.desc_rows,
-                    sep=self.sep,
-                    has_unit=self.has_unit,
-                    encoding=self.encoding,
-                    chunksize=3600,
-                    _progress=_progress_cb,
-                    # 本类是 worker 线程：全量 GC 会把主线程的 QObject 包装器拿到
-                    # 本线程析构，与 Shiboken 主线程延迟删除互锁 → 整窗死锁
-                    allow_gc=False,
-                )
+            loader = create_loader(
+                self.file_path,
+                desc_rows=self.desc_rows,
+                sep=self.sep,
+                has_unit=self.has_unit,
+                encoding=self.encoding,
+                sheet_name=self.sheet_name,
+                progress=_progress_cb,
+                chunksize=3600,
+                # 本类是 worker 线程：全量 GC 会把主线程的 QObject 包装器拿到
+                # 本线程析构，与 Shiboken 主线程延迟删除互锁 → 整窗死锁
+                allow_gc=False,
+                allow_lazy_convert=True,
+            )
             self.finished.emit(loader)
         except MemoryError:
             logger.critical("DataLoadThread 内存不足: %s", self.file_path)

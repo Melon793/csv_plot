@@ -25,6 +25,8 @@ class ConfigKey(StrEnum):
     LOG_WINDOW_GEOMETRY = "log_window/geometry"
     TEMPLATE_LAST_ID = "template/last_id"
     TEMPLATE_LAST_NAME = "template/last_name"
+    LAZY_CONVERT_ENABLED = "lazy_convert/enabled"
+    LAZY_CONVERT_MIN_MB = "lazy_convert/min_mb"
 
 
 class AppSettings:
@@ -189,3 +191,35 @@ class AppSettings:
 
     def set_last_template_name(self, name: str | None) -> None:
         self._settings.setValue(ConfigKey.TEMPLATE_LAST_NAME, name)
+
+    def is_lazy_convert_enabled(self) -> bool:
+        """惰性转换总开关（D2）。关掉即回到今天的内存 loader 行为，
+        这同时就是整个 lazy parquet 特性的回滚手段。"""
+        return self._settings.value(ConfigKey.LAZY_CONVERT_ENABLED, True, type=bool)
+
+    def set_lazy_convert_enabled(self, enabled: bool) -> None:
+        self._settings.setValue(ConfigKey.LAZY_CONVERT_ENABLED, enabled)
+
+    def get_lazy_convert_min_mb(self) -> int:
+        """惰性转换的文件大小阈值（MB），钳到 >= 2MB（D2/D16）。
+
+        钳制原因：低于 FILE_SIZE_LIMIT_BACKGROUND_LOADING(2MB) 的文件走同步
+        路径、在 GUI 线程里加载；转换是 CPU 重活，落在那里就是整窗冻结
+        （见记忆 cross-thread-gc-deadlock-hangs-ui 的同源教训）。
+        """
+        from src.core.config import (
+            DEFAULT_LAZY_CONVERT_MIN_MB,
+            FILE_SIZE_LIMIT_BACKGROUND_LOADING,
+        )
+
+        raw = self._settings.value(
+            ConfigKey.LAZY_CONVERT_MIN_MB, DEFAULT_LAZY_CONVERT_MIN_MB, type=int
+        )
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = DEFAULT_LAZY_CONVERT_MIN_MB
+        return max(value, FILE_SIZE_LIMIT_BACKGROUND_LOADING)
+
+    def set_lazy_convert_min_mb(self, min_mb: int) -> None:
+        self._settings.setValue(ConfigKey.LAZY_CONVERT_MIN_MB, int(min_mb))

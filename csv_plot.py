@@ -29,6 +29,20 @@ def main():
     )
     app = QApplication(sys.argv)
 
+    # D17：启动时清扫上次会话残留的惰性转换临时目录（三重保险：只扫一层、
+    # 只认 <pid>_<rand8> 命名、只删死 PID 或 mtime>24h 的目录），并注册
+    # 进程级 atexit 兜底。任何失败都不得阻断启动。
+    from src.core.logger import get_logger
+    from src.data.temp_cache_dir import TempCacheDir
+
+    try:
+        TempCacheDir.register_atexit()
+        swept = TempCacheDir.sweep_stale()
+        if swept:
+            get_logger("app.startup").info("已清扫 %d 个残留惰性转换临时目录", swept)
+    except Exception:
+        get_logger("app.startup").warning("启动清扫惰性临时目录失败", exc_info=True)
+
     if sys.platform == "win32":
         from src.core.font_cache import get_windows_chinese_font_cached
         font_name = get_windows_chinese_font_cached()
