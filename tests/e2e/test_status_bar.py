@@ -97,6 +97,59 @@ def test_segments_are_clickable(main_window):
     assert hits == ["file"]
 
 
+def _click_segment(widget, qapp):
+    """按真实路径点一下状态栏段：mousePressEvent → clicked 信号 → 开抽屉/播报。"""
+    from PySide6.QtGui import QMouseEvent
+
+    local = QPointF(widget.rect().center())
+    widget.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            local,
+            QPointF(widget.mapToGlobal(local.toPoint())),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    qapp.processEvents()
+
+
+# 两段共用同一条闸门链（reject_when_loading → 空 loader 提示），只在
+# 「段 → 抽屉属性 → 动作名」上不同。原先在 test_file_info_drawer.py 与
+# test_axis_drawer.py 里各写一份，改一处容易漏另一处。
+_SEGMENT_GATE_CASES = [
+    pytest.param("_file_segment", "_file_info_drawer", "查看文件信息", id="file"),
+    pytest.param("_axis_segment", "_axis_drawer", "改 x 轴基准", id="axis"),
+]
+
+
+@pytest.mark.parametrize("segment_attr, drawer_attr, action", _SEGMENT_GATE_CASES)
+def test_drawer_gate_blocks_click_without_data_and_while_loading(
+    main_window, qapp, segment_attr, drawer_attr, action
+):
+    """段点击的两道闸门：无数据只播一句、加载期一律不开抽屉。
+
+    两者都必须「连抽屉对象都不创建」：抽屉里的路径/大小/轴身份全取自
+    loader 快照，无数据时是空壳，加载期则是一份随时会被换掉的旧快照。
+    """
+    mw = main_window
+    segment = getattr(mw, segment_attr)
+
+    _click_segment(segment, qapp)
+    assert getattr(mw, drawer_attr) is None, "无数据时不该创建抽屉"
+    assert mw._message_label.text() == "尚未加载数据文件"
+
+    class _FakeThread:
+        def isRunning(self):
+            return True
+
+    mw._thread = _FakeThread()
+    _click_segment(segment, qapp)
+    assert getattr(mw, drawer_attr) is None, "加载期不该创建抽屉"
+    assert mw._message_label.text() == f"正在加载数据，请稍候再{action}"
+
+
 def test_hover_paints_a_full_cell_block(main_window, qapp):
     """hover 反馈是整块底色（照 VS Code 的 item cell），不是 1 px 下划线。
 
