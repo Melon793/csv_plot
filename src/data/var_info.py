@@ -244,6 +244,8 @@ def build_snapshot(loader, var_name: str, generation: int = 0) -> VarInfoSnapsho
     kind = getattr(loader, "LOADER_TYPE", "") or ""
     if kind == "mdf":
         return _from_mdf(loader, var_name, generation)
+    if kind == "parquet":
+        return _from_parquet(loader, var_name, generation)
     return _from_tabular(loader, var_name, generation, kind or "tabular")
 
 
@@ -315,6 +317,79 @@ def _from_tabular(loader, var_name, generation, kind) -> VarInfoSnapshot:
     # 提供该值的跨格式不一致（非浮点列更是恒报 0，对含 NaN 的文本列属于
     # 误导）。移除后 NaN 数从"打开即有"变成"统计回填后才有"，与
     # min/max/mean 的行为一致，用户心智模型反而更统一。
+    column_rows = [
+        ("是否时间格式列", "是" if var_name in time_formats else "否"),
+    ]
+    if time_fmt:
+        column_rows.append(("时间格式", str(time_fmt)))
+    if all_empty:
+        column_rows.append(
+            ("说明", f"该列全部为空值（共 {length} 行），"
+                     "无有效样本（不支持统计与绘图）")
+        )
+    elif not is_numeric:
+        column_rows.append(("说明", f"非数值列（{dtype}），不支持统计与绘图"))
+
+    snap.sections = {
+        "基本信息": [
+            ("变量名", var_name),
+            ("数据类型", str(dtype)),
+            ("数据点总数", f"{length}"),
+            ("单位", unit),
+            ("有效性", validity_label(validity)),
+        ],
+        "列信息": column_rows,
+        "文件信息": _tabular_file_rows(loader),
+    }
+    return snap
+
+
+def _from_parquet(loader, var_name, generation) -> VarInfoSnapshot:
+    """parquet 惰性 loader 的快照（D15）：只读 meta.json，O(1)。
+
+    与 ``_from_tabular`` 的关系：sections 逐字段复刻（文案等价护栏是
+    tests/unit/data/test_var_info_parquet.py）；差别仅在快照身份字段
+    ``source_kind="parquet"``。meta 记录的 ``dtype_str`` 是转换期的
+    pandas 口径字符串，显示前按 ``_from_tabular`` 的归一规则映射
+    （category/str/object 的文本层一律归一 object——那正是
+    ``_effective_numpy_dtype`` 对 category categories 与 StringDtype
+    的既有输出）。
+    """
+    try:
+        entry = loader.meta(var_name)
+    except AttributeError:
+        raise KeyError(f"变量 '{var_name}' 不存在")
+
+    dtype_str = entry.get("dtype_str", "object")
+    all_empty = bool(entry.get("all_empty", False))
+    if dtype_str.startswith("datetime64"):
+        dtype = np.dtype(dtype_str)  # Excel 日期列：datetime64[s] 等
+    elif dtype_str in ("category", "object", "str"):
+        dtype = np.dtype("O")  # 文本层归一（同 _from_tabular 的输出）
+    else:
+        dtype = np.dtype(dtype_str)  # float32/float64/int64/bool
+
+    is_numeric = dtype.kind in _NUMERIC_KINDS
+    validity = entry.get("validity", UNKNOWN)
+    unit = (getattr(loader, "units", None) or {}).get(var_name, "-") or "-"
+    time_formats = getattr(loader, "time_channels_info", None) or {}
+    time_fmt = time_formats.get(var_name, "")
+    length = loader.datalength
+
+    snap = VarInfoSnapshot(
+        name=var_name,
+        source_kind="parquet",
+        original_name=var_name,
+        dtype=str(dtype),
+        length=length,
+        unit=unit,
+        validity=validity,
+        is_numeric=is_numeric,
+        is_enum=False,  # 枚举列的展示按「文本列」措辞（§4.6），与今天 CSV 一致
+        all_empty=all_empty,
+        generation=generation,
+    )
+
     column_rows = [
         ("是否时间格式列", "是" if var_name in time_formats else "否"),
     ]
@@ -607,6 +682,12 @@ def compute_stats(
     try:
         if kind == "mdf":
             return _stats_mdf(loader, var_name, should_cancel)
+        if kind == "parquet":
+            # C2：单列读 3-5ms，直接复用 CSV 口径的单趟 numpy 统计；
+            # 刻意不复用 _stats_mdf 的分块累加（跨块 float64 手动累加的
+            # 口径会让 mean/std 末位漂移）。get_series 对枚举列还原文本
+            # （D8），这里因此对码值算不出无意义的数字统计。
+            return _stats_from_array(loader.get_series(var_name).to_numpy())
         return _stats_tabular(loader, var_name)
     except Exception as e:  # noqa: BLE001 - 后台线程须把任何异常转成可展示的错误
         logger.debug("计算 %s 统计失败", var_name, exc_info=True)

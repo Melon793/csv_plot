@@ -277,7 +277,13 @@ def _read_csv_with_retry(
     except Exception as exc:  # noqa: BLE001 - 按 S5 只对 utf-8 错误转码重试
         msg = str(exc)
         if "utf-8" not in msg and "utf8" not in msg:
-            raise
+            # 坏行/字段数不齐等解析错误必须包成 ParquetConversionError：
+            # 同一文件在内存链（on_bad_lines="skip"）能加载，转换链若把
+            # polars 原生 ComputeError 直接上抛，用户会看到莫名其妙的
+            # 内部错误而非 D10 回退（P4 等价测试 ragged 用例实测发现）
+            raise ParquetConversionError(
+                f"CSV 解析失败（多半是坏行/字段数不齐）: {exc}"
+            ) from exc
         # 数据区确有非 UTF-8 字节：按头部探测出的实际编码增量转码 →
         # 重试 → 删中间文件。转码编码用 probe.encoding_used（对整个头部
         # 验证过的编码），而不是对文件头再嗅探一次。

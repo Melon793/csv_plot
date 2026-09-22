@@ -13,6 +13,30 @@ from tests.fixtures.data_factory import write_csv, write_mdf
 
 
 # --------------------------------------------------------------------------
+# parquet 惰性 loader（P4 等价性/文案/统计测试共享）
+# --------------------------------------------------------------------------
+@pytest.fixture()
+def lazy_parquet_factory(tmp_path):
+    """转换源文件 → ParquetLazyLoader；测试结束自动 close（删临时目录）。"""
+    from src.data.parquet_converter import convert_to_parquet
+    from src.data.parquet_lazy_loader import ParquetLazyLoader
+    from src.data.temp_cache_dir import TempCacheDir
+
+    loaders: list = []
+
+    def make(src_path, **conv_kwargs):
+        temp = TempCacheDir.create()
+        convert_to_parquet(str(src_path), outdir=temp.path(), **conv_kwargs)
+        loader = ParquetLazyLoader(str(src_path), temp)
+        loaders.append(loader)
+        return loader
+
+    yield make
+    for ld in loaders:
+        ld.close()
+
+
+# --------------------------------------------------------------------------
 # var_info 合成 loader（B3 拆分后的共享夹具）
 # --------------------------------------------------------------------------
 @pytest.fixture(scope="module")
