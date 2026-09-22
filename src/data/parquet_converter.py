@@ -298,6 +298,10 @@ def _read_csv_with_retry(
             ) from e
         try:
             return _read(str(trans_path))
+        except Exception as retry_exc:  # noqa: BLE001 - D10 只认转换异常
+            raise ParquetConversionError(
+                f"转码后 CSV 解析失败: {retry_exc}"
+            ) from retry_exc
         finally:
             try:
                 trans_path.unlink(missing_ok=True)

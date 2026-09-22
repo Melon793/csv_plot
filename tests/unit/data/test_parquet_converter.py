@@ -324,6 +324,29 @@ class TestS5Encoding:
             _convert(tmp_path, csv)
         assert not (tmp_path / "out" / "_transcoded_utf8.csv").exists()
 
+    def test_transcoded_second_read_raises_conversion(self, tmp_path, monkeypatch):
+        # D10：转码后二次解析失败也不能把 polars 原生错误原样上抛，否则
+        # 后续工厂的 ParquetConversionError 回退分支接不住。
+        csv = write_csv(
+            tmp_path / "s5e.csv",
+            header=["a", "b"],
+            units=None,
+            rows=[[1, 2]],
+        )
+
+        import src.data.parquet_converter as pc
+
+        data = Path(csv).read_bytes()
+        Path(csv).write_bytes(data.replace(b"1,2", b"1,\xc82"))
+        monkeypatch.setattr(pc, "_transcode_to_utf8", lambda *args: None)
+        with pytest.raises(ParquetConversionError, match="转码后 CSV 解析失败"):
+            convert_to_parquet(
+                str(csv),
+                has_unit=False,
+                sep=",",
+                outdir=tmp_path / "out2",
+            )
+
 
 class TestValidityRuleTable:
     """§2.1.1 有效性 8 行规则表：一行规则一个夹具一条断言。"""
