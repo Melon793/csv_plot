@@ -112,7 +112,7 @@ tests/
 | unit | 无 Qt | < 50ms | 每次保存 / 高频 | `unit` |
 | component | offscreen + QApplication | < 1s | 提交前 | `component` |
 | e2e | offscreen + 完整主窗口 | < 10s | CI / 发布前 | `e2e` |
-| perf | offscreen + benchmark | 秒级 | 按需手动 | `perf` |
+| perf | offscreen + benchmark | 秒级 | 按需手动：`uv run pytest -m perf`（默认集已排除，见 pyproject addopts） | `perf` |
 
 **marker 无需手写**：`tests/conftest.py` 的 `pytest_collection_modifyitems` 按用例所在目录（`/unit/`、`/component/`、`/e2e/`、`/perf/`）自动打 marker，新用例只需放入对应目录。
 

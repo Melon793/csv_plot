@@ -189,6 +189,10 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         "--include-package=numexpr",
         "--include-module=numpy",
         "--include-module=pandas",
+        # polars 是 Rust 扩展：只给 include-package 可能漏掉扩展数据文件，
+        # 两条都要（D11）。[未验证] Windows 产物需公司电脑复核（R4）
+        "--include-package=polars",
+        "--include-package-data=polars",
         "--include-package=chardet",
         "--include-module=charset_normalizer",
         "--include-module=ujson",

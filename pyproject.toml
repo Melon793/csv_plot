@@ -36,7 +36,9 @@ qt_api = "pyside6"
 # --timeout：把历史上的"永久挂起"（WaitSignal 死锁、模态弹窗）变成可诊断失败
 # --durations=20：常态暴露慢用例，防止本次优化被后续提交吃回
 #   （另见 tests/conftest.py 里的 >1s 点名护栏）
-addopts = "-ra --timeout=120 --timeout-method=thread --durations=20"
+# -m "not perf"：perf 层用大夹具、按需手动跑（uv run pytest -m perf），
+#   不进默认集（§6.4 耗时护栏；tests/README.md 运行策略表同口径）
+addopts = "-ra --timeout=120 --timeout-method=thread --durations=20 -m \"not perf\""
 markers = [
     "unit: 纯逻辑单元测试（无 Qt 界面依赖，秒级完成）",
     "component: offscreen 控件级功能测试",

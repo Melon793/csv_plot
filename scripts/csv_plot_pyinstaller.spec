@@ -28,12 +28,22 @@ ICON_PNG = str(PROJECT_DIR / "assets" / "icon.png")
 
 is_win = sys.platform == "win32"
 
+# ── polars 收集（D11/R4）──────────────────────────────────────
+# polars 是编译好的 Rust 扩展（wheel 内带 .so/.pyd 与数据文件），只声明
+# hiddenimport 会漏掉扩展数据。当前 pyinstaller-hooks-contrib 没有官方
+# hook-polars（本机 macOS venv 实测遍历确认）→ 按 D11 手写 collect_all。
+# [未验证] Windows 产物能否读 parquet 需公司电脑复核（R3/R4）。
+from PyInstaller.utils.hooks import collect_all
+
+_polars_datas, _polars_binaries, _polars_hiddenimports = collect_all("polars")
+
 # ── Analysis ───────────────────────────────────────────────────
 a = Analysis(
     [ENTRY],
     pathex=[],
-    binaries=[],
+    binaries=[*_polars_binaries],
     datas=[
+        *_polars_datas,
         (str(PROJECT_DIR / "assets" / "icon.ico"), "assets"),
         (str(PROJECT_DIR / "assets" / "icon.icns"), "assets"),
         (str(PROJECT_DIR / "assets" / "icon.png"), "assets"),
@@ -41,6 +51,7 @@ a = Analysis(
         (str(PROJECT_DIR / "docs" / "help.md"), "docs"),
     ],
     hiddenimports=[
+        *_polars_hiddenimports,
         # 本项目需要手动声明的隐藏导入
         "src",
         # 版本信息模块（_version.py 内 try-import，静态分析可能漏掉）
@@ -63,6 +74,13 @@ a = Analysis(
         "src.data.loader",
         "src.data.mdf_lazy_loader",
         "src.data.metadata",
+        # lazy parquet 链（P0-P6 新增；模块级为惰性导入，静态分析可能漏掉）
+        "src.data.loader_caps",
+        "src.data.loader_factory",
+        "src.data._column_cache",
+        "src.data.temp_cache_dir",
+        "src.data.parquet_converter",
+        "src.data.parquet_lazy_loader",
         "src.ui",
         "src.ui.main_window_base_manager",
         "src.ui.main_window",
