@@ -134,8 +134,15 @@ def main_window(qapp, app_settings, dialog_stubs, monkeypatch, qtbot):
     # 先向 monkeypatch 注册还原点（恢复原钩子，不泄漏到后续用例），再包装。
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     _install_race_filter()
-    # 先让 pending 定时器尽量跑完再 close，减少清理期竞态窗口。
-    qtbot.wait(80)
+    # 先让 pending 定时器尽量跑完再 close，减少清理期竞态窗口：这些延迟回调
+    # （_post_reload_ui_refresh / _safety_force_unlock 等，见上方标记表）只在
+    # **加载链路**上被调度，没加载过数据的用例等这 80ms 是纯白等，故条件化。
+    try:
+        _loaded = mw.loader is not None
+    except RuntimeError:
+        _loaded = False  # WA_DeleteOnClose：用例体内已自行关闭
+    if _loaded:
+        qtbot.wait(80)
     qapp.processEvents()
     try:
         mw.close()
