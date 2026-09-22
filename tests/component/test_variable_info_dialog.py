@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import isValid
 
+from tests.fixtures.waits import force_delete, pump, wait_idle
 from src.core.config import (
     VAR_INFO_COL0_MIN_WIDTH,
     VAR_INFO_COPY_BTN_MARGIN,
@@ -85,40 +86,6 @@ class FakeMainWindow(QMainWindow):
         self.var_stats_cache = {}
         self.var_info_geometry = None
         self._data_version = 0
-
-
-def pump(ms: int = 30) -> None:
-    """驱动事件循环，让跨线程的 queued 信号得以投递。"""
-    end = time.monotonic() + ms / 1000.0
-    while time.monotonic() < end:
-        QCoreApplication.processEvents()
-        time.sleep(0.002)
-
-
-def force_delete(widget) -> None:
-    """立即销毁 widget 及其子对象的 C++ 部分。
-
-    单用 ``deleteLater()`` 在测试里**不会生效**：Qt 把 DeferredDelete
-    事件推迟到“回到调用时的或更外层事件循环”才处理，而测试从不调
-    ``app.exec()``，因此 ``processEvents()`` 不会消化它（实测子对象仍存活）。
-    必须显式 ``sendPostedEvents(None, DeferredDelete)``。
-    """
-    widget.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    pump(20)
-
-
-def wait_idle(dlg, timeout_s: float = 10.0) -> bool:
-    """等到 worker 队列排空且无正在运行的任务，再多泵一轮让信号落地。"""
-    end = time.monotonic() + timeout_s
-    while time.monotonic() < end:
-        QCoreApplication.processEvents()
-        if dlg.worker.queue_size() == 0 and dlg.worker._current is None:
-            pump(60)
-            if dlg.worker.queue_size() == 0 and dlg.worker._current is None:
-                return True
-        time.sleep(0.005)
-    return False
 
 
 def fake_msgbox(asked: list, answer):

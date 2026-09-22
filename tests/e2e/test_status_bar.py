@@ -10,28 +10,16 @@
 抽屉本身（点开后的内容与动作）在 tests/e2e/test_file_info_drawer.py。
 """
 
-import time
-
 import pytest
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtWidgets import QMessageBox
 
 from tests.fixtures.data_factory import make_simple_rows, write_csv
+from tests.fixtures.waits import wait_until
 
 # 保活容器：offscreen 下手工构造的 QMimeData 不受 Qt 事件系统接管，
 # 局部变量被 GC 后 dropEvent 内访问 mimeData 会 SIGSEGV（README 陷阱 #2）
 _drop_alive: list = []
-
-
-def _pump_until(qapp, qtbot, predicate, timeout=8000):
-    """轮询等待 + 显式泵事件：异步加载的回调靠事件循环投递。"""
-    deadline = time.monotonic() + timeout / 1000
-    while time.monotonic() < deadline:
-        qapp.processEvents()
-        if predicate():
-            return
-        qtbot.wait(10)
-    pytest.fail("等待状态栏条件超时")
 
 
 def test_title_has_no_alpha_and_carries_version(main_window):
@@ -236,8 +224,9 @@ def test_async_load_keeps_modal_and_elapsed_text(
     monkeypatch.setattr(mw, "_broadcast", spy)
 
     mw.file_loader_manager.load_csv_file(str(csv))
-    _pump_until(qapp, qtbot, lambda: mw.loader is not None)
-    _pump_until(qapp, qtbot, lambda: "e2e_async.csv" in mw.windowTitle())
+    # 异步加载：回调靠事件循环投递，等的是"可观测条件"而不是固定时长
+    assert wait_until(lambda: mw.loader is not None), "异步加载未在超时内完成"
+    assert wait_until(lambda: "e2e_async.csv" in mw.windowTitle()), "标题未在超时内更新"
 
     assert created["count"] == 1, "≥2MB 应弹模态加载框"
     assert created["closed"] == 1, "加载完成要关掉模态框"

@@ -13,22 +13,12 @@ add 被去重，但仍排入等量的 off 回调 —— 旧实现 `set.remove()`
 """
 
 import sys
-import time
 
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import QCoreApplication
-
+from tests.fixtures.waits import pump
 from src.ui.table_dialog import CustomDelegate, DataTableDialog
-
-
-def pump(ms: int = 50) -> None:
-    """驱动事件循环，让 QTimer.singleShot 的延后回调落地。"""
-    end = time.monotonic() + ms / 1000.0
-    while time.monotonic() < end:
-        QCoreApplication.processEvents()
-        time.sleep(0.002)
 
 
 # 闪烁参数约定：off 回调由 `QTimer.singleShot(pulse, _off)` 调度，与 pulse 同刻。

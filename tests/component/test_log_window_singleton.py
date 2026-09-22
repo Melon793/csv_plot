@@ -14,15 +14,7 @@ from shiboken6 import isValid
 from src.core.logger import LogManager
 from src.ui.dialogs import log_window as log_window_module
 from src.ui.dialogs.log_window import LogWindow
-
-
-def _force_delete(widget) -> None:
-    """真正销毁 C++ 侧对象，保留 Python 包装器（线上残留引用的形态）"""
-    from PySide6.QtCore import QCoreApplication, QEvent
-
-    widget.deleteLater()
-    QCoreApplication.sendPostedEvents(widget, QEvent.Type.DeferredDelete)
-    QCoreApplication.processEvents()
+from tests.fixtures.waits import force_delete
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +29,7 @@ def test_get_instance_rebuilds_after_owner_destroyed():
     first = LogWindow.get_instance(owner)
     assert LogWindow._instance is first
 
-    _force_delete(owner)
+    force_delete(owner)
 
     assert not isValid(first)
     assert LogWindow._live_instance() is None
@@ -47,13 +39,13 @@ def test_get_instance_rebuilds_after_owner_destroyed():
     second = LogWindow.get_instance(second_owner)
     assert second is not first
     assert isValid(second)
-    _force_delete(second_owner)
+    force_delete(second_owner)
 
 
 def test_get_instance_reuses_live_singleton():
     owner = QWidget()
     assert LogWindow.get_instance(owner) is LogWindow.get_instance(owner)
-    _force_delete(owner)
+    force_delete(owner)
 
 
 def test_log_window_does_not_reach_into_log_manager_privates():

@@ -18,13 +18,11 @@
 实例级替换 _resolve_loader，不走 popup/add_variables，避免污染类级单例。
 """
 
-import time
-
 import numpy as np
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import Qt, QItemSelectionModel, QCoreApplication, QPoint
+from PySide6.QtCore import Qt, QItemSelectionModel, QPoint
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -35,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from tests.fixtures.data_factory import write_mdf
+from tests.fixtures.waits import pump
 from src.core.config import widget_alive
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.file_loader_manager import FileLoaderManager
@@ -45,14 +44,6 @@ from src.ui.table_dialog import (
     _state_time_array,
 )
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
-
-
-def pump(ms: int = 50) -> None:
-    """驱动事件循环，让 QTimer.singleShot 的延后回调落地。"""
-    end = time.monotonic() + ms / 1000.0
-    while time.monotonic() < end:
-        QCoreApplication.processEvents()
-        time.sleep(0.002)
 
 
 @pytest.fixture()

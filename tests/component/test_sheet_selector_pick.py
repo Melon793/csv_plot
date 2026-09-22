@@ -6,16 +6,11 @@ show，快捷路径拦不住弹框。改为 `pick_sheet()` 在构造对话框**�
 
 import openpyxl
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QDialog, QWidget
 from shiboken6 import isValid
 
+from tests.fixtures.waits import flush_deferred_deletes
 from src.ui.dialogs.sheet_selector import SheetSelectorDialog
-
-
-def flush_deferred_deletes(qapp):
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    qapp.processEvents()
 
 
 def _write_xlsx(path, sheet_names):
@@ -77,11 +72,11 @@ def test_dialog_is_destroyed_after_pick(qapp, multi_sheet_xlsx, monkeypatch):
     )
 
     SheetSelectorDialog.pick_sheet(multi_sheet_xlsx, parent)
-    flush_deferred_deletes(qapp)
+    flush_deferred_deletes()
 
     assert [d for d in parent.findChildren(SheetSelectorDialog) if isValid(d)] == []
     parent.deleteLater()
-    flush_deferred_deletes(qapp)
+    flush_deferred_deletes()
 
 
 def test_broken_file_still_warns_and_returns_none(

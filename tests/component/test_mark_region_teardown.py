@@ -10,15 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 import pyqtgraph as pg
-from PySide6.QtCore import QCoreApplication, QEvent
 from shiboken6 import isValid
 
+from tests.fixtures.waits import flush_deferred_deletes
 from src.ui.widgets.mark_region_manager import MarkRegionManager
-
-
-def flush_deferred_deletes(qapp):
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    qapp.processEvents()
 
 
 class _FakeLayoutManager:
@@ -53,7 +48,7 @@ def mark_env(qapp):
     manager = MarkRegionManager(SimpleNamespace(pw=pw))
     yield manager, pw, layout_manager
     pw.view.deleteLater()
-    flush_deferred_deletes(qapp)
+    flush_deferred_deletes()
 
 
 def test_re_add_removes_previous_region_from_scene(mark_env):
@@ -90,7 +85,7 @@ def test_remove_disconnects_and_destroys(mark_env, qapp):
     assert pw.mark_region is None
     region.setRegion([7.0, 8.0])
     assert layout_manager.synced == []
-    flush_deferred_deletes(qapp)
+    flush_deferred_deletes()
     assert not isValid(region)
 
 
