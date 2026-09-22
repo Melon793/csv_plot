@@ -360,7 +360,7 @@ class TestValidityRuleTable:
         return _meta(result)["columns"], _read_parquet(result)
 
     def test_date_column_validity_1(self, tmp_path):
-        cm, _ = self._one(
+        cm, frame = self._one(
             tmp_path,
             "d",
             [[f"00:00:{i:02d}.000"] for i in range(10)],
@@ -368,6 +368,7 @@ class TestValidityRuleTable:
         )
         assert cm["time"]["validity"] == 1
         assert cm["time"]["dtype_str"] == "object"
+        assert frame["time"].dtype == pl.String  # D9：CSV 日期列按 String 原样存
 
     def test_all_empty_validity_minus_1(self, tmp_path):
         # 全空列须搭配数值列（单列全空 → 物理行成空行，会被 oracle 判废）
@@ -513,6 +514,40 @@ class TestNegativeGuardsAndCleanup:
         )
         assert marks[0] <= 10 and marks[-1] == 95
         assert len(marks) >= 4  # 不少于今天 5/15/20/100 的粒度
+
+    def test_read_csv_contract_and_row_group(self, tmp_path, monkeypatch):
+        # P3 DoD 9/10：必须把 probe 的 dtype 显式交给 polars，且危险参数保持关闭；
+        # row_group 固定为实测结论 16384。monkeypatch 捕获 read_csv 实参。
+        import src.data.parquet_converter as pc
+
+        calls = []
+        orig_read_csv = pl.read_csv
+
+        def spy_read_csv(path, *args, **kwargs):
+            calls.append(kwargs)
+            return orig_read_csv(path, *args, **kwargs)
+
+        monkeypatch.setattr(pl, "read_csv", spy_read_csv)
+        csv = write_csv(
+            tmp_path / "contract.csv",
+            header=["time", "small", "big", "state"],
+            units=["s", "-", "-", "-"],
+            rows=[[f"00:00:{i:02d}.000", i * 0.5, 1e39 + i, "ON"] for i in range(30)],
+        )
+        _convert(tmp_path, csv)
+
+        assert calls
+        kwargs = calls[-1]
+        assert kwargs["schema"] == {
+            "time": pl.String,
+            "small": pl.Float32,
+            "big": pl.Float64,
+            "state": pl.String,
+        }
+        assert kwargs["truncate_ragged_lines"] is False
+        assert kwargs["ignore_errors"] is False
+        assert len(kwargs["null_values"]) == 32
+        assert pc.ROW_GROUP_SIZE == 16384
 
 
 class TestExcelChain:
