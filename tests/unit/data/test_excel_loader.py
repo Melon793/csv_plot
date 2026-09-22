@@ -9,22 +9,19 @@ import openpyxl
 import pandas as pd
 import pytest
 
+from tests.fixtures.data_factory import write_xlsx
 from src.data.excel_loader import ExcelDataLoader
 
 
 def _write_xlsx(path, header, units, rows, sheet_name="Sheet1"):
-    """生成 标题行 + 单位行 + 数据行 结构的小型 xlsx"""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = sheet_name
-    ws.append(header)
-    if units is not None:
-        ws.append(units)
-    for row in rows:
-        ws.append(row)
-    wb.save(path)
-    wb.close()
-    return path
+    """位置参数形态的薄包装（本文件 15 处调用都用这一形态）。
+
+    建簿代码只在 ``tests/fixtures/data_factory.write_xlsx`` 一处，
+    多表那个用例也走它——Excel 夹具不再有两份。
+    """
+    return write_xlsx(
+        path, header=header, units=units, rows=rows, sheet_name=sheet_name
+    )
 
 
 HEADER = ["time", "speed", "rpm"]

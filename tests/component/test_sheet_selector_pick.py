@@ -4,37 +4,38 @@
 show，快捷路径拦不住弹框。改为 `pick_sheet()` 在构造对话框**之前**短路。
 """
 
-import openpyxl
 import pytest
 from PySide6.QtWidgets import QDialog, QWidget
 from shiboken6 import isValid
 
+from tests.fixtures.data_factory import write_xlsx
 from tests.fixtures.waits import flush_deferred_deletes
 from src.ui.dialogs.sheet_selector import SheetSelectorDialog
 
 
-def _write_xlsx(path, sheet_names):
-    wb = openpyxl.Workbook()
-    wb.active.title = sheet_names[0]
-    for name in sheet_names[1:]:
-        wb.create_sheet(name)
-    for name in sheet_names:
-        ws = wb[name]
-        ws.append(["time", "speed"])
-        ws.append([0.0, 1.0])
-    wb.save(path)
-    wb.close()
-    return str(path)
-
-
 @pytest.fixture()
 def single_sheet_xlsx(tmp_path):
-    return _write_xlsx(tmp_path / "one.xlsx", ["Data"])
+    return str(
+        write_xlsx(
+            tmp_path / "one.xlsx",
+            header=["time", "speed"],
+            rows=[[0.0, 1.0]],
+            sheet_name="Data",
+        )
+    )
 
 
 @pytest.fixture()
 def multi_sheet_xlsx(tmp_path):
-    return _write_xlsx(tmp_path / "two.xlsx", ["First", "Second"])
+    return str(
+        write_xlsx(
+            tmp_path / "two.xlsx",
+            header=["time", "speed"],
+            rows=[[0.0, 1.0]],
+            sheet_name="First",
+            extra_sheet_names=["Second"],
+        )
+    )
 
 
 def test_single_sheet_never_opens_dialog(qapp, single_sheet_xlsx, monkeypatch):
