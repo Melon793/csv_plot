@@ -16,6 +16,13 @@
 
 替身策略（同 test_table_dialog_blink.py）：直接构造 DataTableDialog 并
 实例级替换 _resolve_loader，不走 popup/add_variables，避免污染类级单例。
+
+等待策略：本文件触达的入表/切页/滚动回写全是同步调用，唯一的异步点是
+``_scroll_tab_to_column(blink=True)`` 与 ``add_variables`` 里的 100ms
+``_later`` 回调（闪烁高亮），本文件都不依赖其落地；因此用 ``settle()``
+（确定性排空事件队列，不睡钟表）替代原有的 ``pump(20~150ms)`` 固定等待。
+``locate_time`` 内的 ``_later(0, _do)`` 是一次事件循环投递，``settle()``
+即可让它落地，无需等钟表。
 """
 
 import numpy as np
@@ -33,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from tests.fixtures.data_factory import write_mdf
-from tests.fixtures.waits import pump
+from tests.fixtures.waits import flush_deferred_deletes, settle
 from src.core.config import widget_alive
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.ui.file_loader_manager import FileLoaderManager
@@ -64,7 +71,7 @@ def tab_dialog(qapp, mdf_loader, monkeypatch):
     if widget_alive(dlg):
         dlg.hide()
         dlg.deleteLater()
-    pump(20)
+    flush_deferred_deletes()
 
 
 class FakeCsvLoader:
@@ -106,7 +113,7 @@ def test_close_clears_class_singleton(qapp, app_settings):
     # 滚动位置是实例状态：关窗不需要（也不应该）去清类属性
     assert DataTableDialog._saved_scroll_pos is None
     monkey_dlg.deleteLater()
-    pump(20)  # closeEvent 已 deleteLater，这里只推进事件循环收尾
+    flush_deferred_deletes()  # closeEvent 已 deleteLater，这里让删除真正落地
 
 
 def test_saved_scroll_pos_is_instance_scoped_and_consumed(qapp, app_settings):
@@ -118,14 +125,14 @@ def test_saved_scroll_pos_is_instance_scoped_and_consumed(qapp, app_settings):
     dlg._saved_scroll_pos = 12
     dlg._add_variable_to_table("b", pd.Series([1.0, 2.0, 3.0], name="b"))
     assert dlg._saved_scroll_pos is None, "消费后必须复位，否则下一个调用方拿到陈旧值"
-    pump(20)
+    settle()
 
     # 未显式保存位置的调用方不受上一个调用方的残留影响
     dlg._add_variable_to_table("c", pd.Series([1.0, 2.0, 3.0], name="c"))
     assert dlg._saved_scroll_pos is None
     dlg.hide()
     dlg.deleteLater()
-    pump(20)
+    flush_deferred_deletes()
 
 
 # ---------- T3 + has_table_content：tab 模式判据 ----------
@@ -236,7 +243,7 @@ def test_refresh_table_dialog_survives_self_close(qapp, app_settings, monkeypatc
     DataTableDialog._instance = dlg
     dlg._add_variable_to_table("a", pd.Series([1.0, 2.0, 3.0], name="a"))
     dlg.show()
-    pump(60)
+    settle()
     assert DataTableDialog._instance is dlg
 
     # file_loader_manager 的真实顺序：_release_old_data 先快照再清空
@@ -248,7 +255,7 @@ def test_refresh_table_dialog_survives_self_close(qapp, app_settings, monkeypatc
     assert dlg.isVisible() is False
     assert not dlg.has_table_content()
     dlg.deleteLater()
-    pump(20)
+    flush_deferred_deletes()
 
 
 # ---------- 审查回归 R2（P1）：group 归属以变量名为准 ----------
@@ -308,7 +315,7 @@ def test_empty_group_tab_is_not_content(qapp, app_settings, tmp_path, monkeypatc
     assert dlg.has_table_content() is False, "0 行空 tab 不得误判为“有内容”"
     loader.close()
     dlg.deleteLater()
-    pump(20)
+    flush_deferred_deletes()
 
 
 # ---------- T4 变量定位器 ----------
@@ -384,7 +391,7 @@ def test_locate_time(tab_dialog):
     assert tab_dialog.locate_time(999, 0.0) is False, "未知 group 返回 False"
     assert tab_dialog.locate_time(1, 0.9) is True
 
-    pump(80)
+    settle()
     sm = state1.view.selectionModel()
     rows = {idx.row() for idx in sm.selectedIndexes()}
     assert rows == {5}, "0.9s 在 G1(0.2s 步长) 上最近行为末行 5"
@@ -480,7 +487,7 @@ def test_jump_to_data_delegates_to_locate_time(tab_dialog, mdf_loader):
     DraggableGraphicsLayoutWidget._jump_to_data_mdf_tab(
         FakePlot(), tab_dialog, ["Press_G1"], 0.55, mdf_loader
     )
-    pump(60)
+    settle()
 
     assert tab_dialog._current_time_anchor == pytest.approx(0.55)
     assert tab_dialog._tab_widget.currentIndex() == tab_dialog._group_tabs[1].widget_index
@@ -505,7 +512,9 @@ def test_jump_to_data_delegates_to_locate_time(tab_dialog, mdf_loader):
 def shown_tab_dialog(tab_dialog):
     tab_dialog.resize(420, 200)
     tab_dialog.show()
-    pump(150)
+    # show() 是同步调用，这里只需把入队的事件（布局/曝光）排空；后续用例
+    # 各自在 _add_variable_to_tab 后再 settle()，布局会持续被推进
+    settle(5)
     return tab_dialog
 
 
@@ -513,7 +522,7 @@ def test_anchor_ignores_hidden_tab_scroll(shown_tab_dialog):
     dlg = shown_tab_dialog
     state0 = dlg._add_variable_to_tab("Press_G0", 0)
     state1 = dlg._add_variable_to_tab("Press_G1", 1)
-    pump(100)
+    settle()
     # 新 tab 自动切页：当前在 G1，G0 处于隐藏页
     assert dlg._tab_widget.currentIndex() == state1.widget_index
 
@@ -523,33 +532,33 @@ def test_anchor_ignores_hidden_tab_scroll(shown_tab_dialog):
 
     before = dlg._current_time_anchor
     sb0.setValue(sb0.maximum())  # 隐藏页 G0 滚到末尾
-    pump(100)
+    settle()
     assert dlg._current_time_anchor == before, "隐藏 tab 的滚动不得污染全局锚点"
 
     # 当前可见 tab 的滚动仍要正常回写（守卫不能一刀切）
     dlg._tab_widget.setCurrentIndex(state0.widget_index)
-    pump(100)
+    settle()
     sb0.setValue(3)
-    pump(100)
+    settle()
     assert dlg._current_time_anchor == pytest.approx(0.3)
 
 
 def test_scroll_to_column_preserves_vertical(shown_tab_dialog):
     dlg = shown_tab_dialog
     state0 = dlg._add_variable_to_tab("Press_G0", 0)
-    pump(100)
+    settle()
 
     sb0 = state0.view.verticalScrollBar()
     if sb0.maximum() <= 0:
         pytest.skip("窗口字体/行高导致无滚动范围，本用例环境下无效")
     sb0.setValue(6)
-    pump(100)
+    settle()
     before = sb0.value()
 
     # 旧实现用 index(0, col)+PositionAtCenter 做水平滚动，垂直被连带
     # 拉到第 0 行居中（实测 12345→0）：定位新变量后时刻丢失跳回 0s
     dlg._scroll_tab_to_column(state0, "Press_G0", blink=False)
-    pump(100)
+    settle()
 
     assert abs(sb0.value() - before) <= 1, "水平定位列不得改变垂直位置"
 
@@ -559,7 +568,7 @@ def test_tab_switch_out_of_range_keeps_own_position(shown_tab_dialog):
     dlg = shown_tab_dialog
     state0 = dlg._add_variable_to_tab("Press_G0", 0)  # G0 时轴 [0, 1.1]s
     state1 = dlg._add_variable_to_tab("Press_G1", 1)  # 新 tab 自动切页 → 当前在 G1
-    pump(100)
+    settle()
 
     sb0 = state0.view.verticalScrollBar()
     if sb0.maximum() <= 0:
@@ -567,16 +576,16 @@ def test_tab_switch_out_of_range_keeps_own_position(shown_tab_dialog):
 
     # 用户在 G0 滚到第 4 行后离开 → scroll_pos 链记住 4
     dlg._tab_widget.setCurrentIndex(state0.widget_index)
-    pump(100)
+    settle()
     sb0.setValue(4)
-    pump(100)
+    settle()
     dlg._tab_widget.setCurrentIndex(state1.widget_index)
-    pump(100)
+    settle()
 
     # 锚点拉到 G0 时间轴覆盖不到的大时刻（模拟长时组里的视线）
     dlg._current_time_anchor = 50.0
     dlg._tab_widget.setCurrentIndex(state0.widget_index)
-    pump(100)
+    settle()
 
     assert sb0.value() == 4, "越界时 G0 应停在历史位置而非跳端点"
     assert dlg._current_time_anchor == 50.0
@@ -591,17 +600,17 @@ def test_new_tab_aligns_anchor_on_creation(shown_tab_dialog):
     """
     dlg = shown_tab_dialog
     state0 = dlg._add_variable_to_tab("Press_G0", 0)  # 0.1s 步长
-    pump(100)
+    settle()
     sb0 = state0.view.verticalScrollBar()
     if sb0.maximum() <= 0:
         pytest.skip("窗口字体/行高导致无滚动范围，本用例环境下无效")
 
     sb0.setValue(4)  # 锚点 0.4s（G1 时轴 [0,1.0] 覆盖得到）
-    pump(100)
+    settle()
     assert dlg._current_time_anchor == pytest.approx(0.4)
 
     state1 = dlg._add_variable_to_tab("Press_G1", 1)  # 新建 tab（自动切页）
-    pump(100)
+    settle()
 
     assert dlg._tab_widget.currentIndex() == state1.widget_index
     first = state1.view.indexAt(QPoint(0, 0))
@@ -880,21 +889,21 @@ def test_locate_time_selects_target_variable_column(tab_dialog):
     dlg._add_variable_to_tab("State", 0)
 
     assert dlg.locate_time(0, 0.5, var_name="State") is True
-    pump(80)
+    settle()
     sel = {
         (i.row(), i.column()) for i in state.view.selectionModel().selectedIndexes()
     }
     assert sel == {(5, 2)}
 
     assert dlg.locate_time(0, 0.5) is True
-    pump(80)
+    settle()
     sel = {
         (i.row(), i.column()) for i in state.view.selectionModel().selectedIndexes()
     }
     assert sel == {(5, 0)}, "未指定变量时回退 time 列"
 
     assert dlg.locate_time(0, 0.5, var_name="NotInThisTab") is True
-    pump(80)
+    settle()
     sel = {
         (i.row(), i.column()) for i in state.view.selectionModel().selectedIndexes()
     }
@@ -1006,13 +1015,13 @@ def test_tab_bar_context_menu_is_wired(shown_tab_dialog, menu_stub):
     dlg = shown_tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     bar = dlg._tab_widget.tabBar()
-    pump(50)
+    settle()
 
     assert bar.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
     assert bar.tabAt(_tab_bar_hit(dlg, 0)) == state.widget_index
 
     bar.customContextMenuRequested.emit(_tab_bar_hit(dlg, 0))
-    pump(50)
+    settle()
     assert menu_stub.menus, "信号未接通 handler → 右键不会弹菜单"
 
 
@@ -1021,7 +1030,7 @@ def test_tab_bar_context_menu_items(shown_tab_dialog, menu_stub):
     dlg = shown_tab_dialog
     dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
-    pump(50)
+    settle()
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
 
@@ -1050,7 +1059,7 @@ def test_add_group_item_greys_out_when_loader_lacks_group_api(
     dlg = shown_tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
     dlg._resolve_loader = lambda: FakeCsvLoader(state.df)
-    pump(50)
+    settle()
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
 
@@ -1072,7 +1081,7 @@ def test_add_group_remaining_from_tab_menu_adds_all_missing_columns(
     """
     dlg = shown_tab_dialog
     state = dlg._add_variable_to_tab("Press_G0", 0)
-    pump(50)
+    settle()
     # 不只打桩 information：question 不打桩的话，一旦有人加回确认框，本用例会
     # 在 offscreen 下挂死而不是失败（改前的变异验证就是这么卡满 15 分钟的）
     _forbid_confirmation(monkeypatch)
@@ -1089,7 +1098,7 @@ def test_single_tab_menu_hides_close_others(shown_tab_dialog, menu_stub):
     """只有一个 tab 时，“关闭其他/关闭所有”与“关闭此页”重复 → 不列出。"""
     dlg = shown_tab_dialog
     dlg._add_variable_to_tab("Press_G0", 0)
-    pump(50)
+    settle()
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
 
@@ -1103,7 +1112,7 @@ def test_tab_bar_blank_area_right_click_shows_no_menu(shown_tab_dialog, menu_stu
     """右键落在标签右侧空白：不得弹菜单（宁可不响应，也不能对错误的 tab 动手）。"""
     dlg = shown_tab_dialog
     dlg._add_variable_to_tab("Press_G0", 0)
-    pump(50)
+    settle()
 
     dlg._on_tab_bar_right_click(QPoint(10000, 2))
 
@@ -1352,7 +1361,7 @@ def test_close_tab_removes_only_target_tab(shown_tab_dialog, menu_stub, monkeypa
     dlg = shown_tab_dialog
     s0 = dlg._add_variable_to_tab("Press_G0", 0)
     s1 = dlg._add_variable_to_tab("Press_G1", 1)
-    pump(50)
+    settle()
     _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
@@ -1374,7 +1383,7 @@ def test_closing_tabs_never_asks_confirmation(shown_tab_dialog, menu_stub, monke
     dlg = shown_tab_dialog
     dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
-    pump(50)
+    settle()
     _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 1))
@@ -1404,7 +1413,7 @@ def test_close_others_keeps_target(shown_tab_dialog, menu_stub, monkeypatch):
     dlg = shown_tab_dialog
     s0 = dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
-    pump(50)
+    settle()
     _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 0))
@@ -1421,13 +1430,13 @@ def test_close_all_tabs_returns_to_single_table_ui(shown_tab_dialog, menu_stub, 
     dlg = shown_tab_dialog
     dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
-    pump(50)
+    settle()
     _forbid_confirmation(monkeypatch)
 
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 1))
     menu_stub.pick = _tab_menu_pick(menu_stub, "关闭所有标签页")
     dlg._on_tab_bar_right_click(_tab_bar_hit(dlg, 1))
-    pump(50)
+    settle()
 
     assert dlg._group_tabs == {} and dlg._tab_mode is False
     assert dlg.model is not None, "退回单表后必须补回空模型"
@@ -1442,7 +1451,7 @@ def test_close_tab_refreshes_locator_and_column_names(shown_tab_dialog, menu_stu
     s0 = dlg._add_variable_to_tab("Press_G0", 0)
     dlg._add_variable_to_tab("State", 0)
     dlg._add_variable_to_tab("Press_G1", 1)
-    pump(50)
+    settle()
     assert dlg.get_column_names() == ["Press_G0", "State", "Press_G1"]
     assert dlg._var_locator.count() == 3
     _forbid_confirmation(monkeypatch)
@@ -1529,7 +1538,7 @@ def test_tab_menu_action_skipped_when_tab_died_during_exec(
     """
     dlg = shown_tab_dialog
     s0 = dlg._add_variable_to_tab("Press_G0", 0)
-    pump(50)
+    settle()
     _forbid_confirmation(monkeypatch)
 
     real_exec = menu_stub.exec
