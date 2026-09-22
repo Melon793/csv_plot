@@ -36,4 +36,5 @@ markers = [
     "component: offscreen 控件级功能测试",
     "e2e: 主窗口端到端冒烟测试",
     "perf: 性能回归测试",
+    "full_matrix: e2e 用例要求真实默认子图矩阵（跳过 1×1 加速替身）",
 ]
