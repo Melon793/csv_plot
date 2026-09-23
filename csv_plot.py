@@ -30,7 +30,7 @@ def main():
     app = QApplication(sys.argv)
 
     # D17：启动时清扫上次会话残留的惰性转换临时目录（三重保险：只扫一层、
-    # 只认 <pid>_<rand8> 命名、只删死 PID 或 mtime>24h 的目录），并注册
+    # 只认 <pid>_<rand8> 命名、只删死 PID 或 mtime>72h 的目录），并注册
     # 进程级 atexit 兜底。任何失败都不得阻断启动。
     from src.core.logger import get_logger
     from src.data.temp_cache_dir import TempCacheDir
@@ -42,6 +42,13 @@ def main():
             get_logger("app.startup").info("已清扫 %d 个残留惰性转换临时目录", swept)
     except Exception:
         get_logger("app.startup").warning("启动清扫惰性临时目录失败", exc_info=True)
+
+    # D17 心跳：每 30 分钟刷新活动临时目录的 mtime，保证清扫的 72h 陈旧
+    # 判据只对真残留生效（长期挂机/跨周末的窗口不会被误删）。
+    heartbeat_timer = QTimer()
+    heartbeat_timer.setInterval(30 * 60 * 1000)
+    heartbeat_timer.timeout.connect(TempCacheDir.touch_all_live)
+    heartbeat_timer.start()
 
     if sys.platform == "win32":
         from src.core.font_cache import get_windows_chinese_font_cached

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -97,13 +98,22 @@ class TestSweepGuards:
         assert live.exists()
 
     def test_guard3_stale_mtime_removed_even_if_pid_alive(self, fake_base):
-        # PID 复用防线：目录 PID 活着但 mtime 超 24h → 删
+        # PID 复用防线：目录 PID 活着但 mtime 超 72h → 删
+        live = fake_base / f"{os.getpid()}_{os.urandom(4).hex()}"
+        live.mkdir()
+        old = time.time() - 73 * 3600
+        os.utime(live, (old, old))
+        assert TempCacheDir.sweep_stale() == 1
+        assert not live.exists()
+
+    def test_guard3_live_pid_25h_mtime_kept(self, fake_base):
+        # 72h 阈值：活 PID + 挂机一天（含隔夜）→ 保留，不误删
         live = fake_base / f"{os.getpid()}_{os.urandom(4).hex()}"
         live.mkdir()
         old = time.time() - 25 * 3600
         os.utime(live, (old, old))
-        assert TempCacheDir.sweep_stale() == 1
-        assert not live.exists()
+        assert TempCacheDir.sweep_stale() == 0
+        assert live.exists()
 
     def test_guard3_fresh_live_pid_dir_with_recent_mtime_kept(self, fake_base):
         # 活 PID + 新 mtime：双条件都不满足删除 → 保留
@@ -123,6 +133,47 @@ class TestSweepGuards:
 
     def test_sweep_on_missing_base_returns_zero(self, tmp_path):
         assert TempCacheDir.sweep_stale(base=tmp_path / "nope") == 0
+
+
+class TestHeartbeat:
+    """touch 心跳：让 72h 陈旧判据只对真残留生效。"""
+
+    def test_touch_refreshes_mtime(self, fake_base):
+        d = TempCacheDir.create()
+        p = Path(d.path())
+        old = time.time() - 25 * 3600
+        os.utime(p, (old, old))
+        d.touch()
+        assert tcd._mtime_age_s(p) < 60
+
+    def test_touch_cleaned_instance_is_noop(self, fake_base):
+        d = TempCacheDir.create()
+        d.cleanup()
+        d.touch()  # 不抛
+
+    def test_touch_missing_dir_swallows_oserror(self, fake_base):
+        d = TempCacheDir.create()
+        shutil.rmtree(d.path())
+        d.touch()  # 目录被外部删除，心跳失败无妨
+
+    def test_touch_all_live_refreshes_registry(self, fake_base):
+        d1 = TempCacheDir.create()
+        d2 = TempCacheDir.create()
+        p1, p2 = Path(d1.path()), Path(d2.path())
+        old = time.time() - 25 * 3600
+        os.utime(p1, (old, old))
+        os.utime(p2, (old, old))
+        TempCacheDir.touch_all_live()
+        assert tcd._mtime_age_s(p1) < 60
+        assert tcd._mtime_age_s(p2) < 60
+
+    def test_heartbeat_keeps_sweep_from_deleting(self, fake_base):
+        # 端到端口径：活 PID + 心跳刷新 mtime → sweep 保留
+        d = TempCacheDir.create()
+        old = time.time() - 25 * 3600
+        os.utime(d.path(), (old, old))
+        TempCacheDir.touch_all_live()
+        assert TempCacheDir.sweep_stale() == 0
 
 
 class TestFallbackChain:

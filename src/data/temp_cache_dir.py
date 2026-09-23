@@ -11,8 +11,10 @@ D17 的三重约束：
 3. sweep_stale() 三重保险（rmtree 不可逆，宁可漏删不可错删）：
    ① 只扫 base_dir() 这一层，不递归；
    ② 只处理名字匹配 ^\\d+_[0-9a-f]{8,}$ 的条目，其余一律跳过（含文件）；
-   ③ 只在「目录名里的 PID 不在进程表」或「目录 mtime 超过 24h」时删。
+   ③ 只在「目录名里的 PID 不在进程表」或「目录 mtime 超过 72h」时删。
    第三条防 PID 复用（残留目录的 PID 被别的进程占用 → 永不清理）。
+   活动实例靠 touch() 心跳刷新 mtime（app 级 QTimer 每 30 分钟一次），
+   使 72h 判据只对真残留生效——长期挂机（含跨周末）不会被误删。
 
 目录名 <pid>_<rand8> 按 loader 实例生成（不是按进程）：同进程先后加载
 两个文件时不互相踩。sweep_stale() 绝不删当前存活 PID 的目录（多实例
@@ -38,8 +40,9 @@ logger = get_logger(__name__)
 
 # 目录名格式：<pid>_<rand8+>；清扫时只认这个格式
 _DIR_NAME_RE = re.compile(r"^\d+_[0-9a-f]{8,}$")
-# 残留目录 mtime 超过该秒数则视为陈旧（防 PID 复用导致永不清理）
-_STALE_AFTER_S = 24 * 3600
+# 残留目录 mtime 超过该秒数则视为陈旧（防 PID 复用导致永不清理）。
+# 72h 覆盖跨周末挂机：心跳每 30 分钟刷新一次，正常实例永不会触线。
+_STALE_AFTER_S = 72 * 3600
 
 # Windows 存活探测参数：查询限权（对高权限进程也可打开）+ STILL_ACTIVE
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -114,6 +117,22 @@ class TempCacheDir:
         self._cleaned = True
         shutil.rmtree(self._path, ignore_errors=True)
 
+    # ---- 心跳 ----
+    def touch(self) -> None:
+        """刷新目录 mtime：让 sweep 的陈旧判据只对真残留生效。"""
+        if self._cleaned:
+            return
+        try:
+            os.utime(self._path, None)
+        except OSError:
+            pass  # 目录已不在（被外部删除）——心跳失败无妨
+
+    @staticmethod
+    def touch_all_live() -> None:
+        """对登记表中所有活动实例做一次心跳（GUI 定时器周期调用）。"""
+        for inst in list(_live_dirs):
+            inst.touch()
+
     # ---- 启动清扫 ----
     @staticmethod
     def sweep_stale(base: Path | None = None) -> int:
@@ -139,7 +158,7 @@ class TempCacheDir:
             if pid == own_pid or _pid_alive(pid):
                 if _mtime_age_s(entry) <= _STALE_AFTER_S:
                     continue
-            # 保险③-b：PID 已死（主判据）或 mtime 超 24h（防 PID 复用）→ 删
+            # 保险③-b：PID 已死（主判据）或 mtime 超 72h（防 PID 复用）→ 删
             # 保险①：只删本层匹配目录本身（rmtree 会带走其内容，但入口
             # 只来自 base_dir 这一层 iterdir，不会递归进入别人的目录结构）
             shutil.rmtree(entry, ignore_errors=True)
