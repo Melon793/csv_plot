@@ -26,6 +26,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import tempfile
 import threading
 import weakref
@@ -39,6 +40,11 @@ logger = get_logger(__name__)
 _DIR_NAME_RE = re.compile(r"^\d+_[0-9a-f]{8,}$")
 # 残留目录 mtime 超过该秒数则视为陈旧（防 PID 复用导致永不清理）
 _STALE_AFTER_S = 24 * 3600
+
+# Windows 存活探测参数：查询限权（对高权限进程也可打开）+ STILL_ACTIVE
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+_ERROR_ACCESS_DENIED = 5
 
 # 活动实例登记表：atexit 兜底时对仍然存活的实例做 cleanup。
 # WeakSet 不阻止 GC（loader 必须可被回收，variable_info_dialog 的
@@ -161,9 +167,17 @@ class TempCacheDir:
 
 
 def _pid_alive(pid: int) -> bool:
-    """PID 是否在进程表（os.kill 信号 0 探测；EPERM 视为存活）。"""
+    """PID 是否在进程表。
+
+    Windows 走 GetExitCodeProcess 探测：os.kill(pid, 0) 在 Python 3.12 的
+    Windows 上是 OpenProcess+TerminateProcess，会把别的实例直接杀掉
+    （分身窗口启动清扫时曾因此误伤前一个 app）。
+    EPERM / 拒绝访问一律视为存活（宁可漏删，不可误删）。
+    """
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        return _win32_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -173,6 +187,50 @@ def _pid_alive(pid: int) -> bool:
         return True  # 进程存在但归别的用户所有
     except OSError:
         return False
+
+
+def _win32_api():
+    """加载 kernel32 并声明签名（惰性：仅 Windows 分支需要）。
+
+    restype 必须显式声明：默认 c_int 会把 64 位 HANDLE 截断成 0/假值。
+    """
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.BOOL,
+        ctypes.wintypes.DWORD,
+    ]
+    kernel32.GetExitCodeProcess.restype = ctypes.wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    return kernel32
+
+
+def _win32_pid_alive(pid: int) -> bool:
+    """Windows 存活探测（只查询，绝不终止目标进程）。"""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _win32_api()
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # ERROR_ACCESS_DENIED(5)：进程存在但不可查询 → 判活；其余错误
+        # （如 87 进程不存在）判死
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True  # 句柄有效但查不到退出码 → 保守判活
+        return code.value == _STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _mtime_age_s(entry: Path) -> float:

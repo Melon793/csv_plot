@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -157,6 +156,98 @@ class TestFallbackChain:
         base = TempCacheDir.base_dir()
         assert base == tmp_path / "CSVPlot" / "lazy_tmp"
         assert base.is_dir()
+
+
+class TestPidAlive:
+    """_pid_alive 探测语义。
+
+    现场事故：os.kill(pid, 0) 在 Windows Python 3.12 是 TerminateProcess，
+    分身窗口启动清扫时会把前一个 app 进程杀掉（或探测报错导致误删其
+    临时目录）。win32 分支改 GetExitCodeProcess 后，这些用例用假
+    kernel32 钉死五条路径（macOS 无法跑真实 Windows 语义）。
+    """
+
+    def test_dispatch_to_win32_probe(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(tcd.sys, "platform", "win32")
+        monkeypatch.setattr(tcd, "_win32_pid_alive", lambda pid: calls.append(pid) or True)
+        assert tcd._pid_alive(1234) is True
+        assert calls == [1234]
+
+    def test_posix_branch_unchanged(self, monkeypatch):
+        # 非 win32 仍走 os.kill 信号 0（本用例进程自身必然存活）
+        monkeypatch.setattr(tcd.sys, "platform", "darwin")
+        assert tcd._pid_alive(os.getpid()) is True
+        dead = _dead_child_pid()
+        assert tcd._pid_alive(dead) is False
+
+    def test_win32_alive_still_active(self, monkeypatch):
+        fake = _FakeKernel32(open_result=4242, exit_code=259)
+        monkeypatch.setattr(tcd, "_win32_api", lambda: fake)
+        assert tcd._win32_pid_alive(4242) is True
+        assert fake.closed == 1
+
+    def test_win32_dead_exit_code_zero(self, monkeypatch):
+        fake = _FakeKernel32(open_result=4242, exit_code=0)
+        monkeypatch.setattr(tcd, "_win32_api", lambda: fake)
+        assert tcd._win32_pid_alive(4242) is False
+        assert fake.closed == 1
+
+    def test_win32_access_denied_treated_alive(self, monkeypatch):
+        # ERROR_ACCESS_DENIED(5)：进程存在但不可查询 → 判活（宁可漏删）
+        fake = _FakeKernel32(open_result=0)
+        monkeypatch.setattr(tcd, "_win32_api", lambda: fake)
+        import ctypes
+
+        # get_last_error 仅 Windows 构建存在，macOS 上注入
+        monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+        assert tcd._win32_pid_alive(4242) is True
+
+    def test_win32_no_such_process_treated_dead(self, monkeypatch):
+        # ERROR_INVALID_PARAMETER(87)：进程不存在 → 判死
+        fake = _FakeKernel32(open_result=0)
+        monkeypatch.setattr(tcd, "_win32_api", lambda: fake)
+        import ctypes
+
+        monkeypatch.setattr(ctypes, "get_last_error", lambda: 87, raising=False)
+        assert tcd._win32_pid_alive(4242) is False
+
+    def test_win32_get_exit_code_fails_conservative_alive(self, monkeypatch):
+        fake = _FakeKernel32(open_result=4242, get_exit_ok=0)
+        monkeypatch.setattr(tcd, "_win32_api", lambda: fake)
+        assert tcd._win32_pid_alive(4242) is True
+        assert fake.closed == 1
+
+    def test_win32_queries_with_limited_information(self, monkeypatch):
+        # 只允许查询限权访问（0x1000），任何情况下不得请求终止权限
+        fake = _FakeKernel32(open_result=4242, exit_code=259)
+        monkeypatch.setattr(tcd, "_win32_api", lambda: fake)
+        tcd._win32_pid_alive(4242)
+        assert fake.opened[0] == 0x1000
+
+
+class _FakeKernel32:
+    """假 kernel32：只实现探测用到的三个 API（含句柄关闭计数）。"""
+
+    def __init__(self, open_result=0, exit_code=259, get_exit_ok=1):
+        self.open_result = open_result
+        self.exit_code = exit_code
+        self.get_exit_ok = get_exit_ok
+        self.closed = 0
+        self.opened = None
+
+    def OpenProcess(self, access, inherit, pid):
+        self.opened = (access, inherit, pid)
+        return self.open_result
+
+    def GetExitCodeProcess(self, handle, code_ref):
+        if self.get_exit_ok:
+            code_ref._obj.value = self.exit_code
+        return self.get_exit_ok
+
+    def CloseHandle(self, handle):
+        self.closed += 1
+        return 1
 
 
 class TestAtexit:
