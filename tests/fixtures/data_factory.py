@@ -71,6 +71,54 @@ def make_simple_rows(n: int = 20) -> list[list]:
     return rows
 
 
+def write_field_like_wide_csv(
+    path: Path | str,
+    *,
+    n_rows: int = 40,
+    n_cols: int = 4,
+    empty_trailing_header: bool = True,
+    pua_column_name: bool = False,
+    star_nulls: bool = False,
+    sep: str = "\t",
+    encoding: str = "utf-8",
+) -> Path:
+    """写入贴近现场宽表形态的合成 CSV（列名全部为合成占位符）。
+
+    复现现场文件的三个真实特征，全部开关控制：
+    - empty_trailing_header：表头行末尾多一个分隔符 → 末列表头为空
+      （pandas 读成 NaN，pandas 3.0 的 astype(str) 保留 float nan）；
+    - pua_column_name：列名内嵌私有区字符（工具链生成的 \\ue71a 前缀）；
+    - star_nulls：数据行周期性出现 ** 缺测标记（_NA_VALUES 已含）。
+    """
+    header = [f"ENG01_CH{i:02d}" for i in range(n_cols)]
+    if pua_column_name:
+        header.append("\ue71aPUA_NAME")
+    if empty_trailing_header:
+        header.append("")
+
+    units = ["-"] * len(header)
+    rows = []
+    for i in range(n_rows):
+        row = [f"{i * 0.1:.1f}", f"{100.0 + i * 0.5:.2f}"] + [
+            800 + i * 10 + j for j in range(n_cols - 2)
+        ]
+        if pua_column_name:
+            row.append("on" if i % 2 else "off")
+        if empty_trailing_header:
+            row.append(f"{1.5 + i:.1f}")
+        if star_nulls and i % 7 == 3:
+            row[1] = "**"
+        rows.append(row)
+    return write_csv(
+        path,
+        header=header,
+        units=units,
+        rows=rows,
+        sep=sep,
+        encoding=encoding,
+    )
+
+
 def write_xlsx(
     path: Path | str,
     *,

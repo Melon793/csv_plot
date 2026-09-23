@@ -216,13 +216,12 @@ class TestCsvEquivalence:
         assert np.isnan(a).any() and np.isfinite(a).any()
 
 
-def test_csv_empty_header_cell(tmp_path):
+def test_csv_empty_header_cell(tmp_path, lazy_parquet_factory):
     """空表头单元格（历史崩溃点 header-empty-cell-pandas3-crash）。
 
     main 上的既有行为是**双侧同崩**（pandas 3.0 astype(str) 保留 NaN 列名，
-    _infer_schema 的 col.lower() 抛 AttributeError；P1 的
-    test_empty_header_cell_preserves_existing_crash 已钉死）。P4 的等价面
-    = 惰性链以同样的方式拒绝，不静默产出错位数据。
+    _infer_schema 的 col.lower() 抛 AttributeError）。修复后两侧都按
+    pandas 惯例归一为 "Unnamed: {i}"，等价面 = 归一结果逐位一致。
     """
     p = write_csv(
         tmp_path / "eh.csv",
@@ -230,17 +229,12 @@ def test_csv_empty_header_cell(tmp_path):
         units=["-", "-", "-", "-"],
         rows=[[f"{i}.5", f"{i}.0", f"{i * 2}.5", ""] for i in range(6)],
     )
-    with pytest.raises(AttributeError):
-        FastDataLoader(str(p), has_unit=True, sep=",")
-    from src.data.parquet_converter import convert_to_parquet
-    from src.data.temp_cache_dir import TempCacheDir
-
-    temp = TempCacheDir.create()
-    try:
-        with pytest.raises(AttributeError):
-            convert_to_parquet(str(p), has_unit=True, sep=",", outdir=temp.path())
-    finally:
-        temp.cleanup()
+    mem = FastDataLoader(str(p), has_unit=True, sep=",")
+    lazy = lazy_parquet_factory(p, has_unit=True, sep=",")
+    assert mem.var_names == ["A", "Unnamed: 1", "B", "Unnamed: 3"]
+    assert lazy.var_names == mem.var_names
+    for name in mem.var_names:
+        _assert_series_equal(mem.get_series(name), lazy.get_series(name))
 
 
 def test_csv_ragged_row_rejected(tmp_path):
@@ -418,3 +412,69 @@ def test_enum_intentional_diff_excel(tmp_path, lazy_parquet_factory):
     _, y, _, text_map = lazy.get_value_from_name("mode")
     assert text_map == {0: "m0", 1: "m1", 2: "m2"}
     np.testing.assert_array_equal(y[:3], [0, 1, 2])
+
+
+# ==========================================================================
+# 现场宽表形态：行尾空表头 + 私有区字符列名 + ** 缺测值
+# ==========================================================================
+
+@pytest.fixture(scope="module")
+def wide_csv(tmp_path_factory):
+    from tests.fixtures.data_factory import write_field_like_wide_csv
+
+    return write_field_like_wide_csv(
+        tmp_path_factory.mktemp("equiv_wide") / "wide.txt",
+        pua_column_name=True,
+        star_nulls=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def mem_wide(wide_csv):
+    return FastDataLoader(str(wide_csv), has_unit=True, sep="\t")
+
+
+@pytest.fixture(scope="module")
+def lazy_wide(wide_csv, lazy_parquet_factory_module):
+    return lazy_parquet_factory_module(wide_csv, has_unit=True, sep="\t")
+
+
+class TestFieldLikeWideCsv:
+
+    def test_var_names_normalized_bitwise(self, mem_wide, lazy_wide):
+        # 行尾空表头 → 末列归一 "Unnamed: 5"；PUA 列名原样保留；全部 str
+        expect = ["ENG01_CH00", "ENG01_CH01", "ENG01_CH02", "ENG01_CH03",
+                  "\ue71aPUA_NAME", "Unnamed: 5"]
+        assert mem_wide.var_names == expect
+        assert lazy_wide.var_names == mem_wide.var_names
+        assert all(isinstance(n, str) for n in mem_wide.var_names)
+
+    def test_metadata_bitwise(self, mem_wide, lazy_wide):
+        assert lazy_wide.units == mem_wide.units
+        # PUA 列是低基数文本 → D8 枚举有意差异，单列断言见 test_pua_column_enum_path
+        pua = "\ue71aPUA_NAME"
+        assert {
+            k: v for k, v in lazy_wide.df_validity.items() if k != pua
+        } == {
+            k: v for k, v in mem_wide.df_validity.items() if k != pua
+        }
+        assert lazy_wide.datalength == mem_wide.datalength == 40
+        assert lazy_wide.column_count == mem_wide.column_count == 6
+
+    def test_get_series_all_columns(self, mem_wide, lazy_wide):
+        for name in mem_wide.var_names:
+            _assert_series_equal(mem_wide.get_series(name), lazy_wide.get_series(name))
+
+    def test_star_nulls_nan_both_sides(self, mem_wide, lazy_wide):
+        a = mem_wide.get_series("ENG01_CH01").to_numpy()
+        b = lazy_wide.get_series("ENG01_CH01").to_numpy()
+        assert (np.isnan(a) == np.isnan(b)).all()
+        assert np.isnan(a).any() and np.isfinite(a).any()
+
+    def test_pua_column_enum_path(self, mem_wide, lazy_wide):
+        # PUA 列是低基数文本（on/off）→ 枚举码值化（D8），两侧有效性有意差异
+        assert mem_wide.df_validity["\ue71aPUA_NAME"] == -1
+        assert lazy_wide.df_validity["\ue71aPUA_NAME"] == 1
+        ms = mem_wide.get_series("\ue71aPUA_NAME")
+        ls = lazy_wide.get_series("\ue71aPUA_NAME")
+        assert ms.tolist() == ls.tolist() == ["on" if i % 2 else "off" for i in range(40)]

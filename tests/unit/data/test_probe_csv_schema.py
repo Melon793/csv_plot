@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from src.data.loader import FastDataLoader, probe_csv_schema
-from tests.fixtures.data_factory import write_csv
+from tests.fixtures.data_factory import write_csv, write_field_like_wide_csv
 
 
 def _assert_probe_matches_loader(csv_path, **kwargs):
@@ -74,21 +74,50 @@ class TestProbeMatchesLoader:
         assert probe.var_names == ["A", "A_2", "A_1"]
         assert len(set(probe.var_names)) == 3
 
-    def test_empty_header_cell_preserves_existing_crash(self, tmp_path):
-        # 空表头单元格是历史崩溃点（pandas 3.0 astype(str) 对 NaN 保留 float，
+    def test_empty_header_cell_normalized(self, tmp_path):
+        # 空表头单元格曾是崩溃点（pandas 3.0 astype(str) 对 NaN 保留 float，
         # 列名变 float nan 后 _infer_schema 的 col.lower() 抛 AttributeError）。
-        # 这是 main 上的既有行为：本重构为「行为不变」重构，故两侧必须
-        # 抛同类异常，等价性以「同崩」的形式钉死；修复不在 P1 范围。
+        # 修复后按 pandas 惯例归一为 "Unnamed: {i}"，两侧一致。
         csv = write_csv(
             tmp_path / "e.csv",
             header=["x", "", "y"],
             units=["-", "-", "-"],
             rows=[[1, 2, 3], [4, 5, 6]],
         )
-        with pytest.raises(AttributeError):
-            FastDataLoader(str(csv))
-        with pytest.raises(AttributeError):
-            probe_csv_schema(str(csv))
+        probe = _assert_probe_matches_loader(csv)
+        assert probe.var_names == ["x", "Unnamed: 1", "y"]
+        assert all(isinstance(n, str) for n in probe.var_names)
+        assert probe.units["Unnamed: 1"] == "-"
+
+    def test_empty_trailing_header_cell_normalized(self, tmp_path):
+        # 现场宽表形态：表头行末尾多一个分隔符 → 末列表头为空
+        csv = write_field_like_wide_csv(tmp_path / "h.csv")
+        probe = _assert_probe_matches_loader(csv, sep="\t")
+        assert probe.var_names[-1] == "Unnamed: 4"
+        assert all(isinstance(n, str) for n in probe.var_names)
+        assert all(isinstance(k, str) for k in probe.dtype_map)
+
+    def test_pua_column_name_survives_probe(self, tmp_path):
+        # 私有区字符列名（\ue71a 前缀）必须是字符串一路贯通
+        csv = write_field_like_wide_csv(
+            tmp_path / "i.csv", pua_column_name=True, empty_trailing_header=False
+        )
+        probe = _assert_probe_matches_loader(csv, sep="\t")
+        assert "\ue71aPUA_NAME" in probe.var_names
+        assert "\ue71aPUA_NAME" in probe.units
+
+    def test_star_nulls_read_as_nan(self, tmp_path):
+        # ** 缺测标记在 probe 样本与正式读取中同为 NaN
+        csv = write_field_like_wide_csv(
+            tmp_path / "j.csv", star_nulls=True, empty_trailing_header=False,
+            pua_column_name=False,
+        )
+        probe = _assert_probe_matches_loader(csv, sep="\t")
+        loader = FastDataLoader(str(csv), has_unit=True, sep="\t")
+        s = loader.get_series("ENG01_CH01")
+        import numpy as np
+
+        assert np.isnan(s.to_numpy()).sum() > 0
 
     def test_gb18030_chinese_names_explicit_encoding(self, tmp_path):
         # 显式传编码（与 test_fast_loader 的 gb18030 用例同口径）。

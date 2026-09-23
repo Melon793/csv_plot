@@ -681,6 +681,13 @@ class FastDataLoader(BaseDataLoader):
             raise ValueError(f"文件至少需要{min_required_rows}行")
 
         var_names = df.iloc[0].astype(str).tolist()
+        # pandas 3.0 astype(str) 产出 StringDtype，NaN 保留为 float nan 而非
+        # 'nan' 字符串；空表头单元格会以 float 列名进入 _infer_schema 的
+        # col.lower()（TypeError）和 UI 的 elidedText(float)（崩溃）。
+        var_names = [
+            name if isinstance(name, str) else f"Unnamed: {i}"
+            for i, name in enumerate(var_names)
+        ]
         var_names = FastDataLoader._make_unique(var_names)
         if actual_has_unit:
             units = dict(zip(var_names, df.iloc[1].fillna("").astype(str).tolist()))

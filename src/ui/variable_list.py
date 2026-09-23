@@ -155,6 +155,11 @@ class NoHoverDelegate(QStyledItemDelegate):
 
         painter.save()
 
+        # 兜底：非 str 值（如历史数据的 float nan 列名）会让 elidedText 抛
+        # TypeError 崩溃整个绘制流程
+        if not isinstance(text, str):
+            text = str(text)
+
         # 选中时使用白色文字（高对比度），否则使用默认颜色
         if option.state & QStyle.StateFlag.State_Selected:
             painter.setPen(QColor(255, 255, 255))
