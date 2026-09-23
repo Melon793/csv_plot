@@ -1,17 +1,21 @@
 # CSV Plot (PySide6)
 
-一个基于 PySide6 + pyqtgraph 的高性能交互式数据可视化工具，支持 CSV 和 MDF（ASAM MDF4/DAT）格式文件，专为快速加载、浏览和分析时序数据而设计。支持百万级数据点的流畅绘制和多曲线模式。
+一个基于 PySide6 + pyqtgraph 的高性能交互式数据可视化工具，支持 CSV、Excel 和 MDF（ASAM MDF4/DAT）格式文件，专为快速加载、浏览和分析时序数据而设计。支持百万级数据点的流畅绘制和多曲线模式。
 
 ![软件截图](docs/snapshot1.png)
 
 ## 主要特性
 
 ### 数据加载与显示
-- **多格式支持**: CSV / MDF（.mf4 / .mdf / .dat）、TSV 及兼容格式
+- **多格式支持**: CSV / Excel（.xlsx / .xlsm）、MDF（.mf4 / .mdf / .dat）及兼容格式
 - **MDF 专属**: 枚举类型通道自动映射文本标签、多 Channel Group 聚合、跨 Group 同名变量智能后缀
 - **拖拽加载**: 直接将文件拖拽到窗口中即可加载
 - **智能解析**: CSV 自动检测编码、分隔符、标题行/单位行；MDF 自动识别枚举通道
 - **大数据支持**: 后台线程加载，进度显示，支持百万级数据点
+- **大 CSV 惰性加载（polars + parquet）**:
+  - 后台加载时 ≥ 50 MB 的 CSV 自动转为临时列式文件（parquet），逐列按需读取 + LRU 缓存，常驻内存不随行数线性增长
+  - 临时目录落在系统缓存区（`<CacheLocation>/CSVPlot/lazy_tmp`），退出/启动时按进程存活与 72h 陈旧度清扫
+  - 转换失败自动回退内存加载并在状态栏提示，不弹窗、不中断分析
 - **数据质量指示 (mdf不支持) **:
   - 🟢 绿色：变化的有效数值
   - 🟡 黄色：无变化的有效数值（常数）
@@ -70,26 +74,37 @@ csv_plot/
 │   ├── icon.ico
 │   └── icon.icns
 ├── docs/                        # 文档
-│   ├── help.md                  # 帮助文档
+│   ├── help.md                  # 帮助文档（打包进产物，应用内 HelpDialog 渲染）
 │   ├── snapshot1.png            # 截图
 │   └── template.yaml            # YAML 模板示例
+├── tests/                       # 测试体系（offscreen 无头，1315 例）
+│   ├── README.md                # 测试体系唯一入口文档
+│   ├── conftest.py              #   环境隔离 + marker 自动分层 + >1s 耗时护栏
+│   ├── fixtures/                #   data_factory（合成数据工厂）/ waits（等待工具）
+│   ├── unit/                    #   纯逻辑，无 Qt（755 例，含 parquet 等价性用例）
+│   ├── component/               #   控件级（474 例）
+│   ├── e2e/                     #   真实 MainWindow 冒烟（86 例）
+│   └── perf/                    #   惰性链量级护栏（4 例，默认 deselected）
 ├── scripts/                     # 打包脚本
 │   ├── build_exe_nuitka         # macOS/Linux Nuitka 编译脚本
 │   ├── build_exe_pyinstaller    # macOS/Linux PyInstaller 打包脚本
 │   ├── build_exe_pyinstaller.bat # Windows PyInstaller 打包批处理
 │   ├── build_win.py             # Windows Nuitka 编译脚本
+│   ├── generate_build_info.py   # 注入版本号与编译时间（src/_build_info.py）
 │   └── csv_plot_pyinstaller.spec # PyInstaller spec 配置
 └── src/                         # 模块化源码
     ├── __init__.py
     ├── app/
     │   └── plot_context.py      # PlotContext 服务层（依赖注入）
     ├── core/
-    │   ├── config.py            # 全局常量、float32 安全检查
-    │   ├── data_types.py        # AutoDetectError / FormatInfo / CurveInfo 数据类型
+    │   ├── config.py            # 全局常量、float32 安全检查、惰性转换阈值
+    │   ├── data_types.py        # FormatInfo / CurveInfo / MarkStatEntry 数据类型
     │   ├── curve_strategy.py    # 曲线策略（单/多曲线模式切换）
     │   ├── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
     │   ├── font_cache.py        # 字体缓存（基于 AppSettings）
     │   ├── logger.py            # Logger 日志管理器
+    │   ├── crash_handler.py     # excepthook + faulthandler 崩溃兜底
+    │   ├── gc_guard.py          # no_autogc()：worker 线程内屏蔽自动分代回收
     │   ├── settings.py          # AppSettings 统一配置管理器 + ConfigKey 枚举
     │   ├── plot_config.py       # PlotSessionConfig / PlotConfig 配置模型
     │   ├── template_models.py   # PlotTemplate / TemplateMetadata 模板数据模型
@@ -97,24 +112,35 @@ csv_plot/
     │   ├── template_manager.py  # TemplateManager 模板 CRUD 管理
     │   └── auto_save_manager.py # AutoSaveManager 自动保存与恢复
     ├── data/
-    │   ├── loader.py            # FastDataLoader CSV 加载 + DataLoadThread 后台线程
+    │   ├── loader_factory.py    # create_loader() 单一分派点（含惰性转换开关）
+    │   ├── loader.py            # FastDataLoader CSV 加载 + probe_csv_schema + DataLoadThread
+    │   ├── base_loader.py       # BaseDataLoader 基础加载器父类（LOADER_TYPE / IS_LAZY）
+    │   ├── loader_caps.py       # is_lazy_loader() 能力谓词（与格式谓词分离）
     │   ├── excel_loader.py      # ExcelDataLoader Excel 加载（calamine / openpyxl）
-    │   ├── base_loader.py       # BaseDataLoader 基础加载器父类
+    │   ├── parquet_converter.py # CSV/Excel → 临时 parquet 转换（polars 显式 schema）
+    │   ├── parquet_lazy_loader.py # ParquetLazyLoader 逐列惰性读取（meta.json 元数据）
+    │   ├── temp_cache_dir.py    # TempCacheDir 临时目录创建 / 清扫 / atexit 兜底
+    │   ├── _column_cache.py     # 列级 LRU 缓存（条数 + 字节双预算）
     │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
+    │   ├── mdf_attribution.py   # MDF 变量归属信息推断（纯函数，零 Qt）
+    │   ├── var_info.py          # 变量信息快照（元数据零 I/O，统计交后台线程）
+    │   ├── file_info.py         # 状态栏「文件信息抽屉」数据源
     │   └── metadata.py          # VarMetadata 数据类 + 有效性分类工具
     ├── utils/
-    │   ├── paths.py             # resource_path 资源路径解析
+    │   ├── paths.py             # resource_path / display_path 路径解析
     │   └── platform_setup.py    # 平台初始化（字体/DPI）
     └── ui/
         ├── main_window.py       # MainWindow 主窗口
         ├── drag_drop.py         # 拖放解析
         ├── table_dialog.py      # DataTableDialog + PandasTableModel + XYScatterPlotDialog
         ├── variable_list.py     # MyTableWidget 变量列表面板
+        ├── variable_actions.py  # 变量操作共享实现（列表右键 / 变量信息窗口共用）
         ├── mark_stats.py        # MarkStatsWindow 标记统计窗口
+        ├── theme.py             # 界面色板与文字层级
         ├── plot_config_manager.py  # PlotConfigManager 配置协调
         ├── plot_variable_editor.py  # PlotVariableEditorDialog 变量编辑器
         ├── main_window_base_manager.py  # MainWindow 基础管理器
-        ├── file_loader_manager.py  # 文件加载管理器
+        ├── file_loader_manager.py  # 文件加载管理器（同步/异步分流、回退播报）
         ├── cursor_sync_manager.py  # 游标同步管理器
         ├── layout_manager.py    # 布局管理器
         ├── splash_screen.py     # SplashScreen 启动画面
@@ -125,6 +151,7 @@ csv_plot/
         │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
         │   ├── sheet_selector.py  # SheetSelectorDialog Excel 工作表选择
         │   ├── log_window.py    # LogWindow 日志窗口
+        │   ├── variable_info_dialog.py # VariableInfoDialog 变量信息窗口（标签页累积）
         │   ├── template_editor_dialog.py  # TemplateEditorDialog 模板编辑器
         │   └── template_manager_dialog.py # TemplateManagerDialog 模板管理器
         └── widgets/
@@ -141,6 +168,7 @@ csv_plot/
             ├── mark_region_manager.py # MarkRegionManager 标记区域管理器
             ├── event_handler.py # EventHandler 事件处理器
             ├── log_viewer.py    # LogViewer 日志查看器
+            ├── status_drawer.py # StatusDrawer 状态栏上翻抽屉（文件信息 / 时间基准）
             └── variable_search_bar.py # VariableSearchBar 绘图变量编辑器内嵌搜索栏
 ```
 
@@ -166,7 +194,7 @@ csv_plot/
 
    或使用 pip：
    ```bash
-   pip install pyside6 pyqtgraph pandas numpy asammdf charset-normalizer ujson openpyxl python-calamine pyyaml
+   pip install pyside6 pyqtgraph pandas polars numpy asammdf charset-normalizer ujson openpyxl python-calamine pyyaml
    ```
 
 3. **运行程序**
@@ -199,7 +227,7 @@ uv run scripts/build_win.py
 
 ## 测试
 
-项目使用 pytest + pytest-qt + pytest-cov 构建 offscreen 无头测试体系，测试环境自动隔离，不会污染真实用户配置。命令速查、分层设计、新用例编写指南与已知陷阱清单详见 [tests/README.md](tests/README.md)。
+项目使用 pytest + pytest-qt + pytest-cov 构建 offscreen 无头测试体系，三层组织（unit 755 / component 474 / e2e 86，共 1315 例，全量串行 ~37s、`-n 4` 并行 ~13s），测试环境自动隔离，不会污染真实用户配置。parquet 惰性链另有逐位等价性用例与按需手跑的 perf 层。命令速查、分层设计、新用例编写指南与已知陷阱清单详见 [tests/README.md](tests/README.md)。
 
 ## 使用指南
 
@@ -217,12 +245,17 @@ uv run scripts/build_win.py
 
 ## 技术栈
 
+**界面与绘图**
 - **PySide6** — 现代化图形界面框架（LGPL 许可）
 - **pyqtgraph** — 高性能科学绘图库
+
+**数据层（双引擎分工）**
 - **pandas** — 数据分析库
-- **numpy** — 数值计算基础库
-- **asammdf** — ASAM MDF 文件解析
-- **openpyxl** — Excel (.xlsx) 文件读写
+- **polars** — 大 CSV 惰性加载链（Rust 引擎）
+- **numpy** — 数值计算基础库，绘图与统计的实际数据载体
+**格式解析与工具**
+- **asammdf** — ASAM MDF 文件解析（7.x / 8.x 双 API）
+- **openpyxl** — Excel 回退读取与工作表元数据（名称 / 行列数）
 - **python-calamine** — Rust 引擎 Excel 解析（比 openpyxl 快 10-20 倍）
 - **charset-normalizer** — 字符编码检测
 - **ujson** — 高性能 JSON 处理
