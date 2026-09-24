@@ -40,8 +40,18 @@ def _module_root(name):
     return name.split(".")[0]
 
 
+# 包内这些顶层子目录（GUI / 命令行 app）不在 `import <pkg>` 核心链上，
+# 只被它们引用的依赖视为可选，默认放行（否则每次裸跑都误报 exit 1）。
+_OPTIONAL_DIRS = {"gui", "app"}
+
+
+def _is_optional_site(rel):
+    """rel 形如 'gui/dialogs/x.py' 或 'blocks/y.py'；判断引用点是否在可选子树。"""
+    return rel.split("/")[0] in _OPTIONAL_DIRS
+
+
 def _scan_package_imports(pkg_name):
-    """返回 {外部模块名: [引用位置 file:line, ...]}，只收集模块级（顶层）import。"""
+    """返回 {外部模块名: [(引用文件相对路径, lineno), ...]}，只收集模块级（顶层）import。"""
     try:
         spec = importlib.util.find_spec(pkg_name)
     except (ValueError, ModuleNotFoundError) as e:
@@ -64,6 +74,7 @@ def _scan_package_imports(pkg_name):
                     tree = ast.parse(Path(path).read_text(encoding="utf-8", errors="replace"))
                 except SyntaxError:
                     continue
+                rel = os.path.relpath(path, base).replace(os.sep, "/")
                 for node in tree.body:  # 只看顶层，不看函数体
                     targets = []
                     if isinstance(node, ast.Import):
@@ -74,11 +85,9 @@ def _scan_package_imports(pkg_name):
                         if node.module:
                             targets = [node.module]
                     for mod in targets:
-                        root = _module_root(mod)
-                        if root == pkg_root:
+                        if _module_root(mod) == pkg_root:
                             continue  # 引用自己，跳过
-                        rel = os.path.relpath(path, base)
-                        imports.setdefault(mod, []).append(f"{pkg_name}/{rel}:{node.lineno}")
+                        imports.setdefault(mod, []).append((rel, node.lineno))
     return imports
 
 
@@ -115,7 +124,9 @@ def main():
     ap.add_argument("--imports-only", action="store_true",
                     help="只打印模块级外部 import，不比对 report")
     ap.add_argument("--whitelist", default="",
-                    help="逗号分隔，确认无需进产物的模块名（如已知的可选特性依赖）")
+                    help="逗号分隔，额外确认无需进产物的模块名")
+    ap.add_argument("--include-optional", action="store_true",
+                    help="连仅被 <pkg>/gui|app 引用（不在 import 链上）的缺口也按失败处理")
     args = ap.parse_args()
 
     pkgs = args.package or ["asammdf"]
@@ -125,7 +136,7 @@ def main():
     all_imports = {}
     for pkg in pkgs:
         for mod, locs in _scan_package_imports(pkg).items():
-            all_imports.setdefault(mod, []).extend(locs)
+            all_imports.setdefault(mod, []).extend((pkg, rel, ln) for rel, ln in locs)
 
     ext = {m: locs for m, locs in all_imports.items() if _module_root(m) not in wl}
 
@@ -145,16 +156,37 @@ def main():
     present = _bundle_modules_from_report(args.report)
     missing = {m: locs for m, locs in ext.items() if not _is_covered(m, present, builtins)}
 
+    def _fmt(mod):
+        return "\n".join(f"      ← {pkg}/{rel}:{ln}" for pkg, rel, ln in missing[mod][:3])
+
+    def _core_only(mod):
+        # 只要有任何一处引用不在 gui/ 或 app/ 顶层，就是核心链缺口
+        return any(not _is_optional_site(rel) for _pkg, rel, _ln in missing[mod])
+
+    core = {m for m in missing if _core_only(m)}
+    optional = set(missing) - core
+    if args.include_optional:
+        core |= optional
+        optional = set()
+
     print(f"[xref] 扫描包: {', '.join(pkgs)}  |  report 收录模块 {len(present)} 个")
-    print(f"[xref] 模块级外部 import {len(ext)} 个，report 未收录 {len(missing)} 个")
-    if not missing:
-        print("✓ 无缺口：所有模块级依赖都能在产物里找到。")
+    print(f"[xref] 模块级外部 import {len(ext)} 个，report 未收录 {len(missing)} 个"
+          f"（核心链 {len(core)} / 仅可选子包 {len(optional)}）")
+
+    if optional:
+        print("\nℹ 已默认放行（仅被 <pkg>/gui|app 引用，不在 import 链上，加 --include-optional 可强制报错）：")
+        for m in sorted(optional):
+            print(f"  {m}")
+            print(_fmt(m))
+
+    if not core:
+        print("\n✓ 无核心缺口：所有 import 链上的模块级依赖都能在产物里找到。")
         return 0
-    print("\n⚠ 疑似缺失（需在 build_win.py 里 --include-module 显式收，或确认可忽略后加 --whitelist）：")
-    for m in sorted(missing):
+
+    print("\n⚠ 核心链缺口（需在 build_win.py 里 --include-module 显式收，或确认可忽略后加 --whitelist）：")
+    for m in sorted(core):
         print(f"  {m}")
-        for loc in missing[m][:3]:
-            print(f"      ← {loc}")
+        print(_fmt(m))
     return 1
 
 
