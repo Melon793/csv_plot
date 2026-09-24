@@ -119,6 +119,101 @@ def test_lazy_load_reload_curves_survive(
     # 旧 loader 的临时目录已随 _release_old_data → close() 删除
     assert first_loader._cache_dir._cleaned is True
 
+    # --- 护栏 1：断言强化（RCA §7 / §8 护栏 1） ---
+    # 等收尾链完成（_restore_cursor_state_after_reload → _post_reload_ui_refresh）
+    qtbot.waitUntil(lambda: not mw._is_loading_new_data, timeout=15000)
+    assert mw._is_loading_new_data is False, "重载收尾后全局锁必须释放"
+    assert pw._is_updating_data is False, "重载收尾后 widget 锁必须释放"
+
+    ci = pw.curves["speed"]
+    assert ci.curve is not None, "CurveInfo.curve 不应为 None"
+    assert ci.curve.scene() is not None, "曲线必须仍在 QGraphicsScene 中"
+
+    # Y 轴范围应覆盖曲线数据域
+    y_range = pw.view_box.viewRange()[1]
+    y_data = ci.curve.getData()[1]
+    if y_data is not None and len(y_data) > 0:
+        import numpy as np
+        assert y_range[0] <= float(np.nanmin(y_data)) + 1e-6, (
+            f"Y 轴下界 {y_range[0]} 未覆盖数据最小值 {np.nanmin(y_data)}"
+        )
+        assert y_range[1] >= float(np.nanmax(y_data)) - 1e-6, (
+            f"Y 轴上界 {y_range[1]} 未覆盖数据最大值 {np.nanmax(y_data)}"
+        )
+
+
+# ---------- 护栏 2：事故直接回归（调度失败 → 兜底不销毁曲线） ----------
+
+def test_reload_finish_schedule_failure_keeps_curves(
+    main_window, qtbot, qapp, dialog_stubs, small_csv, force_async_lazy, monkeypatch
+):
+    """模拟 Nuitka exe 里 _post_reload_ui_refresh 调度失败的场景。
+
+    验证：3 秒兜底 _force_unlock_all 只解锁 + 重建失效曲线，绝不销毁好曲线。
+    （RCA §8 护栏 2；tmp/rca-lazy-reload-curve-vanish.md）
+    """
+    mw = main_window
+    _load_via_button(mw, qtbot, qapp, dialog_stubs, small_csv)
+    pw = _drop_plot(mw, qapp, "speed")
+    assert "speed" in pw.curves
+
+    # 等首次加载收尾完成
+    qtbot.waitUntil(
+        lambda: mw.reload_btn.isEnabled() and not mw._is_loading_new_data,
+        timeout=15000,
+    )
+
+    # --- 注入：拦截 _schedule_delayed，只阻止 _post_reload_ui_refresh 的调度 ---
+    from src.ui.file_loader_manager import FileLoaderManager
+
+    blocked_slots: list = []
+    original_schedule = FileLoaderManager._schedule_delayed
+
+    def patched_schedule(self, msec, slot):
+        slot_name = getattr(slot, "__name__", "") or repr(slot)
+        if "_post_reload_ui_refresh" in slot_name:
+            blocked_slots.append(slot_name)
+            return None  # 不调度 → 等价于打包形态的 TypeError
+        return original_schedule(self, msec, slot)
+
+    monkeypatch.setattr(FileLoaderManager, "_schedule_delayed", patched_schedule)
+
+    # --- 触发重载 ---
+    first_loader = mw.loader
+    qtbot.mouseClick(mw.reload_btn, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(
+        lambda: mw.loader is not first_loader and mw.loader is not None,
+        timeout=15000,
+    )
+    qapp.processEvents()
+
+    # 断言事故现场成立：收尾被阻止、锁仍为 True
+    assert blocked_slots, "_post_reload_ui_refresh 的调度应被拦截"
+    assert mw._is_loading_new_data is True, "收尾未执行 → 全局锁应仍为 True"
+
+    # --- 制造"曲线停在半空中"（scene=None），模拟兜底前的最坏状态 ---
+    ci = pw.curves["speed"]
+    assert ci.curve is not None
+    pw.plot_item.removeItem(ci.curve)
+    assert ci.curve.scene() is None, "removeItem 后曲线应脱离场景"
+
+    # --- 调用兜底（等价于 3 秒定时器到点） ---
+    # 直接调 _safety_force_unlock 而不真等 3 秒：等待不增加覆盖面，
+    # 定时器到点 → _safety_force_unlock → _force_unlock_all 是确定性链路。
+    mw.file_loader_manager._safety_force_unlock()
+    qapp.processEvents()
+
+    # --- 断言：锁释放 + 曲线恢复 ---
+    assert mw._is_loading_new_data is False, "兜底后全局锁必须释放"
+    assert pw._is_updating_data is False, "兜底后 widget 锁必须释放"
+    assert mw.reload_btn.isEnabled(), "兜底后 reload 按钮必须可用"
+
+    ci_after = pw.curves["speed"]
+    assert ci_after.curve is not None, "兜底后 CurveInfo.curve 不应为 None"
+    assert ci_after.curve.scene() is not None, (
+        "兜底必须重建失效曲线（scene=None → _recreate_curve），绝不能销毁好曲线"
+    )
+
 
 # ---------- 开关关闭 = 回到今天的行为（回滚验证） ----------
 

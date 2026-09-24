@@ -1,19 +1,19 @@
 """延迟回调的销毁安全：窗口析构后打到已删控件的 RuntimeError 不得逃逸出槽。
 
 缺陷形态（`src/ui/file_loader_manager.py`）：`_restore_cursor_state_after_reload`
-末尾用**两参** `QTimer.singleShot(50, self._post_reload_ui_refresh)` 排延迟回调，
-Qt 无从知道这个回调归谁 —— 窗口销毁不取消它。回调在窗口析构后才投递时：
+末尾用三参 `QTimer.singleShot(50, self.mw, self._post_reload_ui_refresh)` 排延迟
+回调。在 Nuitka 打包 exe 里，PySide6 post-load 补丁对三参形态的重载解析不稳定，
+抛 `TypeError: ... is wrong (missing signature)` → 收尾永不执行 → 双锁不释放 →
+3 秒兜底销毁全部曲线（见 tmp/rca-lazy-reload-curve-vanish.md）。
 
-1. `widget.setUpdatesEnabled(True)` 抛 `RuntimeError: ... already deleted`，
-   被回调自身的 `except Exception` 吞掉；
-2. **异常处理器自己**又去 `self._safety_timer.stop()`（C++ 已随窗口销毁），
-   再抛一次、这次没人兜 —— 被 PySide6 交给 sys.excepthook，pytest-qt 记成
-   `ERROR at teardown`（用例名随机、77 passed 仍全绿）。
+修复后统一走 `_schedule_delayed(msec, slot)`：QTimer 实例 parent 归 mw，
+窗口销毁即取消；`timeout.connect(slot)` 走 Nuitka `patched_connect` 正确保活槽。
 
-本文件钉住三道防线（缺一条就回到上面那条链）：
-- 排延迟回调一律用带 context 的三参重载（Qt 在 context 销毁时自动取消）；
-- 回调摸控件前先看 `mw._is_being_destroyed` —— pytest-qt 收尾时窗口是
-  「已 close 但 Python 包装器还活着」，三参重载在这个窗口里**不会**取消；
+本文件钉住的防线：
+- 模块内不允许出现任何 `QTimer.singleShot` 调用（AST 扫描）；
+- `_schedule_delayed` 的 parent 所有权保活（gc 后回调仍触发）；
+- 窗口销毁后回调不触发；
+- 回调摸控件前先看 `mw._is_being_destroyed`；
 - 清理期的 `_safety_timer.stop()` 自身对已删 C++ 对象免疫。
 """
 
@@ -161,8 +161,12 @@ class TestOtherDeferredCallbacksHonourDestroyedFlag:
 
 
 class TestSchedulingIdiomCheck:
-    def test_every_single_shot_call_passes_a_context(self):
-        """两参重载就是本缺陷的根源，本模块不允许再出现。"""
+    def test_no_static_single_shot_in_this_module(self):
+        """模块内不允许出现任何 QTimer.singleShot 调用（一律走 _schedule_delayed）。
+
+        原检查只禁两参形态；修复后三参形态在 Nuitka exe 里同样不稳定，
+        故收紧为全面禁止。注释/文档字符串里的出现不算（AST 只看 Call 节点）。
+        """
         tree = ast.parse(Path(flm_mod.__file__).read_text(encoding="utf-8"))
         offenders = [
             node.lineno
@@ -170,6 +174,39 @@ class TestSchedulingIdiomCheck:
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "singleShot"
-            and len(node.args) < 3
         ]
-        assert offenders == [], f"这些行的 singleShot 缺 context 参数: {offenders}"
+        assert offenders == [], f"这些行仍在调用 QTimer.singleShot: {offenders}"
+
+
+class TestScheduleDelayedIdiom:
+    """_schedule_delayed 的 parent 所有权保活与窗口销毁取消。"""
+
+    def test_callback_fires_without_python_reference(self, qtbot):
+        """调度后丢弃 Python 引用 + gc.collect，回调仍能触发（parent 保活）。"""
+        import gc
+
+        mw = _FakeMainWindow()
+        qtbot.addWidget(mw)
+        mgr = FileLoaderManager(mw)
+
+        fired = []
+        # 不持有返回的 timer 引用
+        mgr._schedule_delayed(30, lambda: fired.append("ok"))
+        gc.collect()
+        gc.collect()
+
+        qtbot.wait(300)
+        assert fired == ["ok"], "parent 所有权应保活定时器，gc 不得回收"
+
+    def test_window_destruction_cancels_callback(self, qtbot):
+        """窗口 deleteLater 后回调不触发（parent 销毁 → 定时器随之销毁）。"""
+        mw = _FakeMainWindow()
+        qtbot.addWidget(mw)
+        mgr = FileLoaderManager(mw)
+
+        fired = []
+        mgr._schedule_delayed(50, lambda: fired.append("should_not_fire"))
+        mw.deleteLater()
+
+        qtbot.wait(400)
+        assert fired == [], "窗口销毁后定时器应被取消，回调不得触发"

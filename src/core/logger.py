@@ -164,6 +164,12 @@ class LogManager:
 
         root_logger.addHandler(self._queue_handler)
 
+        # 护栏 3：把 Python warnings（含 pyqtgraph 的 "Item already added to
+        # PlotItem, ignoring."）接进应用日志。否则这类告警只进 stderr，现场
+        # 排查时日志文件里完全看不见（见 tmp/rca-lazy-reload-curve-vanish.md §8）。
+        # 重定向到 'py.warnings' logger，经 root 传播到文件/UI handler。
+        logging.captureWarnings(True)
+
         if os.environ.get("CSV_PLOT_DEBUG_XLIMITS"):
             logging.getLogger("src.ui.widgets.axis_manager").setLevel(logging.DEBUG)
             logging.getLogger("src.ui.layout_manager").setLevel(logging.DEBUG)

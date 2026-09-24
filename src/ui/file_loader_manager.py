@@ -388,7 +388,28 @@ class FileLoaderManager(MainWindowBaseManager):
         self._safety_timer.timeout.connect(self._safety_force_unlock)
         self._safety_timer.start(3000)
 
-        QTimer.singleShot(0, self.mw, self._restore_cursor_state_after_reload)
+        self._schedule_delayed(0, self._restore_cursor_state_after_reload)
+
+    def _schedule_delayed(self, msec: int, slot):
+        """在 ``msec`` 毫秒后把 ``slot`` 投递到 GUI 线程；窗口销毁即取消。
+
+        不用三参 ``QTimer.singleShot(msec, context, slot)``：打包 exe 里
+        Nuitka 的 PySide6 post-load 补丁只保活两参形态的槽，三参形态的重载
+        解析不稳定，会抛 ``TypeError: ... is wrong (missing signature)``，
+        导致重载收尾永不执行（事故与实验见 tmp/rca-lazy-reload-curve-vanish.md）。
+        QTimer 实例的 parent 归 ``mw``：窗口销毁时定时器随之销毁、回调不再
+        投递，与三参重载语义等价；``timeout.connect(slot)`` 会保活槽对象。
+
+        返回定时器仅为便于测试断言，调用方无需持有引用（生命周期归 parent）。
+        """
+        timer = QTimer(self.mw)
+        timer.setSingleShot(True)
+        timer.timeout.connect(slot)
+        # 与静态 singleShot 语义对齐：触发后自毁，否则每次调用都会在 mw 上
+        # 留一个闲置定时器（实测 200 次调用 = 200 个 child）
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(max(0, int(msec)))
+        return timer
 
     def _restore_cursor_state_after_reload(self):
         """延迟恢复 cursor 状态（在 UI 稳定后调用）"""
@@ -529,9 +550,8 @@ class FileLoaderManager(MainWindowBaseManager):
             # 消除锁清除与 setUpdatesEnabled 之间约 50ms 的危险窗口。
             # 在此期间 paintEvent 由 _is_loading_new_data 和 _is_updating_data 双锁拦截。
             self._post_reload_pending_version = self.mw._data_version
-            # 必须用带 context 的三参重载：两参重载 Qt 无从知道回调归谁，窗口销毁
-            # 也不会取消它，回调将在窗口析构后才投递、打到已删的 widget
-            QTimer.singleShot(50, self.mw, self._post_reload_ui_refresh)
+            # 窗口销毁即取消（parent 归 mw），语义等价于三参重载的 context 保活
+            self._schedule_delayed(50, self._post_reload_ui_refresh)
 
     def _stop_safety_timer(self):
         """停掉兜底解锁定时器（可重复调用）。
@@ -567,20 +587,19 @@ class FileLoaderManager(MainWindowBaseManager):
         self._force_unlock_all()
 
     def _force_unlock_all(self):
-        """紧急解锁：确保所有退出路径都不会留下死锁"""
+        """紧急解锁：确保所有退出路径都不会留下死锁。
+
+        v6.x 改动：不再调用 ``_safe_clear_plot_items``（销毁全部曲线），
+        改为只重建真正失效的曲线（``scene() is None`` / ``_dataset`` 被清空）。
+        正常曲线原样保留。理由见 tmp/rca-lazy-reload-curve-vanish.md §8-B。
+        """
+        window_going_away = self._window_going_away()
         logger.warning(
-            "[v5.8] _force_unlock_all 触发：正在清除曲线 + 强制解锁 "
+            "[v6.x] _force_unlock_all 触发：强制解锁 + 修复失效曲线 "
             "(data_version=%d, safety_unlock_version=%d)",
             getattr(self.mw, "_data_version", -1),
             getattr(self, "_safety_unlock_version", -1),
         )
-        for container in getattr(self.mw, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget and hasattr(widget, "_safe_clear_plot_items"):
-                try:
-                    widget._safe_clear_plot_items()
-                except Exception:
-                    logger.debug("_safe_clear_plot_items 失败（紧急解锁期间）")
         # v5.12: 紧急解锁时也要释放 reload 互斥锁
         self._reload_in_progress = False
         self.mw.reload_btn.setEnabled(True)
@@ -595,6 +614,13 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget._is_updating_data = False
                 widget._cached_data_version = self.mw._data_version
                 widget.setUpdatesEnabled(True)
+                # v6.x: 只重建失效曲线（scene=None / _dataset 被清空），正常曲线
+                # 原样保留；窗口销毁中不做任何绘制修复
+                if not window_going_away:
+                    try:
+                        self._refresh_curve_paint_path(widget)
+                    except Exception:
+                        logger.debug("_refresh_curve_paint_path 失败（紧急解锁期间）", exc_info=True)
                 # 紧急解锁后触发一次完整刷新，防止 paintEvent 跳过导致白屏
                 if hasattr(widget, "_queue_ui_refresh"):
                     widget._queue_ui_refresh(immediate=True)
@@ -657,9 +683,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
             # v5.3 修复问题 2：合并 13 个 per-widget QTimer.singleShot(0) 为 1 个统一回调
             current_version = self.mw._data_version
-            QTimer.singleShot(
+            self._schedule_delayed(
                 0,
-                self.mw,
                 lambda: self._deferred_cursor_refresh_all(widgets_to_refresh, current_version)
             )
         except Exception:
@@ -1002,9 +1027,8 @@ class FileLoaderManager(MainWindowBaseManager):
                     self.set_button_status(True)
                     self.mw.load_btn.setEnabled(True)
                     # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-                    QTimer.singleShot(
+                    self._schedule_delayed(
                         0,
-                        self.mw,
                         lambda: self._post_load_actions(file_path, is_reload=is_reload),
                     )
                 else:
@@ -1395,8 +1419,8 @@ class FileLoaderManager(MainWindowBaseManager):
         if not applied:
             return
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-        QTimer.singleShot(
-            0, self.mw, lambda: self._post_load_actions(file_path, is_reload=is_reload)
+        self._schedule_delayed(
+            0, lambda: self._post_load_actions(file_path, is_reload=is_reload)
         )
 
     def _on_load_error(self, msg):
