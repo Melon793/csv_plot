@@ -5,9 +5,12 @@
 接着点「保存」时静默变成新建一个同配置模板。
 """
 
+from datetime import datetime, timedelta
+
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
+import src.core.template_models as tm
 from src.core.plot_config import PlotConfig, PlotSessionConfig
 from src.core.template_manager import TemplateManager
 from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
@@ -18,7 +21,23 @@ def _config(curves):
 
 
 @pytest.fixture()
-def manager(qapp, tmp_path):
+def manager(qapp, tmp_path, monkeypatch):
+    """时钟每次 now() 前进一秒：updated_at 必须严格递增。
+
+    Windows 的 datetime.now() 粒度约 15.6 ms，两次连续保存会盖出同一个
+    updated_at；get_all_templates() 用 sorted(reverse=True) 稳定排序，并列时
+    退回写入顺序 → 行序断言的期望值整个翻转（间歇性，跨过刻度就偶然通过）。
+    """
+
+    class _TickingDatetime(datetime):
+        tick = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.tick += 1
+            return datetime(2026, 1, 1) + timedelta(seconds=cls.tick)
+
+    monkeypatch.setattr(tm, "datetime", _TickingDatetime)
     return TemplateManager(storage_path=tmp_path / "templates")
 
 
