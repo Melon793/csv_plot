@@ -312,6 +312,11 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         # 故仅保留 --include-module=numexpr，不再追加 *.evaluate（会 FATAL 找不到）。
         "--include-module=numpy",
         "--include-module=pandas",
+        # asammdf 是收尾阶段整包拷成 .pyc 的，不在 Nuitka 静态 import 图里。
+        # v2_v3_blocks 顶层 `from getpass import getuser` 无人替它引用，
+        # getpass（Nuitka 按需 stdlib）因此漏收 → MDF 加载报「No module named 'getpass'」。
+        # 纯标准库小模块（约 8KB），显式 include。Windows v5 实测：MDF/Excel/CSV 全通过，+5.5KB。
+        "--include-module=getpass",
         # polars 是 Rust 扩展：只给 include-package 可能漏掉扩展数据文件，
         # 两条都要（D11）；惰性 parquet 路径必需，Windows 产物已实测复核。
         "--include-package=polars",
