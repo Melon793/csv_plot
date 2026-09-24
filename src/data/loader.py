@@ -606,6 +606,8 @@ class FastDataLoader(BaseDataLoader):
                 dict.fromkeys([detected_enc, *ENCODING_FALLBACKS])
             )
 
+        min_required_rows = 2 if has_unit else 1
+        short_df = None
         for enc in encodings_to_try:
             try:
                 df = pd.read_csv(
@@ -618,10 +620,18 @@ class FastDataLoader(BaseDataLoader):
                     encoding=enc,
                     engine="python",
                 )
-                break
             except UnicodeDecodeError:
                 continue
+            if df.shape[0] >= min_required_rows:
+                break
+            # 行数不足视为这个编码解错了，换下一个再试：实测 CRLF 样本被嗅探成
+            # utf_16_be 后 pd.read_csv 并不抛错，整个 3 行文件解成 1 行 —— 直接
+            # 报"文件至少需要 2 行"会把误判说成文件的问题（Windows 实测）。
+            # 真·短文件（每种编码都只有这么多行）在环末照旧报它。
+            short_df = df
         else:
+            if short_df is not None:
+                raise ValueError(f"文件至少需要{min_required_rows}行")
             raise RuntimeError("无法以任何可用编码读取文件")
 
         # 单位行对照校验（不修改 actual_has_unit，仅输出诊断日志）
@@ -675,10 +685,6 @@ class FastDataLoader(BaseDataLoader):
                             "单位行校验: 未达数值阈值 (ratio=%.2f)，保持 has_unit=%s",
                             valid_numeric_ratio, has_unit,
                         )
-
-        min_required_rows = 2 if actual_has_unit else 1
-        if df.shape[0] < min_required_rows:
-            raise ValueError(f"文件至少需要{min_required_rows}行")
 
         var_names = df.iloc[0].astype(str).tolist()
         # pandas 3.0 astype(str) 产出 StringDtype，NaN 保留为 float nan 而非

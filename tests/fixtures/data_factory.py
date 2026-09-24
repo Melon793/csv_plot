@@ -56,7 +56,11 @@ def write_csv(
         lines.append(sep.join(str(u) for u in units))
     for row in rows:
         lines.append(sep.join(str(v) for v in row))
-    path.write_text("\n".join(lines) + "\n", encoding=encoding)
+    # newline=""：文本模式在 Windows 上会把 \n 翻成 \r\n，同一用例换台机器
+    # 就是另一份字节 —— 编码嗅探吃的是前 2000 字节，换行符一改结论就变
+    # （实测 CRLF 样本被嗅探成 utf_16_be，接着撞上 src/data/loader.py 的行数
+    # 守卫）。夹具的字节要跨平台一致
+    path.write_text("\n".join(lines) + "\n", encoding=encoding, newline="")
     return path
 
 

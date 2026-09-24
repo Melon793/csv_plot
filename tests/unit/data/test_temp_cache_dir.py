@@ -19,20 +19,14 @@ import src.data.temp_cache_dir as tcd
 from src.data.temp_cache_dir import TempCacheDir
 
 
-def _find_dead_pid() -> int:
-    """找一个当前不在进程表里的 PID（探测式，找不到则 skip）。"""
-    for pid in range(30_000, 90_000):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return pid
-        except PermissionError:
-            continue
-    pytest.skip("未找到空闲 PID")
-
-
 def _dead_child_pid() -> int:
-    """起一个立即退出的子进程，返回其（已死亡）PID。"""
+    """起一个立即退出的子进程，返回其（已死亡）PID。
+
+    跨平台可靠，也不用扫 PID 区间：``os.kill(pid, 0)`` 在 Windows 上不是存活
+    探测（Python 3.12 走 ``OpenProcess + TerminateProcess``），对不存在的 PID
+    抛的是 ``WinError 87`` 而非 ``ProcessLookupError``，对活着的进程则会真的
+    把它杀掉 —— 产品侧已在 ``88fc926`` 改掉，测试助手跟着用同一种做法。
+    """
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     return proc.pid
@@ -71,7 +65,7 @@ class TestSweepGuards:
 
     def test_guard2_name_pattern_skips_non_matching(self, fake_base):
         # 不匹配 ^\d+_[0-9a-f]{8,}$ 的目录/文件一律保留
-        dead = _find_dead_pid()
+        dead = _dead_child_pid()
         keep_dirs = ["notes", "123_zzzzzzzz", f"{dead}_ZZZZZZZZ", "12_abcd123"]
         for name in keep_dirs:
             (fake_base / name).mkdir()
@@ -124,7 +118,7 @@ class TestSweepGuards:
 
     def test_guard1_only_scans_top_level(self, fake_base):
         # sweep 只扫 base 这一层：嵌套在普通目录里的「合法名」目录不会被碰
-        dead = _find_dead_pid()
+        dead = _dead_child_pid()
         nested_parent = fake_base / "other_app"
         nested = nested_parent / f"{dead}_{os.urandom(4).hex()}"
         nested.mkdir(parents=True)

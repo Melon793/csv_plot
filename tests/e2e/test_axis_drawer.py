@@ -80,6 +80,10 @@ def test_axis_drawer_uses_its_own_narrower_width(loaded_window, qapp):
     440 是扫出来的：最紧的一行是页脚（提示文字 + 恢复默认 + 应用），实测宽度
     420 时 Fusion 只剩 1 px（222/221），440 剩 21 px。这里同时钉住页脚与预览
     行都不被裁 —— 收窄的唯一硬约束就是这两行。
+
+    440 是**收口偏好**而非硬顶：字体度量装不下时抽屉按预览行放宽（Windows
+    实测预览行那句要 540），硬约束是"不得越过文件抽屉那一档"。收口宽度因此
+    是**下限**：宽字体平台内容最小宽先顶上来（实测 485），抽屉跟着走。
     """
     from PySide6.QtWidgets import QLabel
 
@@ -89,7 +93,10 @@ def test_axis_drawer_uses_its_own_narrower_width(loaded_window, qapp):
     drawer = _open(mw, qapp)
 
     assert STATUS_DRAWER_WIDTH_AXIS < STATUS_DRAWER_WIDTH
-    assert drawer.width() <= STATUS_DRAWER_WIDTH_AXIS, "x 轴抽屉比设计宽度更宽"
+    assert drawer.width() >= min(
+        STATUS_DRAWER_WIDTH_AXIS, drawer.minimumSizeHint().width()
+    ), "x 轴抽屉比收口宽度还窄：该收的地方没收到位"
+    assert drawer.width() < STATUS_DRAWER_WIDTH, "x 轴抽屉越过了文件抽屉那一档"
 
     hint = next(l for l in drawer.findChildren(QLabel) if "Esc" in l.text())
     assert hint.width() >= hint.sizeHint().width(), f"页脚提示被裁：{hint.width()}"
@@ -164,6 +171,39 @@ def test_preview_line_is_not_clipped(loaded_window, qapp):
     qapp.processEvents()
 
     assert drawer.preview.width() >= drawer.preview.sizeHint().width()
+
+
+def test_drawer_widens_for_the_font_and_tightens_back(loaded_window, qapp):
+    """字体装不下就按预览行的度量放宽，装得下再收回收口宽度。
+
+    macOS 的字体窄，正常字号下永远走不到"装不下"那条分支，而 Windows 实测
+    那句预览要 540 px、抽屉只给 459 px（尾巴的「偏移量:0」被裁）。这里把预览
+    行的字号调大，在本地把那一步真的跑一遍 —— 量的是"装不下就放宽、装得下就
+    收口"这条规则，不是某个平台的像素值。
+    """
+    from src.ui import theme
+
+    mw = loaded_window
+    drawer = _open(mw, qapp)
+    drawer.freq_spin.setValue(3.0)  # 最长的那句
+    qapp.processEvents()
+    base = drawer.width()
+    bar = mw.statusBar()
+    bar_right = bar.mapToGlobal(QPoint(bar.width(), 0)).x()
+
+    drawer.preview.setStyleSheet("font-size: 22pt;")
+    drawer._refresh_preview()
+    qapp.processEvents()
+
+    assert drawer.width() > base, "预览行装不下，抽屉没放宽"
+    assert drawer.preview.width() >= drawer.preview.sizeHint().width(), "放宽了还裁字"
+    assert drawer.x() + drawer.width() <= bar_right, "放宽后越出了状态栏"
+
+    drawer.preview.setStyleSheet(theme.result_text())
+    drawer._refresh_preview()
+    qapp.processEvents()
+
+    assert drawer.width() == base, "文案装得下时应回收到收口宽度"
 
 
 def test_active_preset_is_marked_with_a_dot(loaded_window, qapp):

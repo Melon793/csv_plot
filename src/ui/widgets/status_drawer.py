@@ -782,7 +782,63 @@ class XAxisDrawer(StatusDrawer):
         text = mw._axis_segment_text(factor, offset, always_show_correction=True)
         self.preview.setText(text)
         self.preview.setToolTip(f"应用后状态栏显示：{text}")
+        self._fit_preview_width()
         self._refresh_preset_states()
+
+    def _preview_width_limit(self) -> int:
+        """预览行允许撑到的最大宽度（含抽屉内边距）。
+
+        口径与 ``open_above`` 的定宽一致：状态栏宽 - 两侧留白。首次
+        ``open_above`` 之前还没有锚定状态栏（``open_for`` 先 ``_load_from``
+        再打开），退回主窗口宽度 —— 常驻段与状态栏同宽，两者等价。
+
+        返回 0 表示量不出上限（主人没有状态栏、或单测的替身主人没这个方法）。
+        取法同 ``_notify`` 用 getattr：替身不必为了这一条实现 QMainWindow 的
+        接口。此时不放宽 —— 宁可按收口宽度裁字，也不顶着看不见的上限乱长。
+        """
+        margins = self._root.contentsMargins()
+        insets = margins.left() + margins.right()
+        bar = self._anchor_bar
+        if bar is None:
+            owner = self._mw()
+            get_bar = getattr(owner, "statusBar", None) if owner is not None else None
+            if get_bar is None:
+                return 0
+            bar = get_bar()
+        return max(0, bar.width() - 2 * STATUS_DRAWER_EDGE_MARGIN - insets)
+
+    def _fit_preview_width(self) -> None:
+        """按字体度量给预览行兜住宽度，避免尾巴被裁。
+
+        预览行是 ``Ignored`` 宽度策略（见 ``_build``）：它的 sizeHint 不参与
+        抽屉的最小宽，收口宽度 ``STATUS_DRAWER_WIDTH_AXIS`` 就挡不住字宽 ——
+        Windows 实测最长那句要 540 px、抽屉只给 459 px，被裁掉的是"偏移量:0"
+        的尾巴。这里量出文案需求，装不下才把抽屉按差额放宽。
+
+        macOS 上这个需求仍低于输入网格自己的最小宽（390 < 413 实测），等于
+        没动 —— 收口宽度只在字体真的装不下时才让步。
+
+        上限：窗口可用宽（宁可裁字也不让抽屉越出窗口；极端 offset 下文案会有
+        截断，但 tooltip 里仍有全文）。
+        """
+        need = self.preview.sizeHint().width()
+        limit = self._preview_width_limit()
+        if not limit or not self.isVisible():
+            return  # 量不出上限、或还没打开：不动宽度
+        want = min(need, limit)
+        # 抽屉除预览行外的横向开销：标签铺满那一行，这个差就是内边距与间距的
+        # 合计，与抽屉当前是不是被撑宽过无关
+        chrome = self.width() - self.preview.width()
+        if chrome < 0:
+            return  # 状态异常（预览行比抽屉还宽），不动手
+        # 先按老路回定宽（顺手按新字号重算高度、贴回状态栏），装不下再补差额。
+        # 宽度不写成预览行的最小宽：最小宽要等下一轮 LayoutRequest 才传成抽屉
+        # 的最小宽，连着两次变大只落地第一跳、文案变短也收不回来（实测
+        # 22pt→60pt 停在 604）
+        self.reposition()
+        target = want + chrome
+        if self.width() < target:
+            self.resize(target, self.height())
 
     # -- 动作 ---------------------------------------------------------------
 

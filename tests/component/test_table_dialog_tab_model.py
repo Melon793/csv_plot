@@ -91,10 +91,13 @@ def test_tab_mode_row_header_and_content(tab_dialog, mdf_loader):
     assert tab_dialog._tab_mode is True
     assert tab_dialog._df.empty, "tab 模式下 _df 恒空（旧判据据此误判）"
     assert tab_dialog.has_table_content() is True
-    # 行号表头：可见 + 定宽 48（PandasTableModel.headerData 提供 1-based 行号）
+    # 行号表头：可见 + 定宽 + 不低于设计下限（PandasTableModel.headerData
+    # 提供 1-based 行号）。具体像素跟字体度量走：宽字体平台光 4 位行号就要
+    # 58px（Windows 实测），锁死 48 会把高位数字裁掉，故只钉性质
     vh = state.view.verticalHeader()
     assert not vh.isHidden()
-    assert vh.minimumWidth() == 48 and vh.maximumWidth() == 48
+    assert vh.minimumWidth() == vh.maximumWidth(), "行号列必须定宽，不留逐节测量的口子"
+    assert vh.minimumWidth() >= 48, "行号列不得窄于设计下限"
 
 
 # ---------- P1 重置链：clear_all_columns 快照 + update_data 重建 ----------
@@ -530,8 +533,16 @@ def test_new_tab_aligns_anchor_on_creation(shown_tab_dialog):
     """当前 tab 滚到某时刻 → 首次添加另一个 group 的变量→新建 tab 必须
     直接落在同一时刻，而非停在表头（旧版 state 注册晚于 setCurrentIndex，
     _on_tab_switched 反查为 None 直接 return）。
+
+    窗口高度是本用例的几何前提，不是被测行为：目标 tab（G1）只有 6 行、锚点
+    0.4s 落在第 2 行，而"把第 2 行顶到首行"要求滚动范围 max ≥ 2。夹具默认 200
+    高时可视行数 = 视口高 // 行高，macOS 行高 24px 恰好压线（max=2）、Windows
+    行高 19px 就差 1 行（max=1，实测），同一份断言因此一个平台过一个平台挂。
+    压到 160 高把可视行数降到 2~4 行，两个平台都留出余量（实测 macOS max=4）。
     """
     dlg = shown_tab_dialog
+    dlg.resize(420, 160)
+    settle(5)
     state0 = dlg._add_variable_to_tab("Press_G0", 0)  # 0.1s 步长
     settle()
     sb0 = state0.view.verticalScrollBar()
@@ -546,6 +557,14 @@ def test_new_tab_aligns_anchor_on_creation(shown_tab_dialog):
     settle()
 
     assert dlg._tab_widget.currentIndex() == state1.widget_index
+    # 前置检查要落在真正被断言的那个 tab 上：范围不够时"首可见行 = 锚点行"
+    # 这条断言无法成立（不是被击败，是没得比），此时该报环境而非静默跳过
+    need_row = _nearest_time_row(_state_time_array(state1), 0.4)
+    sb1 = state1.view.verticalScrollBar()
+    assert sb1.maximum() >= need_row, (
+        f"目标 tab 滚动范围不足：max={sb1.maximum()} < 锚点行 {need_row}，"
+        "本用例在该环境下测不出东西"
+    )
     first = state1.view.indexAt(QPoint(0, 0))
     assert first.isValid()
     assert float(state1.df["time"].iloc[first.row()]) == pytest.approx(0.4), (
@@ -773,11 +792,14 @@ def test_row_header_width_grows_with_row_count(qapp):
     narrow = DataTableDialog._row_header_width(999, font)
     wide = DataTableDialog._row_header_width(1_000_000, font)
 
-    assert narrow == 48, "小表维持原有 48px 观感，不得变宽"
+    # 断言性质而非绝对像素：48 是下限，宽字体平台会按字体度量上浮
+    # （Windows 实测 "9999" 宽 48px → 58px）
+    assert narrow >= 48, "小表不得窄于 48px 下限"
+    assert fm.horizontalAdvance("9999") + 10 <= narrow, "4 位行号不得被裁"
     assert wide > narrow
     # 断言相对关系而非绝对像素：offscreen 与真机字体不同
     assert wide >= fm.horizontalAdvance("999999") + 2, "6 位行号不得被裁切"
-    assert DataTableDialog._row_header_width(0, font) == 48, "空表不得算出 0 位"
+    assert DataTableDialog._row_header_width(0, font) >= 48, "空表不得算出 0 位"
 
 
 def test_tab_row_header_width_matches_row_count(tab_dialog):

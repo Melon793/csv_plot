@@ -323,17 +323,21 @@ class TestFieldCopyButton:
 
         assert QApplication.clipboard().text() == item.text(1) == "30"
 
-    def test_long_value_shows_key_only_and_never_widens_window(self, page):
+    def test_long_value_shows_key_only_and_never_widens_window(self, page, tmp_path):
         """长文件路径：剪贴板给全量，提示只报键名，且窗口不得被提示顶宽。
 
         后半段是回归闸：QLabel 的 sizeHint 会经布局抬高整个窗口的
         minimumWidth，实测复制一条长路径后窗口 700 → 769 且拖不回
         去；靠 status_label 的 Ignored 宽度策略消除。只断言提示文本
         变短是拦不住这个的 —— 真正的因是宽度策略。
+
+        路径用本机临时目录拼：native 风格会规范化成"当前平台的绝对写法"，
+        写死 POSIX 风格的绝对路径到 Windows 上就成了 drive-relative，会被
+        补上盘符（实测路径前多出 `C:`），断言随之平台绑定。
         """
         dlg, pg = page
         tree = pg.tree
-        long_value = "/Volumes/data/" + "measurement_" * 30 + ".mf4"
+        long_value = str(tmp_path / ("measurement_" * 30 + ".mf4"))
         item = QTreeWidgetItem(tree, ["文件路径", long_value])
         # 必须先滚入视口：行高变大后可视行数变少，追加到树末尾的行很
         # 可能已经在视口外，而 visualItemRect 仍会给出一套落在其它行上的
@@ -502,6 +506,11 @@ class TestFilePathCopy:
         "/20260101_DEMO_ENG01_1am=0.8_Map.csv"
     )
     WIN = RAW.replace("/", "\\")
+    #: 当前平台的 native 写法。native 风格的定义就是"当前平台自己的写法"，
+    #: 期望值必须跟着平台走：Windows 上 ``normalize_input_path`` 会把正斜杠
+    #: UNC 规范成 ``\\host\share``（等价性见 tests/unit/utils/test_paths.py 的
+    #: ``test_windows_unc_normalized``），写死正斜杠就成了平台绑定。
+    NATIVE = RAW if sys.platform != "win32" else WIN
 
     def _add_path_row(self, pg, value=RAW):
         """手工注入一行「文件路径」并滚入视口（同长路径用例的做法）。"""
@@ -546,11 +555,11 @@ class TestFilePathCopy:
         assert dlg.status_label.text() == "已复制「文件路径」"
 
     def test_default_native_style_adds_quotes_but_keeps_slashes(self, page):
-        """默认 native：macOS 上保持正斜杠，但含空格/``=`` 必须已被引号保护。"""
+        """默认 native：保持当前平台自己的分隔符，但含空格/``=`` 必须已被引号保护。"""
         _, pg = page
         item = self._add_path_row(pg)
 
-        assert self._click_copy_button(pg, item) == '"' + self.RAW + '"'
+        assert self._click_copy_button(pg, item) == '"' + self.NATIVE + '"'
 
     def test_quote_never_config_disables_wrapping(self, page, monkeypatch):
         """PATH_COPY_QUOTE=never → 粘进 Excel 单元格时不带引号。"""
@@ -558,7 +567,7 @@ class TestFilePathCopy:
         monkeypatch.setattr(vid_mod, "PATH_COPY_QUOTE", "never")
         item = self._add_path_row(pg)
 
-        assert self._click_copy_button(pg, item) == self.RAW
+        assert self._click_copy_button(pg, item) == self.NATIVE
 
     def test_quote_always_wraps_a_clean_path(self, page, monkeypatch):
         """PATH_COPY_QUOTE=always → 无特殊字符也包引号（对齐 Explorer）。"""

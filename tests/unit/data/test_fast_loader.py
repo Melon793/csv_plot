@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -247,6 +249,37 @@ class TestEncodingFallbackChain:
         assert loader.encoding_used == "gb18030"
         assert loader.units["速度"] == "km/h"
         assert loader.datalength == 2
+
+    def test_misdetected_encoding_with_too_few_rows_is_retried(
+        self, tmp_path, monkeypatch
+    ):
+        """误判编码"解得开但行数不对"要继续回退，不能反过来说文件太短。
+
+        现场（Windows 实测）：CRLF 样本被嗅探成 utf_16_be 后 ``pd.read_csv``
+        并不抛错，3 行文件解成 1 行，最后报「文件至少需要2行」—— 把嗅探误判
+        说成了文件的问题。行数不足与解码失败同等处理：该编码不算数。
+        """
+        f = write_csv(
+            tmp_path / "crlf.csv",
+            header=["a", "b"], units=["-", "-"], rows=[[1, 2]],
+        )
+        data = Path(f).read_bytes().replace(b"1,2", b"1,\xc82")
+        Path(f).write_bytes(data.replace(b"\n", b"\r\n"))
+        monkeypatch.setattr(
+            "charset_normalizer.from_bytes", self._fake_detect("utf_16_be", 0.9)
+        )
+
+        loader = FastDataLoader(str(f), has_unit=True, sep=",")
+
+        assert loader.var_names == ["a", "b"]
+        assert loader.encoding_used != "utf_16_be"
+
+    def test_genuinely_short_file_still_says_so(self, tmp_path):
+        """真·短文件照旧报「文件至少需要2行」：加固不能把这条诊断吃掉。"""
+        f = write_csv(tmp_path / "one_line.csv", header=["a", "b"], units=None, rows=[])
+
+        with pytest.raises(ValueError, match="文件至少需要2行"):
+            FastDataLoader(str(f), has_unit=True, sep=",")
 
 
 class TestBadLineTolerance:
