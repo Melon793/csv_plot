@@ -180,6 +180,9 @@ def test_drawer_widens_for_the_font_and_tightens_back(loaded_window, qapp):
     那句预览要 540 px、抽屉只给 459 px（尾巴的「偏移量:0」被裁）。这里把预览
     行的字号调大，在本地把那一步真的跑一遍 —— 量的是"装不下就放宽、装得下就
     收口"这条规则，不是某个平台的像素值。
+
+    字号大到窗口都摆不下时，规则本身是"截到窗口宽为止"（全文另在 tooltip 里），
+    所以宽度断言按 min(需求, 上限) 取 —— 平台字体不同只决定谁先撞上限。
     """
     from src.ui import theme
 
@@ -195,9 +198,14 @@ def test_drawer_widens_for_the_font_and_tightens_back(loaded_window, qapp):
     drawer._refresh_preview()
     qapp.processEvents()
 
+    limit = drawer._preview_width_limit()
     assert drawer.width() > base, "预览行装不下，抽屉没放宽"
-    assert drawer.preview.width() >= drawer.preview.sizeHint().width(), "放宽了还裁字"
-    assert drawer.x() + drawer.width() <= bar_right, "放宽后越出了状态栏"
+    assert drawer.preview.width() >= min(drawer.preview.sizeHint().width(), limit), (
+        "放宽了还裁字（上限内必须给足，到顶才允许截断）"
+    )
+    assert drawer.mapToGlobal(QPoint(drawer.width(), 0)).x() <= bar_right, (
+        "放宽后越出了状态栏"
+    )
 
     drawer.preview.setStyleSheet(theme.result_text())
     drawer._refresh_preview()

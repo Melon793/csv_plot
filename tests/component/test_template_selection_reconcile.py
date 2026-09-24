@@ -13,11 +13,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
+import src.core.template_models as tm
 from src.core.plot_config import PlotConfig, PlotSessionConfig
 from src.core.template_manager import TemplateManager
 from src.ui.dialogs import template_manager_dialog as tmd
@@ -65,8 +68,23 @@ def _gated_buttons(dlg) -> tuple:
 
 
 @pytest.fixture()
-def three_templates(qapp, tmp_path):
-    """updated_at 倒序 → 视图行序为 c, b, a（最近更新的在顶部）。"""
+def three_templates(qapp, tmp_path, monkeypatch):
+    """updated_at 倒序 → 视图行序为 c, b, a（最近更新的在顶部）。
+
+    Windows 上 datetime.now() 的粒度约 15.6 ms，三次连续保存会盖出同一个
+    updated_at；sorted(reverse=True) 是稳定排序，并列时退回写入顺序 a/b/c，
+    行序整个翻转。把时钟换成每次 now() 前进一秒的替身，"谁更晚"就与平台无关。
+    """
+
+    class _TickingDatetime(datetime):
+        tick = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.tick += 1
+            return datetime(2026, 1, 1) + timedelta(seconds=cls.tick)
+
+    monkeypatch.setattr(tm, "datetime", _TickingDatetime)
     manager = TemplateManager(storage_path=tmp_path / "templates")
     ids = {}
     for name in ("a-top", "b-second", "c-third"):

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -220,11 +221,20 @@ class TestPidAlive:
         assert calls == [1234]
 
     def test_posix_branch_unchanged(self, monkeypatch):
-        # 非 win32 仍走 os.kill 信号 0（本用例进程自身必然存活）
+        """非 win32 仍走 os.kill 信号 0；被探查的 os 必须换替身。
+
+        真 os.kill 在 Windows 上不是存活探测而是 TerminateProcess（见
+        _dead_child_pid 的说明），测试机一旦是 Windows 就会把自己杀掉。
+        """
         monkeypatch.setattr(tcd.sys, "platform", "darwin")
+        monkeypatch.setattr(tcd, "os", SimpleNamespace(kill=lambda pid, sig: None))
         assert tcd._pid_alive(os.getpid()) is True
-        dead = _dead_child_pid()
-        assert tcd._pid_alive(dead) is False
+
+        def _raise(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(tcd, "os", SimpleNamespace(kill=_raise))
+        assert tcd._pid_alive(1234) is False
 
     def test_win32_alive_still_active(self, monkeypatch):
         fake = _FakeKernel32(open_result=4242, exit_code=259)
