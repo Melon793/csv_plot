@@ -36,6 +36,23 @@ PYPI_TO_IMPORT = {
     "typing-extensions": "typing_extensions",
 }
 
+# asammdf 的真实运行期依赖（不含 extras）。
+# 只有白名单内的包才会被 --include-* 强制打入，避免"环境中装了什么就打什么"。
+ASAMMDF_RUNTIME_DEPS = {
+    "canmatrix",
+    "chardet",
+    "deflate",
+    "isal",
+    "lxml",
+    "lz4",
+    "numexpr",
+    "numpy",
+    "pandas",
+    "python-dateutil",
+    "typing-extensions",
+    "zstd",
+}
+
 
 def _resolve_import_name(pkg_name):
     pkg_name = pkg_name.split("[")[0].strip()
@@ -43,6 +60,23 @@ def _resolve_import_name(pkg_name):
         return PYPI_TO_IMPORT[pkg_name]
     try_name = pkg_name.replace("-", "_")
     return try_name
+
+
+def _is_extra_requirement(req_line):
+    """判断 requirement 行是否被 extras 限定，例如 pyqtgraph>=0.13.4; extra == "gui"。
+
+    asammdf 的 extras（gui / export / export-matlab-v5 / plot / encryption /
+    filesystem / symbolic-math）都不是运行期必需依赖。把它们当作无条件依赖
+    会让 --include-package 把 pyqtgraph（含 examples/flowchart/opengl 等
+    非绘图子包，约 25 MB 目标代码）、matplotlib、scipy 等整体打进产物。
+    """
+    marker = req_line.partition(";")[2]
+    if not marker:
+        return False
+    # 只看第一个 "==" 之前的部分，可覆盖 "extra == ..." 与
+    # "python_version < ... or extra == ..." 两种写法，同时不会误判
+    # platform_machine 之类的环境标记。
+    return "extra" in marker.split("==")[0]
 
 
 def discover_asammdf_deps():
@@ -58,9 +92,17 @@ def discover_asammdf_deps():
     hidden_excludes = set()
 
     for req_line in raw_requires:
+        if _is_extra_requirement(req_line):
+            continue
+
         name = req_line.partition(";")[0].strip()
         pkg_name = name.partition(">=")[0].partition("<")[0].partition("==")[0].partition("~=")[0].strip()
         pkg_name = pkg_name.split("[")[0].strip()
+
+        if pkg_name not in ASAMMDF_RUNTIME_DEPS:
+            print(f"  [Build] 跳过非运行期依赖: {pkg_name}")
+            continue
+
         import_name = _resolve_import_name(pkg_name)
 
         if pkg_name in ("chardet", "numexpr", "numpy", "pandas"):
@@ -158,6 +200,83 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         "matplotlib",
         "pandas.tests",
         "asammdf",
+
+        # --- pyqtgraph 非绘图必需子包 ---
+        # 运行时已验证：这些子包在"加载 CSV/MDF/Excel + 主窗口"路径上均未被 import
+        # （console 仅在 pyqtgraph.dbg()/stack() 调试函数内导入，opengl 为已废弃
+        # 渲染方案遗留）。examples 约 25 MB 目标代码，是本项最大收益来源。
+        # 注意：multiprocess / imageview / exporters 会被 pyqtgraph 顶层或其控件
+        # 真实导入，不可排除。
+        # 另注意：排除 pyqtgraph.opengl 并不会解除对 PySide6.QtOpenGL 的依赖 ——
+        # graphicsItems/PlotCurveItem 与 Qt/OpenGLHelpers 仍会动态导入它，
+        # 故上面的 --include-module=PySide6.QtOpenGL* 不可删除。
+        "pyqtgraph.examples",
+        "pyqtgraph.flowchart",
+        "pyqtgraph.opengl",
+        "pyqtgraph.console",
+        "pyqtgraph.jupyter",
+
+        # --- canmatrix 仅保留类型与核心 ---
+        # asammdf 只在模块顶层用到 canmatrix / canmatrix.canmatrix.CanMatrix /
+        # canmatrix.formats（canmatrix/formats/__init__.py 会逐个尝试导入各格式，
+        # 失败被 try/except ImportError 吞掉，因此剔除后不会报错）。
+        # 本程序无 DBC/ARXML 加载入口，cli 与 tests 更无必要（cli 同时引入 click）。
+        "canmatrix.cli",
+        "canmatrix.tests",
+        "canmatrix.formats.arxml",
+        "canmatrix.formats.odx",
+        "canmatrix.formats.xlsx",
+        "canmatrix.formats.xls",
+        "canmatrix.formats.xls_common",
+        "canmatrix.formats.scapy",
+        "canmatrix.formats.wireshark",
+        "canmatrix.formats.fibex",
+        "canmatrix.formats.kcd",
+        "canmatrix.formats.ldf",
+        "canmatrix.formats.sym",
+        "canmatrix.formats.dbf",
+        "canmatrix.formats.eds",
+        "canmatrix.formats.yaml",
+
+        # --- lxml 仅保留 etree ---
+        # asammdf.serde 只使用 lxml.etree 解析 MDF 的 XML 块
+        "lxml.html",
+        "lxml.objectify",
+        "lxml.isoschematron",
+        "lxml.cssselect",
+        "lxml.sax",
+        "lxml.builder",
+        "lxml.usedoctest",
+        "lxml.doctestcompare",
+        "lxml.ElementInclude",
+        "lxml.includes",
+        "lxml.pyclasslookup",
+
+        # --- 测试与 CLI 入口 ---
+        "numexpr.tests",
+        "chardet.cli",
+        "chardet.__main__",
+        "dateutil.zoneinfo.rebuild",
+
+        # --- 仅被懒加载引用的标准库网络栈 ---
+        # 来源：src/core/logger.py 的 logging.handlers（smtplib/poplib/imaplib）、
+        # pandas.io.common 与 numpy.lib._datasource 的 urllib.request。
+        # 运行时已验证这些模块不会在应用启动/加载数据时被 import。
+        # 注意：libcrypto 由 _hashlib 使用，不可随 _ssl 一并移除。
+        # 注意：asyncio 不可排除 —— 惰性分支的 polars 在 import 期经
+        # polars.expr.categorical → typing_extensions.deprecated 触发
+        # `import asyncio.coroutines`，排除后 import polars 直接
+        # ModuleNotFoundError（实测表现为「parquet 转换失败，回退内存加载」）。
+        "ssl",
+        "ftplib",
+        "imaplib",
+        "poplib",
+        "smtplib",
+        "http",
+        "urllib.request",
+
+        # --- 仅因 extras 解析缺陷被强制打入（全项目无 import packaging） ---
+        "packaging",
     ]
 
     cmd = [sys.executable, "-m", "nuitka", "--standalone"]
@@ -180,35 +299,68 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         f"--report={REPORT_FILE}",
         f"--output-filename={OUTPUT_NAME}",
         "--enable-plugin=pyside6",
-        "--include-module=PySide6.QtOpenGL",
-        "--include-module=PySide6.QtOpenGLWidgets",
         "--include-package=src",
         "--include-module=src.ui.main_window",
         "--include-module=src.ui.widgets.plot_widget",
         "--include-module=src.core.curve_strategy",
-        "--include-package=numexpr",
+        # 阶段二 4.2.1：chardet / numexpr 仅需顶层入口，避免 --include-package 整包强打
+        # （chardet 各编码内存按需、numexpr.tests 已被 nofollow 排除）。
+        "--include-module=chardet",
+        "--include-module=chardet.universaldetector",
+        "--include-module=numexpr",
+        # 注：numexpr 是单模块包，evaluate 是包内函数名（不含独立子模块），
+        # 故仅保留 --include-module=numexpr，不再追加 *.evaluate（会 FATAL 找不到）。
         "--include-module=numpy",
         "--include-module=pandas",
         # polars 是 Rust 扩展：只给 include-package 可能漏掉扩展数据文件，
-        # 两条都要（D11）。[未验证] Windows 产物需公司电脑复核（R4）
+        # 两条都要（D11）；惰性 parquet 路径必需，Windows 产物已实测复核。
         "--include-package=polars",
         "--include-package-data=polars",
-        "--include-package=chardet",
         "--include-module=charset_normalizer",
         "--include-module=ujson",
+        # 必须显式 include：pyqtgraph 通过 importlib.import_module(f'{QT_LIB}.QtOpenGL')
+        # 动态加载这两个模块（Qt/OpenGLHelpers.py、graphicsItems/PlotCurveItem.py、
+        # widgets/RawImageWidget.py），Nuitka 静态分析发现不了。缺失时
+        # import pyqtgraph 直接 ModuleNotFoundError，程序无法启动。
+        "--include-module=PySide6.QtOpenGL",
+        "--include-module=PySide6.QtOpenGLWidgets",
         f"--include-data-dir={ASSETS_DIR}={ASSETS_DIR}",
         f"--include-data-file={README_FILE}={README_FILE}",
         "--include-data-file=docs/help.md=docs/help.md",
         "--include-data-file=docs/template.yaml=docs/template.yaml",
-        "--follow-imports",
+        # 阶段二 4.2.2：移除 --follow-imports。Nuitka 只按静态可判定的 import 递归收集，
+        # 可再省下 asyncio/http/ftplib/imaplib/poplib/smtplib/email/ssl 等约 382 个按懒加载
+        # 拉入的模块。项目内函数体 import（import openpyxl、chardet/detect、pd.read_excel 引擎）
+        # 仍为静态可见会被保留；唯一拼串导入 canmatrix.formats.* 已在 nofollow 排除且被
+        # try/except ImportError 包住，src 侧无别的 importlib 动态加载（已核验）。
+        # 注意：src 侧无动态 import 这一结论已在惰性分支复核（仅 __import__("PySide6")
+        # 与 importlib.metadata）；但「静态可见」不等于「运行期一定够用」，
+        # polars 的 asyncio 缺失就是反例，见 misc_excludes 中 asyncio 的注释。
         "--no-deployment-flag=excluded-module-usage",
+        # 剥离 docstring / assert 常量：pandas、pyqtgraph、numpy、openpyxl
+        # 的 docstring 体量极大，是 exe 体积的主要来源之一。
+        "--python-flag=no_docstrings",
+        "--python-flag=no_asserts",
         "--lto=yes",
         "--jobs=8",
         "--windows-console-mode=disable",
         f"--windows-icon-from-ico={ICON_FILE}",
     ]
 
+    # —— 阶段二 4.2.1：对只需顶层入口的依赖改用细粒度 include-module，替代 --include-package 整包 ——
+    # lxml：asammdf.serde 仅用 .etree 解析 MDF XML 块，只需 etree + _elementpath。
+    # chardet / numexpr 已在上面 cmd 硬编码区细化为 include-module。
+    # canmatrix 例外保留整包：canmatrix/__init__.py 顶层 `import canmatrix.formats`，
+    # 且 asammdf.mdf 顶层 `from canmatrix import CanMatrix`，format 装载按需 try/except；
+    # 改细粒度收益低、回归风险高。（其 cli/tests 及排除外的 formats 子项已由 nofollow 剔除。）
+    fine_grained_modules = {
+        "lxml": ["lxml.etree", "lxml._elementpath"],
+    }
     for pkg in include_packages:
+        if pkg in fine_grained_modules:
+            for _mod in fine_grained_modules[pkg]:
+                cmd.insert(-1, f"--include-module={_mod}")
+            continue
         cmd.insert(-1, f"--include-package={pkg}")
     for mod in include_modules:
         cmd.insert(-1, f"--include-module={mod}")
@@ -297,6 +449,7 @@ def _run_build():
     if asammdf_dst.exists():
         shutil.rmtree(asammdf_dst)
     shutil.copytree(asammdf_src, asammdf_dst)
+
     print("[Build] asammdf 复制完成")
 
     print("[Build] 正在将 asammdf 源码编译为 .pyc 字节码并清除 .py 源文件...")
