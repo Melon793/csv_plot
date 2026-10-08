@@ -28,6 +28,7 @@ from src.core.config import (
     BLF_TEXT_TRUNCATED,
     FILE_SIZE_LIMIT_BACKGROUND_LOADING,
     safe_qt_op,
+    widget_alive as _qt_alive,
 )
 from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
@@ -90,6 +91,9 @@ class FileLoaderManager(MainWindowBaseManager):
     _blf_auto_used = False
     _blf_force_dialog = False
     _blf_preset_db_paths = None
+    # F 路径（库与报文完全不通）暂存**已经扫完**的 loader：报文桶与数据库是解耦
+    # 的，重开对话框换库只需要重绑（毫秒级），不必把整文件再扫一遍。
+    _blf_pending_loader = None
 
     @staticmethod
     def load_dict(path: str, *, default=None) -> dict:
@@ -604,6 +608,13 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _force_unlock_all(self):
         """紧急解锁：确保所有退出路径都不会留下死锁"""
+        if self._live_mw() is None:
+            # 窗口正在销毁 → 原地收口，不去清曲线也不去解双锁：本函数由 3 s 兜底
+            # 定时器投递，落地时控件往往已经没了，摸下去只会在半途抛 RuntimeError，
+            # 把「解锁」这一语义切成做了一半（历史上正是「过一会儿曲线全消失」那类
+            # 事故的放大器）。窗口都没了，也就不需要这把锁了。
+            logger.info("紧急解锁已跳过：主窗口正在销毁")
+            return
         logger.warning(
             "[v5.8] _force_unlock_all 触发：正在清除曲线 + 强制解锁 "
             "(data_version=%d, safety_unlock_version=%d)",
@@ -626,6 +637,8 @@ class FileLoaderManager(MainWindowBaseManager):
         for container in getattr(self.mw, "plot_widgets", []):
             widget = getattr(container, "plot_widget", None)
             if widget:
+                if not _qt_alive(widget):
+                    continue
                 # v5.11: 紧急解锁时也要把 vline 加回 scene，否则后续 paint 不会绘制光标
                 self._reattach_vlines_to_scene(widget)
                 widget._is_updating_data = False
@@ -667,6 +680,12 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget = getattr(container, "plot_widget", None)
                 if not widget:
                     continue
+                if not _qt_alive(widget):
+                    # 窗口正在销毁时子控件先没。必须在这里就跳过：后面任何一次
+                    # RuntimeError 都会把 _is_loading_new_data 的复位挤进 except，
+                    # 而 except 里若再抛，锁就永久残留 —— 下一次点「导入」会被
+                    # 入口守卫直接吃掉（表现是按钮点不动）。
+                    continue
                 widget._is_updating_data = False
                 widget._cached_data_version = self.mw._data_version
                 widget.setUpdatesEnabled(True)
@@ -700,11 +719,19 @@ class FileLoaderManager(MainWindowBaseManager):
             )
         except Exception:
             logger.debug("_post_reload_ui_refresh 执行失败", exc_info=True)
-            self.mw._is_loading_new_data = False
+            # 兜底收尾本身也不得再抛：这里每步都用 safe_qt_op / 存活判断包一层，
+            # 否则第二次异常会把后面的复位一起带走（锁残留 = 界面永久卡住）。
+            timer = getattr(self, "_safety_timer", None)
+            if timer is not None:
+                safe_qt_op(timer.stop)
+            self._safety_timer = None
             self._safety_unlock_version = -1
-            self._stop_safety_timer()
+            mw = self._live_mw()
+            if mw is None:
+                return
+            mw._is_loading_new_data = False
             # v5.12: 异常路径也要恢复 reload 按钮
-            self.mw.reload_btn.setEnabled(True)
+            safe_qt_op(mw.reload_btn.setEnabled, True)
 
     def _refresh_curve_paint_path(self, widget):
         """v5.8 safety net：检测失效曲线并重建。
@@ -789,6 +816,20 @@ class FileLoaderManager(MainWindowBaseManager):
         finally:
             self._post_reload_cursor_refreshing = False
 
+    def _live_mw(self):
+        """返回 Python 引用与 C++ 对象**两侧**都还存活的 MainWindow，否则 ``None``。
+
+        收尾 / 延迟回调专用的存活判据：``self.mw`` 这个弱引用只探得到 Python 侧被
+        回收，而 ``close() → deleteLater()`` 之后包装器往往还活着、Python 属性照读
+        不误 —— 拿它当守卫会继续往下走并在第一个控件调用上抛 ``RuntimeError``
+        （子控件比窗口先没）。
+        """
+        try:
+            mw = self.mw
+        except RuntimeError:  # 弱引用已失效
+            return None
+        return mw if _qt_alive(mw) else None
+
     def load_csv_file(self, file_path: str):
         # 入口唯一规范化点：文件对话框、拖拽（Qt 会把 UNC 产出成 "//host/share"）、
         # 命令行位置参数、重新加载全部经这里，之后下游看到的都是当前平台的
@@ -810,19 +851,36 @@ class FileLoaderManager(MainWindowBaseManager):
 
         try:
             self._load_file(file_path)
-        except MemoryError:
-            QMessageBox.critical(
-                self.mw, "内存不足", "文件太大，内存不足。请尝试加载较小的文件。"
-            )
-            self._release_old_data()
-            self.mw.load_btn.setEnabled(True)
+        except MemoryError as e:
+            self._report_load_failure("内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
+            self._release_old_data_quietly(e, "内存不足退出")
         except Exception as e:
-            QMessageBox.critical(self.mw, "加载错误", f"加载文件时发生错误: {str(e)}")
-            self._release_old_data()
-            self.mw.load_btn.setEnabled(True)
+            self._report_load_failure("加载错误", f"加载文件时发生错误: {str(e)}")
+            self._release_old_data_quietly(e, "加载失败退出")
         finally:
-            self.mw.raise_()
-            self.mw.activateWindow()
+            mw = self._live_mw()
+            if mw is not None:
+                mw.raise_()
+                mw.activateWindow()
+
+    def _report_load_failure(self, title: str, text: str) -> None:
+        """失败弹窗：窗口正在销毁时静默跳过（此时弹窗只会阻塞退出流程）。"""
+        mw = self._live_mw()
+        if mw is None:
+            logger.info("加载失败弹窗已跳过（主窗口正在销毁）: %s", text)
+            return
+        QMessageBox.critical(mw, title, text)
+
+    def _release_old_data_quietly(self, exc: BaseException, stage: str) -> None:
+        """失败出口的清理 + 按钮恢复；主窗口已销毁时只记日志不抛。"""
+        logger.warning("%s: %s", stage, exc)
+        try:
+            self._release_old_data()
+        except Exception:
+            logger.debug("%s 清理旧数据失败", stage, exc_info=True)
+        mw = self._live_mw()
+        if mw is not None:
+            safe_qt_op(mw.load_btn.setEnabled, True)
 
     def set_button_status(self, status: bool):
         if status is not None:
@@ -1188,7 +1246,16 @@ class FileLoaderManager(MainWindowBaseManager):
             self._blf_force_dialog = False
             preset = getattr(self, "_blf_preset_db_paths", None) or remembered
             self._blf_preset_db_paths = None
-            return self._ask_can_databases(file_path, initial=preset)
+            paths = self._ask_can_databases(file_path, initial=preset)
+            if paths is not None and list(paths) == list(preset or []):
+                # 答案与上一轮逐个相同 → 报文没变、库也没变，结果必然还是 0 信号。
+                # 换库改成毫秒级重绑后，这一环不再被「整文件重扫」天然限速，同一份
+                # 错库会被快速提交成连环弹窗，所以这里直接收口：本轮按「未选库」
+                # 取消处理，回到导入前状态，要再试由用户主动点「导入」。
+                logger.info("CAN 数据库选择未变化，仍与 %s 的报文不匹配，已取消本轮导入",
+                            file_path)
+                return None
+            return paths
 
         if remembered and AppSettings().is_blf_auto_use_last():
             usable, bad = self._usable_db_paths(remembered)
@@ -1256,6 +1323,28 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _start_blf_load(self, file_path: str, db_paths, is_reload: bool = False):
         """§5.4：后台扫描 + 可量化进度 + **必须有取消按钮**。"""
+        pending = self._blf_pending_loader
+        if pending is not None:
+            # F 路径回环（上一轮扫完但 0 信号）：文件没变就复用已扫到的报文桶，只
+            # 重绑数据库。建线程反而会把同一个文件再扫一遍（分钟级 vs 毫秒级）。
+            self._blf_pending_loader = None
+            if pending.path == file_path:
+                try:
+                    pending.bind_databases(list(db_paths or []))
+                except Exception as e:
+                    logger.warning("复用已扫 BLF 重绑数据库失败，回落重新扫描: %s",
+                                   e, exc_info=True)
+                    self._discard_loader(pending)
+                else:
+                    # 代次沿用当前值：本轮虽然没起线程，但 _begin_data_reload 已经
+                    # 递增过版本，下面的取消/过期两道守卫照旧有效。传 -1 反而危险 ——
+                    # 它正是 _blf_cancelled_version 在「不带版本号的直接调用」下会
+                    # 取到的值，撞上就是结果被静默丢弃 + _is_loading_new_data 永久残留。
+                    self._on_blf_done(pending, file_path, self.mw._data_version,
+                                      is_reload)
+                    return
+            self._discard_loader(pending)
+
         name = os.path.basename(file_path)
         thread = DataLoadThread(file_path, db_paths=list(db_paths))
         # QThread 的 Python 包装器一丢最后一条强引用就当场析构 C++ 对象，Qt 直接
@@ -1387,7 +1476,11 @@ class FileLoaderManager(MainWindowBaseManager):
         if not new_loader.var_names:
             # F 路径：库与报文完全不通 → warning 后重开对话框，不进空数据态
             db_paths = list(getattr(new_loader, "db_paths", None) or [])
-            self._discard_loader(new_loader)
+            # 扫好的报文桶**不丢**：桶只按 (通道, CAN ID) 分，与数据库无关，下一轮
+            # 换库靠 bind_databases() 毫秒级重绑即可（与 §5.6「CAN 数据库…」按钮
+            # 同一条承诺）。此前在这里 close() 掉了整轮扫描成果，于是每一轮重试
+            # 都把整个文件重扫一遍（实测 655 万帧 9.16 s/轮 vs 重绑 3.7 ms）。
+            self._blf_pending_loader = new_loader
             # 与 G 路径同理：这轮导入根本没成立，没理由把用户原有的画布留空
             self._restore_curves_after_abort()
             self._end_data_reload()
@@ -1436,19 +1529,20 @@ class FileLoaderManager(MainWindowBaseManager):
         """F 路径重开导入：等上一轮 reload 生命周期完全收尾后再走。
 
         这是一条纯 ``QTimer`` 延迟回调链（``_schedule_delayed``，窗口销毁即自动
-        取消），而 ``mw`` 是弱引用 ——
-        重试期间窗口可能被回收（取属性直接抛 RuntimeError，且因为异常落在 Qt
-        事件循环里只会被 sys.excepthook 记成一条无人认领的日志），所以任何
-        一个退出口都必须把两个临时标志擦干净：否则下一次任意 BLF 导入会被
+        取消），而 ``mw`` 是弱引用 —— 重试期间窗口可能被销毁，所以任何一个退出口
+        都必须把两个临时标志擦干净：否则下一次任意 BLF 导入会被
         ``_blf_force_dialog`` 残留值强制弹窗（表现是「明明记住了数据库却还弹」）。
+
+        存活判据必须是 ``_live_mw()`` 而不是 ``getattr(self.mw, ...)``：后者读的是
+        Python 包装器上的属性，C++ 侧已经析构时照样返回旧值，守卫会放行到
+        ``load_csv_file`` 里再去碰按钮，抛一条无人认领的 RuntimeError。
         """
-        try:
-            still_loading = bool(getattr(self.mw, "_is_loading_new_data", False))
-        except RuntimeError:  # MainWindow 已被回收
+        mw = self._live_mw()
+        if mw is None:  # MainWindow 的 Python 引用或 C++ 对象已经没了
             self._give_up_blf_restart()
             logger.info("BLF 重开导入已中止：主窗口正在销毁")
             return
-        if not still_loading:
+        if not bool(getattr(mw, "_is_loading_new_data", False)):
             self.load_csv_file(file_path)
             return
         if attempt < 50:
@@ -1463,6 +1557,14 @@ class FileLoaderManager(MainWindowBaseManager):
         """放弃 F 路径重开时必须把两个标志复位（它们只对这一轮导入有意义）。"""
         self._blf_force_dialog = False
         self._blf_preset_db_paths = None
+        self._release_pending_blf_loader()
+
+    def _release_pending_blf_loader(self) -> None:
+        """丢弃 F 路径暂存的「已扫完但 0 信号」loader（它可能占几百 MB）。"""
+        pending = self._blf_pending_loader
+        self._blf_pending_loader = None
+        if pending is not None and pending is not getattr(self.mw, "loader", None):
+            self._discard_loader(pending)
 
     def _update_can_db_ui(self) -> None:
         """按当前数据源刷新 banner 三态与「CAN 数据库…」按钮（§5.3 / §5.6）。"""
@@ -1624,6 +1726,16 @@ class FileLoaderManager(MainWindowBaseManager):
                     except Exception:
                         logger.debug("释放旧 loader 内存时发生异常", exc_info=True)
                 self.mw.loader = None
+
+            # 4.5) F 路径暂存的「扫完但 0 信号」loader 同样属于旧数据
+            pending = self._blf_pending_loader
+            if pending is not None:
+                self._blf_pending_loader = None
+                if hasattr(pending, "close"):
+                    try:
+                        pending.close()
+                    except Exception:
+                        logger.debug("关闭暂存 BLF loader 失败", exc_info=True)
 
             # 5) 触发 GC — 把 numpy 数组真正归还给操作系统
             gc.collect()

@@ -985,18 +985,36 @@ class MainWindow(QMainWindow):
         它一起解引用 —— 线程还在跑时 Python 包装器归零即析构 C++ 对象，Qt 直接
         std::terminate（实测 SIGABRT）。BLF 扫描可取消且取消后刻意不 wait，
         所以「点取消 → 立即关窗口」是会踩到的路径。
+
+        BLF 还有一条独立的保活链：取消后仍在跑的旧线程挂在 FileLoaderManager
+        的 ``_blf_thread_refs`` 里（丢引用同样会走到 SIGABRT），一并 cancel/wait。
+        随后收掉扫描中的进度框（否则它作为独立顶层窗口留在屏幕上）与 F 路径
+        暂存的 loader（可能占着几百 MB）。
         """
-        thread = getattr(self, "_thread", None)
-        if thread is None:
+        threads = [getattr(self, "_thread", None)]
+        flm = getattr(self, "file_loader_manager", None)
+        threads.extend(getattr(flm, "_blf_thread_refs", None) or [])
+        for thread in threads:
+            if thread is None:
+                continue
+            try:
+                if thread.isRunning():
+                    if hasattr(thread, "request_cancel"):
+                        thread.request_cancel()
+                    if not thread.wait(3000):
+                        self._logger.warning("后台数据加载线程 3s 内未退出")
+            except (RuntimeError, TypeError):
+                self._logger.debug("收尾后台数据加载线程失败", exc_info=True)
+        if flm is None:
             return
         try:
-            if thread.isRunning():
-                if hasattr(thread, "request_cancel"):
-                    thread.request_cancel()
-                if not thread.wait(3000):
-                    self._logger.warning("后台数据加载线程 3s 内未退出")
+            flm._close_blf_progress()
         except (RuntimeError, TypeError):
-            self._logger.debug("收尾后台数据加载线程失败", exc_info=True)
+            self._logger.debug("关闭 BLF 扫描进度框失败", exc_info=True)
+        try:
+            flm._release_pending_blf_loader()
+        except (RuntimeError, TypeError):
+            self._logger.debug("释放暂存 BLF loader 失败", exc_info=True)
 
     def show_log_window(self):
         log_window = LogWindow.get_instance(self)

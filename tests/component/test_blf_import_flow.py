@@ -629,10 +629,65 @@ def test_path_f_warns_then_loops_straight_back_into_the_dialog(
     # 直接重开对话框（回到 B），而不是等用户再点一次导入
     _pump(150)
     assert len(dialogs["opened"]) == 1, "§5.1 的 F：warning 后自动重开选择框"
-    assert len(threads) == 2, "重开后必须真的再扫一轮"
     assert dialogs["opened"][0].rows, "重开的框要把上一轮的库预填进去（可就地改）"
     assert manager._blf_auto_used is False, "重新问过一轮的选择不能再标「自动使用」"
-    assert empty_loader._closed is True
+
+    # 答案与上一份完全相同时必须收口：报文没变、库也没变，再走一轮必然还是 0 信号，
+    # 而重绑已是毫秒级，没有「重扫天然限速」这道隐性保险了。
+    assert len(threads) == 1, "同一份错库不得再起第二轮扫描（快速空转 = 连环弹窗）"
+    assert host.loader is None, "收口后仍是「回到导入前」，不是空数据态"
+    assert manager._blf_pending_loader is empty_loader, "扫好的桶要留着给下一次换库"
+    assert empty_loader._closed is False, "桶还没用完，不能提前 close"
+
+
+def test_path_f_rebinds_the_same_buckets_without_rescanning(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """F 回环里换了库 → 复用上一轮扫好的报文桶，只重绑数据库（§5.6 同一条承诺）。
+
+    这是 P1 的行为契约：``_on_blf_done`` 的 0 信号分支过去会 ``close()`` 掉整轮
+    扫描成果，于是每一次重试都把整个文件重扫一遍（实测 655 万帧 9.16 s/轮 vs
+    重绑 3.7 ms）。现在必须证明「不再起线程、loader 身份不变、帧数不变、信号出来了」。
+    """
+    import src.ui.file_loader_manager as flm
+
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    unrelated = write_dbc(
+        tmp_path / "other.dbc",
+        [{
+            "name": "Unrelated", "can_id": 0x4C0, "size": 8, "cycle_ms": 20,
+            "sender": "X",
+            "signals": ({
+                "name": "Nothing", "start": 0, "size": 8, "order": "intel",
+                "factor": 1.0, "offset": 0.0, "minimum": 0.0,
+                "maximum": 255.0, "unit": "", "sweep": 5,
+            },),
+        }],
+    )
+    remembered([str(unrelated)])
+    monkeypatch.setattr(
+        flm.QMessageBox, "warning", staticmethod(lambda *a, **k: None)
+    )
+
+    manager.load_csv_file(str(blf))
+    empty_loader = _make_loader(blf, unrelated)
+    threads[0].emit_done(empty_loader)
+    frames_before = empty_loader.total_messages
+    buckets_before = len(empty_loader._buckets)
+
+    # 第二次打开时改成「能对上的那份库」，等价于用户在重开的框里换掉选择
+    dialogs["default_paths"] = [str(dbc)]
+    _pump(150)
+
+    assert len(dialogs["opened"]) == 1
+    assert len(threads) == 1, "换库只重绑，不该再起一条扫描线程"
+    assert host.loader is empty_loader, "装的必须还是同一份 loader（桶没重建）"
+    assert empty_loader.db_paths == [str(dbc)]
+    assert empty_loader.total_messages == frames_before
+    assert len(empty_loader._buckets) == buckets_before
+    assert empty_loader.var_names, "换成配对的库之后就该有信号了"
+    assert host.cursor_sync_manager.replots == [], "重绑成功的一轮不走「恢复原曲线」"
 
 
 def test_a_given_up_restart_clears_the_force_dialog_flags(blf_flow, tmp_path,
