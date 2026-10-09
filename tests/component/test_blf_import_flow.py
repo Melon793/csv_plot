@@ -871,4 +871,4 @@ def test_a_reload_of_a_non_blf_source_is_untouched(blf_flow, monkeypatch):
 
     manager._update_can_db_ui()
     assert host.can_db_banner.isHidden() is True
-    assert host.can_db_btn.isHidden() is True
+    assert host._can_segment.isHidden() is True

@@ -154,27 +154,74 @@ def test_importing_a_real_blf_yields_signals_through_the_ui(
     assert not dialog_stubs["warning"], "正常导入不该弹任何模态框"
 
 
-def test_the_left_panel_switches_to_can_database_mode(
+def test_the_can_segment_appears_with_the_source_and_opens_the_drawer(
     main_window, qapp, qtbot, dialog_stubs, can_dialogs, two_channel_pair
 ):
+    """§6.2/§6.3：常驻信息在状态栏 CAN 段里，细节与操作在段点开的抽屉里。
+
+    左栏那条 44px 横幅已整体撤走（§6.1）；这里钉住新锚点：非 BLF 时段与
+    分隔符一起隐藏、导入后出现，点段弹抽屉且 banner 是其固定头部行。
+    """
     mw = main_window
     blf, dbc = two_channel_pair
-    assert mw.can_db_banner.isHidden() is True
-    assert mw.can_db_btn.isHidden() is True
-    # R6：banner 开机就建好且插在过滤框之上，导入时只改显隐、不动布局
-    left_layout = mw.can_db_banner.parentWidget().layout()
-    assert left_layout.indexOf(mw.can_db_banner) < left_layout.indexOf(mw.filter_input)
-    slots_before = left_layout.count()
+    # 拉宽窗口：段可见性有宽度阈值（窄窗收纳），这里要的是"常态下可见"
+    mw.resize(1400, 800)
+    qapp.processEvents()
+    assert mw._can_segment.isHidden() is True, "非 BLF 数据源时段整组隐藏"
+    assert mw._can_segment_separator.isHidden() is True
+    assert mw._can_db_drawer.isHidden() is True, "开机只有一扇隐身抽屉"
+    assert mw.can_db_banner.window() is mw._can_db_drawer, "§6.4：banner 归属抽屉"
 
     _import(mw, qtbot, qapp, dialog_stubs, can_dialogs, blf, dbc)
 
-    assert left_layout.count() == slots_before, "导入 BLF 不得动态增删左栏控件"
-    assert mw.can_db_banner.isHidden() is False
-    assert mw.can_db_btn.isHidden() is False
+    assert mw._can_segment.isHidden() is False
+    assert mw._can_segment_separator.isHidden() is False
     # two-channel 的 7 个桶全在 dbc 里有定义 → 状态①（绿）
     assert mw.can_db_banner.state == "normal"
+    assert mw._can_segment.text() == (
+        f"CAN：1 库 · {mw.loader.database.signal_count} 信号"
+    )
     text = mw.can_db_banner.info_label.text()
     assert "1 个数据库" in text and "two-channel.dbc" in text
+
+    # 点段 → 抽屉贴状态栏打开，表里列出刚用的库
+    qtbot.mouseClick(mw._can_segment, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    drawer = mw._can_db_drawer
+    assert drawer.isHidden() is False
+    assert mw.can_db_banner.isHidden() is False, "banner 是抽屉里的固定头部行"
+    assert drawer.table.rowCount() == len(mw.loader.database.reports)
+    assert drawer.table.item(0, 1).text() == os.path.basename(str(dbc))
+    assert drawer.table.item(0, 2).text() == "DBC"
+    assert drawer.table.item(0, 4).text() == "✔ 已使用"
+
+
+def test_the_can_segment_is_folded_when_the_window_is_too_narrow(
+    main_window, qapp, qtbot, dialog_stubs, can_dialogs, two_channel_pair
+):
+    """§6.3：Qt 不会替我们收纳段 —— 窄窗下自行隐藏，宽窗下回来。
+
+    判据是显式求和的宽度阈值（始终含 CAN 段自身，避免显隐互相触发抖动），
+    所以这里用「最小宽度 + 一条顶到 elide 上限的长播报」制造真实拥挤。
+    """
+    mw = main_window
+    blf, dbc = two_channel_pair
+    mw.resize(1400, 800)
+    qapp.processEvents()
+    _import(mw, qtbot, qapp, dialog_stubs, can_dialogs, blf, dbc)
+    assert mw._can_segment.isHidden() is False, "前提：宽窗下段可见"
+
+    mw._broadcast("重载 " + "很长的现场播报文案，" * 12)
+    mw.resize(mw.minimumWidth(), 700)
+    qapp.processEvents()
+    assert mw.minimumWidth() >= 700, "窗口的最小宽度由主窗口自己定"
+    assert mw._can_segment.isHidden() is True, "窄窗先丢 CAN 段（不是硬裁文字）"
+    assert mw._can_segment_separator.isHidden() is True
+
+    mw.resize(1600, 800)
+    qapp.processEvents()
+    assert mw._can_segment.isHidden() is False, "宽回来段必须回来"
+    assert mw._can_segment.text().startswith("CAN：")
 
 
 def test_the_choice_is_remembered_for_the_next_blf(
@@ -340,6 +387,9 @@ def test_reselecting_pushes_the_new_units_into_the_plot_widgets(
     mw = main_window
     blf, dbc = write_blf_pair(tmp_path, n=30, buses=(0,))
     _import(mw, qtbot, qapp, dialog_stubs, can_dialogs, blf, dbc)
+    # 拉宽窗口：段可见性有宽度阈值，这里要保证点的到
+    mw.resize(1400, 800)
+    qapp.processEvents()
 
     loader = mw.loader
     frames_before = loader.total_messages
@@ -356,8 +406,13 @@ def test_reselecting_pushes_the_new_units_into_the_plot_widgets(
     can_dialogs["replace"] = True
     can_dialogs["paths"] = [str(alt)]
 
-    qtbot.mouseClick(mw.can_db_btn, Qt.MouseButton.LeftButton)
+    # 入口搬进抽屉（§6.5）：点段开抽屉 → 页脚「重选数据库…」
+    qtbot.mouseClick(mw._can_segment, Qt.MouseButton.LeftButton)
     qapp.processEvents()
+    assert mw._can_db_drawer.isHidden() is False, "先开抽屉"
+    qtbot.mouseClick(mw._can_db_drawer.reselect_btn, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert mw._can_db_drawer.isHidden() is True, "先收抽屉再开模态选库框"
 
     assert not dialog_stubs["critical"], dialog_stubs["critical"]
     assert mw.loader is loader, "换库只重绑数据库，不该重建 loader"

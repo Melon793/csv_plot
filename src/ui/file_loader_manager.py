@@ -1567,19 +1567,21 @@ class FileLoaderManager(MainWindowBaseManager):
             self._discard_loader(pending)
 
     def _update_can_db_ui(self) -> None:
-        """按当前数据源刷新 banner 三态与「CAN 数据库…」按钮（§5.3 / §5.6）。"""
+        """按当前数据源刷新状态栏 CAN 段与抽屉 banner 三态（§6.3）。
+
+        段是常驻信息（不点也看得见三态），抽屉是细节与操作；两者由这一处
+        同源驱动 —— 段文案与 banner 两行文案必须出自同一组数字，否则会出现
+        「段上写 3 库、抽屉里列 4 行」。段放不放得下交给宽度阈值（收纳在
+        ``MainWindow._apply_can_segment_fit``），这里只管写文案。
+        """
         banner = getattr(self.mw, "can_db_banner", None)
-        button = getattr(self.mw, "can_db_btn", None)
         loader = getattr(self.mw, "loader", None)
         if banner is None:
             return
         if not self._is_blf_source():
             banner.hide_banner()
-            if button is not None:
-                button.setVisible(False)
+            self.mw._update_can_segment("")
             return
-        if button is not None:
-            button.setVisible(True)
 
         database = loader.database
         db_names = [os.path.basename(p) for p in database.source_files]
@@ -1592,21 +1594,28 @@ class FileLoaderManager(MainWindowBaseManager):
                 db_count=len(db_names), db_names=db_names,
                 auto_used=auto_used,
             )
-            return
-        unmatched = len(getattr(loader, "unmatched_ids", None) or [])
-        if unmatched:
-            banner.show_unmatched(
-                unmatched_count=unmatched, db_count=len(db_names),
-                frame_count=database.frame_count,
-                signal_count=database.signal_count, db_names=db_names,
-                auto_used=auto_used,
+            seg_text = (
+                f"CAN：仅前 {loader.total_messages:,}（上限 {BLF_MAX_MESSAGES:,}）"
             )
         else:
-            banner.show_normal(
-                db_count=len(db_names), frame_count=database.frame_count,
-                signal_count=database.signal_count, db_names=db_names,
-                auto_used=auto_used,
-            )
+            unmatched = len(getattr(loader, "unmatched_ids", None) or [])
+            if unmatched:
+                banner.show_unmatched(
+                    unmatched_count=unmatched, db_count=len(db_names),
+                    frame_count=database.frame_count,
+                    signal_count=database.signal_count, db_names=db_names,
+                    auto_used=auto_used,
+                )
+                seg_text = f"CAN：{len(db_names)} 库 · {unmatched} 个 ID 未匹配"
+            else:
+                banner.show_normal(
+                    db_count=len(db_names), frame_count=database.frame_count,
+                    signal_count=database.signal_count, db_names=db_names,
+                    auto_used=auto_used,
+                )
+                seg_text = f"CAN：{len(db_names)} 库 · {database.signal_count} 信号"
+        # tooltip 给 banner 两行全文（含库名清单），段被宽度收纳时仍有出口
+        self.mw._update_can_segment(seg_text, tip=banner.info_label.text())
 
     def reselect_can_database(self) -> None:
         """§5.6：重选 DBC / ARXML。原始 payload 与数据库解耦，**不重扫报文**，

@@ -5,7 +5,8 @@
 * 三态（正常 / 截断 / 有未匹配）的配色、文案与按钮组合
 * 未匹配数是「常驻横幅 + 链接」而不是模态框（§5.1 的非阻塞原则）
 * 长文件名 elide、``hide_banner`` 只隐不删（R6：避免 splitter 抖动）
-* ``_update_can_db_ui`` 按 ``LOADER_TYPE`` 同步 banner 与按钮显隐
+* ``_update_can_db_ui`` 按 ``LOADER_TYPE`` 同步 banner 三态与 CAN 段显隐
+  （段文案与 banner 同源：段写摘要、banner 两行全文进 tooltip）
 * ``show_can_unmatched`` 打开详情表并把「重选」回传
 * ``reselect_can_database`` 重绑后清统计缓存、刷新变量列表、**不重扫报文**
 """
@@ -204,7 +205,7 @@ def blf_pair(tmp_path):
     return blf, dbc
 
 
-def test_a_non_blf_source_hides_both_the_banner_and_the_button(blf_flow):
+def test_a_non_blf_source_hides_the_banner_and_the_segment(blf_flow):
     host, manager, _threads = blf_flow
 
     class _CsvLike:
@@ -213,7 +214,8 @@ def test_a_non_blf_source_hides_both_the_banner_and_the_button(blf_flow):
     host.loader = _CsvLike()
     manager._update_can_db_ui()
     assert host.can_db_banner.isHidden() is True
-    assert host.can_db_btn.isHidden() is True
+    assert host._can_segment.isHidden() is True
+    assert host._can_segment.text() == ""
 
 
 def test_no_loader_at_all_is_not_a_crash(blf_flow):
@@ -233,8 +235,11 @@ def test_a_blf_with_unmatched_ids_lands_on_the_orange_state(blf_flow, blf_pair):
         assert loader.unmatched_ids, "样本必须留一个库里没有的 ID"
         assert host.can_db_banner.state == "unmatched"
         assert host.can_db_banner.isHidden() is False
-        assert host.can_db_btn.isHidden() is False, "§5.3：banner 与按钮同步显隐"
         n = len(loader.unmatched_ids)
+        assert host._can_segment.isHidden() is False, "§6.3：段与 banner 同步显隐"
+        assert f"{n} 个 ID 未匹配" in host._can_segment.text()
+        # tooltip 是 banner 两行全文（含库名清单）的稳定出口
+        assert host._can_segment.toolTip() == host.can_db_banner.info_label.text()
         assert f"{n} 个报文 ID 未在数据库中定义" in _label(host.can_db_banner)
         assert os.path.basename(str(dbc)) in _label(host.can_db_banner)
     finally:
@@ -249,6 +254,11 @@ def test_a_matching_database_flips_the_banner_back_to_green(blf_flow, tmp_path):
         host.loader = loader
         manager._update_can_db_ui()
         assert host.can_db_banner.state == "normal"
+        # 状态①段文案：库数 · 信号数（数字与 banner 同一只 database 出的）
+        assert host._can_segment.isHidden() is False
+        assert host._can_segment.text() == (
+            f"CAN：1 库 · {loader.database.signal_count} 信号"
+        )
     finally:
         loader.close()
 
@@ -264,6 +274,9 @@ def test_the_truncated_state_wins_over_unmatched(blf_flow, tmp_path):
         manager._update_can_db_ui()
         assert host.can_db_banner.state == "truncated"
         assert f"{BLF_MAX_MESSAGES:,}" in _label(host.can_db_banner)
+        # 状态②段文案带扫描量（千分位），不报库数/信号数 —— 那两个数已不完整
+        assert "仅前" in host._can_segment.text()
+        assert f"{loader.total_messages:,}" in host._can_segment.text()
     finally:
         loader.close()
 
@@ -507,27 +520,27 @@ def test_cancelling_the_reselect_dialog_changes_nothing(blf_flow, blf_pair,
         loader.close()
 
 
-def test_the_banner_is_built_once_and_inserted_above_the_filter(qapp):
-    """R6：banner 一开机就建好，只靠显隐切换。
+def test_the_banner_lives_in_the_drawer_and_survives_state_changes(blf_flow):
+    """R6 改锚点（§6.4）：banner 不再是左栏过滤框之上的一条，而是抽屉的固定头部行。
 
-    动态 addWidget/removeWidget 会让左列 splitter 在每次导入 BLF 时跳
-    一下高度；这里拿「banner + 一个过滤框」的最小布局把这个约束钉住：
-    位置在过滤框之上、切换三态不增删控件、也不改自身固定高。
-    真实 MainWindow 左侧栏的同项结构断言见 e2e 冒烟。
+    约束不变：一开机就建好、归属稳定、切换三态不增删控件、也不改自身固定高。
+    「点外面就关」的是抽屉（Popup）；收着时 ``_update_can_db_ui`` 照常刷三态
+    —— ``isHidden()`` 只看显式隐藏，不受父层收起影响。
     """
-    from PySide6.QtWidgets import QVBoxLayout, QLineEdit
+    host, _manager, _threads = blf_flow
+    banner = host.can_db_banner
+    drawer = host._can_db_drawer
+    # 归属错了的两种形态（浮在桌面的彩条 / 挂在 mw 但没入布局）都靠这一条钉住
+    assert banner.window() is drawer, "banner 必须从构造起就是抽屉子控件"
+    assert drawer.isHidden() is True, "开机只有一扇隐身抽屉，不许桌面上多一层窗"
+    assert banner.height() == BLF_BANNER_HEIGHT
 
-    left = QWidget()
-    layout = QVBoxLayout(left)
-    b = CanDbBanner(left)
-    layout.addWidget(b)
-    filter_input = QLineEdit(left)
-    layout.addWidget(filter_input)
-    assert layout.indexOf(b) == 0 < layout.indexOf(filter_input)
-    assert b.height() == BLF_BANNER_HEIGHT
-    widgets_before = layout.count()
-    height_before = b.height()
-    b.show_normal(db_count=1, frame_count=1, signal_count=1, db_names=["a.dbc"])
-    b.hide_banner()
-    assert layout.count() == widgets_before, "显隐不得增删控件"
-    assert b.height() == height_before
+    children_before = len(drawer.findChildren(QWidget))
+    banner.show_normal(db_count=1, frame_count=1, signal_count=1, db_names=["a.dbc"])
+    banner.show_unmatched(
+        unmatched_count=2, db_count=1, frame_count=1, signal_count=1,
+        db_names=["a.dbc"],
+    )
+    banner.hide_banner()
+    assert len(drawer.findChildren(QWidget)) == children_before, "显隐不得增删控件"
+    assert banner.height() == BLF_BANNER_HEIGHT

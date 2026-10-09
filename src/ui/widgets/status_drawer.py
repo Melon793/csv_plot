@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -29,16 +30,23 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from src.core.config import (
+    BLF_DB_COLOR_ERROR,
+    BLF_DB_COLOR_OK,
+    BLF_DB_COLOR_WARN,
+    BLF_DB_COL_WIDTHS,
     PATH_COPY_QUOTE,
     PATH_COPY_STYLE,
     STATUS_DRAWER_EDGE_MARGIN,
@@ -53,6 +61,7 @@ from src.core.logger import get_logger
 from src.data.file_info import KEY_FILE_NAME, KEY_FOLDER, build_file_rows
 from src.data.var_info import ROW_KEY_FILE_PATH
 from src.ui import theme
+from src.ui.widgets.can_db_banner import CanDbBanner
 from src.utils.paths import format_for_copy
 
 logger = get_logger(__name__)
@@ -809,3 +818,148 @@ class XAxisDrawer(StatusDrawer):
             getattr(mw, "_factor_default", 1.0), getattr(mw, "_offset_default", 0.0)
         )
         self._on_apply()
+
+
+#: 库清单最多整行露出的条数，更多交给表格内部滚动条（抽屉有 140px 高度下限）
+_CAN_TABLE_MAX_ROWS = 6
+
+
+def _can_db_status(report) -> tuple[str, str]:
+    """``DbFileReport`` → (状态文字, 颜色)。
+
+    词汇沿用选库框（✔ 已加载 / ⚠ 无 CAN 报文 / ✖ 解析失败），但这里的"成功"
+    语义是「正在被使用」：能进这张表的库都已经绑在 loader 上了。
+    """
+    if report.ok and report.frame_count > 0:
+        return "✔ 已使用", BLF_DB_COLOR_OK
+    if report.ok:
+        return "⚠ 无 CAN 报文", BLF_DB_COLOR_WARN
+    reason = (report.error or "未知错误").splitlines()[0]
+    return f"✖ 解析失败: {reason[:48]}", BLF_DB_COLOR_ERROR
+
+
+class CanDbDrawer(StatusDrawer):
+    """CAN 段抽屉：数据库清单 + 「重选数据库…」，banner 作固定头部行（§6）。
+
+    与另两扇抽屉的**有意差异**：``open_for()`` 不重建 body。``set_body()``
+    第一件事是把旧 body 的子控件 ``deleteLater()``（见基类注释），而 banner
+    是主窗口 ``can_db_banner`` 的稳定引用（``_update_can_db_ui`` 与测试都直接
+    摸它），重建一次它就成了死包装器，再调 ``show_*()`` 直接 RuntimeError。
+    抽屉结构固定（一行状态 + 一张表 + 页脚）、只有内容变，所以 body 在
+    ``__init__`` 里建一次，之后 ``_refresh()`` 就地改。
+
+    banner 的**可见性由 ``_update_can_db_ui()`` 独占驱动**，与抽屉开合无关：
+    父层收起时子控件 ``isHidden()`` 仍为 False（Qt 语义），收着时照常
+    ``show_*()`` 才能让「换了库但状态条没更新」这类断言继续有效。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.banner = CanDbBanner(self)
+        self._build()
+        # banner 的两个入口（「重选…」/ 未匹配链接与「查看」）都先收抽屉再开
+        # 模态框：Popup 盖在模态窗上的焦点问题见 §6.4。
+        self.banner.reselect_requested.connect(self._on_reselect)
+        self.banner.view_unmatched_requested.connect(self._on_view_unmatched)
+
+    # -- 打开 ---------------------------------------------------------------
+
+    def open_for(self, mw) -> bool:
+        """刷新库清单表后贴状态栏打开；banner 三态不在这里碰（见类注释）。"""
+        self._refresh(mw)
+        return self.open_above(mw.statusBar())
+
+    # -- 构建 ---------------------------------------------------------------
+
+    def _build(self) -> None:
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["优先级", "文件", "类型", "报文数 / 信号数", "状态"]
+        )
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, BLF_DB_COL_WIDTHS["priority"])
+        self.table.setColumnWidth(2, BLF_DB_COL_WIDTHS["type"])
+        self.table.setColumnWidth(3, BLF_DB_COL_WIDTHS["counts"])
+        self.table.setColumnWidth(4, BLF_DB_COL_WIDTHS["status"])
+        self._fit_table_height(0)
+
+        self.reselect_btn = self._chip(
+            "重选数据库…", "重新指定 DBC / ARXML（无需重新扫描报文）"
+        )
+        self.reselect_btn.clicked.connect(self._on_reselect)
+
+        body = QWidget()
+        outer = QVBoxLayout(body)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        outer.addWidget(self.banner)
+        outer.addWidget(self.table)
+        outer.addWidget(
+            self._footer("换库只重绑数据库，不重新扫描报文", actions=[self.reselect_btn])
+        )
+        self.set_body(body)
+
+    def _fit_table_height(self, rows: int) -> None:
+        """表高按内容：最多露出 `_CAN_TABLE_MAX_ROWS` 行，其余走内部滚动条。"""
+        header_h = self.table.horizontalHeader().sizeHint().height()
+        row_h = self.table.verticalHeader().defaultSectionSize()
+        shown = max(1, min(rows, _CAN_TABLE_MAX_ROWS))
+        self.table.setFixedHeight(header_h + shown * row_h + 2)
+
+    # -- 刷新 ---------------------------------------------------------------
+
+    def _refresh(self, mw) -> None:
+        loader = getattr(mw, "loader", None)
+        database = getattr(loader, "database", None)
+        reports = list(getattr(database, "reports", None) or [])
+        # 局部 import：canmatrix 别借道启动期（抽屉是开机即建的）
+        from src.data.can_database import import_type_for
+
+        self.table.setRowCount(len(reports))
+        for r, report in enumerate(reports):
+            text, color = _can_db_status(report)
+            cells = (
+                str(r + 1),
+                os.path.basename(report.path),
+                (import_type_for(report.path) or "?").upper(),
+                f"{report.frame_count} / {report.signal_count}",
+                text,
+            )
+            for c, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                if c == 0:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 1:
+                    item.setToolTip(report.path)
+                if c == 4:
+                    item.setForeground(QColor(color))
+                    item.setToolTip(report.error or report.warning or text)
+                self.table.setItem(r, c, item)
+        self._fit_table_height(len(reports))
+
+    # -- 动作 ---------------------------------------------------------------
+
+    def _on_reselect(self) -> None:
+        """页脚与 banner 「重选…」共用的入口。"""
+        self._forward("reselect_can_database")
+
+    def _on_view_unmatched(self) -> None:
+        """banner 的「查看」/未匹配链接：先收抽屉（Popup 不能压模态框）。"""
+        self._forward("show_can_unmatched")
+
+    def _forward(self, manager_method: str) -> None:
+        """先收抽屉，再把动作交给 file_loader_manager 的对应入口。"""
+        mw = self._mw()
+        if mw is None:
+            return
+        mw._close_status_drawers()
+        manager = getattr(mw, "file_loader_manager", None)
+        if manager is not None:
+            getattr(manager, manager_method)()

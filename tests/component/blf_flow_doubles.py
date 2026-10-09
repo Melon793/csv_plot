@@ -5,8 +5,8 @@
 机械会连带摸到布局管理器、绘图容器、游标同步、表格对话框等十几个对象。
 本模块把两侧切开：
 
-* :class:`BlfFlowHost` —— 真实 Qt 控件组成的最小宿主（banner/按钮必须是
-  真控件，否则显隐断言没有意义）；
+* :class:`BlfFlowHost` —— 真实 Qt 控件组成的最小宿主（banner 必须是真控件，
+  且从构造起就是 ``CanDbDrawer`` 的子控件 —— 归属错了显隐断言就没有意义）；
 * :class:`BlfFlowManager` —— 只替换掉与 BLF 决策无关的通用 reload 步骤，
   BLF 自身的 A/B/C/F/G 路径一行不改地跑真代码；
 * :class:`FakeLoadThread` —— 顶掉后台线程，让用例自己决定何时「扫完 /
@@ -20,10 +20,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QMainWindow, QPushButton
+from PySide6.QtWidgets import QLabel, QMainWindow, QPushButton
 
 from src.ui.file_loader_manager import FileLoaderManager
-from src.ui.widgets.can_db_banner import CanDbBanner
+from src.ui.widgets.status_drawer import CanDbDrawer
 
 #: 左栏按钮行里 ``set_button_status()`` 会逐个 setEnabled 的按钮
 _STATUS_BUTTONS = (
@@ -69,8 +69,18 @@ class BlfFlowHost(QMainWindow):
         self.loader = None
         self.load_btn = QPushButton("导入数据文件", self)
         self.reload_btn = QPushButton("重载", self)
-        self.can_db_btn = QPushButton("CAN 数据库…", self)
-        self.can_db_banner = CanDbBanner(self)
+        # 与真窗口同构（§6.4）：banner 必须从构造起就是抽屉的子控件，
+        # 否则显隐断言测不出「桌面上浮一条彩条」那种形态。宿主不建状态栏，
+        # 段用真 QLabel 顶替（真段是 _StatusSegment，只多 hover 底色）。
+        self._can_db_drawer = CanDbDrawer(self)
+        self.can_db_banner = self._can_db_drawer.banner
+        self._can_segment = QLabel("CAN：—", self)
+        self._can_segment.hide()
+        # 状态栏要在 show() 之前建：QMainWindow 只为「已建过」的栏跑布局，
+        # 晚建的栏几何停在默认值 (0,0,100,30)，抽屉 open_above 会误判放不下
+        self.statusBar()
+        #: 抽屉侧的被调流水：``_close_status_drawers`` 与它转发到的动作
+        self.drawer_events: list = []
         for name in _STATUS_BUTTONS:
             setattr(self, name, QPushButton(name, self))
         self.list_widget = RecordingListWidget()
@@ -93,6 +103,19 @@ class BlfFlowHost(QMainWindow):
 
     def end_load_feedback(self, hint: str = "", level: str = "info"):
         self.feedback_calls.append(("end", hint, level))
+
+    # --- 状态栏 CAN 段 / 抽屉：真窗口的对应实现见 main_window.py -----------
+
+    def _update_can_segment(self, text: str, tip: str = "") -> None:
+        """真实现还带宽度收纳；宿主没有状态栏，显隐只由文案是否为空决定。"""
+        self._can_segment.setText(text)
+        self._can_segment.setToolTip(tip)
+        self._can_segment.setVisible(bool(text))
+
+    def _close_status_drawers(self, keep=None) -> None:
+        self.drawer_events.append("close_drawers")
+        if self._can_db_drawer is not keep:
+            self._can_db_drawer.hide()
 
 
 class BlfFlowManager(FileLoaderManager):
@@ -229,6 +252,8 @@ def blf_flow_host(qapp):
     host = BlfFlowHost()
     manager = BlfFlowManager(host)
     manager._kept_alive = host  # 基类用弱引用持宿主，测试里得自己留一手
+    # 抽屉的动作转发顺着 mw.file_loader_manager 找落点（与真窗口同名）
+    host.file_loader_manager = manager
     threads: list[FakeLoadThread] = []
 
     def _factory(file_path, parent=None, db_paths=None, **kwargs):

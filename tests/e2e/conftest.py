@@ -17,7 +17,7 @@ import traceback
 import pytest
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 # 已知的清理期竞态异常（非功能缺陷）：加载链路会调度
 # QTimer.singleShot 延迟回调（如 _post_reload_ui_refresh），窗口关闭/
@@ -121,15 +121,45 @@ def main_window(qapp, app_settings, dialog_stubs, monkeypatch, qtbot):
     构造前重置 sys.argv（防止 pytest 参数进入 _handle_cli_args），
     收尾 close() 触发正常退出路径（closeEvent → 自动保存/清理）。
     """
-    monkeypatch.setattr("sys.argv", ["csv_plot_e2e"])
+    mw = _build_main_window(monkeypatch, qtbot, ["csv_plot_e2e"])
+    yield mw
+    _teardown_main_window(mw, qapp, qtbot, monkeypatch)
+
+
+@pytest.fixture()
+def cli_window(qapp, app_settings, dialog_stubs, monkeypatch, qtbot, tmp_path):
+    """以「argv 带数据文件路径」构造的 MainWindow（模拟双击文件/命令行打开）。
+
+    钉构造次序（§6.4）：_handle_cli_args 在 ``__init__`` 内就会走 load_csv_file
+    → _apply_loader → _update_can_db_ui，这条链上要摸 CAN 段与抽屉 —— 晚建一步
+    这轮刷新就打在缺的属性上（静默不更新或直接崩），所以这里用真窗口走一遍。
+    """
+    from tests.fixtures.data_factory import make_simple_rows, write_csv
+
+    csv = write_csv(
+        tmp_path / "cli_demo.csv",
+        header=["time", "speed", "rpm", "flag"],
+        units=["s", "km/h", "rpm", "-"],
+        rows=make_simple_rows(20),
+    )
+    mw = _build_main_window(monkeypatch, qtbot, ["csv_plot_cli", str(csv)])
+    yield mw
+    _teardown_main_window(mw, qapp, qtbot, monkeypatch)
+
+
+def _build_main_window(monkeypatch, qtbot, argv):
+    monkeypatch.setattr("sys.argv", argv)
 
     from src.ui.main_window import MainWindow
 
     mw = MainWindow()
     qtbot.addWidget(mw)
     mw.show()
-    qapp.processEvents()
-    yield mw
+    QApplication.processEvents()
+    return mw
+
+
+def _teardown_main_window(mw, qapp, qtbot, monkeypatch):
     # 收尾窗口才安装竞态过滤器（仅覆盖清理期，测试体内的真实异常照常上报）：
     # 先向 monkeypatch 注册还原点（恢复原钩子，不泄漏到后续用例），再包装。
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
