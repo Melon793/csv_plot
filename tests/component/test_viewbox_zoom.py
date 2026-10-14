@@ -7,15 +7,17 @@
 - Shift+左键框选放大（含 10% margin、过小框忽略）
 - 双击中键清除单个图表
 
-事件一律基于控件自身坐标构造（不依赖绝对屏幕坐标），
-QWheelEvent/QMouseEvent 手工构造后直接调用对应事件方法。
+事件基于控件自身坐标构造，QWheelEvent/QMouseEvent 手工构造后直接调用对应事件方法；
+多列 / 同列不等宽两类宿主拓扑（``zoom_group``）例外——它们要靠子图的屏幕几何错开
+才能测到 XLink 锚点问题，断言口径用「缩放前后同一像素处的数据值漂移（px）」。
 """
 
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from src.core.config import FACTOR_SCROLL_ZOOM
 
@@ -280,47 +282,167 @@ def test_wheel_zoom_on_linked_child_keeps_y_autorange(plot_factory, qapp):
     assert child.view_box.viewRange()[0][1] - child.view_box.viewRange()[0][0] < 99
 
 
-class _FakeVB:
-    """ViewBox 替身：只提供 _map_x_to_viewbox 用到的 screenGeometry / viewRect"""
+class _NoopLayoutManager:
+    """宿主 layout_manager 替身：覆盖绘图/滚轮路径上会被查询的少数成员（均 no-op）"""
 
-    def __init__(self, global_left: int, global_width: int,
-                 view_left: float, view_width: float):
-        self._geom = QRect(global_left, 0, global_width, 100)
-        self._rect = QRectF(view_left, 0.0, view_width, 1.0)
+    def request_mark_stats_refresh(self, immediate: bool = False):
+        pass
 
-    def screenGeometry(self):
-        return self._geom
+    def _hide_drag_indicator_for_plot(self, pw):
+        pass
 
-    def viewRect(self):
-        return self._rect
+    def _show_drag_indicator_for_plot(self, pw, var_names, text=None):
+        pass
 
-
-def test_map_x_to_viewbox_across_unequal_geometry(shown_plot):
-    """锚点换算：按屏幕像素把子图视图 x 映射到 XLink 源视图坐标"""
-    am = shown_plot._axis_manager
-    # 源：屏幕 [0,100) 显示视图 [0,10]；子图：屏幕 [50,150) 显示视图 [100,120]
-    src = _FakeVB(0, 100, 0.0, 10.0)
-    child = _FakeVB(50, 100, 100.0, 20.0)
-
-    # 子图视图 105 → 屏内 25% → 全局 x=75 → 源屏内 75% → 源视图 7.5
-    assert am._map_x_to_viewbox(child, src, 105.0) == pytest.approx(7.5)
-    # 线性对应（子图右边缘在屏幕上也超出源，故 120 映射到 15 而非 10）
-    assert am._map_x_to_viewbox(child, src, 100.0) == pytest.approx(5.0)
-    assert am._map_x_to_viewbox(child, src, 120.0) == pytest.approx(15.0)
-    # 几何完全重合时映射应等价于恒等
-    same = _FakeVB(0, 100, 0.0, 10.0)
-    assert am._map_x_to_viewbox(same, src, 3.25) == pytest.approx(3.25)
+    def _get_plot_container(self, pw):
+        return None
 
 
-def test_map_x_to_viewbox_degrades_on_zero_width_geometry(shown_plot):
-    """几何未就绪（宽度 0）时退化为原值，而不是抛除零或返回垃圾坐标"""
-    am = shown_plot._axis_manager
-    src = _FakeVB(0, 100, 0.0, 10.0)
-    zero_view = _FakeVB(0, 100, 0.0, 0.0)
-    zero_screen = _FakeVB(0, 0, 0.0, 10.0)
+class _ZoomHost(QWidget):
+    """XLink 组宿主：把多张真实子图装进同一个布局，让它们的屏幕几何真的错开。
 
-    assert am._map_x_to_viewbox(zero_view, src, 5.0) == 5.0
-    assert am._map_x_to_viewbox(src, zero_screen, 5.0) == 5.0
+    ``plot_factory`` 给每个 plot 各自一个 FakeHost（独立顶层窗口），offscreen 下二者
+    ``screenGeometry().left()`` 相同 → 跨列类缺陷在该拓扑里天然测不到，故本文件自建。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.layout_manager = _NoopLayoutManager()
+
+
+@pytest.fixture()
+def zoom_group(qapp, plot_factory):
+    """按拓扑建一组 XLink 子图，收尾删宿主。
+
+    arrange="row" → 水平并排（跨列；pyqtgraph 走「整段复制」，两侧范围数值相同）
+    arrange="col" → 垂直堆叠（同列；``left_margin`` 把第 2 张右移，造出「像素对齐」分支）
+    """
+    hosts = []
+
+    def _make(arrange: str, n: int, left_margin: int = 0):
+        host = _ZoomHost()
+        lay = QHBoxLayout(host) if arrange == "row" else QVBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        hosts.append(host)
+
+        df = pd.DataFrame({"a": [float(i) for i in range(100)]})
+        pws = []
+        for i in range(n):
+            pw = plot_factory(df)
+            assert pw.plot_variable("a")
+            pw.setParent(host)
+            pws.append(pw)
+            if arrange == "col" and i == 1 and left_margin:
+                wrap = QWidget()
+                wl = QHBoxLayout(wrap)
+                wl.setContentsMargins(left_margin, 0, 0, 0)
+                wl.setSpacing(0)
+                wl.addWidget(pw)
+                lay.addWidget(wrap)
+            else:
+                lay.addWidget(pw)
+
+        host.resize(1600, 900)
+        host.show()
+        qapp.processEvents()
+
+        # 与生产同序：先关掉各图 X autoRange 再建链。子视图 X autoRange 为 True 时
+        # ``ViewBox.linkView``（0.14.0 :1054-1059）不回调，整组停在「两侧范围不等」的
+        # 非一致态，后面的锚点断言就失去前提。
+        for pw in pws:
+            pw.view_box.enableAutoRange(x=False)
+        pws[0].view_box.setXRange(1, 100, padding=0)
+        for pw in pws[1:]:
+            pw.view_box.setXLink(pws[0].view_box)
+        qapp.processEvents()
+        pws[0].view_box.setXRange(1, 100, padding=0)
+        qapp.processEvents()
+        return host, pws
+
+    yield _make
+
+    for host in hosts:
+        host.deleteLater()
+    qapp.processEvents()
+
+
+def _anchor_drift_px(pw, local: QPoint, x_before: float) -> float:
+    """滚轮缩放后，鼠标所在像素对应的数据值偏了多少 px（0 = 鼠标点被钉住）。
+
+    口径必须是像素漂移，不能用「与源逐位一致的范围」：后者在不等宽/非一致态下天然不成立。
+    """
+    vb = pw.view_box
+    x_after = vb.mapSceneToView(pw.mapToScene(local)).x()
+    lo, hi = vb.viewRange()[0]
+    return (x_after - x_before) * vb.screenGeometry().width() / (hi - lo)
+
+
+def test_wheel_zoom_anchor_pixel_stable_across_columns(qapp, zoom_group):
+    """跨列并排：在第 2 列滚轮，鼠标像素处的数据值不得漂移。
+
+    回归的是「把锚点按屏幕像素映射到 XLink 源视图」的缺陷 —— 跨列时 pyqtgraph 走
+    整段复制（两侧 viewRange 数值相同），那次映射把两列之间的水平距离折进了缩放中心，
+    实测把锚点推到视野外（偏 1 个多视宽），画面每齿缩放都整体横滑。
+    """
+    _host, (master, col2) = zoom_group("row", 2)
+    # 前提：两列屏幕 left 必须不同，否则退化成同列拓扑、测不到本缺陷
+    gap = col2.view_box.screenGeometry().left() - master.view_box.screenGeometry().left()
+    assert gap > 50, f"宿主拓扑未错开列：left gap={gap}"
+    assert col2.view_box.viewRange()[0] == pytest.approx(
+        master.view_box.viewRange()[0], abs=1e-6
+    )
+
+    local = QPoint(int(col2.width() * 0.30), int(col2.height() * 0.5))
+    x_before = col2.view_box.mapSceneToView(col2.mapToScene(local)).x()
+
+    col2.wheelEvent(_wheel_event(col2, local, 120))
+    qapp.processEvents()
+
+    assert abs(_anchor_drift_px(col2, local, x_before)) < 0.01
+    lo, hi = col2.view_box.viewRange()[0]
+    assert hi - lo < 99, "滚轮未缩放"
+
+
+def test_wheel_zoom_anchor_pixel_stable_on_three_columns(qapp, zoom_group):
+    """3 列并排：每一列的滚轮都钉住鼠标点（缺陷在旧实现里按列序线性放大）。"""
+    _host, pws = zoom_group("row", 3)
+    for pw in pws[1:]:
+        local = QPoint(int(pw.width() * 0.35), int(pw.height() * 0.5))
+        x_before = pw.view_box.mapSceneToView(pw.mapToScene(local)).x()
+
+        pw.wheelEvent(_wheel_event(pw, local, 120))
+        qapp.processEvents()
+
+        assert abs(_anchor_drift_px(pw, local, x_before)) < 0.01, (
+            f"列 {pws.index(pw) + 1} 滚轮锚点漂移"
+        )
+
+
+def test_wheel_zoom_anchor_pixel_stable_on_unequal_width_stack(qapp, zoom_group):
+    """同列上下两张、第 2 张视窗被右移（pyqtgraph 像素对齐分支）：不回归。
+
+    该分支下「按屏幕像素映射锚点」与「不映射」数学上给出同一结果（同一像素在两视图里
+    本就是同一数据值），所以删掉换算不影响这一形态 —— 这条用例就是钉这个结论的。
+    """
+    _host, (master, child) = zoom_group("col", 2, left_margin=80)
+    # 前提：真的落在像素对齐分支（两侧 viewRange 数值不同）
+    assert child.view_box.viewRange()[0] != pytest.approx(
+        master.view_box.viewRange()[0], abs=1e-3
+    ), "宿主未造出不等宽的像素对齐态，用例失去意义"
+
+    local = QPoint(int(child.width() * 0.30), int(child.height() * 0.5))
+    x_before = child.view_box.mapSceneToView(child.mapToScene(local)).x()
+
+    child.wheelEvent(_wheel_event(child, local, 120))
+    qapp.processEvents()
+
+    assert abs(_anchor_drift_px(child, local, x_before)) < 0.01
+    lo, hi = child.view_box.viewRange()[0]
+    assert hi - lo < (
+        master.view_box.viewRange()[0][1] - master.view_box.viewRange()[0][0]
+    ) + 1e-6, "整组未按同一比例缩放"
+
 
 
 def test_set_xrange_from_linked_child_writes_link_source(plot_factory, qapp):
