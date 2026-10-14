@@ -240,39 +240,29 @@ class AxisManager:
         linked = vb.linkedView(0)
         return vb if linked is None else linked
 
-    def _map_x_to_viewbox(
-        self, vb: pg.ViewBox, target: pg.ViewBox, x: float
-    ) -> float:
-        """把 ``vb`` 视图坐标 x 换算成 ``target`` 的视图坐标，按屏幕像素对齐。
-
-        各子图是各自独立的 GraphicsLayoutWidget（scene 不共用），因此不能走
-        mapToScene；这里用 ``screenGeometry`` + ``viewRect`` 做线性映射，与
-        pyqtgraph ``linkedViewChanged`` 的 XLink 像素映射同源。
-        """
-        own = vb.screenGeometry()
-        dest = target.screenGeometry()
-        src_rect = vb.viewRect()
-        dst_rect = target.viewRect()
-        if own is None or dest is None:
-            return x
-        if min(own.width(), dest.width(), src_rect.width(), dst_rect.width()) <= 0:
-            return x
-        frac = (x - src_rect.left()) / src_rect.width()
-        global_x = own.left() + frac * own.width()
-        return dst_rect.left() + (global_x - dest.left()) * dst_rect.width() / dest.width()
-
     def zoom_x(self, factor: float, center_x: float) -> None:
         """以 center_x 为中心把 X 轴缩放 factor 倍，且不触碰 Y 轴 autoRange。
 
         pyqtgraph 的 ViewBox.scaleBy 会经 setRange 同时关掉两轴 autoRange，
         导致 Ctrl+Y 开启的「Y 跟随可见段」在一次滚轮后被静默废除。
+
+        ``center_x`` 是鼠标所在子视图的视图坐标，而缩放写入的是 XLink 源视图，
+        两者**不需要换算**：XLink 的两种一致态都保证「同一屏幕像素对应同一数据值」。
+
+        - 整段复制（``linkedViewChanged`` 里两视图屏幕重叠不足较小视宽 1/3 的分支，
+          多列并排即此形态）：子视图 range 直接取源 range，数值相同。
+        - 像素对齐（重叠充分，同列不等宽即此形态）：``子_left = 源_left + dx·upp``，
+          而 ``upp = 源视图宽 / 源视图像素宽`` 每轮随源范围宽度重算，缩放后的平移量
+          按同一比例缩小，联立「鼠标像素不动」解得锚点就是鼠标处的数据值本身。
+
+        这里曾按 ``screenGeometry`` 做过一次像素映射，在两种一致态下它都退化为恒等
+        （白做），却在跨列并排时把两列之间的水平距离折进锚点，把缩放中心推出视野
+        （现象：第 2 列滚轮不以鼠标为中心），故整体移除。两侧范围关系被打破的非一致态
+        （建链时子视图 X autoRange 为 True 则 ``linkView`` 不回调、切布局、框选之后）
+        里没有 ``upp`` 可依，任何映射都只能给出任意值，同样按恒等处理。
         """
         vb = self.pw.view_box
         target = self._xlink_target(vb)
-        if target is not vb:
-            # center_x 是鼠标所在子图的视图坐标，而缩放写进的是 XLink 源；
-            # 不换算锚点的话，跨列/不等宽时缩放中心会按像素映射整体偏移。
-            center_x = self._map_x_to_viewbox(vb, target, center_x)
         left, right = target.viewRange()[0]
         with y_autorange_preserved(target):
             self.set_xrange_with_link_handling(
