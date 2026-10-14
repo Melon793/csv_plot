@@ -107,7 +107,7 @@ FILE_SIZE_LIMIT_BACKGROUND_LOADING = (
 )
 RATIO_RESET_PLOTS = 0.3  # 重置plot比例，超过此比例时，重置plot
 FROZEN_VIEW_WIDTH_DEFAULT = 180  # 冻结视图宽度，默认值为180px
-XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # xRange宽度阈值（考虑factor后），小于此值显示symbols（细线+symbol），否则粗线无symbol
+XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # 可见点数阈值：估算可见点数（x轴宽度×采样密度）小于此值显示symbols（细线+symbol），否则粗线无symbol
 BLINK_PULSE = 200
 FACTOR_SCROLL_ZOOM = 0.3
 MIN_INDEX_LENGTH = 3  # 每个plot，至少显示MIN_INDEX_LENGTH个点

@@ -1181,10 +1181,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """应用绘图样式 → 委托到 MultiCurveManager"""
         self._multi_curve_manager._apply_plot_style(show_symbols)
 
-    def _calculate_visible_points(self, range):
-        """计算当前可见范围的点数估算 → 委托到 PlotUIManager"""
-        return self._plot_ui_manager._calculate_visible_points(self, range)
-
     def update_plot_style(self, view_box, range, rect=None):
         """更新绘图样式 → 委托到 PlotUIManager"""
         self._plot_ui_manager.update_plot_style(self, view_box, range, rect)
