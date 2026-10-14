@@ -3,9 +3,8 @@
 这里管的是**决策与恢复**，不是解码（``test_blf_loader.py``）也不是控件外观
 （``test_can_db_selector.py`` / ``test_can_db_banner.py``）：
 
-* A：有记忆且 ``BLF_AUTO_USE_LAST`` 为真、文件全能解 → **不弹窗**直接扫，
-  banner 说明「已自动使用上次数据库」
-* B：首次导入 → 弹一次选择框，导入成功后写记忆
+* B（每次新导入）：**一律弹窗**（不允许静默解析），上次记忆的库列表只作为
+  预选项；导入成功后按复选框写/清记忆
 * C：记忆命中但文件缺失 → 弹同一个框并给出黄条
 * F：扫完 0 个信号 → warning 后**直接重开对话框**（回到 B），不进空数据态
 * G：取消 → 静默恢复原数据与按钮，不弹错误框，迟到的扫描结果被丢弃
@@ -27,7 +26,6 @@ import pytest
 from PySide6.QtWidgets import QDialog, QPushButton, QProgressDialog
 
 from src.core.config import (
-    BLF_TEXT_AUTO_USED,
     BLF_TEXT_NO_SIGNAL,
     BLF_TEXT_TRUNCATED,
 )
@@ -52,13 +50,11 @@ def _pump(ms: int = 60) -> None:
 def remembered(app_settings):
     """擦干净 BLF 记忆键，返回一个「写入记忆」的小助手。"""
 
-    def _set(paths, auto_use=True):
+    def _set(paths):
         app_settings.set_blf_last_db_paths([])
-        app_settings.set_blf_auto_use_last(False)
         app_settings._settings.sync()
         if paths is not None:
             app_settings.set_blf_last_db_paths(paths)
-        app_settings.set_blf_auto_use_last(bool(auto_use))
         app_settings._settings.sync()
         return app_settings
 
@@ -99,7 +95,7 @@ def dialogs(monkeypatch):
 
 
 def _reject_on_sight(monkeypatch) -> list:
-    """A 路径的守卫：真弹了框就记下，但不阻塞 offscreen。"""
+    """守卫「不该弹框」的场景（重载 / 收口路径）：真弹了框就记下。"""
     boom = []
 
     def fake_exec(self, *args, **kwargs):
@@ -127,40 +123,38 @@ def _cancel_btn(dialog: QProgressDialog) -> QPushButton:
 
 
 # ---------------------------------------------------------------------------
-# A：记忆命中，不弹窗
+# B：每次新导入都弹窗，记忆只作预选
 # ---------------------------------------------------------------------------
 
-def test_path_a_skips_the_dialog_and_says_it_used_the_remembered_set(
-    blf_flow, tmp_path, remembered, monkeypatch
+def test_a_new_import_always_asks_but_preselects_the_remembered_set(
+    blf_flow, tmp_path, remembered, dialogs
 ):
+    """不允许静默导入：有记忆也必须弹窗确认，扫描在用户点「导入」后才启动。"""
     host, manager, threads = blf_flow
-    boom = _reject_on_sight(monkeypatch)
     blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
-    remembered([str(dbc)], auto_use=True)
+    remembered([str(dbc)])
 
     manager.load_csv_file(str(blf))
 
-    assert boom == [], "A 路径的前提就是不弹窗，弹了就必须改代码或改测试"
+    assert len(dialogs["opened"]) == 1, "不允许静默导入：有记忆也要弹窗确认"
+    dlg = dialogs["opened"][0]
+    assert [r.path for r in dlg.rows] == [str(dbc)], "记忆列表要预选进弹窗"
     assert len(threads) == 1
     assert threads[0].db_paths == [str(dbc)]
     assert threads[0].started == 1, "BLF 必须真的把后台线程跑起来"
-    assert manager._blf_auto_used is True
 
     loader = _make_loader(blf, dbc)
     threads[0].emit_done(loader)
     assert host.loader is loader
     assert host.can_db_banner.isHidden() is False
-    # 未匹配是常态，而 A 路径的来源说明必须与三态正交（§5.1 + §5.3）
     assert host.can_db_banner.state == "unmatched"
-    assert BLF_TEXT_AUTO_USED in host.can_db_banner.info_label.text()
 
 
-def test_path_a_still_forces_the_background_thread_for_a_tiny_file(
-    blf_flow, tmp_path, remembered, monkeypatch
+def test_the_dialog_flow_still_forces_the_background_thread_for_a_tiny_file(
+    blf_flow, tmp_path, remembered, dialogs
 ):
     """§5.4「BLF 一律异步」：2 KB 的样本也不该走同步分支。"""
     host, manager, threads = blf_flow
-    _reject_on_sight(monkeypatch)
     blf, dbc = write_blf_pair(tmp_path, n=4, buses=(0,))
     remembered([str(dbc)])
     manager._load_sync = lambda *a, **k: pytest.fail("BLF 不该走同步加载")
@@ -176,7 +170,8 @@ def test_path_a_still_forces_the_background_thread_for_a_tiny_file(
 # ---------------------------------------------------------------------------
 
 def test_the_progress_dialog_is_quantitative_and_cancellable(blf_flow, tmp_path,
-                                                            remembered):
+                                                             remembered,
+                                                             dialogs):
     host, manager, threads = blf_flow
     blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
     remembered([str(dbc)])
@@ -210,7 +205,7 @@ def test_progress_updates_arrive_even_without_a_dialog(blf_flow, tmp_path):
 
 
 def test_closing_the_progress_dialog_is_not_a_cancel(blf_flow, tmp_path,
-                                                    remembered):
+                                                     remembered, dialogs):
     """回归守卫：Qt 的 ``QProgressDialog.close()`` 也会 emit ``canceled()``。
 
     不先收线再关闭的话，每份成功扫完的 BLF 都会在 ``_on_blf_done`` 里
@@ -249,10 +244,8 @@ def test_path_b_first_import_asks_once_and_remembers_the_choice(
     dlg = dialogs["opened"][0]
     # 副标题必须报出正在导入的是哪个数据文件（§5.2 第二行）
     assert blf.name in dlg.subtitle.text()
-    assert manager._blf_auto_used is False, "弹窗选出来的不算「自动使用」"
     assert threads[0].db_paths == [str(dbc)]
     assert AppSettings().get_blf_last_db_paths() == [str(dbc)]
-    assert AppSettings().is_blf_auto_use_last() is True
 
 
 def test_path_g_cancelling_the_dialog_aborts_before_any_scan(
@@ -277,7 +270,7 @@ def test_path_g_cancelling_the_dialog_aborts_before_any_scan(
 
 
 def test_cancelling_mid_scan_is_silent_and_drops_the_late_result(
-    blf_flow, tmp_path, remembered, monkeypatch
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
 ):
     import src.ui.file_loader_manager as flm
 
@@ -320,7 +313,7 @@ def test_cancelling_mid_scan_is_silent_and_drops_the_late_result(
 
 
 def test_a_second_cancel_click_does_not_replay_the_restore(
-    blf_flow, tmp_path, remembered
+    blf_flow, tmp_path, remembered, dialogs
 ):
     """取消按钮会被连点：恢复逻辑必须幂等。"""
     host, manager, threads = blf_flow
@@ -341,7 +334,7 @@ def test_a_second_cancel_click_does_not_replay_the_restore(
 
 
 def test_cancelling_repaints_the_curves_that_were_there_before(
-    blf_flow, tmp_path, remembered
+    blf_flow, tmp_path, remembered, dialogs
 ):
     """§5.1 的 G：「恢复原数据」含曲线。
 
@@ -364,7 +357,7 @@ def test_cancelling_repaints_the_curves_that_were_there_before(
 
 
 def test_cancelling_a_first_import_does_not_try_to_repaint_an_empty_canvas(
-    blf_flow, tmp_path, remembered
+    blf_flow, tmp_path, remembered, dialogs
 ):
     """没有任何数据源时不去重绘：重建全靠 loader.var_names，拿不到就直返。"""
     host, manager, _threads = blf_flow
@@ -410,11 +403,11 @@ def test_path_f_gives_the_canvas_back_too(blf_flow, tmp_path, remembered,
 
     assert host.cursor_sync_manager.replots == [{"skip_pin_reset": True}]
     assert host.loader is loader, "F 后的数据源仍是导入前那一份"
-    assert len(dialogs["opened"]) == 1, "重开选择框的回环不能被曲线恢复抢跑"
+    assert len(dialogs["opened"]) == 2, "重开选择框的回环不能被曲线恢复抢跑"
 
 
 def test_a_late_cancel_from_the_previous_scan_does_not_abort_the_new_one(
-    blf_flow, tmp_path, remembered
+    blf_flow, tmp_path, remembered, dialogs
 ):
     """取消标记必须按**代次**记：一个全局布尔会被旧线程迟到的信号误杀新导入。
 
@@ -446,7 +439,7 @@ def test_a_late_cancel_from_the_previous_scan_does_not_abort_the_new_one(
 
 
 def test_a_still_running_previous_thread_is_kept_alive(blf_flow, tmp_path,
-                                                      remembered):
+                                                       remembered, dialogs):
     """B-1（SIGSEGV/SIGABRT 级别）：覆盖 ``mw._thread`` 前必须保住还在跑的旧线程。
 
     PySide6 里运行中的 QThread 一丢最后一条强引用就当场析构 C++ 对象：
@@ -498,7 +491,7 @@ class _HeldRealThread(DataLoadThread):
 
 
 def test_a_cancelled_but_still_running_thread_survives_a_real_reload(
-    blf_flow, tmp_path, remembered, monkeypatch
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
 ):
     """B-1 的确定性版本：用真 QThread 把「覆盖时旧线程仍在跑」固定下来。
 
@@ -556,7 +549,7 @@ def test_path_c_a_missing_remembered_file_reopens_the_same_dialog_with_a_notice(
     host, manager, threads = blf_flow
     blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
     gone = str(tmp_path / "old_fota.dbc")
-    remembered([gone, str(dbc)], auto_use=True)
+    remembered([gone, str(dbc)])
     dialogs["default_paths"] = [str(dbc)]
 
     manager.load_csv_file(str(blf))
@@ -566,7 +559,6 @@ def test_path_c_a_missing_remembered_file_reopens_the_same_dialog_with_a_notice(
     assert dlg.notice.isVisibleTo(dlg) is True
     assert "old_fota.dbc" in dlg.notice.text()
     assert threads[0].db_paths == [str(dbc)]
-    assert manager._blf_auto_used is False, "被用户重新确认过，就不算自动使用"
 
 
 def test_an_expired_memory_falls_back_to_a_plain_first_import(
@@ -618,7 +610,8 @@ def test_path_f_warns_then_loops_straight_back_into_the_dialog(
     )
 
     manager.load_csv_file(str(blf))
-    assert len(threads) == 1 and len(dialogs["opened"]) == 0, "A 路径不该弹窗"
+    assert len(threads) == 1 and len(dialogs["opened"]) == 1, \
+        "不允许静默导入：弹窗确认后才扫描"
     empty_loader = _make_loader(blf, unrelated)
     assert empty_loader.var_names == [], "样本本身要先成立：库与报文完全不通"
     threads[0].emit_done(empty_loader)
@@ -628,9 +621,8 @@ def test_path_f_warns_then_loops_straight_back_into_the_dialog(
 
     # 直接重开对话框（回到 B），而不是等用户再点一次导入
     _pump(150)
-    assert len(dialogs["opened"]) == 1, "§5.1 的 F：warning 后自动重开选择框"
-    assert dialogs["opened"][0].rows, "重开的框要把上一轮的库预填进去（可就地改）"
-    assert manager._blf_auto_used is False, "重新问过一轮的选择不能再标「自动使用」"
+    assert len(dialogs["opened"]) == 2, "§5.1 的 F：warning 后自动重开选择框"
+    assert dialogs["opened"][-1].rows, "重开的框要把上一轮的库预填进去（可就地改）"
 
     # 答案与上一份完全相同时必须收口：报文没变、库也没变，再走一轮必然还是 0 信号，
     # 而重绑已是毫秒级，没有「重扫天然限速」这道隐性保险了。
@@ -680,7 +672,7 @@ def test_path_f_rebinds_the_same_buckets_without_rescanning(
     dialogs["default_paths"] = [str(dbc)]
     _pump(150)
 
-    assert len(dialogs["opened"]) == 1
+    assert len(dialogs["opened"]) == 2, "第一次导入 + F 重开各一次"
     assert len(threads) == 1, "换库只重绑，不该再起一条扫描线程"
     assert host.loader is empty_loader, "装的必须还是同一份 loader（桶没重建）"
     assert empty_loader.db_paths == [str(dbc)]
@@ -727,13 +719,13 @@ def test_a_given_up_restart_clears_the_force_dialog_flags(blf_flow, tmp_path,
 
     assert manager._blf_force_dialog is False
     assert manager._blf_preset_db_paths is None
-    assert dialogs["opened"] == [], "放弃的那几轮不该偷偷弹过框"
+    assert len(dialogs["opened"]) == 1, "放弃的那几轮不该偷偷再弹框（首弹来自本次导入）"
 
-    # 下一次普通导入必须回到 A 路径
+    # 下一次普通导入回到「弹窗预选」的正常流程
     host._is_loading_new_data = False
     manager.load_csv_file(str(blf))
     assert len(threads) == 2
-    assert dialogs["opened"] == [], "残留标志会把 A 路径变成强制弹窗"
+    assert len(dialogs["opened"]) == 2, "每次新导入都该弹窗预选"
 
 
 # ---------------------------------------------------------------------------
@@ -741,7 +733,7 @@ def test_a_given_up_restart_clears_the_force_dialog_flags(blf_flow, tmp_path,
 # ---------------------------------------------------------------------------
 
 def test_a_background_failure_shows_one_critical_box_and_restores(
-    blf_flow, tmp_path, remembered, monkeypatch
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
 ):
     import src.ui.file_loader_manager as flm
 
@@ -764,7 +756,7 @@ def test_a_background_failure_shows_one_critical_box_and_restores(
 
 
 def test_a_truncated_scan_warns_but_still_loads_the_scanned_part(
-    blf_flow, tmp_path, remembered, monkeypatch
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
 ):
     """§5.8：截断要说明白，但不能因此把已经扫好的数据丢掉。"""
     import src.ui.file_loader_manager as flm
@@ -789,7 +781,8 @@ def test_a_truncated_scan_warns_but_still_loads_the_scanned_part(
 
 
 def test_a_scan_result_from_a_stale_generation_is_discarded(blf_flow, tmp_path,
-                                                           remembered):
+                                                            remembered,
+                                                            dialogs):
     """数据版本号是防污染的最后一道闸：过期结果绝不能换进 UI。"""
     host, manager, threads = blf_flow
     blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
@@ -822,7 +815,6 @@ def test_a_reload_reuses_the_loaders_databases_without_asking(blf_flow, tmp_path
 
     assert boom == [], "§5.1：重载永远复用上次 db_paths"
     assert threads[0].db_paths == [str(dbc)]
-    assert manager._blf_auto_used is False, "重载不是「新导入」，别打自动使用的标签"
     loader.close()
 
 

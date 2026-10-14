@@ -27,7 +27,6 @@ from src.core.config import (
     BLF_BANNER_STYLE_TRUNCATED,
     BLF_BANNER_STYLE_UNMATCHED,
     BLF_MAX_MESSAGES,
-    BLF_TEXT_AUTO_USED,
 )
 from src.data.blf_loader import BLFLazyLoader
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
@@ -101,12 +100,6 @@ def test_state_one_is_green_and_lists_every_loaded_database(banner):
     # 全命中时不给「查看」入口，但「重选…」始终在（§5.6）
     assert banner.view_btn.isHidden() is True
     assert banner.reselect_btn.isHidden() is False
-
-
-def test_the_auto_used_variant_says_so_on_the_same_green_line(banner):
-    banner.show_normal(db_count=1, frame_count=3, signal_count=9,
-                       db_names=["a.dbc"], auto_used=True)
-    assert BLF_TEXT_AUTO_USED in _label(banner)
 
 
 def test_state_two_is_amber_and_quotes_both_the_limit_and_the_scanned_count(banner):

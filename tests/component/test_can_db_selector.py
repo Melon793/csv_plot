@@ -8,7 +8,8 @@
 * 列表顺序即优先级：↑/↓ 调序真的会换掉 first-match-wins 的赢家
 * 拖入非 ``.dbc`` / ``.arxml`` 被拒
 * 记忆命中但文件缺失（§5.1 的 C 路径）：标红 + 顶部黄条
-* 「导入」后写 ``BLF_LAST_DB_PATHS`` / ``BLF_AUTO_USE_LAST``；「取消」不写
+* 「导入」后勾选记忆则写 ``BLF_LAST_DB_PATHS``（不勾则清空）；「取消」不写
+* 后台预扫（不允许静默导入后的匹配度增强）：命中列回填 + 未编辑时按命中排序
 * §5.2 的尺寸与列宽规格（项目规范：UI 容器需显式设置尺寸）
 
 统一用合成 DBC：``canmatrix`` 的 DBC 导入器是逐行正则，垃圾文本会「解析成功
@@ -43,7 +44,12 @@ from src.core.settings import AppSettings
 from src.data.can_database import CanDatabaseSet
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
 from src.ui.file_loader_manager import FileLoaderManager
-from tests.fixtures.data_factory import write_arxml, write_dbc
+from tests.fixtures.data_factory import (
+    CAN_FRAMES,
+    write_arxml,
+    write_blf_pair,
+    write_dbc,
+)
 
 # 保活容器：offscreen 下手工构造的 QMimeData 不受 Qt 事件系统接管，局部变量
 # 被 GC 后事件里访问 mimeData 会 SIGSEGV（tests/README.md 陷阱 #2）
@@ -92,7 +98,7 @@ def _cell(dialog, row, col) -> str:
 
 
 def _status_color(dialog, row) -> str:
-    return dialog.table.item(row, 5).foreground().color().name()
+    return dialog.table.item(row, 6).foreground().color().name()
 
 
 def _import_btn(dialog):
@@ -113,8 +119,9 @@ def test_the_dialog_keeps_the_specified_sizes(qapp, dbc_a):
     assert dlg.table.columnWidth(0) == BLF_DB_COL_WIDTHS["priority"]
     assert dlg.table.columnWidth(2) == BLF_DB_COL_WIDTHS["type"]
     assert dlg.table.columnWidth(3) == BLF_DB_COL_WIDTHS["counts"]
-    assert dlg.table.columnWidth(4) == BLF_DB_COL_WIDTHS["note"]
-    assert dlg.table.columnWidth(5) == BLF_DB_COL_WIDTHS["status"]
+    assert dlg.table.columnWidth(4) == BLF_DB_COL_WIDTHS["hit"]
+    assert dlg.table.columnWidth(5) == BLF_DB_COL_WIDTHS["note"]
+    assert dlg.table.columnWidth(6) == BLF_DB_COL_WIDTHS["status"]
     # 文件名列必须是唯一的弹性列，否则长文件名会把状态列挤出可视区
     assert (
         dlg.table.horizontalHeader().sectionResizeMode(1)
@@ -159,7 +166,7 @@ def test_a_usable_dbc_lights_up_import(qapp, dbc_a):
     assert _import_btn(dlg).toolTip() == ""
     assert dlg.get_selected_paths() == [str(dbc_a)]
     assert _cell(dlg, 0, 3) == "1 / 1"
-    assert _cell(dlg, 0, 5) == "✔ 已加载"
+    assert _cell(dlg, 0, 6) == "✔ 已加载"
     assert _status_color(dlg, 0) == BLF_DB_COLOR_OK
 
 
@@ -171,10 +178,10 @@ def test_only_unreadable_files_leaves_import_disabled_with_a_different_hint(qapp
     assert _import_btn(dlg).isEnabled() is False
     # 与「还没加文件」区分的另一句：加了但一个都没读出来
     assert _import_btn(dlg).toolTip() == "至少选择一个可解析的数据库文件"
-    assert _cell(dlg, 0, 5).startswith("✖ 解析失败")
+    assert _cell(dlg, 0, 6).startswith("✖ 解析失败")
     assert _status_color(dlg, 0) == BLF_DB_COLOR_ERROR
     # 完整异常放 tooltip，状态列只放第一行（否则整列被堆栈撑爆）
-    assert "XMLSyntaxError" in dlg.table.item(0, 5).toolTip()
+    assert "XMLSyntaxError" in dlg.table.item(0, 6).toolTip()
 
 
 def test_accepting_with_no_usable_file_warns_and_keeps_the_dialog_open(qapp,
@@ -209,7 +216,7 @@ def test_a_broken_file_sits_next_to_a_good_one_without_blocking_it(qapp,
     dlg = CanDatabaseSelectorDialog()
     assert dlg.add_paths([str(junk), str(dbc_a)]) == 2
     assert _status_color(dlg, 0) == BLF_DB_COLOR_ERROR
-    assert _cell(dlg, 1, 5) == "✔ 已加载"
+    assert _cell(dlg, 1, 6) == "✔ 已加载"
     # 坏行被跳过后仍可直接导入：这是「单文件失败不中断」的 UI 侧兑现
     assert _import_btn(dlg).isEnabled() is True
     assert dlg.get_selected_paths() == [str(dbc_a)]
@@ -221,7 +228,7 @@ def test_a_dbc_that_parses_to_no_frames_warns_instead_of_failing(qapp, tmp_path)
     empty = tmp_path / "empty.dbc"
     empty.write_text('VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_:\n\n', encoding="utf-8")
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(empty)])
-    assert _cell(dlg, 0, 5) == "⚠ 无 CAN 报文"
+    assert _cell(dlg, 0, 6) == "⚠ 无 CAN 报文"
     assert _status_color(dlg, 0) == BLF_DB_COLOR_WARN
     assert _cell(dlg, 0, 3) == "0 / 0"
     # 「无 CAN 报文」的库对解码毫无贡献，不能让它点亮导入按钮
@@ -341,7 +348,7 @@ def test_missing_remembered_files_are_listed_in_the_notice(qapp, dbc_a, tmp_path
     )
     assert dlg.notice.isVisibleTo(dlg) is True
     assert "old_fota.dbc" in dlg.notice.text()
-    assert _cell(dlg, 0, 5) == "✖ 文件不存在"
+    assert _cell(dlg, 0, 6) == "✖ 文件不存在"
     assert _cell(dlg, 0, 3) == "— / —", "缺失行不该拿 0 冒充「读到了空库」"
     # 缺失行被跳过，但剩下的仍可用 → 不必逼用户重来
     assert dlg.get_selected_paths() == [str(dbc_a)]
@@ -370,13 +377,12 @@ def flow_host(qapp):
 
 @pytest.fixture()
 def fresh_blf_settings(app_settings):
-    """把 BLF 记忆两个键擦干净。
+    """把 BLF 记忆键擦干净。
 
     ``app_settings`` 只重置单例，不删已写入的值：QSettings 是文件级的，
     上一个用例写的路径会漏到下一个用例里，“取消不写”就会被旧值伪造成绩。
     """
     app_settings.set_blf_last_db_paths([])
-    app_settings.set_blf_auto_use_last(False)
     return app_settings
 
 
@@ -394,29 +400,28 @@ def _auto_answer(monkeypatch, *, accept: bool, prepare=None) -> None:
     monkeypatch.setattr(CanDatabaseSelectorDialog, "exec", fake_exec)
 
 
-def test_a_confirmed_selection_is_remembered_with_auto_use_on(flow_host,
-                                                              monkeypatch,
-                                                              dbc_a,
-                                                              fresh_blf_settings):
+def test_a_confirmed_selection_is_remembered_when_the_box_is_checked(
+    flow_host, monkeypatch, dbc_a, fresh_blf_settings
+):
     _auto_answer(monkeypatch, accept=True)
     paths = flow_host._ask_can_databases("log.blf", initial=[str(dbc_a)])
     assert paths == [str(dbc_a)]
     assert AppSettings().get_blf_last_db_paths() == [str(dbc_a)]
-    assert AppSettings().is_blf_auto_use_last() is True
 
 
-def test_unchecking_remember_still_records_paths_but_stops_auto_use(flow_host,
-                                                                   monkeypatch,
-                                                                   dbc_a,
-                                                                   fresh_blf_settings):
+def test_unchecking_remember_clears_the_memory_instead_of_writing_it(
+    flow_host, monkeypatch, dbc_a, fresh_blf_settings
+):
+    """复选框语义：勾选 =「记住此列表，下次自动预选」；不勾 = 不记住，
+    连旧记忆一起清掉，否则旧列表会违背用户意图地在下次弹窗里出现。"""
+    fresh_blf_settings.set_blf_last_db_paths([str(dbc_a)])
     _auto_answer(
         monkeypatch,
         accept=True,
         prepare=lambda dialog: dialog.remember_check.setChecked(False),
     )
     assert flow_host._ask_can_databases("log.blf", initial=[str(dbc_a)])
-    assert AppSettings().get_blf_last_db_paths() == [str(dbc_a)]
-    assert AppSettings().is_blf_auto_use_last() is False
+    assert AppSettings().get_blf_last_db_paths() == []
 
 
 def test_cancelling_the_dialog_writes_nothing(flow_host, monkeypatch,
@@ -424,7 +429,6 @@ def test_cancelling_the_dialog_writes_nothing(flow_host, monkeypatch,
     _auto_answer(monkeypatch, accept=False)
     assert flow_host._ask_can_databases("log.blf", initial=[str(dbc_a)]) is None
     assert AppSettings().get_blf_last_db_paths() == []
-    assert AppSettings().is_blf_auto_use_last() is False
 
 
 # ---------------------------------------------------------------------------
@@ -433,8 +437,8 @@ def test_cancelling_the_dialog_writes_nothing(flow_host, monkeypatch,
 
 def test_the_note_column_is_the_only_editable_one(app_settings, dbc_a):
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
-    assert dlg.table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
-    for col in (0, 1, 2, 3, 5):
+    assert dlg.table.item(0, 5).flags() & Qt.ItemFlag.ItemIsEditable
+    for col in (0, 1, 2, 3, 4, 6):
         assert not (
             dlg.table.item(0, col).flags() & Qt.ItemFlag.ItemIsEditable
         ), f"第 {col} 列不该可编辑（备注列是唯一的输入点）"
@@ -442,21 +446,21 @@ def test_the_note_column_is_the_only_editable_one(app_settings, dbc_a):
 
 def test_note_edits_persist_immediately(app_settings, dbc_a):
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
-    dlg.table.item(0, 4).setText("  动力总成库  ")
+    dlg.table.item(0, 5).setText("  动力总成库  ")
     # 随改随存（不等「导入」：备注是文件的属性，与本次导入是否发生无关），
     # 且落盘前去空白
     assert app_settings.get_blf_db_note(str(dbc_a)) == "动力总成库"
     assert dlg.rows[0].note == "动力总成库"
-    assert _cell(dlg, 0, 4) == "动力总成库", "item 文本要与落盘值一致"
+    assert _cell(dlg, 0, 5) == "动力总成库", "item 文本要与落盘值一致"
 
 
 def test_a_stored_note_is_echoed_and_can_be_cleared(app_settings, dbc_a):
     app_settings.set_blf_db_note(str(dbc_a), "主库")
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
-    assert _cell(dlg, 0, 4) == "主库", "打开对话框要回显已存备注"
-    dlg.table.item(0, 4).setText("  ")
+    assert _cell(dlg, 0, 5) == "主库", "打开对话框要回显已存备注"
+    dlg.table.item(0, 5).setText("  ")
     assert app_settings.get_blf_db_note(str(dbc_a)) == ""
-    assert _cell(dlg, 0, 4) == "", "清空即删除条目"
+    assert _cell(dlg, 0, 5) == "", "清空即删除条目"
 
 
 def test_notes_follow_the_row_when_reordering(app_settings, dbc_a, dbc_b):
@@ -466,3 +470,74 @@ def test_notes_follow_the_row_when_reordering(app_settings, dbc_a, dbc_b):
     dlg.down_btn.click()
     assert [r.path for r in dlg.rows] == [str(dbc_b), str(dbc_a)]
     assert [r.note for r in dlg.rows] == ["", "A 库"], "备注必须跟着行走"
+
+
+# ---------------------------------------------------------------------------
+# 后台预扫：命中列与自动排序（不允许静默导入后的匹配度增强）
+# ---------------------------------------------------------------------------
+
+def _pump_until(dialog, cond, timeout_ms: int = 5000) -> None:
+    from PySide6.QtCore import QCoreApplication
+    import time
+
+    end = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < end:
+        QCoreApplication.processEvents()
+        if cond():
+            return
+        time.sleep(0.005)
+    pytest.fail("预扫没有在超时时间内完成")
+
+
+def test_prescan_fills_the_hit_column_and_sorts_by_match(qapp, tmp_path):
+    """预扫完成后命中列回填、未编辑的列表自动把最匹配的库顶上去。"""
+    blf, dbc_full = write_blf_pair(tmp_path, n=24, buses=(0,))
+    partial_dbc = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(partial_dbc), str(dbc_full)]
+    )
+    try:
+        assert dlg._prescan_state == "running"
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+        assert dlg._prescan_state == "done"
+        assert [r.path for r in dlg.rows] == [str(dbc_full), str(partial_dbc)]
+        hits = [r.hit_frames for r in dlg.rows]
+        assert hits[0] > hits[1] >= 0, "全量库的命中帧数必须高于只含单帧的库"
+        assert _cell(dlg, 0, 4).endswith("%")
+        assert _cell(dlg, 1, 4).endswith("%")
+        assert "已按命中帧数" in dlg.notice.text()
+        assert dlg.get_selected_paths() == [str(dbc_full), str(partial_dbc)]
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_user_edited_order_is_never_resorted(qapp, tmp_path):
+    """用户动过行序就不许自动排序：尊重手工顺序，命中列照常回填。"""
+    blf, dbc_full = write_blf_pair(tmp_path, n=24, buses=(0,))
+    partial_dbc = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(partial_dbc), str(dbc_full)]
+    )
+    try:
+        # 挪下去再挪回来：视觉顺序复原，但 _user_edited 已置位
+        dlg.table.selectRow(0)
+        dlg.down_btn.click()
+        dlg.table.selectRow(1)
+        dlg.up_btn.click()
+        assert [r.path for r in dlg.rows] == [str(partial_dbc), str(dbc_full)]
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+        assert dlg._prescan_state == "done"
+        assert [r.path for r in dlg.rows] == [str(partial_dbc), str(dbc_full)], \
+            "手工调好的顺序不能被自动排序打回去"
+        assert _cell(dlg, 0, 4).endswith("%"), "命中列照常回填"
+        assert dlg.notice.isVisibleTo(dlg) is False, "没排序就别出排序提示"
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_hit_column_degrades_gracefully_without_a_blf(qapp, dbc_a):
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+    assert dlg._prescan_state == "off", "data_file 不是 BLF 就不启动预扫"
+    assert _cell(dlg, 0, 4) == "—"

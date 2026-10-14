@@ -23,7 +23,6 @@ from src.core.config import (
     BLF_BANNER_STYLE_NORMAL,
     BLF_BANNER_STYLE_TRUNCATED,
     BLF_BANNER_STYLE_UNMATCHED,
-    BLF_TEXT_AUTO_USED,
 )
 from src.core.logger import get_logger
 
@@ -101,13 +100,11 @@ class CanDbBanner(QWidget):
         frame_count: int,
         signal_count: int,
         db_names: list[str] | None = None,
-        auto_used: bool = False,
     ) -> None:
         """状态①：全部报文命中数据库。"""
         line1 = (
             f"已加载 {db_count} 个数据库 · "
             f"{frame_count} 报文 / {signal_count} 信号"
-            f"{self._auto_used_suffix(auto_used)}"
         )
         names = ", ".join(_ellide(n) for n in (db_names or []))
         self._set_text(line1, names)
@@ -124,13 +121,11 @@ class CanDbBanner(QWidget):
         scanned: int,
         db_count: int,
         db_names: list[str] | None = None,
-        auto_used: bool = False,
     ) -> None:
         """状态②：报文数超过上限，后半段没生成信号。"""
         line1 = (
             f"报文数超过 {limit:,}，仅扫描前 {scanned:,} 条"
             f" · 已用 {db_count} 个数据库"
-            f"{self._auto_used_suffix(auto_used)}"
         )
         self._set_text(line1, ", ".join(_ellide(n) for n in (db_names or [])))
         self._state = "truncated"
@@ -147,14 +142,12 @@ class CanDbBanner(QWidget):
         frame_count: int,
         signal_count: int,
         db_names: list[str] | None = None,
-        auto_used: bool = False,
     ) -> None:
         """状态③：有 CAN ID 未定义，给「查看」入口。"""
         names = ", ".join(_ellide(n) for n in (db_names or []))
         line1 = (
             f'<a href="unmatched">{unmatched_count} 个报文 ID 未在数据库中定义</a>'
             f"（未生成信号）· {db_count} 库 / {frame_count} 报文 / {signal_count} 信号"
-            f"{self._auto_used_suffix(auto_used)}"
         )
         self.info_label.setText(f"{line1}<br>{names}" if names else line1)
         self._state = "unmatched"
@@ -162,16 +155,6 @@ class CanDbBanner(QWidget):
         self.view_btn.setVisible(unmatched_count > 0)
         self._apply_style(*BLF_BANNER_STYLE_UNMATCHED)
         self.setVisible(True)
-
-    @staticmethod
-    def _auto_used_suffix(auto_used: bool) -> str:
-        """「已自动使用上次数据库」是**来源说明**，不是第四种状态。
-
-        §5.1 的 A 路径要求 banner 上能看到这句话，而未匹配（状态③）在真实
-        日志里才是常态 —— 只在状态①展示就等于「越常见的场景越不知道库里
-        这几个文件是哪来的」，所以三种状态都拼同一个后缀。
-        """
-        return f" · {BLF_TEXT_AUTO_USED}" if auto_used else ""
 
     def hide_banner(self) -> None:
         """非 BLF 数据源：隐藏且不留占位（不动态增删控件，避免 splitter 抖动）。"""

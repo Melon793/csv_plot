@@ -88,7 +88,6 @@ class FileLoaderManager(MainWindowBaseManager):
     # 的默认形参，两者混淆会让取消恢复一次也不跑。
     _blf_cancelled_version = None
     _blf_thread_refs: list | None = None
-    _blf_auto_used = False
     _blf_force_dialog = False
     _blf_preset_db_paths = None
     # F 路径（库与报文完全不通）暂存**已经扫完**的 loader：报文桶与数据库是解耦
@@ -1198,9 +1197,9 @@ class FileLoaderManager(MainWindowBaseManager):
     def _usable_db_paths(self, paths):
         """把数据库路径预检后切成 ``(可用, 不可用)``。
 
-        §5.1 的 A 路径（不弹窗直接扫）只有在**全部记忆文件都还能解出报文**时
-        才成立：否则一个被移走/改坏的老库会被静默丢弃，用户看到的是「少了很
-        多信号」而不是「文件读不到」，比弹窗烦人得多。
+        新导入一律弹窗（不允许静默导入），但预检仍有意义：记忆里已被移走 /
+        改坏的老库要在弹窗里标红并给出黄条说明，而不是等用户「导入了才发现
+        少了很多信号」。
         """
         from src.data.can_database import CanDatabaseSet
 
@@ -1222,10 +1221,14 @@ class FileLoaderManager(MainWindowBaseManager):
         return usable, bad
 
     def _resolve_can_databases(self, file_path: str, is_reload: bool = False):
-        """§5.1 的 A / B / C / F 前置路径。返回 ``db_paths``；``None`` = 中止导入。"""
+        """§5.1 的 B / C / F 前置路径。返回 ``db_paths``；``None`` = 中止导入。
+
+        新导入**永远弹窗**（B）：不允许静默解析，上次记忆的库列表只作为弹窗里
+        的预选项，命中与否由用户确认。唯一的豁免是「重载」——那是对当前数据
+        源的再扫描，库本来就是用户之前显式选过的。
+        """
         from src.core.settings import AppSettings
 
-        self._blf_auto_used = False
         remembered = [normalize_input_path(p)
                       for p in AppSettings().get_blf_last_db_paths()]
 
@@ -1257,21 +1260,16 @@ class FileLoaderManager(MainWindowBaseManager):
                 return None
             return paths
 
-        if remembered and AppSettings().is_blf_auto_use_last():
+        if remembered:
+            # C：记忆命中但个别文件缺失/解析失败 → 弹窗 + 黄条说明
             usable, bad = self._usable_db_paths(remembered)
-            if usable and not bad:
-                # A：不弹窗，banner 上说明「已自动使用上次数据库」
-                self._blf_auto_used = True
-                logger.info("BLF 自动使用上次数据库: %s", ", ".join(usable))
-                return usable
-            if usable:
-                # C：记忆命中但个别文件缺失/解析失败 → 标红 + 黄条说明
+            if bad and usable:
                 return self._ask_can_databases(
                     file_path, initial=remembered, missing=bad,
                     notice=BLF_TEXT_DB_MISSING.format(paths="\n".join(bad)),
                 )
 
-        # B：首次导入（无记忆，或记忆已全部不可用）
+        # B：每次新导入都弹窗，预选上次记忆的列表（可能为空）
         return self._ask_can_databases(file_path, initial=remembered)
 
     def _ask_can_databases(self, file_path: str, initial=None, missing=None,
@@ -1297,10 +1295,10 @@ class FileLoaderManager(MainWindowBaseManager):
             return None
         # 记忆写入时机：「导入」成功后才写；取消不写（§5.2）。此处先记住列表，
         # 扫描失败（异常路径）时不会回滚 —— 下次导入仍能在对话框里看到它们。
+        # 复选框现在是「记住此列表，下次自动预选」：不勾 = 这一次的选择不入
+        # 记忆，同时清掉旧记忆，否则旧列表会在下次弹窗里违背用户意图地出现。
         settings = AppSettings()
-        settings.set_blf_last_db_paths(paths)
-        settings.set_blf_auto_use_last(bool(dialog.remember_choice()))
-        self._blf_auto_used = False
+        settings.set_blf_last_db_paths(paths if dialog.remember_choice() else [])
         return paths
 
     def _close_blf_progress(self) -> None:
@@ -1585,14 +1583,10 @@ class FileLoaderManager(MainWindowBaseManager):
 
         database = loader.database
         db_names = [os.path.basename(p) for p in database.source_files]
-        # 「已自动使用上次数据库」是来源说明，与三态正交（§5.1 A + §5.3），
-        # 所以三个分支都要带；漏在未匹配分支上就会丢掉最常见的场景。
-        auto_used = bool(getattr(self, "_blf_auto_used", False))
         if getattr(loader, "truncated", False):
             banner.show_truncated(
                 limit=BLF_MAX_MESSAGES, scanned=loader.total_messages,
                 db_count=len(db_names), db_names=db_names,
-                auto_used=auto_used,
             )
             seg_text = (
                 f"CAN：仅前 {loader.total_messages:,}（上限 {BLF_MAX_MESSAGES:,}）"
@@ -1604,14 +1598,12 @@ class FileLoaderManager(MainWindowBaseManager):
                     unmatched_count=unmatched, db_count=len(db_names),
                     frame_count=database.frame_count,
                     signal_count=database.signal_count, db_names=db_names,
-                    auto_used=auto_used,
                 )
                 seg_text = f"CAN：{len(db_names)} 库 · {unmatched} 个 ID 未匹配"
             else:
                 banner.show_normal(
                     db_count=len(db_names), frame_count=database.frame_count,
                     signal_count=database.signal_count, db_names=db_names,
-                    auto_used=auto_used,
                 )
                 seg_text = f"CAN：{len(db_names)} 库 · {database.signal_count} 信号"
         # tooltip 给 banner 两行全文（含库名清单），段被宽度收纳时仍有出口
@@ -1640,7 +1632,6 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.warning(self.mw, "未生成任何信号", BLF_TEXT_NO_SIGNAL)
         for err in loader.load_errors:
             logger.warning("CAN 数据库: %s", err)
-        self._blf_auto_used = False
         # 换库后同名变量可能指向完全不同的信号，统计缓存必须整体作废。
         self.mw.var_stats_cache = {}
         # 已画出的曲线引用的也是作废名字，一律清除（沿用 _release_old_data 纪律）。

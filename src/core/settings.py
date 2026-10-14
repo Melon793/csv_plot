@@ -29,10 +29,9 @@ class ConfigKey(StrEnum):
     TEMPLATE_LAST_ID = "template/last_id"
     TEMPLATE_LAST_NAME = "template/last_name"
     # BLF 只存原始报文，必须搭配 DBC / ARXML 才能解出信号。记住上次选中的
-    # 数据库列表（os.pathsep 连接）与「是否自动复用」，让批量导入同一个台架
-    # 的多份 BLF 时不必每次重选。
+    # 数据库列表（os.pathsep 连接），下次导入时在弹窗里**预选**（不再静默
+    # 自动导入），让连续分析同一台架的多份 BLF 不必每次从零重选。
     BLF_LAST_DB_PATHS = "blf/last_db_paths"
-    BLF_AUTO_USE_LAST = "blf/auto_use_last"
     # 数据库文件的用户备注：JSON dict {规范化路径: 备注文本}。备注是自由文本，
     # 不能用 BLF_LAST_DB_PATHS 的 pathsep 连接（值里可能含分隔符或空格），
     # JSON 单字符串在 ini 后端里最稳。
@@ -219,14 +218,6 @@ class AppSettings:
         self._settings.setValue(
             ConfigKey.BLF_LAST_DB_PATHS, os.pathsep.join(str(p) for p in paths)
         )
-
-    def is_blf_auto_use_last(self) -> bool:
-        return bool(
-            self._settings.value(ConfigKey.BLF_AUTO_USE_LAST, False, type=bool)
-        )
-
-    def set_blf_auto_use_last(self, enabled: bool) -> None:
-        self._settings.setValue(ConfigKey.BLF_AUTO_USE_LAST, bool(enabled))
 
     # ------------------------------------------------------------------
     # CAN 数据库备注（用户在选库对话框里给 DBC / ARXML 写的说明）

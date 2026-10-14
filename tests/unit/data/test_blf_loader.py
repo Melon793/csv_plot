@@ -332,6 +332,43 @@ def test_single_shot_signal_falls_back_to_the_declared_cycle(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# prescan_blf_frames：选库对话框「命中」列的口径必须与正式扫描一致
+# ---------------------------------------------------------------------------
+
+def test_prescan_counts_match_the_real_scan(tmp_path):
+    """预扫计数与 loader 分桶逐键相等（含错误帧 / 远程帧被同样跳过）。"""
+    blf, dbc = write_blf_pair(
+        tmp_path, n=24, buses=(0, 1), with_error=True, with_remote=True
+    )
+    counts = blf_module.prescan_blf_frames(str(blf))
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        scanned = {
+            (b.channel, b.can_id, b.extended): b.count
+            for b in loader._buckets
+        }
+        assert dict(counts) == scanned
+        assert sum(counts.values()) == loader.total_messages
+    finally:
+        loader.close()
+
+
+def test_prescan_honours_cancellation(tmp_path):
+    """取消谓词在分块边界生效：选库框关闭后预扫不能继续白跑。"""
+    blf, _dbc = write_blf_pair(tmp_path, n=24, buses=(0,))
+    with pytest.raises(InterruptedError):
+        blf_module.prescan_blf_frames(str(blf), should_cancel=lambda: True)
+
+
+def test_prescan_rejects_a_file_without_can_frames(tmp_path):
+    """垃圾文件 / 空报文必须抛错（对话框据此把命中列退化为「—」）。"""
+    junk = tmp_path / "junk.blf"
+    junk.write_bytes(b"this is not a blf container at all")
+    with pytest.raises(Exception):
+        blf_module.prescan_blf_frames(str(junk))
+
+
+# ---------------------------------------------------------------------------
 # 解码结果
 # ---------------------------------------------------------------------------
 

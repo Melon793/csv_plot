@@ -23,7 +23,6 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import QDialog
 
-from src.core.config import BLF_TEXT_AUTO_USED
 from src.core.settings import AppSettings
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
 from src.ui.dialogs.can_unmatched_dialog import CanUnmatchedDialog
@@ -41,7 +40,6 @@ TIMEOUT = 30_000
 def _isolated_blf_memory(app_settings):
     """逐用例清空 BLF 数据库记忆（跨用例泄漏 = 测试顺序敏感）。"""
     app_settings.set_blf_last_db_paths([])
-    app_settings.set_blf_auto_use_last(False)
     yield app_settings
 
 
@@ -234,7 +232,6 @@ def test_the_choice_is_remembered_for_the_next_blf(
 
     settings = AppSettings()
     assert settings.get_blf_last_db_paths() == [str(dbc)]
-    assert settings.is_blf_auto_use_last() is True, "对话框里「记住…」默认勾选"
 
 
 # ---------------------------------------------------------------------------
@@ -323,10 +320,10 @@ def test_reload_reuses_the_database_without_asking_again(
     assert mw.can_db_banner.isHidden() is False
 
 
-def test_a_second_import_uses_the_memory_and_says_so_on_the_banner(
+def test_a_second_import_preselects_the_remembered_databases(
     main_window, qapp, qtbot, dialog_stubs, can_dialogs, two_channel_pair
 ):
-    """§5.1 A：有记忆且文件都在 → 不弹窗，banner 上说明来源。"""
+    """§5.1 B：不允许静默导入——第二次导入仍弹窗，但预选上次的列表。"""
     mw = main_window
     blf, dbc = two_channel_pair
     _import(mw, qtbot, qapp, dialog_stubs, can_dialogs, blf, dbc)
@@ -335,10 +332,10 @@ def test_a_second_import_uses_the_memory_and_says_so_on_the_banner(
     loader_before = mw.loader
     _import(mw, qtbot, qapp, dialog_stubs, can_dialogs, blf, dbc)
 
-    assert can_dialogs["selector"] == 1, "A 路径不该弹框"
+    assert can_dialogs["selector"] == 2, "每次新导入都必须弹窗确认"
     assert mw.loader is not loader_before
+    assert mw.loader.db_paths == [str(dbc)], "预选项是上次确认过的列表"
     assert mw.can_db_banner.state == "normal"
-    assert BLF_TEXT_AUTO_USED in mw.can_db_banner.info_label.text()
 
 
 # ---------------------------------------------------------------------------

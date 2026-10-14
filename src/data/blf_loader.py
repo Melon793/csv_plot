@@ -67,6 +67,65 @@ def _safe_tell(handle, fallback: int) -> int:
         return int(fallback)
 
 
+def prescan_blf_frames(path: str, *, should_cancel=None):
+    """快速预扫 BLF：只统计 ``(通道, CAN ID, 扩展位)`` 的帧数，不存任何 payload。
+
+    供选库对话框在后台估算「每个数据库能解出多少帧」（命中列）：BLF 没有索引，
+    报文 ID 集合只有完整读一遍才知道，而完整读一遍就是 ``_scan`` 的耗时 ——
+    所以预扫必须是后台线程里的可取消轻量循环。刻意与 :meth:`BLFLazyLoader._scan`
+    保持同一套过滤口径（跳过错误帧 / 远程帧、通道号 -1 归 0、同一上限截断），
+    否则命中率与实际解码结果会对不上。
+
+    Returns:
+        ``Counter[(channel, can_id, extended), 帧数]``；帧数总和即参与解码的
+        总帧数。文件损坏 / 无报文 / python-can 缺失时抛异常，由调用方兜底。
+
+    Args:
+        should_cancel: 轮询式取消谓词，返回 True 时抛 :class:`InterruptedError`。
+    """
+    from collections import Counter
+
+    try:
+        from can import BLFReader
+    except ImportError as e:
+        raise ImportError(f"{BLFLazyLoader._CAN_IMPORT_ERROR}\n原始错误: {e}") from e
+
+    counts: Counter = Counter()
+    total = 0
+    handle = open(path, "rb")
+    try:
+        reader = BLFReader(handle)
+        iterator = iter(reader)
+        while True:
+            chunk = list(itertools.islice(iterator, BLF_SCAN_CHUNK_MESSAGES))
+            if not chunk:
+                break
+            for msg in chunk:
+                if msg.is_error_frame or msg.is_remote_frame:
+                    continue  # 与 _scan 同口径：这两类帧不产生采样点
+                channel = int(msg.channel) if msg.channel is not None else 0
+                counts[(max(0, channel), int(msg.arbitration_id),
+                        bool(msg.is_extended_id))] += 1
+            total = sum(counts.values())
+            if total >= BLF_MAX_MESSAGES:
+                # 与 _scan 的截断一致：超限部分不会生成信号，命中率按会解码的部分算
+                logger.warning("BLF 预扫达到 %s 帧上限，其余报文不计入命中率",
+                               f"{BLF_MAX_MESSAGES:,}")
+                break
+            if should_cancel is not None and should_cancel():
+                raise InterruptedError("预扫已取消")
+            time.sleep(0)  # 让出 GIL，别在 UI 线程忙等时挤占事件循环
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            logger.debug("关闭 BLF 预扫句柄失败", exc_info=True)
+
+    if not counts:
+        raise ValueError("BLF 文件未包含任何 CAN 报文")
+    return counts
+
+
 class _MessageBucket:
     """单个 ``(通道, CAN ID)`` 报文桶的块式列存储。
 
