@@ -515,3 +515,88 @@ def test_blfviewer_pair_matches_canmatrix_exactly():
             assert got.factor == pytest.approx(float(sig.scale))
             assert got.offset == pytest.approx(float(sig.offset))
             assert got.dbc_start_bit == sig.start
+
+
+# ---------------------------------------------------------------------------
+# canmatrix 噪声降噪：compu method 缺失逐条 ERROR → 每文件一条汇总 WARNING
+# ---------------------------------------------------------------------------
+
+
+def _emit_compu_method_error(name: str) -> None:
+    import logging
+
+    logging.getLogger("canmatrix.formats.arxml").error(
+        "No valid compu method found for isignal/systemsignal "
+        "%s/%s_54edbe9fa0e84f47 - check ARXML file!!",
+        name, name,
+    )
+
+
+def test_compu_method_error_spam_is_captured_and_summarized(
+    monkeypatch, tmp_path, caplog
+):
+    """逐信号 ERROR 在解析窗口内被吞掉，收敛为每文件一条 WARNING + tooltip 注记。
+
+    真实诱因是 ARXML 演示库 5 个 isignal 未挂 compu method，而一次 BLF 导入
+    会把数据库解析 2~4 遍 → 同一批 ERROR 刷屏。用假 _load_matrix_list 在捕获
+    窗口内复现日志行为，不依赖手造坏 ARXML。
+    """
+    import logging
+
+    def fake_load_matrix_list(self, path):
+        _emit_compu_method_error("Signal1")
+        _emit_compu_method_error("Signal1")  # 同名去重
+        _emit_compu_method_error("Signal9")
+        return []
+
+    monkeypatch.setattr(CanDatabaseSet, "_load_matrix_list", fake_load_matrix_list)
+    with caplog.at_level(logging.DEBUG):
+        db = CanDatabaseSet().load([str(tmp_path / "bad.arxml")])
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [], "逐条 compu method ERROR 应在窗口内被吞掉"
+    summaries = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "缺少有效换算方法" in r.getMessage()
+    ]
+    assert len(summaries) == 1
+    assert "Signal1, Signal9" in summaries[0].getMessage()
+    note = db.reports[0].warning
+    assert "2 个信号缺少换算方法" in note and "Signal1" not in note
+
+
+def test_other_canmatrix_records_still_reach_root(
+    monkeypatch, tmp_path, caplog
+):
+    """降噪只针对 compu method 模式，canmatrix 的其余记录必须原样放行。"""
+    import logging
+
+    def fake_load_matrix_list(self, path):
+        logging.getLogger("canmatrix.formats.arxml").warning("真实告警别吞我")
+        return []
+
+    monkeypatch.setattr(CanDatabaseSet, "_load_matrix_list", fake_load_matrix_list)
+    with caplog.at_level(logging.DEBUG):
+        CanDatabaseSet().load([str(tmp_path / "bad.arxml")])
+
+    assert any(
+        r.name.startswith("canmatrix") and "真实告警别吞我" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_capture_window_restores_logger_state():
+    """捕获窗口退出后 propagate 与 handler 列表必须恢复原状。"""
+    import logging
+
+    from src.data.can_database import _capture_canmatrix_noise
+
+    cm_logger = logging.getLogger("canmatrix")
+    handlers_before = list(cm_logger.handlers)
+    propagate_before = cm_logger.propagate
+    with _capture_canmatrix_noise() as collector:
+        assert cm_logger.propagate is False
+        _emit_compu_method_error("Signal14")
+    assert collector.missing_signals == ["Signal14"]
+    assert cm_logger.propagate == propagate_before
+    assert list(cm_logger.handlers) == handlers_before

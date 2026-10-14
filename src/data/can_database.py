@@ -15,9 +15,13 @@ CAN 数据库（DBC / ARXML）语义层
 
 from __future__ import annotations
 
+import logging
 import os
+import re
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from src.core.logger import get_logger
 
@@ -29,6 +33,64 @@ _DB_IMPORT_TYPE = {".dbc": "dbc", ".arxml": "arxml"}
 
 # 多路复用选择器在 canmatrix Signal.multiplex 中的标记值
 _MUX_SELECTOR = "Multiplexor"
+
+# canmatrix 对「isignal 未挂有效 compu method」的告警逐信号 logger.error（实测
+# ARXML 演示文件 5 个信号 → 5 条 ERROR），而一次 BLF 导入流程会把数据库解析
+# 2~4 遍（预扫命中率 + 正式解析 + 重绑），同一批告警会成刷屏 ERROR。解析窗口内
+# 按此模式捕获汇总，其余 canmatrix 记录原样放行。
+_COMPU_METHOD_RE = re.compile(
+    r"No valid compu method found for isignal/systemsignal (\S+)/(\S+)"
+)
+# 解析可能发生在后台线程（预扫 / loader），接管全局 logger 的窗口必须串行化
+_CM_CAPTURE_LOCK = threading.Lock()
+
+
+class _CanmatrixCapture(logging.Handler):
+    """解析窗口内接管 canmatrix 日志的 handler。
+
+    命中 compu method 缺失模式的记录就地收集（按 isignal 名保序去重）；其余
+    记录手动转发 root，保持原有可见性。handler 挂在 ``canmatrix`` 祖先 logger
+    上，覆盖其全部格式子模块（arxml / dbc / ...）。
+    """
+
+    def __init__(self):
+        super().__init__(level=0)  # 全量接住，级别过滤交给 root 的 handler
+        self.missing_signals: list[str] = []
+        self._seen: set[str] = set()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            match = _COMPU_METHOD_RE.search(record.getMessage())
+            if match is None:
+                logging.getLogger().handle(record)  # 原样放行
+                return
+            isignal = match.group(1)
+            if isignal not in self._seen:
+                self._seen.add(isignal)
+                self.missing_signals.append(isignal)
+        except Exception:  # noqa: BLE001 - 日志路径绝不能反向拖垮解析
+            self.handleError(record)
+
+
+@contextmanager
+def _capture_canmatrix_noise() -> Iterator[_CanmatrixCapture]:
+    """临时切断 canmatrix → root 的日志传播，由 collector 决定吞或放行。
+
+    退出时无条件恢复 ``propagate`` 并摘除 handler；全局锁保证多线程解析不会
+    互相偷走对方的日志窗口。
+    """
+    collector = _CanmatrixCapture()
+    cm_logger = logging.getLogger("canmatrix")
+    with _CM_CAPTURE_LOCK:
+        cm_logger.addHandler(collector)
+        prev_propagate = cm_logger.propagate
+        cm_logger.propagate = False
+        try:
+            yield collector
+        finally:
+            cm_logger.propagate = prev_propagate
+            cm_logger.removeHandler(collector)
+
 
 # DBC 的导入编码候选，按顺序严格试解。
 #
@@ -379,7 +441,8 @@ class CanDatabaseSet:
             self._paths.append(path)
             report = DbFileReport(path=path, ok=False)
             try:
-                frames = self._load_matrix_list(path)
+                with _capture_canmatrix_noise() as cm_noise:
+                    frames = self._load_matrix_list(path)
             except Exception as e:  # 解析失败 / 编码错误 / canmatrix 内部异常
                 report.error = f"{type(e).__name__}: {e}"
                 self._reports.append(report)
@@ -395,6 +458,7 @@ class CanDatabaseSet:
             )
             if report.frame_count == 0:
                 report.warning = "无 CAN 报文"
+            self._append_compu_method_note(report, cm_noise.missing_signals)
             self._reports.append(report)
 
         logger.info(
@@ -402,6 +466,32 @@ class CanDatabaseSet:
             len(self._reports), self.frame_count, self.signal_count,
         )
         return self
+
+    @staticmethod
+    def _append_compu_method_note(report: DbFileReport, missing: list[str]) -> None:
+        """把 compu method 缺失汇总成一条 WARNING + 状态列 tooltip 提示。
+
+        逐条 ERROR 由 :func:`_capture_canmatrix_noise` 吞掉；这里只发一条
+        WARNING（预览前几个信号名，完整列表进 debug），并追加到 ``report.warning``
+        —— 状态列的三态判定只看 ``ok`` / ``frame_count``，warning 字符串仅用于
+        tooltip，不会改变 ✔ / ⚠ / ✖ 语义。
+        """
+        if not missing:
+            return
+        preview = ", ".join(missing[:8])
+        if len(missing) > 8:
+            preview += f" …等 {len(missing)} 个"
+        logger.warning(
+            "数据库 %s: %d 个信号缺少有效换算方法（compu method 缺失），"
+            "这些信号将按原始码值显示: %s",
+            report.path, len(missing), preview,
+        )
+        logger.debug(
+            "缺少 compu method 的完整信号列表 %s: %s",
+            report.path, ", ".join(missing),
+        )
+        note = f"{len(missing)} 个信号缺少换算方法，按原始码值显示"
+        report.warning = f"{report.warning}; {note}" if report.warning else note
 
     @staticmethod
     def _load_matrix_list(path: str) -> list[CanFrameSpec]:
