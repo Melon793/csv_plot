@@ -771,6 +771,9 @@ class PlotUIManager(BasePlotManager):
 
     def _run_stats_refresh(self, pw: Any) -> None:
         """执行统计刷新"""
+        # window() 非 MainWindow 时（如独立顶层/测试环境）没有 layout_manager，
+        # 与 plot_widget._handle_variable_drop 的防御模式对齐，否则每次 [stats]
+        # 调度回调都会抛 AttributeError。
         main_window = pw.window()
-        if main_window is not None:
+        if main_window is not None and hasattr(main_window, "layout_manager"):
             main_window.layout_manager.request_mark_stats_refresh(immediate=True)
