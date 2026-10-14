@@ -43,13 +43,19 @@ from src.core.config import (
     BLF_DB_DIALOG_MIN_SIZE,
     BLF_DB_DIALOG_SIZE,
 )
+from src.core.settings import AppSettings
 from src.data.can_database import SUPPORTED_DB_EXTS, CanDatabaseSet, import_type_for
 from src.core.logger import get_logger
 from src.utils.paths import normalize_input_path
 
 logger = get_logger("ui.can_db_selector")
 
-_COLUMNS = ("优先级", "文件", "类型", "报文数 / 信号数", "状态")
+_COLUMNS = ("优先级", "文件", "类型", "报文数 / 信号数", "备注", "状态")
+
+#: 备注列下标（抽屉清单表与选库框同序）：放在状态列前，紧邻「这个库现在
+#: 好不好用」的结论，备注解释的正是「为什么选 / 为什么弃用它」。
+_NOTE_COL = 4
+_STATUS_COL = 5
 
 #: 状态列的四种取值 → (文字, 颜色)。⚠ 与 ✔ 用黄绿、✖ 用红，与 banner 三态
 #: 同一套色觉约定，用户不必二次学习「红色 = 这个库没生效」。
@@ -62,7 +68,8 @@ _STATUS_MISSING = ("✖ 文件不存在", BLF_DB_COLOR_ERROR)
 class _Row:
     """一行 = 一个数据库文件及其预解析结果。"""
 
-    __slots__ = ("path", "ok", "frame_count", "signal_count", "error", "missing")
+    __slots__ = ("path", "ok", "frame_count", "signal_count", "error", "missing",
+                 "note")
 
     def __init__(self, path: str):
         self.path = path
@@ -71,6 +78,8 @@ class _Row:
         self.signal_count = 0
         self.error = ""
         self.missing = False
+        # 用户备注：跟文件走（跨会话持久化在 QSettings），缺失/坏文件也可写
+        self.note = AppSettings().get_blf_db_note(path)
 
     @property
     def type_text(self) -> str:
@@ -151,7 +160,13 @@ class CanDatabaseSelectorDialog(QDialog):
         self.table = QTableWidget(0, len(_COLUMNS))
         self.table.setHorizontalHeaderLabels(list(_COLUMNS))
         self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # 只有备注列可编辑：QTableWidget 的 edit trigger 是表级的，但 item
+        # flags 是逐格的 —— 触发放开、非备注列的 item 摘掉 ItemIsEditable，
+        # 双击其他列仍然是选择而不是进入编辑。
+        self.table.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.EditKeyPressed
+        )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
@@ -161,9 +176,11 @@ class CanDatabaseSelectorDialog(QDialog):
         self.table.setColumnWidth(0, BLF_DB_COL_WIDTHS["priority"])
         self.table.setColumnWidth(2, BLF_DB_COL_WIDTHS["type"])
         self.table.setColumnWidth(3, BLF_DB_COL_WIDTHS["counts"])
-        self.table.setColumnWidth(4, BLF_DB_COL_WIDTHS["status"])
+        self.table.setColumnWidth(4, BLF_DB_COL_WIDTHS["note"])
+        self.table.setColumnWidth(5, BLF_DB_COL_WIDTHS["status"])
         self.table.setMinimumHeight(180)
         self.table.currentCellChanged.connect(lambda *_: self._refresh_buttons())
+        self.table.itemChanged.connect(self._on_note_changed)
         layout.addWidget(self.table, 1)
 
         btn_row = QHBoxLayout()
@@ -280,6 +297,7 @@ class CanDatabaseSelectorDialog(QDialog):
                 f"{row.frame_count} / {row.signal_count}"
                 if not row.missing
                 else "— / —",
+                row.note,
                 text,
             )
             for c, value in enumerate(cells):
@@ -288,12 +306,37 @@ class CanDatabaseSelectorDialog(QDialog):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 1:
                     item.setToolTip(row.path)
-                if c == 4:
+                if c == _NOTE_COL:
+                    # 编辑开关只挂在这一列的 flags 上（见 _build_ui）
+                    item.setToolTip(row.note or "双击填写备注（跨会话记忆）")
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c == _STATUS_COL:
                     item.setForeground(_qcolor(color))
                     item.setToolTip(row.error or text)
                 self.table.setItem(r, c, item)
         self.table.blockSignals(False)
         self._refresh_buttons()
+
+    def _on_note_changed(self, item: QTableWidgetItem) -> None:
+        """备注编辑落盘：随改随存，不等「导入」（备注是文件的属性，与本次
+        导入是否发生无关）。strip 后与原文本不同时回写 item，触发一次再入
+        后文本相等，递归自然终止。"""
+        if item.column() != _NOTE_COL:
+            return
+        r = item.row()
+        if not (0 <= r < len(self._rows)):
+            return
+        row = self._rows[r]
+        text = item.text().strip()
+        row.note = text
+        AppSettings().set_blf_db_note(row.path, text)
+        if item.text() != text:
+            item.setText(text)
+        elif not text:
+            item.setToolTip("双击填写备注（跨会话记忆）")
+        else:
+            item.setToolTip(text)
 
     def _refresh_buttons(self) -> None:
         has_row = self.table.currentRow() >= 0

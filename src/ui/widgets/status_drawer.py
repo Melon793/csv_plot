@@ -872,9 +872,9 @@ class CanDbDrawer(StatusDrawer):
     # -- 构建 ---------------------------------------------------------------
 
     def _build(self) -> None:
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["优先级", "文件", "类型", "报文数 / 信号数", "状态"]
+            ["优先级", "文件", "类型", "报文数 / 信号数", "备注", "状态"]
         )
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
@@ -887,7 +887,8 @@ class CanDbDrawer(StatusDrawer):
         self.table.setColumnWidth(0, BLF_DB_COL_WIDTHS["priority"])
         self.table.setColumnWidth(2, BLF_DB_COL_WIDTHS["type"])
         self.table.setColumnWidth(3, BLF_DB_COL_WIDTHS["counts"])
-        self.table.setColumnWidth(4, BLF_DB_COL_WIDTHS["status"])
+        self.table.setColumnWidth(4, BLF_DB_COL_WIDTHS["note"])
+        self.table.setColumnWidth(5, BLF_DB_COL_WIDTHS["status"])
         self._fit_table_height(0)
 
         self.reselect_btn = self._chip(
@@ -922,14 +923,21 @@ class CanDbDrawer(StatusDrawer):
         # 局部 import：canmatrix 别借道启动期（抽屉是开机即建的）
         from src.data.can_database import import_type_for
 
+        # 备注整表读一次（JSON 单键），行内逐条查，键与写入口同样走 normalize
+        from src.core.settings import AppSettings
+        from src.utils.paths import normalize_input_path
+
+        notes = AppSettings().get_blf_db_notes()
         self.table.setRowCount(len(reports))
         for r, report in enumerate(reports):
             text, color = _can_db_status(report)
+            note = notes.get(normalize_input_path(report.path), "")
             cells = (
                 str(r + 1),
                 os.path.basename(report.path),
                 (import_type_for(report.path) or "?").upper(),
                 f"{report.frame_count} / {report.signal_count}",
+                note,
                 text,
             )
             for c, value in enumerate(cells):
@@ -938,7 +946,9 @@ class CanDbDrawer(StatusDrawer):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 1:
                     item.setToolTip(report.path)
-                if c == 4:
+                if c == 4 and note:
+                    item.setToolTip(note)
+                if c == 5:
                     item.setForeground(QColor(color))
                     item.setToolTip(report.error or report.warning or text)
                 self.table.setItem(r, c, item)

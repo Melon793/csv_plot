@@ -47,6 +47,43 @@ class TestGetSetRoundtrip:
         assert app_settings.get_value("nonexistent/key", "fallback") == "fallback"
 
 
+class TestBlfDbNotes:
+    """CAN 数据库备注：JSON dict 持久化，键为规范化路径。"""
+
+    def test_note_roundtrip_and_normalization(self, app_settings, tmp_path):
+        # 未归一化的相对写法也要能命中同一键（normalize_input_path 幂等）
+        real = tmp_path / "powertrain.dbc"
+        real.write_text("x", encoding="utf-8")
+        app_settings.set_blf_db_note(str(real), "动力总成主库")
+        assert app_settings.get_blf_db_note(str(real)) == "动力总成主库"
+        assert app_settings.get_blf_db_note(str(real.resolve())) == "动力总成主库"
+        assert (
+            app_settings.get_blf_db_notes()[str(real)] == "动力总成主库"
+        ), "两个写法必须命中同一条备注"
+
+    def test_blank_note_deletes_the_entry(self, app_settings, tmp_path):
+        # app_settings 只重置单例不删 ini，其他键会跨用例残留 —— 只断言本键
+        p = tmp_path / "a.dbc"
+        app_settings.set_blf_db_note(str(p), "temp")
+        app_settings.set_blf_db_note(str(p), "   ")
+        assert app_settings.get_blf_db_note(str(p)) == ""
+        assert str(p) not in app_settings.get_blf_db_notes()
+
+    def test_corrupt_json_degrades_to_empty(self, app_settings):
+        app_settings.set_value(ConfigKey.BLF_DB_NOTES, "{not json")
+        assert app_settings.get_blf_db_notes() == {}
+        assert app_settings.get_blf_db_note("whatever.dbc") == ""
+
+    def test_notes_survive_singleton_reset(self, tmp_path):
+        p = tmp_path / "keep.dbc"
+        AppSettings._reset_for_tests()
+        AppSettings().set_blf_db_note(str(p), "keep")
+        AppSettings().sync()
+        AppSettings._reset_for_tests()
+        assert AppSettings().get_blf_db_note(str(p)) == "keep"
+        AppSettings._reset_for_tests()
+
+
 class TestPersistence:
     def test_values_survive_singleton_reset(self, qapp):
         """sync 后重置单例，新实例仍能从 ini 读回数据"""

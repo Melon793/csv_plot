@@ -1,6 +1,7 @@
 """统一配置管理器 - 集中管理应用所有配置"""
 
 from __future__ import annotations
+import json
 import logging
 import os
 import sys
@@ -11,6 +12,8 @@ from threading import Lock
 from typing import Any, Optional, Type
 
 from PySide6.QtCore import QSettings
+
+from src.utils.paths import normalize_input_path
 
 _logger = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ class ConfigKey(StrEnum):
     # 的多份 BLF 时不必每次重选。
     BLF_LAST_DB_PATHS = "blf/last_db_paths"
     BLF_AUTO_USE_LAST = "blf/auto_use_last"
+    # 数据库文件的用户备注：JSON dict {规范化路径: 备注文本}。备注是自由文本，
+    # 不能用 BLF_LAST_DB_PATHS 的 pathsep 连接（值里可能含分隔符或空格），
+    # JSON 单字符串在 ini 后端里最稳。
+    BLF_DB_NOTES = "blf/db_notes"
 
 
 class AppSettings:
@@ -220,3 +227,43 @@ class AppSettings:
 
     def set_blf_auto_use_last(self, enabled: bool) -> None:
         self._settings.setValue(ConfigKey.BLF_AUTO_USE_LAST, bool(enabled))
+
+    # ------------------------------------------------------------------
+    # CAN 数据库备注（用户在选库对话框里给 DBC / ARXML 写的说明）
+    #
+    # 键一律走 normalize_input_path：文件对话框 / 拖拽 / 记忆列表给到的写法
+    # 可能不同（~ 展开、分隔符差异），归一后才能命中同一条备注。
+    # ------------------------------------------------------------------
+
+    def get_blf_db_notes(self) -> dict[str, str]:
+        """全部数据库备注。坏 JSON / 类型不符一律返回空 dict，不让设置脏数据拖垮 UI。"""
+        raw = self._settings.value(ConfigKey.BLF_DB_NOTES, "", type=str) or ""
+        if not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            _logger.warning("CAN 数据库备注解析失败，已忽略: %.120s", raw)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): str(v) for k, v in data.items() if str(v).strip()}
+
+    def get_blf_db_note(self, path: str) -> str:
+        """单个数据库文件的备注；无备注返回空串。"""
+        return self.get_blf_db_notes().get(normalize_input_path(path), "")
+
+    def set_blf_db_note(self, path: str, note: str) -> None:
+        """写单条备注；清空（全空白）即删除条目，避免 ini 无限膨胀。"""
+        key = normalize_input_path(path)
+        if not key:
+            return
+        notes = self.get_blf_db_notes()
+        text = str(note).strip()
+        if text:
+            notes[key] = text
+        else:
+            notes.pop(key, None)
+        self._settings.setValue(
+            ConfigKey.BLF_DB_NOTES, json.dumps(notes, ensure_ascii=False)
+        )

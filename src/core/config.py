@@ -238,8 +238,14 @@ BLF_BANNER_STYLE_UNMATCHED = ("#fff3e0", "#b26a00")
 # CAN 数据库选择对话框尺寸（遵循「UI 容器需显式设置尺寸」规范）
 BLF_DB_DIALOG_MIN_SIZE = (640, 420)
 BLF_DB_DIALOG_SIZE = (680, 460)
-# 表格列宽：优先级 / 文件名(Stretch) / 类型 / 报文·信号 / 状态
-BLF_DB_COL_WIDTHS = {"priority": 44, "type": 64, "counts": 150, "status": 56}
+# 表格列宽：优先级 / 文件名(Stretch) / 类型 / 报文·信号 / 备注 / 状态
+BLF_DB_COL_WIDTHS = {
+    "priority": 44,
+    "type": 64,
+    "counts": 150,
+    "note": 150,
+    "status": 56,
+}
 # ---------------------------------------------------------------------------
 # BLF 统一文案（§5.8）
 #

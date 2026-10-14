@@ -122,17 +122,38 @@ def test_the_table_mirrors_reports_including_the_failed_file(blf_flow, tmp_path)
         assert table.item(0, 3).text() == (
             f"{reports[0].frame_count} / {reports[0].signal_count}"
         )
-        assert table.item(0, 4).text() == "✔ 已使用"
+        assert table.item(0, 4).text() == "", "无备注时备注列为空"
+        assert table.item(0, 5).text() == "✔ 已使用"
         assert table.item(1, 1).text() == os.path.basename(str(broken))
         assert table.item(1, 2).text() == "ARXML"
-        assert table.item(1, 4).text().startswith("✖ 解析失败")
-        assert table.item(1, 4).toolTip(), "失败原因要能悬停看到"
+        assert table.item(1, 5).text().startswith("✖ 解析失败")
+        assert table.item(1, 5).toolTip(), "失败原因要能悬停看到"
     finally:
         loader.close()
     # 行数回落也走同一张表（重新打开时 _refresh 再次跑）
     host.loader = None
     host._can_db_drawer._refresh(host)
     assert host._can_db_drawer.table.rowCount() == 0
+
+
+def test_the_note_column_mirrors_the_user_remark(blf_flow, tmp_path):
+    """抽屉的备注列是只读回显：写入口在选库对话框，这里只验证命中与 tooltip。"""
+    from src.core.settings import AppSettings
+
+    host, _manager, _threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=20, buses=(0,))
+    AppSettings().set_blf_db_note(str(dbc), "动力总成主库")
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        host.loader = loader
+        host._can_db_drawer._refresh(host)
+        table = host._can_db_drawer.table
+        assert table.item(0, 4).text() == "动力总成主库"
+        assert table.item(0, 4).toolTip() == "动力总成主库", "长备注悬停可读全文"
+        assert table.item(0, 5).text() == "✔ 已使用"
+    finally:
+        loader.close()
+        AppSettings().set_blf_db_note(str(dbc), "")
 
 
 # ---------------------------------------------------------------------------

@@ -193,7 +193,7 @@ def test_the_can_segment_appears_with_the_source_and_opens_the_drawer(
     assert drawer.table.rowCount() == len(mw.loader.database.reports)
     assert drawer.table.item(0, 1).text() == os.path.basename(str(dbc))
     assert drawer.table.item(0, 2).text() == "DBC"
-    assert drawer.table.item(0, 4).text() == "✔ 已使用"
+    assert drawer.table.item(0, 5).text() == "✔ 已使用"
 
 
 def test_the_can_segment_is_folded_when_the_window_is_too_narrow(

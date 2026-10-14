@@ -92,7 +92,7 @@ def _cell(dialog, row, col) -> str:
 
 
 def _status_color(dialog, row) -> str:
-    return dialog.table.item(row, 4).foreground().color().name()
+    return dialog.table.item(row, 5).foreground().color().name()
 
 
 def _import_btn(dialog):
@@ -113,13 +113,16 @@ def test_the_dialog_keeps_the_specified_sizes(qapp, dbc_a):
     assert dlg.table.columnWidth(0) == BLF_DB_COL_WIDTHS["priority"]
     assert dlg.table.columnWidth(2) == BLF_DB_COL_WIDTHS["type"]
     assert dlg.table.columnWidth(3) == BLF_DB_COL_WIDTHS["counts"]
-    assert dlg.table.columnWidth(4) == BLF_DB_COL_WIDTHS["status"]
+    assert dlg.table.columnWidth(4) == BLF_DB_COL_WIDTHS["note"]
+    assert dlg.table.columnWidth(5) == BLF_DB_COL_WIDTHS["status"]
     # 文件名列必须是唯一的弹性列，否则长文件名会把状态列挤出可视区
     assert (
         dlg.table.horizontalHeader().sectionResizeMode(1)
         == QHeaderView.ResizeMode.Stretch
     )
-    assert dlg.table.editTriggers() == dlg.table.EditTrigger.NoEditTriggers
+    assert dlg.table.editTriggers() == (
+        dlg.table.EditTrigger.DoubleClicked | dlg.table.EditTrigger.EditKeyPressed
+    ), "只有备注列可编辑（flags 摘除，见 test_the_note_column_is_the_only_editable_one）"
     assert dlg.table.selectionBehavior() == dlg.table.SelectionBehavior.SelectRows
     assert dlg.table.selectionMode() == dlg.table.SelectionMode.SingleSelection
     assert dlg.table.alternatingRowColors() is True
@@ -156,7 +159,7 @@ def test_a_usable_dbc_lights_up_import(qapp, dbc_a):
     assert _import_btn(dlg).toolTip() == ""
     assert dlg.get_selected_paths() == [str(dbc_a)]
     assert _cell(dlg, 0, 3) == "1 / 1"
-    assert _cell(dlg, 0, 4) == "✔ 已加载"
+    assert _cell(dlg, 0, 5) == "✔ 已加载"
     assert _status_color(dlg, 0) == BLF_DB_COLOR_OK
 
 
@@ -168,10 +171,10 @@ def test_only_unreadable_files_leaves_import_disabled_with_a_different_hint(qapp
     assert _import_btn(dlg).isEnabled() is False
     # 与「还没加文件」区分的另一句：加了但一个都没读出来
     assert _import_btn(dlg).toolTip() == "至少选择一个可解析的数据库文件"
-    assert _cell(dlg, 0, 4).startswith("✖ 解析失败")
+    assert _cell(dlg, 0, 5).startswith("✖ 解析失败")
     assert _status_color(dlg, 0) == BLF_DB_COLOR_ERROR
     # 完整异常放 tooltip，状态列只放第一行（否则整列被堆栈撑爆）
-    assert "XMLSyntaxError" in dlg.table.item(0, 4).toolTip()
+    assert "XMLSyntaxError" in dlg.table.item(0, 5).toolTip()
 
 
 def test_accepting_with_no_usable_file_warns_and_keeps_the_dialog_open(qapp,
@@ -206,7 +209,7 @@ def test_a_broken_file_sits_next_to_a_good_one_without_blocking_it(qapp,
     dlg = CanDatabaseSelectorDialog()
     assert dlg.add_paths([str(junk), str(dbc_a)]) == 2
     assert _status_color(dlg, 0) == BLF_DB_COLOR_ERROR
-    assert _cell(dlg, 1, 4) == "✔ 已加载"
+    assert _cell(dlg, 1, 5) == "✔ 已加载"
     # 坏行被跳过后仍可直接导入：这是「单文件失败不中断」的 UI 侧兑现
     assert _import_btn(dlg).isEnabled() is True
     assert dlg.get_selected_paths() == [str(dbc_a)]
@@ -218,7 +221,7 @@ def test_a_dbc_that_parses_to_no_frames_warns_instead_of_failing(qapp, tmp_path)
     empty = tmp_path / "empty.dbc"
     empty.write_text('VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_:\n\n', encoding="utf-8")
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(empty)])
-    assert _cell(dlg, 0, 4) == "⚠ 无 CAN 报文"
+    assert _cell(dlg, 0, 5) == "⚠ 无 CAN 报文"
     assert _status_color(dlg, 0) == BLF_DB_COLOR_WARN
     assert _cell(dlg, 0, 3) == "0 / 0"
     # 「无 CAN 报文」的库对解码毫无贡献，不能让它点亮导入按钮
@@ -338,7 +341,7 @@ def test_missing_remembered_files_are_listed_in_the_notice(qapp, dbc_a, tmp_path
     )
     assert dlg.notice.isVisibleTo(dlg) is True
     assert "old_fota.dbc" in dlg.notice.text()
-    assert _cell(dlg, 0, 4) == "✖ 文件不存在"
+    assert _cell(dlg, 0, 5) == "✖ 文件不存在"
     assert _cell(dlg, 0, 3) == "— / —", "缺失行不该拿 0 冒充「读到了空库」"
     # 缺失行被跳过，但剩下的仍可用 → 不必逼用户重来
     assert dlg.get_selected_paths() == [str(dbc_a)]
@@ -422,3 +425,44 @@ def test_cancelling_the_dialog_writes_nothing(flow_host, monkeypatch,
     assert flow_host._ask_can_databases("log.blf", initial=[str(dbc_a)]) is None
     assert AppSettings().get_blf_last_db_paths() == []
     assert AppSettings().is_blf_auto_use_last() is False
+
+
+# ---------------------------------------------------------------------------
+# 用户备注：仅备注列可编辑、随改随存、打开回显、跟随行移动
+# ---------------------------------------------------------------------------
+
+def test_the_note_column_is_the_only_editable_one(app_settings, dbc_a):
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+    assert dlg.table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
+    for col in (0, 1, 2, 3, 5):
+        assert not (
+            dlg.table.item(0, col).flags() & Qt.ItemFlag.ItemIsEditable
+        ), f"第 {col} 列不该可编辑（备注列是唯一的输入点）"
+
+
+def test_note_edits_persist_immediately(app_settings, dbc_a):
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+    dlg.table.item(0, 4).setText("  动力总成库  ")
+    # 随改随存（不等「导入」：备注是文件的属性，与本次导入是否发生无关），
+    # 且落盘前去空白
+    assert app_settings.get_blf_db_note(str(dbc_a)) == "动力总成库"
+    assert dlg.rows[0].note == "动力总成库"
+    assert _cell(dlg, 0, 4) == "动力总成库", "item 文本要与落盘值一致"
+
+
+def test_a_stored_note_is_echoed_and_can_be_cleared(app_settings, dbc_a):
+    app_settings.set_blf_db_note(str(dbc_a), "主库")
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+    assert _cell(dlg, 0, 4) == "主库", "打开对话框要回显已存备注"
+    dlg.table.item(0, 4).setText("  ")
+    assert app_settings.get_blf_db_note(str(dbc_a)) == ""
+    assert _cell(dlg, 0, 4) == "", "清空即删除条目"
+
+
+def test_notes_follow_the_row_when_reordering(app_settings, dbc_a, dbc_b):
+    app_settings.set_blf_db_note(str(dbc_a), "A 库")
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a), str(dbc_b)])
+    dlg.table.selectRow(0)
+    dlg.down_btn.click()
+    assert [r.path for r in dlg.rows] == [str(dbc_b), str(dbc_a)]
+    assert [r.note for r in dlg.rows] == ["", "A 库"], "备注必须跟着行走"
