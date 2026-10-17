@@ -270,6 +270,89 @@ class EventHandler:
         if pw:
             pw.open_variable_editor()
 
+    def _annotation_manager(self, pw):
+        """取标注管理器；替身 widget 上没有该属性时返回 None 而不是抛异常"""
+        if pw is None or not hasattr(pw, "annotation_manager"):
+            return None
+        try:
+            return pw.annotation_manager
+        except (RuntimeError, AttributeError):
+            return None
+
+    def _on_vb_add_annotation(self, kind, pw):
+        """ViewBox 信号：在右键点击处新建标注
+
+        文字标注建完立刻弹属性对话框：否则屏上出现一个空标注，用户还得再找
+        入口才能输入内容。
+        """
+        manager = self._annotation_manager(pw)
+        if manager is None:
+            return
+        if not manager.edit_mode:
+            # 新建即进入编辑态：否则刚建的图元立刻就拖不动，等于白建
+            self._set_annotation_mode(pw, True)
+        annotation_id = manager.create_at_context(kind)
+        if annotation_id and kind == "text":
+            manager.open_property_dialog(annotation_id)
+
+    def _on_vb_annotation_action(self, action, pw):
+        """ViewBox 信号：标注子菜单里的各项动作"""
+        from src.ui.widgets.custom_viewbox import (
+            ACTION_ANNOTATION_CLEAR,
+            ACTION_ANNOTATION_COPY,
+            ACTION_ANNOTATION_COPY_ALL,
+            ACTION_ANNOTATION_OPEN_LIST,
+            ACTION_ANNOTATION_PASTE,
+            ACTION_ANNOTATION_REDO,
+            ACTION_ANNOTATION_TOGGLE_EDIT,
+            ACTION_ANNOTATION_UNDO,
+        )
+
+        manager = self._annotation_manager(pw)
+        if manager is None:
+            return
+        if action == ACTION_ANNOTATION_TOGGLE_EDIT:
+            self._set_annotation_mode(pw, not manager.edit_mode)
+        elif action == ACTION_ANNOTATION_OPEN_LIST:
+            manager.open_list_dialog()
+        elif action == ACTION_ANNOTATION_CLEAR:
+            manager.clear(announce=True)
+        elif action == ACTION_ANNOTATION_COPY:
+            manager.copy()
+        elif action == ACTION_ANNOTATION_COPY_ALL:
+            manager.copy(all_items=True)
+        elif action == ACTION_ANNOTATION_PASTE:
+            # 粘贴出来的图元立刻要能拖，否则用户得先手动开编辑模式才发现粘上了
+            if not manager.edit_mode:
+                self._set_annotation_mode(pw, True)
+            manager.paste()
+        elif action == ACTION_ANNOTATION_UNDO:
+            manager.undo()
+        elif action == ACTION_ANNOTATION_REDO:
+            manager.redo()
+
+    def _on_vb_set_x_axis_column(self, pw, column):
+        """ViewBox 信号：X 轴切换为默认索引或某个时间列（对全部子图生效）"""
+        if pw and pw.plot_context and hasattr(pw.plot_context, "set_x_axis_time_column"):
+            pw.plot_context.set_x_axis_time_column(column)
+
+    def _set_annotation_mode(self, pw, on: bool) -> None:
+        """切换标注编辑模式
+
+        编辑模式是全局模式（顶栏按钮 / 右键菜单 / 快捷键三条入口共用一份状态），
+        所以经 MainWindow 统一下发到所有子图，避免只切了当前子图、顶栏按钮与
+        其它子图对不上。MainWindow 缺失时（独立 widget、测试环境）退化为只切当前子图。
+        """
+        window = pw.window() if pw is not None and hasattr(pw, "window") else None
+        if (
+            window is not None
+            and hasattr(window, "layout_manager")
+            and hasattr(window.layout_manager, "toggle_annotation_mode")
+        ):
+            window.layout_manager.toggle_annotation_mode(on)
+            return
+        pw.annotation_manager.set_edit_mode(on)
+
     def _connect_viewbox_signals(self):
         """连接 ViewBox 信号"""
         vb = self.pw.view_box
@@ -284,6 +367,9 @@ class EventHandler:
         vb.signals.request_set_all_row_height.connect(self._on_vb_set_all_row_height)
         vb.signals.request_copy_name.connect(self._on_vb_copy_name)
         vb.signals.request_variable_editor.connect(self._on_vb_var_editor)
+        vb.signals.request_add_annotation.connect(self._on_vb_add_annotation)
+        vb.signals.request_annotation_action.connect(self._on_vb_annotation_action)
+        vb.signals.request_set_x_axis_column.connect(self._on_vb_set_x_axis_column)
 
     def _cancel_ui_refresh(self, *types):
         """取消 UI 刷新"""

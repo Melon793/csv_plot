@@ -14,6 +14,10 @@ from src.core.config import (  # noqa: E402
     RATIO_RESET_PLOTS,
     widget_alive,
 )
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+
+from src.core.time_axis_mapping import TimeAxisMapping, build_timestamps  # noqa: E402
 from src.core.settings import AppSettings  # noqa: E402
 from src.ui.table_dialog import DropOverlay  # noqa: E402
 from src.ui.variable_list import MyTableWidget  # noqa: E402
@@ -28,6 +32,7 @@ from PySide6.QtGui import (  # noqa: E402
     QIcon,
     QPainter,
     QPalette,
+    QPen,
     QAction,
     QShortcut,
     QKeySequence,
@@ -419,12 +424,17 @@ class MainWindow(QMainWindow):
         self.mark_region_btn.setCheckable(True)
         self.mark_region_btn.setToolTip("切换标记区域 (Ctrl+T)")
 
+        self.annotation_btn = QPushButton("标注", self.plot_widget)
+        self.annotation_btn.setCheckable(True)
+        self.annotation_btn.setToolTip("切换标注编辑模式 (Ctrl+E)；退出后标注只显示、不抢鼠标")
+
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
         self.grid_layout_btn.setToolTip("修改图表布局 (Ctrl+L)")
 
         top_bar.addWidget(self.grid_layout_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
+        top_bar.addWidget(self.annotation_btn)
         top_bar.addWidget(self.auto_y_btn)
         top_bar.addWidget(self.auto_range_btn)
 
@@ -477,6 +487,24 @@ class MainWindow(QMainWindow):
         self.saved_mark_range = None
         self.mark_stats_window = None
 
+        # 标注注册表（窗口级）：create_subplots_matrix 会销毁全部子图 widget，
+        # 标注数据跟着消失，所以换布局前先存这里、建好后按子图索引回放。
+        # 与 saved_mark_range 同一个思路，架构上零新增概念。
+        self.annotation_registry: dict[int, list[dict]] = {}
+        # 标注剪贴板（窗口级）：同样必须活得比子图久 —— "把主驾那套标注照搬到
+        # 副驾/后排"要多子图共享一份剪贴板。只做声明，写读都由
+        # AnnotationManager._clipboard() 负责（它会按需创建，独立 widget 下
+        # 退化成挂在宿主替身上）。
+        self.annotation_clipboard: list[dict] = []
+        # 时间戳 X 轴模式：None = 默认索引轴；否则为 loader.df 里的 datetime64 列名。
+        # 只改轴渲染（索引空间不动），游标 / 标注 / 时间校正全部零影响。
+        self.x_axis_time_column: str | None = None
+        # 行号→时间映射缓存：key = 时间列名，value = (loader 弱引用, TimeAxisMapping)。
+        # 弱引用校验防 id 复用踩到旧 loader 的陈旧映射（重载会换新 loader）。
+        self._time_axis_mappings: dict[str, tuple[object, object]] = {}
+        # 演示视图的状态快照（None 表示当前不在演示视图）
+        self._presentation_state: dict | None = None
+
         self.row_height_factors: dict[int, int] = {}
 
         self._cursor_shortcut = QShortcut(QKeySequence("Ctrl+R"), self.plot_widget)
@@ -490,6 +518,12 @@ class MainWindow(QMainWindow):
 
         self._mark_region_shortcut = QShortcut(QKeySequence("Ctrl+T"), self.plot_widget)
         self._mark_region_shortcut.activated.connect(self._on_mark_region_shortcut)
+
+        self._annotation_shortcut = QShortcut(QKeySequence("Ctrl+E"), self.plot_widget)
+        self._annotation_shortcut.activated.connect(self._on_annotation_shortcut)
+
+        self._presentation_shortcut = QShortcut(QKeySequence("Ctrl+P"), self.plot_widget)
+        self._presentation_shortcut.activated.connect(self._on_presentation_shortcut)
 
         self._open_file_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         self._open_file_shortcut.activated.connect(self._on_open_file_shortcut)
@@ -893,6 +927,7 @@ class MainWindow(QMainWindow):
         self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
         self.cursor_btn.clicked.connect(self.cursor_sync_manager.toggle_cursor_all)
         self.mark_region_btn.clicked.connect(self.layout_manager.toggle_mark_region)
+        self.annotation_btn.clicked.connect(self.layout_manager.toggle_annotation_mode)
         self._crosshair_update_timer.timeout.connect(self.cursor_sync_manager._flush_crosshair_updates)
         self._filter_debounce_timer.timeout.connect(self.cursor_sync_manager.filter_variables)
         self._mark_stats_timer.timeout.connect(self.layout_manager._flush_mark_stats_refresh)
@@ -1125,15 +1160,21 @@ class MainWindow(QMainWindow):
         else:
             self._broadcast(text)
 
-    def _announce_cleared_plots(self, label: str, curves: int) -> None:
+    def _announce_cleared_plots(self, label: str, curves: int, annotations: int = 0) -> None:
         """清除绘图之后的播报，三条入口共用（顶部按钮 / 右键菜单 / 双击中键）。
 
-        只在真有曲线被清掉时出声 —— 清一遍本来就没曲线的子图，屏上什么都没变，
-        不该占消息区（这条守卫顺带保证文案里的数目 ≥1）。
+        只在真有东西被清掉时出声 —— 清一遍本来就没曲线的子图，屏上什么都没变，
+        不该占消息区。``annotations`` 让"清掉的不只是曲线"这件事可见（不然用户
+        辛苦标的图随手一清就无声无息没了）。
+
+        默认 0，既有两条子图级入口的调用点不变。
         """
-        if curves <= 0:
+        if curves <= 0 and annotations <= 0:
             return
-        self._broadcast(f"{label} · {curves} 条曲线")
+        message = f"{label} · {curves} 条曲线"
+        if annotations:
+            message += f" 与 {annotations} 条标注"
+        self._broadcast(message)
 
     def _check_and_apply_template(self, template, template_id: str, name: str):
         from src.core.plot_config import PlotSessionConfig
@@ -1242,6 +1283,140 @@ class MainWindow(QMainWindow):
         new_state = not self.cursor_btn.isChecked()
         self.cursor_sync_manager.toggle_cursor_all(new_state)
 
+    # ========================================================================
+    # 时间戳 X 轴（轴渲染层映射：索引空间不动，只把刻度/游标读数译成时间）
+    # ========================================================================
+
+    def available_time_columns(self) -> list[str]:
+        """loader 数据里可作时间戳 X 轴的列
+
+        判定以 ``loader.date_formats`` 为准（加载器已做"列名含 time 等关键字
+        + 格式可解析"的双重识别，列本身保持字符串 dtype，见
+        FastDataLoader.do_parse_date 默认 False）；再补上已是 datetime64 的
+        列（Excel 等直接给出 datetime 的来源）。
+        """
+        loader = getattr(self, "loader", None)
+        df = getattr(loader, "df", None)
+        if df is None:
+            return []
+        try:
+            columns: list[str] = []
+            for key in getattr(loader, "date_formats", {}) or {}:
+                if str(key) in df.columns:
+                    columns.append(str(key))
+            for col in df.columns:
+                text = str(col)
+                if text not in columns and pd.api.types.is_datetime64_any_dtype(df[col]):
+                    columns.append(text)
+            return columns
+        except Exception:
+            return []
+
+    def _get_time_axis_mapping(self, column: str | None):
+        """取（并缓存）指定时间列的行号→时间映射；列失效返回 None"""
+        if not column:
+            return None
+        loader = getattr(self, "loader", None)
+        df = getattr(loader, "df", None)
+        if df is None or column not in getattr(df, "columns", []):
+            return None
+        import weakref
+
+        cached = self._time_axis_mappings.get(column)
+        if cached is not None:
+            loader_ref, mapping = cached
+            if loader_ref() is loader:
+                return mapping
+        try:
+            fmt = (getattr(loader, "date_formats", {}) or {}).get(column)
+            series = df[column]
+        except Exception:
+            return None
+        mapping = TimeAxisMapping(build_timestamps(series, date_format=fmt), date_format=fmt)
+        self._time_axis_mappings[column] = (weakref.ref(loader), mapping)
+        return mapping
+
+    def set_x_axis_time_column(self, column: str | None) -> None:
+        """切换时间戳 X 轴（None = 默认索引轴）；对全部子图统一生效"""
+        if column is not None and column not in self.available_time_columns():
+            column = None  # 列已随重载消失 → 静默回落默认轴
+        if column == self.x_axis_time_column:
+            # 同列重复设置（如重载后）也要重放：df 内容可能已变
+            if column is None:
+                return
+        self.x_axis_time_column = column
+        if column is None:
+            self._time_axis_mappings.clear()
+        self.apply_x_axis_to_all_plots()
+
+    def apply_x_axis_to_all_plots(self) -> None:
+        for container in list(getattr(self, "plot_widgets", []) or []):
+            widget = getattr(container, "plot_widget", None)
+            if widget is not None:
+                self.apply_x_axis_to_widget(widget)
+
+    def apply_x_axis_to_widget(self, pw) -> None:
+        """把当前 X 轴模式落到单个子图（换轴 / 换映射 / 恢复默认轴）"""
+        if pw is None or not hasattr(pw, "plot_item"):
+            return
+        column = getattr(self, "x_axis_time_column", None)
+        mapping = self._get_time_axis_mapping(column) if column else None
+
+        if mapping is None:
+            if getattr(pw, "x_axis_time_formatter", None) is None:
+                return  # 本来就是默认轴，零操作
+            default_axis = getattr(pw, "_default_bottom_axis", None)
+            if default_axis is not None:
+                pw.plot_item.setAxisItems({"bottom": default_axis})
+                pw.axis_x = default_axis
+            pw.x_axis_time_formatter = None
+            pw._x_axis_label_override = None
+            pw.update_x_axis_label()
+            self._refresh_cursor_readout(pw)
+            return
+
+        from src.ui.widgets.time_axis_item import IndexToTimeTextAdapter, TimestampAxisItem
+
+        mapper = IndexToTimeTextAdapter(mapping, pw)
+        axis = getattr(pw, "_time_bottom_axis", None)
+        if not isinstance(axis, TimestampAxisItem):
+            axis = TimestampAxisItem(orientation="bottom", index_to_text=mapper)
+            pw._time_bottom_axis = axis
+            # 复刻 _setup_plot_area 的底轴样式（换轴后样式不丢）。
+            # 网格 alpha 必须抄默认轴：showGrid(alpha=0.1) 经 ctrl 滑条把各轴
+            # setGrid(25)，硬编码 255 会把整片网格画成纯黑（实测缺陷）。
+            default_axis = getattr(pw, "_default_bottom_axis", None)
+            if default_axis is not None:
+                axis.setPen(default_axis.pen())
+                axis.setTextPen(default_axis.textPen())
+                axis.setGrid(default_axis.grid)
+            else:
+                axis.setTextPen("black")
+                axis.setPen(QPen(QColor("black"), 1))
+                axis.setGrid(int(0.1 * 255))
+        else:
+            axis.set_index_to_text(mapper)
+        pw.plot_item.setAxisItems({"bottom": axis})
+        pw.axis_x = axis
+        pw.x_axis_time_formatter = mapper
+        pw._x_axis_label_override = column
+        pw.update_x_axis_label()
+        self._refresh_cursor_readout(pw)
+
+    def _refresh_cursor_readout(self, pw) -> None:
+        """模式切换后重放游标读数（正在显示的游标 X 文本要跟着换口径）"""
+        try:
+            pw.update_cursor_label()
+        except Exception:
+            pass
+
+    def _on_cursor_shortcut(self):
+        """Ctrl+R 快捷键：切换光标显示状态"""
+        if not self.plot_widgets:
+            return
+        new_state = not self.cursor_btn.isChecked()
+        self.cursor_sync_manager.toggle_cursor_all(new_state)
+
     def _on_auto_y_shortcut(self):
         """Ctrl+Y 快捷键：自动调节Y轴范围"""
         if not self.plot_widgets:
@@ -1260,6 +1435,61 @@ class MainWindow(QMainWindow):
             return
         new_state = not self.mark_region_btn.isChecked()
         self.layout_manager.toggle_mark_region(new_state)
+
+    def _on_annotation_shortcut(self):
+        """Ctrl+E 快捷键：切换标注编辑模式"""
+        if not self.plot_widgets:
+            return
+        self.layout_manager.toggle_annotation_mode(not self.annotation_btn.isChecked())
+
+    def _on_presentation_shortcut(self):
+        """Ctrl+P 快捷键：演示视图（一键隐藏编辑期装饰层，便于直接截图）"""
+        if not self.plot_widgets:
+            return
+        self._toggle_presentation_view(self._presentation_state is None)
+
+    def _toggle_presentation_view(self, on: bool) -> None:
+        """演示视图：只隐藏编辑期装饰，不新增任何渲染逻辑
+
+        截图上最碍眼的几样都是"编辑期才该出现"的东西：游标竖线与数值文本、
+        标记可以拖动的把手、标注的拖拽手柄、拖拽指示器。这个开关把它们临时
+        收起来，退出时按进来之前的状态原样恢复 —— 不改变任何既有开关的语义。
+        """
+        if on:
+            if self._presentation_state is not None:
+                return
+            self._presentation_state = {
+                "cursor": self.cursor_btn.isChecked(),
+                "mark_region": self.mark_region_btn.isChecked(),
+                "annotation": self.annotation_btn.isChecked(),
+            }
+            if self._presentation_state["cursor"]:
+                self.cursor_sync_manager.toggle_cursor_all(False)
+            if self._presentation_state["annotation"]:
+                self.layout_manager.toggle_annotation_mode(False)
+            self.layout_manager.set_annotation_handles_visible(False)
+            self._set_mark_region_draggable(False)
+            self._broadcast("演示视图已开启：已隐藏游标与编辑手柄 (Ctrl+P 退出)")
+            return
+
+        state = self._presentation_state
+        if state is None:
+            return
+        self._presentation_state = None
+        self.layout_manager.set_annotation_handles_visible(True)
+        self._set_mark_region_draggable(True)
+        if state["annotation"]:
+            self.layout_manager.toggle_annotation_mode(True)
+        if state["cursor"]:
+            self.cursor_sync_manager.toggle_cursor_all(True)
+        self._broadcast("演示视图已退出，已恢复进入前的显示状态")
+
+    def _set_mark_region_draggable(self, draggable: bool) -> None:
+        """标记区域的可拖拽把手开关（shading 本体保持可见，截图里仍要看到区间）"""
+        for container in self.plot_widgets:
+            region = getattr(container.plot_widget, "mark_region", None)
+            if region is not None and hasattr(region, "setMovable"):
+                region.setMovable(bool(draggable))
 
     def _on_open_file_shortcut(self):
         """Ctrl+O 快捷键：加载数据文件"""

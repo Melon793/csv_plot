@@ -1432,6 +1432,11 @@ class FileLoaderManager(MainWindowBaseManager):
             widget.time_axis_label = self.mw.loader.time_axis_label
             widget.update_x_axis_label()
 
+        # 时间戳 X 轴：新 loader 的 df 已就位，重放当前模式（列没了会静默回落
+        # 默认索引轴；映射缓存按 loader 弱引用自动失效，不用在这里清）
+        if hasattr(self.mw, "set_x_axis_time_column"):
+            self.mw.set_x_axis_time_column(self.mw.x_axis_time_column)
+
         self.mw.cursor_sync_manager._compute_baseline_density()
         self.mw.cursor_sync_manager._sync_min_xrange()
 

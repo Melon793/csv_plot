@@ -49,8 +49,13 @@ class PlotConfigManager(QObject):
             if not container.isVisible():
                 continue
             curve_names = plot_widget.curve_strategy.get_curve_names()
-            if curve_names:
-                config.plots.append(PlotConfig(curves=curve_names))
+            manager = getattr(plot_widget, "annotation_manager", None)
+            annotations = manager.dump() if manager is not None else []
+            # 只有标注、没有曲线的子图也要导出：否则用户辛苦标的图一存模板就丢
+            if curve_names or annotations:
+                config.plots.append(
+                    PlotConfig(curves=curve_names, annotations=annotations)
+                )
 
         return config
 
@@ -120,8 +125,16 @@ class PlotConfigManager(QObject):
         """将配置应用到单个 Plot"""
         logger.debug("处理 Plot[%d], 曲线: %s", plot_index, plot_config.curves)
 
-        # 先清除现有曲线
-        plot_widget.clear_plot_item()
+        # 先清除现有曲线与标注：模板应用是在重建整个子图内容，旧标注与新曲线
+        # 的语义不再对应，留着就是误导（决策 1）
+        plot_widget.clear_plot_item(clear_annotations=True)
+
+        # 标注与曲线无关，先于曲线落位：曲线加载失败（变量不在当前数据里）时
+        # 标注仍然应该恢复，否则用户会以为模板把标注也弄丢了
+        manager = getattr(plot_widget, "annotation_manager", None)
+        if manager is not None and plot_config.annotations:
+            restored = manager.load(plot_config.annotations, replace=True)
+            logger.debug("Plot[%d] 恢复标注 %d 条", plot_index, restored)
 
         # 根据曲线数量设置模式
         if len(plot_config.curves) == 0:

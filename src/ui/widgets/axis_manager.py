@@ -85,7 +85,10 @@ class AxisManager:
         from src.core.config import DEFAULT_SHOW_X_AXIS_LABEL
 
         if DEFAULT_SHOW_X_AXIS_LABEL:
-            label = pw.time_axis_label if pw.time_axis_label else "Index"
+            # 时间戳模式：标签用所选时间列名（_x_axis_label_override 由 MainWindow 维护）
+            label = getattr(pw, "_x_axis_label_override", None) or (
+                pw.time_axis_label if pw.time_axis_label else "Index"
+            )
             axis.setLabel(label)
             axis.showLabel(True)
         else:

@@ -10,15 +10,23 @@ from typing import Any
 class PlotConfig:
     """单个 Plot 的配置"""
     curves: list[str] = field(default_factory=list)  # 曲线变量名列表
+    # 该子图的标注（annotation_models.AnnotationItem.to_dict 的列表）
+    # 加字段天然向后兼容：from_dict 走 .get 默认值，v0.4.3 之前生成的模板
+    # 没有这个键，读出来就是空表，不会报错也不影响曲线部分。
+    annotations: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """序列化为字典"""
-        return {"curves": self.curves}
+        return {"curves": self.curves, "annotations": self.annotations}
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlotConfig":
         """从字典反序列化"""
-        return cls(curves=data.get("curves", []))
+        annotations = data.get("annotations", [])
+        if not isinstance(annotations, list):
+            # 手改过 / 被别的工具写坏的模板：当作没有标注，而不是抛异常
+            annotations = []
+        return cls(curves=data.get("curves", []), annotations=list(annotations))
 
 
 @dataclass

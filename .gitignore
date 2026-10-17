@@ -19,3 +19,4 @@ htmlcov/
 .pytest_cache/
 .ruff_cache/
 src/_build_info.py
+/report.xml

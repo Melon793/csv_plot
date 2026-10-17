@@ -512,6 +512,12 @@ class PlotUIManager(BasePlotManager):
         pw.view_box = pw.plot_item.vb
         pw.view_box.plot_widget = pw
         pw._connect_viewbox_signals()
+        # 时间戳 X 轴：默认底轴的留档（切时间模式要能原样换回来）+ 模式状态位。
+        # x_axis_time_formatter 非 None 时，刻度/游标读数经它译成时间文本。
+        pw._default_bottom_axis = pw.plot_item.getAxis("bottom")
+        pw._time_bottom_axis = None
+        pw.x_axis_time_formatter = None
+        pw._x_axis_label_override = None
         # 左轴宽度变化（y 轴刻度位数改变）→ 重算 legend 左右对齐
         pw._legend_left_axis = pw.plot_item.getAxis("left")
         pw._legend_left_axis.installEventFilter(pw)
@@ -544,7 +550,10 @@ class PlotUIManager(BasePlotManager):
         """更新 X 轴标签文本"""
         axis = pw.plot_item.getAxis("bottom")
         if DEFAULT_SHOW_X_AXIS_LABEL:
-            label = pw.time_axis_label if pw.time_axis_label else "Index"
+            # 时间戳模式：标签用所选时间列名（_x_axis_label_override 由 MainWindow 维护）
+            label = getattr(pw, "_x_axis_label_override", None) or (
+                pw.time_axis_label if pw.time_axis_label else "Index"
+            )
             axis.setLabel(label)
             axis.showLabel(True)
         else:

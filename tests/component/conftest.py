@@ -35,6 +35,7 @@ class FakePlotContext:
         pass
 
     def announce_cleared(self, label: str, curves: int) -> None:
+        # 只记 (label, curves)：既有断言比对的就是这一对；标注条数由 label 承载
         self.cleared_announces.append((label, curves))
 
 

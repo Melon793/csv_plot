@@ -703,9 +703,7 @@ class CursorManager:
                 if mode not in ("1 anchored cursor", "2 anchored cursor"):
                     if x < x_min or x > x_max:
                         continue
-                x_str = self._significant_decimal_format_str(
-                    value=float(x), ref=self.factor
-                )
+                x_str = self._format_x_readout(float(x))
                 x_info_item = self._get_x_label_from_pool(idx)
                 # 先加入 scene，再设置属性（Qt 规范顺序）
                 x_scene = x_info_item.scene()
@@ -1236,9 +1234,7 @@ class CursorManager:
                 if show_x_mode not in ("1 anchored cursor", "2 anchored cursor"):
                     if x < x_min or x > x_max:
                         continue
-                x_str = self._significant_decimal_format_str(
-                    value=float(x), ref=self.factor
-                )
+                x_str = self._format_x_readout(float(x))
                 x_info_item = self._get_x_label_from_pool(idx)
                 # 先加入 scene，再设置属性（Qt 规范顺序）
                 x_scene = x_info_item.scene()
@@ -1515,6 +1511,22 @@ class CursorManager:
             return dt.strftime('%Y/%m/%d')
         except Exception:
             return str(value)
+
+    def _format_x_readout(self, x: float) -> str:
+        """游标 X 读数：时间戳模式译成 HH:MM:SS，否则走数字精度格式
+
+        时间戳模式只改显示口径（``pw.x_axis_time_formatter`` 由 MainWindow
+        维护，内部按 offset/factor 反解行号），数据空间与游标定位逻辑不动。
+        """
+        formatter = getattr(self.pw, "x_axis_time_formatter", None)
+        if formatter is not None:
+            try:
+                text = formatter(x)
+            except Exception:
+                text = None
+            if text:
+                return text
+        return self._significant_decimal_format_str(value=x, ref=self.factor)
 
     def _significant_decimal_format_str(self, value: float, ref: float, max_dp: int | None = None) -> str:
         """根据 ref 的显示精度自动决定 value 的字符串格式"""

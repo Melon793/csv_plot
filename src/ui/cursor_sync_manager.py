@@ -381,16 +381,22 @@ class CursorSyncManager(MainWindowBaseManager):
             return
         # 播报里的数目在清之前取（全部子图，含不可见的容器——它们同样被清）
         cleared = sum(len(c.plot_widget.curves) for c in self.mw.plot_widgets)
+        annotations = sum(
+            mgr.count()
+            for container in self.mw.plot_widgets
+            for mgr in (getattr(container.plot_widget, "annotation_manager", None),)
+            if mgr is not None
+        )
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
-            widget.clear_plot_item()
+            widget.clear_plot_item(clear_annotations=True)
             widget.clear_value_cache()
             widget.reset_pin_state()
         self.mw.value_cache = OrderedDict()
         self.mw._enum_text_maps = {}
         self.mw.saved_mark_range = None
         self.mw.layout_manager.request_mark_stats_refresh(immediate=True)
-        self.mw._announce_cleared_plots("已清除全部绘图", cleared)
+        self.mw._announce_cleared_plots("已清除全部绘图", cleared, annotations)
 
     def collect_global_x_range(
         self, curves_filter: str = "visible"

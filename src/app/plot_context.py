@@ -157,7 +157,12 @@ class PlotContext:
         self._services.layout_manager.request_mark_stats_refresh(immediate=immediate)
 
     def announce_cleared(self, label: str, curves: int) -> None:
-        """子图级清除的播报落点（右键菜单 / 双击中键共用）。"""
+        """子图级清除的播报落点（右键菜单 / 双击中键共用）。
+
+        标注条数由 ``label`` 承载（``已清除绘图与 N 条标注``），不另开参数：
+        这个签名是既有测试直接替换的接缝（见 test_clear_plot_feedback 里的
+        替身 lambda），加参数会把它打断。
+        """
         self._services._announce_cleared_plots(label, curves)
 
     def toggle_cursor_all(self, enabled: bool) -> None:
@@ -200,6 +205,22 @@ class PlotContext:
 
     def auto_y_in_x_range(self) -> None:
         self._services.cursor_sync_manager.auto_y_in_x_range()
+
+    # ---- 时间戳 X 轴（见 MainWindow 同名方法） ----
+
+    @property
+    def x_axis_time_column(self) -> "str | None":
+        return self._services.x_axis_time_column
+
+    @x_axis_time_column.setter
+    def x_axis_time_column(self, value: "str | None") -> None:
+        self._services.x_axis_time_column = value
+
+    def available_time_columns(self) -> list[str]:
+        return self._services.available_time_columns()
+
+    def set_x_axis_time_column(self, column: "str | None") -> None:
+        self._services.set_x_axis_time_column(column)
 
     def collect_global_x_range(
         self, curves_filter: str = "visible"

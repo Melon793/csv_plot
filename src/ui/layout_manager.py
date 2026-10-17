@@ -708,6 +708,11 @@ class LayoutManager(MainWindowBaseManager):
     def create_subplots_matrix(self, m: int, n: int):
         from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
 
+        # 标注按决策 2 保留：必须在 deleteLater 之前把标注从图元上读出来存进
+        # MainWindow 级注册表（仿 saved_mark_range 的既有做法）。顺序反了就是
+        # "widget 先没、标注后读"，只能读到空表。
+        self._capture_annotations()
+
         # 清空前先标记：新矩阵建好之前，旧 plot 上的在途回调必须短路
         self._mark_all_plots_being_destroyed()
         for i in reversed(range(self.mw.plot_layout.count())):
@@ -743,6 +748,13 @@ class LayoutManager(MainWindowBaseManager):
                 container = PlotContainerWidget(plot_widget)
                 container.plot_widget = plot_widget
 
+                # 标注增删后刷新顶栏按钮上的条数（与 legend 等局部订阅同构）
+                plot_widget.annotations_changed.connect(self.refresh_annotation_button)
+                # 编辑模式是全局状态：新子图必须继承当前模式，否则新建的子图
+                # 一进去就"拖不动"，而顶栏按钮还显示着编辑模式已开
+                if self.mw.annotation_btn.isChecked():
+                    plot_widget.annotation_manager.set_edit_mode(True)
+
                 self.mw.plot_layout.addWidget(container, r, c)
                 self.mw.plot_widgets.append(container)
 
@@ -758,6 +770,104 @@ class LayoutManager(MainWindowBaseManager):
         for r in range(m):
             if r not in self.mw.row_height_factors:
                 self.mw.row_height_factors[r] = 100
+
+        # 矩阵建好后按子图索引回放标注
+        # 时间戳 X 轴：新子图要继承当前模式（setAxisItems 换轴 + 映射重绑）
+        if hasattr(self.mw, "apply_x_axis_to_all_plots"):
+            self.mw.apply_x_axis_to_all_plots()
+        self.replay_annotations()
+        self.refresh_annotation_button()
+
+    # ========================================================================
+    # 标注：跨布局重建的保留与回放（决策 2）
+    # ========================================================================
+    def _capture_annotations(self) -> None:
+        """把各子图的标注按 row-major 索引存进 MainWindow 级注册表
+
+        为什么必须存在窗口级：create_subplots_matrix 会 deleteLater 掉全部
+        plot widget，标注数据挂在这些 widget 上，跟着一起消失。
+
+        **合并而不是覆盖**：只更新"当前矩阵里真实存在的索引"，其余索引原样
+        保留。覆盖写入会把越界索引的标注抹掉 —— 2×2 缩到 1×1 时第 4 格进了
+        注册表，但下一次 1×1→2×2 的捕获会把注册表重建为 {}（第 1 格空着），
+        用户再切回 2×2 就发现第 4 格的标注没了。对当前存在的索引则必须是
+        权威值：用户在某个子图上删光了标注，注册表要跟着删，不能复活旧数据。
+        """
+        registry = dict(getattr(self.mw, "annotation_registry", None) or {})
+        for index, container in enumerate(self.mw.plot_widgets):
+            manager = getattr(container.plot_widget, "annotation_manager", None)
+            if manager is None:
+                continue
+            dumped = manager.dump()
+            if dumped:
+                registry[index] = dumped
+            else:
+                registry.pop(index, None)
+        self.mw.annotation_registry = registry
+
+    def replay_annotations(self) -> int:
+        """按子图索引把注册表里的标注挂到重建后的子图上，返回恢复条数
+
+        索引缺位（新矩阵比旧矩阵小）时**保留**注册表不清空：用户把 2×2 切回
+        3×1 时，原来第 5 个子图的标注还能回到原位。
+
+        ``record=False``：回放的结果是新的历史起点，不进撤销栈，也不留旧历史
+        —— 子图是刚建的、历史本是空的，若不重设基准，第一次 Ctrl+Z 会把刚
+        回放出来的标注整份抹掉。
+        """
+        registry = getattr(self.mw, "annotation_registry", None) or {}
+        if not registry:
+            return 0
+        restored = 0
+        for index, container in enumerate(self.mw.plot_widgets):
+            entries = registry.get(index)
+            if not entries:
+                continue
+            manager = getattr(container.plot_widget, "annotation_manager", None)
+            if manager is None:
+                continue
+            restored += manager.load(entries, replace=True, record=False)
+        return restored
+
+    def toggle_annotation_mode(self, checked) -> None:
+        """统一驱动所有子图的标注编辑模式（顶栏按钮 / 右键菜单 / 快捷键共用一份状态）"""
+        checked = bool(checked)
+        button = getattr(self.mw, "annotation_btn", None)
+        if button is not None:
+            # 三条入口共用一个状态：菜单/快捷键进来时按钮要跟上，
+            # 但必须挡住 clicked，否则会回弹一次造成重复下发
+            button.blockSignals(True)
+            button.setChecked(checked)
+            button.blockSignals(False)
+        for container in self.mw.plot_widgets:
+            manager = getattr(container.plot_widget, "annotation_manager", None)
+            if manager is not None:
+                manager.set_edit_mode(checked)
+        self.refresh_annotation_button()
+        if checked:
+            self.mw._broadcast("标注编辑模式：可拖动/缩放标注，截图前请退出 (Ctrl+E)")
+
+    def refresh_annotation_button(self) -> None:
+        """按钮文案带出总条数，不用打开列表也能知道图上有几条标注"""
+        button = getattr(self.mw, "annotation_btn", None)
+        if button is None:
+            return
+        total = 0
+        for container in self.mw.plot_widgets:
+            manager = getattr(container.plot_widget, "annotation_manager", None)
+            if manager is not None:
+                total += manager.count()
+        if button.isChecked():
+            button.setText("退出标注" if total == 0 else f"退出标注 {total}")
+        else:
+            button.setText("标注" if total == 0 else f"标注 {total}")
+
+    def set_annotation_handles_visible(self, visible: bool) -> None:
+        """演示视图用：只藏编辑手柄，不动标注本身（截图里不该出现拖拽手柄）"""
+        for container in self.mw.plot_widgets:
+            manager = getattr(container.plot_widget, "annotation_manager", None)
+            if manager is not None:
+                manager.set_presentation(not visible)
 
     def set_row_height(self, row: int, percentage: int) -> None:
         if row < 0 or row >= self.mw._plot_row_max_default:

@@ -23,7 +23,7 @@ from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, Signal, QEvent
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QCursor, QKeySequence, QShortcut
 
 logger = get_logger("widget.plot")
 from PySide6.QtWidgets import (
@@ -42,6 +42,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     """
     # 曲线集合变化信号（添加/删除/清空时 emit）
     curves_changed = Signal()
+    # 标注集合变化信号（新建/删除/清空/装载时 emit）
+    annotations_changed = Signal()
 
     def __init__(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
@@ -107,6 +109,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         from src.ui.widgets.cursor_manager import CursorManager
         from src.ui.widgets.mark_region_manager import MarkRegionManager
         from src.ui.widgets.event_handler import EventHandler
+        from src.ui.widgets.annotation_manager import AnnotationManager
 
         self._plot_ui_manager = PlotUIManager(self)
         self._axis_manager = AxisManager(self._plot_ui_manager)
@@ -115,6 +118,46 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._cursor_manager = CursorManager(self._multi_curve_manager)
         self._mark_region_manager = MarkRegionManager(self._cursor_manager)
         self._event_handler = EventHandler(self._mark_region_manager)
+        # 第 8 级：标注管理器挂在链尾。标注不参与任何既有数据流（曲线/坐标轴/
+        # 游标/标记区域都不受它影响），只需要一个"能拿到 pw"的位置，因此对
+        # 前七级是纯观察者，前七级内部实现一行没动。
+        self._annotation_manager = AnnotationManager(self._event_handler)
+        self._init_annotation_shortcuts()
+
+    def _init_annotation_shortcuts(self) -> None:
+        """标注快捷键：Ctrl+C 复制 / Ctrl+V 粘贴 / Ctrl+Z 撤销 / Ctrl+Shift+Z 重做
+
+        刻意用 ``WidgetWithChildrenShortcut`` 绑在**每个子图自己**身上，而不是在
+        MainWindow 上挂 WindowShortcut，两个理由：
+
+        1. 多子图下"当前子图"是个隐藏状态。焦点在谁身上就作用于谁 —— 用户点过
+           哪个子图就是哪个，指哪打哪，不需要再维护一份"最近活动的子图"。
+        2. Ctrl+C / Ctrl+V / Ctrl+Z 是 QLineEdit 的原生按键（左侧变量表、搜索框
+           里要复制文字、撤销输入）。WindowShortcut 会**抢在**焦点控件的按键
+           处理之前生效，把输入框里的复制粘贴弄坏。
+
+        重做用 Ctrl+Shift+Z 而不是 ``StandardKey.Redo``（Windows 上是 Ctrl+Y）：
+        Ctrl+Y 已被"自动 Y 轴"占用，两个 WindowShortcut 撞在一起会让 Qt 判为
+        歧义快捷键、两边都不触发。
+        """
+        manager = self._annotation_manager
+        bindings = (
+            (QKeySequence("Ctrl+C"), manager.copy_selection_or_all),
+            (QKeySequence("Ctrl+V"), manager.paste),
+            (QKeySequence("Ctrl+Z"), manager.undo),
+            (QKeySequence("Ctrl+Shift+Z"), manager.redo),
+        )
+        self._annotation_shortcuts: list[QShortcut] = []
+        for sequence, handler in bindings:
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(handler)
+            self._annotation_shortcuts.append(shortcut)
+
+    @property
+    def annotation_manager(self):
+        """标注管理器（每级 manager 都是 per-widget 的，模式在 MainWindow 层统一驱动）"""
+        return self._annotation_manager
 
     @property
     def curve_strategy(self):
@@ -134,7 +177,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not hasattr(self, '_axis_manager'):
             axis = self.plot_item.getAxis('bottom')
             if DEFAULT_SHOW_X_AXIS_LABEL:
-                label = self.time_axis_label if self.time_axis_label else "Index"
+                # 时间戳模式：标签用所选时间列名（_x_axis_label_override 由 MainWindow 维护）
+                label = getattr(self, '_x_axis_label_override', None) or (
+                    self.time_axis_label if self.time_axis_label else "Index"
+                )
                 axis.setLabel(label)
                 axis.showLabel(True)
             else:
@@ -842,7 +888,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
             if shift_pressed:
                 # Shift + 拖入 = 替换：先清空，再走对应绘制路径
-                self.clear_plot_item()
+                # 替换整图内容，标注按决策一起清（新曲线与旧标注的语义不再对应）
+                self.clear_plot_item(clear_annotations=True)
             # 普通拖入 = 添加（统一路径：plot_variable 内部自动判断首绘/追加）
             if len(var_names) > 1:
                 self.add_variables_to_plot(var_names)
@@ -962,9 +1009,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._plot_data_manager._clear_plot_data()
         self.curves_changed.emit()
 
-    def clear_plot_item(self):
-        """清除绘图项 → 委托到 PlotDataManager"""
+    def clear_plot_item(self, *, clear_annotations: bool = False):
+        """清除绘图项 → 委托到 PlotDataManager
+
+        clear_annotations 默认 False：既有 6 个调用点里，重载数据（时间轴未变，
+        标注仍然有效）与光标同步清图都不该动标注，默认值保证它们的既有行为
+        一字不变。真正"用户不要这个子图了"的入口显式传 True。
+        注意本函数不会连带清标注 —— 现有清图过滤器只命中 getData+opts 的数据项
+        （实测确认），所以必须由调用方显式处置，否则会留下"幽灵标注"。
+        """
         self._plot_data_manager.clear_plot_item()
+        if clear_annotations:
+            self._annotation_manager.clear()
         self.curves_changed.emit()
 
     def clear_current_plot(self) -> None:
@@ -974,11 +1030,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         （plot_config_manager）、Shift 拖入替换、重载重建仍直接调
         clear_plot_item，那些路径各有自己的说法，不该被这句播报认领。
         标记统计刷新仍由各调用点自理（本函数只管清 + 播报）。
+
+        标注按决策一并清掉：用户点"清除绘图"的意图是"这个子图我不要了"，
+        留下孤零零的标注反而是负担。
         """
         cleared = len(self.curves)  # 必须在清之前取
-        self.clear_plot_item()
+        annotations = self._annotation_manager.count()
+        self.clear_plot_item(clear_annotations=True)
         if self.plot_context:
-            self.plot_context.announce_cleared("已清除绘图", cleared)
+            # 标注条数写进 label 而不是另开参数：plot_context.announce_cleared
+            # 的签名是既有测试直接替换的接缝，不能加参数
+            label = "已清除绘图" if not annotations else f"已清除绘图与 {annotations} 条标注"
+            self.plot_context.announce_cleared(label, cleared)
 
     def remove_variable_from_plot(self, var_name: str, *, emit_changed: bool = True) -> bool:
         """从 plot 移除单个变量 → 委托到 PlotDataManager"""
@@ -1104,6 +1167,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
             # 然后检测绘图区域（在检测Y轴之前）
             elif view_box_rect_scene.contains(scene_pos):
+                # 双击落在标注图元上：先选中并打开该标注的属性对话框，
+                # 而不是变量编辑器。浏览态同样生效 —— hit_test 走场景几何，
+                # 不看图元的鼠标门控。先 select 是为了让对话框背后能看到选中高亮。
+                hit_id = self.annotation_manager.hit_test(scene_pos)
+                if hit_id is not None:
+                    self.annotation_manager.select(hit_id)
+                    self.annotation_manager.open_property_dialog(hit_id)
+                    return
                 # 双击绘图区域（网格内部），弹出变量编辑器（统一入口）
                 self.open_variable_editor()
                 return
