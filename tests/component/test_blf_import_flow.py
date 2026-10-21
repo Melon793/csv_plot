@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QDialog, QPushButton, QProgressDialog
 from src.core.config import (
     BLF_TEXT_NO_SIGNAL,
     BLF_TEXT_TRUNCATED,
+    BLF_TEXT_TRUNCATED_PAYLOAD,
 )
 from src.core.settings import AppSettings
 from src.data.blf_loader import BLFLazyLoader
@@ -354,6 +355,8 @@ def test_cancelling_repaints_the_curves_that_were_there_before(
 
     assert host.cursor_sync_manager.replots == [{"skip_pin_reset": True}]
     assert host.loader is loader, "取消不许把旧数据源换掉"
+    # A2：取消路径必须把加载期禁用的 6 个分析按钮还回来，否则取消一次就永久灰掉
+    assert ("buttons", True) in manager.events, manager.events
 
 
 def test_cancelling_a_first_import_does_not_try_to_repaint_an_empty_canvas(
@@ -403,6 +406,7 @@ def test_path_f_gives_the_canvas_back_too(blf_flow, tmp_path, remembered,
 
     assert host.cursor_sync_manager.replots == [{"skip_pin_reset": True}]
     assert host.loader is loader, "F 后的数据源仍是导入前那一份"
+    assert ("buttons", True) in manager.events, manager.events
     assert len(dialogs["opened"]) == 2, "重开选择框的回环不能被曲线恢复抢跑"
 
 
@@ -436,6 +440,158 @@ def test_a_late_cancel_from_the_previous_scan_does_not_abort_the_new_one(
     loader = _make_loader(blf, dbc)
     new.emit_done(loader)
     assert host.loader is loader, "新一轮必须正常落地"
+
+
+def test_a_late_error_from_the_previous_scan_does_not_abort_the_new_one(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """A1：旧一轮迟到的 error 不能收新一轮的线。
+
+    取消路径的代次闸只覆盖 cancelled；error 若漏了闸，会关掉新一轮的进度框、
+    弹「读取失败」并提前解锁 UI，用户可再发第三轮 → 两条扫描并发。
+    """
+    import src.ui.file_loader_manager as flm
+
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    boxes = []
+    monkeypatch.setattr(
+        flm.QMessageBox, "critical",
+        staticmethod(lambda *a, **k: boxes.append(a)),
+    )
+
+    manager.load_csv_file(str(blf))
+    old = threads[0]
+    _cancel_btn(manager._blf_progress).click()
+
+    manager.load_csv_file(str(blf))
+    new = threads[1]
+    dialog = manager._blf_progress
+    assert dialog is not None
+
+    old.emit_error("旧一轮扫描失败（迟到）")
+
+    assert boxes == [], "过期错误不应弹框"
+    assert manager._blf_progress is dialog, "新一轮的进度框与取消入口必须还在"
+    assert host._is_loading_new_data is True, "不能被提前解锁"
+    assert new.cancel_requests == 0
+
+    loader = _make_loader(blf, dbc)
+    new.emit_done(loader)
+    assert host.loader is loader, "新一轮仍必须正常落地"
+
+
+def test_a_late_done_from_the_previous_scan_does_not_close_the_new_progress(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """A3：迟到的 done 会在代次检查前关掉进度框。
+
+    A 取消 → B 开始后，A 的 ``finished`` 若先 ``_close_blf_progress()`` 再判代次，
+    B 的进度框与取消按钮就消失了；B 若在大文件上扫几分钟，用户只能强等。
+    """
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+
+    manager.load_csv_file(str(blf))
+    _cancel_btn(manager._blf_progress).click()
+
+    manager.load_csv_file(str(blf))
+    dialog = manager._blf_progress
+    assert dialog is not None
+
+    late_loader = _make_loader(blf, dbc)
+    threads[0].emit_done(late_loader)
+
+    assert late_loader._closed is True, "过期结果仍必须释放"
+    assert manager._blf_progress is dialog, "B 的进度框不能被 A 的迟到 done 收掉"
+    assert dialog.isVisible() is True
+    assert host._is_loading_new_data is True
+
+    loader = _make_loader(blf, dbc)
+    threads[1].emit_done(loader)
+    assert host.loader is loader
+
+
+def test_a_late_progress_from_the_previous_scan_does_not_touch_the_new_dialog(
+    blf_flow, tmp_path, remembered, dialogs
+):
+    """A5：旧线程迟到的进度不许刷新一轮的框。
+
+    百分比属于旧扫描，``scan_stats`` 更会被读成新一轮线程的数字 —— 不按代次
+    闸住，用户会看到进度条从 10% 跳回 80%，帧数还是别的文件的。
+    """
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+
+    manager.load_csv_file(str(blf))
+    old = threads[0]
+    _cancel_btn(manager._blf_progress).click()
+
+    manager.load_csv_file(str(blf))
+    new = threads[1]
+    dialog = manager._blf_progress
+    new.scan_stats = {"messages": 7}
+    new.emit_progress(10)
+    assert dialog.value() == 10
+
+    old.scan_stats = {"messages": 999_999}
+    old.emit_progress(80)
+
+    assert dialog.value() == 10, "旧轮的百分比不能跳新一轮的进度条"
+    assert "80%" not in dialog.labelText()
+    assert "999,999" not in dialog.labelText()
+
+
+def test_a_failed_import_restores_the_analysis_buttons(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """A2：错误路径与既有异步错误路径同口径，不能失败一次就永久灰掉。"""
+    import src.ui.file_loader_manager as flm
+
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    old_loader = _make_loader(blf, dbc)
+    host.loader = old_loader
+    boxes = []
+    monkeypatch.setattr(
+        flm.QMessageBox, "critical",
+        staticmethod(lambda *a, **k: boxes.append(a)),
+    )
+
+    manager.load_csv_file(str(blf))
+    threads[0].emit_error("BLF 读取失败")
+
+    assert boxes, "真实错误仍要告知用户"
+    assert host.loader is old_loader, "失败不该换掉旧数据源"
+    assert ("buttons", True) in manager.events, manager.events
+    assert host._is_loading_new_data is False
+
+
+def test_a_failed_import_repaints_the_curves_that_were_there_before(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """A6：失败与取消同口径 —— 旧 loader 还在，画布就该还原。"""
+    import src.ui.file_loader_manager as flm
+
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    old_loader = _make_loader(blf, dbc)
+    host.loader = old_loader
+    monkeypatch.setattr(
+        flm.QMessageBox, "critical", staticmethod(lambda *a, **k: None)
+    )
+
+    manager.load_csv_file(str(blf))
+    assert host.cursor_sync_manager.replots == [], "没失败就不该重绘"
+    threads[0].emit_error("BLF 读取失败")
+
+    assert host.cursor_sync_manager.replots == [{"skip_pin_reset": True}]
+    assert host.loader is old_loader, "失败路径不换数据源，曲线必须回到原样"
 
 
 def test_a_still_running_previous_thread_is_kept_alive(blf_flow, tmp_path,
@@ -632,6 +788,51 @@ def test_path_f_warns_then_loops_straight_back_into_the_dialog(
     assert empty_loader._closed is False, "桶还没用完，不能提前 close"
 
 
+def test_cancelling_the_f_restart_dialog_releases_the_stashed_buckets(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """A7：F 重开框被取消 → 上一轮暂存的报文桶立刻释放。
+
+    只有「答了同一份错库」的收口才值得留着桶等下次换库；用户按取消就是明确
+    放弃本轮导入，再攥着一份几百 MB 的扫描结果只会白白占内存。
+    """
+    import src.ui.file_loader_manager as flm
+
+    host, manager, threads = blf_flow
+    blf, _dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    unrelated = write_dbc(
+        tmp_path / "other.dbc",
+        [{
+            "name": "Unrelated", "can_id": 0x4C0, "size": 8, "cycle_ms": 20,
+            "sender": "X",
+            "signals": ({
+                "name": "Nothing", "start": 0, "size": 8, "order": "intel",
+                "factor": 1.0, "offset": 0.0, "minimum": 0.0,
+                "maximum": 255.0, "unit": "", "sweep": 5,
+            },),
+        }],
+    )
+    remembered([str(unrelated)])
+    monkeypatch.setattr(
+        flm.QMessageBox, "warning", staticmethod(lambda *a, **k: None)
+    )
+    dialogs["answers"] = [
+        (QDialog.DialogCode.Accepted, None),
+        (QDialog.DialogCode.Rejected, None),
+    ]
+
+    manager.load_csv_file(str(blf))
+    empty_loader = _make_loader(blf, unrelated)
+    threads[0].emit_done(empty_loader)
+    _pump(150)
+
+    assert len(dialogs["opened"]) == 2, "F 仍应自动重开选择框"
+    assert manager._blf_pending_loader is None, "取消后不许再攥着报文桶"
+    assert empty_loader._closed is True, "释放必须落到 close()，不能只丢引用"
+    assert host.loader is None, "取消后回到导入前状态"
+    assert host.load_btn.isEnabled() is True, "取消后总得让用户再点一次导入"
+
+
 def test_path_f_rebinds_the_same_buckets_without_rescanning(
     blf_flow, tmp_path, remembered, dialogs, monkeypatch
 ):
@@ -778,6 +979,35 @@ def test_a_truncated_scan_warns_but_still_loads_the_scanned_part(
     assert warnings and BLF_TEXT_TRUNCATED in warnings[0][2]
     assert host.loader is loader
     assert host.can_db_banner.state == "truncated"
+
+
+def test_a_payload_truncated_scan_says_the_byte_limit_not_the_message_count(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """内存上限有两种触发方式，提示与状态条必须跟着改口。"""
+    import src.ui.file_loader_manager as flm
+
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    warnings = []
+    monkeypatch.setattr(
+        flm.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: warnings.append(a)),
+    )
+    monkeypatch.setattr(flm, "BLF_MAX_PAYLOAD_BYTES", 512 * 1024 * 1024)
+
+    manager.load_csv_file(str(blf))
+    loader = _make_loader(blf, dbc)
+    loader.truncated = True
+    loader.truncated_reason = "payload"
+    threads[0].emit_done(loader)
+
+    assert warnings and BLF_TEXT_TRUNCATED_PAYLOAD in warnings[0][2]
+    assert BLF_TEXT_TRUNCATED not in warnings[0][2], "别再说成条数上限"
+    assert host.loader is loader
+    assert host.can_db_banner.state == "truncated"
+    assert "512 MB" in host._can_segment.text()
 
 
 def test_a_scan_result_from_a_stale_generation_is_discarded(blf_flow, tmp_path,

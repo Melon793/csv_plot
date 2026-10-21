@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import threading
+from html import escape
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
@@ -45,6 +46,8 @@ from src.core.config import (
     BLF_DB_COLOR_WARN,
     BLF_DB_DIALOG_MIN_SIZE,
     BLF_DB_DIALOG_SIZE,
+    BLF_PRESCAN_MAX_BYTES,
+    BLF_TEXT_PRESCAN_SKIPPED,
 )
 from src.core.settings import AppSettings
 from src.data.can_database import SUPPORTED_DB_EXTS, CanDatabaseSet, import_type_for
@@ -159,6 +162,18 @@ class CanDatabaseSelectorDialog(QDialog):
                 or os.path.splitext(self._data_file)[1].lower() != ".blf"
                 or not os.path.isfile(self._data_file)):
             return
+        try:
+            size = os.path.getsize(self._data_file)
+        except OSError:
+            size = 0
+        if size >= BLF_PRESCAN_MAX_BYTES:
+            # 预扫是第二次完整 I/O，大文件上会让「选库」空转几十秒。宁可
+            # 不显示命中率，也不能让这一步看起来像卡死（评审 M4）。
+            logger.info("BLF 体积 %d MB 达到预扫上限，跳过命中列: %s",
+                        size // (1024 * 1024), self._data_file)
+            self._prescan_state = "off"
+            self._append_notice(BLF_TEXT_PRESCAN_SKIPPED)
+            return
         self._prescan_state = "running"
         self._prescan_box = []
         self._prescan_cancel = False
@@ -227,12 +242,17 @@ class CanDatabaseSelectorDialog(QDialog):
             self._rebuild_table()
             self._show_sort_notice()
 
-    def _show_sort_notice(self) -> None:
-        text = "已按命中帧数对列表降序排序（「命中」= 该库能解出的帧占比）。"
+    def _append_notice(self, text: str) -> None:
+        """提示条已有内容（如缺文件黄条）时追加，不覆盖更重要的告警。"""
         if self.notice.isVisibleTo(self):
             self.notice.setText(self.notice.text() + "<br>" + text)
         else:
             self.set_notice(text)
+
+    def _show_sort_notice(self) -> None:
+        self._append_notice(
+            "已按命中帧数对列表降序排序（「命中」= 该库能解出的帧占比）。"
+        )
 
     def _shutdown_prescan(self) -> None:
         """关窗 / 点「导入」时收口：置取消位，让后台线程在下个分块边界退出。"""
@@ -388,10 +408,11 @@ class CanDatabaseSelectorDialog(QDialog):
             existing.add(path)
             added += 1
         if missing_names:
+            # 提示条是 RichText：文件名里的 & / < 必须转义，否则会被当标记吞掉
             self.set_notice(
                 "上次使用的数据库中有 "
                 f"{len(missing_names)} 个文件不存在或无法读取，已标红："
-                + "、".join(missing_names)
+                + "、".join(escape(n) for n in missing_names)
             )
         self._rebuild_table()
         return added

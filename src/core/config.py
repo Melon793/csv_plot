@@ -221,8 +221,17 @@ BLF_SCAN_CHUNK_MESSAGES = 20_000
 # 报文总量硬上限。超限即停止扫描并置 truncated=True（payload 常驻内存，
 # 不设上限时一个 8 GB 的 BLF 会直接把进程打爆）。
 BLF_MAX_MESSAGES = 30_000_000
+# payload 常驻的字节上限，与条数上限叠加、先到者截断。只看条数兜不住
+# CAN FD：30M × 64 B 光 payload 就 1.92 GB（评审 H2 的估算）。
+BLF_MAX_PAYLOAD_BYTES = 512 * 1024 * 1024
+# 所有桶 pending（尚未压成 numpy 块）的行数合计上限。单桶 8192 在 ID 基数
+# 大的日志里等于没有上限：4000 个 ID × 7500 帧会全部以 Python 对象驻留。
+BLF_PENDING_ROWS_BUDGET = 1_000_000
 # 未匹配 ID 详情表最多展示的行数，其余只进日志（完整列表可达数万条）。
 BLF_UNMATCHED_REPORT_LIMIT = 30
+# 选库对话框的命中率预扫要完整再读一遍 BLF（第二次 I/O）。大文件上这一步
+# 会让「选库」看起来卡死，超过该体积直接跳过，命中列显示「—」。
+BLF_PRESCAN_MAX_BYTES = 128 * 1024 * 1024
 # 左侧常驻 banner 的高度与其中文件名的省略阈值（超过则 elide）。
 BLF_BANNER_HEIGHT = 44
 BLF_BANNER_NAME_ELLIDE_AT = 46
@@ -262,7 +271,15 @@ BLF_TEXT_NO_SIGNAL = (
 BLF_TEXT_TRUNCATED = (
     f"BLF 报文数超过上限 {BLF_MAX_MESSAGES:,}，已停止扫描（其余报文不生成信号）。"
 )
+BLF_TEXT_TRUNCATED_PAYLOAD = (
+    f"BLF 报文数据超过上限 {BLF_MAX_PAYLOAD_BYTES // (1024 * 1024)} MB，"
+    "已停止扫描（其余报文不生成信号）。"
+)
 BLF_TEXT_CANCELLED = "已取消 BLF 扫描: {path}"
+BLF_TEXT_PRESCAN_SKIPPED = (
+    f"BLF 文件超过 {BLF_PRESCAN_MAX_BYTES // (1024 * 1024)} MB，"
+    "已跳过匹配度预扫（「命中」列不显示）；不影响导入，数据库仍会完整解码。"
+)
 BLF_TEXT_DB_MISSING = (
     "上次使用的数据库文件不存在或无法读取：\n{paths}\n请重新选择。"
 )

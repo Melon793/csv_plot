@@ -92,30 +92,100 @@ def _capture_canmatrix_noise() -> Iterator[_CanmatrixCapture]:
             cm_logger.removeHandler(collector)
 
 
-# DBC 的导入编码候选，按顺序严格试解。
+# DBC 的导入编码候选。canmatrix 的 ``dbc.load`` 默认
+# ``dbcImportEncoding='iso-8859-1'``，而 iso-8859-1 **逐字节可解、永不抛异常**，
+# 于是 UTF-8 保存的 DBC 里的中文注释会被静默地解码成 mojibake（实测
+# ``CM_ BO_ 416 "发动机数据"`` 读回来是 ``åå¨æºæ°æ®``）。所以只能把
+# iso-8859-1 当最后兜底。
 #
-# canmatrix 的 ``dbc.load`` 默认 ``dbcImportEncoding='iso-8859-1'``，而
-# iso-8859-1 **逐字节可解、永不抛异常**，于是 UTF-8 保存的 DBC 里的中文注释会
-# 被静默地解码成 mojibake（实测 ``CM_ BO_ 416 "发动机数据"`` 读回来是
-# ``åå¨æºæ°æ®``）。所以只能把 iso-8859-1 当最后兜底，先猜 UTF-8 / cp1252。
-_DBC_ENCODING_CANDIDATES = ("utf-8", "cp1252")
+# gb18030 与 cp1252 都能“成功”解码对方的字节串，不能按顺序硬猜：
+# cp1252 会把 GBK 中文解成 ``·¢¶¯»ú``，gb18030 也会把 ``Größe`` 的
+# 0xF6 0xDF 当成一个汉字。判据见 :func:`_sniff_dbc_encoding`。
 _DBC_ENCODING_FALLBACK = "iso-8859-1"
+
+# CJK 统一表意文字（含扩展 A 与兼容区）。GBK 中文解出来是**连续**的多字 run；
+# 而 cp1252 欧洲文本被 gb18030 误读时，每个重音字母只换来一个孤立汉字。
+_CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+# cp1252 文本的“自然度”字符集：小写重音字母是正常欧洲语言，大写重音字母与
+# 符号则是 GBK 字节被按 cp1252 解码后的典型乱码（``ÊÇ`` / ``·¢`` / ``¿ª``）。
+_CP1252_LOWER = frozenset("àáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ")
+_CP1252_UPPER = frozenset("ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ×")
+_CP1252_SYMBOLS = frozenset("°±²³µ·¸¹º»¼½¾¿¡¢£¤¥¦§¨ª«¬¯´®")
+
+
+def _cp1252_naturalness(text: str) -> int:
+    """cp1252 解码结果像不像自然欧洲语言；越低越像 GBK 乱码。"""
+    score = 0
+    for ch in text:
+        if ch in _CP1252_LOWER:
+            score += 1
+        elif ch in _CP1252_UPPER or ch in _CP1252_SYMBOLS:
+            score -= 1
+        elif ord(ch) < 32 and ch not in "\t\r\n":
+            score -= 3
+    return score
 
 
 def _sniff_dbc_encoding(path: str) -> str:
-    """猜一份 DBC 的文本编码（ARXML 自带 XML 声明，不需要这套）。"""
+    """猜一份 DBC 的文本编码（ARXML 自带 XML 声明，不需要这套）。
+
+    顺序：UTF-8 → gb18030 / cp1252 二选一 → iso-8859-1 兜底。
+
+    gb18030 的判据是“解码结果里存在连续两个及以上的汉字 run”。真实中文
+    注释 / 枚举标签几乎总是多字词；欧洲 cp1252 文本被 gb18030 误读时只会
+    产生**孤立**汉字（每个重音字节吃掉了后面的 ASCII 字母）。单字标签
+    （``开`` / ``否``）另走一条窄判据：孤立汉字两侧必须是非字母数字边界
+    （通常就是 DBC 的引号），且 cp1252 结果里没有小写重音字母、符号占多数
+    （``¿ª`` / ``ÊÇ``）。``°C`` 这类符号后跟 ASCII 也会被 gb18030 读成一个
+    汉字，但它两侧不是“被引号包住的独立词”，且 cp1252 自然度不够低。
+    """
     try:
         with open(path, "rb") as f:
             data = f.read()
     except OSError:
         return _DBC_ENCODING_FALLBACK
-    for enc in _DBC_ENCODING_CANDIDATES:
-        try:
-            data.decode(enc)
-            return enc
-        except UnicodeDecodeError:
-            continue
-    return _DBC_ENCODING_FALLBACK
+    try:
+        data.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        pass
+
+    try:
+        gb_text = data.decode("gb18030")
+    except UnicodeDecodeError:
+        gb_text = None
+    try:
+        cp_text = data.decode("cp1252")
+    except UnicodeDecodeError:
+        cp_text = None
+
+    if gb_text is None:
+        return "cp1252" if cp_text is not None else _DBC_ENCODING_FALLBACK
+    if cp_text is None:
+        return "gb18030"
+    runs = _CJK_RUN_RE.findall(gb_text)
+    if not runs:
+        return "cp1252"
+    if max(len(run) for run in runs) >= 2:
+        return "gb18030"
+    if (
+        _has_standalone_cjk(gb_text)
+        and _cp1252_naturalness(cp_text) <= -2
+    ):
+        return "gb18030"
+    return "cp1252"
+
+
+def _has_standalone_cjk(text: str) -> bool:
+    """是否存在“两侧都不是字母数字”的孤立汉字（DBC 里即被引号包住的标签）。"""
+    for match in _CJK_RUN_RE.finditer(text):
+        if match.end() - match.start() > 1:
+            return True
+        before = text[match.start() - 1] if match.start() else ""
+        after = text[match.end()] if match.end() < len(text) else ""
+        if not before.isalnum() and not after.isalnum():
+            return True
+    return False
 
 
 def import_type_for(path: str) -> Optional[str]:
@@ -513,6 +583,9 @@ class CanDatabaseSet:
         options: dict[str, str] = {}
         if itype == "dbc":
             enc = _sniff_dbc_encoding(path)
+            if enc != "utf-8":
+                # 非 UTF-8 属于“猜”的结果：用户遇到标签乱码时先看这条日志
+                logger.info("DBC %s 按 %s 解码", os.path.basename(path), enc)
             options = {"dbcImportEncoding": enc, "dbcImportCommentEncoding": enc}
 
         loaded = canmatrix.formats.loadp(path, import_type=itype, key="db", **options)

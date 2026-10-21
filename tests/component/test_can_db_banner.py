@@ -18,7 +18,7 @@ import os
 import pytest
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QMainWindow, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QWidget
 
 from src.core.config import (
     BLF_BANNER_HEIGHT,
@@ -27,6 +27,7 @@ from src.core.config import (
     BLF_BANNER_STYLE_TRUNCATED,
     BLF_BANNER_STYLE_UNMATCHED,
     BLF_MAX_MESSAGES,
+    BLF_MAX_PAYLOAD_BYTES,
 )
 from src.data.blf_loader import BLFLazyLoader
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
@@ -115,6 +116,19 @@ def test_state_two_is_amber_and_quotes_both_the_limit_and_the_scanned_count(bann
     assert banner.view_btn.isHidden() is True
 
 
+def test_state_two_can_quote_the_payload_byte_limit_instead(banner):
+    """字节上限触发时不能再谎称「报文数超过 N 条」。"""
+    banner.show_truncated(
+        limit=BLF_MAX_PAYLOAD_BYTES, scanned=8_000_000, db_count=1,
+        db_names=["a.dbc"], reason="payload",
+    )
+    assert banner.state == "truncated"
+    text = _label(banner)
+    assert f"报文数据超过 {BLF_MAX_PAYLOAD_BYTES // (1024 * 1024)} MB" in text
+    assert "报文数超过" not in text
+    assert "仅扫描前 8,000,000 条" in text
+
+
 def test_state_three_turns_the_count_into_a_link_and_a_view_button(banner):
     banner.show_unmatched(unmatched_count=37, db_count=2, frame_count=148,
                           signal_count=2143, db_names=["a.dbc"])
@@ -165,6 +179,22 @@ def test_long_database_names_are_elided_but_keep_their_extension(banner):
     # 用户靠后缀判断类型，省略中段而不是尾段正是为此
     assert shown.endswith(".dbc")
     assert _ellide("short.dbc") == "short.dbc"
+
+
+def test_database_names_are_escaped_in_every_state(banner):
+    """A8：info_label 是 RichText，文件名里的 & / < 不能当标记吞掉。"""
+    name = "A&B<2>.dbc"
+    expected = "A&amp;B&lt;2&gt;.dbc"
+    banner.show_normal(db_count=1, frame_count=2, signal_count=3,
+                       db_names=[name])
+    assert expected in _label(banner)
+    banner.show_truncated(limit=BLF_MAX_MESSAGES, scanned=1, db_count=1,
+                          db_names=[name])
+    assert expected in _label(banner)
+    banner.show_unmatched(unmatched_count=2, db_count=1, frame_count=2,
+                          signal_count=3, db_names=[name])
+    assert expected in _label(banner)
+    assert "A&B<2>" not in _label(banner)
 
 
 def test_a_second_database_list_replaces_rather_than_appends(banner):
@@ -404,6 +434,35 @@ def test_reselecting_hands_the_refresh_back_to_the_single_convergence_entry(
         loader.close()
 
 
+def test_reselecting_holds_a_wait_cursor_only_while_the_database_is_parsed(
+    blf_flow, blf_pair, accepted_selector, monkeypatch
+):
+    """M3 回归：``bind_databases`` 仍在本线程同步解析 DBC/ARXML。
+
+    没有进度框，至少要有等待光标；且无论解析成败都必须复原，不能把整个
+    应用留在忙碌态。
+    """
+    host, manager, _threads = blf_flow
+    blf, dbc = blf_pair
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        host.loader = loader
+        accepted_selector["paths"] = [str(dbc)]
+        seen = []
+        original = loader.bind_databases
+
+        def spy(paths, **kwargs):
+            seen.append(QApplication.overrideCursor() is not None)
+            return original(paths, **kwargs)
+
+        monkeypatch.setattr(loader, "bind_databases", spy)
+        manager.reselect_can_database()
+        assert seen == [True], "解析期间应挂着等待光标"
+        assert QApplication.overrideCursor() is None, "返回后必须复原"
+    finally:
+        loader.close()
+
+
 # ---------------------------------------------------------------------------
 # §5.6 重选数据库
 # ---------------------------------------------------------------------------
@@ -465,10 +524,14 @@ def test_reselecting_rebinds_without_rescanning_and_refreshes_the_list(
         loader.close()
 
 
-def test_a_rebind_that_yields_no_signal_warns_but_keeps_the_data(
+def test_a_rebind_that_yields_no_signal_rolls_back_and_keeps_the_data(
     blf_flow, tmp_path, accepted_selector, monkeypatch
 ):
-    """换到一个完全不搭的库：要说清「没信号」，但不能把原数据搞坏。"""
+    """换到一个完全不搭的库：要说清「没信号」，并回滚到原库与曲线。
+
+    旧实现先重绑、再 warning、最后照样清曲线并应用空变量集 —— 一次误选就
+    把用户画好的整张画布换成空列表，且没有撤销入口。
+    """
     import src.ui.file_loader_manager as flm
 
     host, manager, _threads = blf_flow
@@ -484,11 +547,18 @@ def test_a_rebind_that_yields_no_signal_warns_but_keeps_the_data(
     try:
         host.loader = loader
         before = list(loader.var_names)
+        host.var_names = list(before)
+        before_banner = host.can_db_banner.state
         accepted_selector["paths"] = [str(unrelated)]
         manager.reselect_can_database()
         assert warnings, "0 信号必须有反馈，否则用户以为程序没响应"
-        assert loader.var_names != before
-        assert host.can_db_banner.isHidden() is False
+        assert "已保留原数据库" in warnings[0][2]
+        assert loader.db_paths == [str(dbc)], "误选必须回滚，不能写进 db_paths"
+        assert loader.var_names == before, "旧库的元数据必须原样恢复"
+        assert host.var_names == before
+        assert host.list_widget.calls == [], "没有换库成功就不该重建变量列表"
+        assert host.cursor_sync_manager.cleared == 0, "旧曲线不能被清掉"
+        assert host.can_db_banner.state == before_banner
     finally:
         loader.close()
 

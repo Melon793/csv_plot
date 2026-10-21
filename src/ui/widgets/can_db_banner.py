@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
@@ -37,6 +39,15 @@ def _ellide(text: str, limit: int = BLF_BANNER_NAME_ELLIDE_AT) -> str:
     head = keep // 2
     tail = keep - head
     return f"{text[:head]}…{text[-tail:]}"
+
+
+def _names_html(db_names: list[str] | None) -> str:
+    """逗号拼接的库名（已转义）。
+
+    ``info_label`` 是 RichText：文件名里的 ``&``、``<`` 不转义会被当成实体 /
+    标签吞掉，用户看到的名字就和磁盘上的不一样了（评审 A8）。
+    """
+    return ", ".join(escape(_ellide(n)) for n in (db_names or []))
 
 
 class CanDbBanner(QWidget):
@@ -106,7 +117,7 @@ class CanDbBanner(QWidget):
             f"已加载 {db_count} 个数据库 · "
             f"{frame_count} 报文 / {signal_count} 信号"
         )
-        names = ", ".join(_ellide(n) for n in (db_names or []))
+        names = _names_html(db_names)
         self._set_text(line1, names)
         self._state = "normal"
         self._unmatched_count = 0
@@ -121,13 +132,19 @@ class CanDbBanner(QWidget):
         scanned: int,
         db_count: int,
         db_names: list[str] | None = None,
+        reason: str = "messages",
     ) -> None:
-        """状态②：报文数超过上限，后半段没生成信号。"""
+        """状态②：报文数 / payload 字节数超过上限，后半段没生成信号。"""
+        what = (
+            f"报文数据超过 {limit // (1024 * 1024)} MB"
+            if reason == "payload"
+            else f"报文数超过 {limit:,}"
+        )
         line1 = (
-            f"报文数超过 {limit:,}，仅扫描前 {scanned:,} 条"
+            f"{what}，仅扫描前 {scanned:,} 条"
             f" · 已用 {db_count} 个数据库"
         )
-        self._set_text(line1, ", ".join(_ellide(n) for n in (db_names or [])))
+        self._set_text(line1, _names_html(db_names))
         self._state = "truncated"
         self._unmatched_count = 0
         self.view_btn.setVisible(False)
@@ -144,7 +161,7 @@ class CanDbBanner(QWidget):
         db_names: list[str] | None = None,
     ) -> None:
         """状态③：有 CAN ID 未定义，给「查看」入口。"""
-        names = ", ".join(_ellide(n) for n in (db_names or []))
+        names = _names_html(db_names)
         line1 = (
             f'<a href="unmatched">{unmatched_count} 个报文 ID 未在数据库中定义</a>'
             f"（未生成信号）· {db_count} 库 / {frame_count} 报文 / {signal_count} 信号"

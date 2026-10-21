@@ -776,7 +776,8 @@ def _stats_from_array(a: np.ndarray) -> VarStats:
 
 
 def _stats_mdf(loader, var_name, should_cancel, *,
-               enum_section: str = "枚举映射 (CCBLOCK)") -> VarStats:
+               enum_section: str = "枚举映射 (CCBLOCK)",
+               zero_sample_message: str | None = None) -> VarStats:
     """分块流式统计 MDF 通道。
 
     恒定 ``raw=False`` 取物理值：绘图路径用 ``raw=is_enum``（枚举取码值配合
@@ -909,6 +910,8 @@ def _stats_mdf(loader, var_name, should_cancel, *,
             # 第一块就读不到数据：真实原因是"读不出样本"，不是"全是 NaN"。
             # 沿用旧文案会把文件头不可信误报成数据质量问题，用户会去查
             # 根本不存在的 NaN
+            if zero_sample_message is not None:
+                return VarStats(error=zero_sample_message.format(total=total))
             return VarStats(
                 error=f"通道组无可读样本（文件头声明 {total} 点，实际 0 点）"
             )
@@ -947,10 +950,14 @@ def _stats_blf(loader, var_name, should_cancel) -> VarStats:
     累加」，所以循环体直接复用 :func:`_stats_mdf`（含
     ``MDF_STATS_CHUNK_SIZE`` 分块与逐块取消检查），只换掉枚举提示里的
     分区名 —— BLF 的枚举来自 DBC ``VAL_`` / ARXML 状态表，没有 CC 块。
+
+    零样本文案同样不能沿用 MDF：BLF 没有「文件头 cycles_nr」，样本数就是
+    扫描到的帧数（评审 I2）。
     """
     return _stats_mdf(
         loader, var_name, should_cancel,
         enum_section="枚举映射（VAL_ / 状态表）",
+        zero_sample_message="该信号无可读采样点（扫描到 {total} 帧，实际 0 点）",
     )
 
 

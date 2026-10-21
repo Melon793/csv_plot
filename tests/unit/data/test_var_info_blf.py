@@ -389,6 +389,35 @@ def test_stats_for_an_unknown_variable(blf_loader):
     assert "不存在" in stats.error
 
 
+def test_zero_readable_samples_uses_blf_wording():
+    """I2 回归：BLF 没有 ``cycles_nr``，零样本文案不能沿用 MDF 的「通道组」。
+
+    声明点数在 BLF 里就是扫描到的帧数；把「文件头声明 N 点」套过来会引导
+    用户去查一个不存在的文件头字段。
+    """
+
+    class _Loader:
+        LOADER_TYPE = "blf"
+
+        @staticmethod
+        def get_metadata(_name):
+            class _Meta:
+                sample_count = 5
+                is_enum = False
+
+            return _Meta()
+
+        @staticmethod
+        def get_samples_chunked(_name, _offset, _count):
+            return np.array([], dtype=np.float64)
+
+    stats = var_info.compute_stats(_Loader(), "Ghost")
+    assert stats.computed is False
+    assert "扫描到 5 帧" in stats.error
+    assert "通道组" not in stats.error
+    assert "cycles_nr" not in stats.error
+
+
 def test_a_branch_that_is_never_selected_reports_all_nan(tmp_path):
     """mux 恒选 1 ⇒ BranchA 全 NaN：不能出「min/max 都 0」的假结果。"""
     diag = next(f for f in CAN_FRAMES if f["name"] == "DiagMux")

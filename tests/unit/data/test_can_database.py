@@ -235,6 +235,51 @@ def test_cp1252_dbc_is_not_mistaken_for_utf8(tmp_path):
     assert frame.comment == text
 
 
+def test_gbk_dbc_comments_and_enum_labels_survive(tmp_path):
+    """中文车厂的 DBC 常用 GBK/GB18030：注释与 VAL_ 都不能变 mojibake。"""
+    frame = dict(CAN_FRAMES[0])
+    frame["signals"] = tuple(
+        {**sig, "values": {0: "关闭", 1: "开启", 2: "故障"}}
+        if sig["name"] == "StarterMode" else sig
+        for sig in CAN_FRAMES[0]["signals"]
+    )
+    path = write_dbc(tmp_path / "gbk.dbc", [frame], encoding="gbk")
+
+    loaded = CanDatabaseSet([str(path)]).find_frame(0, 0x1A0)
+    assert loaded.comment == "发动机数据"
+    assert loaded.signal_by_name("EngineSpeed").comment == "发动机转速"
+    assert loaded.signal_by_name("StarterMode").values == {
+        0: "关闭", 1: "开启", 2: "故障",
+    }
+
+
+def test_gbk_single_char_enum_labels_are_still_recognised(tmp_path):
+    """单字标签（开/关）没有多字 run，靠“引号包住的孤立汉字”判据兜住。"""
+    frame = {
+        "name": "Switches", "can_id": 0x123, "size": 1, "cycle_ms": 100,
+        "sender": "ECU", "comment": "Switch states",
+        "signals": ({
+            "name": "Switch", "start": 0, "size": 8, "order": "intel",
+            "factor": 1.0, "offset": 0.0, "minimum": 0.0, "maximum": 255.0,
+            "unit": "", "values": {0: "开", 1: "关"}, "sweep": 1,
+        },),
+    }
+    path = write_dbc(tmp_path / "gbk_single.dbc", [frame], encoding="gbk")
+
+    loaded = CanDatabaseSet([str(path)]).find_frame(0, 0x123)
+    assert loaded.signal_by_name("Switch").values == {0: "开", 1: "关"}
+
+
+def test_cp1252_degree_symbol_is_not_stolen_by_gb18030(tmp_path):
+    """``°C`` 的 0xB0 0x43 也是合法 GBK 对，不能因此把欧洲文判成中文。"""
+    text = "Temperatur °C und Spannung"
+    path = write_dbc(tmp_path / "deg.dbc", [_frame_with_comment(text)],
+                     encoding="cp1252")
+
+    loaded = CanDatabaseSet([str(path)]).find_frame(0, 0x1A0)
+    assert loaded.comment == text
+
+
 def test_latin1_fallback_never_raises(tmp_path):
     """utf-8 / cp1252 都解不了的字节（0x81/0x8D/… 在 cp1252 里未定义）也要
     能读完：兜底编码的任务是「不阻断导入」，而不是「注释好看」。"""

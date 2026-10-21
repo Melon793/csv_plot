@@ -35,6 +35,9 @@ logger = get_logger(__name__)
 
 _UINT64 = np.uint64
 _MASK64 = (1 << 64) - 1
+# 逐帧回落是纯 Python 循环：超过该样本数时把日志提到 WARNING，让「打开一条
+# 曲线卡了几秒」在日志里对得上号（评审 M1 的短期收敛；分块解码另行跟进）。
+_ROW_FALLBACK_WARN_ROWS = 100_000
 
 
 def _mask_for(size: int) -> int:
@@ -152,20 +155,55 @@ def _finalize(raw: np.ndarray, sig: CanSignalSpec, n_rows: int) -> np.ndarray:
     return raw.astype(np.float64)
 
 
+def row_validity(lengths: Optional[np.ndarray],
+                 sig: CanSignalSpec) -> Optional[np.ndarray]:
+    """逐行判断信号占用的位段是否落在该行**真实**有效字节内。
+
+    BLF 桶按桶内最大 stride 对齐存储，短行尾部是补出来的 0。补 0 只适合
+    让数组形状一致，**不能参与解码**：CAN FD 的 ``valid_bytes < DLC`` 与
+    经典 CAN 的 ``DLC < 8`` 都是常态，把缺失字节当 0 会静默给出
+    ``0 * factor + offset`` 这类看似合理的错值。
+
+    Args:
+        lengths: ``(N,)`` 每行有效字节数；None 表示调用方没有行级信息
+            （兼容独立使用，返回 None，不改变旧行为）
+        sig: 信号配方；canmatrix 内部位号下，Intel/Motorola 都满足
+            「占用位区间 = [start_bit, start_bit + size)」
+
+    Returns:
+        ``(N,)`` bool；True 表示该行包含完整信号位段
+    """
+    if lengths is None:
+        return None
+    need_bits = int(sig.start_bit) + int(sig.size)
+    return lengths.astype(np.uint16) * 8 >= need_bits
+
+
 def mux_validity(payload: np.ndarray, frame: CanFrameSpec,
-                 target: CanSignalSpec) -> Optional[np.ndarray]:
+                 target: CanSignalSpec,
+                 lengths: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
     """计算目标信号在本帧中的 mux 有效性掩码。
 
     多路复用帧里，非本 mux 值的采样点**没有数据**（报文的这一段是上一 mux 组
     的残留值）。不掩掉就会把残留画成台阶，因此掩不到的位置必须由调用方填 NaN。
+
+    传入 ``lengths`` 时还会排除选择器本身不完整的短行（补出来的 0 会被当成
+    组 0）。目标信号自身的行级有效性是另一个维度，仍由调用方用
+    :func:`row_validity` 合并 —— 这里只负责 mux。
 
     Returns:
         ``(N,)`` bool；None 表示该信号不参与多路复用（全部有效）
     """
     if not frame.is_multiplexed or frame.mux_signal is None:
         return None
-    if target.mux is None or target.is_mux_selector:
-        return None  # mux 为 None 的公共信号始终有效
+    if target.is_mux_selector:
+        return None  # 选择器自身对所有行都有效
+    # canmatrix 1.2 用 ``multiplex`` 存组号；未来版本若只填 ``mux_val``
+    # （解析层已兜到 ``mux_value``），这里必须跟着回退，否则会把非本组采样点
+    # 当公共信号全放行（评审 L2）。
+    group = target.mux if target.mux is not None else target.mux_value
+    if group is None or isinstance(group, str):
+        return None  # 公共信号 / 未知组：保持全部有效
 
     selector = frame.signal_by_name(frame.mux_signal)
     if selector is None:
@@ -175,10 +213,13 @@ def mux_validity(payload: np.ndarray, frame: CanFrameSpec,
     except ValueError:
         return None
 
-    group = int(target.mux) if not isinstance(target.mux, str) else None
-    if group is None:
-        return None
-    return sel_raw == group
+    group = int(group)
+    valid = sel_raw == group
+    if lengths is not None:
+        sel_ok = row_validity(lengths, selector)
+        if sel_ok is not None:
+            valid = valid & sel_ok
+    return valid
 
 
 def decode_physical(payload: np.ndarray, sig: CanSignalSpec,
@@ -198,6 +239,13 @@ def decode_physical(payload: np.ndarray, sig: CanSignalSpec,
         valid = np.asarray(mask, dtype=bool)
         if valid.shape[0] == values.shape[0]:
             values[~valid] = np.nan
+        else:
+            # 长度不一致时静默跳过，等于把 mux / 短行的掩码失效变成「全有效」，
+            # 残留值会被画成曲线（评审 L7）。至少留一条可追的证据。
+            logger.warning(
+                "信号 %s 的有效性掩码长度 %d 与采样点数 %d 不一致，已忽略掩码",
+                sig.name, valid.shape[0], values.shape[0],
+            )
     return values
 
 
@@ -248,20 +296,39 @@ def decode_single(payload_row: bytes | memoryview, sig: CanSignalSpec,
     return float(value) * factor + (sig.offset or 0.0)
 
 
+def _log_row_fallback(kind: str, n_rows: int, frame_name: str,
+                      sig_name: str) -> None:
+    """记录回落解码的规模（M1）：大样本时提到 WARNING，便于对上 UI 卡顿。"""
+    if n_rows >= _ROW_FALLBACK_WARN_ROWS:
+        logger.warning(
+            "%s 逐帧解码 %d 个采样点（报文 %s，信号 %s），可能阻塞数秒",
+            kind, n_rows, frame_name, sig_name,
+        )
+    else:
+        logger.debug(
+            "%s 逐帧解码 %d 个采样点（报文 %s，信号 %s）",
+            kind, n_rows, frame_name, sig_name,
+        )
+
+
 def _rows_view(payload: np.ndarray, use: int) -> memoryview:
     """把 ``(N, use)`` 的字节窗口摊平成可按行偏移切的 memoryview。
 
     多维 memoryview 既不支持和 ``mv[i, :n]`` 下标，也不支持 ``mv[i]`` 子视图
     （``NotImplementedError: multi-dimensional sub-views are not implemented``），
-    所以只能按行偏移在平直视图上切。切列后的视图本就非连续，ascontiguousarray
-    这一步省不掉。
+    所以只能按行偏移在平直视图上切。``use == stride`` 且数组连续时窗口就是
+    整行：直接 ravel，避免 30M 行 × stride 的瞬时副本；只有切列（``use <
+    stride``）才必须 ascontiguousarray。
     """
+    if use >= payload.shape[1] and payload.flags.c_contiguous:
+        return memoryview(payload.ravel())
     window = np.ascontiguousarray(payload[:, :use])
     return memoryview(window.ravel())
 
 
 def decode_rows_via_canmatrix(payload: np.ndarray, sig: CanSignalSpec,
-                              frame: CanFrameSpec) -> np.ndarray:
+                              frame: CanFrameSpec,
+                              lengths: Optional[np.ndarray] = None) -> np.ndarray:
     """容器帧 / 复杂多路复用帧的整帧回落解码：解不出该信号即 **NaN**。
 
     这两类帧的位段布局由 canmatrix 自己处理（逐 PDU 的子报文偏移、扩展复用组
@@ -271,8 +338,13 @@ def decode_rows_via_canmatrix(payload: np.ndarray, sig: CanSignalSpec,
     对未选中的组根本不会产出键，缺失本身就是正确的掩码。
 
     ``cm_frame`` 缺失或逐帧解码抛异常时一律填 NaN 并告警一次，不静默退回位提取。
+    ``lengths`` 只用来跳过 0 字节行：canmatrix 的 ``Frame.decode()`` 要求整帧
+    长度，喂短行会抛 ``DecodingFrameLength``。这里仍喂对齐后的整行（缺失字节
+    为 0），有效段内信号的解码结果不受影响；跨越缺失字节的信号由调用方的
+    ``row_ok`` 掩码置 NaN，不会把补出来的 0 当数据。
     """
     n_rows = payload.shape[0]
+    _log_row_fallback("容器/复杂多路复用帧", n_rows, frame.name, sig.name)
     out = np.full(n_rows, np.nan, dtype=np.float64)
     cm_frame = getattr(frame, "cm_frame", None)
     if cm_frame is None:
@@ -288,13 +360,15 @@ def decode_rows_via_canmatrix(payload: np.ndarray, sig: CanSignalSpec,
     view = _rows_view(payload, use)
     warned = False
     for i in range(n_rows):
+        if lengths is not None and int(lengths[i]) <= 0:
+            continue
         row = bytes(view[i * use:(i + 1) * use])
         try:
             entry = cm_frame.decode(bytearray(row)).get(sig.name)
         except Exception:
             if not warned:
                 logger.warning(
-                    "canmatrix 解码报文 %s 失败，信号 %s 及其后采样点置空",
+                    "canmatrix 解码报文 %s 失败，信号 %s 当前采样点置空",
                     frame.name, sig.name, exc_info=True,
                 )
                 warned = True
@@ -306,26 +380,43 @@ def decode_rows_via_canmatrix(payload: np.ndarray, sig: CanSignalSpec,
 
 def decode_rows(payload: np.ndarray, sig: CanSignalSpec,
                 frame: Optional[CanFrameSpec] = None,
-                mask: Optional[np.ndarray] = None) -> np.ndarray:
+                mask: Optional[np.ndarray] = None,
+                lengths: Optional[np.ndarray] = None) -> np.ndarray:
     """逐帧标量解码（向量化失败时的回落路径）。
 
     按帧布局分流：容器帧 / 复杂多路复用帧走 :func:`decode_rows_via_canmatrix`
     （掩码由 canmatrix 的缺键语义代替），其余（仅 ``size > 64`` 触发的回落）仍用
     大整数位提取 —— 那条路径与 canmatrix 逐位等价且快一个数量级。
+
+    ``lengths`` 给出时按每行真实有效字节解码；``decode_single`` 本身对
+    位段越界返回 NaN，这里再按 ``mask``（含行级有效性）统一收口。
     """
     if frame is not None and not frame.is_vectorizable:
-        return decode_rows_via_canmatrix(payload, sig, frame)
+        out = decode_rows_via_canmatrix(payload, sig, frame, lengths)
+    else:
+        n_rows = payload.shape[0]
+        _log_row_fallback(
+            "逐帧位提取", n_rows,
+            frame.name if frame is not None else "-", sig.name,
+        )
+        out = np.full(n_rows, np.nan, dtype=np.float64)
+        stride = payload.shape[1]
+        dlc = frame.dlc if frame is not None else stride
+        use = min(stride, dlc) if dlc else stride
+        view = _rows_view(payload, use)
+        for i in range(n_rows):
+            row_len = min(int(lengths[i]), use) if lengths is not None else use
+            if row_len <= 0:
+                continue
+            out[i] = decode_single(view[i * use:i * use + row_len], sig, frame)
 
-    n_rows = payload.shape[0]
-    out = np.empty(n_rows, dtype=np.float64)
-    stride = payload.shape[1]
-    dlc = frame.dlc if frame is not None else stride
-    use = min(stride, dlc) if dlc else stride
-    view = _rows_view(payload, use)
-    for i in range(n_rows):
-        out[i] = decode_single(view[i * use:(i + 1) * use], sig, frame)
     if mask is not None:
         valid = np.asarray(mask, dtype=bool)
-        if valid.shape[0] == n_rows:
+        if valid.shape[0] == out.shape[0]:
             out[~valid] = np.nan
+        else:
+            logger.warning(
+                "信号 %s 的有效性掩码长度 %d 与采样点数 %d 不一致，已忽略掩码",
+                sig.name, valid.shape[0], out.shape[0],
+            )
     return out

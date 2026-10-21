@@ -17,15 +17,23 @@ import warnings
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QStandardPaths, QTimer, QSignalBlocker
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QMessageBox,
+    QProgressDialog,
+)
 
 from src.core.config import (
     BLF_MAX_MESSAGES,
+    BLF_MAX_PAYLOAD_BYTES,
     BLF_TEXT_CANCELLED,
     BLF_TEXT_DB_MISSING,
     BLF_TEXT_NO_DB_SELECTED,
     BLF_TEXT_NO_SIGNAL,
     BLF_TEXT_TRUNCATED,
+    BLF_TEXT_TRUNCATED_PAYLOAD,
     FILE_SIZE_LIMIT_BACKGROUND_LOADING,
     safe_qt_op,
     widget_alive as _qt_alive,
@@ -1227,6 +1235,8 @@ class FileLoaderManager(MainWindowBaseManager):
         的预选项，命中与否由用户确认。唯一的豁免是「重载」——那是对当前数据
         源的再扫描，库本来就是用户之前显式选过的。
         """
+        from html import escape
+
         from src.core.settings import AppSettings
 
         remembered = [normalize_input_path(p)
@@ -1241,7 +1251,9 @@ class FileLoaderManager(MainWindowBaseManager):
                 return usable
             return self._ask_can_databases(
                 file_path, initial=current, missing=bad,
-                notice=BLF_TEXT_DB_MISSING.format(paths="\n".join(bad) or "（无）"),
+                notice=BLF_TEXT_DB_MISSING.format(
+                    paths=escape("\n".join(bad) or "（无）")
+                ),
             )
 
         if getattr(self, "_blf_force_dialog", False):
@@ -1250,7 +1262,13 @@ class FileLoaderManager(MainWindowBaseManager):
             preset = getattr(self, "_blf_preset_db_paths", None) or remembered
             self._blf_preset_db_paths = None
             paths = self._ask_can_databases(file_path, initial=preset)
-            if paths is not None and list(paths) == list(preset or []):
+            if paths is None:
+                # 用户在重开的框里按了取消/没留下任何可用库：本轮导入到此为止，
+                # 上一轮暂存的报文桶（可能几百 MB）没有下一轮可复用，立刻释放
+                # （评审 A7）。
+                self._release_pending_blf_loader()
+                return None
+            if list(paths) == list(preset or []):
                 # 答案与上一轮逐个相同 → 报文没变、库也没变，结果必然还是 0 信号。
                 # 换库改成毫秒级重绑后，这一环不再被「整文件重扫」天然限速，同一份
                 # 错库会被快速提交成连环弹窗，所以这里直接收口：本轮按「未选库」
@@ -1266,7 +1284,9 @@ class FileLoaderManager(MainWindowBaseManager):
             if bad and usable:
                 return self._ask_can_databases(
                     file_path, initial=remembered, missing=bad,
-                    notice=BLF_TEXT_DB_MISSING.format(paths="\n".join(bad)),
+                    notice=BLF_TEXT_DB_MISSING.format(
+                        paths=escape("\n".join(bad))
+                    ),
                 )
 
         # B：每次新导入都弹窗，预选上次记忆的列表（可能为空）
@@ -1377,7 +1397,9 @@ class FileLoaderManager(MainWindowBaseManager):
         self._blf_load_version = load_version
         self._blf_cancelled_version = None
 
-        thread.progress.connect(self._on_blf_progress)
+        thread.progress.connect(
+            lambda value: self._on_blf_progress(value, load_version)
+        )
         dialog.canceled.connect(thread.request_cancel)
         dialog.canceled.connect(lambda: self._on_blf_cancel(file_path, load_version))
         thread.finished.connect(
@@ -1391,7 +1413,11 @@ class FileLoaderManager(MainWindowBaseManager):
         )
         thread.start()
 
-    def _on_blf_progress(self, value: int) -> None:
+    def _on_blf_progress(self, value: int, load_version: int = -1) -> None:
+        if load_version >= 0 and load_version != self._blf_load_version:
+            # 旧线程迟到的进度：新一轮已经在扫，不能拿旧百分比与新线程无关的
+            # 统计去刷新一轮的进度框（评审 A5）。与 done/error/cancel 同口径。
+            return
         dialog = getattr(self, "_blf_progress", None)
         if dialog is None:
             return
@@ -1426,6 +1452,9 @@ class FileLoaderManager(MainWindowBaseManager):
         # 就白白丢掉整张画布，只能重新拖变量。
         self._restore_curves_after_abort()
         self._end_data_reload()
+        # 加载期被闸门禁用的分析按钮要还原（与 _on_load_error 同口径），
+        # 否则取消一次 BLF 导入就让 6 个按钮永久灰掉。
+        self.set_button_status(self._has_valid_data)
         self.mw.end_load_feedback("已取消导入")
         self.mw.load_btn.setEnabled(True)
         self._reload_in_progress = False
@@ -1458,9 +1487,10 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _on_blf_done(self, new_loader, file_path: str, load_version: int = -1,
                      is_reload: bool = False):
-        self._close_blf_progress()
         if self._blf_cancelled_version == load_version:
-            # 取消与完成撞在一起：以取消为准，丢掉扫好的 loader
+            # 取消与完成撞在一起：以取消为准，丢掉扫好的 loader。
+            # 此时进度框已由 _on_blf_cancel 收掉，这里不能再碰它 —— 它可能已经
+            # 属于新一轮导入了（迟到 done 关掉新框会让用户失去取消入口）。
             self._discard_loader(new_loader)
             return
         if load_version >= 0 and load_version != self.mw._data_version:
@@ -1470,6 +1500,8 @@ class FileLoaderManager(MainWindowBaseManager):
             )
             self._discard_loader(new_loader)
             return
+        # 代次/取消检查之后再收线：迟到的 done 不允许关掉新一轮的进度框。
+        self._close_blf_progress()
 
         if not new_loader.var_names:
             # F 路径：库与报文完全不通 → warning 后重开对话框，不进空数据态
@@ -1482,6 +1514,7 @@ class FileLoaderManager(MainWindowBaseManager):
             # 与 G 路径同理：这轮导入根本没成立，没理由把用户原有的画布留空
             self._restore_curves_after_abort()
             self._end_data_reload()
+            self.set_button_status(self._has_valid_data)
             self.mw.end_load_feedback()
             self.mw.load_btn.setEnabled(True)
             self._reload_in_progress = False
@@ -1495,7 +1528,12 @@ class FileLoaderManager(MainWindowBaseManager):
         for err in getattr(new_loader, "load_errors", None) or []:
             logger.warning("CAN 数据库: %s", err)
         if getattr(new_loader, "truncated", False):
-            QMessageBox.warning(self.mw, "报文数超上限", BLF_TEXT_TRUNCATED)
+            if getattr(new_loader, "truncated_reason", None) == "payload":
+                QMessageBox.warning(
+                    self.mw, "报文数据超上限", BLF_TEXT_TRUNCATED_PAYLOAD
+                )
+            else:
+                QMessageBox.warning(self.mw, "报文数超上限", BLF_TEXT_TRUNCATED)
 
         self._swap_loader(new_loader, is_reload=is_reload)
         self._end_data_reload()
@@ -1510,6 +1548,15 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _on_blf_error(self, msg: str, is_reload: bool = False,
                       load_version: int = -1) -> None:
+        if load_version >= 0 and load_version != self._blf_load_version:
+            # 旧一轮线程迟到的错误：新一轮已经开始了，不能收它的进度框、
+            # 也不能替它弹「读取失败」或提前解锁 UI（否则用户可再发一轮导入，
+            # 与新线程并发扫描）。与 _on_blf_cancel 的代次闸同口径。
+            logger.debug(
+                "忽略过期 BLF 错误信号 (got=%d, current=%d)",
+                load_version, self._blf_load_version,
+            )
+            return
         if self._blf_cancelled_version == load_version:
             # 已走静默恢复的取消路径，不能再弹一个错误框打扰用户
             self._close_blf_progress()
@@ -1518,8 +1565,12 @@ class FileLoaderManager(MainWindowBaseManager):
         self._close_blf_progress()
         self.mw.end_load_feedback(f"加载失败：{msg}", level="error")
         QMessageBox.critical(self.mw, "读取失败", msg)
+        # 与本轮取消同口径：_begin_data_reload 已把曲线摘掉，而失败路径不释放
+        # 旧 loader（host.loader 仍是导入前那份），必须显式重绘回来（评审 A6）。
+        self._restore_curves_after_abort()
         self._end_data_reload()
         self.mw.load_btn.setEnabled(True)
+        self.set_button_status(self._has_valid_data)
         self._reload_in_progress = False
         self.mw.reload_btn.setEnabled(True)
 
@@ -1584,12 +1635,21 @@ class FileLoaderManager(MainWindowBaseManager):
         database = loader.database
         db_names = [os.path.basename(p) for p in database.source_files]
         if getattr(loader, "truncated", False):
+            reason = getattr(loader, "truncated_reason", None) or "messages"
+            if reason == "payload":
+                limit = BLF_MAX_PAYLOAD_BYTES
+                seg_text = (
+                    f"CAN：仅前 {loader.total_messages:,}"
+                    f"（上限 {BLF_MAX_PAYLOAD_BYTES // (1024 * 1024)} MB）"
+                )
+            else:
+                limit = BLF_MAX_MESSAGES
+                seg_text = (
+                    f"CAN：仅前 {loader.total_messages:,}（上限 {BLF_MAX_MESSAGES:,}）"
+                )
             banner.show_truncated(
-                limit=BLF_MAX_MESSAGES, scanned=loader.total_messages,
-                db_count=len(db_names), db_names=db_names,
-            )
-            seg_text = (
-                f"CAN：仅前 {loader.total_messages:,}（上限 {BLF_MAX_MESSAGES:,}）"
+                limit=limit, scanned=loader.total_messages,
+                db_count=len(db_names), db_names=db_names, reason=reason,
             )
         else:
             unmatched = len(getattr(loader, "unmatched_ids", None) or [])
@@ -1611,7 +1671,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def reselect_can_database(self) -> None:
         """§5.6：重选 DBC / ARXML。原始 payload 与数据库解耦，**不重扫报文**，
-        所以 ms 级完成、不需要进度条。"""
+        但 ``bind_databases`` 仍会在本线程同步解析数据库（大 ARXML 可达数秒），
+        因此解析期间挂等待光标；真正的线程化留作后续（评审 M3）。"""
         loader = getattr(self.mw, "loader", None)
         if not self._is_blf_source():
             return
@@ -1620,12 +1681,32 @@ class FileLoaderManager(MainWindowBaseManager):
         )
         if not paths:
             return
+        # 解析大库时主线程确实会卡住（Qt 也来不及重绘）；至少让光标先变成
+        # 等待态，用户能区分「在处理」与「卡死」。finally 保证异常/提前返回
+        # 都不会把整个应用留在忙碌光标上；错误框放到光标复原之后再弹。
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            stats = loader.bind_databases(paths)
-        except Exception as e:
-            logger.error("重选 CAN 数据库失败: %s", e, exc_info=True)
+            stats = loader.bind_databases(paths, rollback_if_empty=True)
+            bind_error = None
+        except Exception as e:  # noqa: BLE001 - 对话框要把任意解析异常都报出来
+            bind_error = e
+        finally:
+            QApplication.restoreOverrideCursor()
+        if bind_error is not None:
+            logger.error("重选 CAN 数据库失败: %s", bind_error, exc_info=bind_error)
             QMessageBox.critical(
-                self.mw, "重选失败", f"重新绑定 CAN 数据库时出错：\n{e}"
+                self.mw, "重选失败",
+                f"重新绑定 CAN 数据库时出错：\n{bind_error}",
+            )
+            return
+        if stats.get("rolled_back"):
+            # 新库与当前报文完全对不上：loader 已自动恢复旧库/旧元数据。
+            # 此时绝不能继续清缓存、清曲线、_apply_loader —— 否则一次误选就把
+            # 用户已经画好的整张画布换成空变量集，且无法一键撤销。
+            logger.info("重选 CAN 数据库 0 命中，已回滚到原数据库")
+            QMessageBox.warning(
+                self.mw, "未生成任何信号",
+                BLF_TEXT_NO_SIGNAL + "\n已保留原数据库与已绘制曲线。",
             )
             return
         if not stats.get("var_count"):

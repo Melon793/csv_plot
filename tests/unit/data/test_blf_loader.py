@@ -558,6 +558,41 @@ def test_bind_databases_rebinds_without_rescanning(loader_and_paths):
     assert not loader._signal_cache and not loader._time_cache
 
 
+def test_bind_databases_rollback_if_empty_restores_the_old_database(tmp_path):
+    """A4：误选 0 命中库时恢复旧库/旧元数据，而不是留下空变量集。"""
+    blf, dbc = write_blf_pair(tmp_path / "a", n=6, buses=(0,))
+    unrelated = write_dbc(
+        tmp_path / "b" / "other.dbc",
+        [{"name": "Unrelated", "can_id": 0x4C0, "size": 8,
+          "signals": ({
+              "name": "Nothing", "start": 0, "size": 8, "order": "intel",
+              "factor": 1.0, "offset": 0.0, "minimum": 0.0,
+              "maximum": 255.0,
+          },)}],
+    )
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        before_vars = list(loader.var_names)
+        before_db = loader.database
+        before_unmatched = list(loader.unmatched_ids)
+
+        stats = loader.bind_databases([str(unrelated)], rollback_if_empty=True)
+
+        assert stats["rolled_back"] is True
+        assert stats["var_count"] == len(before_vars)
+        assert loader.db_paths == [str(dbc)]
+        assert loader.database is before_db
+        assert loader.var_names == before_vars
+        assert loader.unmatched_ids == before_unmatched
+        # 默认语义不变：显式要求换库时仍允许换成 0 信号（reload/F 路径）
+        stats = loader.bind_databases([str(unrelated)])
+        assert "rolled_back" not in stats
+        assert stats["var_count"] == 0
+        assert loader.db_paths == [str(unrelated)]
+    finally:
+        loader.close()
+
+
 def test_bind_databases_switching_to_a_conflicting_db_changes_factors(tmp_path):
     """first-match-wins 的 UI 落点：重选到另一份库，因子必须跟着变。"""
     blf, dbc_a = write_blf_pair(tmp_path / "a", n=6, buses=(0,))
@@ -644,6 +679,75 @@ def test_not_truncated_below_the_cap(loader_and_paths):
     assert loader_and_paths[0].truncated is False
 
 
+def test_truncation_flag_is_set_at_the_payload_byte_cap(tmp_path, monkeypatch):
+    """只看条数兜不住 CAN FD：payload 字节数到顶也要截断并说明原因。"""
+    blf, dbc = write_blf_pair(tmp_path, n=200, buses=(0,))
+    monkeypatch.setattr(blf_module, "BLF_SCAN_CHUNK_MESSAGES", 10)
+    monkeypatch.setattr(blf_module, "BLF_MAX_PAYLOAD_BYTES", 400)
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        assert loader.truncated is True
+        assert loader.truncated_reason == "payload"
+        assert 0 < loader.total_messages < 200, "必须在文件读完前停下"
+        assert loader.payload_bytes >= 400
+        assert loader.var_names, "截断后仍应给出已扫到部分的信号"
+    finally:
+        loader.close()
+
+
+def test_payload_bytes_accounting_matches_the_stored_arrays(loader_and_paths):
+    """扫描期记账口径要与真正留下的数组一致，否则上限只是装饰。"""
+    loader = loader_and_paths[0]
+    stored = sum(
+        b.payload.nbytes + b.lengths.nbytes for b in loader._buckets
+    )
+    assert loader.payload_bytes == stored
+
+
+def test_global_pending_budget_forces_flushes_across_buckets(tmp_path, monkeypatch):
+    """高基数日志里单桶 8192 等于没上限：全局预算必须提前压块。"""
+    blf, dbc = write_blf_pair(tmp_path, n=100, buses=(0,), with_unmatched=False)
+    calls = {"n": 0}
+    original = blf_module._MessageBucket._flush
+
+    def counted_flush(self):
+        calls["n"] += 1
+        original(self)
+
+    monkeypatch.setattr(blf_module._MessageBucket, "_flush", counted_flush)
+    monkeypatch.setattr(blf_module, "BLF_PENDING_ROWS_BUDGET", 10)
+    monkeypatch.setattr(blf_module, "BLF_SCAN_CHUNK_MESSAGES", 5)
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        assert loader.total_messages == 100
+        # 每桶最终收尾各 flush 一次；超出这个数就说明全局预算真的在扫描中途生效
+        assert calls["n"] > len(loader._buckets)
+        assert all(len(b._pending_t) == 0 for b in loader._buckets)
+        assert sum(b.count for b in loader._buckets) == 100
+        name = loader.var_names[0]
+        group = loader._buckets[loader.get_var_group_index(name)]
+        assert loader.get_series(name).shape[0] == group.count
+    finally:
+        loader.close()
+
+
+def test_cancellation_is_honoured_while_finalizing(tmp_path, monkeypatch):
+    """合并分块也要能取消：大文件拖到 90% 后点取消不能毫无反应。"""
+    blf, dbc = write_blf_pair(tmp_path, n=100, buses=(0,))
+    monkeypatch.setattr(blf_module, "BLF_SCAN_CHUNK_MESSAGES", 1000)
+    monkeypatch.setattr(blf_module, "_BUCKET_BLOCK_ROWS", 5)
+    calls = {"n": 0}
+
+    def should_cancel():
+        calls["n"] += 1
+        # 1 = 扫描循环；2 = 进第一个桶之前的检查；3 = finalize 的块循环
+        return calls["n"] >= 3
+
+    with pytest.raises(InterruptedError):
+        BLFLazyLoader(str(blf), db_paths=[str(dbc)], _should_cancel=should_cancel)
+    assert calls["n"] >= 3
+
+
 # ---------------------------------------------------------------------------
 # 生命周期与并发
 # ---------------------------------------------------------------------------
@@ -711,6 +815,32 @@ def test_close_is_idempotent_and_del_is_silent(tmp_path):
     loader.close()
     loader.close()
     assert loader._closed is True
+
+
+def test_closed_loader_returns_empty_views_instead_of_stale_state(tmp_path):
+    """L3/L4/L5：close 后读属性既不能抛异常，也不能露出旧数据。
+
+    - ``time_values`` 曾伪造 ``[0]`` 索引（与缓存的 y 长度、语义都对不上）
+    - ``database`` 曾继续持有整棵 canmatrix 对象图（等于常驻一份 DBC）
+    - 只读属性曾无锁遍历容器，与后台 close 并发时会踩到已清空的 dict
+    """
+    blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    name = loader.var_names[0]
+    assert len(loader.time_values) > 0
+    loader.close()
+
+    assert loader.time_values.empty
+    assert loader.time_values.name == "time"
+    assert loader.database.source_files == []
+    assert loader.var_names == []
+    assert loader.units == {}
+    assert loader.df_validity == {}
+    assert loader.column_count == 0
+    assert loader.groups == []
+    assert loader.group_count == 0
+    with pytest.raises(KeyError):
+        loader.get_var_group_index(name)
 
 
 def test_partially_constructed_loader_can_be_collected(tmp_path):
@@ -785,6 +915,45 @@ def test_signal_cache_is_lru_bounded_and_clearable(loader_and_paths, monkeypatch
     assert [b.count for b in loader._buckets] == counts
 
 
+def test_caches_also_honour_a_byte_budget(loader_and_paths, monkeypatch):
+    """只有条数上限时，少数大数组仍能撑爆内存：字节预算必须独立生效。"""
+    loader = loader_and_paths[0]
+    monkeypatch.setattr(BLFLazyLoader, "MAX_CACHE_SIZE", 999)
+    monkeypatch.setattr(BLFLazyLoader, "MAX_CACHE_BYTES", 1)
+    monkeypatch.setattr(BLFLazyLoader, "MAX_TIME_CACHE_SIZE", 999)
+    monkeypatch.setattr(BLFLazyLoader, "MAX_TIME_CACHE_BYTES", 1)
+    loader.clear_cache()
+
+    names = list(loader.var_names[:3])
+    for name in names:
+        loader.get_series(name)
+        loader.get_group_time_array(loader.get_var_group_index(name))
+
+    assert list(loader._signal_cache) == [names[-1]], "超预算时只留下最新一条"
+    assert loader._signal_cache_bytes == loader._signal_cache[names[-1]].nbytes
+    assert len(loader._time_cache) == 1
+    assert loader._time_cache_bytes == sum(
+        a.nbytes for a in loader._time_cache.values()
+    )
+
+    loader.clear_cache()
+    assert loader._signal_cache_bytes == 0
+    assert loader._time_cache_bytes == 0
+
+
+def test_close_zeroes_the_cache_byte_counters(tmp_path):
+    loader, _blf, _dbc = _load(tmp_path)
+    name = loader.var_names[0]
+    loader.get_series(name)
+    loader.get_group_time_array(loader.get_var_group_index(name))
+    assert loader._signal_cache_bytes > 0
+    assert loader._time_cache_bytes > 0
+
+    loader.close()
+    assert loader._signal_cache_bytes == 0
+    assert loader._time_cache_bytes == 0
+
+
 def test_search_variables_and_aggregates(loader_and_paths):
     loader = loader_and_paths[0]
     hits = loader.search_variables("enginespeed")     # 大小写不敏感
@@ -853,12 +1022,150 @@ def test_payload_that_grows_between_blocks_is_padded_not_broken(tmp_path, monkey
         bucket = loader._buckets[0]
         assert bucket.stride == 8 and bucket.count == 6
         assert bucket.payload.shape == (6, 8)
+        np.testing.assert_array_equal(bucket.lengths, [2, 2, 2, 8, 8, 8])
         np.testing.assert_array_equal(bucket.payload[0], [0, 1] + [0] * 6)
         np.testing.assert_array_equal(bucket.payload[5], list(range(8)))
         name = next(n for n in loader.var_names if n.endswith("EngineSpeed"))
         values = loader.get_series(name).to_numpy()
         assert values.shape[0] == 6
         assert values[0] == pytest.approx(0x0100 * 0.125)
+        # 只存在于补 0 区段的信号必须是 NaN；把补出来的 0 解成 -40 °C 这类
+        # 「看似合理」的读数正是 C1 的失效模式。
+        coolant = next(n for n in loader.var_names if n.endswith("CoolantTemp"))
+        coolant_values = loader.get_series(coolant).to_numpy()
+        assert np.isnan(coolant_values[:3]).all()
+        assert not np.isnan(coolant_values[3:]).any()
+    finally:
+        loader.close()
+
+
+def test_mixed_short_rows_do_not_decode_padded_bytes(tmp_path):
+    """C1 回归：短 payload / 0 字节行 / mux 组 0 都不得读出补出来的 0。
+
+    覆盖物理值、枚举码值、选择器本身与统计路径；短行尾部被桶补 0 后，
+    ``get_series`` 仍必须给 NaN（而不是 ``0 * factor + offset``）。
+    """
+    frames = ({
+        "name": "MuxShort", "can_id": 0x321, "size": 8, "sender": "DemoECU",
+        "signals": (
+            {"name": "Sel", "start": 0, "size": 8, "order": "intel",
+             "factor": 1.0, "offset": 0.0, "minimum": 0.0, "maximum": 255.0,
+             "mux": "M"},
+            {"name": "TailEnum", "start": 32, "size": 8, "order": "intel",
+             "factor": 1.0, "offset": 0.0, "minimum": 0.0, "maximum": 3.0,
+             "values": {0: "off", 1: "run", 2: "err"}, "mux": 0},
+            {"name": "TailB", "start": 32, "size": 8, "order": "intel",
+             "factor": 1.0, "offset": 0.0, "minimum": 0.0, "maximum": 3.0,
+             "mux": 1},
+            {"name": "TailWord", "start": 16, "size": 32, "order": "intel",
+             "factor": 1.0, "offset": 0.0, "minimum": 0.0,
+             "maximum": 4e9},
+        ),
+    },)
+    dbc = write_dbc(tmp_path / "mux_short.dbc", frames)
+    full = bytes([0x00, 0x00, 0x00, 0x00, 0x02, 0, 0, 0])
+    blf = write_blf(tmp_path / "mux_short.blf", [
+        {"timestamp": T0 + 0.0, "channel": 0, "can_id": 0x321, "data": full},
+        {"timestamp": T0 + 0.1, "channel": 0, "can_id": 0x321,
+         "data": bytes([0x00, 0x00])},
+        {"timestamp": T0 + 0.2, "channel": 0, "can_id": 0x321, "data": b""},
+        {"timestamp": T0 + 0.3, "channel": 0, "can_id": 0x321, "data": full},
+    ])
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        bucket = loader._buckets[0]
+        assert bucket.stride == 8
+        np.testing.assert_array_equal(bucket.lengths, [8, 2, 0, 8])
+        series = {name: loader.get_series(name).to_numpy()
+                  for name in loader.var_names}
+
+        sel = series["Sel"]
+        assert sel[0] == 0.0 and sel[1] == 0.0 and sel[3] == 0.0
+        assert np.isnan(sel[2]), "0 字节行连选择器本身都没有数据"
+
+        word = series["TailWord"]
+        assert word[0] == pytest.approx(131072.0)
+        assert np.isnan(word[1]) and np.isnan(word[2])
+        assert word[3] == pytest.approx(131072.0)
+
+        enum = series["TailEnum"]
+        assert enum[0] == 2.0
+        assert np.isnan(enum[1]) and np.isnan(enum[2])
+        assert enum[3] == 2.0
+
+        assert np.isnan(series["TailB"]).all(), "Sel=0 时组 1 全部无效"
+
+        # 统计路径与绘图路径同口径：不能把补 0 计入 finite_count
+        stats = loader.get_samples_chunked("TailWord", 0, 0)
+        np.testing.assert_array_equal(np.isnan(stats), np.isnan(word))
+    finally:
+        loader.close()
+
+
+def test_channel_info_separates_declared_dlc_from_observed_bytes(tmp_path):
+    """L1 回归：DLC 是数据库声明的上限，观察到的最大 payload 另报。
+
+    把日志里的实际长度报成 DLC，会掩盖「高字节从未出现过」这一真实原因；
+    CAN FD 的 ``valid_bytes < DLC`` 正是靠这两个数并排才看得出来。
+    """
+    frames = ({
+        "name": "ShortFrame", "can_id": 0x321, "size": 8, "sender": "DemoECU",
+        "signals": ({
+            "name": "Byte0", "start": 0, "size": 8, "order": "intel",
+            "factor": 1.0, "offset": 0.0, "minimum": 0.0, "maximum": 255.0,
+        },),
+    },)
+    dbc = write_dbc(tmp_path / "short_dlc.dbc", frames)
+    blf = write_blf(tmp_path / "short_dlc.blf", [
+        {"timestamp": T0 + i * 0.01, "channel": 0, "can_id": 0x321,
+         "data": bytes([i])}
+        for i in range(3)
+    ])
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        can = loader.get_channel_info("Byte0")["can"]
+        assert can["dlc"] == 8, "DBC 声明 8 字节就该报 8"
+        assert can["observed_max_bytes"] == 1, "日志里最大只有 1 字节"
+    finally:
+        loader.close()
+
+
+def test_fd_valid_bytes_below_dlc_does_not_decode_missing_bytes(tmp_path):
+    """CAN FD ``valid_bytes < DLC``：python-can 读回的 data 就是短行。
+
+    同一桶里混有 64 B / 8 B / 4 B / 0 B 行，位段在 byte4..7 的信号只在
+    前两行有效；后两行必须是 NaN，而不是补 0 后的物理值。
+    """
+    frames = ({
+        "name": "FdWide", "can_id": 0x7A0, "size": 64, "sender": "DemoECU",
+        "signals": (
+            {"name": "TailWord", "start": 32, "size": 32, "order": "intel",
+             "float_bits": 32, "factor": 1.0, "offset": 0.0, "minimum": 0.0,
+             "maximum": 4e9},
+        ),
+    },)
+    dbc = write_dbc(tmp_path / "fd_wide.dbc", frames)
+    one = bytes([0, 0, 0, 0, 0x00, 0x00, 0x80, 0x3F])
+    rows = [
+        {"timestamp": T0 + 0.0, "channel": 0, "can_id": 0x7A0,
+         "fd": True, "dlc": 64, "data": one + bytes(56)},
+        {"timestamp": T0 + 0.1, "channel": 0, "can_id": 0x7A0,
+         "fd": True, "dlc": 64, "data": one},
+        {"timestamp": T0 + 0.2, "channel": 0, "can_id": 0x7A0,
+         "fd": True, "dlc": 64, "data": one[:4]},
+        {"timestamp": T0 + 0.3, "channel": 0, "can_id": 0x7A0,
+         "fd": True, "dlc": 64, "data": b""},
+    ]
+    blf = write_blf(tmp_path / "fd_wide.blf", rows)
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        bucket = loader._buckets[0]
+        assert bucket.stride == 64
+        np.testing.assert_array_equal(bucket.lengths, [64, 8, 4, 0])
+        values = loader.get_series("TailWord").to_numpy()
+        assert values[0] == pytest.approx(1.0)
+        assert values[1] == pytest.approx(1.0)
+        assert np.isnan(values[2]) and np.isnan(values[3])
     finally:
         loader.close()
 

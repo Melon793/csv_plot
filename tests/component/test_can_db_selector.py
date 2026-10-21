@@ -355,6 +355,18 @@ def test_missing_remembered_files_are_listed_in_the_notice(qapp, dbc_a, tmp_path
     assert _import_btn(dlg).isEnabled() is True
 
 
+def test_missing_file_names_are_escaped_in_the_notice(qapp, tmp_path):
+    """A8：提示条是 RichText，文件名里的 & / < 不能当标记吞掉。"""
+    weird = tmp_path / "A&B<2>.dbc"
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(weird)])
+    try:
+        text = dlg.notice.text()
+        assert "A&amp;B&lt;2&gt;.dbc" in text
+        assert "A&B<2>" not in text
+    finally:
+        dlg.deleteLater()
+
+
 # ---------------------------------------------------------------------------
 # 记忆写入（§5.2「导入成功后写，取消不写」）
 # ---------------------------------------------------------------------------
@@ -541,3 +553,50 @@ def test_hit_column_degrades_gracefully_without_a_blf(qapp, dbc_a):
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
     assert dlg._prescan_state == "off", "data_file 不是 BLF 就不启动预扫"
     assert _cell(dlg, 0, 4) == "—"
+
+
+def test_a_blf_at_the_prescan_cap_skips_it_without_hiding_other_notices(
+        qapp, tmp_path, monkeypatch, dbc_a):
+    """大文件不预扫（第二次完整 I/O）：命中列退化为「—」，且黄条叠加不覆盖。"""
+    blf, _ = write_blf_pair(tmp_path, n=8, buses=(0,))
+    monkeypatch.setattr(
+        "src.ui.dialogs.can_db_selector.BLF_PRESCAN_MAX_BYTES",
+        os.path.getsize(blf),  # 恰好触到上限：>= 即跳过
+    )
+    missing = tmp_path / "gone.dbc"
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(missing), str(dbc_a)]
+    )
+    try:
+        assert dlg._prescan_state == "off"
+        assert dlg._prescan_thread is None, "跳过时不许留下后台线程"
+        assert dlg._prescan_timer is None
+        for r in range(dlg.table.rowCount()):
+            assert _cell(dlg, r, 4) == "—", "没有预扫就不许显示假命中率"
+        text = dlg.notice.text()
+        assert "不存在" in text, "缺文件的告警不能被跳过说明顶掉"
+        assert "跳过" in text and "128 MB" in text
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_a_blf_below_the_prescan_cap_still_prescans(
+        qapp, tmp_path, monkeypatch, dbc_a):
+    """阈值只用体积判定：差 1 字节就照常预扫。"""
+    blf, dbc_full = write_blf_pair(tmp_path, n=8, buses=(0,))
+    monkeypatch.setattr(
+        "src.ui.dialogs.can_db_selector.BLF_PRESCAN_MAX_BYTES",
+        os.path.getsize(blf) + 1,
+    )
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc_a), str(dbc_full)]
+    )
+    try:
+        assert dlg._prescan_state == "running"
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+        assert dlg._prescan_state == "done"
+        assert "跳过" not in dlg.notice.text()
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()

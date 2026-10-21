@@ -10,8 +10,8 @@ BLF 里只有**原始报文**（时间戳 + CAN ID + 数据字节），没有任
    「组 / 变量」元数据，使 UI 的分组 tab、游标同步、X 轴 limits 全部零改动复用；
 3. 绘图时才做 numpy 向量化解码，并按 LRU 缓存结果。
 
-设计后果（也是「重选数据库」能做成毫秒级的原因）：换数据库**不需要重扫报文**，
-只重建元数据 + 清缓存，见 :meth:`bind_databases`。
+设计后果（也是「重选数据库」不需重扫报文的原因）：换数据库**不需要重扫报文**，
+只重建元数据 + 清缓存，见 :meth:`bind_databases`（数据库解析仍是同步的）。
 
 生命周期、并发与缓存纪律全部照抄 MDFLazyLoader 已验证的写法
 （``RLock`` / ``_closed`` 先置位 / ``_ensure_open()`` 抛 ``KeyError`` /
@@ -33,6 +33,8 @@ import pandas as pd
 
 from src.core.config import (
     BLF_MAX_MESSAGES,
+    BLF_MAX_PAYLOAD_BYTES,
+    BLF_PENDING_ROWS_BUDGET,
     BLF_SCAN_CHUNK_MESSAGES,
     BLF_UNMATCHED_REPORT_LIMIT,
 )
@@ -42,6 +44,7 @@ from src.data.can_decode import (
     decode_rows,
     extract_raw,
     mux_validity,
+    row_validity,
 )
 from src.data.metadata import UNKNOWN, VarMetadata
 from src.core.logger import get_logger
@@ -92,6 +95,7 @@ def prescan_blf_frames(path: str, *, should_cancel=None):
 
     counts: Counter = Counter()
     total = 0
+    total_bytes = 0
     handle = open(path, "rb")
     try:
         reader = BLFReader(handle)
@@ -106,11 +110,15 @@ def prescan_blf_frames(path: str, *, should_cancel=None):
                 channel = int(msg.channel) if msg.channel is not None else 0
                 counts[(max(0, channel), int(msg.arbitration_id),
                         bool(msg.is_extended_id))] += 1
+                total_bytes += len(msg.data) if msg.data else 0
             total = sum(counts.values())
-            if total >= BLF_MAX_MESSAGES:
+            if total >= BLF_MAX_MESSAGES or total_bytes >= BLF_MAX_PAYLOAD_BYTES:
                 # 与 _scan 的截断一致：超限部分不会生成信号，命中率按会解码的部分算
-                logger.warning("BLF 预扫达到 %s 帧上限，其余报文不计入命中率",
-                               f"{BLF_MAX_MESSAGES:,}")
+                logger.warning(
+                    "BLF 预扫达到上限（%s 帧 / %s MB），其余报文不计入命中率",
+                    f"{BLF_MAX_MESSAGES:,}",
+                    f"{BLF_MAX_PAYLOAD_BYTES // (1024 * 1024)}",
+                )
                 break
             if should_cancel is not None and should_cancel():
                 raise InterruptedError("预扫已取消")
@@ -136,8 +144,8 @@ class _MessageBucket:
 
     __slots__ = (
         "channel", "can_id", "extended", "stride", "count", "t_min", "t_max",
-        "frame", "_t_blocks", "_p_blocks", "_pending_t", "_pending_p",
-        "_payload",
+        "frame", "_t_blocks", "_p_blocks", "_l_blocks", "_pending_t",
+        "_pending_p", "_pending_l", "_payload", "_lengths", "_stored_bytes",
     )
 
     def __init__(self, channel: int, can_id: int, extended: bool):
@@ -151,11 +159,23 @@ class _MessageBucket:
         self.frame: Optional[CanFrameSpec] = None
         self._t_blocks: list[np.ndarray] = []
         self._p_blocks: list[np.ndarray] = []
+        # 每行**实际**有效字节数。payload 仍按桶内最大 stride 对齐存储（列式
+        # 数组不能变宽），但短行尾部是补出来的 0，不能当真实数据解码。
+        # CAN FD 上限 64 B，uint8 足够；30M 行也只需 30 MB。
+        self._l_blocks: list[np.ndarray] = []
         self._pending_t: list[float] = []
         self._pending_p: list[bytes] = []
+        self._pending_l: list[int] = []
         self._payload: Optional[np.ndarray] = None
+        self._lengths: Optional[np.ndarray] = None
+        # 已占用的存储字节数（payload 块 + 行长度数组，含按 stride 补出来的
+        # 那部分）。扫描期用它兑现 ``BLF_MAX_PAYLOAD_BYTES``；pending 阶段先
+        # 按实际长度记，压块时补上对齐差额。
+        self._stored_bytes = 0
 
-    def add(self, timestamp: float, payload: bytes):
+    def add(self, timestamp: float, payload: bytes) -> int:
+        """追加一帧，返回本次调用造成的存储字节增量（供全局预算统计）。"""
+        before = self._stored_bytes
         n = len(payload)
         if n > self.stride:
             self.stride = n
@@ -166,8 +186,18 @@ class _MessageBucket:
             self.t_max = timestamp
         self._pending_t.append(timestamp)
         self._pending_p.append(payload)
+        self._pending_l.append(min(n, 255))
+        self._stored_bytes += n
         if len(self._pending_t) >= _BUCKET_BLOCK_ROWS:
             self._flush()
+        return self._stored_bytes - before
+
+    def pending_rows(self) -> int:
+        return len(self._pending_t)
+
+    def flush(self):
+        """把 pending 压成 numpy 块（全局 pending 预算触发时调用）。"""
+        self._flush()
 
     def _flush(self):
         if not self._pending_t:
@@ -176,21 +206,33 @@ class _MessageBucket:
         stride = self.stride
         buf = bytearray(n * stride)
         off = 0
+        data_bytes = 0
         for row in self._pending_p:
             buf[off:off + len(row)] = row
             off += stride
+            data_bytes += len(row)
         self._t_blocks.append(np.asarray(self._pending_t, dtype=np.float64))
         self._p_blocks.append(
             np.frombuffer(bytes(buf), dtype=np.uint8).reshape(n, stride)
         )
+        self._l_blocks.append(np.asarray(self._pending_l, dtype=np.uint8))
+        # pending 按实际长度记的账，压块后变为 n×stride（含补位）+ n（长度）
+        self._stored_bytes += n * stride + n - data_bytes
         self._pending_t = []
         self._pending_p = []
+        self._pending_l = []
 
-    def finalize(self):
-        """收尾并把分块合并成单条连续 payload 数组（之后不再写入）。"""
+    def finalize(self, should_cancel: Optional[Callable[[], bool]] = None):
+        """收尾并把分块合并成单条连续 payload 数组 + 行级有效长度。
+
+        Args:
+            should_cancel: 轮询式取消谓词。合并是逐块拷贝，块数可达数百，
+                每块之间检查一次，否则大文件拖到 90% 再点取消没有效果。
+        """
         self._flush()
         if not self._p_blocks:
             self._payload = np.zeros((0, 0), dtype=np.uint8)
+            self._lengths = np.zeros(0, dtype=np.uint8)
             return
         if len(self._p_blocks) == 1:
             self._payload = self._p_blocks[0]
@@ -198,17 +240,23 @@ class _MessageBucket:
             merged = np.zeros((self.count, self.stride), dtype=np.uint8)
             row = 0
             for block in self._p_blocks:
+                if should_cancel is not None and should_cancel():
+                    raise InterruptedError("用户取消了 BLF 扫描")
                 # 各块的列数可以不同：``stride`` 是「到目前为止的最大 dlc」，
                 # 所以同一个桶里「前几帧短、后几帧长」（实测 CAN FD 与
                 # issue_1905 那一类 valid_bytes 偏小的帧）会留下窄历史块。
                 # 直接 ``merged[a:b] = block`` 会
                 # ``ValueError: could not broadcast (n, 6) into (n, 8)``；窄列
-                # 尾部留 0 与 ``_flush`` 当时若已知最终宽度的结果一致。
+                # 尾部留 0，但真实行长度记录在 ``_lengths`` 里，解码时会把
+                # 该行相关信号置 NaN，不会把补出来的 0 当数据。
                 width = min(block.shape[1], self.stride)
                 merged[row:row + block.shape[0], :width] = block[:, :width]
                 row += block.shape[0]
             self._payload = merged
             self._p_blocks = []
+        self._lengths = np.concatenate(self._l_blocks) if self._l_blocks else np.zeros(
+            0, dtype=np.uint8
+        )
 
     @property
     def timestamps(self) -> np.ndarray:
@@ -220,6 +268,11 @@ class _MessageBucket:
     @property
     def payload(self) -> np.ndarray:
         return self._payload
+
+    @property
+    def lengths(self) -> Optional[np.ndarray]:
+        """每行实际有效字节数；``finalize()`` 之前为 None。"""
+        return self._lengths
 
     @property
     def mean_cycle_s(self) -> Optional[float]:
@@ -237,7 +290,12 @@ class BLFLazyLoader:
     GROUP_MODE = "can_message"
 
     MAX_CACHE_SIZE = 256
+    # 信号缓存字节预算：单条就是整条信号的 float64 数组。BLF 允许 30M 帧，
+    # 单个高频 ID 可达百万级（8 MB/条），只限 256 条时理论峰值是 GB 级。
+    MAX_CACHE_BYTES = 128 * 1024 * 1024
     MAX_TIME_CACHE_SIZE = 64
+    # 时间戳缓存同样按字节压一道上限（每条约 8 B/帧）。
+    MAX_TIME_CACHE_BYTES = 64 * 1024 * 1024
 
     _CAN_IMPORT_ERROR = "python-can 库未安装。请运行: uv add python-can>=4.4"
 
@@ -265,6 +323,8 @@ class BLFLazyLoader:
 
         self._signal_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._time_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._signal_cache_bytes = 0
+        self._time_cache_bytes = 0
         self._metadata: list[VarMetadata] = []
         self._var_to_meta: dict[str, VarMetadata] = {}
         self._var_to_sig: dict[str, CanSignalSpec] = {}
@@ -275,7 +335,11 @@ class BLFLazyLoader:
 
         self.db_paths: list[str] = list(db_paths or [])
         self.total_messages = 0
+        #: 扫描期 payload 实际占用的字节数（含对齐补位与行长度数组）
+        self.payload_bytes = 0
         self.truncated = False
+        #: ``"messages"`` / ``"payload"``；未截断时为 None
+        self.truncated_reason: Optional[str] = None
         self.unmatched_ids: list[tuple[int, int, bool, int]] = []
         self.load_errors: list[str] = []
         self._t0 = 0.0
@@ -327,6 +391,8 @@ class BLFLazyLoader:
 
         buckets: dict[tuple[int, int, bool], _MessageBucket] = {}
         total = 0
+        payload_bytes = 0
+        pending_rows = 0
         t_min = float("inf")
         t_max = float("-inf")
 
@@ -357,12 +423,24 @@ class BLFLazyLoader:
                         bucket = buckets[key] = _MessageBucket(channel, aid, extended)
                     payload = bytes(msg.data) if msg.data else b""
                     ts = float(msg.timestamp)
-                    bucket.add(ts, payload)
+                    before_pending = bucket.pending_rows()
+                    payload_bytes += bucket.add(ts, payload)
+                    pending_rows += bucket.pending_rows() - before_pending
                     if ts < t_min:
                         t_min = ts
                     if ts > t_max:
                         t_max = ts
                     total += 1
+
+                # 全局 pending 预算：单桶 8192 在 ID 基数大的日志里等于没上限
+                # （4000 个 ID × 7500 帧会全部以 Python 对象驻留）。超预算就
+                # 把所有桶一起压块，代价是块数变多，换来 pending 有确定上界。
+                if pending_rows >= BLF_PENDING_ROWS_BUDGET:
+                    for b in buckets.values():
+                        b.flush()
+                    pending_rows = 0
+                    # 压块时补上了对齐差额，重算一次让字节预算的账保持真实
+                    payload_bytes = sum(b._stored_bytes for b in buckets.values())
 
                 self._stats["messages"] = total
                 self._stats["buckets"] = len(buckets)
@@ -377,9 +455,18 @@ class BLFLazyLoader:
 
                 if total >= BLF_MAX_MESSAGES:
                     self.truncated = True
+                    self.truncated_reason = "messages"
                     logger.warning(
                         "BLF 报文数超过上限 %s，已停止扫描（其余报文不生成信号）",
                         f"{BLF_MAX_MESSAGES:,}",
+                    )
+                    break
+                if payload_bytes >= BLF_MAX_PAYLOAD_BYTES:
+                    self.truncated = True
+                    self.truncated_reason = "payload"
+                    logger.warning(
+                        "BLF 报文数据超过上限 %s MB，已停止扫描（其余报文不生成信号）",
+                        f"{BLF_MAX_PAYLOAD_BYTES // (1024 * 1024)}",
                     )
                     break
         finally:
@@ -393,9 +480,18 @@ class BLFLazyLoader:
 
         ordered = sorted(buckets.values(), key=lambda b: (b.channel, b.extended, b.can_id))
         for bucket in ordered:
-            bucket.finalize()
+            # 合并是逐块拷贝，一个百万帧文件可能在 finalize 里再花数秒。
+            # 每个桶前后都查一次取消，避免「进度到 90% 后取消没反应」。
+            if self._should_cancel is not None and self._should_cancel():
+                raise InterruptedError("用户取消了 BLF 扫描")
+            bucket.finalize(self._should_cancel)
         self._buckets = ordered
         self.total_messages = total
+        # 以最终数组为准重算：合并时窄历史块会被补到 stride，扫描期的
+        # 增量记账到不了这部分补位。
+        self.payload_bytes = sum(
+            b.payload.nbytes + b.lengths.nbytes for b in ordered
+        )
         self._t0 = t_min if np.isfinite(t_min) else 0.0
         self._scan_span = (t_min, t_max) if np.isfinite(t_min) else (0.0, 1.0)
         self._notify_progress(90)
@@ -404,17 +500,50 @@ class BLFLazyLoader:
     # 数据库绑定与元数据构建
     # ------------------------------------------------------------------
 
-    def bind_databases(self, paths: list[str]) -> dict:
+    def bind_databases(self, paths: list[str], *,
+                       rollback_if_empty: bool = False) -> dict:
         """重新绑定 DBC / ARXML：**不重扫报文**，只重建元数据并清缓存。
 
-        这是 §5.6「CAN 数据库…」按钮能做到毫秒级完成的原因 —— 原始 payload
-        与数据库是解耦的，换库只改变「怎么解释这些字节」。
+        ``CanDatabaseSet(paths)`` 会在调用线程**同步解析**全部数据库，耗时取
+        决于库的数量/体积（几十 MB 的 ARXML 可达数百毫秒到数秒），并非
+        「毫秒级」；调用方必须自行给出忙碌反馈。省掉的只是整份 BLF 的重扫
+        —— 原始 payload 与数据库解耦，换库只改变「怎么解释这些字节」。
+
+        Args:
+            rollback_if_empty: 新库与当前报文完全对不上（``var_count == 0``）
+                时恢复旧库、旧元数据，并在返回值里带 ``rolled_back=True``。
+                供 UI 的「重选数据库」使用：一次误选不能先把已画曲线清掉再
+                告诉用户「没有信号」。默认 False 保持既有调用语义。
         """
         # ``db_paths`` 与元数据是同一份状态：写它必须跟重建共用一把锁，否则
         # reload 路径（读 loader.db_paths 直接复用）会读到半新半旧的组合。
         with self._access_lock:
+            old_paths = list(self.db_paths)
+            old_database = self._database
+            old_errors = list(self.load_errors)
             self.db_paths = list(paths or [])
-            return self._bind_database(self.db_paths)
+            try:
+                stats = self._bind_database(self.db_paths)
+            except Exception:
+                # 解析/建元数据中途失败：恢复到调用前的可用状态，再把异常抛回
+                self.db_paths = old_paths
+                self._database = old_database
+                self.load_errors = old_errors
+                self._build_metadata()
+                raise
+            if rollback_if_empty and not stats.get("var_count"):
+                self.db_paths = old_paths
+                self._database = old_database
+                self.load_errors = old_errors
+                self._build_metadata()
+                return {
+                    "var_count": len(self._metadata),
+                    "unmatched": len(self.unmatched_ids),
+                    "frame_count": old_database.frame_count,
+                    "signal_count": old_database.signal_count,
+                    "rolled_back": True,
+                }
+            return stats
 
     def _bind_database(self, paths: list[str]) -> dict:
         self._database = CanDatabaseSet(paths)
@@ -423,8 +552,7 @@ class BLFLazyLoader:
         # 末尾那记 100 之前；顺序写反会让进度条从 100 退回 99。
         self._notify_progress(99)
         self._build_metadata()
-        self._signal_cache.clear()
-        self._time_cache.clear()
+        self._clear_lru_caches()
         return {
             "var_count": len(self._metadata),
             "unmatched": len(self.unmatched_ids),
@@ -469,7 +597,6 @@ class BLFLazyLoader:
                 q = f"{sig.frame_name}.{bare}"
                 qualified_counts[q] = qualified_counts.get(q, 0) + 1
 
-        self._scan_span = getattr(self, "_scan_span", (0.0, 1.0))
         group_metas: dict[int, list[VarMetadata]] = {}
         for gi, bucket, sig, bare in candidates:
             # 标称周期优先用数据库声明值：DBC 的周期是**报文**属性
@@ -552,23 +679,69 @@ class BLFLazyLoader:
             return self._signal_cache[name]
         return None
 
+    def _enforce_cache_budget(
+        self,
+        cache: OrderedDict,
+        byte_total: int,
+        *,
+        max_entries: int,
+        max_bytes: int,
+    ) -> int:
+        """LRU 逐出到「条数 + 字节」双双达标，返回逐出后的字节总量。
+
+        调用方必须已持有 ``_access_lock``。至少保留一条：单条数组本身就可能
+        超过预算，把它也逐出等于刚算出来就丢，下次同一信号还得再解一遍。
+        """
+        while len(cache) > 1 and (
+            len(cache) > max_entries or byte_total > max_bytes
+        ):
+            _, dropped = cache.popitem(last=False)
+            byte_total -= dropped.nbytes
+        return byte_total
+
     def _cache_put(self, name: str, data: np.ndarray):
         if name in self._signal_cache:
             self._signal_cache.move_to_end(name)
         else:
-            if len(self._signal_cache) >= self.MAX_CACHE_SIZE:
-                self._signal_cache.popitem(last=False)
             self._signal_cache[name] = data
+            self._signal_cache_bytes += data.nbytes
+            self._signal_cache_bytes = self._enforce_cache_budget(
+                self._signal_cache,
+                self._signal_cache_bytes,
+                max_entries=self.MAX_CACHE_SIZE,
+                max_bytes=self.MAX_CACHE_BYTES,
+            )
+
+    def _cache_put_time(self, group_index: int, timestamps: np.ndarray) -> np.ndarray:
+        """写入时间轴 LRU（调用方持锁），返回入缓存的那份数组。"""
+        if group_index in self._time_cache:
+            self._time_cache.move_to_end(group_index)
+            return self._time_cache[group_index]
+        self._time_cache[group_index] = timestamps
+        self._time_cache_bytes += timestamps.nbytes
+        self._time_cache_bytes = self._enforce_cache_budget(
+            self._time_cache,
+            self._time_cache_bytes,
+            max_entries=self.MAX_TIME_CACHE_SIZE,
+            max_bytes=self.MAX_TIME_CACHE_BYTES,
+        )
+        return timestamps
 
     def _ensure_open(self):
         """调用方必须已持有 self._access_lock。"""
         if self._closed:
             raise KeyError("BLF 数据源已关闭")
 
+    def _clear_lru_caches(self):
+        """清空两份 LRU 并归零字节账（调用方持锁）。"""
+        self._signal_cache.clear()
+        self._time_cache.clear()
+        self._signal_cache_bytes = 0
+        self._time_cache_bytes = 0
+
     def clear_cache(self):
         with self._access_lock:
-            self._signal_cache.clear()
-            self._time_cache.clear()
+            self._clear_lru_caches()
 
     def release_memory(self):
         """清空解码缓存（原始 payload 仍需保留，故不动桶数据）。"""
@@ -586,7 +759,13 @@ class BLFLazyLoader:
                 container = getattr(self, attr, None)
                 if container is not None:
                     container.clear()
+            self._signal_cache_bytes = 0
+            self._time_cache_bytes = 0
             self._buckets = []
+            # canmatrix 的整棵 Frame/Signal 对象图跟着数据库走：loader 关闭后
+            # 仍可能被「最近文件」/pending 列表引用，留着等于继续常驻一份 DBC。
+            # 置空集而非 None，``database`` 属性对已关闭 loader 仍可安全读取。
+            self._database = CanDatabaseSet()
             self._cached_max_samples = 0
             self._cached_global_time_range = (0.0, 1.0)
 
@@ -606,7 +785,15 @@ class BLFLazyLoader:
         sig = self._var_to_sig[display_name]
         frame = bucket.frame
         payload = bucket.payload
-        mask = mux_validity(payload, frame, sig) if frame is not None else None
+        lengths = bucket.lengths
+        # 行级有效性是 mux 掩码之外的独立维度：短行的补 0 既不能参与物理值，
+        # 也不能让选择器被误当成组 0。
+        row_ok = row_validity(lengths, sig)
+        mask = mux_validity(payload, frame, sig, lengths) if frame is not None else None
+        if mask is None:
+            mask = row_ok
+        elif row_ok is not None:
+            mask = mask & row_ok
         try:
             if frame is not None and not frame.is_vectorizable:
                 raise ValueError("该报文布局不适用向量化解码")
@@ -616,7 +803,7 @@ class BLFLazyLoader:
             # 多路复用）：回落逐帧解码。这类信号在真实工程里极少，但画不出来
             # 比画得慢更糟。
             logger.debug("信号 %s 回落逐帧解码", display_name, exc_info=True)
-            values = decode_rows(payload, sig, frame, mask)
+            values = decode_rows(payload, sig, frame, mask, lengths)
 
         if sig.is_enum:
             # 与 MDF 一致：枚举变量绘图走**原始码值**，文本标签交给 enum_map，
@@ -629,6 +816,14 @@ class BLFLazyLoader:
                     if valid.shape[0] == values.shape[0]:
                         values = values.astype(np.float64).copy()
                         values[~valid] = np.nan
+                    else:
+                        # 静默忽略掩码 = 保留补 0 解出的残留值，正是 mux / 短行
+                        # 最该避免的失败模式；长度不一致必须留下证据（评审 L7）。
+                        logger.warning(
+                            "信号 %s 的有效性掩码长度 %d 与采样点数 %d 不一致，"
+                            "已忽略掩码",
+                            display_name, valid.shape[0], values.shape[0],
+                        )
             except ValueError:
                 logger.debug("枚举码值提取失败，回落物理值: %s", display_name,
                              exc_info=True)
@@ -665,16 +860,15 @@ class BLFLazyLoader:
         bucket = self._buckets[group_index]
         abs_ts = bucket.timestamps
         rel = (abs_ts - self._t0) if abs_ts.size else abs_ts
-        if len(self._time_cache) >= self.MAX_TIME_CACHE_SIZE:
-            self._time_cache.popitem(last=False)
-        self._time_cache[group_index] = rel
-        return rel
+        return self._cache_put_time(group_index, rel)
 
     def get_var_group_index(self, display_name: str) -> int:
-        meta = self._var_to_meta.get(display_name)
-        if meta is None:
-            raise KeyError(f"变量 '{display_name}' 不存在")
-        return meta.group_index
+        with self._access_lock:
+            self._ensure_open()
+            meta = self._var_to_meta.get(display_name)
+            if meta is None:
+                raise KeyError(f"变量 '{display_name}' 不存在")
+            return meta.group_index
 
     def get_group_time_array(self, group_index: int) -> np.ndarray:
         with self._access_lock:
@@ -737,7 +931,11 @@ class BLFLazyLoader:
                 "can_id_hex": f"0x{bucket.can_id:X}"
                 + ("（扩展帧）" if bucket.extended else ""),
                 "is_extended": bucket.extended,
-                "dlc": bucket.stride or (frame.dlc if frame else 0),
+                "dlc": frame.dlc if frame is not None else (bucket.stride or 0),
+                # DBC 声明的是「最多多少字节」，桶的 stride 是「日志里实际观察到
+                # 的最大 payload」。CAN FD 的 valid_bytes < DLC 时两者不同，把
+                # 观察值报成 DLC 会掩盖高字节全 0 的真实原因（评审 L1）。
+                "observed_max_bytes": bucket.stride,
                 "bus_channel": bucket.channel,
                 "start_bit": sig.dbc_start_bit,
                 # 解码器真正用的 canmatrix 内部位号（Intel 与 DBC 相同，
@@ -863,7 +1061,18 @@ class BLFLazyLoader:
             if offset >= total or stop <= offset:
                 return np.zeros(0, dtype=np.float64)
             window = payload[offset:stop]
-            mask = mux_validity(window, frame, sig) if frame is not None else None
+            window_lengths = (
+                bucket.lengths[offset:stop] if bucket.lengths is not None else None
+            )
+            row_ok = row_validity(window_lengths, sig)
+            mask = (
+                mux_validity(window, frame, sig, window_lengths)
+                if frame is not None else None
+            )
+            if mask is None:
+                mask = row_ok
+            elif row_ok is not None:
+                mask = mask & row_ok
             try:
                 if frame is not None and not frame.is_vectorizable:
                     raise ValueError("该报文布局不适用向量化解码")
@@ -871,7 +1080,7 @@ class BLFLazyLoader:
             except ValueError:
                 logger.debug("信号 %s 统计路径回落逐帧解码", display_name,
                              exc_info=True)
-                return decode_rows(window, sig, frame, mask)
+                return decode_rows(window, sig, frame, mask, window_lengths)
 
     # ------------------------------------------------------------------
     # 属性（与 FastDataLoader / MDFLazyLoader 对齐）
@@ -879,11 +1088,13 @@ class BLFLazyLoader:
 
     @property
     def var_names(self) -> list[str]:
-        return [m.name for m in self._metadata]
+        with self._access_lock:
+            return [m.name for m in self._metadata]
 
     @property
     def units(self) -> dict[str, str]:
-        return {m.name: m.unit for m in self._metadata}
+        with self._access_lock:
+            return {m.name: m.unit for m in self._metadata}
 
     @property
     def df(self):
@@ -891,7 +1102,8 @@ class BLFLazyLoader:
 
     @property
     def df_validity(self) -> dict[str, int]:
-        return {m.name: UNKNOWN for m in self._metadata}
+        with self._access_lock:
+            return {m.name: UNKNOWN for m in self._metadata}
 
     @property
     def datalength(self) -> int:
@@ -907,7 +1119,8 @@ class BLFLazyLoader:
 
     @property
     def column_count(self) -> int:
-        return len(self._metadata)
+        with self._access_lock:
+            return len(self._metadata)
 
     @property
     def global_time_range(self) -> tuple[float, float]:
@@ -941,7 +1154,11 @@ class BLFLazyLoader:
     def time_values(self):
         gi = self._current_group_index
         with self._access_lock:
-            if not self._closed and gi < len(self._buckets):
+            if self._closed:
+                # 关闭后不再伪造 ``[0]`` 索引：x 与窗口里缓存的 y 长度、语义
+                # 都对不上，空序列至少能让调用方/绘图发现「没有时间轴」。
+                return pd.Series(dtype=np.float64, name="time")
+            if gi < len(self._buckets):
                 arr = self._group_time_array(gi)
                 if arr.size:
                     return pd.Series(arr, name="time")
@@ -953,20 +1170,22 @@ class BLFLazyLoader:
 
     @property
     def groups(self) -> list:
-        result = []
-        for gi in sorted(self._raw_groups.keys()):
-            metas = self._raw_groups.get(gi, [])
-            if not metas:
-                continue
-            result.append({"index": gi, "var_names": [m.name for m in metas]})
-        return result
+        with self._access_lock:
+            result = []
+            for gi in sorted(self._raw_groups.keys()):
+                metas = self._raw_groups.get(gi, [])
+                if not metas:
+                    continue
+                result.append({"index": gi, "var_names": [m.name for m in metas]})
+            return result
 
     @property
     def group_count(self) -> int:
         # 与 MDFLazyLoader 对齐：只数**生成了变量**的组。未匹配的报文桶仍然占
         # 一个 gi（label/索引稳定），但不能出现在 range(group_count) 里，
         # 否则 UI 会画出永远为空的组 tab。
-        return len(self._raw_groups)
+        with self._access_lock:
+            return len(self._raw_groups)
 
     @property
     def current_group_index(self) -> int:

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 import numpy as np
@@ -21,11 +22,13 @@ import pytest
 
 from src.data.can_database import CanDatabaseSet, CanFrameSpec, CanSignalSpec  # noqa: E402
 from src.data.can_decode import (  # noqa: E402
+    _rows_view,
     decode_physical,
     decode_rows,
     decode_single,
     extract_raw,
     mux_validity,
+    row_validity,
 )
 from tests.fixtures.data_factory import write_dbc  # noqa: E402
 
@@ -273,6 +276,39 @@ def test_mux_validity_is_none_for_plain_frames_and_public_signals(db):
     assert mux_validity(_payloads(8, 8, 9), muxed, public) is None
 
 
+def test_mux_group_falls_back_to_mux_value_when_the_name_is_missing(db):
+    """L2 回归：spec 只填了 ``mux_value`` 时仍要按组掩码。
+
+    canmatrix 1.2 把组名放在 ``mux``；若某个解析器（或手搓 spec）只填组号，
+    只看 ``mux`` 会把非本组采样点当公共信号全放行，残留值就被画成台阶。
+    """
+    frame = db.find_frame(0, 0x3B0)
+    legacy = replace(frame.signal_by_name("BranchB"), mux=None)
+    assert legacy.mux_value == 1
+    assert not legacy.is_mux_selector
+
+    rows = np.zeros((4, 8), np.uint8)
+    rows[:, 0] = [0, 1, 0, 1]
+    np.testing.assert_array_equal(
+        mux_validity(rows, frame, legacy), [False, True, False, True]
+    )
+
+
+def test_a_validity_mask_of_the_wrong_length_is_ignored_but_logged(db, caplog):
+    """L7 回归：长度不一致不能静默当「全部有效」。
+
+    行为仍是忽略错位掩码（按位应用会张冠李戴），但必须留下可追的日志证据，
+    否则 mux / 短行掩码失效在线上完全看不出来。
+    """
+    frame = db.find_frame(0, 0x1A0)
+    sig = frame.signal_by_name("EngineSpeed")
+    rows = np.zeros((3, 8), np.uint8)
+    with caplog.at_level("WARNING", logger="src.data.can_decode"):
+        values = decode_physical(rows, sig, np.array([True, False]))
+    assert np.isfinite(values).all()
+    assert any("掩码长度" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # 向量化不适用 → 回落
 # ---------------------------------------------------------------------------
@@ -315,6 +351,22 @@ def test_wide_signal_falls_back_to_bigint_with_hand_computed_values():
     # 同一行走向量化路径必须显式不适用，而不是悄悄截断成 64 bit
     with pytest.raises(ValueError):
         extract_raw(rows, sig)
+
+
+def test_rows_view_avoids_a_copy_when_the_window_is_the_whole_row():
+    """M1：``use == stride`` 时窗口就是整行，瞬时副本必须省掉。
+
+    ``ascontiguousarray`` 对该情形本就返回原数组；但这里用「写穿原数组」把
+    「共享内存」钉成契约，避免以后改成切片/astype 时悄悄多一份 N×stride。
+    """
+    payload = np.arange(24, dtype=np.uint8).reshape(3, 8)
+    whole = _rows_view(payload, 8)
+    payload[1, 2] = 0xAB
+    assert whole[8 + 2] == 0xAB
+
+    # 切列（use < stride）必须仍是逐行连续的新窗口
+    cut = _rows_view(payload, 4)
+    assert cut.tobytes() == payload[:, :4].tobytes()
 
 
 class _FakeCanMatrixFrame:
@@ -385,6 +437,22 @@ def test_container_signal_absent_from_the_decode_table_stays_nan():
     got = decode_rows(rows, sig, frame)
     assert np.isnan(got[0]) and np.isnan(got[1])
     assert len(frame.cm_frame.calls) == 2
+
+
+def test_row_fallback_warns_with_the_sample_count_for_large_series(
+    monkeypatch, caplog
+):
+    """M1：逐帧回落是纯 Python 循环，卡顿必须能在日志里对上规模。"""
+    monkeypatch.setattr("src.data.can_decode._ROW_FALLBACK_WARN_ROWS", 1)
+    frame = _frame(cm_frame=_FakeCanMatrixFrame({}))
+    sig = _spec(name="Sub", size=8)
+    rows = np.zeros((2, 8), np.uint8)
+
+    with caplog.at_level("WARNING", logger="src.data.can_decode"):
+        decode_rows(rows, sig, frame)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("2 个采样点" in m and "Container" in m for m in messages), messages
 
 
 def test_container_fallback_without_cm_frame_is_nan_and_warned(monkeypatch):
@@ -460,6 +528,100 @@ def test_short_payload_yields_nan_instead_of_truncating_silently():
     assert np.isnan(decode_single(row, sig))
     rows = np.frombuffer(row, np.uint8).reshape(1, 2)
     assert np.isnan(decode_rows(rows, sig)[0])
+
+
+def test_row_validity_uses_the_internal_bit_span(db):
+    """行级有效性按 canmatrix 内部位号判断，Intel 与 Motorola 同一公式。"""
+    engine = db.find_frame(0, 0x1A0)
+    speed = engine.signal_by_name("EngineSpeed")      # start 0, size 16
+    torque = engine.signal_by_name("TorqueLimit")     # start 32, size 32
+    lengths = np.array([0, 1, 2, 5, 6, 8], dtype=np.uint8)
+    np.testing.assert_array_equal(
+        row_validity(lengths, speed), [False, False, True, True, True, True]
+    )
+    np.testing.assert_array_equal(
+        row_validity(lengths, torque), [False, False, False, False, False, True]
+    )
+
+    chassis = db.find_frame(0, 0x2C0)
+    fl = chassis.signal_by_name("WheelSpeedFL")       # internal start 0, size 12
+    fr = chassis.signal_by_name("WheelSpeedFR")       # internal start 12, size 12
+    lengths = np.array([0, 1, 2, 3], dtype=np.uint8)
+    np.testing.assert_array_equal(
+        row_validity(lengths, fl), [False, False, True, True]
+    )
+    np.testing.assert_array_equal(
+        row_validity(lengths, fr), [False, False, False, True]
+    )
+    assert row_validity(None, speed) is None
+
+
+def test_decode_paths_apply_row_validity_to_padded_rows(db):
+    """同一桶里混有长短行：补 0 只用于对齐存储，不能变成物理值。"""
+    frame = db.find_frame(0, 0x1A0)
+    sig = frame.signal_by_name("TorqueLimit")         # float32 @ byte 4..7
+    payload = np.zeros((2, 8), dtype=np.uint8)
+    payload[0, 4:8] = [0x00, 0x00, 0x80, 0x3F]        # 1.0f
+    payload[1, 4:8] = [0x00, 0x00, 0x80, 0x3F]
+    lengths = np.array([4, 8], dtype=np.uint8)
+    mask = row_validity(lengths, sig)
+
+    physical = decode_physical(payload, sig, mask, frame)
+    assert np.isnan(physical[0])
+    assert physical[1] == pytest.approx(1.0)
+
+    rows = decode_rows(payload, sig, frame, mask, lengths)
+    assert np.isnan(rows[0])
+    assert rows[1] == pytest.approx(1.0)
+
+
+def test_mux_validity_rejects_a_selector_from_padding(tmp_path):
+    """选择器本身在缺失字节里时，补出来的 0 不能被当成 mux 组 0。"""
+    from src.data.can_database import CanDatabaseSet
+    from tests.fixtures.data_factory import write_dbc as _write_dbc
+
+    # 反向布局：目标信号在 byte0，选择器在 byte1。1 字节行只含目标信号，
+    # 选择器是补出来的 0；若不做选择器行级校验，它会被误判为组 0 有效。
+    path = _write_dbc(
+        tmp_path / "tail_mux.dbc",
+        [{
+            "name": "TailMux", "can_id": 0x400, "size": 8,
+            "signals": (
+                {"name": "Tail", "start": 0, "size": 8, "order": "intel",
+                 "factor": 1.0, "offset": 0.0, "minimum": 0.0,
+                 "maximum": 255.0, "mux": 0},
+                {"name": "Sel", "start": 8, "size": 8, "order": "intel",
+                 "factor": 1.0, "offset": 0.0, "minimum": 0.0,
+                 "maximum": 255.0, "mux": "M"},
+            ),
+        }],
+    )
+    frame = CanDatabaseSet([str(path)]).find_frame(0, 0x400)
+    tail = frame.signal_by_name("Tail")
+    rows = np.zeros((3, 8), dtype=np.uint8)
+    rows[:, 1] = [0, 0, 5]                            # 第 3 行 Sel=5，不属于组 0
+    lengths = np.array([1, 2, 2], dtype=np.uint8)
+    # 第 1 行选择器缺失（补 0）⇒ 无效；第 2 行选择器完整且为组 0 ⇒ 有效；
+    # 第 3 行选择器为 5 ⇒ 不属于组 0。目标信号自身的位段由 row_validity 合并。
+    np.testing.assert_array_equal(
+        mux_validity(rows, frame, tail, lengths), [False, True, False]
+    )
+    # 去掉行级信息时退回旧语义（只看字节，选择器补 0 会命中组 0）：
+    np.testing.assert_array_equal(
+        mux_validity(rows, frame, tail), [True, True, False]
+    )
+
+
+def test_mux_validity_only_checks_the_selector_span(db):
+    """mux 掩码只管选择器；目标位段缺失由调用方与 row_validity 合并。"""
+    frame = db.find_frame(0, 0x3B0)
+    branch = frame.signal_by_name("BranchA")           # start 8, size 16
+    rows = np.zeros((4, 8), dtype=np.uint8)            # Sel=0，BranchA 组
+    lengths = np.array([0, 1, 2, 3], dtype=np.uint8)
+    selector_only = mux_validity(rows, frame, branch, lengths)
+    np.testing.assert_array_equal(selector_only, [False, True, True, True])
+    combined = selector_only & row_validity(lengths, branch)
+    np.testing.assert_array_equal(combined, [False, False, False, True])
 
 
 def test_payload_shape_and_dtype_are_validated():
