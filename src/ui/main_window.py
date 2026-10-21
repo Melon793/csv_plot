@@ -20,9 +20,10 @@ from src.ui.variable_list import MyTableWidget  # noqa: E402
 from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
+from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
     QColor,
     QIcon,
@@ -44,6 +45,12 @@ SCREEN_HEIGHT_MARGIN = 0.3
 STATUS_MESSAGE_WIDTH_RATIO = 0.6
 # 右区消息停留时长：错误常驻（挡住后续播报直到被新消息替换），其余按时回收
 STATUS_MESSAGE_TIMEOUT_MS = {"info": 5000, "warn": 8000}
+# CAN 段宽度收纳判据里的固定开销：offscreen 实测全可见状态下「段宽之和 ↔
+# 状态栏宽」的差为 67 px（两端留白 8 + 至多三条段间竖线 9 + 项间 6px 间隙
+# 36 + 栏内边距 14），留到 80 给平台样式差（Windows/Fusion 的间隙口径）。
+# 段与消息的 sizeHint 单独累加，这个常量只兜住不逐个量的那几样，宁可略大
+# （早一点收纳）不漏算（收纳迟了 CAN 文字会被硬裁且无省略号）。
+CAN_SEGMENT_RESERVE = 80
 
 
 class _ElideStatusBar(QStatusBar):
@@ -328,6 +335,10 @@ class MainWindow(QMainWindow):
 
         left_layout.addLayout(title_layout)
 
+        # 原先这里常驻一条 BLF 数据库状态横幅（44px）：已整体搬进状态栏 CAN 段
+        # 与抽屉（§6）—— 左栏是分析区，最贵的一屏不该被与「变量」无关的状态条
+        # 占用。banner 现在从构造起就是 CAN 抽屉的固定头部行（_init_status_bar 末）。
+
         self.filter_input = QLineEdit(left_widget)
         self.filter_input.setPlaceholderText("输入变量名关键词（空格分隔）")
         self.filter_input.textChanged.connect(self.filter_variables)
@@ -345,6 +356,9 @@ class MainWindow(QMainWindow):
         self.load_btn = QPushButton("导入数据文件", left_widget)
 
         self.reload_btn = QPushButton("重载", left_widget)
+
+        # 原先这里还有「CAN 数据库…」按钮：只撤入口、不撤实现，能力换成
+        # 状态栏 CAN 段 + 抽屉页脚「重选数据库…」（§6），选库框原样保留。
 
         button_layout.addWidget(self.load_btn, 4)
         button_layout.addWidget(self.reload_btn, 1)
@@ -562,6 +576,22 @@ class MainWindow(QMainWindow):
 
         status_bar.addWidget(self._axis_segment)
 
+        # CAN 段：紧接 x 轴段之后 —— normal 区的最后一个，窗口压窄时天然最先
+        # 该被收纳（§6.3）。文案由 _update_can_db_ui 写；非 BLF 数据源时与
+        # 自己的分隔符成组隐藏。分隔符必须新起实例：_segment_separator 是
+        # x 轴段专用的，两段共用一条线会让显隐分组错乱。
+        self._can_segment = _StatusSegment(
+            "CAN：—", tip="点击查看 CAN 数据库与未匹配报文"
+        )
+        self._can_segment.clicked.connect(self._open_can_drawer)
+        self._can_segment.hide()
+        self._can_segment_text = ""
+
+        self._can_segment_separator = self._vline_separator()
+        self._can_segment_separator.hide()
+        status_bar.addWidget(self._can_segment_separator)
+        status_bar.addWidget(self._can_segment)
+
         self._message_text = ""
         self._message_level = "info"
         self._message_label = QLabel("")
@@ -592,6 +622,13 @@ class MainWindow(QMainWindow):
         self._message_hide_timer = QTimer(self)
         self._message_hide_timer.setSingleShot(True)
         self._message_hide_timer.timeout.connect(self.clear_status_message)
+
+        # CAN 抽屉开机即建（§6.4）：_handle_cli_args 在 __init__ 里就会走
+        # load_csv_file → _update_can_db_ui 摸段与 banner，晚建一步就静默不更新；
+        # banner 必须从构造起就是它的子控件 —— 先无 parent、开抽屉时才 setParent
+        # 会在桌面上浮一条 44px 彩条，而 isHidden() 断言看不见这一形态。
+        self._can_db_drawer = CanDbDrawer(self)
+        self.can_db_banner = self._can_db_drawer.banner
 
     def _open_file_info_drawer(self):
         """左段抽屉：文件级信息 + 复制 / 打开所在文件夹。
@@ -637,6 +674,22 @@ class MainWindow(QMainWindow):
         if not self._axis_drawer.open_for(self):
             self._broadcast("窗口高度不足，放大主窗口后再设置 x 轴基准", level="warn")
 
+    def _open_can_drawer(self):
+        """右段（CAN）抽屉：数据库清单 + 重选 / 查看未匹配。
+
+        换库与「查看未匹配」的落地动作都在 file_loader_manager，抽屉只负责
+        展示清单与转发，避免在 UI 层复刻 DB 重绑逻辑。
+        """
+        if self.reject_when_loading("重选 CAN 数据库"):
+            return
+        if self.loader is None:
+            self._broadcast("尚未加载数据文件", level="warn")
+            return
+
+        self._close_status_drawers(keep=self._can_db_drawer)
+        if not self._can_db_drawer.open_for(self):
+            self._broadcast("窗口高度不足，放大主窗口后再查看 CAN 数据库", level="warn")
+
     def _status_drawers(self) -> list:
         """已创建的状态栏抽屉清单（尚未创建的不出现在里面）。"""
         return [
@@ -644,6 +697,7 @@ class MainWindow(QMainWindow):
             for drawer in (
                 getattr(self, "_file_info_drawer", None),
                 getattr(self, "_axis_drawer", None),
+                getattr(self, "_can_db_drawer", None),
             )
             if drawer is not None
         ]
@@ -686,6 +740,7 @@ class MainWindow(QMainWindow):
         self._message_label.setText(self._status_elided(message))
         self._message_label.setToolTip(message)
         self._log_separator.setVisible(bool(message))
+        self._apply_can_segment_fit()
         timeout = STATUS_MESSAGE_TIMEOUT_MS.get(level)
         if timeout:
             self._message_hide_timer.start(timeout)
@@ -700,6 +755,7 @@ class MainWindow(QMainWindow):
         self._message_label.setText("")
         self._message_label.setToolTip("")
         self._log_separator.hide()
+        self._apply_can_segment_fit()
 
     def _set_busy_cursor(self, busy: bool):
         """沙漏光标只在加载期覆盖，成对调用避免光标覆盖栈泄漏。"""
@@ -814,6 +870,56 @@ class MainWindow(QMainWindow):
         self._axis_segment.setText(self._axis_segment_text(self.factor, self.offset))
         self._segment_separator.show()
         self._axis_segment.show()
+        self._apply_can_segment_fit()
+
+    def _update_can_segment(self, text: str, tip: str = "") -> None:
+        """CAN 段：文案与 tooltip 由 file_loader_manager 写（三态见 §6.3）。
+
+        非 BLF 数据源或未加载时传空串即整段收纳（含自己的竖线）；空串把
+        控件文案一并清掉，避免换回 BLF 前留着上一份数据的旧文案 —— 段的
+        宽度判据（``_can_segment_text``）与控件文案同进同出，不各说各话。
+        """
+        self._can_segment_text = text
+        self._can_segment.setToolTip(tip)
+        if not text:
+            self._can_segment.setText("")
+            self._can_segment.hide()
+            self._can_segment_separator.hide()
+            return
+        self._can_segment.setText(text)
+        self._can_segment_separator.show()
+        self._can_segment.show()
+        self._apply_can_segment_fit()
+
+    def _apply_can_segment_fit(self) -> None:
+        """窄窗口下收纳 CAN 段：宽度不够时隐藏，腾给消息区。
+
+        判据用「各项 sizeHint 显式求和」而不是 ``status_bar.sizeHint()``：
+        后者随 CAN 段自身的显隐变化，隐藏后 bar 变窄 → 一放开就又够宽 →
+        显隐来回抖动。求和里**始终计入** CAN 段与竖线（不按当前可见性），
+        阈值就成了一个与显隐无关的常数，同一宽度下决策稳定。
+
+        由三处触发：段文案更新、x 轴段显隐、消息区显隐（消息与 CAN 段争
+        同一行的空间），以及状态栏 resize（eventFilter）。消息文字已被
+        ``_status_elided`` 按窗口宽度截过，这里的 ``sizeHint`` 即真实占宽。
+        """
+        if not getattr(self, "_can_segment_text", ""):
+            return
+        status_bar = self.statusBar()
+        if status_bar is None:
+            return  # _load_window_context 的 resize 早于状态栏构建
+        needed = (
+            self._file_segment.sizeHint().width()
+            + self._can_segment.sizeHint().width()
+            + self._message_label.sizeHint().width()
+            + self._log_segment.sizeHint().width()
+            + CAN_SEGMENT_RESERVE
+        )
+        if not self._axis_segment.isHidden():
+            needed += self._axis_segment.sizeHint().width()
+        crowded = status_bar.width() < needed
+        self._can_segment.setVisible(not crowded)
+        self._can_segment_separator.setVisible(not crowded)
 
     def begin_load_feedback(self, file_path: str):
         self._status_busy = True
@@ -888,6 +994,10 @@ class MainWindow(QMainWindow):
         self._grid_layout_shortcut.activated.connect(self._on_grid_layout_shortcut)
         self.load_btn.clicked.connect(self.file_loader_manager.load_btn_click)
         self.reload_btn.clicked.connect(self.file_loader_manager.reload_data)
+        # BLF 专有接线已整体搬进 CanDbDrawer（§6）：banner 的「重选」/「查看」
+        # 由抽屉在构造时自连（reselect_can_database / show_can_unmatched），
+        # 左栏的「CAN 数据库…」按钮只撤入口、不撤实现，dialog 类照旧可达
+        # （仅剩 file_loader_manager 内部调用路径）。
         self.clear_all_plots_btn.clicked.connect(self.cursor_sync_manager.clear_all_plots)
         self.auto_range_btn.clicked.connect(self.cursor_sync_manager.auto_range_all_plots)
         self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
@@ -923,6 +1033,7 @@ class MainWindow(QMainWindow):
         if self.loader is not None:
             self.plot_config_manager.save_auto_save(self)
         self._shutdown_var_info_worker()
+        self._shutdown_data_load_thread()
         self.layout_manager._handle_close()
         # 退出前释放 loader 资源（文件句柄、内存映射等）
         try:
@@ -951,6 +1062,44 @@ class MainWindow(QMainWindow):
             dlg.shutdown_worker()
         except Exception:
             self._logger.debug("终止变量信息统计线程失败", exc_info=True)
+
+    def _shutdown_data_load_thread(self):
+        """退出前收尾后台数据加载线程（与 _shutdown_var_info_worker 同一理由）。
+
+        ``self._thread`` 是运行中 DataLoadThread 的唯一强引用，窗口销毁会连同
+        它一起解引用 —— 线程还在跑时 Python 包装器归零即析构 C++ 对象，Qt 直接
+        std::terminate（实测 SIGABRT）。BLF 扫描可取消且取消后刻意不 wait，
+        所以「点取消 → 立即关窗口」是会踩到的路径。
+
+        BLF 还有一条独立的保活链：取消后仍在跑的旧线程挂在 FileLoaderManager
+        的 ``_blf_thread_refs`` 里（丢引用同样会走到 SIGABRT），一并 cancel/wait。
+        随后收掉扫描中的进度框（否则它作为独立顶层窗口留在屏幕上）与 F 路径
+        暂存的 loader（可能占着几百 MB）。
+        """
+        threads = [getattr(self, "_thread", None)]
+        flm = getattr(self, "file_loader_manager", None)
+        threads.extend(getattr(flm, "_blf_thread_refs", None) or [])
+        for thread in threads:
+            if thread is None:
+                continue
+            try:
+                if thread.isRunning():
+                    if hasattr(thread, "request_cancel"):
+                        thread.request_cancel()
+                    if not thread.wait(3000):
+                        self._logger.warning("后台数据加载线程 3s 内未退出")
+            except (RuntimeError, TypeError):
+                self._logger.debug("收尾后台数据加载线程失败", exc_info=True)
+        if flm is None:
+            return
+        try:
+            flm._close_blf_progress()
+        except (RuntimeError, TypeError):
+            self._logger.debug("关闭 BLF 扫描进度框失败", exc_info=True)
+        try:
+            flm._release_pending_blf_loader()
+        except (RuntimeError, TypeError):
+            self._logger.debug("释放暂存 BLF loader 失败", exc_info=True)
 
     def show_log_window(self):
         log_window = LogWindow.get_instance(self)
@@ -1228,6 +1377,15 @@ class MainWindow(QMainWindow):
         # 或只剩失效的包装器。这类异常从 Qt 回调里逃出会污染解释器状态，判据不过就静默跳过。
         if not isinstance(obj, QObject) or not widget_alive(obj) or not widget_alive(self):
             return False
+        # 状态栏 resize：CAN 段放不放得下随宽度变，这里复算收纳（§6.3）。
+        # _can_segment_text 为空即未加载 BLF，先短路 —— 也顺带避免在状态栏
+        # 尚未构建时经自惰性创建语义的 statusBar() 建出第二条栏。
+        if (
+            event.type() == QEvent.Type.Resize
+            and getattr(self, "_can_segment_text", "")
+            and obj is self.statusBar()
+        ):
+            self._apply_can_segment_fit()
         if not hasattr(self, "layout_manager") or self.layout_manager is None:
             return super().eventFilter(obj, event)
         handled = self.layout_manager._handle_event_filter(obj, event)

@@ -706,25 +706,27 @@ class PlotUIManager(BasePlotManager):
         if hasattr(pw, "view_box") and hasattr(pw, "plot_item"):
             self.update_plot_style(pw, pw.view_box, pw.view_box.viewRange(), None)
 
-    def _calculate_visible_points(self, pw: Any, range) -> tuple:
-        """计算当前可见范围的点数估算"""
-        x_min, x_max = range[0]
-        x_range_width = x_max - x_min
+    def _resolve_visible_density(self, pw: Any) -> float:
+        """获取当前子图的可见曲线采样密度（单位：点 / x轴单位，取最大值）。
 
-        if hasattr(pw, 'factor') and pw.factor != 0:
-            index_range_width = x_range_width / abs(pw.factor)
-        else:
-            index_range_width = x_range_width
-
-        curve_count = len(pw.curves) if hasattr(pw, 'curves') and pw.curves else 0
-
-        curve_count = max(curve_count, 1)
-        visible_points = index_range_width * curve_count
-
-        return index_range_width, visible_points
+        只统计可见曲线：隐藏曲线不参与渲染，不应驱动 symbol 视觉开关；
+        per-plot 口径避免混合采样率时低采样子图被全局最大密度"连坐"。
+        """
+        densities = [
+            ci.point_density
+            for ci in pw.curves.values()
+            if ci.visible and ci.point_density > 0
+        ]
+        return max(densities) if densities else 0.0
 
     def update_plot_style(self, pw: Any, view_box, range, rect=None):
-        """更新绘图样式 - 基于xRange宽度判断细线+symbol或粗线无symbol"""
+        """更新绘图样式 - 基于估算可见点数判断细线+symbol或粗线无symbol
+
+        判据：x宽度 × 采样密度（=估算可见点数）< XRANGE_THRESHOLD_FOR_SYMBOLS
+        时显示 symbols（细线+点），否则粗线无 symbol。
+        与 factor 无关：无论 x 轴是行号（CSV）还是秒（MDF/BLF），
+        阈值语义统一为"可见点数 < 100"。
+        """
         try:
             _mw = pw.window()
 
@@ -735,24 +737,24 @@ class PlotUIManager(BasePlotManager):
             if _mw and getattr(_mw, '_is_loading_new_data', False):
                 return
 
-            if not hasattr(pw, 'factor') or not hasattr(pw, 'plot_item'):
+            if not hasattr(pw, 'plot_item'):
                 return
 
             is_interacting = getattr(pw, '_is_interacting', False)
             if is_interacting:
                 return
 
-            index_range_width, visible_points = self._calculate_visible_points(pw, range)
+            x_min, x_max = range[0]
+            x_width = x_max - x_min
+            density = self._resolve_visible_density(pw)
+            visible_points = x_width * density
+            show_symbols = visible_points < XRANGE_THRESHOLD_FOR_SYMBOLS
 
-            density = getattr(_mw, '_global_max_density', 0.0) if _mw else 0.0
-            if density > 0:
-                raw_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS / density
-                # clamp 到 [100, 200]，防止 density 变化导致阈值异常（如 factor=10 时 threshold≈999）
-                effective_threshold = max(XRANGE_THRESHOLD_FOR_SYMBOLS,
-                                          min(raw_threshold, XRANGE_THRESHOLD_FOR_SYMBOLS * 2))
-            else:
-                effective_threshold = XRANGE_THRESHOLD_FOR_SYMBOLS
-            show_symbols = index_range_width < effective_threshold
+            logger.debug(
+                "[PLOT_STYLE] x_width=%.4g, density=%.4g, visible_points=%.4g, "
+                "show_symbols=%s",
+                x_width, density, visible_points, show_symbols,
+            )
 
             pw._apply_plot_style(show_symbols)
 

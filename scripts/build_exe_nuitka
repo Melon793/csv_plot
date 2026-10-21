@@ -42,6 +42,54 @@ echo "Generating build info..."
 $PYTHON scripts/generate_build_info.py
 echo
 
+# 第三方许可证（方案 §9 R3）：python-can 是 LGPL-3.0，分发产物必须附许可证。
+# 许可证位置在新旧包之间不统一（PEP 639 写 dist-info/licenses/，旧式直接
+# 写 dist-info/LICENSE），所以交给 Python 用元数据查，而不是拼硬编码路径。
+resolve_license() {
+    $PYTHON -c "import os,sys,importlib.metadata as md
+wanted=('LICENSE','LICENSE.txt','LICENSE.md','COPYING','COPYING.LESSER')
+try:
+    d=md.distribution(sys.argv[1])
+except Exception:
+    sys.exit(1)
+base=str(d.locate_file(''))
+for f in (d.files or ()):
+    n=str(f).replace(chr(92),'/')
+    if n.rpartition('/')[2] not in wanted or '.dist-info' not in n: continue
+    p=os.path.join(base,*n.split('/'))
+    if os.path.isfile(p):
+        print(p)
+        break
+" "$1" 2>/dev/null
+}
+
+LICENSE_OPTS=()
+for entry in "python-can:python-can-LICENSE.txt" "canmatrix:canmatrix-LICENSE"; do
+    dist="${entry%%:*}"
+    target="${entry##*:}"
+    lic="$(resolve_license "$dist" || true)"
+    if [ -n "$lic" ]; then
+        LICENSE_OPTS+=("--include-data-file=$lic=licenses/$target")
+        echo "附带第三方许可证: $dist -> licenses/$target"
+    else
+        echo "WARN 未找到 $dist 的 LICENSE，发布前需手工补附"
+    fi
+done
+
+# BLF / CAN 数据库（方案 §4）相关的打包取舍：
+# * can: 只用到 can.io.blf 的 BLFReader，但 `import can` 会拉起 can.io 整层。
+# * canmatrix.formats 用 importlib.import_module("canmatrix.formats." + 名字)
+#   动态装载解析器，且把 ImportError 吞成一条 debug 日志 —— 整包 include 是唯一
+#   可靠写法，漏掉时产物表现为「BLF 导入后一个信号也没有」，极难归因。
+# * lxml: canmatrix 的 arxml 解析器硬依赖（原先下面有一行
+#   --nofollow-import-to=lxml，已删；保留它等于打包版永远读不了 ARXML）。
+# * 硬件后端（can.interfaces.<23 个>）无需排除：它们只在 BACKENDS 字典里以名字
+#   存在、按需 import，实测加载 BLFReader 后零个后端进 sys.modules；而 can/util.py
+#   有 `from .interfaces import VALID_INTERFACES`，把整个 can.interfaces 排掉会让
+#   `import can` 直接崩（PyInstaller 那边因此是逐个排子模块）。
+#
+# 注意：bash 里反引号续行（行尾 \）之间**不能**插注释行 —— 注释会吃掉续行并把
+# 后面的参数当独立命令执行，所以下面这一串参数必须保持连续。
 nuitka --standalone \
     --output-filename="$NAME" \
     --enable-plugin=pyside6 \
@@ -49,6 +97,11 @@ nuitka --standalone \
     --include-package=src \
     --include-package=asammdf \
     --include-package=asammdf.blocks \
+    --include-package=can \
+    --include-package=can.io \
+    --include-package=canmatrix \
+    --include-package=canmatrix.formats \
+    --include-package=lxml \
     --include-module=numpy \
     --include-module=pandas \
     --include-module=chardet \
@@ -58,6 +111,7 @@ nuitka --standalone \
     --include-data-file=assets/icon.png=assets/icon.png \
     --include-data-file=README.md=README.md \
     --include-data-file=docs/help.md=docs/help.md \
+    "${LICENSE_OPTS[@]}" \
     --follow-imports \
     --nofollow-import-to=nuitka \
     --nofollow-import-to=pytest \
@@ -70,7 +124,6 @@ nuitka --standalone \
     --nofollow-import-to=pip \
     --nofollow-import-to=wheel \
     --nofollow-import-to=scipy \
-    --nofollow-import-to=lxml \
     --nofollow-import-to=PIL \
     --nofollow-import-to=cv2 \
     --nofollow-import-to=matplotlib \

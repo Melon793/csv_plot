@@ -22,6 +22,7 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_Y,
     MIN_INDEX_LENGTH,
     compute_global_x_limits,
+    is_grouped_loader,
 )
 from src.core.logger import get_logger
 import numpy as np
@@ -110,7 +111,7 @@ class AxisManager:
             pw.plot_context is not None
             and hasattr(pw.plot_context, "loader")
             and pw.plot_context.loader is not None
-            and getattr(pw.plot_context.loader, "LOADER_TYPE", "") == "mdf"
+            and is_grouped_loader(pw.plot_context.loader)
         )
 
         has_own_data = bool(pw.curves)  # 统一：只看 curves 字典

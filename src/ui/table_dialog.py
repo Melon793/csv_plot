@@ -43,6 +43,7 @@ from src.core.config import (
     FROZEN_VIEW_WIDTH_DEFAULT,
     BLINK_PULSE,
     widget_alive,
+    is_grouped_loader,
 )
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.core.logger import get_logger
@@ -1454,7 +1455,7 @@ class DataTableDialog(QMainWindow):
                 continue
 
             # 检查变量是否在数据中存在
-            is_mdf_loader = getattr(loader, "LOADER_TYPE", "") == "mdf"
+            is_mdf_loader = is_grouped_loader(loader)
             if not is_mdf_loader and var_name not in loader.df.columns:
                 invalid_vars.append(var_name)
                 continue
@@ -1524,7 +1525,7 @@ class DataTableDialog(QMainWindow):
             QMessageBox.warning(self, "错误", "没有加载数据")
             return
 
-        is_mdf_loader = getattr(loader, "LOADER_TYPE", "") == "mdf"
+        is_mdf_loader = is_grouped_loader(loader)
         if not is_mdf_loader and var_name not in loader.df.columns:  # 改为 loader
             QMessageBox.warning(self, "错误", f"变量 '{var_name}' 不存在")
             return
@@ -1557,7 +1558,7 @@ class DataTableDialog(QMainWindow):
             data: 变量数据序列
         """
         loader = self._resolve_loader()
-        is_mdf = loader is not None and getattr(loader, "LOADER_TYPE", "") == "mdf"
+        is_mdf = is_grouped_loader(loader)
 
         if is_mdf:
             # MDF 数据：切换到 tab 模式并按 group 添加（数据获取在
@@ -3019,7 +3020,7 @@ class DataTableDialog(QMainWindow):
         if self._tab_mode or self._group_tabs:
             self._reset_tab_mode()
 
-        is_mdf = getattr(loader, "LOADER_TYPE", "") == "mdf"
+        is_mdf = is_grouped_loader(loader)
         removed: list[str] = []
 
         if is_mdf:

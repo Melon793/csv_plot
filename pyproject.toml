@@ -16,6 +16,8 @@ dependencies = [
     "pyyaml>=6.0.0",
     "shiboken6>=6.11.1",
     "ujson>=5.11.0",
+    "python-can>=4.4",
+    "canmatrix[arxml,dbc]>=1.2",
 ]
 
 [dependency-groups]
@@ -27,6 +29,8 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "pytest-timeout>=2.4.0",
+    "vblf>=0.1",
+    "cantools>=39",
 ]
 
 [tool.pytest.ini_options]

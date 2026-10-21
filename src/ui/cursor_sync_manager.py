@@ -11,6 +11,7 @@ from src.core.config import (
     RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
     safe_qt_op,
+    is_grouped_loader,
 )
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -534,7 +535,7 @@ class CursorSyncManager(MainWindowBaseManager):
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance.get_column_names())
 
-            is_mdf = getattr(self.mw.loader, "LOADER_TYPE", "") == "mdf"
+            is_mdf = is_grouped_loader(self.mw.loader)
 
             unique_y_names = set(all_y_names)
             skip_var_restore = False

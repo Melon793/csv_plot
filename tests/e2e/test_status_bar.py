@@ -149,6 +149,60 @@ def test_drawer_gate_blocks_click_without_data_and_while_loading(
     assert getattr(mw, drawer_attr) is None, "加载期不该创建抽屉"
     assert mw._message_label.text() == f"正在加载数据，请稍候再{action}"
 
+    # 替身只建模了 isRunning；closeEvent 现在会收尾运行中的加载线程
+    # （_shutdown_data_load_thread → request_cancel()+wait(3000)），
+    # 留着它会在用例收尾关窗时炸。与 test_busy_gate 的收尾方式一致。
+    del mw._thread
+
+
+def test_can_segment_gate_keeps_the_eager_drawer_closed(main_window, qapp):
+    """CAN 段两道闸门（§6.5）：同样是"不许开抽屉"，形态与另两段不同。
+
+    它是唯一**开机即建**的抽屉（banner 从构造起就是它的子控件，§6.4），
+    所以无数据时对象必须在、但不许打开；加载期也一样 —— 清单里的库是
+    旧 loader 的快照，随时会被换掉。
+    """
+    mw = main_window
+    drawer = mw._can_db_drawer
+    assert drawer.isHidden() is True
+
+    _click_segment(mw._can_segment, qapp)
+    assert drawer.isHidden() is True, "无数据时不该打开抽屉"
+    assert mw._message_label.text() == "尚未加载数据文件"
+
+    class _FakeThread:
+        def isRunning(self):
+            return True
+
+    mw._thread = _FakeThread()
+    _click_segment(mw._can_segment, qapp)
+    assert drawer.isHidden() is True, "加载期不该打开抽屉"
+    assert mw._message_label.text() == "正在加载数据，请稍候再重选 CAN 数据库"
+
+    del mw._thread
+
+
+def test_cli_argument_lands_on_a_wired_can_ui(cli_window, qapp, qtbot):
+    """argv 直接带文件：构造期内的 _handle_cli_args 链必须能摸到 CAN 段。
+
+    ``_handle_cli_args`` 在 ``__init__`` 里就跑 load_csv_file → _apply_loader
+    → _update_can_db_ui；这条链落在「非 BLF」分支上会把 CAN 段整组收起。
+    段/抽屉若晚建一步，这轮刷新会打在缺的属性上 —— 要么崩、要么静默
+    不更新，这里用真窗口的实测状态把它钉住（§6.4 的构造次序约束）。
+    """
+    mw = cli_window
+    qtbot.waitUntil(lambda: mw.loader is not None, timeout=5000)
+    qapp.processEvents()
+
+    assert mw.windowTitle() == f"cli_demo.csv - CSV Plot v{mw.app_version}"
+    assert mw._file_segment.text() == f"csv文件 · {len(mw.var_names)} 个变量"
+    # 非 BLF：段文案为空且整组隐藏（含自己的分隔线），抽屉与 banner 也收着
+    assert mw._can_segment.isHidden() is True
+    assert mw._can_segment.text() == ""
+    assert mw._can_segment_separator.isHidden() is True
+    assert mw._can_db_drawer.isHidden() is True
+    assert mw.can_db_banner.isHidden() is True
+
 
 def test_hover_paints_a_full_cell_block(main_window, qapp):
     """hover 反馈是整块底色（照 VS Code 的 item cell），不是 1 px 下划线。

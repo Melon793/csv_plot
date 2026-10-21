@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 from src.core.logger import get_logger
-from src.core.config import VAR_INFO_MAX_TABS
+from src.core.config import VAR_INFO_MAX_TABS, is_grouped_loader
 from src.ui.drag_drop import build_var_mimedata, create_drag_pixmap
 from src.ui.variable_actions import (
     add_variables_to_blank_plot,
@@ -521,7 +521,7 @@ class MyTableWidget(QTableWidget):
         if not hasattr(main_window, "loader") or main_window.loader is None:
             return
 
-        if getattr(main_window.loader, "LOADER_TYPE", "") == "mdf":
+        if is_grouped_loader(main_window.loader):
             try:
                 series = main_window.loader.get_series(var_name)
             except KeyError:

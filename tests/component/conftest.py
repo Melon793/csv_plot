@@ -304,3 +304,17 @@ def shown_tab_dialog(tab_dialog):
     # 各自在 _add_variable_to_tab 后再 settle()，布局会持续被推进
     settle(5)
     return tab_dialog
+
+
+@pytest.fixture()
+def blf_flow(qapp):
+    """BLF 导入链路宿主（实现见 ``blf_flow_doubles.blf_flow_host``）。
+
+    夹具名必须在 conftest 里声明：测试文件若以 ``import`` 引入夹具再用同名
+    形参请求，会被 ruff 判成「重定义未使用的导入」（F811）；而实现连带
+    import ``src.ui.*``，所以在这里延迟装载，不拖慢无关用例的收集。
+    """
+    from tests.component.blf_flow_doubles import blf_flow_host
+
+    with blf_flow_host(qapp) as trio:
+        yield trio

@@ -37,6 +37,9 @@ class DataLoadThread(QThread):
     progress = Signal(int)  # 百分比
     finished = Signal(object)  # FastDataLoader 实例
     error = Signal(str)
+    # 用户取消（目前只有 BLF 扫描会走到）：单列一个信号而不是复用 error，
+    # 是为了让 UI 能静默恢复原数据而不弹错误框。
+    cancelled = Signal(str)  # 被取消的文件路径
 
     def __init__(
         self,
@@ -47,6 +50,7 @@ class DataLoadThread(QThread):
         has_unit: bool | None = True,
         encoding: str | None = None,
         sheet_name: str | None = None,
+        db_paths: list[str] | None = None,
     ):
         super().__init__(parent)
         self.file_path = file_path
@@ -55,6 +59,22 @@ class DataLoadThread(QThread):
         self.has_unit = has_unit
         self.encoding = encoding
         self.sheet_name = sheet_name
+        # BLF 专有：DBC / ARXML 数据库路径列表。其他格式一律忽略，
+        # 但 reload 路径会无条件读 ``loader.db_paths``，故统一存下来。
+        self.db_paths = list(db_paths) if db_paths else []
+        self._cancel_requested = False
+        # BLF 扫描的实时计数（{"messages": int, "buckets": int}），供进度框
+        # 显示「已读 N 帧」。非 BLF 格式始终为空 dict。
+        self.scan_stats: dict = {}
+
+    def request_cancel(self):
+        """请求取消加载（目前只对 BLF 扫描生效）。
+
+        刻意不叫 ``cancel()``：``QThread`` 没有 cancel，但本方法要与
+        ``InterruptedError`` 抛出后的静默恢复路径配套，命名上显式带
+        "request" 强调它只是置标志位，真正的中断发生在下个分块边界。
+        """
+        self._cancel_requested = True
 
     def run(self):
         """
@@ -87,6 +107,16 @@ class DataLoadThread(QThread):
                     has_unit=self.has_unit,
                     _progress=_progress_cb,
                 )
+            elif ext == ".blf":
+                from src.data.blf_loader import BLFLazyLoader
+
+                loader = BLFLazyLoader(
+                    self.file_path,
+                    db_paths=self.db_paths,
+                    _progress=_progress_cb,
+                    _should_cancel=lambda: self._cancel_requested,
+                    _stats=self.scan_stats,
+                )
             elif ext in (".mf4", ".mdf", ".dat"):
                 from src.data.mdf_lazy_loader import MDFLazyLoader
 
@@ -105,6 +135,11 @@ class DataLoadThread(QThread):
                     allow_gc=False,
                 )
             self.finished.emit(loader)
+        except InterruptedError:
+            # 用户主动取消：不是错误，不发 error 信号，也不发 finished。
+            # 调用方收到 cancelled 后按「已取消」恢复按钮与原数据。
+            logger.info("已取消后台加载: %s", self.file_path)
+            self.cancelled.emit(self.file_path)
         except MemoryError:
             logger.critical("DataLoadThread 内存不足: %s", self.file_path)
             self.error.emit("内存不足，无法加载此文件。请尝试加载较小的文件。")

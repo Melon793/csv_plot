@@ -1,6 +1,7 @@
 """统一配置管理器 - 集中管理应用所有配置"""
 
 from __future__ import annotations
+import json
 import logging
 import os
 import sys
@@ -11,6 +12,8 @@ from threading import Lock
 from typing import Any, Optional, Type
 
 from PySide6.QtCore import QSettings
+
+from src.utils.paths import normalize_input_path
 
 _logger = logging.getLogger(__name__)
 
@@ -25,6 +28,14 @@ class ConfigKey(StrEnum):
     LOG_WINDOW_GEOMETRY = "log_window/geometry"
     TEMPLATE_LAST_ID = "template/last_id"
     TEMPLATE_LAST_NAME = "template/last_name"
+    # BLF 只存原始报文，必须搭配 DBC / ARXML 才能解出信号。记住上次选中的
+    # 数据库列表（os.pathsep 连接），下次导入时在弹窗里**预选**（不再静默
+    # 自动导入），让连续分析同一台架的多份 BLF 不必每次从零重选。
+    BLF_LAST_DB_PATHS = "blf/last_db_paths"
+    # 数据库文件的用户备注：JSON dict {规范化路径: 备注文本}。备注是自由文本，
+    # 不能用 BLF_LAST_DB_PATHS 的 pathsep 连接（值里可能含分隔符或空格），
+    # JSON 单字符串在 ini 后端里最稳。
+    BLF_DB_NOTES = "blf/db_notes"
 
 
 class AppSettings:
@@ -189,3 +200,61 @@ class AppSettings:
 
     def set_last_template_name(self, name: str | None) -> None:
         self._settings.setValue(ConfigKey.TEMPLATE_LAST_NAME, name)
+
+    # ------------------------------------------------------------------
+    # BLF / CAN 数据库记忆
+    #
+    # 刻意以「单个字符串 + os.pathsep 连接」而非 QStringList 存储：QSettings 的
+    # ini 后端对列表值会写成带计数的复合键，跨平台读取时的类型不稳定（实测
+    # 单元素列表返回 str、多元素返回 list[str]）。pathsep 方案与 PATH 语义一致，
+    # 且 Windows 下的盘符反斜杠不会破坏 ini。
+    # ------------------------------------------------------------------
+
+    def get_blf_last_db_paths(self) -> list[str]:
+        raw = self._settings.value(ConfigKey.BLF_LAST_DB_PATHS, "", type=str) or ""
+        return [p for p in raw.split(os.pathsep) if p.strip()]
+
+    def set_blf_last_db_paths(self, paths: list[str]) -> None:
+        self._settings.setValue(
+            ConfigKey.BLF_LAST_DB_PATHS, os.pathsep.join(str(p) for p in paths)
+        )
+
+    # ------------------------------------------------------------------
+    # CAN 数据库备注（用户在选库对话框里给 DBC / ARXML 写的说明）
+    #
+    # 键一律走 normalize_input_path：文件对话框 / 拖拽 / 记忆列表给到的写法
+    # 可能不同（~ 展开、分隔符差异），归一后才能命中同一条备注。
+    # ------------------------------------------------------------------
+
+    def get_blf_db_notes(self) -> dict[str, str]:
+        """全部数据库备注。坏 JSON / 类型不符一律返回空 dict，不让设置脏数据拖垮 UI。"""
+        raw = self._settings.value(ConfigKey.BLF_DB_NOTES, "", type=str) or ""
+        if not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            _logger.warning("CAN 数据库备注解析失败，已忽略: %.120s", raw)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): str(v) for k, v in data.items() if str(v).strip()}
+
+    def get_blf_db_note(self, path: str) -> str:
+        """单个数据库文件的备注；无备注返回空串。"""
+        return self.get_blf_db_notes().get(normalize_input_path(path), "")
+
+    def set_blf_db_note(self, path: str, note: str) -> None:
+        """写单条备注；清空（全空白）即删除条目，避免 ini 无限膨胀。"""
+        key = normalize_input_path(path)
+        if not key:
+            return
+        notes = self.get_blf_db_notes()
+        text = str(note).strip()
+        if text:
+            notes[key] = text
+        else:
+            notes.pop(key, None)
+        self._settings.setValue(
+            ConfigKey.BLF_DB_NOTES, json.dumps(notes, ensure_ascii=False)
+        )
