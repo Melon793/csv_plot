@@ -11,7 +11,9 @@ Qt 无从知道这个回调归谁 —— 窗口销毁不取消它。回调在窗
    `ERROR at teardown`（用例名随机、77 passed 仍全绿）。
 
 本文件钉住三道防线（缺一条就回到上面那条链）：
-- 排延迟回调一律用带 context 的三参重载（Qt 在 context 销毁时自动取消）；
+- 排延迟回调一律走 `_schedule_delayed`（parent 归 mw 的 QTimer 实例）—— 静态
+  `QTimer.singleShot` 的两种重载都不行：两参没有 context，三参在 Nuitka 打包
+  形态下抛 TypeError（见文末 AST 守卫）；
 - 回调摸控件前先看 `mw._is_being_destroyed` —— pytest-qt 收尾时窗口是
   「已 close 但 Python 包装器还活着」，三参重载在这个窗口里**不会**取消；
 - 清理期的 `_safety_timer.stop()` 自身对已删 C++ 对象免疫。
@@ -161,8 +163,17 @@ class TestOtherDeferredCallbacksHonourDestroyedFlag:
 
 
 class TestSchedulingIdiomCheck:
-    def test_every_single_shot_call_passes_a_context(self):
-        """两参重载就是本缺陷的根源，本模块不允许再出现。"""
+    def test_module_never_calls_qtimer_singleshot(self):
+        """本模块排延迟回调只准用 ``_schedule_delayed``。
+
+        两种静态 ``QTimer.singleShot`` 重载都不行：
+        - 两参重载没有 context，窗口销毁后回调照样投递、打到已删控件（本文件
+          开头那条缺陷链）；
+        - 三参重载在 Nuitka 打包形态下重载解析不稳定，抛
+          ``TypeError: ... is wrong (missing signature)``，收尾链路整条不执行
+          → 3 秒兜底解锁接管（历史现场事故：重载后曲线全消失）。
+        ``_schedule_delayed`` 用 parent 归 mw 的 QTimer 实例，两个问题同时避开。
+        """
         tree = ast.parse(Path(flm_mod.__file__).read_text(encoding="utf-8"))
         offenders = [
             node.lineno
@@ -170,6 +181,5 @@ class TestSchedulingIdiomCheck:
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "singleShot"
-            and len(node.args) < 3
         ]
-        assert offenders == [], f"这些行的 singleShot 缺 context 参数: {offenders}"
+        assert offenders == [], f"这些行调用了 QTimer.singleShot，改用 _schedule_delayed: {offenders}"

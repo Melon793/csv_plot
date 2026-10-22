@@ -16,6 +16,11 @@ from PySide6.QtWidgets import QWidget
 from src.core.font_cache import installed_font_families
  
 ICON_SIZE = 115
+
+#: 启动看门狗：主窗口构造超过这个时长仍未发出 ``finished``，就认定启动失败。
+#: 取值要明显大于最慢机器上的冷启动（字体缓存 + 配置读取 + 首屏构建），
+#: 又不至于让用户对着启动图干等太久。
+SPLASH_WAIT_TIMEOUT_MS = 60_000
  
  
 class SplashScreen(QWidget):
@@ -68,17 +73,42 @@ class SplashScreen(QWidget):
         self.timer.stop()
         super().close()
 
-    def wait_for_completion(self):
-        """
-        启动嵌套事件循环，直到 finished 信号触发。
-        在这期间，Splash 动画会持续流畅运行。
+    def wait_for_completion(self, timeout_ms: int = SPLASH_WAIT_TIMEOUT_MS) -> bool:
+        """启动嵌套事件循环，直到 finished 信号触发或看门狗超时。
+
+        返回 ``True`` 表示正常收到 ``finished``；``False`` 表示看门狗超时 ——
+        调用方必须自己决定怎么退出，否则用户面对的是一个「只剩启动图、
+        点不动也关不掉」的进程。
+
+        看门狗存在的理由：``finished`` 只有 ``signal_finish()`` 会发，而它挂在
+        主窗口构造成功之后；构造期任何异常/意外卡住都会让这里永久等待。
+        ``timeout_ms <= 0`` 表示不设看门狗（测试可用小值）。
         """
         if self._event_loop is not None:
-            return
-        self._event_loop = QEventLoop()
-        self.finished.connect(self._event_loop.quit)
-        self._event_loop.exec()
-        self._event_loop = None
+            return True
+        loop = QEventLoop()
+        self._event_loop = loop
+        timed_out: list[bool] = []
+
+        watchdog = QTimer(self)
+        watchdog.setSingleShot(True)
+        # 不用三参 QTimer.singleShot：打包形态下重载解析不稳定（详见
+        # file_loader_manager._schedule_delayed 的说明）
+        watchdog.timeout.connect(lambda: timed_out.append(True))
+        watchdog.timeout.connect(loop.quit)
+        self.finished.connect(loop.quit)
+        if timeout_ms > 0:
+            watchdog.start(timeout_ms)
+        try:
+            loop.exec()
+        finally:
+            watchdog.stop()
+            try:
+                self.finished.disconnect(loop.quit)
+            except (RuntimeError, TypeError):
+                pass  # 已断开 / loop 已销毁
+            self._event_loop = None
+        return not timed_out
 
     def signal_finish(self):
         """触发 finished 信号，结束 wait_for_completion"""

@@ -417,7 +417,10 @@ class FileLoaderManager(MainWindowBaseManager):
         self._safety_timer.timeout.connect(self._safety_force_unlock)
         self._safety_timer.start(3000)
 
-        QTimer.singleShot(0, self.mw, self._restore_cursor_state_after_reload)
+        # 必须走 _schedule_delayed（QTimer 实例，parent 归 mw）：三参
+        # QTimer.singleShot 在 Nuitka 打包形态下会抛 TypeError，这一句失败
+        # 就等于整条收尾链路不再执行 → 3 秒后兜底解锁接管
+        self._schedule_delayed(0, self._restore_cursor_state_after_reload)
 
     def _schedule_delayed(self, msec: int, slot):
         """在 ``msec`` 毫秒后把 ``slot`` 投递到 GUI 线程；窗口销毁即取消。
@@ -576,9 +579,9 @@ class FileLoaderManager(MainWindowBaseManager):
             # 消除锁清除与 setUpdatesEnabled 之间约 50ms 的危险窗口。
             # 在此期间 paintEvent 由 _is_loading_new_data 和 _is_updating_data 双锁拦截。
             self._post_reload_pending_version = self.mw._data_version
-            # 必须用带 context 的三参重载：两参重载 Qt 无从知道回调归谁，窗口销毁
-            # 也不会取消它，回调将在窗口析构后才投递、打到已删的 widget
-            QTimer.singleShot(50, self.mw, self._post_reload_ui_refresh)
+            # 窗口销毁即取消（定时器 parent 归 mw），语义等价于三参重载的 context
+            # 保活；同时避开三参重载在打包形态下抛 TypeError 的老问题
+            self._schedule_delayed(50, self._post_reload_ui_refresh)
 
     def _stop_safety_timer(self):
         """停掉兜底解锁定时器（可重复调用）。
@@ -614,7 +617,15 @@ class FileLoaderManager(MainWindowBaseManager):
         self._force_unlock_all()
 
     def _force_unlock_all(self):
-        """紧急解锁：确保所有退出路径都不会留下死锁"""
+        """紧急解锁：确保所有退出路径都不会留下死锁。
+
+        兜底解锁**不得销毁曲线**：本函数是 3 秒定时器投递的最后手段，触发时
+        往往只是收尾调度没跑成（历史上正是打包形态下三参 singleShot 抛
+        TypeError 那条链），曲线本身是好的。旧实现调 ``_safe_clear_plot_items``
+        把全部曲线清掉，用户看到的是「重载完 3 秒后曲线全消失」，而
+        ``curves`` 字典与 cursor 读数还在 —— 状态与画面彻底对不上。
+        这里改为只重建真正失效的曲线（``_refresh_curve_paint_path``）。
+        """
         if self._live_mw() is None:
             # 窗口正在销毁 → 原地收口，不去清曲线也不去解双锁：本函数由 3 s 兜底
             # 定时器投递，落地时控件往往已经没了，摸下去只会在半途抛 RuntimeError，
@@ -623,18 +634,11 @@ class FileLoaderManager(MainWindowBaseManager):
             logger.info("紧急解锁已跳过：主窗口正在销毁")
             return
         logger.warning(
-            "[v5.8] _force_unlock_all 触发：正在清除曲线 + 强制解锁 "
+            "紧急解锁触发：强制解锁 + 修复失效曲线 "
             "(data_version=%d, safety_unlock_version=%d)",
             getattr(self.mw, "_data_version", -1),
             getattr(self, "_safety_unlock_version", -1),
         )
-        for container in getattr(self.mw, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget and hasattr(widget, "_safe_clear_plot_items"):
-                try:
-                    widget._safe_clear_plot_items()
-                except Exception:
-                    logger.debug("_safe_clear_plot_items 失败（紧急解锁期间）")
         # v5.12: 紧急解锁时也要释放 reload 互斥锁
         self._reload_in_progress = False
         self.mw.reload_btn.setEnabled(True)
@@ -651,6 +655,13 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget._is_updating_data = False
                 widget._cached_data_version = self.mw._data_version
                 widget.setUpdatesEnabled(True)
+                # 只重建失效曲线，正常曲线原样保留
+                try:
+                    self._refresh_curve_paint_path(widget)
+                except Exception:
+                    logger.debug(
+                        "_refresh_curve_paint_path 失败（紧急解锁期间）", exc_info=True
+                    )
                 # 紧急解锁后触发一次完整刷新，防止 paintEvent 跳过导致白屏
                 if hasattr(widget, "_queue_ui_refresh"):
                     widget._queue_ui_refresh(immediate=True)
@@ -664,7 +675,7 @@ class FileLoaderManager(MainWindowBaseManager):
         3. _is_loading_new_data → False（放行 paintEvent）
         4. _refresh_curve_paint_path（v5.8 safety net：检测失效曲线并重建）
         5. widget.viewport().update()（显式触发 viewport 重绘）
-        6. 单一 QTimer.singleShot(0)（延迟 cursor 更新到下一个事件循环迭代，
+        6. 单一延迟回调（把 cursor 更新推到下一个事件循环迭代，
            合并 13 个 per-widget 回调为 1 个，避免 BSP 树交叉修改）
         """
         if self._window_going_away():
@@ -717,11 +728,10 @@ class FileLoaderManager(MainWindowBaseManager):
             for widget in widgets_to_refresh:
                 widget.viewport().update()
 
-            # v5.3 修复问题 2：合并 13 个 per-widget QTimer.singleShot(0) 为 1 个统一回调
+            # v5.3 修复问题 2：合并 13 个 per-widget 延迟回调为 1 个统一回调
             current_version = self.mw._data_version
-            QTimer.singleShot(
+            self._schedule_delayed(
                 0,
-                self.mw,
                 lambda: self._deferred_cursor_refresh_all(widgets_to_refresh, current_version)
             )
         except Exception:
@@ -860,10 +870,11 @@ class FileLoaderManager(MainWindowBaseManager):
             self._load_file(file_path)
         except MemoryError as e:
             self._report_load_failure("内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
-            self._release_old_data_quietly(e, "内存不足退出")
+            # 内存不足是唯一允许连带释放旧数据的失败：不腾出内存连重试都做不了
+            self._abort_load_after_failure(e, "内存不足退出", release_old=True)
         except Exception as e:
             self._report_load_failure("加载错误", f"加载文件时发生错误: {str(e)}")
-            self._release_old_data_quietly(e, "加载失败退出")
+            self._abort_load_after_failure(e, "加载失败退出")
         finally:
             mw = self._live_mw()
             if mw is not None:
@@ -878,16 +889,62 @@ class FileLoaderManager(MainWindowBaseManager):
             return
         QMessageBox.critical(mw, title, text)
 
-    def _release_old_data_quietly(self, exc: BaseException, stage: str) -> None:
-        """失败出口的清理 + 按钮恢复；主窗口已销毁时只记日志不抛。"""
+    def _abort_load_after_failure(
+        self, exc: BaseException, stage: str, *, release_old: bool = False
+    ) -> None:
+        """加载失败出口的收口：记日志 + 放平 UI 状态，**默认保留**旧数据。
+
+        旧实现在这里无条件调 ``_release_old_data()``，而后者的 docstring 明确写着
+        「仅在新 loader 成功后调用」。后果是：用户正看着一屏曲线，去打开另一个
+        文件失败（检测阶段文件变得不可读、BLF 起线程失败等），原有数据和曲线被
+        一起清掉，而且没有任何撤销入口。
+
+        ``release_old=True`` 只留给内存不足这种「不腾出内存就没法重试」的场景。
+        """
         logger.warning("%s: %s", stage, exc)
+        if release_old:
+            try:
+                self._release_old_data()
+            except Exception:
+                logger.debug("%s 清理旧数据失败", stage, exc_info=True)
+        # 失败可能发生在 _begin_data_reload() 之后（锁已置位），这里补一次解锁；
+        # 没上过锁时 _end_data_reload 自己会早退
         try:
-            self._release_old_data()
+            self._end_data_reload()
         except Exception:
-            logger.debug("%s 清理旧数据失败", stage, exc_info=True)
+            logger.debug("%s 解锁失败", stage, exc_info=True)
+        self._finish_load_failure()
+
+    def _finish_load_failure(
+        self, hint: str = "加载失败", is_reload: bool = False
+    ) -> None:
+        """把加载期抬起的 UI 状态一次放平：忙等光标 / 秒表 / 分析按钮 / reload 锁。
+
+        与后台线程的 ``_on_load_error``、BLF 的 ``_on_blf_error`` 同口径。分析类
+        按钮按「当前是否还有有效数据」恢复，而不是无条件置真 —— 失败前若本来
+        就没有数据，把它们点亮等于让用户去点必然再报错的入口。
+        """
         mw = self._live_mw()
-        if mw is not None:
-            safe_qt_op(mw.load_btn.setEnabled, True)
+        if mw is None:
+            return
+        # 本函数是在异常处理器里跑的：自己再抛一次就会把原始错误顶掉，并把
+        # 「恢复」切成做了一半（本仓反复修过这一类，见 _stop_safety_timer 的
+        # 注释）。所以每一步各自兜住，谁失败都不影响后面的步骤。
+        end_feedback = getattr(mw, "end_load_feedback", None)
+        if callable(end_feedback):
+            safe_qt_op(end_feedback, hint, level="error")
+        try:
+            has_data = self._has_valid_data
+        except Exception:
+            has_data = False
+        try:
+            self.set_button_status(has_data)
+        except Exception:
+            logger.debug("恢复分析按钮失败", exc_info=True)
+        safe_qt_op(mw.load_btn.setEnabled, True)
+        if is_reload or getattr(self, "_reload_in_progress", False):
+            self._reload_in_progress = False
+            safe_qt_op(mw.reload_btn.setEnabled, True)
 
     def set_button_status(self, status: bool):
         if status is not None:
@@ -1062,6 +1119,24 @@ class FileLoaderManager(MainWindowBaseManager):
                     "请确认文件格式是否正确。\n"
                     "支持的分隔符：逗号(,)、分号(;)、制表符(Tab)",
                 )
+                # 调用方（导入按钮 / 拖拽）在进来前已经把 load_btn 灰掉，
+                # 这些「还没上锁就返回」的分支必须自己把它点亮，否则用户
+                # 连下一次导入都点不动
+                self.mw.load_btn.setEnabled(True)
+                return
+            except OSError as e:
+                # auto_detect 内部要 open(file_path, "rb")：文件在 isfile 校验之后
+                # 被移动/删除/占用（网盘同步、Excel 独占）时抛 OSError。旧实现只
+                # 捕获 AutoDetectError，这个 OSError 会一路逃到 load_csv_file 的
+                # 外层 except，连带把当前已加载的数据清掉。
+                logger.error("自动检测阶段无法读取文件: %s", e, exc_info=True)
+                QMessageBox.critical(
+                    self.mw,
+                    "文件不可读",
+                    f"无法读取文件内容，文件可能已被移动、删除或占用：\n"
+                    f"{file_path}\n\n错误详情: {e}",
+                )
+                self.mw.load_btn.setEnabled(True)
                 return
 
         if not is_excel_file and not is_blf_file and (delimiter_typ is None or desc_rows is None or has_unit is None):
@@ -1070,6 +1145,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 "数据解析失败",
                 "无法确定文件的分隔符和标题行位置。\n" "请确认文件格式是否正确。",
             )
+            self.mw.load_btn.setEnabled(True)
             return
 
         # P0-4: 取尺寸必须在 _begin_data_reload() 上锁之前 —— 文件在 isfile 校验之后、
@@ -1135,17 +1211,16 @@ class FileLoaderManager(MainWindowBaseManager):
                     self.set_button_status(True)
                     self.mw.load_btn.setEnabled(True)
                     # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-                    QTimer.singleShot(
+                    self._schedule_delayed(
                         0,
-                        self.mw,
                         lambda: self._post_load_actions(file_path, is_reload=is_reload),
                     )
                 else:
-                    self.mw.load_btn.setEnabled(True)
-                    # v5.12: 同步 reload 失败时也要恢复 reload 按钮
-                    if is_reload and getattr(self, "_reload_in_progress", False):
-                        self._reload_in_progress = False
-                        self.mw.reload_btn.setEnabled(True)
+                    # _load_sync 已经弹过具体错误框；这里只负责把加载期抬起的
+                    # 忙等光标 / 秒表 / 6 个分析按钮放平。旧实现只恢复 load/reload，
+                    # 结果是失败一次后状态栏永远停在「正在加载 … Ns」、分析按钮
+                    # 永久灰掉，只有下一次成功加载才清得掉。
+                    self._finish_load_failure(is_reload=is_reload)
             else:
                 logger.info("后台加载文件 (%.1f MB)", file_size / 1024 / 1024)
 
@@ -2101,7 +2176,12 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(self.mw, "读取失败", f"应用数据时发生错误: {str(e)}")
         finally:
             self._end_data_reload()
-            self.set_button_status(True)
+            if applied:
+                self.set_button_status(True)
+            else:
+                # 应用失败时按「当前是否还有有效数据」恢复，并收掉忙等光标/秒表；
+                # 无条件 set_button_status(True) 会在没有数据时点亮必然再报错的入口
+                self._finish_load_failure(is_reload=is_reload)
             self.mw.load_btn.setEnabled(True)
             # v5.12: 异步 reload 完成，释放互斥锁
             self._reload_in_progress = False
@@ -2109,8 +2189,8 @@ class FileLoaderManager(MainWindowBaseManager):
         if not applied:
             return
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
-        QTimer.singleShot(
-            0, self.mw, lambda: self._post_load_actions(file_path, is_reload=is_reload)
+        self._schedule_delayed(
+            0, lambda: self._post_load_actions(file_path, is_reload=is_reload)
         )
 
     def _on_load_error(self, msg):
