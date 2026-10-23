@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QTableWidget,
     QTableWidgetItem,
+    QTableWidgetSelectionRange,
     QHeaderView,
 )
 from src.core.logger import get_logger
@@ -246,6 +247,8 @@ class MyTableWidget(QTableWidget):
         self.setSortingEnabled(False)
         self.horizontalHeader().setSortIndicatorShown(True)
         self.horizontalHeader().sectionClicked.connect(self._handle_header_click)
+        # 初始无排序：隐藏指向不存在 section 3 的默认指示器
+        self._reset_sort_state()
 
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -255,8 +258,13 @@ class MyTableWidget(QTableWidget):
         # font.setPointSize(12)  # 调小字体大小
         # self.setFont(font)
 
+    def _reset_sort_state(self) -> None:
+        """清空排序状态并隐藏表头指示器（section=-1 表示无排序）。"""
+        self._column_sort_order.clear()
+        self.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+
     def _handle_header_click(self, logicalIndex):
-        """自定义排序处理，确保有效性始终是第一优先级"""
+        """表头点击：首次升序、再次降序，按当前列语义排序"""
         # 如果该列之前没有排序过，或者上次是降序，则设为升序；否则设为降序
         if logicalIndex not in self._column_sort_order:
             new_order = Qt.SortOrder.AscendingOrder  # 第一次点击：升序
@@ -365,9 +373,13 @@ class MyTableWidget(QTableWidget):
             self.setItem(row, 2, index_item)
 
     def sortItems(self, column, order=Qt.SortOrder.AscendingOrder):
-        """重写排序方法，确保有效性始终是第一优先级"""
+        """重写排序方法；具体语义见 _collect_sort_data"""
+        selected_names = self._selected_var_names()
         sorted_data = self._collect_sort_data(column, order)
+        # 重建 item 前先清空旧行号选择，排序后按变量名恢复
+        self.clearSelection()
         self._apply_sorted_order(sorted_data)
+        self._restore_selection(selected_names)
 
         # 更新排序指示器
         self.horizontalHeader().setSortIndicator(column, order)
@@ -384,6 +396,30 @@ class MyTableWidget(QTableWidget):
                 self._current_unit_keywords,
                 self._current_units,
             )
+
+    def _selected_var_names(self) -> list:
+        """返回当前选中的变量名（按行去重，保持选择顺序）。"""
+        names = []
+        for index in self.selectedIndexes():
+            if index.column() != 0:
+                continue
+            name = self.item(index.row(), 0).data(Qt.ItemDataRole.UserRole + 1)
+            if name not in names:
+                names.append(name)
+        return names
+
+    def _restore_selection(self, names) -> None:
+        """按变量名恢复行选择，避免排序后选中行指向另一个变量。"""
+        if not names:
+            return
+        wanted = set(names)
+        for row in range(self.rowCount()):
+            name = self.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            if name in wanted:
+                self.setRangeSelected(
+                    QTableWidgetSelectionRange(row, 0, row, self.columnCount() - 1),
+                    True,
+                )
 
     def _show_context_menu(self, pos):
         index = self.indexAt(pos)
@@ -569,6 +605,8 @@ class MyTableWidget(QTableWidget):
         super().mouseDoubleClickEvent(event)
 
     def populate(self, var_names, units, validity):
+        # 换文件/重载后不能沿用上一份文件的排序状态与箭头
+        self._reset_sort_state()
         self.clearContents()
         self.clearSelection()  # 清除选择状态
         self.setRowCount(len(var_names))

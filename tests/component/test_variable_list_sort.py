@@ -173,3 +173,73 @@ def test_filter_replay_keeps_hidden_set(table):
 
     assert set(_hidden_names(table)) == {"zulu", "mike"}
     assert _visible_names(table) == ["alpha", "bravo", "yankee", "charlie"]
+
+
+def test_initial_indicator_hidden_and_state_empty(qapp):
+    """新控件与首次 populate 后都不应指向不存在的 section 3。"""
+    widget = MyTableWidget(None)
+    try:
+        header = widget.horizontalHeader()
+        assert widget._column_sort_order == {}
+        assert header.sortIndicatorSection() == -1
+
+        widget.populate(NAMES, UNITS, VALID)
+
+        assert widget._column_sort_order == {}
+        assert header.sortIndicatorSection() == -1
+    finally:
+        widget.deleteLater()
+
+
+def test_first_click_after_populate_is_ascending(table):
+    header = table.horizontalHeader()
+    header.sectionClicked.emit(0)
+    assert table._column_sort_order[0] == Qt.SortOrder.AscendingOrder
+
+    header.sectionClicked.emit(0)
+    assert table._column_sort_order[0] == Qt.SortOrder.DescendingOrder
+
+
+def test_populate_resets_sort_state_and_indicator(table):
+    table.horizontalHeader().sectionClicked.emit(0)
+    assert table._column_sort_order
+    assert table.horizontalHeader().sortIndicatorSection() == 0
+
+    table.populate(
+        ["alpha", "bravo"],
+        {"alpha": "m", "bravo": "s"},
+        {"alpha": 1, "bravo": 0},
+    )
+
+    assert table._column_sort_order == {}
+    assert table.horizontalHeader().sortIndicatorSection() == -1
+
+    # 复位后首点重新从 Asc 开始
+    table.horizontalHeader().sectionClicked.emit(0)
+    assert table._column_sort_order[0] == Qt.SortOrder.AscendingOrder
+
+
+def test_sort_keeps_selected_variable(qapp):
+    """排序后选中行应仍指向同一个变量，而不是同一行号。"""
+    widget = MyTableWidget(None)
+    try:
+        names = ["zulu", "alpha", "bravo"]
+        widget.populate(
+            names,
+            {name: "m" for name in names},
+            {name: 1 for name in names},
+        )
+        widget.selectRow(_names(widget).index("zulu"))
+        assert widget._selected_var_names() == ["zulu"]
+
+        widget.sortItems(0, Qt.SortOrder.AscendingOrder)
+
+        assert _names(widget) == ["alpha", "bravo", "zulu"]
+        selected_rows = {index.row() for index in widget.selectedIndexes()}
+        assert len(selected_rows) == 1
+        selected_name = widget.item(
+            selected_rows.pop(), 0
+        ).data(Qt.ItemDataRole.UserRole + 1)
+        assert selected_name == "zulu"
+    finally:
+        widget.deleteLater()
