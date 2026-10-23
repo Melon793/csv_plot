@@ -276,7 +276,13 @@ class MyTableWidget(QTableWidget):
         self.sortItems(logicalIndex, new_order)
 
     def _collect_sort_data(self, column: int, order: Qt.SortOrder) -> list[tuple]:
-        """收集所有行数据并按有效性+指定列排序，返回排序后的 (name, unit, index, valid) 元组列表"""
+        """收集所有行数据并按列排序，返回排序后的 (name, unit, index, valid) 元组列表
+
+        排序语义：
+        - 变量名：非无效变量（VALID/CONST/UNKNOWN）全局排序，INVALID(-1) 固定压底；
+        - 单位：保持既有"有效性分组 + 组内排序"；
+        - 序号：按文件原始列顺序全局排序（无效行也参与）。
+        """
         rows = []
         for row in range(self.rowCount()):
             name_item = self.item(row, 0)
@@ -285,44 +291,56 @@ class MyTableWidget(QTableWidget):
 
             if name_item and unit_item and index_item:
                 valid = name_item.data(Qt.ItemDataRole.UserRole)
-                original_name = name_item.data(Qt.ItemDataRole.UserRole + 1)
                 rows.append(
                     (
-                        original_name if original_name else "",
+                        name_item.data(Qt.ItemDataRole.UserRole + 1) or "",
                         unit_item.text(),
                         index_item.data(Qt.ItemDataRole.DisplayRole),
-                        valid if valid is not None else -999,
+                        # 缺失有效性按无效处理，不再伪造 -999 混入可用段
+                        -1 if valid is None else valid,
                     )
                 )
 
-        # Level 1: 有效性降序（1 → 0 → -1，即有效的在前）
-        rows.sort(key=lambda x: -x[3])
+        desc = order == Qt.SortOrder.DescendingOrder
 
-        # Level 2: 按有效性分组，组内按选择的列排序
+        if column == 0:  # 变量名
+            # 兜底：历史/异常路径可能留下非 str 名称（如 float NaN）
+            return self._sort_usable_then_invalid(
+                rows, key=lambda x: str(x[0]).lower(), descending=desc
+            )
+
+        if column == 2:  # 序号：严格按文件原始列顺序，不压底
+            rows.sort(key=lambda x: x[2], reverse=desc)
+            return rows
+
+        # 单位：保持既有"有效性分组 + 组内排序"语义
+        rows.sort(key=lambda x: -x[3])
         rows_sorted: list[tuple] = []
         for _valid_value, group in groupby(rows, key=lambda x: x[3]):
             group_list = list(group)
-
-            if column == 0:  # 变量名
-                group_list.sort(
-                    # 兜底：历史/异常路径可能留下非 str 名称（如 float NaN）
-                    key=lambda x: str(x[0]).lower(),
-                    reverse=(order == Qt.SortOrder.DescendingOrder),
-                )
-            elif column == 1:  # 单位
+            if column == 1:
                 group_list.sort(
                     key=lambda x: str(x[1]).lower(),
-                    reverse=(order == Qt.SortOrder.DescendingOrder),
+                    reverse=desc,
                 )
-            elif column == 2:  # 序号
-                group_list.sort(
-                    key=lambda x: x[2],
-                    reverse=(order == Qt.SortOrder.DescendingOrder),
-                )
-
             rows_sorted.extend(group_list)
 
         return rows_sorted
+
+    @staticmethod
+    def _sort_usable_then_invalid(
+        rows: list[tuple], key, descending: bool
+    ) -> list[tuple]:
+        """两阶段排序：可用段全局排序，INVALID(-1) 整段压底。
+
+        不能写成单键 ``(invalid_rank, key)`` 再整体 ``reverse=True``：
+        降序时 invalid_rank=1 会先排，INVALID 会全部跑到头部。
+        """
+        usable = [r for r in rows if r[3] != -1]
+        invalid = [r for r in rows if r[3] == -1]
+        usable.sort(key=key, reverse=descending)
+        invalid.sort(key=key, reverse=descending)
+        return usable + invalid
 
     def _apply_sorted_order(self, sorted_data: list[tuple]) -> None:
         """按排序后的数据重新填充表格（整行移动，包含颜色信息）"""
