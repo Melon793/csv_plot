@@ -652,6 +652,14 @@ class FastDataLoader(BaseDataLoader):
             raise ValueError(f"文件至少需要{min_required_rows}行")
 
         var_names = df.iloc[0].astype(str).tolist()
+        # pandas 3.0 的 astype(str) 会把缺失值保留为 float NaN（而非 "nan" 字符串）。
+        # CSV/TXT 表头末尾的空单元格因此会变成 float 列名，后续 _infer_schema 的
+        # col.lower()、UI 的排序/筛选/绘制都会在它上面抛异常。
+        # 按列位置归一为 Unnamed: N（0-based），与 pandas 自身命名习惯一致。
+        var_names = [
+            name if isinstance(name, str) else f"Unnamed: {i}"
+            for i, name in enumerate(var_names)
+        ]
         var_names = FastDataLoader._make_unique(var_names)
         if actual_has_unit:
             units = dict(zip(var_names, df.iloc[1].fillna("").astype(str).tolist()))
