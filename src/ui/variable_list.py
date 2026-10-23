@@ -154,6 +154,11 @@ class NoHoverDelegate(QStyledItemDelegate):
 
         painter.save()
 
+        # 兜底：非 str 值（如历史数据里的 float NaN 列名）会让 elidedText 抛
+        # TypeError 并中断整个绘制流程
+        if not isinstance(text, str):
+            text = str(text)
+
         # 选中时使用白色文字（高对比度），否则使用默认颜色
         if option.state & QStyle.StateFlag.State_Selected:
             painter.setPen(QColor(255, 255, 255))
@@ -300,12 +305,13 @@ class MyTableWidget(QTableWidget):
 
             if column == 0:  # 变量名
                 group_list.sort(
-                    key=lambda x: x[0].lower(),
+                    # 兜底：历史/异常路径可能留下非 str 名称（如 float NaN）
+                    key=lambda x: str(x[0]).lower(),
                     reverse=(order == Qt.SortOrder.DescendingOrder),
                 )
             elif column == 1:  # 单位
                 group_list.sort(
-                    key=lambda x: x[1].lower(),
+                    key=lambda x: str(x[1]).lower(),
                     reverse=(order == Qt.SortOrder.DescendingOrder),
                 )
             elif column == 2:  # 序号
@@ -614,11 +620,11 @@ class MyTableWidget(QTableWidget):
         try:
             for row, name in enumerate(self._row_var_names):
                 if name_keywords:
-                    if not any(kw in name.lower() for kw in name_keywords):
+                    if not any(kw in str(name).lower() for kw in name_keywords):
                         self.setRowHidden(row, True)
                         continue
                 if unit_keywords:
-                    unit = units.get(name, "").lower()
+                    unit = str(units.get(name, "")).lower()
                     if not any(kw in unit for kw in unit_keywords):
                         self.setRowHidden(row, True)
                         continue
