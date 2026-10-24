@@ -556,13 +556,22 @@ class PlotDataManager:
         return y_values, y_format
 
     def update_time_correction(
-        self, new_factor: float, new_offset: float, *, scene: bool = True
+        self,
+        new_factor: float,
+        new_offset: float,
+        *,
+        scene: bool = True,
+        sync_min_xrange: bool = True,
     ):
         """更新时间修正参数（统一版：始终从 CurveInfo.original_index 重算）
 
-        ``scene=False``（非活动页）只做数据层重算（setData / x_data / x_range），
-        X limits、vline bounds 与标记区 setRegion 这些场景写入留给切页时补建
-        （设计文档 §6.7 时间修正落地顺序）。
+        ``scene=False``（非活动页）只做数据层重算（setData / x_data / x_range /
+        局部密度），X limits、vline bounds 与标记区 setRegion 这些场景写入留给
+        切页时补建（设计文档 §6.7 时间修正落地顺序）。
+
+        ``sync_min_xrange`` 只控制当前页的全局 minXRange 汇总。批量修正所有页时
+        逐图传 ``False``，待全部页的局部密度都刷新后由协调者统一同步一次，避免
+        读到半新半旧的跨页密度、也避免反复 setLimits。
         """
         pw = self.pw
         pw._suppress_pin_update = True
@@ -595,6 +604,11 @@ class PlotDataManager:
                 ci.x_data = new_x
                 ci.update_x_range()
 
+            # 密度 = N / x跨度，随 factor 反比缩放；局部缓存必须随 x_data 一起刷新。
+            # minXRange 实际读的是 plot_context._global_max_density，批量调用方传
+            # sync_min_xrange=False，待所有页的局部密度都刷新后由协调者统一汇总一次。
+            self._axis_manager._recalc_max_point_density()
+
             # 统一 X limits 计算：始终基于全局数据范围（loader.datalength / global_time_range），
             # 避免使用 per-plot 曲线长度导致与 reload/auto_range 路径不一致
             loader = (
@@ -610,6 +624,14 @@ class PlotDataManager:
                 # 非活动页：场景写入全部延后（激活时按全局基准重建）
                 pw.mark_dirty_for_activation()
                 return
+            if sync_min_xrange:
+                # 必须放在 _set_x_limits_with_min_range 之前：当前页 limits 要按
+                # 新全局密度判定 minXRange 扩张，而不是按上一轮的旧密度。
+                main_window = pw.window()
+                if main_window is not None:
+                    cursor_sync = getattr(main_window, "cursor_sync_manager", None)
+                    if cursor_sync is not None:
+                        cursor_sync._sync_min_xrange()
             if global_result is not None:
                 _, _, limits_xMin, limits_xMax = global_result
                 self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)

@@ -306,6 +306,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """重新计算最大数据点密度 → 委托到 AxisManager"""
         self._axis_manager._recalc_max_point_density()
 
+    def _refresh_global_x_limits(self):
+        """按当前全局密度重写 X limits → 委托到 AxisManager"""
+        self._axis_manager.refresh_global_x_limits()
+
     def _set_safe_y_range(self, min_y: float, max_y: float, set_limits: bool = True):
         """设置 Y 轴的 viewRange 和 limits → 委托到 AxisManager"""
         self._axis_manager._set_safe_y_range(min_y, max_y, set_limits)
@@ -778,10 +782,20 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """根据变量名获取值和格式 → 委托到 PlotDataManager"""
         return self._plot_data_manager.get_value_from_name(var_name)
     
-    def update_time_correction(self, new_factor, new_offset, *, scene: bool = True):
+    def update_time_correction(
+        self,
+        new_factor,
+        new_offset,
+        *,
+        scene: bool = True,
+        sync_min_xrange: bool = True,
+    ):
         """更新时间修正参数 → 委托到 PlotDataManager"""
         self._plot_data_manager.update_time_correction(
-            new_factor, new_offset, scene=scene
+            new_factor,
+            new_offset,
+            scene=scene,
+            sync_min_xrange=sync_min_xrange,
         )
 
     # ---------------- 拖拽相关 ----------------

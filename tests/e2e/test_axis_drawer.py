@@ -13,6 +13,7 @@ from PySide6.QtCore import QEvent, QPointF, QPoint, Qt
 from PySide6.QtGui import QDropEvent, QMouseEvent
 from PySide6.QtWidgets import QPushButton
 
+from src.core.config import MIN_INDEX_LENGTH, compute_global_x_limits
 from src.ui.drag_drop import build_var_mimedata
 from src.ui.widgets.status_drawer import XAxisDrawer
 
@@ -266,6 +267,20 @@ def test_apply_writes_global_base_and_recomputes_curve_x(loaded_window, qapp):
     curve = next(iter(pw.curves.values()))
     # 合成 CSV 有 50 行、Index 从 1 起：最后一个点的 x 必须是 50 × 0.01
     assert curve.x_data[-1] == pytest.approx(50 * 0.01)
+
+    # 时间修正后密度/minXRange 必须同步：50 行 + 0.01 正是旧 minXRange
+    # 会把 limits 撑宽的触发区，只断言 xRange 会假绿，必须同时钉住 xLimits。
+    expected_density = 50 / ((50 - 1) * 0.01)
+    assert mw._global_max_density == pytest.approx(expected_density)
+    limits = pw.view_box.state["limits"]
+    assert limits["xRange"][0] == pytest.approx(
+        MIN_INDEX_LENGTH / expected_density
+    )
+    expected = compute_global_x_limits(
+        mw.loader, factor=mw.factor, offset=mw.offset
+    )
+    assert expected is not None
+    assert list(limits["xLimits"]) == pytest.approx([expected[2], expected[3]])
 
 
 def test_reset_returns_to_the_original_axis(loaded_window, qapp):

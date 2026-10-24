@@ -423,6 +423,20 @@ class AxisManager:
 
         pw.plot_item.setLimits(minXRange=minXRange)
 
+    def refresh_global_x_limits(self) -> None:
+        """按当前全局密度重写 xLimits / minXRange（不碰 vline/场景）。
+
+        时间修正的批量路径在循环内会先按上一轮全局密度写一次 limits，而
+        ``_set_min_x_range`` 只扩不缩；全局密度汇总后必须用唯一 oracle
+        （``_global_x_limits``）重写一次，否则小样本 + 缩小系数会把 limits
+        永久撑宽。
+        """
+        limits = self._global_x_limits()
+        if limits is None:
+            return
+        _, _, limits_xmin, limits_xmax = limits
+        self._set_x_limits_with_min_range(limits_xmin, limits_xmax)
+
     def _recalc_max_point_density(self) -> None:
         """重新计算当前 plot 的最大数据点密度（统一版：仅从 curves 字典）"""
         pw = self.pw

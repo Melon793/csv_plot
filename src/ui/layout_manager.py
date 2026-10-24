@@ -718,13 +718,32 @@ class LayoutManager(MainWindowBaseManager):
                         if widget is None:
                             continue
                         widget.update_time_correction(
-                            new_factor, new_offset, scene=scene
+                            new_factor,
+                            new_offset,
+                            scene=scene,
+                            sync_min_xrange=False,
                         )
             else:
                 for container in self.mw.plot_widgets:
                     container.plot_widget.update_time_correction(
-                        new_factor, new_offset
+                        new_factor,
+                        new_offset,
+                        sync_min_xrange=False,
                     )
+
+            # 所有页的局部密度已按新基准重算：全局只汇总一次；随后按新密度
+            # 重写当前页 limits。循环内写的是上一轮全局密度，而
+            # _set_min_x_range 只扩不缩，不补这一次会让小样本的 limits 永久超宽。
+            # 放在最终 setXRange 之前，保证视窗按新 minXRange 落地。
+            cursor_sync = getattr(self.mw, "cursor_sync_manager", None)
+            if cursor_sync is not None:
+                cursor_sync._sync_min_xrange()
+            for container in list(getattr(self.mw, "plot_widgets", [])):
+                if getattr(container, "isHidden", lambda: False)():
+                    continue
+                plot_widget = getattr(container, "plot_widget", None)
+                if plot_widget is not None and _widget_alive(plot_widget):
+                    plot_widget._refresh_global_x_limits()
 
             if old_factor != 0:
                 index_min = (curr_min - old_offset) / old_factor

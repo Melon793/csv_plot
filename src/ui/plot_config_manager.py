@@ -188,7 +188,13 @@ class PlotConfigManager(QObject):
                             config.time_factor,
                             config.time_offset,
                             scene=is_current,
+                            sync_min_xrange=False,
                         )
+                # 全部页的局部密度都刷新后统一汇总一次；目标页的 limits
+                # 由随后 activate_page 的场景恢复按新全局密度重写。
+                cursor_sync = getattr(main_window, "cursor_sync_manager", None)
+                if cursor_sync is not None:
+                    cursor_sync._sync_min_xrange()
 
             target = pages[min(max(config.active_page, 0), len(pages) - 1)]
             main_window.activate_page(target)

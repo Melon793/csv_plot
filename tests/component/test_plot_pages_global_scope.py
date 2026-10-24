@@ -7,10 +7,11 @@
    ``isVisible()=False`` 但 ``isHidden()=False``，用错谓词会整页漏掉）；
 2. 非活动页的数据重建只许写纯数值：``_finalize_batch_add(scene=False)`` /
    ``_update_cursor_after_plot(scene=False)`` 不得碰 vline 可见性与标签；
-3. 时间修正的 ``scene=False`` 分支只重算曲线数据，X limits 这类场景写入
-   留到激活时补建；
+3. 时间修正的 ``scene=False`` 分支只重算数据层（曲线 x + 局部密度），
+   全局 minXRange 汇总与 X limits 这类场景写入留到批量末尾/激活时补建；
 4. ``LayoutManager.apply_time_correction`` 必须把全部页都传给
-   ``update_time_correction``，且只有当前页拿到 ``scene=True``。
+   ``update_time_correction``，只有当前页拿到 ``scene=True``；逐图关闭
+   全局 sync，末尾统一汇总一次并重写当前页 limits。
 """
 
 from __future__ import annotations
@@ -240,16 +241,37 @@ def test_cursor_after_plot_scene_false_skips_toggle_and_label():
 
 
 class _RecordingPW:
-    def __init__(self):
-        self.calls: list[tuple[float, float, bool]] = []
+    def __init__(self, events):
+        self.events = events
+        self.calls: list[tuple[float, float, bool, bool]] = []
+        self.limit_refreshes = 0
         self.view_box = SimpleNamespace(
             viewRange=lambda: [(0.0, 10.0)],
             enableAutoRange=lambda **kwargs: None,
             setXRange=lambda *args, **kwargs: None,
         )
 
-    def update_time_correction(self, factor, offset, *, scene=True):
-        self.calls.append((factor, offset, scene))
+    def update_time_correction(
+        self, factor, offset, *, scene=True, sync_min_xrange=True
+    ):
+        self.calls.append((factor, offset, scene, sync_min_xrange))
+
+    def _refresh_global_x_limits(self):
+        self.limit_refreshes += 1
+        self.events.append("refresh")
+
+
+class _CursorSync:
+    def __init__(self, events):
+        self.events = events
+        self.sync_calls = 0
+
+    def _realign_pinned_cursor_after_time_correction(self, *args):
+        pass
+
+    def _sync_min_xrange(self):
+        self.sync_calls += 1
+        self.events.append("sync")
 
 
 class _Container:
@@ -261,8 +283,9 @@ class _Container:
 
 
 def test_layout_time_correction_traverses_all_pages_with_scene_flag():
-    current_pw = _RecordingPW()
-    hidden_pw = _RecordingPW()
+    events: list[str] = []
+    current_pw = _RecordingPW(events)
+    hidden_pw = _RecordingPW(events)
     current_page = SimpleNamespace(plot_widgets=[_Container(current_pw)])
     hidden_page = SimpleNamespace(plot_widgets=[_Container(hidden_pw)])
 
@@ -281,9 +304,7 @@ def test_layout_time_correction_traverses_all_pages_with_scene_flag():
             self.current_page = current_page
             self.loader = SimpleNamespace(datalength=N)
             self.mark_stats_window = None
-            self.cursor_sync_manager = SimpleNamespace(
-                _realign_pinned_cursor_after_time_correction=lambda *a: None
-            )
+            self.cursor_sync_manager = _CursorSync(events)
             self.announcements = []
 
         def _update_axis_segment(self):
@@ -298,8 +319,13 @@ def test_layout_time_correction_traverses_all_pages_with_scene_flag():
 
     assert manager.apply_time_correction(2.0, 5.0) is True
 
-    assert current_pw.calls == [(2.0, 5.0, True)]
-    assert hidden_pw.calls == [(2.0, 5.0, False)]
+    assert current_pw.calls == [(2.0, 5.0, True, False)]
+    assert hidden_pw.calls == [(2.0, 5.0, False, False)]
+    assert host.cursor_sync_manager.sync_calls == 1
+    # 只重写当前页 limits，隐藏页留给激活；且 sync 必须先于 limits 重写
+    assert current_pw.limit_refreshes == 1
+    assert hidden_pw.limit_refreshes == 0
+    assert events == ["sync", "refresh"]
     assert host.factor == 2.0
     assert host.offset == 5.0
 
@@ -419,11 +445,14 @@ def test_time_correction_scene_false_keeps_limits_and_recomputes_data(real_plot)
 
     pw.update_time_correction(0.5, 10.0, scene=False)
 
-    # 数据层：曲线 x 已按新基准重算
+    # 数据层：曲线 x 与局部密度都已按新基准重算
     assert ci.x_data is not None
     np.testing.assert_allclose(
         np.asarray(ci.x_data[:5]), 10.0 + 0.5 * original_index[:5], rtol=1e-6
     )
+    expected_density = N / ((N - 1) * 0.5)
+    assert ci.point_density == pytest.approx(expected_density)
+    assert pw._max_point_density == pytest.approx(expected_density)
     # 场景层：X limits 未动，页被标脏等激活补建
     assert _x_limits(pw) == old_limits
     assert page.dirty_calls >= 1

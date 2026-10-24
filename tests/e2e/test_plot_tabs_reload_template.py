@@ -206,3 +206,9 @@ def test_v1_template_still_applies_as_single_page(loaded_window, qtbot):
     assert set(first.plot_widgets[0].plot_widget.curves) == {"rpm"}
     assert mw.factor == pytest.approx(2.0)
     assert mw.offset == pytest.approx(1.0)
+    # 模板的时间基准落地后，局部/全局密度必须一起刷新（50 行、index 1..50）
+    expected_density = 50 / ((50 - 1) * 2.0)
+    assert first.plot_widgets[0].plot_widget._max_point_density == pytest.approx(
+        expected_density
+    )
+    assert mw._global_max_density == pytest.approx(expected_density)
