@@ -1,11 +1,12 @@
 """变量列表排序语义回归测试。
 
-覆盖：
-- 变量名：非无效变量全局排序，INVALID(-1) 固定压底（升/降）；
-- 序号：严格按文件原始列顺序，无效行也参与；
-- 单位：保持既有"有效性分组 + 组内排序"；
-- UNKNOWN(-2) 视为可用；缺失有效性按无效处理；
-- 排序后过滤重放，隐藏集合不变。
+有效性始终是第一优先级：
+- 分组顺序固定为 VALID(1) → CONST(0) → INVALID(-1) → UNKNOWN(-2)，
+  不随升/降序变化；缺失有效性(-999)排在最后；
+- 组内分别按变量名、单位文本、文件序号升/降序；
+- 序号升序在首次点击时与初始加载顺序一致（设计使然，不是 bug）。
+
+另覆盖排序状态复位、指示器隐藏、按变量名保持选中、过滤重放。
 """
 
 from __future__ import annotations
@@ -62,63 +63,78 @@ def _hidden_names(table):
     ]
 
 
-def test_name_asc_global_with_invalid_tail(table):
-    """可用段（valid + const）全局 A→Z；INVALID 段在尾部内部再排序。"""
+def test_populate_orders_by_validity_then_file_order(table):
+    """初始加载：有效性优先，同组保持文件顺序。"""
+    assert _names(table) == [
+        "zulu",
+        "bravo",
+        "alpha",
+        "yankee",
+        "mike",
+        "charlie",
+    ]
+
+
+def test_name_asc_sorts_within_validity_groups(table):
+    """变量名升序：每组内部 A→Z，组顺序不变。"""
     table.sortItems(0, Qt.SortOrder.AscendingOrder)
 
     assert _names(table) == [
-        "alpha",
         "bravo",
-        "yankee",
         "zulu",
+        "alpha",
+        "yankee",
         "charlie",
         "mike",
     ]
 
 
-def test_name_desc_keeps_invalid_tail(table):
-    """降序时可用段 Z→A，INVALID 段仍在尾部（不能被整体 reverse 顶到头部）。"""
+def test_name_desc_sorts_within_validity_groups(table):
+    """变量名降序：每组内部 Z→A，有效组仍在无效组之前。"""
     table.sortItems(0, Qt.SortOrder.DescendingOrder)
 
     assert _names(table) == [
         "zulu",
-        "yankee",
         "bravo",
+        "yankee",
         "alpha",
         "mike",
         "charlie",
     ]
 
 
-def test_index_asc_is_file_order_including_invalid(table):
-    """序号升序 = 文件原始列顺序 0..N-1，无效行不压底。"""
+def test_index_asc_is_initial_order(table):
+    """序号升序与初始加载顺序一致（首点结构性无变化，属既有设计）。"""
+    before = _names(table)
+
     table.sortItems(2, Qt.SortOrder.AscendingOrder)
 
+    assert _names(table) == before
     assert _names(table) == [
         "zulu",
-        "alpha",
-        "mike",
         "bravo",
+        "alpha",
         "yankee",
+        "mike",
         "charlie",
     ]
 
 
-def test_index_desc_is_reversed_file_order(table):
+def test_index_desc_sorts_within_validity_groups(table):
+    """序号降序：只反转组内序号，无效组仍留在最后。"""
     table.sortItems(2, Qt.SortOrder.DescendingOrder)
 
     assert _names(table) == [
-        "charlie",
-        "yankee",
         "bravo",
-        "mike",
-        "alpha",
         "zulu",
+        "yankee",
+        "alpha",
+        "charlie",
+        "mike",
     ]
 
 
-def test_unit_keeps_validity_grouping(table):
-    """单位列保持现状：每个有效性段内部按单位排序。"""
+def test_unit_asc_sorts_within_validity_groups(table):
     table.sortItems(1, Qt.SortOrder.AscendingOrder)
 
     assert _names(table) == [
@@ -131,8 +147,21 @@ def test_unit_keeps_validity_grouping(table):
     ]
 
 
-def test_unknown_validity_is_usable(qapp):
-    """UNKNOWN(-2)（MDF/BLF）视为可用，参与全局名称排序。"""
+def test_unit_desc_sorts_within_validity_groups(table):
+    table.sortItems(1, Qt.SortOrder.DescendingOrder)
+
+    assert _names(table) == [
+        "zulu",
+        "bravo",
+        "yankee",
+        "alpha",
+        "mike",
+        "charlie",
+    ]
+
+
+def test_unknown_validity_stays_after_invalid(qapp):
+    """UNKNOWN(-2) 自成一组且排在 INVALID 之后；组内仍按名称排序。"""
     widget = MyTableWidget(None)
     widget.populate(
         ["delta", "mike", "alpha"],
@@ -141,13 +170,13 @@ def test_unknown_validity_is_usable(qapp):
     )
     try:
         widget.sortItems(0, Qt.SortOrder.AscendingOrder)
-        assert _names(widget) == ["alpha", "delta", "mike"]
+        assert _names(widget) == ["alpha", "mike", "delta"]
     finally:
         widget.deleteLater()
 
 
-def test_missing_validity_is_treated_as_invalid(table):
-    """有效性为 None 的历史数据按 INVALID 处理，不再伪造 -999 混入可用段。"""
+def test_missing_validity_sorts_last(table):
+    """有效性为 None 的历史数据沿用 -999 语义，排在所有分组之后。"""
     alpha_row = _names(table).index("alpha")
     table.item(alpha_row, 0).setData(Qt.ItemDataRole.UserRole, None)
 
@@ -155,16 +184,16 @@ def test_missing_validity_is_treated_as_invalid(table):
 
     assert _names(table) == [
         "bravo",
-        "yankee",
         "zulu",
-        "alpha",
+        "yankee",
         "charlie",
         "mike",
+        "alpha",
     ]
 
 
 def test_filter_replay_keeps_hidden_set(table):
-    """排序前后隐藏集合不变；可见行仍按新语义有序。"""
+    """排序前后隐藏集合不变；可见行仍按“分组 + 组内排序”有序。"""
     assert table.hide_non_matching(["a"], [], UNITS) is True
     assert set(_hidden_names(table)) == {"zulu", "mike"}
     assert _visible_names(table) == ["bravo", "alpha", "yankee", "charlie"]
@@ -172,7 +201,7 @@ def test_filter_replay_keeps_hidden_set(table):
     table.sortItems(0, Qt.SortOrder.AscendingOrder)
 
     assert set(_hidden_names(table)) == {"zulu", "mike"}
-    assert _visible_names(table) == ["alpha", "bravo", "yankee", "charlie"]
+    assert _visible_names(table) == ["bravo", "alpha", "yankee", "charlie"]
 
 
 def test_initial_indicator_hidden_and_state_empty(qapp):
