@@ -20,6 +20,7 @@ from src.ui.variable_list import MyTableWidget  # noqa: E402
 from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
+from src.ui.widgets.plot_page import PlotPage  # noqa: E402
 from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
@@ -51,6 +52,9 @@ STATUS_MESSAGE_TIMEOUT_MS = {"info": 5000, "warn": 8000}
 # 段与消息的 sizeHint 单独累加，这个常量只兜住不逐个量的那几样，宁可略大
 # （早一点收纳）不漏算（收纳迟了 CAN 文字会被硬裁且无省略号）。
 CAN_SEGMENT_RESERVE = 80
+
+#: 垫片 C1：无页时的共享空列表。可读、不抛异常、不分配。
+EMPTY_PLOT_WIDGETS: list[PlotContainerWidget] = []
 
 
 class _ElideStatusBar(QStatusBar):
@@ -151,7 +155,148 @@ class MainWindow(QMainWindow):
         self._init_managers()
         self._handle_cli_args()
 
+    # ------------------------------------------------------------------
+    # 垫片（设计文档 §4.3 C1-C5）：页级状态委托给 current_page
+    # ------------------------------------------------------------------
+    @property
+    def current_page(self) -> PlotPage | None:
+        return self._current_page
+
+    @property
+    def plot_widgets(self) -> list[PlotContainerWidget]:
+        """C1/C2：任何时刻可读；返回当前页的同一个 list 引用，禁止拷贝。"""
+        page = self._current_page
+        return page.plot_widgets if page is not None else EMPTY_PLOT_WIDGETS
+
+    @plot_widgets.setter
+    def plot_widgets(self, value):
+        """C3：语义 = 替换当前页容器列表（构造期落到后备字段）。"""
+        page = self._current_page
+        if page is not None:
+            page.plot_widgets = list(value)
+        else:
+            self._bootstrap_state["plot_widgets"] = list(value)
+
+    @property
+    def plot_layout(self) -> QGridLayout | None:
+        page = self._current_page
+        return page.plot_layout if page is not None else None
+
+    @property
+    def _plot_row_max_default(self) -> int:
+        page = self._current_page
+        if page is not None:
+            return page.rows_max
+        return self._bootstrap_state.get("_plot_row_max_default", PLOT_ROW_MAX_DEFAULT)
+
+    @_plot_row_max_default.setter
+    def _plot_row_max_default(self, value: int):
+        page = self._current_page
+        if page is not None:
+            page.rows_max = int(value)
+        else:
+            self._bootstrap_state["_plot_row_max_default"] = int(value)
+
+    @property
+    def _plot_col_max_default(self) -> int:
+        page = self._current_page
+        if page is not None:
+            return page.cols_max
+        return self._bootstrap_state.get("_plot_col_max_default", PLOT_COL_MAX_DEFAULT)
+
+    @_plot_col_max_default.setter
+    def _plot_col_max_default(self, value: int):
+        page = self._current_page
+        if page is not None:
+            page.cols_max = int(value)
+        else:
+            self._bootstrap_state["_plot_col_max_default"] = int(value)
+
+    @property
+    def _plot_row_current(self) -> int:
+        page = self._current_page
+        if page is not None:
+            return page.rows_current
+        return self._bootstrap_state.get("_plot_row_current", PLOT_ROW_CURRENT_DEFAULT)
+
+    @_plot_row_current.setter
+    def _plot_row_current(self, value: int):
+        page = self._current_page
+        if page is not None:
+            page.rows_current = int(value)
+        else:
+            self._bootstrap_state["_plot_row_current"] = int(value)
+
+    @property
+    def _plot_col_current(self) -> int:
+        page = self._current_page
+        if page is not None:
+            return page.cols_current
+        return self._bootstrap_state.get("_plot_col_current", PLOT_COL_CURRENT_DEFAULT)
+
+    @_plot_col_current.setter
+    def _plot_col_current(self, value: int):
+        page = self._current_page
+        if page is not None:
+            page.cols_current = int(value)
+        else:
+            self._bootstrap_state["_plot_col_current"] = int(value)
+
+    @property
+    def row_height_factors(self) -> dict[int, int]:
+        page = self._current_page
+        if page is not None:
+            return page.row_height_factors
+        return self._bootstrap_state.setdefault("row_height_factors", {})
+
+    @row_height_factors.setter
+    def row_height_factors(self, value: dict[int, int]):
+        page = self._current_page
+        if page is not None:
+            page.row_height_factors = dict(value)
+        else:
+            self._bootstrap_state["row_height_factors"] = dict(value)
+
+    def _create_page(self, *, parent: QWidget, title: str | None = None) -> PlotPage:
+        """建立首个页容器（P1 起由 PlotTabsWidget 承担挂载）。"""
+        bootstrap = self._bootstrap_state
+        page = PlotPage(
+            parent=parent,
+            title=title or f"图 {len(self.pages) + 1}",
+            rows_max=int(bootstrap.get("_plot_row_max_default", PLOT_ROW_MAX_DEFAULT)),
+            cols_max=int(bootstrap.get("_plot_col_max_default", PLOT_COL_MAX_DEFAULT)),
+            rows_current=int(bootstrap.get("_plot_row_current", PLOT_ROW_CURRENT_DEFAULT)),
+            cols_current=int(bootstrap.get("_plot_col_current", PLOT_COL_CURRENT_DEFAULT)),
+            row_height_factors=dict(bootstrap.get("row_height_factors") or {}),
+            plot_widgets=bootstrap.get("plot_widgets") or [],
+        )
+        self.pages.append(page)
+        self._current_page = page
+        return page
+
+    def page_index(self, page: PlotPage | None) -> int:
+        if page is None:
+            return -1
+        for index, candidate in enumerate(self.pages):
+            if candidate is page:
+                return index
+        return -1
+
+    def iter_all_plot_widgets(self):
+        """跨全部页生成 plot 容器；过滤已销毁项（设计文档 §7.4）。"""
+        for page in tuple(self.pages):
+            for container in tuple(page.plot_widgets):
+                if widget_alive(container):
+                    yield container
+
     def _init_basic_config(self):
+        # 构造期兜底（C4）：页创建前对这些字段的读写都落在 _bootstrap_state
+        self._bootstrap_state: dict = {}
+        self.pages: list[PlotPage] = []
+        self._current_page: PlotPage | None = None
+        self._is_switching = False
+        self._x_range_follow_enabled = True
+
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._drop_event_filter_registered = False
         from src._version import get_version
@@ -444,10 +589,9 @@ class MainWindow(QMainWindow):
 
         root_layout.addLayout(top_bar)
 
-        self.plot_layout = QGridLayout()
-        self.plot_layout.setContentsMargins(0, 0, 0, 0)
-        self.plot_layout.setSpacing(0)
-        root_layout.addLayout(self.plot_layout, 1)
+        # 首个 PlotPage：页容器承载 QGridLayout；后续页由 PlotTabsWidget 挂载
+        self._create_page(parent=self.plot_widget)
+        root_layout.addWidget(self._current_page.widget, 1)
 
         self.main_splitter.addWidget(self.left_widget)
         self.main_splitter.addWidget(self.plot_widget)
@@ -461,12 +605,10 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.main_splitter)
         QTimer.singleShot(0, self._ensure_splitter_ready)
 
-        self.plot_widgets = []
-
-        self.placeholder_label = QLabel("请导入 CSV 文件以查看数据", self.plot_widget)
+        self.placeholder_label = QLabel("请导入 CSV 文件以查看数据", self._current_page.widget)
         self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder_label.setStyleSheet("font-size: 24px; color: gray;")
-        self.plot_layout.addWidget(self.placeholder_label, 0, 0)
+        self._current_page.plot_layout.addWidget(self.placeholder_label, 0, 0)
 
         self.drop_overlay = DropOverlay(self.centralWidget())
         self.drop_overlay.lower()
@@ -490,8 +632,6 @@ class MainWindow(QMainWindow):
 
         self.saved_mark_range = None
         self.mark_stats_window = None
-
-        self.row_height_factors: dict[int, int] = {}
 
         self._cursor_shortcut = QShortcut(QKeySequence("Ctrl+R"), self.plot_widget)
         self._cursor_shortcut.activated.connect(self._on_cursor_shortcut)
