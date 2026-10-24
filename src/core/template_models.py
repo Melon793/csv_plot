@@ -1,10 +1,9 @@
 """模板数据模型"""
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
-from pathlib import Path
+from typing import Iterator, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.core.plot_config import PlotSessionConfig
@@ -76,16 +75,39 @@ class PlotTemplate:
         )
 
 
-def _iter_config_plots(config: dict):
-    """按 v2 ``pages`` 优先、v1 顶层 ``plots`` 回退，逐个子图配置产出。"""
-    pages = config.get("pages") if isinstance(config, dict) else None
+def iter_template_pages(config: dict | None) -> Iterator[dict]:
+    """按 v2 ``pages`` 优先、v1 顶层字段回退，逐页产出原始 dict。
+
+    只做结构提取，不做 ``int()`` 等字段转换：编辑器预览/生成 YAML 必须能
+    承受用户手写的非法 ``layout_rows``（如 ``"abc"``），不能在这里先抛
+    ``ValueError``。
+
+    非 dict 页与 ``PlotSessionConfig.from_dict`` 一样跳过；``pages`` 非空
+    但没有任何合法页时回退到 v1 单页口径，保证计数与实际应用一致。
+    """
+    if not isinstance(config, dict):
+        config = {}
+    pages = config.get("pages")
     if isinstance(pages, list) and pages:
-        for page in pages:
-            for plot in (page or {}).get("plots", []) or []:
-                yield plot or {}
-        return
-    for plot in config.get("plots", []) or []:
-        yield plot or {}
+        valid = [page for page in pages if isinstance(page, dict)]
+        if valid:
+            yield from valid
+            return
+    yield {
+        "title": "图 1",
+        "layout_rows": config.get("layout_rows", 1),
+        "layout_cols": config.get("layout_cols", 1),
+        "row_height_factors": {},
+        "plots": config.get("plots", []) or [],
+    }
+
+
+def _iter_config_plots(config: dict | None):
+    """按页遍历子图配置；手写 YAML 里的非 dict 项直接跳过。"""
+    for page in iter_template_pages(config):
+        for plot in page.get("plots", []) or []:
+            if isinstance(plot, dict):
+                yield plot
 
 
 def count_template_variables(config: dict) -> int:
@@ -103,10 +125,7 @@ def count_template_plots(config: dict) -> int:
 
 def count_template_pages(config: dict) -> int:
     """模板包含的绘图页数；v1 档固定为 1。"""
-    pages = config.get("pages") if isinstance(config, dict) else None
-    if isinstance(pages, list) and pages:
-        return len(pages)
-    return 1
+    return sum(1 for _ in iter_template_pages(config))
 
 
 def extract_variables_from_config(config: "PlotSessionConfig | dict") -> set[str]:

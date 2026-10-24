@@ -1643,9 +1643,9 @@ class MainWindow(QMainWindow):
     def _template_saved_text(self, summary: str, template_id: str) -> str:
         """原先播的是 ``template_id``（``uuid4().hex[:8]``，屏上没人读得懂）。
 
-        变量数/子图数与模板管理器列表那两列同一套算法
-        （``count_template_variables`` / ``len(config["plots"])``），同一个模板
-        不会在两个地方给出两个说法。
+        变量数/页数与模板管理器列表同一套算法
+        （``count_template_variables`` / ``count_template_plots`` /
+        ``count_template_pages``），同一个模板不会在两个地方给出两个说法。
         """
         name = self._last_template_name or template_id
         template = self.plot_config_manager.template_manager.get_template(template_id)

@@ -1,7 +1,6 @@
 """模板管理器对话框"""
 
 from __future__ import annotations
-import yaml
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -13,17 +12,20 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QTableWidget,
     QTableWidgetItem,
-    QHeaderView,
     QMessageBox,
     QFileDialog,
     QSplitter,
 )
 from src.core.template_manager import TemplateManager
-from src.core.template_models import PlotTemplate, count_template_variables
+from src.core.template_models import (
+    PlotTemplate,
+    count_template_pages,
+    count_template_plots,
+    count_template_variables,
+    iter_template_pages,
+)
 from src.core.plot_config import (
-    PlotSessionConfig,
     TemplateNotFoundError,
-    TemplateNameConflictError,
 )
 from src.core.logger import get_logger
 from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
@@ -89,11 +91,11 @@ class TemplateManagerDialog(QDialog):
         # 分割器
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # 模板列表（3:1:1:3 比例自适应列宽）
-        self._table = _ProportionalTable(ratios=[3, 1, 1, 3])
-        self._table.setColumnCount(4)
+        # 模板列表（名称/页数/变量数/子图数/时间 按比例自适应列宽）
+        self._table = _ProportionalTable(ratios=[3, 1, 1, 1, 3])
+        self._table.setColumnCount(5)
         self._table.setHorizontalHeaderLabels(
-            ["名称", "变量数", "Plot 数", "更新时间"]
+            ["名称", "页数", "变量数", "Plot 数", "更新时间"]
         )
         self._table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
@@ -191,14 +193,17 @@ class TemplateManagerDialog(QDialog):
             name_item.setData(Qt.ItemDataRole.UserRole, template.metadata.id)
             self._table.setItem(row, 0, name_item)
 
-            var_count = count_template_variables(template.config)
-            self._table.setItem(row, 1, QTableWidgetItem(str(var_count)))
+            page_count = count_template_pages(template.config)
+            self._table.setItem(row, 1, QTableWidgetItem(str(page_count)))
 
-            plot_count = len(template.config.get("plots", []))
-            self._table.setItem(row, 2, QTableWidgetItem(str(plot_count)))
+            var_count = count_template_variables(template.config)
+            self._table.setItem(row, 2, QTableWidgetItem(str(var_count)))
+
+            plot_count = count_template_plots(template.config)
+            self._table.setItem(row, 3, QTableWidgetItem(str(plot_count)))
 
             updated_at = template.metadata.updated_at[:16]  # 只显示日期和时间
-            self._table.setItem(row, 3, QTableWidgetItem(updated_at))
+            self._table.setItem(row, 4, QTableWidgetItem(updated_at))
 
         self._selected_template_id = previous_id
         self._reconcile_selection_with_view()
@@ -239,18 +244,76 @@ class TemplateManagerDialog(QDialog):
             self._selected_template_id = template_id
             template = self._template_manager.get_template(template_id)
             if template:
-                self._details_label.setText(
-                    f"选中: {template.metadata.name}\n\n"
-                    f"描述: {template.metadata.description or '无'}\n\n"
-                    f"创建时间: {template.metadata.created_at[:16]}\n"
-                    f"更新时间: {template.metadata.updated_at[:16]}"
-                )
+                self._details_label.setText(self._details_text(template))
                 self._refresh_selection_actions()
                 return
 
         self._selected_template_id = None
         self._details_label.setText("选中: -")
         self._refresh_selection_actions()
+
+    # ------------------------------------------------------------------
+    # 详情：页数 / 当前页 / 各页摘要
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _safe_active_page(config: dict, page_count: int) -> int:
+        """active_page 的安全读取：非数字/None/越界都收敛到合法下标。"""
+        if page_count <= 0:
+            return 0
+        raw = config.get("active_page", 0) if isinstance(config, dict) else 0
+        try:
+            index = int(raw or 0)
+        except (TypeError, ValueError):
+            index = 0
+        return min(max(index, 0), page_count - 1)
+
+    @staticmethod
+    def _page_plot_count(page: dict) -> int:
+        return sum(
+            1
+            for plot in (page.get("plots", []) or [])
+            if isinstance(plot, dict) and plot.get("curves")
+        )
+
+    @staticmethod
+    def _display_title(value, fallback: str) -> str:
+        """页标题进列表/详情时压成单行；换行会拆散一行摘要。"""
+        text = str(value) if value else fallback
+        return text.replace("\r", " ").replace("\n", " ")
+
+    def _details_text(self, template: PlotTemplate) -> str:
+        pages = list(iter_template_pages(template.config))
+        active = self._safe_active_page(template.config, len(pages))
+        active_title = (
+            self._display_title(
+                pages[active].get("title"), f"page {active + 1}"
+            )
+            if pages
+            else "page 1"
+        )
+
+        lines = [
+            f"选中: {template.metadata.name}",
+            "",
+            f"描述: {template.metadata.description or '无'}",
+            "",
+            f"创建时间: {template.metadata.created_at[:16]}",
+            f"更新时间: {template.metadata.updated_at[:16]}",
+            "",
+            f"页数: {len(pages)}（当前页: {active_title}）",
+            "页面:",
+        ]
+        for index, page in enumerate(pages[:6], start=1):
+            title = self._display_title(page.get("title"), f"page {index}")
+            rows = page.get("layout_rows", 1)
+            cols = page.get("layout_cols", 1)
+            lines.append(
+                f"  {index}. {title} · {rows}×{cols}"
+                f" · {self._page_plot_count(page)} 个子图"
+            )
+        if len(pages) > 6:
+            lines.append(f"  … 共 {len(pages)} 页")
+        return "\n".join(lines)
 
     def _on_double_clicked(self, item):
         """双击加载模板"""

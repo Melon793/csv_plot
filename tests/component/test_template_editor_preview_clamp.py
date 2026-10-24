@@ -75,3 +75,37 @@ def test_illegal_grid_values_are_rejected_without_exception(editor, yaml_text):
     editor._yaml_edit.setPlainText(yaml_text)
     assert _cell_count(editor) == 0
     assert "布局过大或非法" in editor._stats_label.text()
+
+
+def test_v2_oversized_page_only_blocks_that_page(editor):
+    """多页 YAML：只渲染当前页；切到超限页才清空并提示。"""
+    editor._yaml_edit.setPlainText(
+        "pages:\n"
+        "  - title: page 1\n"
+        "    layout_rows: 2\n"
+        "    layout_cols: 2\n"
+        "    plots: []\n"
+        "  - title: page 2\n"
+        "    layout_rows: 1000\n"
+        "    layout_cols: 1000\n"
+        "    plots: []\n"
+    )
+    assert editor._page_combo.count() == 2
+    assert _cell_count(editor) == 4
+    assert "cells: 2 × 2" in editor._stats_label.text()
+
+    editor._page_combo.setCurrentIndex(1)
+    assert _cell_count(editor) == 0
+    assert "第 2 页" in editor._stats_label.text()
+    assert "布局过大或非法" in editor._stats_label.text()
+
+    editor._page_combo.setCurrentIndex(0)
+    assert _cell_count(editor) == 4
+
+
+def test_non_dict_page_entry_falls_back_without_crash(editor):
+    """pages 里只有 None/非 dict 页：与 from_dict 一样回退单页，不崩。"""
+    editor._yaml_edit.setPlainText("pages:\n  - null\n")
+    assert editor._page_combo.count() == 1
+    assert _cell_count(editor) == 1
+    assert "pages: 1" in editor._stats_label.text()

@@ -10,6 +10,7 @@ from src.core.template_models import (
     count_template_plots,
     count_template_variables,
     extract_variables_from_config,
+    iter_template_pages,
 )
 
 
@@ -72,6 +73,45 @@ class TestCountTemplateVariables:
         assert count_template_plots({"plots": [{"curves": ["a"]}]}) == 1
         assert count_template_pages({"plots": [{"curves": ["a"]}]}) == 1
         assert count_template_pages({}) == 1
+
+    def test_non_dict_plots_are_skipped(self):
+        """手写 YAML 的字符串子图项不能触发 .get 崩溃，也不参与计数。"""
+        config = {"plots": ["broken", {"curves": ["a"]}, None]}
+        assert count_template_variables(config) == 1
+        assert count_template_plots(config) == 1
+
+
+class TestIterTemplatePages:
+    def test_v2_yields_each_dict_page(self):
+        pages = [
+            {"title": "page 1", "plots": [{"curves": ["a"]}]},
+            {"title": "page 2", "plots": [{"curves": ["b"]}]},
+        ]
+        assert list(iter_template_pages({"pages": pages})) == pages
+
+    def test_v1_falls_back_to_single_page(self):
+        config = {
+            "layout_rows": 3,
+            "layout_cols": 1,
+            "plots": [{"curves": ["a"]}],
+        }
+        pages = list(iter_template_pages(config))
+        assert len(pages) == 1
+        assert pages[0]["layout_rows"] == 3
+        assert pages[0]["layout_cols"] == 1
+        assert pages[0]["plots"] == [{"curves": ["a"]}]
+
+    def test_empty_or_invalid_pages_fall_back_to_v1(self):
+        assert len(list(iter_template_pages({"pages": []}))) == 1
+        # pages 非空但没有任何 dict 页 → 与 from_dict 一样回退顶层
+        fallback = list(iter_template_pages({"pages": [None], "plots": []}))
+        assert len(fallback) == 1
+        assert fallback[0]["title"] == "图 1"
+
+    def test_non_dict_config_does_not_crash(self):
+        pages = list(iter_template_pages(None))
+        assert len(pages) == 1
+        assert pages[0]["layout_rows"] == 1
 
 
 class TestExtractVariablesFromConfig:

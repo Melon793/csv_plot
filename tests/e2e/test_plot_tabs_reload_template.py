@@ -139,6 +139,47 @@ def test_template_v2_export_apply_roundtrip(loaded_window, qtbot, monkeypatch):
     assert first_pw.curves["speed"].curve.isVisible() is True
 
 
+def test_editor_save_preserves_all_pages(loaded_window, qtbot, tmp_path):
+    """真实导出 → 编辑器保存：两页/当前页/曲线都必须落盘。"""
+    from src.core.template_manager import TemplateManager
+    from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
+
+    mw = loaded_window
+    first = mw.current_page
+    assert first.plot_widgets[0].plot_widget.plot_variable("speed")
+    second = _add_page_with_curve(mw, qtbot, "rpm")
+    second.title = "对比页"
+    mw.plot_tabs.setTabText(mw.plot_tabs.indexOf(second.widget), "对比页")
+    assert mw.current_page is second
+
+    config = mw.plot_config_manager.export_current_config(mw)
+    manager = TemplateManager(storage_path=tmp_path / "templates")
+    dialog = TemplateEditorDialog(manager, current_config=config)
+    try:
+        assert dialog._page_combo.count() == 2
+        assert dialog._page_combo.currentIndex() == 1
+        dialog._name_edit.setText("two-page-e2e")
+        dialog._save_btn.click()
+    finally:
+        dialog.deleteLater()
+
+    saved = next(
+        template
+        for template in manager.get_all_templates()
+        if template.metadata.name == "two-page-e2e"
+    )
+    assert len(saved.config["pages"]) == 2
+    assert [page["title"] for page in saved.config["pages"]] == [
+        "page 1",
+        "对比页",
+    ]
+    assert saved.config["active_page"] == 1
+    assert saved.config["pages"][0]["plots"][0]["curves"] == ["speed"]
+    assert saved.config["pages"][1]["plots"][0]["curves"] == ["rpm"]
+    # 顶层 v1 回退视图仍保留第 1 页
+    assert saved.config["plots"][0]["curves"] == ["speed"]
+
+
 def test_v1_template_still_applies_as_single_page(loaded_window, qtbot):
     """v1 旧模板（只有顶层 plots）→ 单页恢复，多开的页被收敛掉。"""
     mw = loaded_window
