@@ -97,6 +97,45 @@ def test_partial_grid_uses_actual_column_stride(page):
 
     page.apply_visibility(2, 1)
     assert [page.cell_visible(i) for i in range(2)] == [True, True]
+    # 容量第 2/3 列没有容器，不能残留 stretch（否则右侧多出空白）
+    assert [
+        page.plot_layout.columnStretch(c) for c in range(page.cols_max)
+    ] == [1, 0, 0]
+
+
+def test_same_size_reapply_leaves_no_stretch_for_phantom_column(page):
+    # 新页实际只建 3×1，重复应用 3×1 也不能给容量列发 stretch
+    page.build_matrix(3, 1)
+    page.apply_visibility(3, 1)
+    assert page.grid_cols == 1
+    assert [
+        page.plot_layout.columnStretch(c) for c in range(page.cols_max)
+    ] == [1, 0, 0]
+
+
+def test_shrink_to_two_columns_leaves_no_stretch_for_phantom_column(page):
+    page.build_matrix(3, 1)
+    page.apply_visibility(3, 2)
+    assert page.grid_cols == 2
+    assert [
+        page.plot_layout.columnStretch(c) for c in range(page.cols_max)
+    ] == [1, 1, 0]
+
+
+def test_shrink_to_one_column_keeps_only_first_column(page):
+    page.build_matrix(3, 2)
+    page.apply_visibility(3, 1)
+    assert [
+        page.plot_layout.columnStretch(c) for c in range(page.cols_max)
+    ] == [1, 0, 0]
+
+
+def test_three_columns_keep_all_column_stretches(page):
+    page.build_matrix(3, 1)
+    page.apply_visibility(3, 3)
+    assert [
+        page.plot_layout.columnStretch(c) for c in range(page.cols_max)
+    ] == [1, 1, 1]
 
 
 def test_ensure_matrix_first_build_uses_current_rows_cols(page):

@@ -11,9 +11,10 @@ P0-2 从 LayoutManager 搬迁进来。
 from __future__ import annotations
 
 import math
+from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSignalBlocker, QTimer
 from PySide6.QtWidgets import QGridLayout, QWidget
 
 from src.core.config import safe_qt_op, widget_alive
@@ -32,7 +33,7 @@ class PlotPage:
 
     Args:
         parent: 页容器的父控件（首版为 MainWindow.plot_widget）。
-        title: 标签标题，默认 ``图 N``。
+        title: 标签标题，默认 ``page N``。
         rows_max/cols_max: 本页网格容量上限。
         rows_current/cols_current: 当前可见行列。
         row_height_factors: 行高百分比（100 = 均分）。
@@ -78,6 +79,8 @@ class PlotPage:
 
         #: 隐藏期间有 cursor / mark item 待补建，切回本页时处理（§5.1）
         self._scene_dirty = False
+        #: 最近一次游标场景恢复对应的全局状态指纹；相同则激活时可跳过
+        self._cursor_state_sig: tuple | None = None
         #: 页面级 XLink 防抖标志（§3）
         self._pending_xlink_sync = False
         #: 非活动页几何变化后待补对齐（§6.2）
@@ -314,16 +317,19 @@ class PlotPage:
         """调整行列 stretch，并把可见子图对齐到首个可见 master 的 X 范围。"""
         services = self.services
         grid_cols = self.grid_cols
+        # 按实际可见容器反推列号：已建列数可能小于容量 cols_max，
+        # 不能用容量列号直接拼扁平索引（会回绕到真实列，形成幽灵列）。
+        visible_cols = {
+            index % grid_cols
+            for index in range(len(self.plot_widgets))
+            if self.cell_visible(index)
+        }
         for col in range(self.cols_max):
-            has_visible = any(
-                self.cell_visible(row * grid_cols + col)
-                for row in range(self.rows_max)
-                if row * grid_cols + col < len(self.plot_widgets)
-            )
-            self.plot_layout.setColumnStretch(col, 1 if has_visible else 0)
+            stretch = 1 if col in visible_cols else 0
+            self.plot_layout.setColumnStretch(col, stretch)
             logger.debug(
                 "[LAYOUT] setColumnStretch col=%d stretch=%s has_visible=%s",
-                col, 1 if has_visible else 0, has_visible,
+                col, stretch, col in visible_cols,
             )
 
         for row in range(self.rows_max):
@@ -458,11 +464,18 @@ class PlotPage:
                 "[LAYOUT] set_plots_visible done: synced %d visible plot(s)", synced_count,
             )
 
+        # 布局对齐同样走 _is_syncing_range 静默路径，范围落定后补刷样式
+        self.refresh_curve_styles()
         # 布局变更后调度一次 X-link 健康检查，覆盖 reload 后 link 丢失场景
         self.schedule_xlink_sync()
 
     def sync_xlink(self) -> None:
-        """按本页 master 重建各子图 X 范围；隐藏页只记 dirty。"""
+        """按本页 master 重建各子图 X 范围；隐藏页只记 dirty。
+
+        XLink 同步走 ``_sync_guard``，被改范围的子图收不到可刷新的
+        ``sigRangeChanged``；范围落定后必须显式补刷样式（见
+        ``refresh_curve_styles``）。
+        """
         if not widget_alive(self.widget):
             return
         if self.widget.isHidden():
@@ -474,6 +487,31 @@ class PlotPage:
         sync_linked_x_ranges(
             self, master_resolver=lambda _containers: self.master_container()
         )
+        self.refresh_curve_styles()
+
+    def refresh_curve_styles(self) -> None:
+        """X 范围被程序化改写后补刷曲线样式（细线+symbol ↔ 粗线）。
+
+        ``apply_x_range`` / 布局对齐 / XLink 同步都用 ``_is_syncing_range``
+        屏蔽 ``sigRangeChanged``，样式判据（X 宽度 × 采样密度）不会随范围
+        自动更新；不在范围落定处补一次，切页后就会停在旧范围的样式。
+
+        逐子图走统一调度器的 style 任务，``_apply_plot_style`` 自带
+        pen/symbol 缓存，序列未变时不会重建画笔。
+        """
+        for container in self.plot_widgets:
+            if not widget_alive(container):
+                continue
+            pw = getattr(container, "plot_widget", None)
+            if pw is None or getattr(pw, "_is_being_destroyed", False):
+                continue
+            queue = getattr(pw, "_queue_ui_refresh", None)
+            if queue is None:
+                continue
+            try:
+                queue(style=True, cursor=False, stats=False, immediate=True)
+            except RuntimeError:
+                logger.debug("[PAGE] 样式补刷跳过已销毁子图", exc_info=True)
 
     def schedule_xlink_sync(self, delay_ms: int = 50) -> None:
         """页级 50ms 防抖；回调按 epoch 作废（R4）。"""
@@ -571,6 +609,59 @@ class PlotPage:
         self.restore_cursor_scene()
         self.restore_mark_regions()
 
+    def _apply_cursor_domain_quietly(self, plot_widget) -> None:
+        """重设 X limits / vline bounds，但不让钳制结果回写全局 pin。
+
+        ``AxisManager._set_vline_bounds`` 直接调 ``vline.setBounds()``；
+        pyqtgraph 会在内部 ``setValue(self.value())`` 把越界值钳到新 bounds
+        并 emit ``sigPositionChanged``。切页恢复/补齐 limits 时这条回调会把
+        旧值写进 ``pinned_x_values``（单游标模式下 vline2 还会补第二份），
+        污染全局状态；这里用信号阻断 + 标志位兜住，随后外面再按全局 pin 落位。
+        """
+        previous = getattr(plot_widget, "_suppress_pin_update", False)
+        plot_widget._suppress_pin_update = True
+        try:
+            with ExitStack() as stack:
+                for attr in ("vline", "vline2"):
+                    line = getattr(plot_widget, attr, None)
+                    if line is not None:
+                        stack.enter_context(QSignalBlocker(line))
+                plot_widget._apply_cursor_x_domain_and_limits()
+        finally:
+            plot_widget._suppress_pin_update = previous
+
+    def cursor_state_signature(self) -> tuple:
+        """影响游标场景的全局状态指纹；相同即可判定本页无需重建。"""
+        services = self.services
+        if services is None:
+            return ()
+        cursor_btn = getattr(services, "cursor_btn", None)
+        enabled = bool(cursor_btn.isChecked()) if cursor_btn is not None else False
+        pinned = tuple(getattr(services, "pinned_x_values", []) or [])
+        return (
+            enabled,
+            bool(getattr(services, "cursor_values_hidden", False)),
+            getattr(services, "cursor_mode", "1 free cursor"),
+            pinned,
+        )
+
+    def sync_cursor_scene(self) -> bool:
+        """激活后按全局游标状态同步本页；状态未变则不重复写（§5.1）。
+
+        非脏页此前完全不碰游标，而拖动固定游标只同步当前页的兄弟子图，
+        导致切回目标页时 vline 仍是旧值；一旦叠加“切页跟随”的视图范围，
+        旧游标就会落在 viewRange 之外。脏页刚在 ``restore_scene`` 里恢复过，
+        指纹相同自然跳过。
+        """
+        if self.services is None or not self.plot_widgets:
+            return False
+        if not widget_alive(self.widget) or self.widget.isHidden():
+            return False
+        if self.cursor_state_signature() == self._cursor_state_sig:
+            return False
+        self.restore_cursor_scene()
+        return True
+
     def restore_cursor_scene(self) -> None:
         """按全局游标状态重建本页 vline / 标签（仅当前页可调用）。"""
         services = self.services
@@ -585,8 +676,9 @@ class PlotPage:
             if plot_widget is None:
                 continue
             try:
-                # 隐藏期间可能改过时间基准：X limits 与游标域按全局口径重算
-                plot_widget._apply_cursor_x_domain_and_limits()
+                # 隐藏期间可能改过时间基准：X limits 与游标域按全局口径重算。
+                # 必须静默执行：setBounds 的钳制回写会污染全局 pinned。
+                self._apply_cursor_domain_quietly(plot_widget)
                 if cursor_enabled and values_hidden:
                     plot_widget.toggle_cursor(False, hide_values_only=True)
                 else:
@@ -597,8 +689,30 @@ class PlotPage:
                     plot_widget._last_cursor_update_time = 0
                 safe_qt_op(plot_widget.update_cursor_label)
             except RuntimeError:
-                # 页正在销毁：后续容器也不再处理
+                # 页正在销毁：后续容器也不再处理，不记录指纹
                 logger.debug("[PAGE] restore_cursor_scene 撞到已销毁控件", exc_info=True)
+                return
+        self._cursor_state_sig = self.cursor_state_signature()
+
+    def apply_global_x_limits(self) -> None:
+        """把本页各子图的 X limits / 游标域对齐到全局数据域。
+
+        新建页是在数据加载之后创建的，没有走 ``replots_after_loading``；
+        首次激活且 ``_scene_dirty`` 为 False 时补这一次，避免 ViewBox 停在
+        默认哨兵 limits 导致 X 轴可无限缩放。
+        """
+        if not widget_alive(self.widget) or self.widget.isHidden():
+            return
+        for container in self.plot_widgets:
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            try:
+                self._apply_cursor_domain_quietly(plot_widget)
+            except RuntimeError:
+                logger.debug(
+                    "[PAGE] apply_global_x_limits 撞到已销毁控件", exc_info=True
+                )
                 return
 
     def set_row_height(self, row: int, percentage: int) -> None:

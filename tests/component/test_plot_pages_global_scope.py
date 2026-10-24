@@ -25,6 +25,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from src.core.config import MIN_INDEX_LENGTH, compute_global_x_limits
+from src.app.plot_context import PageServices, PlotContext
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.layout_manager import LayoutManager
 from src.ui.widgets.cursor_manager import CursorManager
@@ -105,6 +106,30 @@ def test_explicitly_hidden_cell_is_still_skipped(qapp):
 
     assert host._global_max_density == pytest.approx(100.0)
     assert hidden_cell.plot_widget.min_ranges == []
+
+
+# --------------------------------------------- PageServices 的写穿契约（§3）
+
+
+def test_page_services_forwards_cursor_writes_without_shadow_state():
+    """PlotContext 写 pinned/cursor_values_hidden 必须落到 MainWindow。
+
+    代理只有 ``__getattr__`` 时，写操作会在代理实例上生成影子属性：
+    拖动固定游标后 ``mw.pinned_x_values`` 仍是旧值，切页/时间修正随后
+    拿着陈旧 pin 反算，factor 越大偏差越大。这里钉住两个显式 setter，
+    同时保证没有退化成“什么都吞”的通用 ``__setattr__``。
+    """
+    mw = SimpleNamespace(pinned_x_values=[1.0], cursor_values_hidden=False)
+    services = PageServices(mw, SimpleNamespace())
+    ctx = PlotContext(services)
+
+    ctx.pinned_x_values = [2.0, 3.0]
+    ctx.cursor_values_hidden = True
+
+    assert mw.pinned_x_values == [2.0, 3.0]
+    assert mw.cursor_values_hidden is True
+    # 代理实例上不得出现影子属性（vars 里只应有真实持有的 mw/page）
+    assert set(vars(services)) == {"mw", "page"}
 
 
 # ------------------------------------------------- scene=False 的纯数值约定

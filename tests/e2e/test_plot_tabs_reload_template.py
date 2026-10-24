@@ -97,7 +97,7 @@ def test_template_v2_export_apply_roundtrip(loaded_window, qtbot, monkeypatch):
     config = manager.export_current_config(mw)
     assert len(config.pages) == 2
     assert config.active_page == 1
-    assert [page_cfg.title for page_cfg in config.pages] == ["图 1", "对比页"]
+    assert [page_cfg.title for page_cfg in config.pages] == ["page 1", "对比页"]
     assert config.pages[0].plots[0].curves == ["speed"]
     assert config.pages[1].plots[0].curves == ["rpm"]
     assert config.pages[0].row_height_factors[0] == 40
@@ -123,8 +123,8 @@ def test_template_v2_export_apply_roundtrip(loaded_window, qtbot, monkeypatch):
     assert manager.apply_config(mw, restored) is True
     qtbot.waitUntil(lambda: len(mw.pages) == 2, timeout=3000)
 
-    assert [page.title for page in mw.pages] == ["图 1", "对比页"]
-    assert mw.plot_tabs.tabText(0) == "图 1"
+    assert [page.title for page in mw.pages] == ["page 1", "对比页"]
+    assert mw.plot_tabs.tabText(0) == "page 1"
     assert mw.plot_tabs.tabText(1) == "对比页"
     assert mw.current_page is mw.pages[1], "active_page=1 应回到第二页"
     assert mw.pages[0].get_row_height(0) == 40

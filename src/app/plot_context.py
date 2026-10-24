@@ -242,6 +242,27 @@ class PageServices:
         # 只处理本类没有的名字；mw/page 都在 __dict__，不会递归
         return getattr(self.mw, name)
 
+    # ---- 全局状态的写入口 ----
+    # __getattr__ 只覆盖读取。若不给这两个高频写入显式转发，PlotContext 的
+    # 赋值会落到代理实例的 __dict__，形成只有本页看得见的影子状态（拖动固定
+    # 游标后 mw.pinned_x_values 仍停在旧值）。这里只转发需要写的两个名字，
+    # 不引入通用 __setattr__，避免误吞页级属性的赋值。
+    @property
+    def pinned_x_values(self) -> list[float]:
+        return self.mw.pinned_x_values
+
+    @pinned_x_values.setter
+    def pinned_x_values(self, value: list[float]) -> None:
+        self.mw.pinned_x_values = list(value)
+
+    @property
+    def cursor_values_hidden(self) -> bool:
+        return self.mw.cursor_values_hidden
+
+    @cursor_values_hidden.setter
+    def cursor_values_hidden(self, value: bool) -> None:
+        self.mw.cursor_values_hidden = bool(value)
+
     # ---- 页级 ----
     @property
     def plot_widgets(self):

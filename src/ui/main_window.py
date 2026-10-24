@@ -38,7 +38,7 @@ from PySide6.QtGui import (  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QInputDialog,
-    QMessageBox, QSplitter, QMenu, QStyle, QStatusBar, QFrame,
+    QMessageBox, QSplitter, QMenu, QStatusBar, QFrame,
 )
 
 SCREEN_WIDTH_MARGIN = 0.3
@@ -340,12 +340,12 @@ class MainWindow(QMainWindow):
         return None
 
     def _next_page_title(self) -> str:
-        """最小的未占用「图 N」标题（关闭中间页后不复用重名）。"""
+        """最小的未占用「page N」标题（关闭中间页后不复用重名）。"""
         used = {page.title for page in self.pages}
         index = 1
-        while f"图 {index}" in used:
+        while f"page {index}" in used:
             index += 1
-        return f"图 {index}"
+        return f"page {index}"
 
     def activate_page(self, page: PlotPage | None) -> None:
         """切换当前页（统一入口：新建页、关闭邻居、模板应用）。"""
@@ -432,8 +432,15 @@ class MainWindow(QMainWindow):
                 page.ensure_matrix()
             if page._scene_dirty:
                 page.restore_scene()
+            else:
+                # 新页在加载后创建，没走过 replots_after_loading；
+                # 激活时补一次全局 X limits（否则可无限缩放）
+                page.apply_global_x_limits()
             if page.saved_x_range and self._x_range_follow_enabled:
                 page.apply_x_range(*page.saved_x_range)
+            # 非脏页也要按全局游标状态对齐一次：视图跟随后旧 vline 可能落在
+            # viewRange 外（指纹未变时内部直接跳过，见 PlotPage.sync_cursor_scene）
+            page.sync_cursor_scene()
             page.sync_xlink()
             cursor_sync = getattr(self, "cursor_sync_manager", None)
             if cursor_sync is not None:

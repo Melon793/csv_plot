@@ -6,14 +6,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QInputDialog, QToolButton
 
 from src.ui.widgets.plot_tabs import MAX_PAGES
 
 
 def _plus_button(mw) -> QToolButton:
-    button = mw.plot_tabs.cornerWidget(Qt.Corner.TopRightCorner)
+    button = mw.plot_tabs.new_page_button
     assert isinstance(button, QToolButton)
     return button
 
@@ -34,6 +33,30 @@ def test_plus_enabled_after_load(loaded_window):
     mw = loaded_window
     assert mw.loader is not None
     assert _plus_button(mw).isEnabled()
+
+
+def test_new_page_gets_global_x_limits(loaded_window, qtbot):
+    """新建页在加载后创建，激活时必须补齐全局 X limits，不能无限缩放。"""
+    mw = loaded_window
+    first_master = mw.pages[0].master_viewbox()
+    assert first_master is not None
+    expected = tuple(first_master.state["limits"]["xLimits"])
+    assert expected != (-1e307, 1e307)
+
+    page = mw.new_page()
+    _wait_new_page_matrix(qtbot, page)
+    qtbot.waitUntil(
+        lambda: tuple(
+            page.master_viewbox().state["limits"]["xLimits"]
+        ) == expected,
+        timeout=3000,
+    )
+
+    pw = page.plot_widgets[0].plot_widget
+    pw.view_box.setXRange(-1e6, 1e6, padding=0)
+    x_min, x_max = pw.view_box.viewRange()[0]
+    assert x_min >= expected[0] - 1e-6
+    assert x_max <= expected[1] + 1e-6
 
 
 def test_new_page_inherits_visible_grid_and_builds_on_activation(loaded_window, qtbot):
@@ -172,12 +195,14 @@ def test_new_page_title_skips_used_numbers(loaded_window, qtbot):
     _wait_new_page_matrix(qtbot, p2)
     p3 = mw.new_page()
     _wait_new_page_matrix(qtbot, p3)
-    assert (mw.pages[0].title, p2.title, p3.title) == ("图 1", "图 2", "图 3")
+    assert (mw.pages[0].title, p2.title, p3.title) == (
+        "page 1", "page 2", "page 3",
+    )
 
     mw.close_page(p2)
     p4 = mw.new_page()
     _wait_new_page_matrix(qtbot, p4)
-    assert p4.title == "图 2"
+    assert p4.title == "page 2"
 
 
 def test_rename_updates_page_title(loaded_window, monkeypatch):

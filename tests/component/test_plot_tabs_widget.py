@@ -1,4 +1,4 @@
-"""PlotTabsWidget：角部「＋」闸门、上限、信号转发与常显 tab bar。
+"""PlotTabsWidget：尾部「＋」闸门、上限、信号转发与常显 tab bar。
 
 对应设计文档 §4.4 与决策 D-D（未加载数据时禁用「＋」，上限 8 页）。
 """
@@ -25,14 +25,14 @@ def tabs(qapp, qtbot):
 
 
 def _plus_button(tabs: PlotTabsWidget) -> QToolButton:
-    button = tabs.cornerWidget(Qt.Corner.TopRightCorner)
+    button = tabs.new_page_button
     assert isinstance(button, QToolButton)
     return button
 
 
 def _add_pages(tabs: PlotTabsWidget, count: int) -> None:
     for index in range(count):
-        tabs.addTab(QLabel(f"page {index}"), f"图 {index + 1}")
+        tabs.addTab(QLabel(f"page {index}"), f"page {index + 1}")
 
 
 def test_corner_plus_disabled_until_data_loaded(tabs):
@@ -94,8 +94,25 @@ def test_double_click_requests_rename(tabs, qtbot):
 
 
 def test_tab_bar_stays_visible_with_single_page(tabs, qapp):
-    """autoHide 会连 corner「＋」一起隐藏，故 tab bar 必须常显。"""
+    """autoHide 会把「＋」一起隐藏，故 tab bar 必须常显。"""
     _add_pages(tabs, 1)
     qapp.processEvents()
     assert tabs.tabBar().isVisible()
     assert _plus_button(tabs).isVisible()
+
+
+def test_native_tab_bar_base_is_disabled(tabs):
+    """macOS 原生 base 会盖住 QSS 底色（#bebebe），必须显式关掉。"""
+    assert tabs.tabBar().drawBase() is False
+
+
+def test_plus_follows_last_tab_instead_of_far_right(tabs, qapp):
+    _add_pages(tabs, 3)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    button = _plus_button(tabs)
+    last = bar.tabRect(2)
+    assert last.isValid()
+    # 紧挨最后一个标签右侧，而不是标签栏最右端
+    assert 0 <= button.x() - last.right() <= 12
+    assert button.x() + button.width() < bar.width() - 100

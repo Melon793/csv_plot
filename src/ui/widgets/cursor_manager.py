@@ -1412,6 +1412,14 @@ class CursorManager:
             return
 
         line = line_obj if line_obj is not None else self.pw.vline
+        # 单游标模式下 vline2 只是隐藏的备用线。恢复 bounds 时 pyqtgraph 会在
+        # setBounds() 内部对它做一次钳制 setValue，这条信号没有语义，却会以
+        # cursor_index=1 往 pinned_x_values 塞第二个值，污染单游标状态。
+        if (
+            line is getattr(self.pw, "vline2", None)
+            and self._get_cursor_mode() != "2 anchored cursor"
+        ):
+            return
         cursor_index = getattr(line, "cursor_index", 0)
 
         if self.is_cursor_pinned:
