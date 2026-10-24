@@ -33,6 +33,17 @@ if TYPE_CHECKING:
     from src.ui.widgets.plot_ui_manager import PlotUIManager
 
 
+def _as_float(value: float | None) -> float | None:
+    """把 limits 参数归一成 Python float（None 原样返回）。
+
+    曲线数据列常被下转为 float32，其 min/max 是 np.float32 标量。
+    ``ViewBox.setLimits`` 内部拿默认 limits（±1e307）与传入值做标量比较，
+    np.float32 参与比较时 numpy 会把 1e307 转成 float32，触发
+    "overflow encountered in cast" RuntimeWarning（一条日志噪音，不改变数值）。
+    """
+    return None if value is None else float(value)
+
+
 def set_y_autorange(vb: pg.ViewBox) -> None:
     """开启「Y 轴跟随当前 X 可见段」，并保证这一帧就重算。
 
@@ -183,10 +194,12 @@ class AxisManager:
         # 先设 limits（确保新 limits 生效后再设 range，避免被旧 limits 钳制）
         minXRange_val = self._get_min_x_range_value()
         if is_mdf:
-            pw.plot_item.setLimits(minXRange=minXRange_val)
+            pw.plot_item.setLimits(minXRange=_as_float(minXRange_val))
         else:
             pw.plot_item.setLimits(
-                xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val
+                xMin=_as_float(limits_xMin),
+                xMax=_as_float(limits_xMax),
+                minXRange=_as_float(minXRange_val),
             )
 
         # 再设 range（此时 limits 已是新值）
@@ -355,6 +368,8 @@ class AxisManager:
                 plot_id, limits_xMin, limits_xMax, old_limits, caller_info,
             )
         minXRange_val = self._get_min_x_range_value()
+        limits_xMin = _as_float(limits_xMin)
+        limits_xMax = _as_float(limits_xMax)
         # 确保 limits 宽度 >= minXRange，防止约束冲突导致 viewRange 振荡
         if limits_xMin is not None and limits_xMax is not None:
             limits_width = limits_xMax - limits_xMin
@@ -368,7 +383,9 @@ class AxisManager:
                     limits_width, minXRange_val, limits_xMin, limits_xMax,
                 )
         pw.plot_item.setLimits(
-            xMin=limits_xMin, xMax=limits_xMax, minXRange=minXRange_val
+            xMin=limits_xMin,
+            xMax=limits_xMax,
+            minXRange=_as_float(minXRange_val),
         )
 
     def _set_min_x_range(self, minXRange: float) -> None:
@@ -378,6 +395,7 @@ class AxisManager:
         防止 pyqtgraph 约束求解器在二者冲突时产生不稳定的 viewRange。
         """
         pw = self.pw
+        minXRange = _as_float(minXRange)
         # 获取当前的 xMin/xMax limits，必要时扩展以容纳 minXRange
         try:
             current_limits = pw.view_box.state.get('limits', {})
@@ -482,7 +500,9 @@ class AxisManager:
             y_max_limit = max_y + padding_yVal_limit * y_range
 
         if set_limits:
-            pw.plot_item.setLimits(yMin=y_min_limit, yMax=y_max_limit)
+            pw.plot_item.setLimits(
+                yMin=_as_float(y_min_limit), yMax=_as_float(y_max_limit)
+            )
         pw.view_box.setYRange(y_min_view, y_max_view, padding=DEFAULT_PADDING_VAL_Y)
 
     def _reset_plot_limits(self) -> None:

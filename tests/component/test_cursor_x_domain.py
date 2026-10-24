@@ -11,6 +11,8 @@ AxisManager.cursor_x_domain()（全局数据 X 域，随当前 factor/offset 现
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -199,6 +201,26 @@ def test_plotted_and_empty_plots_agree(pw_factory):
     for pw in (plotted, empty):
         pw.vline.setPos(0.5)
     assert plotted.vline.value() == pytest.approx(empty.vline.value())
+
+
+def test_float32_curve_data_does_not_warn_overflow_in_set_limits(pw_factory):
+    """float32 曲线数据不得把 np.float32 标量送进 ViewBox.setLimits。
+
+    ViewBox 内部拿默认 limits（±1e307）与传入值比较；np.float32 参与比较时
+    numpy 会把 1e307 转成 float32，触发 overflow encountered in cast 告警。
+    """
+    pw = pw_factory()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert pw.plot_variable("a")
+        pw.update_time_correction(0.1, 0.0)
+
+    overflow = [
+        str(w.message)
+        for w in caught
+        if "overflow encountered in cast" in str(w.message)
+    ]
+    assert overflow == []
 
 
 def test_remove_last_curve_keeps_domain(pw_factory):
