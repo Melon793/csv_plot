@@ -33,6 +33,17 @@ from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
 
 from tests.component._tab_mode_shared import FakeCsvLoader
 
+
+def _row_header_floor(font) -> int:
+    """小表（4 位行号）应有的定宽 —— 与 ``_row_header_width`` 同一公式。
+
+    48px 是**下限**，不是结果值：Windows 的默认 UI 字体更宽，同一公式在真机
+    实测算出 58px。把 48 写死进断言，测的就不是「宽度够不够」而是「字体像不像
+    macOS」了，所以这里按字体现算，另处再断言它不低于 48。
+    """
+    return max(48, QFontMetrics(font).horizontalAdvance("9" * 4) + 10)
+
+
 # ---------- T2(纯函数) _nearest_time_row：中点/端点钳制 ----------
 
 def test_nearest_time_row():
@@ -91,10 +102,11 @@ def test_tab_mode_row_header_and_content(tab_dialog, mdf_loader):
     assert tab_dialog._tab_mode is True
     assert tab_dialog._df.empty, "tab 模式下 _df 恒空（旧判据据此误判）"
     assert tab_dialog.has_table_content() is True
-    # 行号表头：可见 + 定宽 48（PandasTableModel.headerData 提供 1-based 行号）
+    # 行号表头：可见 + 定宽（PandasTableModel.headerData 提供 1-based 行号）
     vh = state.view.verticalHeader()
     assert not vh.isHidden()
-    assert vh.minimumWidth() == 48 and vh.maximumWidth() == 48
+    floor = _row_header_floor(state.view.font())
+    assert vh.minimumWidth() == vh.maximumWidth() == floor
 
 
 # ---------- P1 重置链：clear_all_columns 快照 + update_data 重建 ----------
@@ -769,15 +781,17 @@ def test_row_header_width_grows_with_row_count(qapp):
     """行号表头右对齐，宽度不足被裁的是高位数字（固定 48px 只容 5 位）。"""
     font = QTableView().font()
     fm = QFontMetrics(font)
+    floor = _row_header_floor(font)
 
     narrow = DataTableDialog._row_header_width(999, font)
     wide = DataTableDialog._row_header_width(1_000_000, font)
 
-    assert narrow == 48, "小表维持原有 48px 观感，不得变宽"
+    assert narrow == floor, "小表维持下限宽度（4 位数字 + 余量），不得随行数变宽"
+    assert floor >= 48
     assert wide > narrow
     # 断言相对关系而非绝对像素：offscreen 与真机字体不同
     assert wide >= fm.horizontalAdvance("999999") + 2, "6 位行号不得被裁切"
-    assert DataTableDialog._row_header_width(0, font) == 48, "空表不得算出 0 位"
+    assert DataTableDialog._row_header_width(0, font) == floor, "空表不得算出 0 位"
 
 
 def test_tab_row_header_width_matches_row_count(tab_dialog):

@@ -92,8 +92,16 @@ def test_axis_drawer_uses_its_own_narrower_width(loaded_window, qapp):
     assert drawer.width() <= STATUS_DRAWER_WIDTH_AXIS, "x 轴抽屉比设计宽度更宽"
 
     hint = next(l for l in drawer.findChildren(QLabel) if "Esc" in l.text())
-    assert hint.width() >= hint.sizeHint().width(), f"页脚提示被裁：{hint.width()}"
-    assert drawer.preview.width() >= drawer.preview.sizeHint().width()
+    # 报错信息把四个数一起带出来：Windows 真机字体更宽时这里**本来就会红**，
+    # 需要的是实测读数（判「该加宽」还是「该放宽断言」），而不是再来一轮复现。
+    assert hint.width() >= hint.sizeHint().width(), (
+        f"页脚提示被裁：实际 {hint.width()} < 需要 {hint.sizeHint().width()}"
+        f"｜抽屉宽 {drawer.width()} 上限 {STATUS_DRAWER_WIDTH_AXIS}"
+    )
+    assert drawer.preview.width() >= drawer.preview.sizeHint().width(), (
+        f"预览行被裁：实际 {drawer.preview.width()} < 需要 "
+        f"{drawer.preview.sizeHint().width()}｜抽屉宽 {drawer.width()}"
+    )
 
 
 def test_drawer_sits_above_status_bar(loaded_window, qapp):
@@ -163,7 +171,10 @@ def test_preview_line_is_not_clipped(loaded_window, qapp):
     drawer.freq_spin.setValue(3.0)  # → "x轴：Index（比例系数:0.333333, 偏移量:0）"
     qapp.processEvents()
 
-    assert drawer.preview.width() >= drawer.preview.sizeHint().width()
+    assert drawer.preview.width() >= drawer.preview.sizeHint().width(), (
+        f"预览行被裁：实际 {drawer.preview.width()} < 需要 "
+        f"{drawer.preview.sizeHint().width()}｜抽屉宽 {drawer.width()}"
+    )
 
 
 def test_active_preset_is_marked_with_a_dot(loaded_window, qapp):
