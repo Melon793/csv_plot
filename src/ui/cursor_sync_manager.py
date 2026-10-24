@@ -453,12 +453,27 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw._baseline_density = 0.0
 
     def _sync_min_xrange(self):
+        # 密度是全局量（§7.2 #12/#18）：跨页收集，取所有页显式可见子图的
+        # max_point_density；隐藏页的子图不是「不可见单元格」，必须用
+        # isHidden() 而不是 isVisible()（R0，否则隐藏页密度被整体漏掉）。
+        def _cell_shown(container) -> bool:
+            is_hidden = getattr(container, "isHidden", None)
+            if callable(is_hidden):
+                return not is_hidden()
+            # 组件测试的轻量替身只实现了 isVisible()
+            is_visible = getattr(container, "isVisible", None)
+            return bool(is_visible()) if callable(is_visible) else True
 
+        iter_all = getattr(self.mw, "iter_all_plot_widgets", None)
+        if callable(iter_all):
+            all_containers = list(iter_all())
+        else:
+            all_containers = list(self.mw.plot_widgets)
         new_max = max(
             (
                 container.plot_widget._max_point_density
-                for container in self.mw.plot_widgets
-                if container.isVisible()
+                for container in all_containers
+                if _cell_shown(container)
                 and container.plot_widget._max_point_density > 0
             ),
             default=0.0,
@@ -471,14 +486,17 @@ class CursorSyncManager(MainWindowBaseManager):
             prev = self.mw._global_max_density
             self.mw._global_max_density = new_max
             min_range = MIN_INDEX_LENGTH / new_max
+            # 场景写入只落在当前页；隐藏页的 limits 在其激活时由
+            # _post_activation 重新应用（S4），此处不跨页碰 ViewBox。
+            current_containers = list(self.mw.plot_widgets)
             logger.debug(
                 "[MIN_XRANGE] _sync_min_xrange: density %.4f -> %.4f, min_range=%.4f, "
                 "syncing to %d visible plots",
                 prev, new_max, min_range,
-                sum(1 for c in self.mw.plot_widgets if c.isVisible()),
+                sum(1 for c in current_containers if _cell_shown(c)),
             )
-            for container in self.mw.plot_widgets:
-                if container.isVisible():
+            for container in current_containers:
+                if _cell_shown(container):
                     container.plot_widget._set_min_x_range(min_range)
         else:
             logger.debug(

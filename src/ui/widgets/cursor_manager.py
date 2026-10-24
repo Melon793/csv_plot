@@ -1369,9 +1369,20 @@ class CursorManager:
                 self.pw.vline2.setMovable(False)
                 self.pw.vline2.setVisible(False)
 
-    def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
-        """绘图后更新光标边界和可见性"""
+    def _update_cursor_after_plot(
+        self, min_x_bound: float, max_x_bound: float, *, scene: bool = True
+    ):
+        """绘图后更新光标边界和可见性。
+
+        ``scene=False``（非活动页的数据重建）只写 vline 边界这一纯数值，
+        不改 vline 可见性/标签，并把所属页标脏，留给切页时按全局游标状态补建
+        （设计文档 §5.5：隐藏页一律不碰场景）。
+        """
         pw = self.pw
+        if not scene:
+            pw._set_vline_bounds([min_x_bound, max_x_bound])
+            pw.mark_dirty_for_activation()
+            return
         main_window = pw.window()
         if main_window and hasattr(main_window, 'cursor_btn'):
             # 设置 cursor 的移动边界

@@ -645,7 +645,7 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw._is_loading_new_data = False
         self._safety_unlock_version = -1
         self._stop_safety_timer()
-        for container in getattr(self.mw, "plot_widgets", []):
+        for container in self._iter_all_containers():
             widget = getattr(container, "plot_widget", None)
             if widget:
                 if not _qt_alive(widget):
@@ -694,7 +694,7 @@ class FileLoaderManager(MainWindowBaseManager):
             return
         try:
             widgets_to_refresh = []
-            for container in getattr(self.mw, "plot_widgets", []):
+            for container in self._iter_all_containers():
                 widget = getattr(container, "plot_widget", None)
                 if not widget:
                     continue
@@ -846,6 +846,20 @@ class FileLoaderManager(MainWindowBaseManager):
         except RuntimeError:  # 弱引用已失效
             return None
         return mw if _qt_alive(mw) else None
+
+    def _iter_all_containers(self):
+        """遍历所有页的绘图容器；旧式替身/构造期退化为当前页 ``plot_widgets``。
+
+        解锁、释放旧数据这类「数据层 / 全局」路径必须跨页（设计文档 §7.2
+        #10/#11），不能只用垫片返回的当前页列表。
+        """
+        iter_all = getattr(self.mw, "iter_all_plot_widgets", None)
+        if callable(iter_all):
+            try:
+                return list(iter_all())
+            except Exception:
+                logger.debug("遍历全部页绘图容器失败，回退当前页", exc_info=True)
+        return list(getattr(self.mw, "plot_widgets", []))
 
     def load_csv_file(self, file_path: str):
         # 入口唯一规范化点：文件对话框、拖拽（Qt 会把 UNC 产出成 "//host/share"）、
@@ -1838,8 +1852,8 @@ class FileLoaderManager(MainWindowBaseManager):
             # 且自身抛 AttributeError 时仍受下方 except 保护。
             self.mw.var_stats_cache = {}
 
-            # 1) 清理 plot widgets 的 data 引用
-            for container in getattr(self.mw, "plot_widgets", []):
+            # 1) 清理 plot widgets 的 data 引用（所有页：旧 DataFrame 必须真正释放）
+            for container in self._iter_all_containers():
                 widget = getattr(container, "plot_widget", None)
                 if widget is not None:
                     widget.data = None
@@ -1958,7 +1972,7 @@ class FileLoaderManager(MainWindowBaseManager):
         if hasattr(self.mw, 'plot_config_manager'):
             any_curve_restored = any(
                 not container.isHidden() and bool(container.plot_widget.curves)
-                for container in self.mw.plot_widgets
+                for container in self._iter_all_containers()
             )
 
             if any_curve_restored:
@@ -2234,7 +2248,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw._plot_row_current, self.mw._plot_col_current
             )
 
-        for container in self.mw.plot_widgets:
+        for container in self._iter_all_containers():
             widget = container.plot_widget
             widget.data = self.mw.loader.df
             widget.units = self.mw.loader.units

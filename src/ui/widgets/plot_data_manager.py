@@ -555,8 +555,15 @@ class PlotDataManager:
                 _lru_cache_put(pw.plot_context.value_cache, var_name, (y_values, y_format))
         return y_values, y_format
 
-    def update_time_correction(self, new_factor: float, new_offset: float):
-        """更新时间修正参数（统一版：始终从 CurveInfo.original_index 重算）"""
+    def update_time_correction(
+        self, new_factor: float, new_offset: float, *, scene: bool = True
+    ):
+        """更新时间修正参数（统一版：始终从 CurveInfo.original_index 重算）
+
+        ``scene=False``（非活动页）只做数据层重算（setData / x_data / x_range），
+        X limits、vline bounds 与标记区 setRegion 这些场景写入留给切页时补建
+        （设计文档 §6.7 时间修正落地顺序）。
+        """
         pw = self.pw
         pw._suppress_pin_update = True
         try:
@@ -599,6 +606,10 @@ class PlotDataManager:
             global_result = compute_global_x_limits(
                 loader, factor=pw.factor, offset=pw.offset
             )
+            if not scene:
+                # 非活动页：场景写入全部延后（激活时按全局基准重建）
+                pw.mark_dirty_for_activation()
+                return
             if global_result is not None:
                 _, _, limits_xMin, limits_xMax = global_result
                 self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)

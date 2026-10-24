@@ -233,6 +233,7 @@ class MultiCurveManager:
         update_header: bool = True,
         vline_fallback: tuple[float, float] | None = None,
         sync_min_xrange: bool = True,
+        scene: bool = True,
     ) -> None:
         """批量添加收尾：补偿 _batch_adding 模式跳过的副作用（唯一权威实现）。
 
@@ -245,6 +246,8 @@ class MultiCurveManager:
                 不传则保持原 bounds 不变（普通批量路径行为）
             sync_min_xrange: 是否触发全局 minXRange 同步（reload 路径在
                 所有 plot 重建后统一触发一次，传 False）
+            scene: 是否允许写场景（游标 item / 标签）。非活动页传 False，
+                保持默认 True 以兼容既有单页调用。
         """
         pw = self.pw
         if update_header:
@@ -261,10 +264,14 @@ class MultiCurveManager:
 
         if min_x is not None:
             pw._set_vline_bounds([min_x, max_x])
-            pw._update_cursor_after_plot(min_x, max_x)
+            if scene:
+                pw._update_cursor_after_plot(min_x, max_x)
 
-        if pw.vline.isVisible():
-            pw.update_cursor_label()
+        if scene:
+            if pw.vline.isVisible():
+                pw.update_cursor_label()
+        else:
+            pw.mark_dirty_for_activation()
 
         pw._recalc_max_point_density()
 

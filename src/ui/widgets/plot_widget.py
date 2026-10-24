@@ -748,9 +748,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """根据当前绘制的数据更新vline bounds → 委托到 CursorManager"""
         return self._cursor_manager._update_vline_bounds_from_data()
     
-    def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
-        """绘图后更新光标边界和可见性 → 委托到 CursorManager"""
-        self._cursor_manager._update_cursor_after_plot(min_x_bound, max_x_bound)
+    def _update_cursor_after_plot(
+        self, min_x_bound: float, max_x_bound: float, *, scene: bool = True
+    ):
+        """绘图后更新光标边界和可见性 → 委托到 CursorManager
+
+        ``scene=False`` 只写纯数值（vline 边界）并标记所属页场景待重建，
+        供数据重载时处理非活动页使用（设计文档 §5.5）。
+        """
+        self._cursor_manager._update_cursor_after_plot(
+            min_x_bound, max_x_bound, scene=scene
+        )
+
+    def mark_dirty_for_activation(self):
+        """把所属页标记为场景待重建（隐藏页切回时按全局状态补建）。"""
+        page = getattr(self, "page", None)
+        if page is not None and hasattr(page, "mark_dirty_for_activation"):
+            page.mark_dirty_for_activation()
 
     def clear_value_cache(self):
         """清除值缓存 → 委托到 PlotDataManager"""
@@ -764,9 +778,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """根据变量名获取值和格式 → 委托到 PlotDataManager"""
         return self._plot_data_manager.get_value_from_name(var_name)
     
-    def update_time_correction(self, new_factor, new_offset):
+    def update_time_correction(self, new_factor, new_offset, *, scene: bool = True):
         """更新时间修正参数 → 委托到 PlotDataManager"""
-        self._plot_data_manager.update_time_correction(new_factor, new_offset)
+        self._plot_data_manager.update_time_correction(
+            new_factor, new_offset, scene=scene
+        )
 
     # ---------------- 拖拽相关 ----------------
     def _build_indicator_text(

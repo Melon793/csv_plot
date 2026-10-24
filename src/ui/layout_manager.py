@@ -81,7 +81,8 @@ def sync_linked_x_ranges(grid, *, master_resolver=None) -> None:
         if not hasattr(container, "plot_widget"):
             continue
         view_box = container.plot_widget.view_box
-        if view_box.linkedView(0) is None and container.isVisible():
+        # isHidden()：隐藏页里的显式可见单元格不应被误判为「不可见」（R0）
+        if view_box.linkedView(0) is None and not container.isHidden():
             logger.warning(
                 "[XLINK_SYNC] plot idx=%d lost X-link, re-establishing", index
             )
@@ -611,10 +612,26 @@ class LayoutManager(MainWindowBaseManager):
             else:
                 curr_min, curr_max = 0, 1
 
-            for container in self.mw.plot_widgets:
-                container.plot_widget.update_time_correction(
-                    new_factor, new_offset
-                )
+            # 数据层：所有页的曲线都必须按新基准重算；场景层（X limits /
+            # vline / 标记区）只对当前页立即执行，隐藏页标脏等切页补建
+            # （设计文档 §6.7 时间修正落地顺序）。
+            pages = list(getattr(self.mw, "pages", None) or [])
+            if pages:
+                current_page = getattr(self.mw, "current_page", None)
+                for page in pages:
+                    scene = page is current_page
+                    for container in list(getattr(page, "plot_widgets", [])):
+                        widget = getattr(container, "plot_widget", None)
+                        if widget is None:
+                            continue
+                        widget.update_time_correction(
+                            new_factor, new_offset, scene=scene
+                        )
+            else:
+                for container in self.mw.plot_widgets:
+                    container.plot_widget.update_time_correction(
+                        new_factor, new_offset
+                    )
 
             if old_factor != 0:
                 index_min = (curr_min - old_offset) / old_factor

@@ -46,7 +46,9 @@ class PlotConfigManager(QObject):
         config.plots = []
         for container in main_window.plot_widgets:
             plot_widget = container.plot_widget
-            if not container.isVisible():
+            # R0：跨页路径不能用 isVisible()（隐藏页恒 False），用 isHidden()
+            # 判断「显式可见单元格」；当前页语义与旧实现一致。
+            if container.isHidden():
                 continue
             curve_names = plot_widget.curve_strategy.get_curve_names()
             if curve_names:
