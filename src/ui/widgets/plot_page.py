@@ -12,10 +12,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QGridLayout, QWidget
 
+from src.core.config import widget_alive
+from src.core.logger import get_logger
+from src.app.plot_context import PlotContext
+from src.ui.widgets.plot_container import PlotContainerWidget
+
 if TYPE_CHECKING:  # pragma: no cover - 仅类型检查
-    from src.ui.widgets.plot_container import PlotContainerWidget
+    pass
+
+logger = get_logger(__name__)
 
 
 class PlotPage:
@@ -42,6 +50,9 @@ class PlotPage:
         row_height_factors: dict[int, int] | None = None,
         plot_widgets: list | None = None,
     ):
+        #: 页级服务（PageServices），由 MainWindow 建页后注入
+        self.services = None
+        #: 页容器（QWidget）上是否发生过布局变更的调试记录
         self.title = title
         #: 每次切页/关页自增，迟到回调据此作废（设计文档 §5.2 / R4）
         self.epoch = 0
@@ -66,6 +77,385 @@ class PlotPage:
         self._xlink_dirty = False
         #: 切页前的 master X 范围，用于“切页跟随”（§5.2）
         self.saved_x_range: tuple[float, float] | None = None
+
+    # ------------------------------------------------------------------
+    # 网格构建 / 拆除（从 LayoutManager 搬迁，顺序与原实现一致）
+    # ------------------------------------------------------------------
+    def mark_all_plots_being_destroyed(self) -> None:
+        """deleteLater 到真正析构之间仍可能有定时器回调，先显式置位。"""
+        for container in self.plot_widgets:
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is not None:
+                try:
+                    plot_widget.mark_being_destroyed()
+                except RuntimeError:
+                    pass
+
+    def clear_matrix(self) -> None:
+        """摘掉全部子图容器（页容器本身保留）。"""
+        self.mark_all_plots_being_destroyed()
+        for index in reversed(range(self.plot_layout.count())):
+            widget = self.plot_layout.itemAt(index).widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.plot_widgets.clear()
+
+    def build_matrix(self, rows: int, cols: int, *, deps=None) -> None:
+        """建立 rows×cols 子图矩阵并注入页作用域 PlotContext。
+
+        Args:
+            rows/cols: 本次要建的网格规模（既有调用方传页容量）。
+            deps: PageServices；不传则用建页时注入的 ``self.services``。
+        """
+        from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+
+        services = deps if deps is not None else self.services
+        if services is None:
+            raise RuntimeError("PlotPage.build_matrix: PageServices 未注入")
+
+        self.mark_all_plots_being_destroyed()
+        for index in reversed(range(self.plot_layout.count())):
+            widget = self.plot_layout.itemAt(index).widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.plot_widgets.clear()
+
+        first_viewbox = None
+        for row in range(rows):
+            for col in range(cols):
+                plot_widget = DraggableGraphicsLayoutWidget(
+                    services.units, services.data, services.time_channels_infos
+                )
+                #: 反查所属页（mark region / 统计 / 日志头）
+                plot_widget.page = self
+                # 关键：注入“本页”而不是“当前页”，页切走后 ctx 仍指向自己的兄弟集合
+                plot_widget.plot_context = PlotContext(services)
+
+                cursor_enabled = services.cursor_btn.isChecked()
+                if cursor_enabled and services.cursor_values_hidden:
+                    plot_widget.toggle_cursor(False, hide_values_only=True)
+                else:
+                    plot_widget.toggle_cursor(cursor_enabled)
+                if cursor_enabled:
+                    plot_widget.apply_cursor_mode(
+                        services.cursor_mode, services.pinned_x_values
+                    )
+
+                if col == 0 and row == 0:
+                    first_viewbox = plot_widget.view_box
+                else:
+                    plot_widget.view_box.setXLink(first_viewbox)
+
+                container = PlotContainerWidget(plot_widget)
+                container.plot_widget = plot_widget
+
+                self.plot_layout.addWidget(container, row, col)
+                self.plot_widgets.append(container)
+
+        for row in range(rows):
+            percentage = self.row_height_factors.get(row, 100)
+            self.plot_layout.setRowStretch(row, max(1, percentage // 25))
+        for col in range(cols):
+            self.plot_layout.setColumnStretch(col, 1)
+        if services.mark_region_btn.isChecked():
+            services.layout_manager.toggle_mark_region(True)
+
+        for row in range(rows):
+            self.row_height_factors.setdefault(row, 100)
+
+    # ------------------------------------------------------------------
+    # 可见性 / 行高 / XLink
+    # ------------------------------------------------------------------
+    def apply_visibility(self, rows: int, cols: int) -> None:
+        """按显式行列设置可见区（不能用 isVisible 反推，R0）。"""
+        self.rows_current = int(rows)
+        self.cols_current = int(cols)
+        for index, container in enumerate(self.plot_widgets):
+            row, col = divmod(index, self.cols_max) if self.cols_max > 0 else (0, 0)
+            container.setVisible(row < rows and col < cols)
+        self.sync_xlink_after_visibility_change(rows, cols)
+        self.adjust_stretch_and_range(rows, cols)
+
+    def sync_xlink_after_visibility_change(self, rows: int, cols: int) -> None:
+        """可见性变更后建立/断开本页 link（不跨页建 link）。"""
+        master_container = self.master_container()
+        master_vb = self.master_viewbox()
+        if master_container is None or master_vb is None:
+            return
+        for index, container in enumerate(self.plot_widgets):
+            if container is master_container or not widget_alive(container):
+                continue
+            row, col = divmod(index, self.cols_max) if self.cols_max > 0 else (0, 0)
+            should_be_visible = row < rows and col < cols
+            view_box = getattr(getattr(container, "plot_widget", None), "view_box", None)
+            if view_box is None:
+                continue
+            currently_linked = view_box.linkedView(0) is not None
+            if should_be_visible and not currently_linked:
+                logger.debug(
+                    "[XLINK] set_plots_visible: establishing link for plot idx=%d r=%d c=%d",
+                    index, row, col,
+                )
+                view_box.setXLink(master_vb)
+            elif not should_be_visible and currently_linked:
+                logger.debug(
+                    "[XLINK] set_plots_visible: breaking link for hidden plot idx=%d r=%d c=%d",
+                    index, row, col,
+                )
+                view_box.setXLink(None)
+
+    def adjust_stretch_and_range(self, rows: int, cols: int) -> None:
+        """调整行列 stretch，并把可见子图对齐到首个可见 master 的 X 范围。"""
+        services = self.services
+        for col in range(self.cols_max):
+            has_visible = any(
+                self.cell_visible(row * self.cols_max + col)
+                for row in range(self.rows_max)
+                if row * self.cols_max + col < len(self.plot_widgets)
+            )
+            self.plot_layout.setColumnStretch(col, 1 if has_visible else 0)
+            logger.debug(
+                "[LAYOUT] setColumnStretch col=%d stretch=%s has_visible=%s",
+                col, 1 if has_visible else 0, has_visible,
+            )
+
+        for row in range(self.rows_max):
+            if row < rows:
+                percentage = self.row_height_factors.get(row, 100)
+                self.plot_layout.setRowStretch(row, max(1, percentage // 25))
+            else:
+                self.plot_layout.setRowStretch(row, 0)
+
+        self.rows_current = int(rows)
+        self.cols_current = int(cols)
+        self.restore_mark_regions()
+
+        if not self.plot_widgets:
+            services.cursor_sync_manager._sync_min_xrange()
+            return
+
+        visible_indices = [
+            index for index in range(len(self.plot_widgets)) if self.cell_visible(index)
+        ]
+        if not visible_indices:
+            logger.debug("[LAYOUT] no visible plots, skipping X-range sync")
+            services.cursor_sync_manager._sync_min_xrange()
+            return
+
+        first_visible = self.plot_widgets[visible_indices[0]]
+        global_min, global_max = None, None
+        try:
+            global_min, global_max = first_visible.plot_widget.view_box.viewRange()[0]
+            logger.debug(
+                "[LAYOUT] X-range sync source: first_visible viewRange=(%.4f, %.4f)",
+                global_min, global_max,
+            )
+        except Exception:
+            logger.debug("[LAYOUT] failed to read first visible plot viewRange, falling back")
+
+        if global_min is None or global_max is None:
+            global_min, global_max = services.cursor_sync_manager.collect_global_x_range()
+            if global_min is not None:
+                logger.debug(
+                    "[LAYOUT] X-range sync fallback: collect_global_x_range=(%.4f, %.4f)",
+                    global_min, global_max,
+                )
+
+        if global_min is None or global_max is None:
+            services.cursor_sync_manager._sync_min_xrange()
+            return
+
+        synced_count = 0
+        sync_error = None
+        for index in visible_indices:
+            self.plot_widgets[index].plot_widget._is_syncing_range = True
+        try:
+            for index in visible_indices:
+                container = self.plot_widgets[index]
+                widget = container.plot_widget
+                view_box = widget.view_box
+                linked = view_box.linkedView(0)
+                geom = container.geometry()
+
+                before_min, before_max = None, None
+                try:
+                    before_min, before_max = view_box.viewRange()[0]
+                except Exception:
+                    logger.debug("获取 viewRange 失败", exc_info=True)
+
+                if linked is not None:
+                    view_box.setXLink(None)
+                    logger.debug(
+                        "[XLINK] plot=%s temp unlink for sync_all (%.4f, %.4f)",
+                        getattr(widget, "y_name", f"idx={index}"),
+                        global_min, global_max,
+                    )
+                try:
+                    view_box.enableAutoRange(x=False)
+                    view_box.setXRange(global_min, global_max, padding=0)
+                finally:
+                    if linked is not None:
+                        view_box.setXLink(linked)
+                        logger.debug(
+                            "[XLINK] plot=%s link restored after sync_all",
+                            getattr(widget, "y_name", f"idx={index}"),
+                        )
+
+                after_min, after_max = None, None
+                try:
+                    after_min, after_max = view_box.viewRange()[0]
+                except Exception:
+                    logger.debug("获取 viewRange 失败", exc_info=True)
+
+                row, col = divmod(index, self.cols_max) if self.cols_max > 0 else (0, 0)
+                match_ok = (
+                    after_min is not None
+                    and after_max is not None
+                    and abs(after_min - global_min) < 1e-6
+                    and abs(after_max - global_max) < 1e-6
+                )
+                logger.debug(
+                    "[LAYOUT]   plot[%d,%d] idx=%d linked=%s before=(%.4f,%.4f) "
+                    "after=(%.4f,%.4f) geom=(%d,%d %dx%d) match=%s",
+                    row, col, index, linked is not None,
+                    before_min if before_min is not None else -1,
+                    before_max if before_max is not None else -1,
+                    after_min if after_min is not None else -1,
+                    after_max if after_max is not None else -1,
+                    geom.x(), geom.y(), geom.width(), geom.height(),
+                    match_ok,
+                )
+                if not match_ok:
+                    logger.warning(
+                        "[LAYOUT] X-RANGE MISMATCH! plot[%d,%d] linked=%s "
+                        "target=(%.4f,%.4f) actual=(%.4f,%.4f)",
+                        row, col, linked is not None,
+                        global_min, global_max,
+                        after_min if after_min is not None else -1,
+                        after_max if after_max is not None else -1,
+                    )
+                synced_count += 1
+        except Exception as exc:
+            sync_error = exc
+            logger.warning(
+                "[LAYOUT] set_plots_visible: sync failed at plot %d/%d: %s",
+                synced_count, len(visible_indices), exc,
+            )
+        finally:
+            for index in visible_indices:
+                self.plot_widgets[index].plot_widget._is_syncing_range = False
+
+        services.cursor_sync_manager._sync_min_xrange()
+        if sync_error is None:
+            logger.debug(
+                "[LAYOUT] set_plots_visible done: synced %d visible plot(s)", synced_count,
+            )
+
+        # 布局变更后调度一次 X-link 健康检查，覆盖 reload 后 link 丢失场景
+        self.schedule_xlink_sync()
+
+    def sync_xlink(self) -> None:
+        """按本页 master 重建各子图 X 范围；隐藏页只记 dirty。"""
+        if not widget_alive(self.widget):
+            return
+        if self.widget.isHidden():
+            self._xlink_dirty = True
+            return
+        from src.ui.layout_manager import sync_linked_x_ranges
+
+        self._xlink_dirty = False
+        sync_linked_x_ranges(
+            self, master_resolver=lambda _containers: self.master_container()
+        )
+
+    def schedule_xlink_sync(self, delay_ms: int = 50) -> None:
+        """页级 50ms 防抖；回调按 epoch 作废（R4）。"""
+        if self._pending_xlink_sync:
+            return
+        self._pending_xlink_sync = True
+        epoch = self.epoch
+        QTimer.singleShot(delay_ms, lambda: self._run_pending_sync(epoch))
+
+    def _run_pending_sync(self, epoch: int) -> None:
+        if epoch != self.epoch or not widget_alive(self.widget):
+            return
+        # 定时器落地时页可能已随窗口销毁：sync_xlink 入口还有一道存活守卫，
+        # 这里先挡一次，避免 _pending_xlink_sync 在残壳上被无意义地推进。
+        self._pending_xlink_sync = False
+        self.sync_xlink()
+
+    def set_row_height(self, row: int, percentage: int) -> None:
+        if row < 0 or row >= self.rows_max:
+            return
+        self.row_height_factors[row] = percentage
+        for candidate in range(self.rows_max):
+            visible = any(
+                self.cell_visible(candidate * self.cols_max + col)
+                for col in range(self.cols_max)
+            )
+            if visible:
+                pct = self.row_height_factors.get(candidate, 100)
+                self.plot_layout.setRowStretch(candidate, max(1, pct // 25))
+            else:
+                self.plot_layout.setRowStretch(candidate, 0)
+
+    def set_all_row_height(self, percentage: int) -> None:
+        for row in range(self.rows_max):
+            self.row_height_factors[row] = percentage
+        for row in range(self.rows_max):
+            visible = any(
+                self.cell_visible(row * self.cols_max + col)
+                for col in range(self.cols_max)
+            )
+            if visible:
+                pct = self.row_height_factors.get(row, 100)
+                self.plot_layout.setRowStretch(row, max(1, pct // 25))
+            else:
+                self.plot_layout.setRowStretch(row, 0)
+
+    def get_row_height(self, row: int) -> int:
+        return self.row_height_factors.get(row, 100)
+
+    def restore_mark_regions(self) -> None:
+        """布局变更后按全局区间重建本页 mark region（页作用域）。"""
+        services = self.services
+        if services is None or not services.mark_region_btn.isChecked():
+            return
+        if self.widget.isHidden():
+            self.mark_dirty_for_activation()
+            return
+        master = self.master_container()
+        if master is None:
+            return
+        mark = getattr(master.plot_widget, "mark_region", None)
+        if mark is not None:
+            services.saved_mark_range = mark.getRegion()
+
+        for container in self.plot_widgets:
+            try:
+                container.plot_widget.remove_mark_region()
+            except RuntimeError:
+                pass
+
+        try:
+            view_min, view_max = master.plot_widget.view_box.viewRange()[0]
+        except Exception:
+            logger.debug("[MARK] 读取视图范围失败，跳过区域重建", exc_info=True)
+            return
+        saved = services.saved_mark_range
+        if saved:
+            min_x, max_x = saved
+        else:
+            width = view_max - view_min
+            min_x = view_min + width / 3
+            max_x = view_min + 2 * width / 3
+
+        for index, container in enumerate(self.plot_widgets):
+            if self.cell_visible(index):
+                container.plot_widget.add_mark_region(min_x, max_x)
+        services.layout_manager.request_mark_stats_refresh(immediate=True)
 
     # ------------------------------------------------------------------
     # 纯查询：跨页路径必须用显式行列，不能用 isVisible（全局规则 R0）
@@ -130,10 +520,10 @@ class PlotPage:
     # 生命周期
     # ------------------------------------------------------------------
     def dispose(self) -> None:
-        """断开页容器与 Qt 父控件的关系（网格清理由 P0-2 的 clear_matrix 负责）。"""
+        """关闭标签页：标记销毁 → 摘场景 → 删页容器。"""
         self.epoch += 1
         self.cancel_pending()
-        self.plot_widgets.clear()
+        self.clear_matrix()
         self.widget.hide()
         self.widget.setParent(None)
         self.widget.deleteLater()

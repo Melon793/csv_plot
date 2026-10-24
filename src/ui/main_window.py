@@ -272,6 +272,10 @@ class MainWindow(QMainWindow):
         )
         self.pages.append(page)
         self._current_page = page
+        # 页作用域服务：子图 ctx 拿到的是“自己所在页”，不是“当前页”
+        from src.app.plot_context import PageServices
+
+        page.services = PageServices(self, page)
         return page
 
     def page_index(self, page: PlotPage | None) -> int:

@@ -180,6 +180,11 @@ class PlotContext:
         )
 
     def sync_mark_regions(self, mark_region: Any) -> None:
+        # 页级服务自带所属页；旧替身/无页服务继续走 LayoutManager 默认（广播）
+        handler = getattr(self._services, "sync_mark_regions", None)
+        if handler is not None:
+            handler(mark_region)
+            return
         self._services.layout_manager.sync_mark_regions(mark_region)
 
     def _sync_min_xrange(self) -> None:
@@ -211,3 +216,54 @@ class PlotContext:
 
     def is_cursor_enabled(self) -> bool:
         return self._services.cursor_sync_manager.is_cursor_enabled()
+
+
+class PageServices:
+    """把 MainWindow 的全局服务 + 所属 PlotPage 的页级状态拼成 PlotServices。
+
+    页级状态（§3）：plot_widgets / plot_layout / 行列 / 行高。
+    全局状态（§3）：数据、时间基准、游标、标记区间、密度、缓存 —— 一律经
+    ``__getattr__`` 透传到 MainWindow，保证所有页看到同一份。
+    """
+
+    def __init__(self, main_window: Any, page: Any):
+        object.__setattr__(self, "mw", main_window)
+        object.__setattr__(self, "page", page)
+
+    def __getattr__(self, name: str) -> Any:
+        # 只处理本类没有的名字；mw/page 都在 __dict__，不会递归
+        return getattr(self.mw, name)
+
+    # ---- 页级 ----
+    @property
+    def plot_widgets(self):
+        return self.page.plot_widgets
+
+    @property
+    def plot_layout(self):
+        return self.page.plot_layout
+
+    @property
+    def _plot_col_max_default(self) -> int:
+        return self.page.cols_max
+
+    @property
+    def _plot_row_max_default(self) -> int:
+        return self.page.rows_max
+
+    @property
+    def _plot_row_current(self) -> int:
+        return self.page.rows_current
+
+    @property
+    def _plot_col_current(self) -> int:
+        return self.page.cols_current
+
+    @property
+    def row_height_factors(self) -> dict:
+        return self.page.row_height_factors
+
+    # ---- 页作用域动作 ----
+    def sync_mark_regions(self, mark_region: Any) -> None:
+        """只同步本页 region；跨页广播由 LayoutManager（page=None）负责。"""
+        self.layout_manager.sync_mark_regions(mark_region, page=self.page)
