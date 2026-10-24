@@ -20,7 +20,7 @@ class _FakeLayoutManager:
     def __init__(self):
         self.synced = []
 
-    def sync_mark_regions(self, region):
+    def sync_mark_regions(self, region, *, page=None):
         self.synced.append(region)
 
 

@@ -65,11 +65,17 @@ class MarkRegionManager:
             line.setHoverPen(pg.mkPen(color="r", width=10))
 
         self.pw.plot_item.addItem(self.pw.mark_region)
+        # 槽内按 pw.page 反查所属页（§6.4 #6）：连接/断开都指向同一个成员方法，
+        # 不用 lambda（每次都是新对象，无法可靠 disconnect）
+        self.pw.mark_region.sigRegionChanged.connect(self._on_region_changed)
+
+    def _on_region_changed(self, region):
+        """任一页的区间被拖动：交给 LayoutManager 广播到全部页。"""
+        page = getattr(self.pw, "page", None)
         window = self.pw.window()
-        if window is not None and hasattr(window, "layout_manager"):
-            self.pw.mark_region.sigRegionChanged.connect(
-                window.layout_manager.sync_mark_regions
-            )
+        if window is None or not hasattr(window, "layout_manager"):
+            return
+        window.layout_manager.sync_mark_regions(region, page=page)
 
     def _teardown_mark_region(self):
         """断开信号 → 摘出场景 → 销毁 C++ 对象。
@@ -81,15 +87,11 @@ class MarkRegionManager:
         region = self.pw.mark_region
         if region is None:
             return
-        window = self.pw.window()
-        if window is not None and hasattr(window, "layout_manager"):
-            try:
-                region.sigRegionChanged.disconnect(
-                    window.layout_manager.sync_mark_regions
-                )
-            except (RuntimeError, TypeError):
-                # 构造期窗口尚无 layout_manager / 连接本就不存在
-                pass
+        try:
+            region.sigRegionChanged.disconnect(self._on_region_changed)
+        except (RuntimeError, TypeError):
+            # 构造期尚无连接 / C++ 侧已销毁
+            pass
         if region.scene() is not None:
             self.pw.plot_item.removeItem(region)
         region.deleteLater()
@@ -99,15 +101,21 @@ class MarkRegionManager:
         """移除标记区域"""
         self._teardown_mark_region()
 
-    def get_mark_stats(self) -> list | None:
+    def get_mark_stats(self, region: tuple[float, float] | None = None) -> list | None:
         """获取标记区域的统计信息（统一版：始终走 curves 字典路径）
+
+        Args:
+            region: 显式区间；隐藏页尚未补建 region item 时由调用方传入全局
+                ``saved_mark_range``，保证统计窗口覆盖所有页（§6.4 #9）。
 
         【NumPy优化】使用NumPy掩码数组批量计算统计值，避免循环过滤
         """
-        if not self.pw.mark_region:
-            return None
-
-        min_x, max_x = self.pw.mark_region.getRegion()
+        if region is None:
+            if not self.pw.mark_region:
+                return None
+            min_x, max_x = self.pw.mark_region.getRegion()
+        else:
+            min_x, max_x = region
         return self._get_mark_stats_multi_curve(min_x, max_x)
 
     def _get_mark_stats_multi_curve(self, min_x: float, max_x: float) -> list | None:

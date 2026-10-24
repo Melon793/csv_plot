@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
 )
+from shiboken6 import isValid
 
 
 class MarkStatsWindow(QDialog):
@@ -29,6 +30,9 @@ class MarkStatsWindow(QDialog):
 
     @classmethod
     def get_instance(cls, parent=None):
+        # 主窗口销毁后子窗口的 C++ 对象已不在，类级单例不能继续复用
+        if cls._instance is not None and not isValid(cls._instance):
+            cls._instance = None
         if cls._instance is None:
             cls._instance = cls(parent)
         return cls._instance
@@ -81,84 +85,82 @@ class MarkStatsWindow(QDialog):
             )
         super().changeEvent(event)
 
+    @staticmethod
+    def _stat_cells(stat) -> list[str]:
+        return [
+            f"{stat.x1:.2f}",
+            f"{stat.x2:.2f}",
+            f"{stat.y1:.2f}",
+            f"{stat.y2:.2f}",
+            f"{stat.dx:.2f}",
+            f"{stat.dy:.2f}",
+            f"{stat.slope:.2f}" if not np.isinf(stat.slope) else "inf",
+            f"{stat.y_avg:.2f}",
+            f"{stat.y_max:.2f}",
+            f"{stat.y_min:.2f}",
+        ]
+
     def update_stats(self, stats_list):
-        """更新统计信息显示
+        """更新统计信息显示（按页分组，§6.4 #9）
 
         Args:
-            stats_list: 每个plot的统计信息列表
-                - 单曲线模式：每个元素是一个包含11个值的元组列表
-                - 多曲线模式：每个元素是一个包含多个元组的列表
+            stats_list: ``[(page_name, idx_in_page, stats), ...]``。
+                stats 为该子图的曲线统计列表；``None`` 表示该子图没有可统计
+                的曲线。仍兼容旧式 ``[stats, ...]``（视为单页「图 1」）。
         """
         self.tree.clear()
         self.no_curve_item = QTreeWidgetItem(self.tree, ["No Curve"])
         self.no_curve_item.setExpanded(False)
         has_no_curve = False
+        page_items: dict[str, QTreeWidgetItem] = {}
 
-        for idx, stats in enumerate(stats_list):
-            if stats:
-                # stats现在是一个列表，可能包含多个曲线的统计信息
-                if len(stats) == 1:
-                    # 单曲线模式：直接显示
-                    stat = stats[0]
-                    QTreeWidgetItem(
-                        self.tree,
-                        [
-                            f"Plot {idx+1} -> {stat.label}",
-                            f"{stat.x1:.2f}",
-                            f"{stat.x2:.2f}",
-                            f"{stat.y1:.2f}",
-                            f"{stat.y2:.2f}",
-                            f"{stat.dx:.2f}",
-                            f"{stat.dy:.2f}",
-                            f"{stat.slope:.2f}" if not np.isinf(stat.slope) else "inf",
-                            f"{stat.y_avg:.2f}",
-                            f"{stat.y_max:.2f}",
-                            f"{stat.y_min:.2f}",
-                        ],
-                    )
-                else:
-                    # 多曲线模式：创建父节点和子节点
-                    parent_item = QTreeWidgetItem(
-                        self.tree,
-                        [
-                            f"Plot {idx+1} (多曲线)",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                        ],
-                    )
-                    parent_item.setExpanded(True)
-
-                    for stat in stats:
-                        QTreeWidgetItem(
-                            parent_item,
-                            [
-                                f"  → {stat.label}",
-                                f"{stat.x1:.2f}",
-                                f"{stat.x2:.2f}",
-                                f"{stat.y1:.2f}",
-                                f"{stat.y2:.2f}",
-                                f"{stat.dx:.2f}",
-                                f"{stat.dy:.2f}",
-                                f"{stat.slope:.2f}" if not np.isinf(stat.slope) else "inf",
-                                f"{stat.y_avg:.2f}",
-                                f"{stat.y_max:.2f}",
-                                f"{stat.y_min:.2f}",
-                            ],
-                        )
+        normalized: list[tuple[str, int, object]] = []
+        for position, entry in enumerate(stats_list):
+            if isinstance(entry, tuple) and len(entry) == 3:
+                normalized.append(entry)
             else:
+                normalized.append(("图 1", position, entry))
+
+        def _page_item(page_name: str) -> QTreeWidgetItem:
+            item = page_items.get(page_name)
+            if item is None:
+                item = QTreeWidgetItem(
+                    self.tree,
+                    [page_name, "", "", "", "", "", "", "", "", "", ""],
+                )
+                item.setExpanded(True)
+                page_items[page_name] = item
+            return item
+
+        for page_name, idx, stats in normalized:
+            if not stats:
                 has_no_curve = True
                 QTreeWidgetItem(
                     self.no_curve_item,
-                    [f"Plot {idx+1}", "", "", "", "", "", "", "", "", "", ""],
+                    [f"{page_name} · Plot {idx + 1}", "", "", "", "", "", "", "", "", "", ""],
                 )
+                continue
+
+            page_item = _page_item(page_name)
+            if len(stats) == 1:
+                # 单曲线模式：直接挂在页节点下
+                stat = stats[0]
+                QTreeWidgetItem(
+                    page_item,
+                    [f"Plot {idx + 1} -> {stat.label}", *self._stat_cells(stat)],
+                )
+            else:
+                # 多曲线模式：创建子图父节点和曲线子节点
+                plot_item = QTreeWidgetItem(
+                    page_item,
+                    [f"Plot {idx + 1} (多曲线)", "", "", "", "", "", "", "", "", "", ""],
+                )
+                plot_item.setExpanded(True)
+                for stat in stats:
+                    QTreeWidgetItem(
+                        plot_item,
+                        [f"  → {stat.label}", *self._stat_cells(stat)],
+                    )
 
         if not has_no_curve:
             self.tree.takeTopLevelItem(

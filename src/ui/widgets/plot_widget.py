@@ -1189,9 +1189,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """移除标记区域 → 委托到 MarkRegionManager"""
         self._mark_region_manager.remove_mark_region()
 
-    def get_mark_stats(self):
-        """获取标记区域统计 → 委托到 MarkRegionManager"""
-        return self._mark_region_manager.get_mark_stats()
+    def get_mark_stats(self, region=None):
+        """获取标记区域统计 → 委托到 MarkRegionManager
+
+        ``region`` 可选：隐藏页的 region item 尚未补建时按全局区间直接算。
+        """
+        return self._mark_region_manager.get_mark_stats(region)
 
     def _apply_plot_style(self, show_symbols: bool):
         """应用绘图样式 → 委托到 MultiCurveManager"""

@@ -438,6 +438,8 @@ class MainWindow(QMainWindow):
             cursor_sync = getattr(self, "cursor_sync_manager", None)
             if cursor_sync is not None:
                 cursor_sync._sync_min_xrange()
+                # 切页收尾：清节流时间戳并补刷一次标签（§6.3 #4）
+                cursor_sync.refresh_cursor_labels(page)
             if self.mark_region_btn.isChecked():
                 page.restore_mark_regions()
         finally:

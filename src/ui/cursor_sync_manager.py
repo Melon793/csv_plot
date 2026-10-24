@@ -72,18 +72,57 @@ class CursorSyncManager(MainWindowBaseManager):
                 except Exception:
                     logger.debug("刷新 cursor UI 失败", exc_info=True)
 
+    def _iter_all_containers(self):
+        """跨页容器快照（优先 mw.iter_all_plot_widgets，已过滤销毁项）。"""
+        iter_all = getattr(self.mw, "iter_all_plot_widgets", None)
+        if callable(iter_all):
+            return list(iter_all())
+        return list(getattr(self.mw, "plot_widgets", []) or [])
+
+    def _defers_scene_write(self, widget) -> bool:
+        """非当前页只许写状态：置页脏，切页时由 ``restore_scene`` 补建（§6.3 #3）。"""
+        page = getattr(widget, "page", None)
+        if page is None:
+            return False
+        current = getattr(self.mw, "current_page", None)
+        return current is not None and page is not current
+
     def _get_cursor_source_plot(self, source_plot=None):
         if source_plot is not None and hasattr(source_plot, "view_box"):
             return source_plot
-        for container in getattr(self.mw, "plot_widgets", []):
+        # 兜底顺序：当前页可见 → 当前页任意 → 全局任意（§6.3 #5）
+        current = getattr(self.mw, "current_page", None)
+        if current is not None:
+            candidates = list(getattr(current, "plot_widgets", []) or [])
+        else:
+            candidates = list(getattr(self.mw, "plot_widgets", []) or [])
+        for container in candidates:
             widget = getattr(container, "plot_widget", None)
             if widget is not None and container.isVisible():
                 return widget
-        for container in getattr(self.mw, "plot_widgets", []):
+        for container in candidates:
+            widget = getattr(container, "plot_widget", None)
+            if widget is not None:
+                return widget
+        for container in self._iter_all_containers():
             widget = getattr(container, "plot_widget", None)
             if widget is not None:
                 return widget
         return None
+
+    def refresh_cursor_labels(self, page=None) -> None:
+        """清节流时间戳并补刷一次标签（切页/模式切换共用收尾）。"""
+        if page is not None:
+            containers = list(getattr(page, "plot_widgets", []) or [])
+        else:
+            containers = list(getattr(self.mw, "plot_widgets", []) or [])
+        for container in containers:
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if hasattr(widget, "_last_cursor_update_time"):
+                widget._last_cursor_update_time = 0
+            safe_qt_op(widget.update_cursor_label)
 
     def _get_cursor_view_range(self, source_plot=None):
         plot = self._get_cursor_source_plot(source_plot)
@@ -120,9 +159,12 @@ class CursorSyncManager(MainWindowBaseManager):
         return int(np.argmax(distances))
 
     def _apply_cursor_mode_to_plots(self):
-        for container in getattr(self.mw, "plot_widgets", []):
+        for container in self._iter_all_containers():
             widget = getattr(container, "plot_widget", None)
             if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                widget.mark_dirty_for_activation()
                 continue
             widget.apply_cursor_mode(self.mw.cursor_mode, self.mw.pinned_x_values)
 
@@ -197,11 +239,7 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw.cursor_mode = mode
 
         self._apply_cursor_mode_to_plots()
-        for container in getattr(self.mw, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget is not None:
-                widget._last_cursor_update_time = 0
-                safe_qt_op(widget.update_cursor_label)
+        self.refresh_cursor_labels()
 
     def set_cursor_enabled(self, enabled: bool) -> None:
         if self.mw.cursor_btn:
@@ -213,10 +251,16 @@ class CursorSyncManager(MainWindowBaseManager):
         return False
 
     def toggle_cursor_all(self, checked):
-        if not self.mw.plot_widgets:
+        containers = self._iter_all_containers()
+        if not containers:
             return
-        for container in self.mw.plot_widgets:
-            widget = container.plot_widget
+        for container in containers:
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                widget.mark_dirty_for_activation()
+                continue
             if checked and self.mw.cursor_values_hidden:
                 widget.toggle_cursor(False, hide_values_only=True)
             else:
@@ -234,7 +278,8 @@ class CursorSyncManager(MainWindowBaseManager):
     def _realign_pinned_cursor_after_time_correction(
         self, old_factor, old_offset, new_factor, new_offset
     ):
-        if not self.mw.plot_widgets:
+        all_containers = self._iter_all_containers()
+        if not all_containers:
             return
 
         if getattr(self.mw, "cursor_mode", "1 free cursor") == "1 free cursor":
@@ -262,7 +307,7 @@ class CursorSyncManager(MainWindowBaseManager):
         if hasattr(self.mw, "loader") and self.mw.loader is not None:
             datalength = max(int(self.mw.loader.datalength), 0)
         else:
-            first_widget = self.mw.plot_widgets[0].plot_widget
+            first_widget = all_containers[0].plot_widget
             first_ci = next(iter(first_widget.curves.values()), None)
             if first_ci is not None and first_ci.original_index is not None:
                 datalength = len(first_ci.original_index)
@@ -283,8 +328,14 @@ class CursorSyncManager(MainWindowBaseManager):
         self.mw.pinned_x_values = new_display_values
         self.mw.pinned_index_values = list(pinned_indices)
 
-        for container in self.mw.plot_widgets:
-            widget = container.plot_widget
+        for container in all_containers:
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                # 隐藏页只记脏：pin 值是全局的，切页时 restore_scene 按新基准重建
+                widget.mark_dirty_for_activation()
+                continue
 
             # 统一版：有可见曲线时用本图曲线域，否则用全局数据 X 域（唯一权威源，
             # 随当前 factor/offset 现算）。曾经这里手写 offset+factor*1 / datalength，
@@ -374,8 +425,14 @@ class CursorSyncManager(MainWindowBaseManager):
     def reset_all_pin_states(self):
         self.mw.cursor_mode = "1 free cursor"
         self.mw.pinned_x_values = []
-        for container in self.mw.plot_widgets:
-            container.plot_widget.reset_pin_state()
+        for container in self._iter_all_containers():
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                widget.mark_dirty_for_activation()
+                continue
+            widget.reset_pin_state()
 
     def clear_all_plots(self):
         if self.mw.reject_when_loading("清除绘图"):

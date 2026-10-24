@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QGridLayout, QWidget
 
-from src.core.config import widget_alive
+from src.core.config import safe_qt_op, widget_alive
 from src.core.logger import get_logger
 from src.app.plot_context import PlotContext
 from src.ui.widgets.plot_container import PlotContainerWidget
@@ -559,14 +559,47 @@ class PlotPage:
         return True
 
     def restore_scene(self) -> None:
-        """隐藏页切回：按全局状态补建场景 item（§5.1）。
+        """隐藏页切回：按全局状态补建场景 item（§5.1 / §6.3 #4）。
 
-        S4 先处理标记区；游标 vline/label 的补建在 P2 接入同一入口。
+        游标是全局限定的一份状态（``mw.cursor_mode / pinned_x_values /
+        cursor_btn``），隐藏期间只标脏、不碰 pyqtgraph 场景；这里统一补建
+        vline/label 与标记区。
         """
         if not widget_alive(self.widget) or self.widget.isHidden():
             return
         self._scene_dirty = False
+        self.restore_cursor_scene()
         self.restore_mark_regions()
+
+    def restore_cursor_scene(self) -> None:
+        """按全局游标状态重建本页 vline / 标签（仅当前页可调用）。"""
+        services = self.services
+        if services is None or not self.plot_widgets:
+            return
+        cursor_enabled = bool(services.cursor_btn.isChecked())
+        values_hidden = bool(getattr(services, "cursor_values_hidden", False))
+        mode = getattr(services, "cursor_mode", "1 free cursor")
+        pinned = list(getattr(services, "pinned_x_values", []) or [])
+        for container in self.plot_widgets:
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            try:
+                # 隐藏期间可能改过时间基准：X limits 与游标域按全局口径重算
+                plot_widget._apply_cursor_x_domain_and_limits()
+                if cursor_enabled and values_hidden:
+                    plot_widget.toggle_cursor(False, hide_values_only=True)
+                else:
+                    plot_widget.toggle_cursor(cursor_enabled)
+                if cursor_enabled:
+                    plot_widget.apply_cursor_mode(mode, pinned)
+                if hasattr(plot_widget, "_last_cursor_update_time"):
+                    plot_widget._last_cursor_update_time = 0
+                safe_qt_op(plot_widget.update_cursor_label)
+            except RuntimeError:
+                # 页正在销毁：后续容器也不再处理
+                logger.debug("[PAGE] restore_cursor_scene 撞到已销毁控件", exc_info=True)
+                return
 
     def set_row_height(self, row: int, percentage: int) -> None:
         if row < 0 or row >= self.rows_max:

@@ -429,27 +429,49 @@ class LayoutManager(MainWindowBaseManager):
             if len(self.mw.plot_widgets) == 0:
                 self.mw.mark_region_btn.setChecked(False)
                 return
+            current = getattr(self.mw, "current_page", None)
+            reference = self._mark_reference_plot(current)
+            if reference is None:
+                self.mw.mark_region_btn.setChecked(False)
+                return
+            try:
+                view_min, view_max = reference.view_box.viewRange()[0]
+            except Exception:
+                logger.debug("[MARK] 读取视图范围失败，放弃开启标记区", exc_info=True)
+                self.mw.mark_region_btn.setChecked(False)
+                return
+            if view_min is None or view_max is None:
+                self.mw.mark_region_btn.setChecked(False)
+                return
             if self.mw.saved_mark_range:
                 min_x, max_x = self.mw.saved_mark_range
-                view_min, view_max = self.mw.plot_widgets[
-                    0
-                ].plot_widget.view_box.viewRange()[0]
                 # 保存的范围超出当前视图时，重置为视图中间 1/3 区域
                 if min_x < view_min or max_x > view_max:
                     width = view_max - view_min
                     min_x = view_min + width / 3
                     max_x = view_min + 2 * width / 3
             else:
-                view_min, view_max = self.mw.plot_widgets[
-                    0
-                ].plot_widget.view_box.viewRange()[0]
                 width = view_max - view_min
                 min_x = view_min + width / 3
                 max_x = view_min + 2 * width / 3
+            # 区间是全局量：隐藏页没有 item 时按它补建（§6.4 #2）
+            self.mw.saved_mark_range = (min_x, max_x)
 
-            for container in self.mw.plot_widgets:
-                if container.isVisible():
-                    container.plot_widget.add_mark_region(min_x, max_x)
+            pages = list(getattr(self.mw, "pages", []) or [])
+            if pages:
+                for page in pages:
+                    if page is current:
+                        for index, container in enumerate(page.plot_widgets):
+                            if not page.cell_visible(index):
+                                continue
+                            container.plot_widget.add_mark_region(min_x, max_x)
+                    else:
+                        # 隐藏页只记脏，切过去时 restore_mark_regions 补建
+                        page.mark_dirty_for_activation()
+            else:
+                for container in self.mw.plot_widgets:
+                    if container.isVisible():
+                        container.plot_widget.add_mark_region(min_x, max_x)
 
             self.mw.mark_stats_window = MarkStatsWindow.get_instance(self.mw)
             self.mw.mark_stats_window.load_geom()  # 内部完成恢复，无返回值
@@ -459,29 +481,73 @@ class LayoutManager(MainWindowBaseManager):
         else:
             self.mw.mark_region_btn.setText("标记区域")
             self.mw.mark_region_btn.setChecked(False)
-            if self.mw.plot_widgets and self.mw.plot_widgets[0].plot_widget.mark_region:
-                self.mw.saved_mark_range = self.mw.plot_widgets[
-                    0
-                ].plot_widget.mark_region.getRegion()
-            for container in self.mw.plot_widgets:
-                container.plot_widget.remove_mark_region()
+            pages = list(getattr(self.mw, "pages", []) or [])
+            current = getattr(self.mw, "current_page", None)
+            if pages:
+                containers = [
+                    container for page in pages for container in page.plot_widgets
+                ]
+            else:
+                containers = list(getattr(self.mw, "plot_widgets", []) or [])
+            # 关闭必须全量拆（§7.2 #16）：隐藏页遗留的 region 仍连着全局槽，
+            # 会继续响应拖拽并改写他页区间（幽灵 region）。
+            saved_range = None
+            for container in containers:
+                pw = getattr(container, "plot_widget", None)
+                mark = getattr(pw, "mark_region", None) if pw is not None else None
+                if mark is None:
+                    continue
+                if saved_range is None or (
+                    current is not None and getattr(pw, "page", None) is current
+                ):
+                    try:
+                        saved_range = tuple(mark.getRegion())
+                    except Exception:
+                        logger.debug("[MARK] 回读区间失败", exc_info=True)
+            if saved_range is not None:
+                self.mw.saved_mark_range = saved_range
+            for container in containers:
+                pw = getattr(container, "plot_widget", None)
+                if pw is None:
+                    continue
+                try:
+                    pw.remove_mark_region()
+                except RuntimeError:
+                    pass
             if self.mw.mark_stats_window:
                 self.mw.mark_stats_window.save_geom()
                 self.mw.mark_stats_window.hide()
 
-    def sync_mark_regions(self, region_item, *, page=None):
-        """同步标记区区间。
+    def _mark_reference_plot(self, page=None):
+        """标记区默认区间的参考子图：页内首个可见格 → 页内首个格。"""
+        target = page if page is not None else getattr(self.mw, "current_page", None)
+        if target is not None:
+            if hasattr(target, "master_container"):
+                master = target.master_container()
+                if master is not None:
+                    return getattr(master, "plot_widget", None)
+            for container in getattr(target, "plot_widgets", []) or []:
+                pw = getattr(container, "plot_widget", None)
+                if pw is not None:
+                    return pw
+        return None
 
-        ``page=None`` 时不传页 → 广播全部页（与全局共享区间语义一致）。
-        隐藏页若尚未补建 item（mark_region is None）自然跳过，切页时由
-        ``page.restore_mark_regions()`` 补建。
+    def sync_mark_regions(self, region_item, *, page=None):
+        """同步标记区区间（全局量）。
+
+        任一页拖动都广播到全部页（§6.4 #3）；``page`` 仅标识来源页，供诊断
+        与后续页作用域扩展使用，不改变广播语义。隐藏页若尚未补建 item
+        （``mark_region is None``）自然跳过，切页时由 ``restore_mark_regions``
+        按 ``saved_mark_range`` 补建。
         """
         if self.mw._is_syncing_mark_region:
             return
         self.mw._is_syncing_mark_region = True
         try:
             min_x, max_x = region_item.getRegion()
-            pages = [page] if page is not None else list(getattr(self.mw, "pages", []) or [])
+            # 全局区间随拖拽即时更新：隐藏页统计与切页补建都读它
+            self.mw.saved_mark_range = (min_x, max_x)
+            pages = list(getattr(self.mw, "pages", []) or [])
             if pages:
                 containers = [
                     container for target in pages for container in target.plot_widgets
@@ -497,6 +563,11 @@ class LayoutManager(MainWindowBaseManager):
                 # 阻塞完全无效（同文件 :101 是正确写法）。
                 with QSignalBlocker(mark):
                     mark.setRegion([min_x, max_x])
+            if page is not None:
+                logger.debug(
+                    "[MARK] sync from page=%s range=(%.4f, %.4f)",
+                    getattr(page, "title", "?"), min_x, max_x,
+                )
             self.request_mark_stats_refresh()
         finally:
             self.mw._is_syncing_mark_region = False
@@ -520,13 +591,35 @@ class LayoutManager(MainWindowBaseManager):
         self.update_mark_stats()
 
     def update_mark_stats(self):
-        if hasattr(self.mw, "mark_stats_window") and self.mw.mark_stats_window:
-            stats_list = []
-            for container in self.mw.plot_widgets:
+        """汇总所有页的布局内子图，按页分组交给统计窗口（§6.4 #9）。
+
+        跨页口径用显式行列（``page.cell_visible``），不能用 ``isVisible``
+        （R0）。隐藏页尚未补建 region item 时，用全局 ``saved_mark_range``
+        直接计算，保证统计覆盖全部页而不是只显示当前页。
+        """
+        window = getattr(self.mw, "mark_stats_window", None)
+        if not window:
+            return
+        saved = getattr(self.mw, "saved_mark_range", None)
+        entries: list[tuple[str, int, object]] = []
+        pages = list(getattr(self.mw, "pages", []) or [])
+        if pages:
+            for page in pages:
+                for index, container in enumerate(page.plot_widgets):
+                    if hasattr(page, "cell_visible") and not page.cell_visible(index):
+                        continue
+                    pw = container.plot_widget
+                    stats = pw.get_mark_stats()
+                    if stats is None and getattr(pw, "mark_region", None) is None:
+                        stats = pw.get_mark_stats(saved) if saved else None
+                    entries.append((page.title, index, stats))
+        else:
+            for index, container in enumerate(self.mw.plot_widgets):
                 if container.isVisible():
-                    stats = container.plot_widget.get_mark_stats()
-                    stats_list.append(stats)
-            self.mw.mark_stats_window.update_stats(stats_list)
+                    entries.append(
+                        ("图 1", index, container.plot_widget.get_mark_stats())
+                    )
+        window.update_stats(entries)
 
     def open_layout_dialog(self):
         if self.mw.reject_when_loading("修改布局"):
