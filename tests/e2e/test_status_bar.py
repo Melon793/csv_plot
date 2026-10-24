@@ -467,7 +467,7 @@ def test_saved_template_announces_name_not_id(main_window, monkeypatch):
     text = mw._template_saved_text("模板已保存", "deadbeef")
 
     assert "deadbeef" not in text, "uuid 短码不该出现在界面上"
-    assert text == "模板已保存：台架四项 · 3 个变量 / 2 个子图", "变量数按去重算，与列表「变量数」列一致"
+    assert text == "模板已保存：台架四项 · 3 个变量 / 1 个绘图页", "变量数按去重算，与列表「变量数」列一致；v1 档按单页计"
 
 
 def test_apply_template_announces_match(loaded_window, qapp):
@@ -752,6 +752,6 @@ def test_template_saved_signal_reaches_the_status_bar(
     qapp.processEvents()
 
     assert manager.exists("接线检查"), "前置条件：保存真的落盘了"
-    assert mw._message_text == "模板已保存：接线检查 · 1 个变量 / 1 个子图"
+    assert mw._message_text == "模板已保存：接线检查 · 1 个变量 / 1 个绘图页"
     template_id = next(t.metadata.id for t in manager.get_all_templates())
     assert template_id not in mw._message_text, "uuid 短码不该出现在界面上"

@@ -76,13 +76,37 @@ class PlotTemplate:
         )
 
 
+def _iter_config_plots(config: dict):
+    """按 v2 ``pages`` 优先、v1 顶层 ``plots`` 回退，逐个子图配置产出。"""
+    pages = config.get("pages") if isinstance(config, dict) else None
+    if isinstance(pages, list) and pages:
+        for page in pages:
+            for plot in (page or {}).get("plots", []) or []:
+                yield plot or {}
+        return
+    for plot in config.get("plots", []) or []:
+        yield plot or {}
+
+
 def count_template_variables(config: dict) -> int:
     var_set = set()
-    plots = config.get("plots", []) or []
-    for plot in plots:
-        curves = (plot or {}).get("curves", []) or []
+    for plot in _iter_config_plots(config):
+        curves = plot.get("curves", []) or []
         var_set.update(curves)
     return len(var_set)
+
+
+def count_template_plots(config: dict) -> int:
+    """模板包含的非空子图数（v2 按全部页统计）。"""
+    return sum(1 for plot in _iter_config_plots(config) if plot.get("curves"))
+
+
+def count_template_pages(config: dict) -> int:
+    """模板包含的绘图页数；v1 档固定为 1。"""
+    pages = config.get("pages") if isinstance(config, dict) else None
+    if isinstance(pages, list) and pages:
+        return len(pages)
+    return 1
 
 
 def extract_variables_from_config(config: "PlotSessionConfig | dict") -> set[str]:
@@ -97,13 +121,11 @@ def extract_variables_from_config(config: "PlotSessionConfig | dict") -> set[str
     var_set: set[str] = set()
 
     if isinstance(config, dict):
-        plots = config.get("plots", []) or []
-        for plot in plots:
-            curves = (plot or {}).get("curves", []) or []
-            var_set.update(curves)
+        for plot in _iter_config_plots(config):
+            var_set.update(plot.get("curves", []) or [])
     else:
-        for plot in config.plots:
-            for v in plot.curves:
-                var_set.add(v)
+        for page in config.normalized_pages():
+            for plot in page.plots:
+                var_set.update(plot.curves)
 
     return var_set

@@ -62,7 +62,8 @@ class _FakePlotWidget:
     def _safe_clear_plot_items(self):
         self.clear_calls += 1
 
-    def _queue_ui_refresh(self, immediate=False):
+    def _queue_ui_refresh(self, immediate=False, cursor=True):
+        # cursor= 是 P3 新增的场景分级参数：兜底解锁只对当前页写 cursor
         self.refresh_calls.append(immediate)
 
 

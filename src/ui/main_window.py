@@ -480,8 +480,12 @@ class MainWindow(QMainWindow):
     def _on_tab_close_requested(self, index: int) -> None:
         self.close_page(self.page_at_tab(index))
 
-    def close_page(self, page: PlotPage | None) -> None:
-        """关闭页；最后一页保留，只清空内容（§5.4）。"""
+    def close_page(self, page: PlotPage | None, *, confirm: bool = True) -> None:
+        """关闭页；最后一页保留，只清空内容（§5.4）。
+
+        ``confirm=False`` 供模板套用等程序化路径使用：事务化重建时不能再弹
+        「仍有曲线，确定关闭？」。
+        """
         if page is None or page not in self.pages:
             return
         if not widget_alive(page.widget):
@@ -495,7 +499,7 @@ class MainWindow(QMainWindow):
             getattr(container.plot_widget, "curves", None)
             for container in page.plot_widgets
         )
-        if has_curves:
+        if confirm and has_curves:
             answer = QMessageBox.question(
                 self,
                 "关闭绘图页",
@@ -1640,11 +1644,11 @@ class MainWindow(QMainWindow):
         template = self.plot_config_manager.template_manager.get_template(template_id)
         if template is None:
             return f"{summary}：{name}"
-        from src.core.template_models import count_template_variables
-        plot_count = len(template.config.get("plots", []) or [])
+        from src.core.template_models import count_template_pages, count_template_variables
+        page_count = count_template_pages(template.config)
         return (
             f"{summary}：{name} · {count_template_variables(template.config)} 个变量"
-            f" / {plot_count} 个子图"
+            f" / {page_count} 个绘图页"
         )
 
     def _persist_last_template(self, template_id: str, name: str):

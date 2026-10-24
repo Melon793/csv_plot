@@ -6,7 +6,11 @@ from PySide6.QtCore import QObject
 from src.core.config import RATIO_RESET_PLOTS
 from src.core.template_manager import TemplateManager
 from src.core.auto_save_manager import AutoSaveManager
-from src.core.plot_config import PlotSessionConfig, PlotConfig
+from src.core.plot_config import (
+    PlotSessionConfig,
+    PlotConfig,
+    PlotPageConfig,
+)
 from src.core.template_models import PlotTemplate
 from src.core.logger import get_logger
 
@@ -31,95 +35,209 @@ class PlotConfigManager(QObject):
         return self._auto_save_manager
 
     def export_current_config(self, main_window) -> PlotSessionConfig:
-        """从 MainWindow 导出当前状态为配置对象"""
-        config = PlotSessionConfig()
+        """从 MainWindow 导出当前状态为配置对象（模板 v2，设计文档 §6.5）。
 
-        # 获取布局信息
-        config.layout_rows = main_window._plot_row_current
-        config.layout_cols = main_window._plot_col_current
+        关键在于可见性口径：隐藏页整体不可见，``isVisible()`` 恒为 False，
+        必须用 ``isHidden()`` + 页的显式行列，否则整页会被导成空。
+        """
+        config = PlotSessionConfig(
+            time_factor=main_window.factor,
+            time_offset=main_window.offset,
+        )
 
-        # 获取时间修正参数
-        config.time_factor = main_window.factor
-        config.time_offset = main_window.offset
+        pages = list(getattr(main_window, "pages", []) or [])
+        if pages:
+            for page in pages:
+                config.pages.append(self._export_page(page))
+            current = getattr(main_window, "current_page", None)
+            config.active_page = max(0, main_window.page_index(current))
+            # 顶层字段是旧版软件的回退视图（第 1 页）
+            first = config.pages[0]
+            config.layout_rows = first.layout_rows
+            config.layout_cols = first.layout_cols
+            config.plots = list(first.plots)
+        else:
+            # 旧式替身（没有 pages）：保持单页导出行为
+            config.layout_rows = main_window._plot_row_current
+            config.layout_cols = main_window._plot_col_current
+            config.plots = [
+                PlotConfig(curves=container.plot_widget.curve_strategy.get_curve_names())
+                for container in main_window.plot_widgets
+                if not container.isHidden()
+                and container.plot_widget.curve_strategy.get_curve_names()
+            ]
+            config.pages = [
+                PlotPageConfig(
+                    title="图 1",
+                    layout_rows=config.layout_rows,
+                    layout_cols=config.layout_cols,
+                    plots=list(config.plots),
+                )
+            ]
 
-        # 获取各 Plot 的变量名（按 row-major 顺序）
-        config.plots = []
-        for container in main_window.plot_widgets:
-            plot_widget = container.plot_widget
-            # R0：跨页路径不能用 isVisible()（隐藏页恒 False），用 isHidden()
-            # 判断「显式可见单元格」；当前页语义与旧实现一致。
-            if container.isHidden():
-                continue
-            curve_names = plot_widget.curve_strategy.get_curve_names()
-            if curve_names:
-                config.plots.append(PlotConfig(curves=curve_names))
+        # 全局视图态（可选字段：缺省不写，应用时不覆盖当前值）
+        cursor_btn = getattr(main_window, "cursor_btn", None)
+        if cursor_btn is not None and cursor_btn.isChecked():
+            config.cursor_mode = getattr(main_window, "cursor_mode", None)
+        mark_btn = getattr(main_window, "mark_region_btn", None)
+        saved_range = getattr(main_window, "saved_mark_range", None)
+        if mark_btn is not None and mark_btn.isChecked() and saved_range:
+            config.saved_mark_range = [float(saved_range[0]), float(saved_range[1])]
 
         return config
 
+    @staticmethod
+    def _export_page(page) -> PlotPageConfig:
+        page_config = PlotPageConfig(
+            title=getattr(page, "title", ""),
+            layout_rows=int(page.rows_current),
+            layout_cols=int(page.cols_current),
+            row_height_factors=dict(page.row_height_factors or {}),
+        )
+        for index, container in enumerate(page.plot_widgets):
+            if container.isHidden():
+                continue
+            if hasattr(page, "cell_visible") and not page.cell_visible(index):
+                continue
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            curve_names = plot_widget.curve_strategy.get_curve_names()
+            if curve_names:
+                page_config.plots.append(PlotConfig(curves=list(curve_names)))
+        return page_config
+
+    def _reconcile_pages(self, main_window, page_count: int) -> None:
+        """让页数量与模板一致：复用已有页、多的删、少的建（§6.5）。"""
+        if not hasattr(main_window, "pages"):
+            return
+        while len(main_window.pages) > page_count:
+            main_window.close_page(main_window.pages[-1], confirm=False)
+        while len(main_window.pages) < page_count:
+            if main_window.loader is None:
+                logger.warning("未加载数据，无法新建模板中的绘图页")
+                return
+            if main_window.new_page() is None:
+                logger.warning("新建绘图页失败，模板页数将被截断")
+                return
+
+    def _apply_page_title(self, main_window, page, title: str) -> None:
+        if not title:
+            return
+        page.title = title
+        tabs = getattr(main_window, "plot_tabs", None)
+        if tabs is not None:
+            index = tabs.indexOf(page.widget)
+            if index >= 0:
+                tabs.setTabText(index, title)
+
     def apply_config(self, main_window, config: PlotSessionConfig) -> bool:
-        """将配置应用到 MainWindow"""
+        """将配置应用到 MainWindow（模板 v2：逐页应用）。"""
         try:
+            page_cfgs = config.normalized_pages()
             logger.info("开始应用模板配置")
-            logger.info("  布局: %d 行 × %d 列", config.layout_rows, config.layout_cols)
+            logger.info("  页数: %d", len(page_cfgs))
             logger.info("  时间因子: %s, 偏移: %s", config.time_factor, config.time_offset)
-            logger.info("  Plot 数量: %d", len(config.plots))
-            
-            # 设置布局
-            from src.ui.layout_manager import LayoutManager
 
-            # 先设置布局
-            logger.debug("设置布局...")
-            main_window.layout_manager.set_plots_visible(
-                config.layout_rows, config.layout_cols
-            )
+            self._reconcile_pages(main_window, len(page_cfgs))
+            pages = list(getattr(main_window, "pages", []) or [])
+            if not pages:
+                # 旧式替身：保留单页路径
+                return self._apply_single_page_config(main_window, config)
 
-            # 设置时间修正参数
-            logger.debug("设置时间修正参数...")
+            current = getattr(main_window, "current_page", None)
+            applied_count = 0
+            total_plots = 0
+
+            for page, page_config in zip(pages, page_cfgs):
+                self._apply_page_title(main_window, page, page_config.title)
+
+                factors = {
+                    int(row): int(value)
+                    for row, value in (page_config.row_height_factors or {}).items()
+                }
+                if factors:
+                    page.row_height_factors = factors
+                page.apply_visibility(page_config.layout_rows, page_config.layout_cols)
+
+                # 模板 = 完整还原：页内未列出的可见格子也要清掉旧曲线
+                visible_containers = page.visible_containers()
+                for container in visible_containers:
+                    container.plot_widget.clear_plot_item()
+
+                scene = page is current
+                for index, plot_config in enumerate(page_config.plots):
+                    total_plots += 1
+                    if index >= len(visible_containers):
+                        logger.warning("Plot[%d] 超出页面可见格子，跳过", index)
+                        continue
+                    plot_widget = visible_containers[index].plot_widget
+                    if self._apply_plot_config(
+                        plot_widget, plot_config, main_window, index, scene=scene
+                    ):
+                        applied_count += 1
+
+            # 全局时间基准：所有页都要重算数据层，隐藏页由 scene=False 分级
             main_window.factor = config.time_factor
             main_window.offset = config.time_offset
-
-            # 检查是否有数据
-            has_data = main_window.loader is not None
-            logger.info("数据加载状态: %s", "已加载" if has_data else "未加载")
-
-            if not has_data:
-                logger.warning("⚠️  未加载数据，只能设置布局和时间参数，无法加载曲线")
-            else:
-                logger.debug("可用数据列数: %d", len(main_window.loader.var_names))
-
-            # 应用各 Plot 的配置 - 只遍历可见的 container（row-major 顺序）
-            applied_count = 0
-            visible_containers = [c for c in main_window.plot_widgets if not c.isHidden()]
-            logger.debug("可见容器数: %d", len(visible_containers))
-
-            for i, plot_config in enumerate(config.plots):
-                if i < len(visible_containers):
-                    container = visible_containers[i]
-                    plot_widget = container.plot_widget
-                    success = self._apply_plot_config(plot_widget, plot_config, main_window, i)
-                    if success:
-                        applied_count += 1
-                else:
-                    logger.warning("Plot[%d] 没有对应的可见容器，跳过", i)
-
-            logger.info("已成功应用 %d/%d 个 Plot 配置", applied_count, len(config.plots))
-
-            # 同步 factor/offset 到各 plot widget（修复模板恢复后时间轴不生效的问题）
             if config.time_factor != 1.0 or config.time_offset != 0.0:
-                for container in main_window.plot_widgets:
-                    if not container.isHidden():
+                for page in pages:
+                    is_current = page is current
+                    for container in page.plot_widgets:
                         container.plot_widget.update_time_correction(
-                            config.time_factor, config.time_offset
+                            config.time_factor,
+                            config.time_offset,
+                            scene=is_current,
                         )
 
-            logger.info("模板配置应用完成")
+            target = pages[min(max(config.active_page, 0), len(pages) - 1)]
+            main_window.activate_page(target)
+
+            # 可选视图态：缺省保留当前值，不覆盖。放在激活之后，
+            # set_cursor_mode / toggle_mark_region 的参考视图才是目标页。
+            if config.cursor_mode is not None:
+                main_window.cursor_mode = config.cursor_mode
+                cursor_sync = getattr(main_window, "cursor_sync_manager", None)
+                if cursor_sync is not None:
+                    cursor_sync.set_cursor_mode(config.cursor_mode)
+            if config.saved_mark_range:
+                # 区间在保存时存在 ⇒ 当时标记区是开着的，恢复时一并打开
+                main_window.saved_mark_range = tuple(config.saved_mark_range)
+                main_window.layout_manager.toggle_mark_region(True)
+
+            logger.info(
+                "已成功应用 %d/%d 个 Plot 配置（%d 页）",
+                applied_count, total_plots, len(pages),
+            )
             return True
         except Exception as e:
             logger.error("❌ 应用配置失败: %s", e, exc_info=True)
             return False
 
-    def _apply_plot_config(self, plot_widget, plot_config: PlotConfig, main_window, plot_index: int):
-        """将配置应用到单个 Plot"""
+    def _apply_single_page_config(self, main_window, config: PlotSessionConfig) -> bool:
+        """旧式替身（无 pages）：保持原先单页应用路径。"""
+        main_window.layout_manager.set_plots_visible(
+            config.layout_rows, config.layout_cols
+        )
+        main_window.factor = config.time_factor
+        main_window.offset = config.time_offset
+
+        applied_count = 0
+        visible_containers = [c for c in main_window.plot_widgets if not c.isHidden()]
+        for i, plot_config in enumerate(config.plots):
+            if i < len(visible_containers):
+                if self._apply_plot_config(
+                    visible_containers[i].plot_widget, plot_config, main_window, i
+                ):
+                    applied_count += 1
+        logger.info("已成功应用 %d/%d 个 Plot 配置", applied_count, len(config.plots))
+        return True
+
+    def _apply_plot_config(
+        self, plot_widget, plot_config: PlotConfig, main_window, plot_index: int,
+        *, scene: bool = True,
+    ):
+        """将配置应用到单个 Plot；隐藏页只建数据层（scene=False）。"""
         logger.debug("处理 Plot[%d], 曲线: %s", plot_index, plot_config.curves)
 
         # 先清除现有曲线
@@ -129,34 +247,53 @@ class PlotConfigManager(QObject):
         if len(plot_config.curves) == 0:
             logger.debug("Plot[%d] 没有曲线配置，跳过", plot_index)
             return False
-        elif len(plot_config.curves) == 1:
-            var_name = plot_config.curves[0]
-            if main_window.loader and var_name in main_window.loader.var_names:
-                logger.debug("Plot[%d] 设置单曲线: %s", plot_index, var_name)
-                plot_widget.plot_variable(var_name)
-                return True
-            else:
-                if not main_window.loader:
-                    logger.warning("Plot[%d] 无法加载曲线 '%s': 未加载数据", plot_index, var_name)
-                else:
-                    logger.warning("Plot[%d] 无法加载曲线 '%s': 变量名不存在于数据中", plot_index, var_name)
-                return False
-        else:
-            # 多曲线模式
-            # 添加每条曲线
-            added_count = 0
-            for var_name in plot_config.curves:
+
+        if not scene:
+            # 隐藏页：只建数据层；游标/标签收尾由切页时的 restore_scene 补
+            plot_widget._batch_adding = True
+        try:
+            if len(plot_config.curves) == 1:
+                var_name = plot_config.curves[0]
                 if main_window.loader and var_name in main_window.loader.var_names:
-                    logger.debug("Plot[%d] 添加曲线: %s", plot_index, var_name)
-                    plot_widget.add_variable_to_plot(var_name)
-                    added_count += 1
+                    logger.debug("Plot[%d] 设置单曲线: %s", plot_index, var_name)
+                    plot_widget.plot_variable(var_name)
+                    return True
                 else:
                     if not main_window.loader:
                         logger.warning("Plot[%d] 无法加载曲线 '%s': 未加载数据", plot_index, var_name)
                     else:
                         logger.warning("Plot[%d] 无法加载曲线 '%s': 变量名不存在于数据中", plot_index, var_name)
-            
-            return added_count > 0
+                    return False
+            else:
+                # 多曲线模式
+                added_count = 0
+                for var_name in plot_config.curves:
+                    if main_window.loader and var_name in main_window.loader.var_names:
+                        logger.debug("Plot[%d] 添加曲线: %s", plot_index, var_name)
+                        plot_widget.add_variable_to_plot(var_name)
+                        added_count += 1
+                    else:
+                        if not main_window.loader:
+                            logger.warning("Plot[%d] 无法加载曲线 '%s': 未加载数据", plot_index, var_name)
+                        else:
+                            logger.warning("Plot[%d] 无法加载曲线 '%s': 变量名不存在于数据中", plot_index, var_name)
+
+                return added_count > 0
+        finally:
+            if not scene:
+                plot_widget._batch_adding = False
+                try:
+                    plot_widget._multi_curve_manager._finalize_batch_add(
+                        update_header=True,
+                        sync_min_xrange=False,
+                        scene=False,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Plot[%d] 隐藏页批量收尾失败，留待切页补建",
+                        plot_index, exc_info=True,
+                    )
+                plot_widget.mark_dirty_for_activation()
 
     @staticmethod
     def check_template_match(config: PlotSessionConfig, current_vars: list[str]) -> tuple[float, set[str], set[str]]:
@@ -165,8 +302,9 @@ class PlotConfigManager(QObject):
         返回 (match_ratio, matched_vars, unmatched_vars)
         """
         template_vars: set[str] = set()
-        for plot in config.plots:
-            template_vars.update(plot.curves)
+        for page in config.normalized_pages():
+            for plot in page.plots:
+                template_vars.update(plot.curves)
 
         if not template_vars:
             return 1.0, set(), set()
