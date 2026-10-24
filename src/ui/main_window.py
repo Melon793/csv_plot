@@ -438,6 +438,10 @@ class MainWindow(QMainWindow):
                 page.apply_global_x_limits()
             if page.saved_x_range and self._x_range_follow_enabled:
                 page.apply_x_range(*page.saved_x_range)
+                # 跟随只在切页那一刻生效一次；不清除的话，同页重激活
+                # （模板应用目标页=当前页 / 关最后一页回退）会把用户
+                # 之后的缩放拉回上次切页的旧范围。
+                page.saved_x_range = None
             # 非脏页也要按全局游标状态对齐一次：视图跟随后旧 vline 可能落在
             # viewRange 外（指纹未变时内部直接跳过，见 PlotPage.sync_cursor_scene）
             page.sync_cursor_scene()

@@ -1126,7 +1126,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 try:
                     if dialog.exec():
                         min_val, max_val = self.view_box.viewRange()[0]
-                        for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
+                        # 广播限本页（多页设计 §6.2：XLink 只在页内，隐藏页
+                        # 的范围由切页跟随管理）；findChildren 会命中所有页。
+                        page = getattr(self, "page", None)
+                        if page is not None:
+                            views = [
+                                container.plot_widget
+                                for container in page.plot_widgets
+                                if getattr(container, "plot_widget", None) is not None
+                            ]
+                        else:
+                            views = self.window().findChildren(DraggableGraphicsLayoutWidget)
+                        for view in views:
                             view.set_xrange_with_link_handling(xmin=min_val, xmax=max_val, padding=DEFAULT_PADDING_VAL_X)
                             view.plot_item.update()
                 finally:

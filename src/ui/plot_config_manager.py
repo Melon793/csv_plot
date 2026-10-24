@@ -1,8 +1,9 @@
 """Plot 配置管理器 - 协调各模块的入口"""
 
 from __future__ import annotations
+from contextlib import ExitStack, contextmanager
 from typing import Optional
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QSignalBlocker
 from src.core.config import RATIO_RESET_PLOTS
 from src.core.template_manager import TemplateManager
 from src.core.auto_save_manager import AutoSaveManager
@@ -131,6 +132,33 @@ class PlotConfigManager(QObject):
             if index >= 0:
                 tabs.setTabText(index, title)
 
+    @staticmethod
+    @contextmanager
+    def _quiet_cursor_signals(plot_widget):
+        """隐藏页的清除/重建必须静默执行（契约 2）。
+
+        ``clear_plot_item`` → ``apply_cursor_x_domain`` → ``_set_vline_bounds``
+        内部的 ``setBounds`` 会把越界 vline 钳到新边界并 emit
+        ``sigPositionChanged``；pinned 状态下这条回调会把钳制值写回全局
+        ``pinned_x_values``，把用户游标悄悄挪走。信号阻断 + 抑制回写双保险。
+        """
+        previous = getattr(plot_widget, "_suppress_pin_update", False)
+        plot_widget._suppress_pin_update = True
+        try:
+            with ExitStack() as stack:
+                for attr in ("vline", "vline2"):
+                    line = getattr(plot_widget, attr, None)
+                    if line is None:
+                        continue
+                    try:
+                        stack.enter_context(QSignalBlocker(line))
+                    except TypeError:
+                        # 组件测试替身非 QObject：抑制标志仍生效
+                        pass
+                yield
+        finally:
+            plot_widget._suppress_pin_update = previous
+
     def apply_config(self, main_window, config: PlotSessionConfig) -> bool:
         """将配置应用到 MainWindow（模板 v2：逐页应用）。"""
         try:
@@ -162,10 +190,14 @@ class PlotConfigManager(QObject):
 
                 # 模板 = 完整还原：页内未列出的可见格子也要清掉旧曲线
                 visible_containers = page.visible_containers()
-                for container in visible_containers:
-                    container.plot_widget.clear_plot_item()
-
                 scene = page is current
+                for container in visible_containers:
+                    if scene:
+                        container.plot_widget.clear_plot_item()
+                    else:
+                        with self._quiet_cursor_signals(container.plot_widget):
+                            container.plot_widget.clear_plot_item()
+
                 for index, plot_config in enumerate(page_config.plots):
                     total_plots += 1
                     if index >= len(visible_containers):
@@ -246,8 +278,12 @@ class PlotConfigManager(QObject):
         """将配置应用到单个 Plot；隐藏页只建数据层（scene=False）。"""
         logger.debug("处理 Plot[%d], 曲线: %s", plot_index, plot_config.curves)
 
-        # 先清除现有曲线
-        plot_widget.clear_plot_item()
+        # 先清除现有曲线（隐藏页静默：clear 链的 setBounds 钳制不得回写全局 pin）
+        if scene:
+            plot_widget.clear_plot_item()
+        else:
+            with self._quiet_cursor_signals(plot_widget):
+                plot_widget.clear_plot_item()
 
         # 根据曲线数量设置模式
         if len(plot_config.curves) == 0:
@@ -262,7 +298,14 @@ class PlotConfigManager(QObject):
                 var_name = plot_config.curves[0]
                 if main_window.loader and var_name in main_window.loader.var_names:
                     logger.debug("Plot[%d] 设置单曲线: %s", plot_index, var_name)
-                    plot_widget.plot_variable(var_name)
+                    if scene:
+                        plot_widget.plot_variable(var_name)
+                    else:
+                        # 隐藏页：plot_variable 的首绘收尾不受 _batch_adding
+                        # 保护，会直接写场景（vline bounds 钳制回写全局 pin、
+                        # toggle_cursor 改 vline 可见性）；改走批量入口，收尾
+                        # 统一由 finally 的 _finalize_batch_add(scene=False) 静默补偿。
+                        plot_widget.add_variable_to_plot(var_name)
                     return True
                 else:
                     if not main_window.loader:

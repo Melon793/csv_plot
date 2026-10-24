@@ -263,9 +263,34 @@ class MultiCurveManager:
             min_x, max_x = vline_fallback if vline_fallback is not None else (None, None)
 
         if min_x is not None:
-            pw._set_vline_bounds([min_x, max_x])
             if scene:
+                pw._set_vline_bounds([min_x, max_x])
                 pw._update_cursor_after_plot(min_x, max_x)
+            else:
+                # 静默设 bounds：setBounds 内部 setValue(value()) 会把越界的
+                # vline 钳到新边界并 emit sigPositionChanged，pinned 状态下
+                # on_vline_position_changed 会把钳制值写回全局 pinned_x_values
+                # （契约 2：隐藏页恢复/补 bounds 必须信号阻断 + 抑制回写）。
+                from contextlib import ExitStack
+
+                from PySide6.QtCore import QSignalBlocker
+
+                previous = getattr(pw, "_suppress_pin_update", False)
+                pw._suppress_pin_update = True
+                try:
+                    with ExitStack() as stack:
+                        for attr in ("vline", "vline2"):
+                            line = getattr(pw, attr, None)
+                            if line is None:
+                                continue
+                            try:
+                                stack.enter_context(QSignalBlocker(line))
+                            except TypeError:
+                                # 组件测试替身非 QObject：抑制标志仍生效
+                                pass
+                        pw._set_vline_bounds([min_x, max_x])
+                finally:
+                    pw._suppress_pin_update = previous
 
         if scene:
             if pw.vline.isVisible():

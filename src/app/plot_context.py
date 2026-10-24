@@ -263,6 +263,16 @@ class PageServices:
     def cursor_values_hidden(self, value: bool) -> None:
         self.mw.cursor_values_hidden = bool(value)
 
+    # 标记区间同为全局量：PlotPage.restore_mark_regions 的回读写入若不转发，
+    # 会落成本实例的影子属性，之后隐藏页补建读到过时区间（与 pinned 同病）。
+    @property
+    def saved_mark_range(self):
+        return self.mw.saved_mark_range
+
+    @saved_mark_range.setter
+    def saved_mark_range(self, value) -> None:
+        self.mw.saved_mark_range = value
+
     # ---- 页级 ----
     @property
     def plot_widgets(self):
