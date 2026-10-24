@@ -170,6 +170,7 @@ def write_mdf(
     with_single_shot_group: bool = False,
     with_empty_group: bool = False,
     with_attribution: bool = False,
+    with_time_named_data: bool = False,
 ) -> Path:
     """写入合成 MDF 文件，返回 **asammdf 实际写出的路径**。
 
@@ -198,6 +199,8 @@ def write_mdf(
             ``ATTRIBUTION_*`` 常量）。v4 额外写一个带 SI 源块与 display_names
             的报文组（v3 无 SI 块概念，asammdf 只会给它注入一个
             ``'Channel inserted by Python Script'`` 的噪声源）
+        with_time_named_data: 是否追加一个含**恰好名为** ``time`` 的数据通道的组。
+            用于钉住 P1-7：名字启发式不得把这种数据通道当成主通道
 
     Returns:
         asammdf 实际写出的 Path
@@ -286,6 +289,25 @@ def write_mdf(
             ],
             acq_name="EmptyGroup",
             comment="empty reserved group",
+        )
+
+    if with_time_named_data:
+        # P1-7 回归夹具：这个组里有一个**数据**通道恰好叫 ``time``。
+        # asammdf 会给该组另建真正的主通道（masters_db 指向它），
+        # 因此 loader 里 ``time`` 必须保持为普通可绘制通道。
+        t5 = np.arange(n, dtype=np.float64) * 0.05
+        mdf.append(
+            [
+                Signal(
+                    np.linspace(0.0, 1.0, n, dtype=np.float32),
+                    t5,
+                    unit="s",
+                    name="time",
+                ),
+                Signal(np.arange(n, dtype=np.float32), t5, unit="km/h", name="Speed"),
+            ],
+            acq_name="TimeNamedGroup",
+            comment="group with a data channel literally named time",
         )
 
     if with_attribution:

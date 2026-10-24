@@ -143,3 +143,55 @@ class TestSafeCallback:
             raise ValueError("boom")
 
         assert fn() is None
+
+
+class TestFloat32PrecisionGuard:
+    """下转换的**精度**判据（全仓审查 P1-8）。
+
+    旧实现只问「float32 装不装得下」（max_abs <= 3.4e38），于是量级大而分辨率细的
+    列一路通过：epoch 秒 ~1.7e9 处 float32 的间距约 128 s，毫秒时间戳下转换后被
+    整体抹平成同一秒 —— 不溢出、不报错，但读数已经错了，而且用户看不出来。
+    """
+
+    # epoch 秒（2026-01-01 前后）带毫秒：abs_max ~1.7e9，min_gap 0.001
+    EPOCH_MS = [1_767_225_600.000 + i * 0.001 for i in range(200)]
+
+    def test_epoch_milliseconds_are_refused(self):
+        is_safe, abs_max = _evaluate_float32_safety(self.EPOCH_MS)
+        assert is_safe is False, "间距 128s 会把毫秒抹平，必须拒绝下转换"
+        assert abs_max == pytest.approx(1_767_225_600.199, abs=1e-3)
+
+    def test_epoch_integer_seconds_are_refused_too(self):
+        """整数取值也一样：超过 float32 连续整数上限（2^24）就未必精确。"""
+        values = [1_767_225_600 + i for i in range(200)]
+        is_safe, _ = _evaluate_float32_safety(np.asarray(values, dtype=np.float64))
+        assert is_safe is False
+
+    def test_small_magnitude_decimal_data_still_downcasts(self):
+        """常见工程量（0.1 网格、量级几百）必须照旧允许，别把内存收益一并砍掉。"""
+        values = [10.0 + i * 0.1 for i in range(1200)]
+        is_safe, _ = _evaluate_float32_safety(values)
+        assert is_safe is True
+
+    def test_integers_within_exact_range_are_allowed(self):
+        values = [float(i) for i in range(1000)]  # max 999 << 2^24，gap 1
+        is_safe, _ = _evaluate_float32_safety(values)
+        assert is_safe is True
+
+    def test_constant_column_requires_exact_representation(self):
+        # 2^29 + 2^28 = 805306368 在 float32 里只有 24 位尾数 → 不精确
+        inexact = [805_306_369.0] * 10
+        assert _evaluate_float32_safety(inexact)[0] is False
+        exact = [805_306_368.0] * 10  # = 0x30000000，可精确表示
+        assert _evaluate_float32_safety(exact)[0] is True
+
+    def test_round_trip_actually_changes_the_epoch_values(self):
+        """判据本身之外，再钉住「确实会错」这个事实，防止判据被改松。"""
+        arr = np.asarray(self.EPOCH_MS, dtype=np.float64)
+        collapsed = np.unique(arr.astype(np.float32).astype(np.float64))
+        assert collapsed.size < arr.size, "float32 下这些毫秒值会互相吞掉"
+
+    def test_float32_input_is_accepted_directly(self):
+        """已经是 float32 的数组不存在进一步损失，快速路径保持原样。"""
+        arr = np.asarray([1_767_225_600.123], dtype=np.float32)
+        assert _evaluate_float32_safety(arr)[0] is True

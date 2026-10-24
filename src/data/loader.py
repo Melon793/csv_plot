@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import gc
+import time
 from pathlib import Path
 from typing import Callable
 import numpy as np
@@ -12,6 +13,7 @@ from src.core.config import (
     _UNIT_KEYWORDS,
     UNIT_KEYWORD_RATIO_THRESHOLD,
     VALID_NUMERIC_RATIO_THRESHOLD,
+    CSV_PERF_LOG_THRESHOLD_S,
     _evaluate_float32_safety,
 )
 from src.core.gc_guard import no_autogc
@@ -324,6 +326,7 @@ class FastDataLoader(BaseDataLoader):
         encodings_to_try = list(dict.fromkeys([detected_encoding, *ENCODING_FALLBACKS]))
 
         lines: list[str] = []
+        physical_lines: list[int] = []
         final_encoding = None
         for enc in encodings_to_try:
             # P0-5: 必须 errors="strict"。errors="replace" 下解码永不抛
@@ -332,6 +335,14 @@ class FastDataLoader(BaseDataLoader):
             # U+FFFD 乱码上进行。
             try:
                 decoded: list[str] = []
+                # P1-5: decoded 是**过滤掉空行**的列表，它的下标不等于物理行号。
+                # 平行记录每个非空行的物理行号，返回值一律用物理口径 —— 下游
+                # `_load_header_units` 用 `skiprows=desc_rows`、正式读取用
+                # `skiprows=desc_rows(+1~2)`，pandas 的 skiprows 数的是物理行；
+                # 拿过滤下标当物理行号，文件里只要有空行（表头之前的空行很常见）
+                # 就会整段错位：少跳一行 → 把单位行读成表头，多跳一行 → 丢首行数据。
+                physical_of: list[int] = []
+                physical_index = 0
                 with open(file_path, "r", encoding=enc, errors="strict") as f:
                     for _ in range(50):
                         line = f.readline()
@@ -340,11 +351,14 @@ class FastDataLoader(BaseDataLoader):
                         stripped = line.rstrip("\n\r")
                         if stripped.strip():
                             decoded.append(stripped)
+                            physical_of.append(physical_index)
+                        physical_index += 1
                         if len(decoded) >= 40:
                             break
             except (UnicodeDecodeError, UnicodeError, LookupError):
                 continue
             lines = decoded
+            physical_lines = physical_of
             final_encoding = enc
             break
 
@@ -358,13 +372,25 @@ class FastDataLoader(BaseDataLoader):
 
         sep = FastDataLoader._detect_sep_from_lines(lines)
         if sep is not None:
-            header_row = FastDataLoader._detect_header_from_lines(lines, sep)
+            # 探测函数一律按「过滤后的行列表」取索引，最后才换算成物理行号
+            header_pos = FastDataLoader._detect_header_from_lines(lines, sep)
             has_unit = FastDataLoader._detect_has_unit_from_lines(
-                lines, sep, header_row
+                lines, sep, header_pos
             )
         else:
-            header_row = 0
+            header_pos = 0
             has_unit = False
+
+        header_row = (
+            physical_lines[header_pos]
+            if header_pos < len(physical_lines)
+            else header_pos
+        )
+        if header_row != header_pos:
+            logger.debug(
+                "auto_detect: 表头前有空行，过滤下标 %d → 物理行号 %d",
+                header_pos, header_row,
+            )
 
         return FormatInfo(
             encoding=final_encoding, sep=sep, header_row=header_row, has_unit=has_unit
@@ -441,6 +467,23 @@ class FastDataLoader(BaseDataLoader):
             "开始加载 CSV: %s (%.1f MB, sep=%s, desc=%d, has_unit=%s)",
             csv_path, self.file_size / 1024 / 1024, sep, desc_rows, has_unit,
         )
+        # [PERF] 阶段计时：慢阶段立刻落 WARNING。这样即使中途抛错，日志里也
+        # 已经有「跑到哪一步、各花了多久」，不至于只剩首尾两条 INFO 定不了位。
+        _perf_started = time.perf_counter()
+        _perf_prev = [_perf_started]
+
+        def _perf_mark(stage: str) -> None:
+            now = time.perf_counter()
+            elapsed = now - _perf_prev[0]
+            _perf_prev[0] = now
+            if elapsed >= CSV_PERF_LOG_THRESHOLD_S:
+                logger.warning(
+                    "[PERF] CSV 阶段「%s」耗时 %.3fs（阈值 %.1fs）｜%s",
+                    stage, elapsed, CSV_PERF_LOG_THRESHOLD_S,
+                    os.path.basename(csv_path),
+                )
+            else:
+                logger.debug("[PERF] CSV 阶段「%s」耗时 %.3fs", stage, elapsed)
         self.max_rows_infer = max_rows_infer
         self.usecols = usecols
         self.drop_empty = drop_empty
@@ -462,6 +505,7 @@ class FastDataLoader(BaseDataLoader):
                 encoding=encoding,
             )
         )
+        _perf_mark("表头/单位")
 
         if self._progress_cb:
             self._progress_cb(5)
@@ -488,12 +532,14 @@ class FastDataLoader(BaseDataLoader):
             sample
         )
         self.date_formats = date_formats
+        _perf_mark("采样读取+schema 推断")
 
         del sample
         if self._allow_gc:
             gc.collect()
         if self._progress_cb:
             self._progress_cb(15)
+        _perf_mark("采样后 GC")
 
         # 计算 chunk 大小
         if chunksize is None:
@@ -509,9 +555,11 @@ class FastDataLoader(BaseDataLoader):
             desc_rows=self.desc_rows,
             has_unit=self.has_unit,
         )
+        _perf_mark("正式读取")
 
         # 后处理：合并 downcast + validity 为单次遍历
         self._df_validity = self._postprocess_columns(downcast=downcast_float)
+        _perf_mark("后处理(downcast+validity)")
 
         # 强制垃圾回收（worker 线程路径由 allow_gc 关闭）
         if self._allow_gc:
@@ -519,10 +567,12 @@ class FastDataLoader(BaseDataLoader):
 
         if self._progress_cb:
             self._progress_cb(100)
+        _perf_mark("收尾 GC")
 
         logger.info(
-            "CSV 加载完成: %s (%d 行, %d 列)",
+            "CSV 加载完成: %s (%d 行, %d 列)｜总耗时 %.3fs",
             csv_path, len(self._df), len(self._var_names),
+            time.perf_counter() - _perf_started,
         )
 
     @staticmethod
@@ -740,6 +790,55 @@ class FastDataLoader(BaseDataLoader):
 
         return dtype_map, parse_dates, date_formats, downcast_ratio_est
 
+    #: 「采样窗口的 dtype 太窄」在 pandas 侧的报错特征串（P1-6）
+    _DTYPE_CONVERSION_MARKERS = (
+        "could not convert string to float",
+        "cannot cast array data from dtype('o')",
+    )
+
+    @classmethod
+    def _is_dtype_conversion_error(cls, exc: ValueError) -> bool:
+        """判定 ValueError 是否由「推断出的数值 dtype 撞上后段文本」引起。
+
+        只认这两类特征串。真损坏文件、编码问题等 ValueError 照旧上抛 ——
+        否则容错路径会把「文件确实打不开」也吞成「打开但少数据」，那才是更大的坑。
+        """
+        text = str(exc).lower()
+        return any(marker in text for marker in cls._DTYPE_CONVERSION_MARKERS)
+
+    @staticmethod
+    def _expected_numeric_columns(dtype_map: dict) -> list[str]:
+        """采样阶段被判成数值列（float32/float64）的那些列名。"""
+        return [c for c, dt in dtype_map.items() if str(dt) in ("float32", "float64")]
+
+    def _coerce_expected_numeric(
+        self, df: pd.DataFrame, expected: list[str], source: str
+    ) -> None:
+        """容错重读后把「本该数值却变成文本」的列转回数值。
+
+        重读不带 dtype，pandas 自己按整列判断：干净的列照样是 float64，只有真的
+        混进文本的列才落成 object —— 所以这里只处理落在 expected 里、却不再是
+        数值 dtype 的列，转不动的单元格置为缺失并计数（图上表现为断点）。
+        """
+        repaired = getattr(self, "dtype_repairs", None)
+        if repaired is None:
+            repaired = self.dtype_repairs = {}
+        for col in expected:
+            if col not in df.columns:
+                continue
+            series = df[col]
+            if pd.api.types.is_numeric_dtype(series):
+                continue
+            numeric = pd.to_numeric(series, errors="coerce")
+            bad = int((numeric.isna() & series.notna()).sum())
+            df[col] = numeric
+            if bad:
+                logger.warning(
+                    "列 %s 有 %d 个非数值单元格（采样窗口外出现的文本），已置为缺失: %s",
+                    col, bad, source,
+                )
+            repaired[col] = bad
+
     def _read_chunks(
         self,
         path: str,
@@ -762,56 +861,63 @@ class FastDataLoader(BaseDataLoader):
         except OSError:
             file_size = 0
 
-        if file_size > 0 and file_size <= _LARGE_FILE_THRESHOLD:
-            # —— 中小文件：一次性读入
-            # pandas 内部已是 C 级流式解析，Python 层 chunksize + concat 反而额外占用 ~1× 内存。
-            df = pd.read_csv(
-                path,
-                skiprows=(2 + desc_rows) if has_unit else (1 + desc_rows),
-                names=self._var_names,
-                dtype=dtype_map,
-                parse_dates=parse_dates,
-                encoding=self.encoding_used,
-                usecols=self.usecols,
-                low_memory=False,
-                memory_map=True,
-                sep=sep,
-                na_values=self._NA_VALUES,
-                keep_default_na=True,
-                on_bad_lines="skip",
-            )
+        small_file = 0 < file_size <= _LARGE_FILE_THRESHOLD
+        self.dtype_repairs = {}
+        common_kwargs = {
+            "skiprows": (2 + desc_rows) if has_unit else (1 + desc_rows),
+            "names": self._var_names,
+            "encoding": self.encoding_used,
+            "usecols": self.usecols,
+            "memory_map": True,
+            "sep": sep,
+            "na_values": self._NA_VALUES,
+            "keep_default_na": True,
+            "on_bad_lines": "skip",
+        }
 
-            if self._progress_cb:
-                self._progress_cb(85)
-
+        def _read(dtype: dict | None, dates: list[str]) -> pd.DataFrame:
+            """按给定 dtype/日期列读一次；``dtype=None`` 让 pandas 自己按整列推断。"""
+            kwargs = dict(common_kwargs, dtype=dtype, parse_dates=dates)
+            if small_file:
+                # pandas 内部已是 C 级流式解析，Python 层 chunksize + concat 反而
+                # 额外占用 ~1× 内存。
+                kwargs["low_memory"] = False
+                return pd.read_csv(path, **kwargs)
+            # —— 超大文件（>2GB 或无法获取大小）：保留 chunksize 分批读取防止 OOM
+            kwargs["low_memory"] = True  # 超大文件分列推断，减少峰值内存
+            chunks: list[pd.DataFrame] = []
+            for idx, chunk in enumerate(
+                pd.read_csv(path, chunksize=chunksize, **kwargs)
+            ):
+                chunks.append(chunk)
+                if self._progress_cb and file_size > 0:
+                    # 粗略进度估算（基于已读 chunk 数 × chunksize / 文件大小）
+                    progress = min(80, int((idx + 1) * chunksize * 100 / file_size))
+                    self._progress_cb(15 + progress)
+            df = pd.concat(chunks, ignore_index=True)
+            del chunks
             return df
 
-        # —— 超大文件（>2GB 或无法获取大小）：保留 chunksize 分批读取防止 OOM
-        chunks: list[pd.DataFrame] = []
-        for idx, chunk in enumerate(pd.read_csv(
-            path,
-            skiprows=(2 + desc_rows) if has_unit else (1 + desc_rows),
-            names=self._var_names,
-            dtype=dtype_map,
-            parse_dates=parse_dates,
-            encoding=self.encoding_used,
-            usecols=self.usecols,
-            low_memory=True,  # 超大文件分列推断，减少峰值内存
-            memory_map=True,
-            chunksize=chunksize,
-            sep=sep,
-            na_values=self._NA_VALUES,
-            keep_default_na=True,
-            on_bad_lines="skip",
-        )):
-            chunks.append(chunk)
-            if self._progress_cb and file_size > 0:
-                # 粗略进度估算（基于已读 chunk 数 × chunksize / 文件大小）
-                progress = min(80, int((idx + 1) * chunksize * 100 / file_size))
-                self._progress_cb(15 + progress)
-
-        df = pd.concat(chunks, ignore_index=True)
-        del chunks
+        try:
+            df = _read(dtype_map, parse_dates)
+        except ValueError as e:
+            # P1-6：dtype 是拿前 max_rows_infer 行推断的，文件后段（现场很常见：
+            # 结尾几行状态文本、传感器故障行的字符串标记）一旦出现非数值文本，
+            # 带 dtype 的读取直接抛 ValueError → 整个文件「打不开」。
+            # 这里改成不带 dtype 重读一次（pandas 按整列推断，干净的列照旧是
+            # 数值，只有混入文本的列落成文本），再把本该数值的列逐格 coerce，
+            # 让文件照常打开，只有那几个单元格变成缺失。
+            # 判定见 _is_dtype_conversion_error —— 真损坏文件照旧上抛。
+            expected = self._expected_numeric_columns(dtype_map)
+            if not expected or not self._is_dtype_conversion_error(e):
+                raise
+            logger.warning(
+                "按采样推断的 dtype 读取失败（文件后段出现非数值文本），"
+                "改用不带 dtype 重读: %s",
+                e,
+            )
+            df = _read(None, parse_dates)
+            self._coerce_expected_numeric(df, expected, path)
 
         if self._progress_cb:
             self._progress_cb(85)
