@@ -10,6 +10,7 @@ P0-2 从 LayoutManager 搬迁进来。
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QTimer
@@ -69,6 +70,12 @@ class PlotPage:
         self.cols_current = int(cols_current)
         self.row_height_factors: dict[int, int] = dict(row_height_factors or {})
 
+        #: 最近一次实际构建的网格规模。容器扁平列表的列步长以它为准：
+        #: 新建页只建可见区（§5.3），若仍按 cols_max 算 divmod 会把
+        #: (r,c) 映射到错误单元格。
+        self._built_rows = 0
+        self._built_cols = 0
+
         #: 隐藏期间有 cursor / mark item 待补建，切回本页时处理（§5.1）
         self._scene_dirty = False
         #: 页面级 XLink 防抖标志（§3）
@@ -77,6 +84,18 @@ class PlotPage:
         self._xlink_dirty = False
         #: 切页前的 master X 范围，用于“切页跟随”（§5.2）
         self.saved_x_range: tuple[float, float] | None = None
+
+    @property
+    def grid_cols(self) -> int:
+        """容器扁平列表的列步长。
+
+        新页只建 ``rows_current × cols_current``（§5.3），此时实际列数可能
+        小于容量 ``cols_max``；凡按扁平索引反算 (row, col) 的地方都必须用
+        本属性，不能再用 ``cols_max``。
+        """
+        if self._built_cols > 0:
+            return self._built_cols
+        return max(1, self.cols_max)
 
     # ------------------------------------------------------------------
     # 网格构建 / 拆除（从 LayoutManager 搬迁，顺序与原实现一致）
@@ -100,6 +119,46 @@ class PlotPage:
                 widget.setParent(None)
                 widget.deleteLater()
         self.plot_widgets.clear()
+        self._built_rows = 0
+        self._built_cols = 0
+
+    def _new_plot_container(self, row: int, col: int, *, services, master_viewbox):
+        """建一个子图容器；非首格自动 XLink 到 master。"""
+        from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+
+        plot_widget = DraggableGraphicsLayoutWidget(
+            services.units, services.data, services.time_channels_infos
+        )
+        #: 反查所属页（mark region / 统计 / 日志头）
+        plot_widget.page = self
+        # 关键：注入“本页”而不是“当前页”，页切走后 ctx 仍指向自己的兄弟集合
+        plot_widget.plot_context = PlotContext(services)
+
+        cursor_enabled = services.cursor_btn.isChecked()
+        if cursor_enabled and services.cursor_values_hidden:
+            plot_widget.toggle_cursor(False, hide_values_only=True)
+        else:
+            plot_widget.toggle_cursor(cursor_enabled)
+        if cursor_enabled:
+            plot_widget.apply_cursor_mode(
+                services.cursor_mode, services.pinned_x_values
+            )
+
+        if master_viewbox is None:
+            master_viewbox = plot_widget.view_box
+        else:
+            plot_widget.view_box.setXLink(master_viewbox)
+
+        container = PlotContainerWidget(plot_widget)
+        container.plot_widget = plot_widget
+        return container, master_viewbox
+
+    def _apply_grid_stretches(self, rows: int, cols: int) -> None:
+        for row in range(rows):
+            percentage = self.row_height_factors.get(row, 100)
+            self.plot_layout.setRowStretch(row, max(1, percentage // 25))
+        for col in range(cols):
+            self.plot_layout.setColumnStretch(col, 1)
 
     def build_matrix(self, rows: int, cols: int, *, deps=None) -> None:
         """建立 rows×cols 子图矩阵并注入页作用域 PlotContext。
@@ -108,8 +167,6 @@ class PlotPage:
             rows/cols: 本次要建的网格规模（既有调用方传页容量）。
             deps: PageServices；不传则用建页时注入的 ``self.services``。
         """
-        from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
-
         services = deps if deps is not None else self.services
         if services is None:
             raise RuntimeError("PlotPage.build_matrix: PageServices 未注入")
@@ -122,58 +179,104 @@ class PlotPage:
                 widget.deleteLater()
         self.plot_widgets.clear()
 
-        first_viewbox = None
+        master_viewbox = None
         for row in range(rows):
             for col in range(cols):
-                plot_widget = DraggableGraphicsLayoutWidget(
-                    services.units, services.data, services.time_channels_infos
+                container, master_viewbox = self._new_plot_container(
+                    row, col, services=services, master_viewbox=master_viewbox
                 )
-                #: 反查所属页（mark region / 统计 / 日志头）
-                plot_widget.page = self
-                # 关键：注入“本页”而不是“当前页”，页切走后 ctx 仍指向自己的兄弟集合
-                plot_widget.plot_context = PlotContext(services)
-
-                cursor_enabled = services.cursor_btn.isChecked()
-                if cursor_enabled and services.cursor_values_hidden:
-                    plot_widget.toggle_cursor(False, hide_values_only=True)
-                else:
-                    plot_widget.toggle_cursor(cursor_enabled)
-                if cursor_enabled:
-                    plot_widget.apply_cursor_mode(
-                        services.cursor_mode, services.pinned_x_values
-                    )
-
-                if col == 0 and row == 0:
-                    first_viewbox = plot_widget.view_box
-                else:
-                    plot_widget.view_box.setXLink(first_viewbox)
-
-                container = PlotContainerWidget(plot_widget)
-                container.plot_widget = plot_widget
-
                 self.plot_layout.addWidget(container, row, col)
                 self.plot_widgets.append(container)
 
-        for row in range(rows):
-            percentage = self.row_height_factors.get(row, 100)
-            self.plot_layout.setRowStretch(row, max(1, percentage // 25))
-        for col in range(cols):
-            self.plot_layout.setColumnStretch(col, 1)
+        self._built_rows = int(rows)
+        self._built_cols = int(cols)
+        self._apply_grid_stretches(rows, cols)
         if services.mark_region_btn.isChecked():
             services.layout_manager.toggle_mark_region(True)
 
         for row in range(rows):
             self.row_height_factors.setdefault(row, 100)
 
+    def ensure_matrix(self, rows: int | None = None, cols: int | None = None) -> bool:
+        """确保本页至少有 rows×cols 的容器；返回是否发生了创建。
+
+        新建页激活时按“继承当前页可见行列”首次建矩阵（D-C）；用户随后在
+        布局对话框里扩大行列时，只补建缺失单元格，已有子图与曲线原样保留
+        （§5.3：不能为了补格把整页重建）。
+        """
+        target_rows = int(rows if rows is not None else self.rows_current)
+        target_cols = int(cols if cols is not None else self.cols_current)
+        target_rows = min(max(1, target_rows), max(1, self.rows_max))
+        target_cols = min(max(1, target_cols), max(1, self.cols_max))
+
+        if not self.plot_widgets:
+            self.build_matrix(target_rows, target_cols)
+            return True
+        if target_rows <= self._built_rows and target_cols <= self._built_cols:
+            return False
+        self._grow_matrix(
+            max(target_rows, self._built_rows), max(target_cols, self._built_cols)
+        )
+        return True
+
+    def _grow_matrix(self, new_rows: int, new_cols: int) -> None:
+        """补建缺失单元格；按 (r,c) 而非旧扁平索引搬运已有容器。"""
+        services = self.services
+        if services is None:
+            raise RuntimeError("PlotPage._grow_matrix: PageServices 未注入")
+
+        old_cols = self.grid_cols
+        existing = {}
+        for index, container in enumerate(self.plot_widgets):
+            row, col = divmod(index, old_cols)
+            existing[(row, col)] = container
+
+        master = existing.get((0, 0))
+        master_viewbox = None
+        if master is not None:
+            master_viewbox = getattr(
+                getattr(master, "plot_widget", None), "view_box", None
+            )
+
+        self.plot_widgets.clear()
+        for row in range(new_rows):
+            for col in range(new_cols):
+                container = existing.get((row, col))
+                if container is None:
+                    container, master_viewbox = self._new_plot_container(
+                        row, col,
+                        services=services,
+                        master_viewbox=master_viewbox,
+                    )
+                    self.plot_layout.addWidget(container, row, col)
+                self.plot_widgets.append(container)
+
+        self._built_rows = int(new_rows)
+        self._built_cols = int(new_cols)
+        self._apply_grid_stretches(new_rows, new_cols)
+        for row in range(new_rows):
+            self.row_height_factors.setdefault(row, 100)
+
+        if services.mark_region_btn.isChecked():
+            self.restore_mark_regions()
+
     # ------------------------------------------------------------------
     # 可见性 / 行高 / XLink
     # ------------------------------------------------------------------
     def apply_visibility(self, rows: int, cols: int) -> None:
-        """按显式行列设置可见区（不能用 isVisible 反推，R0）。"""
+        """按显式行列设置可见区（不能用 isVisible 反推，R0）。
+
+        行列超过已建网格时先补建缺失格（新页首次调布局对话框的入口），
+        已有子图与曲线不会被重建。
+        """
+        rows = min(max(1, int(rows)), max(1, self.rows_max))
+        cols = min(max(1, int(cols)), max(1, self.cols_max))
+        self.ensure_matrix(rows, cols)
         self.rows_current = int(rows)
         self.cols_current = int(cols)
+        grid_cols = self.grid_cols
         for index, container in enumerate(self.plot_widgets):
-            row, col = divmod(index, self.cols_max) if self.cols_max > 0 else (0, 0)
+            row, col = divmod(index, grid_cols)
             container.setVisible(row < rows and col < cols)
         self.sync_xlink_after_visibility_change(rows, cols)
         self.adjust_stretch_and_range(rows, cols)
@@ -184,10 +287,11 @@ class PlotPage:
         master_vb = self.master_viewbox()
         if master_container is None or master_vb is None:
             return
+        grid_cols = self.grid_cols
         for index, container in enumerate(self.plot_widgets):
             if container is master_container or not widget_alive(container):
                 continue
-            row, col = divmod(index, self.cols_max) if self.cols_max > 0 else (0, 0)
+            row, col = divmod(index, grid_cols)
             should_be_visible = row < rows and col < cols
             view_box = getattr(getattr(container, "plot_widget", None), "view_box", None)
             if view_box is None:
@@ -209,11 +313,12 @@ class PlotPage:
     def adjust_stretch_and_range(self, rows: int, cols: int) -> None:
         """调整行列 stretch，并把可见子图对齐到首个可见 master 的 X 范围。"""
         services = self.services
+        grid_cols = self.grid_cols
         for col in range(self.cols_max):
             has_visible = any(
-                self.cell_visible(row * self.cols_max + col)
+                self.cell_visible(row * grid_cols + col)
                 for row in range(self.rows_max)
-                if row * self.cols_max + col < len(self.plot_widgets)
+                if row * grid_cols + col < len(self.plot_widgets)
             )
             self.plot_layout.setColumnStretch(col, 1 if has_visible else 0)
             logger.debug(
@@ -309,7 +414,7 @@ class PlotPage:
                 except Exception:
                     logger.debug("获取 viewRange 失败", exc_info=True)
 
-                row, col = divmod(index, self.cols_max) if self.cols_max > 0 else (0, 0)
+                row, col = divmod(index, grid_cols)
                 match_ok = (
                     after_min is not None
                     and after_max is not None
@@ -386,14 +491,92 @@ class PlotPage:
         self._pending_xlink_sync = False
         self.sync_xlink()
 
+    # ------------------------------------------------------------------
+    # 切页范围跟随（§5.2）
+    # ------------------------------------------------------------------
+    def grab_master_x_range(self) -> tuple[float, float] | None:
+        """切页前抓 master 的 X 范围，供新页 ``apply_x_range`` 跟随。"""
+        view_box = self.master_viewbox()
+        if view_box is None:
+            self.saved_x_range = None
+            return None
+        try:
+            x_min, x_max = view_box.viewRange()[0]
+            x_min, x_max = float(x_min), float(x_max)
+        except Exception:
+            logger.debug("[PAGE] grab_master_x_range 读取失败", exc_info=True)
+            self.saved_x_range = None
+            return None
+        if not (math.isfinite(x_min) and math.isfinite(x_max)) or x_max <= x_min:
+            self.saved_x_range = None
+            return None
+        self.saved_x_range = (x_min, x_max)
+        return self.saved_x_range
+
+    def apply_x_range(self, x_min: float, x_max: float) -> bool:
+        """把本页 master 搬到给定 X 范围，页内其余子图由 XLink 级联。
+
+        复用既有“临时 unlink → setXRange(padding=0) → 恢复 link”套路，
+        避免 pyqtgraph 的 XLink 把程序化范围按源范围静默回收。
+        """
+        view_box = self.master_viewbox()
+        if view_box is None:
+            return False
+        try:
+            x_min, x_max = float(x_min), float(x_max)
+        except (TypeError, ValueError):
+            return False
+        if not (math.isfinite(x_min) and math.isfinite(x_max)) or x_max <= x_min:
+            return False
+
+        flags: dict = {}
+        for container in self.plot_widgets:
+            candidate = getattr(container, "plot_widget", None)
+            if candidate is None:
+                continue
+            flags[candidate] = getattr(candidate, "_is_syncing_range", False)
+            candidate._is_syncing_range = True
+        try:
+            linked = view_box.linkedView(0)
+            if linked is not None:
+                view_box.setXLink(None)
+            try:
+                view_box.enableAutoRange(x=False)
+                view_box.setXRange(x_min, x_max, padding=0)
+            finally:
+                if linked is not None:
+                    view_box.setXLink(linked)
+        except Exception:
+            logger.debug("[PAGE] apply_x_range 失败", exc_info=True)
+            return False
+        finally:
+            for candidate, previous in flags.items():
+                try:
+                    candidate._is_syncing_range = previous
+                except RuntimeError:
+                    pass
+        logger.debug("[PAGE] apply_x_range %.4f..%.4f on %s", x_min, x_max, self)
+        return True
+
+    def restore_scene(self) -> None:
+        """隐藏页切回：按全局状态补建场景 item（§5.1）。
+
+        S4 先处理标记区；游标 vline/label 的补建在 P2 接入同一入口。
+        """
+        if not widget_alive(self.widget) or self.widget.isHidden():
+            return
+        self._scene_dirty = False
+        self.restore_mark_regions()
+
     def set_row_height(self, row: int, percentage: int) -> None:
         if row < 0 or row >= self.rows_max:
             return
         self.row_height_factors[row] = percentage
+        grid_cols = self.grid_cols
         for candidate in range(self.rows_max):
             visible = any(
-                self.cell_visible(candidate * self.cols_max + col)
-                for col in range(self.cols_max)
+                self.cell_visible(candidate * grid_cols + col)
+                for col in range(grid_cols)
             )
             if visible:
                 pct = self.row_height_factors.get(candidate, 100)
@@ -404,10 +587,11 @@ class PlotPage:
     def set_all_row_height(self, percentage: int) -> None:
         for row in range(self.rows_max):
             self.row_height_factors[row] = percentage
+        grid_cols = self.grid_cols
         for row in range(self.rows_max):
             visible = any(
-                self.cell_visible(row * self.cols_max + col)
-                for col in range(self.cols_max)
+                self.cell_visible(row * grid_cols + col)
+                for col in range(grid_cols)
             )
             if visible:
                 pct = self.row_height_factors.get(row, 100)
@@ -464,9 +648,8 @@ class PlotPage:
         """第 index 个网格是否落在当前可见行列内。"""
         if index < 0 or index >= len(self.plot_widgets):
             return False
-        if self.cols_max <= 0:
-            return False
-        row, col = divmod(index, self.cols_max)
+        grid_cols = self.grid_cols
+        row, col = divmod(index, grid_cols)
         return row < self.rows_current and col < self.cols_current
 
     def visible_containers(self) -> list[PlotContainerWidget]:
@@ -477,9 +660,9 @@ class PlotPage:
         ]
 
     def container_at(self, row: int, col: int) -> PlotContainerWidget | None:
-        if row < 0 or col < 0 or self.cols_max <= 0:
+        if row < 0 or col < 0 or col >= self.grid_cols:
             return None
-        index = row * self.cols_max + col
+        index = row * self.grid_cols + col
         if index >= len(self.plot_widgets):
             return None
         return self.plot_widgets[index]
@@ -488,7 +671,7 @@ class PlotPage:
         """给定子图，返回它在本页的行号；找不到返回 -1。"""
         for index, container in enumerate(self.plot_widgets):
             if container is plot_widget or container.plot_widget is plot_widget:
-                return index // self.cols_max if self.cols_max > 0 else -1
+                return index // self.grid_cols
         return -1
 
     def master_container(self) -> PlotContainerWidget | None:

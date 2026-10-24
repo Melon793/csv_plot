@@ -37,6 +37,8 @@ class PlotServices(Protocol):
     @property
     def _plot_col_max_default(self) -> int: ...
     @property
+    def grid_cols(self) -> int: ...
+    @property
     def plot_layout(self) -> QGridLayout: ...
     @property
     def _is_loading_new_data(self) -> bool: ...
@@ -121,6 +123,12 @@ class PlotContext:
     @property
     def _plot_col_max_default(self) -> int:
         return self._services._plot_col_max_default
+
+    @property
+    def grid_cols(self) -> int:
+        # 旧替身服务没有 grid_cols 时退回容量列数（单页且建满时两者相等）
+        cols = getattr(self._services, "grid_cols", 0)
+        return cols if cols and cols > 0 else self._services._plot_col_max_default
 
     @property
     def plot_layout(self) -> QGridLayout:
@@ -246,6 +254,10 @@ class PageServices:
     @property
     def _plot_col_max_default(self) -> int:
         return self.page.cols_max
+
+    @property
+    def grid_cols(self) -> int:
+        return self.page.grid_cols
 
     @property
     def _plot_row_max_default(self) -> int:

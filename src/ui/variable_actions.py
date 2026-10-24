@@ -59,7 +59,9 @@ def add_variables_to_blank_plot(var_names, main_window, msg_parent=None) -> bool
     # 2. 在用户设置的当前布局(mxn)中查找空白绘图区，无论绘图区整体是否可见
     blank_plot = None
     rows, cols = main_window._plot_row_current, main_window._plot_col_current
-    max_cols = main_window._plot_col_max_default  # 这是完整网格的列数，用于计算索引
+    # 扁平索引的列步长是“实际构建列数”（新页只建可见区，可能小于容量）；
+    # 旧替身没有 grid_cols 时退回容量列数，单页建满时两者相等。
+    max_cols = getattr(main_window, "grid_cols", 0) or main_window._plot_col_max_default
 
     for idx, container in enumerate(main_window.plot_widgets):
         # 根据一维索引计算其在完整网格(pxq)中的二维坐标(r, c)

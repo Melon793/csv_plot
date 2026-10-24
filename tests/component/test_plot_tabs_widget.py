@@ -1,0 +1,101 @@
+"""PlotTabsWidget：角部「＋」闸门、上限、信号转发与常显 tab bar。
+
+对应设计文档 §4.4 与决策 D-D（未加载数据时禁用「＋」，上限 8 页）。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel, QToolButton
+
+from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
+
+
+@pytest.fixture()
+def tabs(qapp, qtbot):
+    widget = PlotTabsWidget()
+    qtbot.addWidget(widget)
+    widget.resize(640, 360)
+    widget.show()
+    qapp.processEvents()
+    yield widget
+    widget.close()
+
+
+def _plus_button(tabs: PlotTabsWidget) -> QToolButton:
+    button = tabs.cornerWidget(Qt.Corner.TopRightCorner)
+    assert isinstance(button, QToolButton)
+    return button
+
+
+def _add_pages(tabs: PlotTabsWidget, count: int) -> None:
+    for index in range(count):
+        tabs.addTab(QLabel(f"page {index}"), f"图 {index + 1}")
+
+
+def test_corner_plus_disabled_until_data_loaded(tabs):
+    assert not _plus_button(tabs).isEnabled()
+    tabs.set_new_page_enabled(True)
+    assert _plus_button(tabs).isEnabled()
+    tabs.set_new_page_enabled(False)
+    assert not _plus_button(tabs).isEnabled()
+
+
+def test_plus_emits_only_when_allowed(tabs, qtbot):
+    received = []
+    tabs.new_page_requested.connect(lambda: received.append(True))
+
+    qtbot.mouseClick(_plus_button(tabs), Qt.MouseButton.LeftButton)
+    assert received == []          # 未加载数据：禁用，不发出请求
+
+    tabs.set_new_page_enabled(True)
+    qtbot.mouseClick(_plus_button(tabs), Qt.MouseButton.LeftButton)
+    assert received == [True]
+
+
+def test_plus_disables_at_page_limit(tabs):
+    tabs.set_new_page_enabled(True)
+    _add_pages(tabs, MAX_PAGES)
+    assert tabs.count() == MAX_PAGES
+    assert not _plus_button(tabs).isEnabled()
+
+    tabs.removeTab(MAX_PAGES - 1)
+    assert _plus_button(tabs).isEnabled()
+
+
+def test_close_request_forwarded(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    tabs.tabCloseRequested.emit(2)
+    assert received == [2]
+
+
+def test_middle_click_closes_tab(tabs, qtbot):
+    _add_pages(tabs, 2)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    center = tabs.tabBar().tabRect(1).center()
+    qtbot.mouseClick(
+        tabs.tabBar(), Qt.MouseButton.MiddleButton, pos=center
+    )
+    assert received == [1]
+
+
+def test_double_click_requests_rename(tabs, qtbot):
+    _add_pages(tabs, 2)
+    received = []
+    tabs.rename_page_requested.connect(received.append)
+    center = tabs.tabBar().tabRect(0).center()
+    qtbot.mouseDClick(tabs.tabBar(), Qt.MouseButton.LeftButton, pos=center)
+    assert received == [0]
+
+
+def test_tab_bar_stays_visible_with_single_page(tabs, qapp):
+    """autoHide 会连 corner「＋」一起隐藏，故 tab bar 必须常显。"""
+    _add_pages(tabs, 1)
+    qapp.processEvents()
+    assert tabs.tabBar().isVisible()
+    assert _plus_button(tabs).isVisible()

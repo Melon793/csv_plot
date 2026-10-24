@@ -2240,6 +2240,11 @@ class FileLoaderManager(MainWindowBaseManager):
         if self.mw.placeholder_label.parent():
             self.mw.placeholder_label.setParent(None)
 
+        # 有数据后才允许新建绘图页（决策 D-D）
+        plot_tabs = getattr(self.mw, "plot_tabs", None)
+        if plot_tabs is not None:
+            plot_tabs.set_new_page_enabled(True)
+
         if not self.mw.plot_widgets:
             self.mw.layout_manager.create_subplots_matrix(
                 self.mw._plot_row_max_default, self.mw._plot_col_max_default

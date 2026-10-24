@@ -21,6 +21,7 @@ from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 from src.ui.widgets.plot_page import PlotPage  # noqa: E402
+from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget  # noqa: E402
 from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
@@ -36,7 +37,7 @@ from PySide6.QtGui import (  # noqa: E402
 )
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QLineEdit,
+    QPushButton, QLabel, QLineEdit, QInputDialog,
     QMessageBox, QSplitter, QMenu, QStyle, QStatusBar, QFrame,
 )
 
@@ -140,6 +141,8 @@ class MainWindow(QMainWindow):
     提供完整的用户交互界面和数据处理流程
     """
     APP_DISPLAY_NAME = "CSV Plot"
+    #: 绘图页数量上限（与 PlotTabsWidget 的「＋」闸门同源）
+    MAX_PLOT_PAGES = MAX_PAGES
     # 加载期间右区文案的秒表步进，只用于"还在干活吗"，不表示百分比
     LOAD_ELAPSED_TICK_MS = 1000
 
@@ -181,6 +184,14 @@ class MainWindow(QMainWindow):
     def plot_layout(self) -> QGridLayout | None:
         page = self._current_page
         return page.plot_layout if page is not None else None
+
+    @property
+    def grid_cols(self) -> int:
+        """当前页容器扁平列表的列步长（新页只建可见区时可能小于容量）。"""
+        page = self._current_page
+        if page is not None:
+            return page.grid_cols
+        return self._bootstrap_state.get("_plot_col_max_default", PLOT_COL_MAX_DEFAULT)
 
     @property
     def _plot_row_max_default(self) -> int:
@@ -257,26 +268,290 @@ class MainWindow(QMainWindow):
         else:
             self._bootstrap_state["row_height_factors"] = dict(value)
 
-    def _create_page(self, *, parent: QWidget, title: str | None = None) -> PlotPage:
-        """建立首个页容器（P1 起由 PlotTabsWidget 承担挂载）。"""
+    def _create_page(
+        self,
+        *,
+        parent: QWidget,
+        title: str | None = None,
+        rows_max: int | None = None,
+        cols_max: int | None = None,
+        rows_current: int | None = None,
+        cols_current: int | None = None,
+        row_height_factors: dict[int, int] | None = None,
+        plot_widgets: list | None = None,
+        make_current: bool = True,
+    ) -> PlotPage:
+        """建立一个绘图页并注入页作用域服务。
+
+        不带参数时沿用构造期后备值（首个页）；``new_page`` 显式传入继承的
+        行列与行高。``make_current=False`` 供「先建页、加入标签、再激活」。
+        """
         bootstrap = self._bootstrap_state
         page = PlotPage(
             parent=parent,
-            title=title or f"图 {len(self.pages) + 1}",
-            rows_max=int(bootstrap.get("_plot_row_max_default", PLOT_ROW_MAX_DEFAULT)),
-            cols_max=int(bootstrap.get("_plot_col_max_default", PLOT_COL_MAX_DEFAULT)),
-            rows_current=int(bootstrap.get("_plot_row_current", PLOT_ROW_CURRENT_DEFAULT)),
-            cols_current=int(bootstrap.get("_plot_col_current", PLOT_COL_CURRENT_DEFAULT)),
-            row_height_factors=dict(bootstrap.get("row_height_factors") or {}),
-            plot_widgets=bootstrap.get("plot_widgets") or [],
+            title=title or self._next_page_title(),
+            rows_max=int(
+                rows_max if rows_max is not None
+                else bootstrap.get("_plot_row_max_default", PLOT_ROW_MAX_DEFAULT)
+            ),
+            cols_max=int(
+                cols_max if cols_max is not None
+                else bootstrap.get("_plot_col_max_default", PLOT_COL_MAX_DEFAULT)
+            ),
+            rows_current=int(
+                rows_current if rows_current is not None
+                else bootstrap.get("_plot_row_current", PLOT_ROW_CURRENT_DEFAULT)
+            ),
+            cols_current=int(
+                cols_current if cols_current is not None
+                else bootstrap.get("_plot_col_current", PLOT_COL_CURRENT_DEFAULT)
+            ),
+            row_height_factors=(
+                dict(row_height_factors)
+                if row_height_factors is not None
+                else dict(bootstrap.get("row_height_factors") or {})
+            ),
+            plot_widgets=(
+                list(plot_widgets)
+                if plot_widgets is not None
+                else list(bootstrap.get("plot_widgets") or [])
+            ),
         )
         self.pages.append(page)
-        self._current_page = page
+        if make_current:
+            self._current_page = page
         # 页作用域服务：子图 ctx 拿到的是“自己所在页”，不是“当前页”
         from src.app.plot_context import PageServices
 
         page.services = PageServices(self, page)
         return page
+
+    # ------------------------------------------------------------------
+    # 标签页：切页 / 新建 / 关闭 / 重命名（设计文档 §5.2-§5.4）
+    # ------------------------------------------------------------------
+    def page_at_tab(self, index: int) -> PlotPage | None:
+        tabs = getattr(self, "plot_tabs", None)
+        if tabs is None or index < 0 or index >= tabs.count():
+            return None
+        widget = tabs.widget(index)
+        for page in self.pages:
+            if page.widget is widget:
+                return page
+        return None
+
+    def _next_page_title(self) -> str:
+        """最小的未占用「图 N」标题（关闭中间页后不复用重名）。"""
+        used = {page.title for page in self.pages}
+        index = 1
+        while f"图 {index}" in used:
+            index += 1
+        return f"图 {index}"
+
+    def activate_page(self, page: PlotPage | None) -> None:
+        """切换当前页（统一入口：新建页、关闭邻居、模板应用）。"""
+        if page is None:
+            return
+        tabs = getattr(self, "plot_tabs", None)
+        if tabs is None:
+            return
+        index = tabs.indexOf(page.widget)
+        if index < 0:
+            return
+        if page is self._current_page and tabs.currentIndex() == index:
+            self._schedule_page_activation(page)
+            return
+        # 屏蔽 currentChanged，避免与 _switch_to_page 重复处理
+        tabs.blockSignals(True)
+        try:
+            tabs.setCurrentIndex(index)
+        finally:
+            tabs.blockSignals(False)
+        self._switch_to_page(page)
+
+    def _on_current_changed(self, index: int) -> None:
+        if self._is_switching:
+            return
+        self._switch_to_page(self.page_at_tab(index))
+
+    def _switch_to_page(self, new: PlotPage | None) -> None:
+        """切页时序（§5.2）：抓旧范围 → 两页 epoch+1 → 取消待办 → 延迟激活。"""
+        if new is None:
+            return
+        if new is self._current_page:
+            self._schedule_page_activation(new)
+            return
+        old = self._current_page
+        old_range = None
+        if old is not None:
+            old_range = old.grab_master_x_range()
+            old.epoch += 1            # 作废旧页已排队的迟到回调（v0.1 漏项）
+            old.cancel_pending()
+        new.epoch += 1                # 作废新页在本次切页前残留的回调
+        if old_range is not None and self._x_range_follow_enabled:
+            # “跟随”= 新页沿用旧页当前的 X 范围；关闭跟随时各页保留各自范围
+            new.saved_x_range = old_range
+        self._cancel_app_level_pending()
+        self._current_page = new
+        self._schedule_page_activation(new)
+
+    def _cancel_app_level_pending(self) -> None:
+        """切页时停掉 mw 级单例定时器（交叉线/标记统计/待激活）。"""
+        for timer in (
+            getattr(self, "_crosshair_update_timer", None),
+            getattr(self, "_mark_stats_timer", None),
+            getattr(self, "_page_activation_timer", None),
+        ):
+            if timer is not None and timer.isActive():
+                timer.stop()
+        self._pending_crosshair_x = None
+        self._mark_stats_dirty = False
+        self._pending_activation = None
+
+    def _schedule_page_activation(self, page: PlotPage) -> None:
+        """parented 单次定时器承载延迟激活（打包环境不用三参 singleShot）。"""
+        self._pending_activation = (page, page.epoch)
+        self._page_activation_timer.start(0)
+
+    def _run_pending_page_activation(self) -> None:
+        pending = self._pending_activation
+        self._pending_activation = None
+        if pending is not None:
+            self._post_activation(*pending)
+
+    def _post_activation(self, page: PlotPage, epoch: int) -> None:
+        """延迟激活：三重校验后补场景/范围/联动（§5.2）。"""
+        if page is None or not widget_alive(page.widget) or page.epoch != epoch:
+            return
+        if page is not self._current_page:
+            return
+        self.setUpdatesEnabled(False)
+        try:
+            # 页 1 仍由 _apply_loader 建满（无数据时不建，保住启动占位文案）；
+            # 新建页在首次激活时补建继承的可见区网格（D-C）。
+            if self.loader is not None:
+                page.ensure_matrix()
+            if page._scene_dirty:
+                page.restore_scene()
+            if page.saved_x_range and self._x_range_follow_enabled:
+                page.apply_x_range(*page.saved_x_range)
+            page.sync_xlink()
+            cursor_sync = getattr(self, "cursor_sync_manager", None)
+            if cursor_sync is not None:
+                cursor_sync._sync_min_xrange()
+            if self.mark_region_btn.isChecked():
+                page.restore_mark_regions()
+        finally:
+            self.setUpdatesEnabled(True)
+            page.widget.update()
+
+    def new_page(self) -> PlotPage | None:
+        """新建绘图页：继承当前页可见行列，激活时首次建矩阵（§5.3 / D-C）。"""
+        if self.loader is None:
+            self._broadcast("请先导入数据文件后再新建绘图页", "warn")
+            return None
+        if len(self.pages) >= self.MAX_PLOT_PAGES:
+            self._broadcast(f"最多支持 {self.MAX_PLOT_PAGES} 个绘图页", "warn")
+            return None
+        current = self._current_page
+        page = self._create_page(
+            parent=self.plot_tabs,
+            rows_max=current.rows_max if current is not None else None,
+            cols_max=current.cols_max if current is not None else None,
+            rows_current=current.rows_current if current is not None else None,
+            cols_current=current.cols_current if current is not None else None,
+            row_height_factors=(
+                dict(current.row_height_factors) if current is not None else None
+            ),
+            plot_widgets=[],
+            make_current=False,
+        )
+        page.widget.hide()            # 建矩阵前先隐藏，避免中间态被 paint
+        self.plot_tabs.blockSignals(True)
+        try:
+            self.plot_tabs.addTab(page.widget, page.title)
+        finally:
+            self.plot_tabs.blockSignals(False)
+        self.activate_page(page)
+        self._broadcast(f"已新建「{page.title}」", "info")
+        return page
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        self.close_page(self.page_at_tab(index))
+
+    def close_page(self, page: PlotPage | None) -> None:
+        """关闭页；最后一页保留，只清空内容（§5.4）。"""
+        if page is None or page not in self.pages:
+            return
+        if not widget_alive(page.widget):
+            self.pages.remove(page)
+            return
+        if len(self.pages) == 1:
+            self.activate_page(page)
+            self.cursor_sync_manager.clear_all_plots()
+            return
+        has_curves = any(
+            getattr(container.plot_widget, "curves", None)
+            for container in page.plot_widgets
+        )
+        if has_curves:
+            answer = QMessageBox.question(
+                self,
+                "关闭绘图页",
+                f"「{page.title}」中仍有曲线，确定关闭？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        is_current = page is self._current_page
+        index = self.plot_tabs.indexOf(page.widget)
+        page.epoch += 1               # 丢弃在途回调
+        page.cancel_pending()
+        layout_manager = getattr(self, "layout_manager", None)
+        if layout_manager is not None:
+            layout_manager._mark_all_plots_being_destroyed(page)
+        self.plot_tabs.blockSignals(True)
+        try:
+            if index >= 0:
+                self.plot_tabs.removeTab(index)
+        finally:
+            self.plot_tabs.blockSignals(False)
+        self.pages.remove(page)
+        page.dispose()
+
+        if is_current:
+            self._current_page = None
+            target_index = min(max(0, index - 1 if index > 0 else 0),
+                               self.plot_tabs.count() - 1)
+            next_page = self.page_at_tab(target_index)
+            if next_page is None and self.pages:
+                next_page = self.pages[0]
+            self.activate_page(next_page)
+
+    def _on_tab_rename_requested(self, index: int) -> None:
+        page = self.page_at_tab(index)
+        if page is None:
+            return
+        title, ok = QInputDialog.getText(
+            self, "重命名绘图页", "标签名称：", text=page.title
+        )
+        title = (title or "").strip()
+        if not ok or not title or title == page.title:
+            return
+        page.title = title
+        tab_index = self.plot_tabs.indexOf(page.widget)
+        if tab_index >= 0:
+            self.plot_tabs.setTabText(tab_index, title)
+
+    def _on_tab_moved(self, from_index: int, to_index: int) -> None:
+        """拖动标签后同步 pages 顺序（按页对象搬运，不重排容器）。"""
+        if from_index == to_index:
+            return
+        if not (0 <= from_index < len(self.pages) and 0 <= to_index < len(self.pages)):
+            return
+        page = self.pages.pop(from_index)
+        self.pages.insert(to_index, page)
 
     def page_index(self, page: PlotPage | None) -> int:
         if page is None:
@@ -300,6 +575,11 @@ class MainWindow(QMainWindow):
         self._current_page: PlotPage | None = None
         self._is_switching = False
         self._x_range_follow_enabled = True
+        #: 延迟激活（parented 单次定时器；打包环境不用三参 singleShot）
+        self._pending_activation: tuple[PlotPage, int] | None = None
+        self._page_activation_timer = QTimer(self)
+        self._page_activation_timer.setSingleShot(True)
+        self._page_activation_timer.timeout.connect(self._run_pending_page_activation)
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._drop_event_filter_registered = False
@@ -593,9 +873,25 @@ class MainWindow(QMainWindow):
 
         root_layout.addLayout(top_bar)
 
-        # 首个 PlotPage：页容器承载 QGridLayout；后续页由 PlotTabsWidget 挂载
-        self._create_page(parent=self.plot_widget)
-        root_layout.addWidget(self._current_page.widget, 1)
+        # 绘图页标签容器：首个页与后续页都挂在 tab 栈里（§4.4）
+        self.plot_tabs = PlotTabsWidget(self.plot_widget)
+        self.plot_tabs.new_page_requested.connect(self.new_page)
+        self.plot_tabs.close_page_requested.connect(self._on_tab_close_requested)
+        self.plot_tabs.rename_page_requested.connect(self._on_tab_rename_requested)
+        self.plot_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
+        self.plot_tabs.currentChanged.connect(self._on_current_changed)
+        root_layout.addWidget(self.plot_tabs, 1)
+
+        # 首个 PlotPage：页容器承载 QGridLayout；「＋」在未加载数据时禁用（D-D）
+        first_page = self._create_page(parent=self.plot_tabs, make_current=False)
+        self.plot_tabs.blockSignals(True)
+        try:
+            self.plot_tabs.addTab(first_page.widget, first_page.title)
+        finally:
+            self.plot_tabs.blockSignals(False)
+        self._current_page = first_page
+        self.plot_tabs.setCurrentIndex(0)
+        self._schedule_page_activation(first_page)
 
         self.main_splitter.addWidget(self.left_widget)
         self.main_splitter.addWidget(self.plot_widget)

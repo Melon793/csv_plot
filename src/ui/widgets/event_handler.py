@@ -244,7 +244,9 @@ class EventHandler:
         if pw and pw.plot_context and hasattr(pw.plot_context, "plot_widgets"):
             for idx, c in enumerate(pw.plot_context.plot_widgets):
                 if c.plot_widget is pw:
-                    row, _ = divmod(idx, pw.plot_context._plot_col_max_default)
+                    ctx = pw.plot_context
+                    ncols = getattr(ctx, "grid_cols", 0) or ctx._plot_col_max_default
+                    row, _ = divmod(idx, ncols)
                     pw.plot_context.set_row_height(row, pct)
                     break
 
