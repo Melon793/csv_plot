@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from PySide6.QtWidgets import QInputDialog
 
 from src.core.plot_config import PlotSessionConfig
@@ -135,3 +137,31 @@ def test_template_v2_export_apply_roundtrip(loaded_window, qtbot, monkeypatch):
     qtbot.waitUntil(lambda: not mw.pages[0]._scene_dirty, timeout=3000)
     first_pw = mw.pages[0].plot_widgets[0].plot_widget
     assert first_pw.curves["speed"].curve.isVisible() is True
+
+
+def test_v1_template_still_applies_as_single_page(loaded_window, qtbot):
+    """v1 旧模板（只有顶层 plots）→ 单页恢复，多开的页被收敛掉。"""
+    mw = loaded_window
+    first = mw.current_page
+    assert first.plot_widgets[0].plot_widget.plot_variable("speed")
+    _add_page_with_curve(mw, qtbot, "rpm")
+    assert len(mw.pages) == 2
+
+    payload = {
+        "created_at": "2026-01-01T00:00:00",
+        "layout_rows": 1,
+        "layout_cols": 1,
+        "time_factor": 2.0,
+        "time_offset": 1.0,
+        "plots": [{"curves": ["rpm"]}],
+    }
+    assert PlotSessionConfig.is_v2(payload) is False
+    config = PlotSessionConfig.from_dict(payload)
+
+    assert mw.plot_config_manager.apply_config(mw, config) is True
+    qtbot.waitUntil(lambda: len(mw.pages) == 1, timeout=3000)
+    assert mw.pages[0] is first
+    assert mw.current_page is first
+    assert set(first.plot_widgets[0].plot_widget.curves) == {"rpm"}
+    assert mw.factor == pytest.approx(2.0)
+    assert mw.offset == pytest.approx(1.0)

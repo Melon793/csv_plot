@@ -122,6 +122,31 @@ def test_closing_last_page_clears_instead_of_removing(loaded_window):
     assert all(not c.plot_widget.curves for c in page.plot_widgets)
 
 
+def test_close_page_marks_destroyed_and_filters_global_iteration(
+    loaded_window, qtbot, dialog_stubs
+):
+    """R5：关页先确认；确认后旧页面所有子图置销毁位，跨页遍历不再返回。"""
+    mw = loaded_window
+    first = mw.current_page
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    assert second.plot_widgets[0].plot_widget.plot_variable("speed")
+    containers = list(second.plot_widgets)
+    widgets = [container.plot_widget for container in containers]
+
+    # 默认确认口径：替身返回 No，页必须保留
+    mw.close_page(second)
+    assert second in mw.pages
+    assert len(dialog_stubs["question"]) == 1
+
+    mw.close_page(second, confirm=False)
+    assert second not in mw.pages
+    assert mw.current_page is first
+    assert all(widget._is_being_destroyed for widget in widgets)
+    remaining = {container.plot_widget for container in mw.iter_all_plot_widgets()}
+    assert remaining.isdisjoint(widgets)
+
+
 def test_close_invalidates_pending_epoch(loaded_window, qtbot):
     mw = loaded_window
     page = mw.new_page()
