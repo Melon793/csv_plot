@@ -73,6 +73,41 @@ def test_close_request_forwarded(tabs):
     assert received == [2]
 
 
+def test_custom_close_button_attached_and_centered(tabs, qapp):
+    """自绘关闭按钮替换原生图标：挂在每页右侧且在标签矩形内垂直居中。"""
+    _add_pages(tabs, 3)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    for index in range(3):
+        button = tabs.close_button(index)
+        assert isinstance(button, QToolButton)
+        rect = bar.tabRect(index)
+        button_rect = button.geometry()
+        assert rect.isValid()
+        assert rect.contains(button_rect)
+        assert (rect.top() + rect.bottom()) == (button_rect.top() + button_rect.bottom())
+
+
+def test_custom_close_button_click_emits_request(tabs, qtbot):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    qtbot.mouseClick(tabs.close_button(1), Qt.MouseButton.LeftButton)
+    assert received == [1]
+
+
+def test_custom_close_button_follows_tab_move(tabs, qtbot):
+    """拖动重排后按钮随页移动，点击仍关闭正确的页（索引实时反查）。"""
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    moved_button = tabs.close_button(0)
+    tabs.tabBar().moveTab(0, 2)
+    assert tabs.close_button(2) is moved_button
+    qtbot.mouseClick(tabs.close_button(2), Qt.MouseButton.LeftButton)
+    assert received == [2]
+
+
 def test_middle_click_closes_tab(tabs, qtbot):
     _add_pages(tabs, 2)
     received = []
