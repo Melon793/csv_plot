@@ -4,10 +4,18 @@
 新建页（跟随最后一个标签）。**不启用** ``setTabBarAutoHide(True)``：它会把
 「＋」一并隐藏，导致只有一页时入口消失。
 
+未加载数据时整个标签栏隐藏（同 VSCode：无文件即无标签栏），数据闸门
+``set_new_page_enabled(True)`` 开启后显示且从此常显——空标签没有信息量，
+加载前隐藏能让绘图区上移、入口心智更简单。
+
 标签为 VSCode 扁平风：无圆角、激活页顶部 2px 强调线、标签相互贴合。关闭
 按钮与「＋」均为 QPainter 矢量自绘：QSS 无法控制原生关闭图标的尺寸与对齐
 （Windows 下贴右缘、竖直偏下），文本字形则随平台基线漂移；自绘后三平台
 观感一致且任意 DPI 清晰。
+
+「＋」的落位由 ``_TabsBar.tabLayoutChange`` 官方布局钩子驱动：插 / 删 /
+拖动 / **重命名**等一切布局变化都会重算位置（PySide6 未暴露信号版
+``tabLayoutChanged``，故经 ``setTabBar`` 挂入子类重写虚方法）。
 
 本类只负责标签交互与信号转发，页对象的增删与切页时序由 MainWindow 掌握。
 """
@@ -150,6 +158,25 @@ class _NewPageButton(_FlatIconButton):
         painter.drawLine(center + QPointF(-arm, 0), center + QPointF(arm, 0))
 
 
+class _TabsBar(QTabBar):
+    """挂 ``tabLayoutChange`` 官方布局钩子的标签栏。
+
+    PySide6 里 ``tabLayoutChanged`` 信号未暴露（同名属性是 protected 虚
+    方法），故经 ``QTabWidget.setTabBar`` 挂入子类重写。重命名 ``setTabText``
+    只改变标签宽度，不走插 / 删 / Resize 任何路径——「＋」位置会过期并被
+    拉宽的标签盖住；此钩子在插 / 删 / 拖动 / 重命名等一切布局变化后都会
+    触发，一处覆盖全部。
+    """
+
+    def __init__(self, owner: "PlotTabsWidget"):
+        super().__init__()
+        self._owner = owner
+
+    def tabLayoutChange(self):  # noqa: N802 - Qt 命名
+        super().tabLayoutChange()
+        self._owner._place_new_page_button()
+
+
 class PlotTabsWidget(QTabWidget):
     """多绘图页标签容器。
 
@@ -165,11 +192,15 @@ class PlotTabsWidget(QTabWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 必须在一切 tabBar() 使用之前挂入：布局钩子依赖自定义子类
+        self.setTabBar(_TabsBar(self))
         self.setDocumentMode(True)
         self.setMovable(True)
         self.setElideMode(Qt.TextElideMode.ElideRight)
         self.setUsesScrollButtons(True)
-        # 常显 tab bar：autoHide 会把「＋」一起藏掉
+        # 不用 autoHide（它是"单页隐藏"语义，会把「＋」一起藏掉，加载后
+        # 单页时新建入口消失）；改为"数据闸门驱动可见性"：
+        # 未加载数据时整个标签栏隐藏，加载成功后显示且从此常显。
         self.setTabBarAutoHide(False)
         self.setStyleSheet(_TABS_STYLE)
         # macOS 原生样式会画 #bebebe 的 tab bar base，盖住 QSS 底色；
@@ -177,6 +208,8 @@ class PlotTabsWidget(QTabWidget):
         self.tabBar().setDrawBase(False)
 
         self._new_page_allowed = False
+        # 未加载数据：初始隐藏（set_new_page_enabled(True) 时显示）
+        self.tabBar().setVisible(False)
         # 「＋」跟随最后一个标签，而不是钉在标签栏最右端
         self._new_page_btn = _NewPageButton(self.tabBar())
         self._new_page_btn.setFixedSize(26, 24)
@@ -199,8 +232,12 @@ class PlotTabsWidget(QTabWidget):
 
     def _place_new_page_button(self) -> None:
         """把「＋」放到最后一个标签右侧；空间不足时贴右缘。"""
+        # setTabBar 挂钩子后 Qt 会在构造期同步触发布局回调，此时「＋」
+        # 尚未创建——直接跳过（__init__ 尾部会显式放置一次）。
+        button = getattr(self, "_new_page_btn", None)
+        if button is None:
+            return
         bar = self.tabBar()
-        button = self._new_page_btn
         if bar.count() > 0:
             last_rect = bar.tabRect(bar.count() - 1)
             x = last_rect.right() + 5 if last_rect.isValid() else 5
@@ -236,8 +273,12 @@ class PlotTabsWidget(QTabWidget):
     # 「＋」可用性：未加载数据 / 已达上限时禁用（决策 D-D / §4.4）
     # ------------------------------------------------------------------
     def set_new_page_enabled(self, enabled: bool) -> None:
-        """外部闸门（是否已加载数据）；与页数上限共同决定按钮可用性。"""
+        """外部闸门（是否已加载数据）；与页数上限共同决定按钮可用性。
+
+        未加载数据时整个标签栏一并隐藏；开启后显示且从此常显（含单页）。
+        """
         self._new_page_allowed = bool(enabled)
+        self.tabBar().setVisible(enabled)
         self._sync_new_page_button()
 
     def new_page_enabled(self) -> bool:
