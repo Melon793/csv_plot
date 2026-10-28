@@ -483,15 +483,21 @@ class MarkStatsWindow(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        # 紧凑布局：压减四周留白与行间距，把高度让给中间表格（可见行数最大化）
+        layout.setContentsMargins(4, 3, 4, 3)
+        layout.setSpacing(2)
 
         # 工具栏：页筛选 + 曲线名搜索 + 仅当前页开关
         bar = QHBoxLayout()
+        bar.setSpacing(4)
         self.page_combo = QComboBox(self)
         self.page_combo.setMinimumWidth(140)
+        self.page_combo.setFixedHeight(24)  # 压缩控件高度（默认约 28px）
         self.page_combo.currentIndexChanged.connect(self._on_page_combo_changed)
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("搜索曲线名…")
         self.search_input.setClearButtonEnabled(True)
+        self.search_input.setFixedHeight(24)
         self.search_input.textChanged.connect(self._on_search_changed)
         self.current_page_only = QCheckBox("仅当前页", self)
         self.current_page_only.setChecked(True)
@@ -525,16 +531,21 @@ class MarkStatsWindow(QDialog):
         header.resizeSection(3, 70)
         layout.addWidget(self.table, 1)
 
-        # 状态栏：汇总计数 + 标记区间 + 导出
+        # 状态栏：汇总计数 + 标记区间 + 导出（单行紧凑条）
         status = QHBoxLayout()
+        status.setSpacing(4)
         self.status_label = QLabel("", self)
+        # 状态文字字号缩一档，整行高度随之压低
+        status_font = self.status_label.font()
+        status_font.setPointSize(max(status_font.pointSize() - 1, 8))
+        self.status_label.setFont(status_font)
         self.copy_csv_btn = QPushButton("复制 CSV", self)
+        self.copy_csv_btn.setFixedHeight(22)  # 压缩按钮高度（macOS 默认约 32px）
         self.copy_csv_btn.clicked.connect(self._copy_csv)
-        self.copy_md_btn = QPushButton("复制 Markdown", self)
-        self.copy_md_btn.clicked.connect(self._copy_markdown)
+        # 「复制 Markdown」按钮已按需求从界面移除；_copy_markdown 导出
+        # 实现保留在下方，供未来重新接入或测试直接调用
         status.addWidget(self.status_label, 1)
         status.addWidget(self.copy_csv_btn)
-        status.addWidget(self.copy_md_btn)
         layout.addLayout(status)
 
     def changeEvent(self, event):
@@ -848,6 +859,9 @@ class MarkStatsWindow(QDialog):
     def _copy_csv(self):
         QApplication.clipboard().setText(self._export_text(as_csv=True))
 
+    # 注：「复制 Markdown」按钮已按需求从界面移除（见 _build_ui 状态栏），
+    # 本方法与 _export_text(as_csv=False) 的导出实现一并保留，
+    # 供未来重新接入 UI 或测试直接调用，勿删。
     def _copy_markdown(self):
         QApplication.clipboard().setText(self._export_text(as_csv=False))
 
