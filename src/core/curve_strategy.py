@@ -44,6 +44,15 @@ class UnifiedCurveStrategy(CurveStrategy):
     def get_curve_names(self) -> list[str]:
         return list(self._pw.curves.keys()) if self._pw.curves else []
 
+    def get_invalid_curve_names(self) -> list[str]:
+        """失效占位变量名（方案 B2，§8.2）：与 get_curve_names 并列，供导出写入。
+
+        占位不在 curves 中，故独立取 invalid_curves；替身/旧 widget 无该属性时
+        容错为空列表。
+        """
+        invalid = getattr(self._pw, "invalid_curves", None)
+        return list(invalid.keys()) if invalid else []
+
     def get_y_arrays(self) -> list[np.ndarray]:
         if not self._pw.curves:
             return []

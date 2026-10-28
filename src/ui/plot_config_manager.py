@@ -4,7 +4,7 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from typing import Optional
 from PySide6.QtCore import QObject, QSignalBlocker
-from src.core.config import RATIO_RESET_PLOTS
+from src.core.config import RATIO_RESET_PLOTS, INVALID_CURVE_COLOR
 from src.core.template_manager import TemplateManager
 from src.core.auto_save_manager import AutoSaveManager
 from src.core.plot_config import (
@@ -61,12 +61,21 @@ class PlotConfigManager(QObject):
             # 旧式替身（没有 pages）：保持单页导出行为
             config.layout_rows = main_window._plot_row_current
             config.layout_cols = main_window._plot_col_current
-            config.plots = [
-                PlotConfig(curves=container.plot_widget.curve_strategy.get_curve_names())
-                for container in main_window.plot_widgets
-                if not container.isHidden()
-                and container.plot_widget.curve_strategy.get_curve_names()
-            ]
+            plots = []
+            for container in main_window.plot_widgets:
+                if container.isHidden():
+                    continue
+                strategy = container.plot_widget.curve_strategy
+                curve_names = strategy.get_curve_names()
+                invalid_names = strategy.get_invalid_curve_names()
+                if curve_names or invalid_names:
+                    plots.append(
+                        PlotConfig(
+                            curves=list(curve_names),
+                            invalid_curves=list(invalid_names),
+                        )
+                    )
+            config.plots = plots
             config.pages = [
                 PlotPageConfig(
                     title="图 1",
@@ -103,9 +112,17 @@ class PlotConfigManager(QObject):
             plot_widget = getattr(container, "plot_widget", None)
             if plot_widget is None:
                 continue
-            curve_names = plot_widget.curve_strategy.get_curve_names()
-            if curve_names:
-                page_config.plots.append(PlotConfig(curves=list(curve_names)))
+            strategy = plot_widget.curve_strategy
+            curve_names = strategy.get_curve_names()
+            invalid_names = strategy.get_invalid_curve_names()
+            # 判空口径含占位（§8.2/R16）：纯占位格子也是用户资产，不得静默丢弃
+            if curve_names or invalid_names:
+                page_config.plots.append(
+                    PlotConfig(
+                        curves=list(curve_names),
+                        invalid_curves=list(invalid_names),
+                    )
+                )
         return page_config
 
     def _reconcile_pages(self, main_window, page_count: int) -> None:
@@ -188,15 +205,15 @@ class PlotConfigManager(QObject):
                     page.row_height_factors = factors
                 page.apply_visibility(page_config.layout_rows, page_config.layout_cols)
 
-                # 模板 = 完整还原：页内未列出的可见格子也要清掉旧曲线
+                # 模板 = 完整还原：页内未列出的可见格子也要清掉旧曲线与旧占位
                 visible_containers = page.visible_containers()
                 scene = page is current
                 for container in visible_containers:
                     if scene:
-                        container.plot_widget.clear_plot_item()
+                        container.plot_widget.clear_plot_item(clear_invalid=True)
                     else:
                         with self._quiet_cursor_signals(container.plot_widget):
-                            container.plot_widget.clear_plot_item()
+                            container.plot_widget.clear_plot_item(clear_invalid=True)
 
                 for index, plot_config in enumerate(page_config.plots):
                     total_plots += 1
@@ -275,59 +292,70 @@ class PlotConfigManager(QObject):
         self, plot_widget, plot_config: PlotConfig, main_window, plot_index: int,
         *, scene: bool = True,
     ):
-        """将配置应用到单个 Plot；隐藏页只建数据层（scene=False）。"""
-        logger.debug("处理 Plot[%d], 曲线: %s", plot_index, plot_config.curves)
+        """将配置应用到单个 Plot；隐藏页只建数据层（scene=False）。
 
-        # 先清除现有曲线（隐藏页静默：clear 链的 setBounds 钳制不得回写全局 pin）
+        模板 = 完整还原（§7）：开头 clear 连带清占位（clear_invalid=True）；
+        ``curves`` 中变量存在则绘制、不存在则降级为占位（固定灰色，§8.3/§12.2）；
+        ``invalid_curves`` 忠实还原为占位。占位不参与 applied_count（§8.3）。
+        """
+        curve_names = list(plot_config.curves)
+        invalid_names = list(getattr(plot_config, "invalid_curves", []) or [])
+        logger.debug(
+            "处理 Plot[%d], 曲线: %s, 占位: %s", plot_index, curve_names, invalid_names
+        )
+
+        # 先清除现有曲线与占位（隐藏页静默：clear 链的 setBounds 钳制不得回写全局 pin）
         if scene:
-            plot_widget.clear_plot_item()
+            plot_widget.clear_plot_item(clear_invalid=True)
         else:
             with self._quiet_cursor_signals(plot_widget):
-                plot_widget.clear_plot_item()
+                plot_widget.clear_plot_item(clear_invalid=True)
 
-        # 根据曲线数量设置模式
-        if len(plot_config.curves) == 0:
+        if not curve_names and not invalid_names:
             logger.debug("Plot[%d] 没有曲线配置，跳过", plot_index)
             return False
+
+        has_loader = bool(main_window.loader)
+        available = set(main_window.loader.var_names) if has_loader else set()
+        # 单曲线首绘走 plot_variable（保留既有首绘语义），其余走批量入口
+        single_scene_first = scene and len(curve_names) == 1
 
         if not scene:
             # 隐藏页：只建数据层；游标/标签收尾由切页时的 restore_scene 补
             plot_widget._batch_adding = True
         try:
-            if len(plot_config.curves) == 1:
-                var_name = plot_config.curves[0]
-                if main_window.loader and var_name in main_window.loader.var_names:
-                    logger.debug("Plot[%d] 设置单曲线: %s", plot_index, var_name)
-                    if scene:
+            added_count = 0
+            for i, var_name in enumerate(curve_names):
+                if has_loader and var_name in available:
+                    logger.debug("Plot[%d] 添加曲线: %s", plot_index, var_name)
+                    if single_scene_first and i == 0:
                         plot_widget.plot_variable(var_name)
                     else:
-                        # 隐藏页：plot_variable 的首绘收尾不受 _batch_adding
-                        # 保护，会直接写场景（vline bounds 钳制回写全局 pin、
-                        # toggle_cursor 改 vline 可见性）；改走批量入口，收尾
-                        # 统一由 finally 的 _finalize_batch_add(scene=False) 静默补偿。
                         plot_widget.add_variable_to_plot(var_name)
-                    return True
+                    added_count += 1
                 else:
-                    if not main_window.loader:
+                    # 变量不存在 → 降级为占位（模板来源落固定灰色，不用
+                    # _assign_curve_color：避免同一模板多次应用占位色随索引漂移）
+                    if not has_loader:
                         logger.warning("Plot[%d] 无法加载曲线 '%s': 未加载数据", plot_index, var_name)
                     else:
-                        logger.warning("Plot[%d] 无法加载曲线 '%s': 变量名不存在于数据中", plot_index, var_name)
-                    return False
-            else:
-                # 多曲线模式
-                added_count = 0
-                for var_name in plot_config.curves:
-                    if main_window.loader and var_name in main_window.loader.var_names:
-                        logger.debug("Plot[%d] 添加曲线: %s", plot_index, var_name)
-                        plot_widget.add_variable_to_plot(var_name)
-                        added_count += 1
-                    else:
-                        if not main_window.loader:
-                            logger.warning("Plot[%d] 无法加载曲线 '%s': 未加载数据", plot_index, var_name)
-                        else:
-                            logger.warning("Plot[%d] 无法加载曲线 '%s': 变量名不存在于数据中", plot_index, var_name)
+                        logger.warning("Plot[%d] 曲线 '%s' 不存在于数据中，降级为占位", plot_index, var_name)
+                    plot_widget.demote_to_invalid(var_name, INVALID_CURVE_COLOR, True)
 
-                return added_count > 0
+            # 模板自带占位：忠实还原为占位（固定灰色）；与 curves 天然互斥，
+            # 已绘制成曲线的（手工编辑的畸形模板）跳过，避免同名两侧共存
+            for var_name in invalid_names:
+                if var_name in plot_widget.curves:
+                    continue
+                plot_widget.demote_to_invalid(var_name, INVALID_CURVE_COLOR, True)
+
+            # scene 路径的曲线绘制已各自刷新过 header；若新增了占位，需再刷新
+            # 一次让占位条目进图例（demote 是纯数据操作，不刷 header，§4.2）。
+            # 非活动页由 finally 的 _finalize_batch_add(update_header=True) 统一刷新。
+            if scene and getattr(plot_widget, "invalid_curves", None):
+                plot_widget._update_header_for_curves()
+
+            return added_count > 0
         finally:
             if not scene:
                 plot_widget._batch_adding = False

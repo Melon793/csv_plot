@@ -22,6 +22,25 @@ class TestPlotConfig:
     def test_from_dict_missing_curves_defaults_empty(self):
         assert PlotConfig.from_dict({}).curves == []
 
+    def test_invalid_curves_defaults_empty(self):
+        assert PlotConfig(curves=["a"]).invalid_curves == []
+        assert PlotConfig.from_dict({}).invalid_curves == []
+
+    def test_invalid_curves_roundtrip(self):
+        cfg = PlotConfig(curves=["a"], invalid_curves=["ghost"])
+        assert PlotConfig.from_dict(cfg.to_dict()) == cfg
+        assert cfg.to_dict()["invalid_curves"] == ["ghost"]
+
+    def test_to_dict_omits_invalid_key_when_empty(self):
+        """invalid_curves 为空时不写键：保持 v1 视图与旧档字节兼容（§8.4）"""
+        assert PlotConfig(curves=["a"]).to_dict() == {"curves": ["a"]}
+
+    def test_from_dict_ignores_unknown_keys(self):
+        """旧版软件读新模板：未知键忽略；新版读旧档：缺省容错"""
+        cfg = PlotConfig.from_dict({"curves": ["a"], "future_key": 1})
+        assert cfg.curves == ["a"]
+        assert cfg.invalid_curves == []
+
 
 class TestPlotSessionConfig:
     def test_created_at_auto_filled(self):

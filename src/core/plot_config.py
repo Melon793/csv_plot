@@ -8,17 +8,30 @@ from typing import Any
 
 @dataclass
 class PlotConfig:
-    """单个 Plot 的配置"""
+    """单个 Plot 的配置
+
+    ``invalid_curves`` 是失效占位的变量名（方案 B2，§8.1）：仅存名字，颜色随
+    ``InvalidCurveRef`` 在运行期保存、不进模板（与"模板不含颜色"现状一致）。
+    可选字段——序列化时仅在非空才写键，旧模板/旧 auto-save 缺省读作空列表，
+    旧版软件读新模板忽略未知键，往返零影响。
+    """
     curves: list[str] = field(default_factory=list)  # 曲线变量名列表
+    invalid_curves: list[str] = field(default_factory=list)  # 失效占位变量名列表
 
     def to_dict(self) -> dict:
-        """序列化为字典"""
-        return {"curves": self.curves}
+        """序列化为字典（invalid_curves 仅非空才写，保持 v1 视图与旧档兼容）"""
+        data = {"curves": self.curves}
+        if self.invalid_curves:
+            data["invalid_curves"] = list(self.invalid_curves)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlotConfig":
-        """从字典反序列化"""
-        return cls(curves=data.get("curves", []))
+        """从字典反序列化（缺省 invalid_curves 容错为空列表）"""
+        return cls(
+            curves=data.get("curves", []),
+            invalid_curves=data.get("invalid_curves", []) or [],
+        )
 
 
 @dataclass
