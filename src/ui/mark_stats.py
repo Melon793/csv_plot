@@ -76,20 +76,22 @@ class StatColumn:
 
 
 _STAT_COLUMN_DEFS: list[tuple[str, str, str, Callable, bool]] = [
-    ("x1", "起点 X", "区间左边界采样点的 x 值", lambda e: e.x1, False),
-    ("x2", "终点 X", "区间右边界采样点的 x 值", lambda e: e.x2, False),
-    ("y1", "起点 Y", "区间左边界采样点的 y 值", lambda e: e.y1, False),
-    ("y2", "终点 Y", "区间右边界采样点的 y 值", lambda e: e.y2, False),
-    ("dx", "区间宽 ΔX", "x2 - x1", lambda e: e.dx, False),
-    ("dy", "变化量 ΔY", "y2 - y1", lambda e: e.dy, True),
-    ("slope", "斜率", "ΔY / ΔX（点区间 dx=0 时为 inf）", lambda e: e.slope, True),
-    ("y_avg", "均值", "区间内有效点的 y 平均值", lambda e: e.y_avg, True),
-    ("y_max", "最大值", "区间内有效点的 y 最大值", lambda e: e.y_max, True),
-    ("y_min", "最小值", "区间内有效点的 y 最小值", lambda e: e.y_min, True),
-    ("x_at_y_max", "最大值位置 X", "y 取最大值时的 x", lambda e: e.x_at_y_max, False),
-    ("x_at_y_min", "最小值位置 X", "y 取最小值时的 x", lambda e: e.x_at_y_min, False),
-    ("y_pp", "峰峰值", "y_max - y_min", lambda e: e.y_pp, False),
-    ("count", "样本数", "区间内有效样本点数", lambda e: e.count, False),
+    # 标题格式：中文名 + ASCII 符号（符号沿用旧版表头，新增指标用紧凑缩写；
+    # 全部保持 ASCII，避免非 ASCII 字符的字体渲染宽度不可预期）
+    ("x1", "起点 x1", "区间左边界采样点的 x 值", lambda e: e.x1, False),
+    ("x2", "终点 x2", "区间右边界采样点的 x 值", lambda e: e.x2, False),
+    ("y1", "起点 y1", "区间左边界采样点的 y 值", lambda e: e.y1, False),
+    ("y2", "终点 y2", "区间右边界采样点的 y 值", lambda e: e.y2, False),
+    ("dx", "区间宽 dx", "x2 - x1", lambda e: e.dx, False),
+    ("dy", "变化量 dy", "y2 - y1", lambda e: e.dy, True),
+    ("slope", "斜率 slope", "dy / dx（点区间 dx=0 时为 inf）", lambda e: e.slope, True),
+    ("y_avg", "均值 y_avg", "区间内有效点的 y 平均值", lambda e: e.y_avg, True),
+    ("y_max", "最大值 y_max", "区间内有效点的 y 最大值", lambda e: e.y_max, True),
+    ("y_min", "最小值 y_min", "区间内有效点的 y 最小值", lambda e: e.y_min, True),
+    ("x_at_y_max", "最大值位置 x@y_max", "y 取最大值时的 x", lambda e: e.x_at_y_max, False),
+    ("x_at_y_min", "最小值位置 x@y_min", "y 取最小值时的 x", lambda e: e.x_at_y_min, False),
+    ("y_pp", "峰峰值 y_pp", "y_max - y_min", lambda e: e.y_pp, False),
+    ("count", "样本数 n", "区间内有效样本点数", lambda e: e.count, False),
 ]
 
 STAT_COLUMNS: dict[str, StatColumn] = {

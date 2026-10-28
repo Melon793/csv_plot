@@ -370,26 +370,26 @@ class TestHeaderMenu:
             assert data in STAT_COLUMNS
 
     def test_checking_metric_appends_column(self, stats_window, header_menu):
-        """勾选「样本数」→ count 列追加到末尾。"""
-        self._open_menu(stats_window, click="样本数")
+        """勾选「样本数 n」→ count 列追加到末尾。"""
+        self._open_menu(stats_window, click="样本数 n")
 
         keys = stats_window.model.column_keys()
         assert keys[-1] == "count"
         assert stats_window.model.columnCount() == len(CONTEXT_COLUMNS) + len(keys)
-        # 表头确实多出「样本数」列
+        # 表头确实多出「样本数 n」列
         header_texts = [
             stats_window.model.headerData(
                 c, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
             )
             for c in range(stats_window.model.columnCount())
         ]
-        assert "样本数" in header_texts
+        assert "样本数 n" in header_texts
 
     def test_unchecking_metric_removes_column(
         self, stats_window, header_menu, app_settings
     ):
-        """取消勾选「均值」→ y_avg 列移除并持久化。"""
-        self._open_menu(stats_window, click="均值")
+        """取消勾选「均值 y_avg」→ y_avg 列移除并持久化。"""
+        self._open_menu(stats_window, click="均值 y_avg")
 
         keys = stats_window.model.column_keys()
         assert "y_avg" not in keys
@@ -403,7 +403,7 @@ class TestHeaderMenu:
         """仅剩 1 列指标时该项禁用取消。"""
         stats_window._apply_column_keys(["dy"])
         menu = self._open_menu(stats_window)
-        dy_act = next(a for a in menu.actions() if a.text() == "变化量 ΔY")
+        dy_act = next(a for a in menu.actions() if a.text() == "变化量 dy")
         assert dy_act.isChecked() is True
         assert dy_act.isEnabled() is False
 
