@@ -2342,4 +2342,7 @@ class FileLoaderManager(MainWindowBaseManager):
         if self.mw.filter_input.text() or self.mw.unit_filter_input.text():
             self.mw.cursor_sync_manager.filter_variables()
         if self.mw.mark_region_btn.isChecked():
+            # 曲线原位重建（同名换文件/reload）时 region 钉在旧数据坐标：
+            # 先校验域再刷统计，否则域错位时 count=0 的错误统计直接进表
+            self.mw.layout_manager.revalidate_mark_region_domain()
             self.mw.layout_manager.request_mark_stats_refresh(immediate=True)

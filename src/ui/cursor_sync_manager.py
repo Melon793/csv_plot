@@ -56,7 +56,6 @@ class CursorSyncManager(MainWindowBaseManager):
 
             self.mw.cursor_mode = "1 free cursor"
             self.mw.pinned_x_values = []
-            self.mw.saved_mark_range = None
             if self.mw.mark_stats_window:
                 self.mw.mark_stats_window.hide()
                 self.mw.mark_stats_window.clear_stats()
@@ -64,6 +63,10 @@ class CursorSyncManager(MainWindowBaseManager):
             if self.mw.mark_region_btn.isChecked():
                 self.mw.mark_region_btn.setChecked(False)
                 self.mw.layout_manager.toggle_mark_region(False)
+            # 数据已整体更换：必须在 toggle(False) 之后清——关闭路径会把
+            # 幸存 region 的旧域区间回写到 saved_mark_range（供下次开启），
+            # 先清会被这段回灌复活成对新数据无意义的死值
+            self.mw.saved_mark_range = None
 
             self.mw._enum_text_maps = {}
 

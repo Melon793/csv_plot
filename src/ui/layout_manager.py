@@ -13,7 +13,11 @@ import numpy as np
 from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
 
-from src.core.config import UI_DEBOUNCE_DELAY_MS, widget_alive as _widget_alive
+from src.core.config import (
+    UI_DEBOUNCE_DELAY_MS,
+    compute_global_x_limits,
+    widget_alive as _widget_alive,
+)
 from src.utils.paths import normalize_input_path
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -579,6 +583,55 @@ class LayoutManager(MainWindowBaseManager):
             self.request_mark_stats_refresh(immediate=True, allow_throttled=True)
         finally:
             self.mw._is_syncing_mark_region = False
+
+    def revalidate_mark_region_domain(self):
+        """数据换源/重载后校验全局标记区间是否仍落在新的 x 域内。
+
+        变量匹配率高时（同名换文件、reload 文件变化）曲线走原位重建，
+        mark region item 全程存活且钉在旧数据的 x 坐标——新旧域错位时
+        加载收尾立即刷新统计，会算出 count=0 / x1=x2 钳边界的错误统计。
+        区间与新数据域完全不相交时按新域中间 1/3 重置（与开启路径的
+        默认区间语义一致），并同步全部页的存活 region；部分相交时保留
+        用户区间（统计仍有意义，由用户自行拖动调整）。
+        """
+        if not self.mw.mark_region_btn.isChecked():
+            return
+        saved = getattr(self.mw, "saved_mark_range", None)
+        if not saved:
+            return
+        limits = compute_global_x_limits(
+            getattr(self.mw, "loader", None),
+            factor=getattr(self.mw, "factor", 1.0),
+            offset=getattr(self.mw, "offset", 0.0),
+        )
+        if limits is None:
+            return
+        domain_min, domain_max = limits[0], limits[1]
+        min_x, max_x = saved
+        if max_x >= domain_min and min_x <= domain_max:
+            return
+        width = domain_max - domain_min
+        new_min = domain_min + width / 3
+        new_max = domain_min + 2 * width / 3
+        self.mw.saved_mark_range = (new_min, new_max)
+        pages = list(getattr(self.mw, "pages", []) or [])
+        if pages:
+            containers = [
+                container for target in pages for container in target.plot_widgets
+            ]
+        else:
+            containers = list(getattr(self.mw, "plot_widgets", []) or [])
+        for container in containers:
+            mark = getattr(container.plot_widget, "mark_region", None)
+            if mark is None:
+                continue
+            with QSignalBlocker(mark):
+                mark.setRegion([new_min, new_max])
+        logger.debug(
+            "[MARK] 域校验：旧区间 (%.4f, %.4f) 脱离新城 (%.4f, %.4f)，"
+            "已重置为 (%.4f, %.4f)",
+            min_x, max_x, domain_min, domain_max, new_min, new_max,
+        )
 
     def request_mark_stats_refresh(self, *, immediate: bool = False,
                                    allow_throttled: bool = False):

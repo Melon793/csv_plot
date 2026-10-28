@@ -195,7 +195,12 @@ class PlotPage:
         self._built_cols = int(cols)
         self._apply_grid_stretches(rows, cols)
         if services.mark_region_btn.isChecked():
-            services.layout_manager.toggle_mark_region(True)
+            # 给新建格子补 region 必须走 restore_mark_regions（按全局区间
+            # 重建、不写回全局值）：toggle_mark_region(True) 是完整开启路径，
+            # 会以本页空图默认 viewRange [0,1] 为参照把全局 saved_mark_range
+            # 重置成 (1/3, 2/3)，污染所有页的统计区间（新建页拖入曲线后
+            # 统计 count=0/1 的病征）。隐藏页在 restore 内部自动记脏延迟补建。
+            self.restore_mark_regions()
 
         for row in range(rows):
             self.row_height_factors.setdefault(row, 100)
