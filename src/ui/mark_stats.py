@@ -723,6 +723,9 @@ class MarkStatsWindow(QDialog):
             act = menu.addAction(col.title)
             act.setCheckable(True)
             act.setChecked(key in current)
+            # 携带载荷：chosen.data() 依赖它识别勾的是哪个指标
+            # （漏 setData 会让 data() 返回 None，勾选静默失效）
+            act.setData(key)
             # 至少保留 1 列指标：最后一列勾选项禁用取消
             act.setEnabled(not (key in current and len(current) == 1))
         menu.addSeparator()
@@ -733,7 +736,11 @@ class MarkStatsWindow(QDialog):
         if chosen is order_act:
             self._open_column_dialog()
             return
-        key = str(chosen.data())
+        # 防御：非字符串载荷（含 None）直接忽略，不落入 "None" 字面量
+        data = chosen.data()
+        if not isinstance(data, str):
+            return
+        key = data
         if key in current:
             new_keys = [k for k in current if k != key]
         else:

@@ -15,7 +15,8 @@ import math
 import numpy as np
 import pytest
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QAction
 
 from src.core.data_types import MarkStatEntry
 from src.ui.mark_stats import (
@@ -29,6 +30,9 @@ from src.ui.mark_stats import (
     StatRow,
     _format_stat_value,
 )
+
+# _show_header_menu 的 pos 参数仅用于 mapToGlobal，未显示窗口下取原点即可
+_QT_POINT_ZERO = QPoint(0, 0)
 
 
 def _entry(**over) -> MarkStatEntry:
@@ -287,6 +291,121 @@ class TestColumnConfig:
 
         stats_window._apply_column_keys(["slope"])  # dy 被删 → 排序清除
         assert stats_window.proxy.sortColumn() == -1
+
+
+class _HeaderMenuStub:
+    """替换 mark_stats 模块内的 QMenu 符号：免模态 exec，捕获菜单内容。
+
+    PySide6 的 QMenu.exec 是 C++ 方法，monkeypatch 类属性拦不住实例调用
+    （真实模态 exec 会阻塞到超时）；stub 化模块符号后整条
+    _show_header_menu 路径可以纯同步驱动。
+    """
+
+    # 测试前设置要"点击"的菜单项标题；None = 模拟弹出后不选择
+    click_title: str | None = None
+    last: "_HeaderMenuStub | None" = None
+
+    def __init__(self, parent=None):
+        self._actions: list = []
+        self._parent = parent
+        _HeaderMenuStub.last = self
+
+    def addAction(self, text):
+        act = QAction(text)
+        self._actions.append(act)
+        return act
+
+    def addSeparator(self):
+        act = QAction()
+        act.setSeparator(True)
+        self._actions.append(act)
+        return act
+
+    def actions(self):
+        return list(self._actions)
+
+    def exec(self, _pos):
+        for act in self._actions:
+            if act.text() == _HeaderMenuStub.click_title:
+                return act
+        return None
+
+
+class TestHeaderMenu:
+    """§5.6 表头右键菜单：勾选载荷与端到端生效。
+
+    回归背景：曾因漏 ``act.setData(key)`` 导致 ``chosen.data()`` 恒为
+    None，任何勾选都静默失效（key 变成 "None" 字面量被注册表过滤）。
+    """
+
+    @pytest.fixture()
+    def header_menu(self, stats_window, monkeypatch):
+        """注入菜单 stub 并在用例结束后恢复。"""
+        import src.ui.mark_stats as mark_stats_module
+
+        monkeypatch.setattr(mark_stats_module, "QMenu", _HeaderMenuStub)
+        _HeaderMenuStub.click_title = None
+        _HeaderMenuStub.last = None
+        yield _HeaderMenuStub
+        _HeaderMenuStub.click_title = None
+        _HeaderMenuStub.last = None
+
+    def _open_menu(self, stats_window, click: str | None = None):
+        _HeaderMenuStub.click_title = click
+        stats_window._show_header_menu(_QT_POINT_ZERO)
+        menu = _HeaderMenuStub.last
+        assert menu is not None
+        return menu
+
+    def test_every_checkable_action_carries_valid_key(
+        self, stats_window, header_menu
+    ):
+        """勾选项必须携带注册表合法 key（漏 setData 的直接回归测试）。"""
+        menu = self._open_menu(stats_window)
+        checkable = [a for a in menu.actions() if a.isCheckable()]
+        assert len(checkable) == len(STAT_COLUMNS)
+        for act in checkable:
+            data = act.data()
+            assert isinstance(data, str), f"'{act.text()}' 未携带 key 载荷"
+            assert data in STAT_COLUMNS
+
+    def test_checking_metric_appends_column(self, stats_window, header_menu):
+        """勾选「样本数」→ count 列追加到末尾。"""
+        self._open_menu(stats_window, click="样本数")
+
+        keys = stats_window.model.column_keys()
+        assert keys[-1] == "count"
+        assert stats_window.model.columnCount() == len(CONTEXT_COLUMNS) + len(keys)
+        # 表头确实多出「样本数」列
+        header_texts = [
+            stats_window.model.headerData(
+                c, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
+            )
+            for c in range(stats_window.model.columnCount())
+        ]
+        assert "样本数" in header_texts
+
+    def test_unchecking_metric_removes_column(
+        self, stats_window, header_menu, app_settings
+    ):
+        """取消勾选「均值」→ y_avg 列移除并持久化。"""
+        self._open_menu(stats_window, click="均值")
+
+        keys = stats_window.model.column_keys()
+        assert "y_avg" not in keys
+        assert app_settings.get_mark_stats_columns(
+            DEFAULT_COLUMN_KEYS, STAT_COLUMNS.keys()
+        ) == keys
+
+    def test_last_remaining_metric_cannot_be_unchecked(
+        self, stats_window, header_menu
+    ):
+        """仅剩 1 列指标时该项禁用取消。"""
+        stats_window._apply_column_keys(["dy"])
+        menu = self._open_menu(stats_window)
+        dy_act = next(a for a in menu.actions() if a.text() == "变化量 ΔY")
+        assert dy_act.isChecked() is True
+        assert dy_act.isEnabled() is False
 
 
 class TestFilters:
