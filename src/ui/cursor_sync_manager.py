@@ -455,7 +455,7 @@ class CursorSyncManager(MainWindowBaseManager):
         cleared = sum(len(c.plot_widget.curves) for c in self.mw.plot_widgets)
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
-            widget.clear_plot_item()
+            widget.clear_plot_item(clear_invalid=True)
             widget.clear_value_cache()
             widget.reset_pin_state()
         self.mw.value_cache = OrderedDict()

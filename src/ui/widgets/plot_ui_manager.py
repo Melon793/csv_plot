@@ -300,6 +300,9 @@ class PlotUIManager(BasePlotManager):
 
         # 曲线统一管理
         pw.curves = {}
+        # 失效曲线占位（方案 B2）：与 curves 物理隔离，仅存轻量 InvalidCurveRef。
+        # 不变量：同一变量名绝不同时出现在 curves 与 invalid_curves。
+        pw.invalid_curves = {}
         pw._batch_adding = False
         pw.curve_colors = [
             "blue",

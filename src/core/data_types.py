@@ -3,6 +3,7 @@
 包含项目共用的数据类、异常类型和枚举：
 - FormatInfo: 文件格式自动检测结果
 - CurveInfo: 单条曲线元数据
+- InvalidCurveRef: 失效曲线占位（布局资产保留）
 - MarkStatEntry: 标记区域统计条目
 - AutoDetectError: 格式检测失败异常
 """
@@ -77,6 +78,24 @@ class CurveInfo:
     def update_x_range(self):
         """当 x_data 变更后调用，同步更新缓存"""
         self._refresh_x_cache()
+
+
+@dataclass
+class InvalidCurveRef:
+    """失效曲线占位（方案 B2：布局是用户资产，数据只是输入）。
+
+    加载新数据后，某变量不存在或 ``df_validity == INVALID`` 时，曲线不被删除，
+    而是降级为一条轻量占位：保留原颜色与可见性偏好，等该变量再次出现时
+    自动复活。占位与 ``CurveInfo`` 物理隔离（存放在 ``pw.invalid_curves``
+    字典），不建 PlotDataItem、不写场景，因此所有遍历 ``pw.curves`` 的下游
+    消费方（Y 轴 auto_range、密度、cursor、标记统计、导出）天然不受影响。
+
+    不变量：同一变量名绝不同时出现在 ``pw.curves`` 与 ``pw.invalid_curves``。
+    """
+
+    var_name: str
+    color: str = "gray"
+    visible_preference: bool = True  # 复活时恢复用户上次显隐选择
 
 
 @dataclass

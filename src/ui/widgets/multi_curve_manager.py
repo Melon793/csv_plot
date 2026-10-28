@@ -546,13 +546,19 @@ class MultiCurveManager:
                         x_values = pw.offset + pw.factor * original_index
                         y_contiguous = np.ascontiguousarray(y_array)
 
+                        # 占位复活：批量拖入的同名变量先查占位取色/可见性偏好
+                        revive_ref = self._data_manager._consume_invalid_ref(var_name)
+                        revive_color = revive_ref.color if revive_ref is not None else None
                         # 颜色分配（统一方法）
-                        color = self._assign_curve_color()
+                        color = self._assign_curve_color(revive_color)
                         logger.debug(
-                            "[COLOR] 批量添加颜色分配: var=%s, color=%s",
-                            var_name, color,
+                            "[COLOR] 批量添加颜色分配: var=%s, color=%s, revived=%s",
+                            var_name, color, revive_ref is not None,
                         )
 
+                        initial_visible = (
+                            True if revive_ref is None else revive_ref.visible_preference
+                        )
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
                         # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
                         # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
@@ -569,8 +575,14 @@ class MultiCurveManager:
                             original_index=original_index,
                             color=color,
                             y_format=y_format or '',
-                            visible=True
+                            visible=initial_visible
                         )
+                        if not initial_visible and curve is not None:
+                            try:
+                                if curve.scene() is not None:
+                                    curve.setVisible(False)
+                            except Exception:
+                                logger.debug("复活曲线可见性恢复失败: %s", var_name, exc_info=True)
 
                         success_vars.append(var_name)
 
@@ -602,11 +614,21 @@ class MultiCurveManager:
             "preferred_color=%s, skip_existence_check=%s",
             var_name, len(pw.curves), preferred_color, skip_existence_check,
         )
+        revive_ref = None
         try:
+            # 占位复活：变量在 invalid_curves 中时取其颜色作 preferred_color、
+            # 恢复其可见性偏好，并从占位侧原子移除（用户手动添加同名变量 = 显式复活）
+            revive_ref = self._data_manager._consume_invalid_ref(var_name)
+            if revive_ref is not None and preferred_color is None:
+                preferred_color = revive_ref.color
+
             original_index = None
             if x_values is None or y_values is None:
                 success, error_msg, x_array, y_array, y_format = pw._prepare_plot_data(var_name)
                 if not success:
+                    # 复活失败（数据仍不可用）：把占位还回去，避免资产丢失
+                    if revive_ref is not None:
+                        pw.invalid_curves[var_name] = revive_ref
                     QMessageBox.warning(pw, "错误", error_msg)
                     return False
                 original_index = np.ascontiguousarray(x_array, dtype=np.float32)
@@ -621,6 +643,9 @@ class MultiCurveManager:
 
             # 统一重复检测：始终检查 curves 字典
             if not skip_existence_check and var_name in pw.curves:
+                # 复活失败（重复）：把占位还回去
+                if revive_ref is not None:
+                    pw.invalid_curves[var_name] = revive_ref
                 if show_duplicate_warning:
                     QMessageBox.information(pw, "提示", f"变量 {var_name} 已在绘图中")
                 return False
@@ -632,6 +657,7 @@ class MultiCurveManager:
                 var_name, preferred_color, color, self.pw.current_color_index,
             )
 
+            initial_visible = True if revive_ref is None else revive_ref.visible_preference
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck 快速路径；
             # 含 NaN（ragged CSV 尾部补 NaN）自动断线，避免 NaN 坐标进入 Qt
@@ -650,15 +676,23 @@ class MultiCurveManager:
                 original_index=original_index,
                 color=color,
                 y_format=y_format or '',
-                visible=True
+                visible=initial_visible
             )
+            if not initial_visible and curve is not None:
+                try:
+                    if curve.scene() is not None:
+                        curve.setVisible(False)
+                except Exception:
+                    logger.debug("复活曲线可见性恢复失败: %s", var_name, exc_info=True)
             logger.debug(
-                "[ADD_VAR] CurveInfo 已创建: var_name=%s, x_shape=%s, y_shape=%s, color=%s",
+                "[ADD_VAR] CurveInfo 已创建: var_name=%s, x_shape=%s, y_shape=%s, color=%s, revived=%s",
                 var_name,
                 x_values.shape if x_values is not None else None,
                 y_values.shape if y_values is not None else None,
                 color,
+                revive_ref is not None,
             )
+
 
             batch_adding = getattr(pw, '_batch_adding', False)
             # batch 模式下 header/legend 由调用方在批量循环后统一刷新，
@@ -726,5 +760,8 @@ class MultiCurveManager:
             return True
 
         except Exception as e:
+            # 复活失败（异常）：把占位还回去，避免资产丢失（未成功进 curves 才还）
+            if revive_ref is not None and var_name not in pw.curves:
+                pw.invalid_curves[var_name] = revive_ref
             QMessageBox.critical(pw, "绘图错误", f"添加变量时发生错误: {str(e)}")
             return False

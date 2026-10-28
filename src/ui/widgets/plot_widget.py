@@ -871,8 +871,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         else:
             shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
             if shift_pressed:
-                # Shift + 拖入 = 替换：先清空，再走对应绘制路径
-                self.clear_plot_item()
+                # Shift + 拖入 = 替换：先清空（连带清占位，§7），再走对应绘制路径
+                self.clear_plot_item(clear_invalid=True)
             # 普通拖入 = 添加（统一路径：plot_variable 内部自动判断首绘/追加）
             if len(var_names) > 1:
                 self.add_variables_to_plot(var_names)
@@ -967,9 +967,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """准备绘图数据 → 委托到 PlotDataManager"""
         return self._plot_data_manager._prepare_plot_data(var_name)
 
-    def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
+    def plot_variable(
+        self,
+        var_name: str,
+        show_duplicate_warning: bool = True,
+        preferred_color: str | None = None,
+    ) -> bool:
         """绘制变量到图表 → 委托到 PlotDataManager"""
-        success = self._plot_data_manager.plot_variable(var_name, show_duplicate_warning)
+        success = self._plot_data_manager.plot_variable(
+            var_name, show_duplicate_warning, preferred_color
+        )
         # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）
         if success and len(self.curves) == 1:
             self.curves_changed.emit()
@@ -987,15 +994,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """重置绘图限制 → 委托到 AxisManager"""
         self._axis_manager._reset_plot_limits()
 
-    def _clear_plot_data(self):
+    def _clear_plot_data(self, clear_invalid: bool = False):
         """清除绘图数据 → 委托到 PlotDataManager"""
-        self._plot_data_manager._clear_plot_data()
+        self._plot_data_manager._clear_plot_data(clear_invalid=clear_invalid)
         self.curves_changed.emit()
 
-    def clear_plot_item(self):
-        """清除绘图项 → 委托到 PlotDataManager"""
-        self._plot_data_manager.clear_plot_item()
+    def clear_plot_item(self, clear_invalid: bool = False):
+        """清除绘图项 → 委托到 PlotDataManager
+
+        ``clear_invalid`` 缺省 False：reload 路径保留占位跨清空存活；
+        模板应用 / 用户显式清空传 True（完整还原，不留孤儿占位，§4.3）。
+        """
+        self._plot_data_manager.clear_plot_item(clear_invalid=clear_invalid)
         self.curves_changed.emit()
+
+    def demote_to_invalid(
+        self, var_name: str, color: str, visible_preference: bool = True
+    ) -> None:
+        """把不可绘制的变量降级为失效占位 → 委托到 PlotDataManager（不 emit）"""
+        self._plot_data_manager.demote_to_invalid(var_name, color, visible_preference)
 
     def clear_current_plot(self) -> None:
         """清当前子图 + 播报（右键菜单与双击中键两个用户入口共用）。
@@ -1004,9 +1021,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         （plot_config_manager）、Shift 拖入替换、重载重建仍直接调
         clear_plot_item，那些路径各有自己的说法，不该被这句播报认领。
         标记统计刷新仍由各调用点自理（本函数只管清 + 播报）。
+        用户显式清空连带清占位（clear_invalid=True，§7），不留孤儿资产。
         """
         cleared = len(self.curves)  # 必须在清之前取
-        self.clear_plot_item()
+        self.clear_plot_item(clear_invalid=True)
         if self.plot_context:
             self.plot_context.announce_cleared("已清除绘图", cleared)
 
