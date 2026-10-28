@@ -301,16 +301,15 @@ def test_mark_region_is_shared_and_stats_grouped_by_page(
         assert second_pw.mark_region is None
 
         mw.layout_manager.update_mark_stats()
-        tree = mw.mark_stats_window.tree
-        labels = [
-            tree.topLevelItem(i).text(0)
-            for i in range(tree.topLevelItemCount())
-        ]
-        assert "page 1" in labels and "page 2" in labels
+        # 统计窗口重构后改为扁平表格：按 model 行断言页分组（不再访问 .tree）
+        rows = mw.mark_stats_window.model.rows()
+        assert {r.page for r in rows} == {"page 1", "page 2"}
         for page_name in ("page 1", "page 2"):
-            page_item = tree.topLevelItem(labels.index(page_name))
-            assert page_item.childCount() >= 1
-            assert "speed" in page_item.child(0).text(0)
+            page_rows = [r for r in rows if r.page == page_name]
+            assert page_rows, f"{page_name} 无统计行"
+            assert any(
+                "speed" in (r.entry.var_name or r.entry.label) for r in page_rows
+            )
 
         mw.activate_page(second)
         qtbot.waitUntil(

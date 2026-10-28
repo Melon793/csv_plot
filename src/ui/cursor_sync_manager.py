@@ -59,7 +59,7 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw.saved_mark_range = None
             if self.mw.mark_stats_window:
                 self.mw.mark_stats_window.hide()
-                self.mw.mark_stats_window.tree.clear()
+                self.mw.mark_stats_window.clear_stats()
 
             if self.mw.mark_region_btn.isChecked():
                 self.mw.mark_region_btn.setChecked(False)

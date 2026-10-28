@@ -619,7 +619,11 @@ class LayoutManager(MainWindowBaseManager):
                     entries.append(
                         ("图 1", index, container.plot_widget.get_mark_stats())
                     )
-        window.update_stats(entries)
+        current = getattr(self.mw, "current_page", None)
+        active_page = getattr(current, "title", None) if current is not None else None
+        # 活动页名随刷新传入：统计窗口「仅当前页」开关跟随切页
+        # （切页链路 restore_mark_regions → request_mark_stats_refresh(immediate)）
+        window.update_stats(entries, active_page=active_page)
 
     def open_layout_dialog(self):
         if self.mw.reject_when_loading("修改布局"):
