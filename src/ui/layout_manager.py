@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import subprocess
+import time
 from contextlib import contextmanager
 
 import numpy as np
@@ -24,6 +25,11 @@ from src.ui.dialogs.time_correction import TimeCorrectionDialog
 from src.ui.widgets.plot_container import PlotContainerWidget
 
 logger = get_logger(__name__)
+
+# 拖动标记区域时统计窗口的节流间隔：60Hz 的 sigRegionChanged 若走纯
+# trailing 防抖（每次 start 重启 50ms 倒计时）会全程冻结统计表；
+# 拖动起止立即刷 + 拖动中按此间隔节流，兼顾响应感与重算开销。
+MARK_STATS_DRAG_THROTTLE_MS = 150
 
 
 @contextmanager
@@ -568,14 +574,37 @@ class LayoutManager(MainWindowBaseManager):
                     "[MARK] sync from page=%s range=(%.4f, %.4f)",
                     getattr(page, "title", "?"), min_x, max_x,
                 )
-            self.request_mark_stats_refresh()
+            # 拖动中（60Hz）：节流立即刷新（首个事件即刷，其后 150ms 合并），
+            # 不能走纯 trailing 防抖——事件间隔 < 防抖窗会让统计表全程冻结
+            self.request_mark_stats_refresh(immediate=True, allow_throttled=True)
         finally:
             self.mw._is_syncing_mark_region = False
 
-    def request_mark_stats_refresh(self, *, immediate: bool = False):
+    def request_mark_stats_refresh(self, *, immediate: bool = False,
+                                   allow_throttled: bool = False):
+        """请求刷新统计窗口。
+
+        Args:
+            immediate: 立即刷新（跳过防抖定时器）。
+            allow_throttled: 允许节流合并——拖动 region 时 60Hz 的
+                sigRegionChanged 会让纯 trailing 防抖（每次 start 重启
+                倒计时）全程冻结统计表；带此标记的请求按
+                ``MARK_STATS_DRAG_THROTTLE_MS`` 节流：距上次实际刷新
+                超过间隔就立即刷，否则重启 trailing 定时器兜底。
+        """
         if not getattr(self.mw, "mark_stats_window", None):
             return
         if immediate:
+            if allow_throttled:
+                now = time.monotonic()
+                last = getattr(self.mw, "_mark_stats_last_flush", 0.0)
+                if now - last < MARK_STATS_DRAG_THROTTLE_MS / 1000.0:
+                    self.mw._mark_stats_dirty = True
+                    self.mw._mark_stats_timer.start(
+                        MARK_STATS_DRAG_THROTTLE_MS
+                    )
+                    return
+                self.mw._mark_stats_last_flush = now
             if self.mw._mark_stats_timer.isActive():
                 self.mw._mark_stats_timer.stop()
             self.mw._mark_stats_dirty = False
@@ -588,6 +617,7 @@ class LayoutManager(MainWindowBaseManager):
         if not self.mw._mark_stats_dirty:
             return
         self.mw._mark_stats_dirty = False
+        self.mw._mark_stats_last_flush = time.monotonic()
         self.update_mark_stats()
 
     def update_mark_stats(self):

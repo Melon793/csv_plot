@@ -68,6 +68,12 @@ class MarkRegionManager:
         # 槽内按 pw.page 反查所属页（§6.4 #6）：连接/断开都指向同一个成员方法，
         # 不用 lambda（每次都是新对象，无法可靠 disconnect）
         self.pw.mark_region.sigRegionChanged.connect(self._on_region_changed)
+        # 拖动结束信号：松手立即精确刷新统计。本环境 pyqtgraph 0.14 的
+        # LinearRegionItem 没有 sigRegionChangeStarted，拖动中的节流刷新
+        # 由 sync_mark_regions → request_mark_stats_refresh(allow_throttled)
+        # 承担（首个事件立即刷，其后 150ms 节流）——否则纯 trailing 防抖
+        # 在 60Hz 事件下（间隔 < 50ms 防抖窗）拖动全程冻结统计表。
+        self.pw.mark_region.sigRegionChangeFinished.connect(self._on_region_change_finished)
 
     def _on_region_changed(self, region):
         """任一页的区间被拖动：交给 LayoutManager 广播到全部页。"""
@@ -76,6 +82,13 @@ class MarkRegionManager:
         if window is None or not hasattr(window, "layout_manager"):
             return
         window.layout_manager.sync_mark_regions(region, page=page)
+
+    def _on_region_change_finished(self, region):
+        """拖动结束：绕过节流立即精确刷新统计（落定值）。"""
+        window = self.pw.window()
+        if window is None or not hasattr(window, "layout_manager"):
+            return
+        window.layout_manager.request_mark_stats_refresh(immediate=True)
 
     def _teardown_mark_region(self):
         """断开信号 → 摘出场景 → 销毁 C++ 对象。
@@ -87,11 +100,15 @@ class MarkRegionManager:
         region = self.pw.mark_region
         if region is None:
             return
-        try:
-            region.sigRegionChanged.disconnect(self._on_region_changed)
-        except (RuntimeError, TypeError):
-            # 构造期尚无连接 / C++ 侧已销毁
-            pass
+        for sig, slot in (
+            (region.sigRegionChanged, self._on_region_changed),
+            (region.sigRegionChangeFinished, self._on_region_change_finished),
+        ):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                # 构造期尚无连接 / C++ 侧已销毁
+                pass
         if region.scene() is not None:
             self.pw.plot_item.removeItem(region)
         region.deleteLater()

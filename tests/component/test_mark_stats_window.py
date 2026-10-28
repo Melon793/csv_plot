@@ -184,7 +184,7 @@ class TestTableModelRoles:
         # 中文表头（痛点 3）
         assert (
             model.headerData(2, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
-            == "曲线"
+            == "变量名"
         )
 
 
@@ -480,12 +480,12 @@ class TestExport:
         stats_window.search_input.setText("alpha")
         csv_text = stats_window._export_text(as_csv=True)
         lines = csv_text.splitlines()
-        assert lines[0].split("\t")[:4] == ["页", "子图", "曲线", "单位"]
+        assert lines[0].split("\t")[:4] == ["页", "子图", "变量名", "单位"]
         assert len(lines) == 2  # 表头 + 1 行（beta 被筛掉）
         assert "alpha" in lines[1]
 
         md_text = stats_window._export_text(as_csv=False)
-        assert md_text.splitlines()[0].startswith("| 页 | 子图 | 曲线 | 单位 |")
+        assert md_text.splitlines()[0].startswith("| 页 | 子图 | 变量名 | 单位 |")
         assert "alpha" in md_text.splitlines()[2]
 
     def test_status_bar_counts_and_range(self, stats_window):

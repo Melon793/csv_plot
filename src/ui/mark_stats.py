@@ -109,9 +109,9 @@ class _ContextColumn:
 
 # 列 0-3 固定上下文列，不参与显隐/顺序配置
 CONTEXT_COLUMNS: list[_ContextColumn] = [
-    _ContextColumn("page", "页", "曲线所在页"),
+    _ContextColumn("page", "页", "变量所在页"),
     _ContextColumn("plot", "子图", "页内子图序号（1-based）"),
-    _ContextColumn("curve", "曲线", "变量名"),
+    _ContextColumn("curve", "变量名", "变量名"),
     _ContextColumn("unit", "单位", "变量单位"),
 ]
 
@@ -497,7 +497,7 @@ class MarkStatsWindow(QDialog):
         self.page_combo.setFixedHeight(24)  # 压缩控件高度（默认约 28px）
         self.page_combo.currentIndexChanged.connect(self._on_page_combo_changed)
         self.search_input = QLineEdit(self)
-        self.search_input.setPlaceholderText("搜索曲线名…")
+        self.search_input.setPlaceholderText("搜索变量名…")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setFixedHeight(24)
         self.search_input.textChanged.connect(self._on_search_changed)
