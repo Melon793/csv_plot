@@ -134,12 +134,14 @@ class LegendTextBrowser(QTextBrowser):
             press_pos = self._ctx_press_pos
             self._ctx_var_name = None
             self._ctx_press_pos = None
+            in_curves = var_name in self._pw.curves
+            in_invalid = var_name in (getattr(self._pw, "invalid_curves", {}) or {})
             if (
                 var_name
                 and press_pos is not None
                 and (event.position().toPoint() - press_pos).manhattanLength()
                 < QApplication.startDragDistance()
-                and var_name in self._pw.curves
+                and (in_curves or in_invalid)
             ):
                 global_pos = self.viewport().mapToGlobal(
                     event.position().toPoint()
@@ -187,6 +189,10 @@ class LegendTextBrowser(QTextBrowser):
             return
         pw = self._pw
         if var_name not in pw.curves:
+            # 失效占位专用轻量菜单（§6.2）：删除占位 + 复制变量名。
+            # 销毁资产须用户显式操作；删除后由调用方显式 emit curves_changed。
+            if var_name in (getattr(pw, "invalid_curves", {}) or {}):
+                self._exec_invalid_menu(var_name, global_pos)
             return
         menu = QMenu(pw)
         act_solo = menu.addAction("仅显示此变量")
@@ -226,10 +232,43 @@ class LegendTextBrowser(QTextBrowser):
             from src.ui.dialogs.variable_info_dialog import VariableInfoDialog
             VariableInfoDialog.popup([var_name], parent=main_window)
 
+    def _exec_invalid_menu(self, var_name: str, global_pos: QPoint) -> None:
+        """失效占位专用轻量菜单（§6.2）：删除占位 + 复制变量名。
+
+        占位无曲线可切显隐/独占/看信息，故只给两项。删除是销毁用户资产，
+        须显式操作；删除后显式 emit curves_changed（对齐 §4.5 发射口径），
+        驱动编辑器/搜索栏增量刷新。动作在菜单关闭后执行（不进嵌套事件循环改状态）。
+        """
+        if not widget_alive(self) or not widget_alive(self._pw):
+            return
+        pw = self._pw
+        if var_name not in (getattr(pw, "invalid_curves", {}) or {}):
+            return
+        menu = QMenu(pw)
+        act_remove = menu.addAction("删除占位")
+        act_copy = menu.addAction("复制变量名")
+
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        # 菜单打开期间占位可能已复活/被删（reload、编辑器）：分发前复查
+        invalid = getattr(pw, "invalid_curves", None)
+        if not invalid or var_name not in invalid:
+            return
+        if chosen is act_copy:
+            QApplication.clipboard().setText(var_name)
+        elif chosen is act_remove:
+            del invalid[var_name]
+            pw._update_header_for_curves()
+            pw.curves_changed.emit()
+
     def _start_var_drag(self):
         var_name = self._drag_var_name
         self._drag_var_name = None
         self._drag_press_pos = None
+        # 占位锚点不发起 legend 拖拽（§6.1）：拖到目标页后 plot_variable 会失败弹错
+        if var_name in (getattr(self._pw, "invalid_curves", {}) or {}):
+            return
         drag = QDrag(self)
         drag.setMimeData(build_legend_var_mimedata([var_name], self._pw))
         pixmap = create_drag_pixmap([var_name], self.font())

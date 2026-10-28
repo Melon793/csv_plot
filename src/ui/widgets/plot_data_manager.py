@@ -887,12 +887,20 @@ class PlotDataManager:
         完整刷新链；不 emit curves_changed（由调用方按需触发，防信号回环）。
         保持编辑器多选删除的现有性能特征（N 选删除 = 1 次全量刷新）。
 
+        两侧都查（§6.3）：变量名可能命中 curves（真实曲线）或 invalid_curves
+        （失效占位）——编辑器"删除选中"须能销毁占位资产。
+
         Returns:
             实际删除成功的变量名列表
         """
+        pw = self.pw
+        invalid = getattr(pw, "invalid_curves", None)
         removed: list[str] = []
         for var_name in var_names or []:
             if self._remove_single_curve_light(var_name):
+                removed.append(var_name)
+            elif invalid is not None and var_name in invalid:
+                del invalid[var_name]
                 removed.append(var_name)
         if removed:
             self._post_remove_refresh()

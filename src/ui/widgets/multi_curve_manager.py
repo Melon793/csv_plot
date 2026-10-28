@@ -74,15 +74,17 @@ class MultiCurveManager:
         """统一的图例更新逻辑
 
         始终使用 HTML 图例格式（颜色方块 + 文字），支持点击切换可见性。
+        判空口径含失效占位（§6.1）：纯占位页也要渲染图例，否则占位条目永远不显示。
         """
         pw = self.pw
         curve_count = len(pw.curves)
+        invalid_count = len(getattr(pw, "invalid_curves", {}) or {})
         logger.debug(
-            "[HEADER] _update_header_for_curves: curve_count=%d, 显示模式=%s",
-            curve_count, "图例" if curve_count > 0 else "空",
+            "[HEADER] _update_header_for_curves: curve_count=%d, invalid_count=%d, 显示模式=%s",
+            curve_count, invalid_count, "图例" if (curve_count + invalid_count) > 0 else "空",
         )
 
-        if curve_count > 0:
+        if curve_count + invalid_count > 0:
             self.update_legend()
         else:
             pw.update_legend_label("channel name")
@@ -114,6 +116,22 @@ class MultiCurveManager:
                     f"<span style='color: {color}; opacity: 0.5;'>□</span>&nbsp;"
                     f"<span style='color: gray;'>{legend_text}</span></a>"
                 )
+
+        # 失效占位条目（§6.1）：置尾部，保留原色块但整体降透明度 + 灰名 +（缺失）后缀。
+        # 图例是 QLabel setHtml，不涉场景写入，隐藏页刷新安全。
+        invalid_curves = getattr(pw, "invalid_curves", {}) or {}
+        for var_name, ref in invalid_curves.items():
+            unit = pw.units.get(var_name, "")
+            legend_text = html.escape(
+                f"{var_name} ({unit})" if unit else var_name
+            )
+            encoded = quote(var_name, safe="")
+            legend_items.append(
+                f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
+                f"style='text-decoration: none; opacity: 0.35;'>"
+                f"<span style='color: {ref.color};'>✕</span>&nbsp;"
+                f"<span style='color: gray;'>{legend_text}（缺失）</span></a>"
+            )
         return " | ".join(legend_items)
 
     def update_legend(self):
@@ -465,10 +483,20 @@ class MultiCurveManager:
         变量名存放在 URL path 部分（curve:///name）：QUrl 会将 host 强制
         转小写并对非 ASCII 做 IDNA 编码，故用 toString + unquote 解析
         （封装在 parse_anchor_var_name，与 legend 拖拽发起端共用）。
+
+        失效占位（§12.1 已拍板）：仅状态栏提示、不切换显隐（无曲线可切）。
         """
         var_name = parse_anchor_var_name(url.toString())
-        if var_name and var_name in self.pw.curves:
+        if not var_name:
+            return
+        pw = self.pw
+        if var_name in pw.curves:
             self.toggle_curve_visibility_by_name(var_name)
+        elif var_name in (getattr(pw, "invalid_curves", {}) or {}):
+            main_window = pw.window()
+            show = getattr(main_window, "_show_status_message", None)
+            if callable(show):
+                show(f"变量 {var_name} 不在当前数据中（失效占位）")
 
     def _apply_plot_style(self, show_symbols: bool = False):
         """应用绘图样式 - 细线+symbol 或 粗线无symbol（含内存优化pen缓存，统一版）"""
