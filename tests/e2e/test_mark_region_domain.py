@@ -5,7 +5,8 @@
    （新页拖入曲线后统计 count=0/1）；
 2. 同名换文件曲线原位重建时，钉在旧数据坐标的 region 必须域校验重置
    （否则统计 count=0 / x1=x2 钳边界）；
-3. 换不同变量文件清空 plot 后，saved_mark_range 不得被关闭路径回灌复活。
+3. 换不同变量文件（B2：曲线降级为占位、不清空 plot）后，标记区间作为布局
+   资产保留并域校验，saved_mark_range 落在新数据域内，不得是脱离新城的死值。
 """
 
 from __future__ import annotations
@@ -101,9 +102,16 @@ def test_reload_shorter_file_resets_stale_region(loaded_window, qtbot, qapp,
     assert rows[0].entry.count > 0
 
 
-def test_load_unrelated_file_clears_saved_range(loaded_window, qtbot, qapp,
-                                                dialog_stubs, tmp_path):
-    """换不同变量文件（清空 plot）后 saved_mark_range 必须归 None，不得回灌。"""
+def test_load_unrelated_file_demotes_to_placeholder_keeps_region_in_domain(
+    loaded_window, qtbot, qapp, dialog_stubs, tmp_path
+):
+    """换不同变量文件（B2）：曲线降级为占位而非清空，标记区间作为布局资产保留。
+
+    旧契约（B2 前）是"变量全不匹配 → 全清 reset → saved_mark_range 归 None"。
+    B2 下 speed 降级为占位（invalid_curves），reset 只在"无曲线且无占位"时进入
+    （设计 §5.2/§5.5），故标记区间不被强制清除，而是由 revalidate_mark_region_domain
+    域校验后保留。回归点从"必须归 None"改为"必须落在新数据域内、不是脱离新城的死值"。
+    """
     mw = loaded_window
     pw = mw.pages[0].plot_widgets[0].plot_widget
     assert pw.plot_variable("speed")
@@ -122,7 +130,18 @@ def test_load_unrelated_file_clears_saved_range(loaded_window, qtbot, qapp,
     qapp.processEvents()
     qtbot.wait(200)
 
-    assert not mw.mark_region_btn.isChecked()
-    # 回归点：关闭路径从幸存 region 回读旧域区间，先清 None 会被回灌复活
-    assert mw.saved_mark_range is None
-    assert mw.pages[0].plot_widgets[0].plot_widget.mark_region is None
+    # B2：speed 降级为占位，不进 curves（布局资产保留，等原数据回来复活）
+    assert list(pw.curves) == []
+    assert "speed" in pw.invalid_curves
+    assert not (set(pw.curves) & set(pw.invalid_curves))
+
+    # 标记区间作为布局资产保留（未被全清 reset 强制关闭）
+    assert mw.mark_region_btn.isChecked()
+    assert pw.mark_region is not None
+    # 回归点：区间必须落在新数据域（50 行 → index [1, 50]）内，
+    # 不是钉在旧坐标、脱离新城的死值（域校验保证统计不会 count=0/钳边界）
+    new_range = tuple(mw.saved_mark_range)
+    assert 1.0 <= new_range[0] < new_range[1] <= 50.0
+    assert tuple(pw.mark_region.getRegion()) == new_range
+    # 占位不参与标记统计（§9）：无可绘制曲线 → 统计表空
+    assert _stat_rows(mw) == []
