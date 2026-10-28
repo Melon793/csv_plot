@@ -508,6 +508,7 @@ class MainWindow(QMainWindow):
             return
         has_curves = any(
             getattr(container.plot_widget, "curves", None)
+            or getattr(container.plot_widget, "invalid_curves", None)
             for container in page.plot_widgets
         )
         if confirm and has_curves:

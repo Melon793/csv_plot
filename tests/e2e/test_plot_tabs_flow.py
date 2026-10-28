@@ -145,6 +145,25 @@ def test_closing_last_page_clears_instead_of_removing(loaded_window):
     assert all(not c.plot_widget.curves for c in page.plot_widgets)
 
 
+def test_close_page_with_only_placeholder_still_confirms(
+    loaded_window, qtbot, dialog_stubs
+):
+    """B2 §7：只有失效占位（curves 为空）的页关闭前也要确认，不得静默销毁资产。"""
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    pw = second.plot_widgets[0].plot_widget
+    # 只降级为占位：curves 保持空，invalid_curves 有内容
+    pw.demote_to_invalid("speed", "gray")
+    assert not pw.curves
+    assert "speed" in pw.invalid_curves
+
+    # 替身返回 No → 页必须保留，且确认弹窗被触发
+    mw.close_page(second)
+    assert len(dialog_stubs["question"]) == 1
+    assert second in mw.pages
+
+
 def test_close_page_marks_destroyed_and_filters_global_iteration(
     loaded_window, qtbot, dialog_stubs
 ):
