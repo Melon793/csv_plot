@@ -165,17 +165,31 @@ class MarkRegionManager:
             slope = float("inf") if dx == 0 else dy / dx
 
             mask = (x_data >= min_x) & (x_data <= max_x)
-            if not np.any(mask):
-                y_avg = y_max = y_min = np.nan
-            else:
+            # 新增指标默认值：区间无有效点时保持 NaN / 0（与 y_avg 语义一致）
+            x_at_y_max = x_at_y_min = y_pp = np.nan
+            count = 0
+            if np.any(mask):
                 y_masked = y_data[mask]
-                valid_y = y_masked[~np.isnan(y_masked)]
+                valid = ~np.isnan(y_masked)
+                valid_y = y_masked[valid]
                 if len(valid_y) > 0:
                     y_avg = np.mean(valid_y)
                     y_max = np.max(valid_y)
                     y_min = np.min(valid_y)
+                    # x 与 valid_y 对齐：valid_y 已滤 NaN，x 必须套同一掩码。
+                    # 注意：不能用 np.nanargmin —— 它内部转调 np.argmin
+                    # （NaN→inf 后求 argmin），会被统计链路的 argmin
+                    # 调用禁令测试捕获；最小值位置用 nanargmax(-y) 等价
+                    # 实现（首处最小值语义与 nanargmin 完全一致）。
+                    x_valid = x_data[mask][valid]
+                    x_at_y_max = float(x_valid[np.nanargmax(valid_y)])
+                    x_at_y_min = float(x_valid[np.nanargmax(-valid_y)])
+                    y_pp = float(y_max - y_min)
+                    count = int(len(valid_y))
                 else:
                     y_avg = y_max = y_min = np.nan
+            else:
+                y_avg = y_max = y_min = np.nan
 
             unit = self.pw.units.get(var_name, "")
             label = f"{var_name} ({unit})" if unit else var_name
@@ -193,6 +207,12 @@ class MarkRegionManager:
                     y_avg=y_avg,
                     y_max=y_max,
                     y_min=y_min,
+                    var_name=var_name,
+                    unit=unit,
+                    x_at_y_max=x_at_y_max,
+                    x_at_y_min=x_at_y_min,
+                    y_pp=y_pp,
+                    count=count,
                 )
             )
 

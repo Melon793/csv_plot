@@ -139,3 +139,96 @@ class TestMarkStatsParity:
 
         assert entries is not None
         assert calls == [], f"统计路径仍在做全量扫描: {calls}"
+
+
+class TestExtendedMetrics:
+    """新增统计字段：var_name / unit / x_at_y_max / x_at_y_min / y_pp / count。
+
+    取值实现避开 np.argmin（有上一条的调用禁令；np.nanargmin 内部也会
+    转调 argmin），这里与「朴素全量 NumPy」逐一对照，并钉死空区间的
+    NaN/0 默认分支。
+    """
+
+    def test_new_metrics_match_plain_numpy(self, plot_factory):
+        """四个新指标与朴素全量 NumPy 对照（区间内混 NaN，nanarg* 必须跳过）。"""
+        rng = np.random.default_rng(11)
+        x = np.linspace(0.0, 100.0, 501)
+        y = rng.random(501)
+        y[100:110] = np.nan  # NaN 段落在统计区间内
+        y[300] = np.nanmax(y) + 5.0  # 保证唯一最大点（x=60.0，区间内）
+        pw = _arm_stats(plot_factory, x, y)
+
+        entries = pw._mark_region_manager._get_mark_stats_multi_curve(5.0, 95.0)
+        assert entries is not None and len(entries) == 1
+        e = entries[0]
+
+        m = (x >= 5.0) & (x <= 95.0)
+        xv, yv = x[m], y[m]
+        keep = ~np.isnan(yv)
+        xv, yv = xv[keep], yv[keep]
+        assert e.x_at_y_max == pytest.approx(xv[int(np.argmax(yv))])
+        assert e.x_at_y_min == pytest.approx(xv[int(np.argmin(yv))])
+        assert e.y_pp == pytest.approx(float(yv.max() - yv.min()))
+        assert e.count == len(yv)
+
+    def test_all_nan_region_yields_nan_defaults(self, plot_factory):
+        """区间内全是 NaN：新数值指标 NaN、count=0（nanarg* 空数组前置判空）。"""
+        x = np.linspace(0.0, 100.0, 101)
+        y = np.full(101, np.nan)
+        y[0] = 1.0  # 唯一有效点在区间外
+        pw = _arm_stats(plot_factory, x, y)
+
+        entries = pw._mark_region_manager._get_mark_stats_multi_curve(30.0, 70.0)
+        assert entries is not None and len(entries) == 1
+        e = entries[0]
+        assert np.isnan(e.x_at_y_max)
+        assert np.isnan(e.x_at_y_min)
+        assert np.isnan(e.y_pp)
+        assert e.count == 0
+        assert np.isnan(e.y_avg)
+
+    def test_region_outside_data_yields_nan_defaults(self, plot_factory):
+        """区间在数据范围外（mask 全空）：同样走 NaN/0 默认分支不抛错。"""
+        x = np.linspace(0.0, 100.0, 101)
+        y = np.arange(101, dtype=float)
+        pw = _arm_stats(plot_factory, x, y)
+
+        entries = pw._mark_region_manager._get_mark_stats_multi_curve(200.0, 300.0)
+        assert entries is not None and len(entries) == 1
+        e = entries[0]
+        assert np.isnan(e.x_at_y_max)
+        assert np.isnan(e.y_pp)
+        assert e.count == 0
+
+    def test_var_name_and_unit_are_independent_fields(self, plot_factory):
+        """var_name/unit 独立成字段，不再需要从拼死的 label 反解。"""
+        pw = _arm_stats(
+            plot_factory, np.linspace(0, 10, 11), np.arange(11, dtype=float)
+        )
+        pw.units["a"] = "km/h"
+        entries = pw._mark_region_manager._get_mark_stats_multi_curve(1.0, 9.0)
+        assert entries is not None
+        e = entries[0]
+        assert e.var_name == "a"
+        assert e.unit == "km/h"
+        assert e.label == "a (km/h)"  # label 兼容保留
+
+    def test_var_name_containing_brackets(self, plot_factory):
+        """变量名本身含括号：label 无法可靠反解，独立字段是唯一可靠来源。"""
+        import pandas as pd
+
+        df = pd.DataFrame({"a (veh)": [1.0, 2.0, 3.0]})
+        pw = plot_factory(df)
+        assert pw.plot_variable("a (veh)") is True
+        ci = pw.curves["a (veh)"]
+        ci.x_data = np.linspace(0.0, 10.0, 11)
+        ci.y_data = np.arange(11, dtype=float)
+        ci.update_x_range()
+        pw.units["a (veh)"] = "km/h"
+
+        entries = pw._mark_region_manager._get_mark_stats_multi_curve(1.0, 9.0)
+        assert entries is not None
+        e = entries[0]
+        assert e.var_name == "a (veh)"
+        assert e.unit == "km/h"
+        assert e.label == "a (veh) (km/h)"

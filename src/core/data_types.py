@@ -81,7 +81,12 @@ class CurveInfo:
 
 @dataclass
 class MarkStatEntry:
-    """标记区域统计条目"""
+    """标记区域统计条目
+
+    ``label`` 保留拼好的 ``"var (unit)"``（导出文本与既有测试兼容）；
+    ``var_name`` / ``unit`` 是未拼接的原始字段，供统计表格独立成列
+    （变量名本身可含括号，从 label 反解不可靠）。
+    """
     x1: float
     x2: float
     y1: float
@@ -93,3 +98,10 @@ class MarkStatEntry:
     y_avg: float
     y_max: float
     y_min: float
+    # ---- 新增（全部带默认值，向后兼容旧构造点）----
+    var_name: str = ""                 # 变量名（未拼单位的原始名，表格"曲线"列）
+    unit: str = ""                     # 单位（独立成列）
+    x_at_y_max: float = float("nan")   # y 最大时的 x 值
+    x_at_y_min: float = float("nan")   # y 最小时的 x 值
+    y_pp: float = float("nan")         # 峰峰值 y_max - y_min
+    count: int = 0                     # 区间内有效样本数
