@@ -9,7 +9,7 @@ import tempfile
 from enum import StrEnum
 from pathlib import Path
 from threading import Lock
-from typing import Any, Optional, Type
+from typing import Any, Iterable, Optional, Sequence, Type
 
 from PySide6.QtCore import QSettings
 
@@ -36,6 +36,13 @@ class ConfigKey(StrEnum):
     # 不能用 BLF_LAST_DB_PATHS 的 pathsep 连接（值里可能含分隔符或空格），
     # JSON 单字符串在 ini 后端里最稳。
     BLF_DB_NOTES = "blf/db_notes"
+    # 标记统计窗口的已选指标列（JSON 数组字符串，有序；顺序即显示顺序）。
+    # 合法 key 集合由窗口侧的指标注册表定义，settings 只做存储与防御性解析，
+    # 不反向依赖 ui 层。
+    MARK_STATS_COLUMNS = "mark_stats/columns"
+    # 标记统计窗口表头状态（QHeaderView.saveState() 的 QByteArray，ini 后端
+    # 存 base64）：列宽 + 视觉列序 + 隐藏位。
+    MARK_STATS_HEADER_STATE = "mark_stats/header_state"
 
 
 class AppSettings:
@@ -258,3 +265,58 @@ class AppSettings:
         self._settings.setValue(
             ConfigKey.BLF_DB_NOTES, json.dumps(notes, ensure_ascii=False)
         )
+
+    # ------------------------------------------------------------------
+    # 标记统计窗口（MarkStatsWindow）持久化
+    #
+    # 列配置走 JSON-in-ini（同 BLF_DB_NOTES 模式）；表头状态直接存
+    # QByteArray（QSettings 原生支持，ini 后端写 base64）。写入即 sync()，
+    # 崩溃也不丢。读取防御四级：① JSON 解析失败 → 默认集；② 过滤注册表
+    # 外的 key（防手改 ini / 未来版本删指标）；③ 结果为空 → 默认集；
+    # ④ 去重且保持存储顺序。合法 key 集与默认集由调用方（窗口侧注册表）
+    # 传入，settings 不依赖 ui 层。
+    # ------------------------------------------------------------------
+
+    def get_mark_stats_columns(
+        self, default_keys: list[str], valid_keys: "Iterable[str]"
+    ) -> list[str]:
+        """读取已选指标列（有序）。任何损坏/非法输入都降级到默认集。"""
+        raw = self._settings.value(ConfigKey.MARK_STATS_COLUMNS, "", type=str) or ""
+        keys: list[str] = []
+        if raw.strip():
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                _logger.warning(
+                    "标记统计列配置解析失败，回退默认集: %.120s", raw
+                )
+                data = None
+            if isinstance(data, list):
+                valid = set(valid_keys)
+                seen: set[str] = set()
+                for item in data:
+                    if isinstance(item, str) and item in valid and item not in seen:
+                        seen.add(item)
+                        keys.append(item)
+        return keys if keys else list(default_keys)
+
+    def set_mark_stats_columns(self, keys: "Sequence[str]") -> None:
+        """写入已选指标列（顺序即显示顺序），即写即持久化。"""
+        self._settings.setValue(
+            ConfigKey.MARK_STATS_COLUMNS,
+            json.dumps(list(keys), ensure_ascii=False),
+        )
+        self._settings.sync()
+
+    def get_mark_stats_header_state(self) -> Any:
+        """读取表头状态；无存档/空值返回 None，由窗口侧静默走默认列宽。"""
+        state = self._settings.value(ConfigKey.MARK_STATS_HEADER_STATE)
+        # 键不存在 → None；被清成空串 / 空 QByteArray 同样视为无存档
+        if not state:
+            return None
+        return state
+
+    def set_mark_stats_header_state(self, state: Any) -> None:
+        """写入表头状态（QHeaderView.saveState() 的 QByteArray），即写即持久化。"""
+        self._settings.setValue(ConfigKey.MARK_STATS_HEADER_STATE, state)
+        self._settings.sync()
