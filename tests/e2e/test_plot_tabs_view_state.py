@@ -320,6 +320,41 @@ def test_mark_region_is_shared_and_stats_grouped_by_page(
         mw.layout_manager.toggle_mark_region(False)
 
 
+def test_mark_stats_current_page_filter_follows_page_activation(
+    loaded_window, qtbot, mark_stats_singleton_cleanup
+):
+    """「仅当前页」跟随活动页：切页链路（restore_mark_regions → 即时刷新）
+    会带新活动页名重刷统计，窗口筛选随之切换。"""
+    mw = loaded_window
+    first, second = _two_pages(mw, qtbot, with_curve=True)
+    second_pw = second.plot_widgets[0].plot_widget
+
+    mw.layout_manager.toggle_mark_region(True)
+    try:
+        window = mw.mark_stats_window
+        mw.layout_manager.update_mark_stats()
+        assert {r.page for r in window.model.rows()} == {"page 1", "page 2"}
+        assert window.current_page_only.isChecked()
+
+        def _visible_pages():
+            return {
+                window.proxy.data(
+                    window.proxy.index(r, 0), Qt.ItemDataRole.DisplayRole
+                )
+                for r in range(window.proxy.rowCount())
+            }
+
+        # 活动页为 first：仅当前页 → proxy 只放行 page 1 的行
+        assert _visible_pages() == {"page 1"}
+
+        mw.activate_page(second)
+        qtbot.waitUntil(lambda: second_pw.mark_region is not None, timeout=3000)
+        # restore_mark_regions 末尾的即时刷新带上了 active_page="page 2"
+        assert _visible_pages() == {"page 2"}
+    finally:
+        mw.layout_manager.toggle_mark_region(False)
+
+
 def test_closing_mark_region_removes_items_on_every_page(
     loaded_window, qtbot, mark_stats_singleton_cleanup
 ):
