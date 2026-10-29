@@ -87,6 +87,8 @@ class PlotPage:
         self._xlink_dirty = False
         #: 切页前的 master X 范围，用于“切页跟随”（§5.2）
         self.saved_x_range: tuple[float, float] | None = None
+        #: 模板恢复后待对齐数据域（一次性，由 _post_activation 消费）
+        self._range_dirty: bool = False
 
     @property
     def grid_cols(self) -> int:

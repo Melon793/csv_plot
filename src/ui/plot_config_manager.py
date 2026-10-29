@@ -195,6 +195,9 @@ class PlotConfigManager(QObject):
             total_plots = 0
 
             for page, page_config in zip(pages, page_cfgs):
+                # 模板 = 整套替换曲线：恢复后视图对齐数据域，
+                # 由页激活收尾 _post_activation 消费（覆盖 saved_x_range 跟随值）
+                page._range_dirty = True
                 self._apply_page_title(main_window, page, page_config.title)
 
                 factors = {

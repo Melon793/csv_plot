@@ -442,6 +442,11 @@ class MainWindow(QMainWindow):
                 # （模板应用目标页=当前页 / 关最后一页回退）会把用户
                 # 之后的缩放拉回上次切页的旧范围。
                 page.saved_x_range = None
+            # 模板恢复的对齐标志：跟随范围落地后，把视图对齐到恢复后的数据域
+            # （模板不保存视角；置脏见 PlotConfigManager.apply_config）
+            if getattr(page, "_range_dirty", False):
+                page._range_dirty = False
+                self._align_restored_page_range(page)
             # 非脏页也要按全局游标状态对齐一次：视图跟随后旧 vline 可能落在
             # viewRange 外（指纹未变时内部直接跳过，见 PlotPage.sync_cursor_scene）
             page.sync_cursor_scene()
@@ -456,6 +461,32 @@ class MainWindow(QMainWindow):
         finally:
             self.setUpdatesEnabled(True)
             page.widget.update()
+
+    def _align_restored_page_range(self, page: PlotPage) -> None:
+        """消费模板恢复遗留的 _range_dirty：视图对齐恢复后的数据域。
+
+        复用 apply_x_range 的 _is_syncing_range 套路，避免 auto_range 的
+        程序化 setXRange 触发 _on_range_changed 交互态级联
+        （event_handler 排 _end_interaction 定时器）。
+        """
+        cursor_sync = getattr(self, "cursor_sync_manager", None)
+        if cursor_sync is None:
+            return
+        sync_flags: dict = {}
+        for container in page.plot_widgets:
+            candidate = getattr(container, "plot_widget", None)
+            if candidate is None:
+                continue
+            sync_flags[candidate] = getattr(candidate, "_is_syncing_range", False)
+            candidate._is_syncing_range = True
+        try:
+            cursor_sync.auto_range_page(page, announce=False)
+        finally:
+            for candidate, previous in sync_flags.items():
+                try:
+                    candidate._is_syncing_range = previous
+                except RuntimeError:
+                    pass
 
     def new_page(self) -> PlotPage | None:
         """新建绘图页：继承当前页可见行列，激活时首次建矩阵（§5.3 / D-C）。"""
