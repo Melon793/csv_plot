@@ -573,10 +573,11 @@ class CursorSyncManager(MainWindowBaseManager):
                 self.mw._global_max_density,
             )
 
-    def auto_range_page(self, page=None):
+    def auto_range_page(self, page=None, *, announce: bool = True):
         """按可见曲线自动缩放 XY：只作用于指定页（默认当前页，§6.7）。
 
         跨页 autoRange 会重算隐藏页几何，且用户看不到结果；保持页作用域。
+        announce=False 供程序化路径（模板恢复）静默调用，不播报状态栏。
         """
         if not self.mw.loader or self.mw.loader.datalength == 0:
             return
@@ -604,7 +605,8 @@ class CursorSyncManager(MainWindowBaseManager):
                 external_xmin=global_min_x,
                 external_xmax=global_max_x,
             )
-        self.mw._show_status_message("已按全部可见曲线自动缩放 XY 轴")
+        if announce:
+            self.mw._show_status_message("已按全部可见曲线自动缩放 XY 轴")
 
     def auto_range_all_plots(self):
         """兼容旧名：语义已是「当前页全部子图」。"""
