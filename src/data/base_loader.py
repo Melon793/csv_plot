@@ -7,7 +7,7 @@ MDFLazyLoader 因惰性加载设计差异不纳入此体系。
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from src.core.config import FLOAT32_REPRESENTABLE_MAX
+from src.core.config import _evaluate_float32_safety
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -94,33 +94,25 @@ class BaseDataLoader:
                 arr = series.to_numpy(copy=True)  # 必须可写（memory_map 产生的数组可能是只读的）
 
                 if downcast:
+                    # P1-8：能不能下转换由 _evaluate_float32_safety 统一裁定
+                    # （既看「能否表示」，也看「float32 间距会不会吃掉数据自身
+                    # 的分辨率」）。这里原先只比 max_abs，量级大而分辨率细的列
+                    # （epoch 毫秒时间戳、大额带小数的计数）会被静默抹平。
                     finite_mask = np.isfinite(arr)
-                    if finite_mask.all() and arr.dtype == np.float64:
-                        # 无 inf，直接判断是否能下转换
-                        max_abs = float(np.nanmax(np.abs(arr))) if arr.size > 0 else 0.0
-                        if max_abs <= FLOAT32_REPRESENTABLE_MAX:
-                            arr = arr.astype(np.float32)  # 拷贝 2（如果需要）
-                            self._df[col] = arr
-                    elif not finite_mask.all():
-                        # 有 inf，清理后判断是否下转换
-                        if arr.dtype == np.float64:
-                            finite_vals = arr[finite_mask]
-                            if finite_vals.size > 0:
-                                max_abs = float(np.max(np.abs(finite_vals)))
-                            else:
-                                max_abs = 0.0
-                            if max_abs <= FLOAT32_REPRESENTABLE_MAX:
-                                target = np.empty(arr.shape, dtype=np.float32)
-                                np.copyto(target, arr, where=finite_mask)
-                                target[~finite_mask] = np.float32(np.nan)
-                                self._df[col] = target
-                                arr = target
-                            else:
-                                arr[~finite_mask] = np.nan
-                                self._df[col] = arr
+                    can_downcast, _abs_max = _evaluate_float32_safety(arr)
+                    if arr.dtype == np.float64 and can_downcast:
+                        if finite_mask.all():
+                            arr = arr.astype(np.float32)  # 无 inf/NaN，整列直转
                         else:
-                            arr[~finite_mask] = np.nan
-                            self._df[col] = arr
+                            # 有 inf：NaN 用 where 分支写入，避免 inf→float32 溢出
+                            target = np.empty(arr.shape, dtype=np.float32)
+                            np.copyto(target, arr, where=finite_mask)
+                            target[~finite_mask] = np.float32(np.nan)
+                            arr = target
+                        self._df[col] = arr
+                    elif not finite_mask.all():
+                        arr[~finite_mask] = np.nan
+                        self._df[col] = arr
 
                 # 有效性判断（复用已处理的 arr，无额外分配）
                 if arr.size == 0:

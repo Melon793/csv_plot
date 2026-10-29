@@ -4,6 +4,7 @@
 复制按钮的几何、命中区、与选区互不干扰，以及行高列宽的落地守卫。
 """
 
+import os
 import sys
 
 import pytest
@@ -502,6 +503,10 @@ class TestFilePathCopy:
         "/20260101_DEMO_ENG01_1am=0.8_Map.csv"
     )
     WIN = RAW.replace("/", "\\")
+    #: native 风格 = **当前平台**写法。macOS/Linux 保持正斜杠，Windows 会转成
+    #: 反斜杠（UNC 保留两层前导）。把 Mac 的结果写死进断言，等于用「字体像不像
+    #: macOS」当判据，Windows 上必然红 —— 这里按平台算出期望值。
+    NATIVE = WIN if os.name == "nt" else RAW
 
     def _add_path_row(self, pg, value=RAW):
         """手工注入一行「文件路径」并滚入视口（同长路径用例的做法）。"""
@@ -546,11 +551,11 @@ class TestFilePathCopy:
         assert dlg.status_label.text() == "已复制「文件路径」"
 
     def test_default_native_style_adds_quotes_but_keeps_slashes(self, page):
-        """默认 native：macOS 上保持正斜杠，但含空格/``=`` 必须已被引号保护。"""
+        """默认 native：给当前平台写法，但含空格/``=`` 必须已被引号保护。"""
         _, pg = page
         item = self._add_path_row(pg)
 
-        assert self._click_copy_button(pg, item) == '"' + self.RAW + '"'
+        assert self._click_copy_button(pg, item) == '"' + self.NATIVE + '"'
 
     def test_quote_never_config_disables_wrapping(self, page, monkeypatch):
         """PATH_COPY_QUOTE=never → 粘进 Excel 单元格时不带引号。"""
@@ -558,7 +563,7 @@ class TestFilePathCopy:
         monkeypatch.setattr(vid_mod, "PATH_COPY_QUOTE", "never")
         item = self._add_path_row(pg)
 
-        assert self._click_copy_button(pg, item) == self.RAW
+        assert self._click_copy_button(pg, item) == self.NATIVE
 
     def test_quote_always_wraps_a_clean_path(self, page, monkeypatch):
         """PATH_COPY_QUOTE=always → 无特殊字符也包引号（对齐 Explorer）。"""

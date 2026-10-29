@@ -166,3 +166,38 @@ class TestReleaseMemoryContract:
         after = (sys.getrefcount(old_units), sys.getrefcount(old_validity))
         assert after[0] == before[0] - 1
         assert after[1] == before[1] - 1
+
+
+class TestDowncastPrecisionGuard:
+    """后处理的下转换决定必须与 _evaluate_float32_safety 同源（P1-8）。"""
+
+    def test_epoch_millisecond_column_stays_float64(self):
+        # epoch 秒带毫秒：float32 间距约 128s，会把这些点全部吞成同一个值
+        values = [1_767_225_600.000 + i * 0.001 for i in range(500)]
+        loader = _make_loader(pd.DataFrame({"tstamp": values}))
+
+        loader._postprocess_columns(downcast=True)
+
+        col = loader._df["tstamp"]
+        assert col.dtype == np.float64, "该列被下转换就会静默改变读数，必须保持 float64"
+        assert np.unique(col.to_numpy()).size == 500
+
+    def test_ordinary_engineering_column_still_downcasts(self):
+        values = [10.0 + i * 0.1 for i in range(5000)]
+        loader = _make_loader(pd.DataFrame({"speed": values}))
+
+        loader._postprocess_columns(downcast=True)
+
+        assert loader._df["speed"].dtype == np.float32, "常规工程量不该被精度护栏挡住"
+
+    def test_inf_column_with_fine_resolution_stays_float64(self):
+        """有 inf 的列：清理 inf 与是否下转换是两件事，护栏优先。"""
+        values = [1_767_225_600.000 + i * 0.001 for i in range(300)] + [float("inf")]
+        loader = _make_loader(pd.DataFrame({"tstamp": values}))
+
+        loader._postprocess_columns(downcast=True)
+
+        col = loader._df["tstamp"]
+        assert col.dtype == np.float64
+        assert np.isnan(col.iloc[-1]), "inf 仍要清成 NaN"
+        assert not np.isinf(col.to_numpy()).any()

@@ -106,6 +106,7 @@ FILE_SIZE_LIMIT_BACKGROUND_LOADING = (
     2  # 2MB：区分平均值文件(<100点)和连续测量文件(~10000点)
 )
 RATIO_RESET_PLOTS = 0.3  # 重置plot比例，超过此比例时，重置plot
+INVALID_CURVE_COLOR = "gray"  # 失效占位默认色（模板来源占位固定灰色，§8.3/§12.2：不取 _assign_curve_color，避免同一模板多次应用占位色随索引漂移）
 FROZEN_VIEW_WIDTH_DEFAULT = 180  # 冻结视图宽度，默认值为180px
 XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # 可见点数阈值：估算可见点数（x轴宽度×采样密度）小于此值显示symbols（细线+symbol），否则粗线无symbol
 BLINK_PULSE = 200
@@ -317,6 +318,21 @@ PLOT_COL_CURRENT_DEFAULT = 1
 
 FLOAT32_REPRESENTABLE_MAX = 3.4028234663852886e+38
 
+# —— float32 下转换的**精度**护栏（全仓审查 P1-8）——
+# 只判「能不能表示」不够：float32 尾数 24 位，量级越大间距越粗。
+# epoch 秒（~1.7e9）下转换后间距约 128 s，毫秒时间戳会被整体抹平成同一秒 ——
+# 数值仍在范围内、不报错，但用户看到的读数已经错位。故下转换前还要确认
+# 舍入间距不吃掉数据自身的分辨率。
+FLOAT32_EXACT_INTEGER_MAX = float(2 ** 24)  # float32 能连续精确表示的整数上限
+FLOAT32_RESOLUTION_SAMPLE_ROWS = 4096  # 估计最小非零间隔的采样上限
+FLOAT32_ULP_GUARD_MARGIN = 4.0  # 要求 ulp 至少比观测到的最小间隔小 4 倍
+
+# —— CSV 读入分阶段计时（日志前缀 [PERF]）——
+# 单阶段耗时超过该阈值就落 WARNING。现场出现过「251 行的小文件读失败用了 17 秒」，
+# 光有首尾两条 INFO 定不了位，故把阶段边界打进日志（成功与中途抛错都能留下
+# 最后一条已写出的阶段行）。
+CSV_PERF_LOG_THRESHOLD_S = 2.0
+
 # 单位行自动检测阈值
 UNIT_KEYWORD_RATIO_THRESHOLD = 0.2  # 单位关键字列比例超过此值，判定为单位行
 VALID_NUMERIC_RATIO_THRESHOLD = 0.6  # 有效数值列比例超过此值，判定为数据行
@@ -410,9 +426,65 @@ def compute_global_x_limits(
     return (min_x, max_x, limits_xMin, limits_xMax)
 
 
+def _estimate_min_positive_gap(values) -> "float | None":
+    """采样估计该列相邻不同取值之间的最小正间距（= 数据自身的分辨率）。
+
+    返回 ``None`` 表示列里只有一个取值（常量列）—— 没有「间距」可言，
+    此时只要该值本身能精确表示就可以下转换。
+    """
+    import numpy as np
+
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    if arr.size > FLOAT32_RESOLUTION_SAMPLE_ROWS:
+        stride = int(np.ceil(arr.size / FLOAT32_RESOLUTION_SAMPLE_ROWS))
+        arr = arr[::stride]
+    uniq = np.unique(arr)
+    if uniq.size < 2:
+        return None
+    positive = np.diff(uniq)
+    positive = positive[positive > 0]
+    if positive.size == 0:
+        return None
+    return float(positive.min())
+
+
+def _float32_spacing_preserves_resolution(arr, abs_max: float) -> bool:
+    """float32 在该量级上的间距，是否不吃掉数据自身的分辨率。
+
+    判据：``ulp(abs_max) * FLOAT32_ULP_GUARD_MARGIN <= 最小正间距``。
+    采样估计的间距可能偏大（漏掉真正更近的一对值），所以留 4 倍余量。
+    常量列没有间距可言，改为要求该值在 float32 下**逐位精确**。
+    """
+    import numpy as np
+
+    if abs_max == 0.0:
+        return True
+    ulp = float(np.spacing(np.float32(abs_max)))
+    if not np.isfinite(ulp) or ulp <= 0:
+        return False
+
+    gap = _estimate_min_positive_gap(arr)
+    if gap is None:
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return False
+        value = float(finite[0])
+        return float(np.float32(value).astype(np.float64)) == value
+    return ulp * FLOAT32_ULP_GUARD_MARGIN <= gap
+
+
 def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     """
     判断数值是否能安全表示为 float32。
+
+    两层判据（全仓审查 P1-8）：
+    1. **能表示** —— 绝对值最大值不超过 float32 上界；
+    2. **不丢分辨率** —— float32 在该量级的间距不会抹掉数据自身的最小正间距。
+       只看第 1 条会漏掉真正危险的场景：epoch 秒（~1.7e9）的 float32 间距约
+       128 s，毫秒时间戳下转换后被整体抹平，数值不溢出、不报错，读数却错了。
 
     参数:
         values: pandas Series、NumPy 数组或其它可迭代的数值序列。
@@ -438,17 +510,24 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
                 if not finite_mask.any():
                     return False, None
                 abs_max = float(np.max(np.abs(values[finite_mask])))
-                # float32 值必然 <= FLOAT32_REPRESENTABLE_MAX，但保留统一比较
+                # float32 值必然 <= FLOAT32_REPRESENTABLE_MAX，且本身就是
+                # float32 表示 → 不存在进一步的下转换损失
                 return abs_max <= FLOAT32_REPRESENTABLE_MAX, abs_max
             elif values.dtype == np.float64:
                 if values.size == 0:
                     return True, 0.0
-                # float64 输入：检查 max abs 是否超出 float32 范围
                 finite_mask = np.isfinite(values)
                 if not finite_mask.any():
                     return False, None
                 abs_max = float(np.max(np.abs(values[finite_mask])))
-                return abs_max <= FLOAT32_REPRESENTABLE_MAX, abs_max
+                if abs_max > FLOAT32_REPRESENTABLE_MAX:
+                    return False, abs_max
+                # 整数型取值（kind 是 f 但值都是整数）量级超过 float32 的连续
+                # 整数上限时同样会被抹平，统一交给间距判据
+                return (
+                    _float32_spacing_preserves_resolution(values[finite_mask], abs_max),
+                    abs_max,
+                )
             else:
                 # 其他 dtype（int 等），转 float64 检查
                 arr = values.astype(np.float64)
@@ -472,4 +551,6 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
         return False, None
 
     abs_max = float(np.max(np.abs(arr[finite_mask])))
-    return abs_max <= FLOAT32_REPRESENTABLE_MAX, abs_max
+    if abs_max > FLOAT32_REPRESENTABLE_MAX:
+        return False, abs_max
+    return _float32_spacing_preserves_resolution(arr[finite_mask], abs_max), abs_max

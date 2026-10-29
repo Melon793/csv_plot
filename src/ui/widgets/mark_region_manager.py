@@ -65,11 +65,30 @@ class MarkRegionManager:
             line.setHoverPen(pg.mkPen(color="r", width=10))
 
         self.pw.plot_item.addItem(self.pw.mark_region)
+        # 槽内按 pw.page 反查所属页（§6.4 #6）：连接/断开都指向同一个成员方法，
+        # 不用 lambda（每次都是新对象，无法可靠 disconnect）
+        self.pw.mark_region.sigRegionChanged.connect(self._on_region_changed)
+        # 拖动结束信号：松手立即精确刷新统计。本环境 pyqtgraph 0.14 的
+        # LinearRegionItem 没有 sigRegionChangeStarted，拖动中的节流刷新
+        # 由 sync_mark_regions → request_mark_stats_refresh(allow_throttled)
+        # 承担（首个事件立即刷，其后 150ms 节流）——否则纯 trailing 防抖
+        # 在 60Hz 事件下（间隔 < 50ms 防抖窗）拖动全程冻结统计表。
+        self.pw.mark_region.sigRegionChangeFinished.connect(self._on_region_change_finished)
+
+    def _on_region_changed(self, region):
+        """任一页的区间被拖动：交给 LayoutManager 广播到全部页。"""
+        page = getattr(self.pw, "page", None)
         window = self.pw.window()
-        if window is not None and hasattr(window, "layout_manager"):
-            self.pw.mark_region.sigRegionChanged.connect(
-                window.layout_manager.sync_mark_regions
-            )
+        if window is None or not hasattr(window, "layout_manager"):
+            return
+        window.layout_manager.sync_mark_regions(region, page=page)
+
+    def _on_region_change_finished(self, region):
+        """拖动结束：绕过节流立即精确刷新统计（落定值）。"""
+        window = self.pw.window()
+        if window is None or not hasattr(window, "layout_manager"):
+            return
+        window.layout_manager.request_mark_stats_refresh(immediate=True)
 
     def _teardown_mark_region(self):
         """断开信号 → 摘出场景 → 销毁 C++ 对象。
@@ -81,14 +100,14 @@ class MarkRegionManager:
         region = self.pw.mark_region
         if region is None:
             return
-        window = self.pw.window()
-        if window is not None and hasattr(window, "layout_manager"):
+        for sig, slot in (
+            (region.sigRegionChanged, self._on_region_changed),
+            (region.sigRegionChangeFinished, self._on_region_change_finished),
+        ):
             try:
-                region.sigRegionChanged.disconnect(
-                    window.layout_manager.sync_mark_regions
-                )
+                sig.disconnect(slot)
             except (RuntimeError, TypeError):
-                # 构造期窗口尚无 layout_manager / 连接本就不存在
+                # 构造期尚无连接 / C++ 侧已销毁
                 pass
         if region.scene() is not None:
             self.pw.plot_item.removeItem(region)
@@ -99,15 +118,21 @@ class MarkRegionManager:
         """移除标记区域"""
         self._teardown_mark_region()
 
-    def get_mark_stats(self) -> list | None:
+    def get_mark_stats(self, region: tuple[float, float] | None = None) -> list | None:
         """获取标记区域的统计信息（统一版：始终走 curves 字典路径）
+
+        Args:
+            region: 显式区间；隐藏页尚未补建 region item 时由调用方传入全局
+                ``saved_mark_range``，保证统计窗口覆盖所有页（§6.4 #9）。
 
         【NumPy优化】使用NumPy掩码数组批量计算统计值，避免循环过滤
         """
-        if not self.pw.mark_region:
-            return None
-
-        min_x, max_x = self.pw.mark_region.getRegion()
+        if region is None:
+            if not self.pw.mark_region:
+                return None
+            min_x, max_x = self.pw.mark_region.getRegion()
+        else:
+            min_x, max_x = region
         return self._get_mark_stats_multi_curve(min_x, max_x)
 
     def _get_mark_stats_multi_curve(self, min_x: float, max_x: float) -> list | None:
@@ -157,17 +182,31 @@ class MarkRegionManager:
             slope = float("inf") if dx == 0 else dy / dx
 
             mask = (x_data >= min_x) & (x_data <= max_x)
-            if not np.any(mask):
-                y_avg = y_max = y_min = np.nan
-            else:
+            # 新增指标默认值：区间无有效点时保持 NaN / 0（与 y_avg 语义一致）
+            x_at_y_max = x_at_y_min = y_pp = np.nan
+            count = 0
+            if np.any(mask):
                 y_masked = y_data[mask]
-                valid_y = y_masked[~np.isnan(y_masked)]
+                valid = ~np.isnan(y_masked)
+                valid_y = y_masked[valid]
                 if len(valid_y) > 0:
                     y_avg = np.mean(valid_y)
                     y_max = np.max(valid_y)
                     y_min = np.min(valid_y)
+                    # x 与 valid_y 对齐：valid_y 已滤 NaN，x 必须套同一掩码。
+                    # 注意：不能用 np.nanargmin —— 它内部转调 np.argmin
+                    # （NaN→inf 后求 argmin），会被统计链路的 argmin
+                    # 调用禁令测试捕获；最小值位置用 nanargmax(-y) 等价
+                    # 实现（首处最小值语义与 nanargmin 完全一致）。
+                    x_valid = x_data[mask][valid]
+                    x_at_y_max = float(x_valid[np.nanargmax(valid_y)])
+                    x_at_y_min = float(x_valid[np.nanargmax(-valid_y)])
+                    y_pp = float(y_max - y_min)
+                    count = int(len(valid_y))
                 else:
                     y_avg = y_max = y_min = np.nan
+            else:
+                y_avg = y_max = y_min = np.nan
 
             unit = self.pw.units.get(var_name, "")
             label = f"{var_name} ({unit})" if unit else var_name
@@ -185,6 +224,12 @@ class MarkRegionManager:
                     y_avg=y_avg,
                     y_max=y_max,
                     y_min=y_min,
+                    var_name=var_name,
+                    unit=unit,
+                    x_at_y_max=x_at_y_max,
+                    x_at_y_min=x_at_y_min,
+                    y_pp=y_pp,
+                    count=count,
                 )
             )
 

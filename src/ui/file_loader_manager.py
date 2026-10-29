@@ -307,7 +307,11 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.cursor_sync_manager.reset_all_pin_states()
         except Exception:
             logger.debug("重置 pin 状态失败（可能数据已变更）")
-        for container in getattr(self.mw, "plot_widgets", []):
+        # 拆卸场景是所有页都要做的例外（§5.5 末注）：reload 期间每个子图都
+        # 必须断信号、摘 vline、清 item，否则隐藏页会以“冻结/幽灵 region/
+        # 旧数据引用”的形式静默坏掉。非活动页拆完后不要立即重建 cursor item，
+        # 留给激活时的 restore_scene。
+        for container in self._iter_all_containers():
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
@@ -459,7 +463,8 @@ class FileLoaderManager(MainWindowBaseManager):
             # v5.11: 先将 vline/vline2 重新添加到 scene，再做状态恢复。
             # _begin_data_reload 中将它们从 scene 移除了，此处必须配对恢复。
             # 对 free cursor 也必须恢复——free cursor 也有 vline（只是不可见）。
-            for container in getattr(self.mw, "plot_widgets", []):
+            # 重新挂回 scene 属于拆卸链的配对动作，所有页都要做（§5.5 末注）。
+            for container in self._iter_all_containers():
                 widget = getattr(container, "plot_widget", None)
                 if widget:
                     self._reattach_vlines_to_scene(widget)
@@ -468,7 +473,7 @@ class FileLoaderManager(MainWindowBaseManager):
             # _begin_data_reload 断开了信号，但原实现把重连放在 is_free_cursor return 之后，
             # 导致 reload 前 free cursor 时信号永远不会被重连，后续开启 anchored cursor
             # 拖动 vline 不会触发 on_vline_position_changed，跨 plot link 失效。
-            for container in getattr(self.mw, "plot_widgets", []):
+            for container in self._iter_all_containers():
                 widget = getattr(container, "plot_widget", None)
                 if widget:
                     self._reconnect_vline_signals(widget)
@@ -476,10 +481,13 @@ class FileLoaderManager(MainWindowBaseManager):
             if is_free_cursor:
                 # 防抖：阻止 reload 过渡期内的中间 cursor label 更新，
                 # 只在 _post_reload_ui_refresh 中渲染一次
-                for container in getattr(self.mw, "plot_widgets", []):
+                for container in self._iter_all_containers():
                     widget = getattr(container, "plot_widget", None)
                     if widget and hasattr(widget, "_last_cursor_update_time"):
                         widget._last_cursor_update_time = time.time()
+                    if not self._container_scene_allowed(container):
+                        # 隐藏页 vline 已重新挂回 scene，但可见性/标签状态不在此刻写
+                        self._mark_container_page_dirty(container)
                 return
 
             # v5.x 修复问题 A：钳制 pinned 值到新数据范围。
@@ -493,12 +501,13 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.pinned_x_values = list(saved_pinned_x_values)
 
             widgets_list = []
-            for container in getattr(self.mw, "plot_widgets", []):
+            for container in self._iter_all_containers():
                 widget = getattr(container, "plot_widget", None)
                 if widget:
-                    widgets_list.append(widget)
+                    widgets_list.append((container, widget))
 
-            for widget in widgets_list:
+            for container, widget in widgets_list:
+                scene = self._container_scene_allowed(container)
                 widget.is_cursor_pinned = True
                 widget.pinned_x_values = list(saved_pinned_x_values)
                 if saved_pinned_x_values:
@@ -508,6 +517,15 @@ class FileLoaderManager(MainWindowBaseManager):
                 for x_val in saved_pinned_x_values:
                     if widget.factor != 0:
                         widget.pinned_index_values.append((x_val - widget.offset) / widget.factor)
+
+                if not scene:
+                    # 隐藏页：Python 状态已就绪，vline 位置/可见性/tag 留给激活补建
+                    if hasattr(widget.view_box, "is_cursor_pinned"):
+                        widget.view_box.is_cursor_pinned = True
+                    if hasattr(widget, "_last_cursor_update_time"):
+                        widget._last_cursor_update_time = time.time()
+                    self._mark_container_page_dirty(container)
+                    continue
 
                 # v5.11: vline 已重新添加到 scene，现在可以安全操作
                 if hasattr(widget, "vline"):
@@ -645,7 +663,7 @@ class FileLoaderManager(MainWindowBaseManager):
         self.mw._is_loading_new_data = False
         self._safety_unlock_version = -1
         self._stop_safety_timer()
-        for container in getattr(self.mw, "plot_widgets", []):
+        for container in self._iter_all_containers():
             widget = getattr(container, "plot_widget", None)
             if widget:
                 if not _qt_alive(widget):
@@ -662,9 +680,13 @@ class FileLoaderManager(MainWindowBaseManager):
                     logger.debug(
                         "_refresh_curve_paint_path 失败（紧急解锁期间）", exc_info=True
                     )
-                # 紧急解锁后触发一次完整刷新，防止 paintEvent 跳过导致白屏
+                # 紧急解锁后触发一次完整刷新，防止 paintEvent 跳过导致白屏；
+                # 隐藏页不做 cursor 场景写入，留给切页 restore_scene
                 if hasattr(widget, "_queue_ui_refresh"):
-                    widget._queue_ui_refresh(immediate=True)
+                    widget._queue_ui_refresh(
+                        immediate=True,
+                        cursor=self._widget_scene_allowed(widget),
+                    )
 
     def _post_reload_ui_refresh(self):
         """重载完成后的 UI 刷新：分步清除锁，确保场景一致后再放行 paintEvent。
@@ -694,7 +716,7 @@ class FileLoaderManager(MainWindowBaseManager):
             return
         try:
             widgets_to_refresh = []
-            for container in getattr(self.mw, "plot_widgets", []):
+            for container in self._iter_all_containers():
                 widget = getattr(container, "plot_widget", None)
                 if not widget:
                     continue
@@ -729,10 +751,15 @@ class FileLoaderManager(MainWindowBaseManager):
                 widget.viewport().update()
 
             # v5.3 修复问题 2：合并 13 个 per-widget 延迟回调为 1 个统一回调
+            # 场景分级：隐藏页只解锁/重建数据层，cursor 标签留到切页 restore_scene
+            scene_widgets = [
+                widget for widget in widgets_to_refresh
+                if self._widget_scene_allowed(widget)
+            ]
             current_version = self.mw._data_version
             self._schedule_delayed(
                 0,
-                lambda: self._deferred_cursor_refresh_all(widgets_to_refresh, current_version)
+                lambda: self._deferred_cursor_refresh_all(scene_widgets, current_version)
             )
         except Exception:
             logger.debug("_post_reload_ui_refresh 执行失败", exc_info=True)
@@ -846,6 +873,38 @@ class FileLoaderManager(MainWindowBaseManager):
         except RuntimeError:  # 弱引用已失效
             return None
         return mw if _qt_alive(mw) else None
+
+    def _iter_all_containers(self):
+        """遍历所有页的绘图容器；旧式替身/构造期退化为当前页 ``plot_widgets``。
+
+        解锁、释放旧数据这类「数据层 / 全局」路径必须跨页（设计文档 §7.2
+        #10/#11），不能只用垫片返回的当前页列表。
+        """
+        iter_all = getattr(self.mw, "iter_all_plot_widgets", None)
+        if callable(iter_all):
+            try:
+                return list(iter_all())
+            except Exception:
+                logger.debug("遍历全部页绘图容器失败，回退当前页", exc_info=True)
+        return list(getattr(self.mw, "plot_widgets", []))
+
+    def _container_scene_allowed(self, container) -> bool:
+        """reload 场景分级：只有当前页允许重建 cursor/region 场景 item。"""
+        widget = getattr(container, "plot_widget", None)
+        return self._widget_scene_allowed(widget)
+
+    def _widget_scene_allowed(self, widget) -> bool:
+        current = getattr(self.mw, "current_page", None)
+        if current is None:
+            return True
+        page = getattr(widget, "page", None)
+        return page is None or page is current
+
+    def _mark_container_page_dirty(self, container) -> None:
+        widget = getattr(container, "plot_widget", None)
+        page = getattr(widget, "page", None)
+        if page is not None:
+            page.mark_dirty_for_activation()
 
     def load_csv_file(self, file_path: str):
         # 入口唯一规范化点：文件对话框、拖拽（Qt 会把 UNC 产出成 "//host/share"）、
@@ -1838,8 +1897,8 @@ class FileLoaderManager(MainWindowBaseManager):
             # 且自身抛 AttributeError 时仍受下方 except 保护。
             self.mw.var_stats_cache = {}
 
-            # 1) 清理 plot widgets 的 data 引用
-            for container in getattr(self.mw, "plot_widgets", []):
+            # 1) 清理 plot widgets 的 data 引用（所有页：旧 DataFrame 必须真正释放）
+            for container in self._iter_all_containers():
                 widget = getattr(container, "plot_widget", None)
                 if widget is not None:
                     widget.data = None
@@ -1958,7 +2017,7 @@ class FileLoaderManager(MainWindowBaseManager):
         if hasattr(self.mw, 'plot_config_manager'):
             any_curve_restored = any(
                 not container.isHidden() and bool(container.plot_widget.curves)
-                for container in self.mw.plot_widgets
+                for container in self._iter_all_containers()
             )
 
             if any_curve_restored:
@@ -2226,6 +2285,11 @@ class FileLoaderManager(MainWindowBaseManager):
         if self.mw.placeholder_label.parent():
             self.mw.placeholder_label.setParent(None)
 
+        # 有数据后才允许新建绘图页（决策 D-D）
+        plot_tabs = getattr(self.mw, "plot_tabs", None)
+        if plot_tabs is not None:
+            plot_tabs.set_new_page_enabled(True)
+
         if not self.mw.plot_widgets:
             self.mw.layout_manager.create_subplots_matrix(
                 self.mw._plot_row_max_default, self.mw._plot_col_max_default
@@ -2234,7 +2298,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw._plot_row_current, self.mw._plot_col_current
             )
 
-        for container in self.mw.plot_widgets:
+        for container in self._iter_all_containers():
             widget = container.plot_widget
             widget.data = self.mw.loader.df
             widget.units = self.mw.loader.units
@@ -2278,4 +2342,7 @@ class FileLoaderManager(MainWindowBaseManager):
         if self.mw.filter_input.text() or self.mw.unit_filter_input.text():
             self.mw.cursor_sync_manager.filter_variables()
         if self.mw.mark_region_btn.isChecked():
+            # 曲线原位重建（同名换文件/reload）时 region 钉在旧数据坐标：
+            # 先校验域再刷统计，否则域错位时 count=0 的错误统计直接进表
+            self.mw.layout_manager.revalidate_mark_region_domain()
             self.mw.layout_manager.request_mark_stats_refresh(immediate=True)

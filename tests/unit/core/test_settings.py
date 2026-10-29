@@ -84,6 +84,71 @@ class TestBlfDbNotes:
         AppSettings._reset_for_tests()
 
 
+class TestMarkStatsPersistence:
+    """标记统计窗口持久化：列配置四级读取防御 + 表头状态 QByteArray。"""
+
+    DEFAULT = ["dy", "slope", "y_avg"]
+    VALID = ["x1", "x2", "dx", "dy", "slope", "y_avg", "y_max", "y_min", "count"]
+
+    def _get(self, settings):
+        return settings.get_mark_stats_columns(self.DEFAULT, self.VALID)
+
+    def test_columns_roundtrip_preserves_order(self, app_settings):
+        """存储顺序即显示顺序，读回不得重排。"""
+        app_settings.set_mark_stats_columns(["y_max", "dy", "x1"])
+        assert self._get(app_settings) == ["y_max", "dy", "x1"]
+
+    def test_columns_roundtrip_survives_singleton_reset(self, qapp):
+        from src.core.settings import AppSettings
+
+        AppSettings._reset_for_tests()
+        AppSettings().set_mark_stats_columns(["dy", "count"])
+        AppSettings._reset_for_tests()
+        assert self._get(AppSettings()) == ["dy", "count"]
+        AppSettings._reset_for_tests()
+
+    def test_unknown_keys_filtered(self, app_settings):
+        """注册表外的 key（手改 ini / 未来版本删指标）静默过滤。"""
+        app_settings.set_mark_stats_columns(["dy", "bogus"])
+        assert self._get(app_settings) == ["dy"]
+
+    def test_corrupt_json_falls_back_to_default(self, app_settings):
+        app_settings.set_value(ConfigKey.MARK_STATS_COLUMNS, "{not json")
+        assert self._get(app_settings) == self.DEFAULT
+
+    def test_non_list_json_falls_back_to_default(self, app_settings):
+        app_settings.set_value(ConfigKey.MARK_STATS_COLUMNS, '"dy"')
+        assert self._get(app_settings) == self.DEFAULT
+
+    def test_empty_list_falls_back_to_default(self, app_settings):
+        """全部 key 非法 → 过滤后为空 → 默认集（③级防御）。"""
+        app_settings.set_mark_stats_columns(["nope", "also_bad"])
+        assert self._get(app_settings) == self.DEFAULT
+
+    def test_duplicates_removed_keeping_first(self, app_settings):
+        app_settings.set_mark_stats_columns(["dy", "dy", "slope", "dy"])
+        assert self._get(app_settings) == ["dy", "slope"]
+
+    def test_unset_returns_default(self, app_settings):
+        # fixture 只重置单例不删 ini：上一用例写入的列配置会残留，先显式清键
+        app_settings.set_value(ConfigKey.MARK_STATS_COLUMNS, "")
+        assert self._get(app_settings) == self.DEFAULT
+
+    def test_header_state_roundtrip(self, app_settings, qapp):
+        """QByteArray 表头状态经 ini（base64）往返不变。"""
+        from PySide6.QtCore import QByteArray
+
+        state = QByteArray(b"\x00\x01header-state-bytes")
+        app_settings.set_mark_stats_header_state(state)
+        restored = app_settings.get_mark_stats_header_state()
+        assert bytes(restored) == b"\x00\x01header-state-bytes"
+
+    def test_header_state_unset_returns_none(self, app_settings):
+        # 同上：上一用例写入的状态残留在 ini，先清键再断言
+        app_settings.set_value(ConfigKey.MARK_STATS_HEADER_STATE, "")
+        assert app_settings.get_mark_stats_header_state() is None
+
+
 class TestPersistence:
     def test_values_survive_singleton_reset(self, qapp):
         """sync 后重置单例，新实例仍能从 ini 读回数据"""

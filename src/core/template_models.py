@@ -1,10 +1,9 @@
 """模板数据模型"""
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
-from pathlib import Path
+from typing import Iterator, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.core.plot_config import PlotSessionConfig
@@ -76,13 +75,57 @@ class PlotTemplate:
         )
 
 
+def iter_template_pages(config: dict | None) -> Iterator[dict]:
+    """按 v2 ``pages`` 优先、v1 顶层字段回退，逐页产出原始 dict。
+
+    只做结构提取，不做 ``int()`` 等字段转换：编辑器预览/生成 YAML 必须能
+    承受用户手写的非法 ``layout_rows``（如 ``"abc"``），不能在这里先抛
+    ``ValueError``。
+
+    非 dict 页与 ``PlotSessionConfig.from_dict`` 一样跳过；``pages`` 非空
+    但没有任何合法页时回退到 v1 单页口径，保证计数与实际应用一致。
+    """
+    if not isinstance(config, dict):
+        config = {}
+    pages = config.get("pages")
+    if isinstance(pages, list) and pages:
+        valid = [page for page in pages if isinstance(page, dict)]
+        if valid:
+            yield from valid
+            return
+    yield {
+        "title": "图 1",
+        "layout_rows": config.get("layout_rows", 1),
+        "layout_cols": config.get("layout_cols", 1),
+        "row_height_factors": {},
+        "plots": config.get("plots", []) or [],
+    }
+
+
+def _iter_config_plots(config: dict | None):
+    """按页遍历子图配置；手写 YAML 里的非 dict 项直接跳过。"""
+    for page in iter_template_pages(config):
+        for plot in page.get("plots", []) or []:
+            if isinstance(plot, dict):
+                yield plot
+
+
 def count_template_variables(config: dict) -> int:
     var_set = set()
-    plots = config.get("plots", []) or []
-    for plot in plots:
-        curves = (plot or {}).get("curves", []) or []
+    for plot in _iter_config_plots(config):
+        curves = plot.get("curves", []) or []
         var_set.update(curves)
     return len(var_set)
+
+
+def count_template_plots(config: dict) -> int:
+    """模板包含的非空子图数（v2 按全部页统计）。"""
+    return sum(1 for plot in _iter_config_plots(config) if plot.get("curves"))
+
+
+def count_template_pages(config: dict) -> int:
+    """模板包含的绘图页数；v1 档固定为 1。"""
+    return sum(1 for _ in iter_template_pages(config))
 
 
 def extract_variables_from_config(config: "PlotSessionConfig | dict") -> set[str]:
@@ -97,13 +140,11 @@ def extract_variables_from_config(config: "PlotSessionConfig | dict") -> set[str
     var_set: set[str] = set()
 
     if isinstance(config, dict):
-        plots = config.get("plots", []) or []
-        for plot in plots:
-            curves = (plot or {}).get("curves", []) or []
-            var_set.update(curves)
+        for plot in _iter_config_plots(config):
+            var_set.update(plot.get("curves", []) or [])
     else:
-        for plot in config.plots:
-            for v in plot.curves:
-                var_set.add(v)
+        for page in config.normalized_pages():
+            for plot in page.plots:
+                var_set.update(plot.curves)
 
     return var_set

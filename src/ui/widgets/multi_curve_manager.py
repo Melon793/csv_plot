@@ -74,15 +74,17 @@ class MultiCurveManager:
         """统一的图例更新逻辑
 
         始终使用 HTML 图例格式（颜色方块 + 文字），支持点击切换可见性。
+        判空口径含失效占位（§6.1）：纯占位页也要渲染图例，否则占位条目永远不显示。
         """
         pw = self.pw
         curve_count = len(pw.curves)
+        invalid_count = len(getattr(pw, "invalid_curves", {}) or {})
         logger.debug(
-            "[HEADER] _update_header_for_curves: curve_count=%d, 显示模式=%s",
-            curve_count, "图例" if curve_count > 0 else "空",
+            "[HEADER] _update_header_for_curves: curve_count=%d, invalid_count=%d, 显示模式=%s",
+            curve_count, invalid_count, "图例" if (curve_count + invalid_count) > 0 else "空",
         )
 
-        if curve_count > 0:
+        if curve_count + invalid_count > 0:
             self.update_legend()
         else:
             pw.update_legend_label("channel name")
@@ -114,6 +116,22 @@ class MultiCurveManager:
                     f"<span style='color: {color}; opacity: 0.5;'>□</span>&nbsp;"
                     f"<span style='color: gray;'>{legend_text}</span></a>"
                 )
+
+        # 失效占位条目（§6.1）：置尾部，保留原色块但整体降透明度 + 灰名 +（缺失）后缀。
+        # 图例是 QLabel setHtml，不涉场景写入，隐藏页刷新安全。
+        invalid_curves = getattr(pw, "invalid_curves", {}) or {}
+        for var_name, ref in invalid_curves.items():
+            unit = pw.units.get(var_name, "")
+            legend_text = html.escape(
+                f"{var_name} ({unit})" if unit else var_name
+            )
+            encoded = quote(var_name, safe="")
+            legend_items.append(
+                f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
+                f"style='text-decoration: none; opacity: 0.35;'>"
+                f"<span style='color: {ref.color};'>✕</span>&nbsp;"
+                f"<span style='color: gray;'>{legend_text}（缺失）</span></a>"
+            )
         return " | ".join(legend_items)
 
     def update_legend(self):
@@ -233,6 +251,7 @@ class MultiCurveManager:
         update_header: bool = True,
         vline_fallback: tuple[float, float] | None = None,
         sync_min_xrange: bool = True,
+        scene: bool = True,
     ) -> None:
         """批量添加收尾：补偿 _batch_adding 模式跳过的副作用（唯一权威实现）。
 
@@ -245,6 +264,8 @@ class MultiCurveManager:
                 不传则保持原 bounds 不变（普通批量路径行为）
             sync_min_xrange: 是否触发全局 minXRange 同步（reload 路径在
                 所有 plot 重建后统一触发一次，传 False）
+            scene: 是否允许写场景（游标 item / 标签）。非活动页传 False，
+                保持默认 True 以兼容既有单页调用。
         """
         pw = self.pw
         if update_header:
@@ -260,11 +281,40 @@ class MultiCurveManager:
             min_x, max_x = vline_fallback if vline_fallback is not None else (None, None)
 
         if min_x is not None:
-            pw._set_vline_bounds([min_x, max_x])
-            pw._update_cursor_after_plot(min_x, max_x)
+            if scene:
+                pw._set_vline_bounds([min_x, max_x])
+                pw._update_cursor_after_plot(min_x, max_x)
+            else:
+                # 静默设 bounds：setBounds 内部 setValue(value()) 会把越界的
+                # vline 钳到新边界并 emit sigPositionChanged，pinned 状态下
+                # on_vline_position_changed 会把钳制值写回全局 pinned_x_values
+                # （契约 2：隐藏页恢复/补 bounds 必须信号阻断 + 抑制回写）。
+                from contextlib import ExitStack
 
-        if pw.vline.isVisible():
-            pw.update_cursor_label()
+                from PySide6.QtCore import QSignalBlocker
+
+                previous = getattr(pw, "_suppress_pin_update", False)
+                pw._suppress_pin_update = True
+                try:
+                    with ExitStack() as stack:
+                        for attr in ("vline", "vline2"):
+                            line = getattr(pw, attr, None)
+                            if line is None:
+                                continue
+                            try:
+                                stack.enter_context(QSignalBlocker(line))
+                            except TypeError:
+                                # 组件测试替身非 QObject：抑制标志仍生效
+                                pass
+                        pw._set_vline_bounds([min_x, max_x])
+                finally:
+                    pw._suppress_pin_update = previous
+
+        if scene:
+            if pw.vline.isVisible():
+                pw.update_cursor_label()
+        else:
+            pw.mark_dirty_for_activation()
 
         pw._recalc_max_point_density()
 
@@ -433,10 +483,20 @@ class MultiCurveManager:
         变量名存放在 URL path 部分（curve:///name）：QUrl 会将 host 强制
         转小写并对非 ASCII 做 IDNA 编码，故用 toString + unquote 解析
         （封装在 parse_anchor_var_name，与 legend 拖拽发起端共用）。
+
+        失效占位（§12.1 已拍板）：仅状态栏提示、不切换显隐（无曲线可切）。
         """
         var_name = parse_anchor_var_name(url.toString())
-        if var_name and var_name in self.pw.curves:
+        if not var_name:
+            return
+        pw = self.pw
+        if var_name in pw.curves:
             self.toggle_curve_visibility_by_name(var_name)
+        elif var_name in (getattr(pw, "invalid_curves", {}) or {}):
+            main_window = pw.window()
+            show = getattr(main_window, "_show_status_message", None)
+            if callable(show):
+                show(f"变量 {var_name} 不在当前数据中（失效占位）")
 
     def _apply_plot_style(self, show_symbols: bool = False):
         """应用绘图样式 - 细线+symbol 或 粗线无symbol（含内存优化pen缓存，统一版）"""
@@ -514,13 +574,19 @@ class MultiCurveManager:
                         x_values = pw.offset + pw.factor * original_index
                         y_contiguous = np.ascontiguousarray(y_array)
 
+                        # 占位复活：批量拖入的同名变量先查占位取色/可见性偏好
+                        revive_ref = self._data_manager._consume_invalid_ref(var_name)
+                        revive_color = revive_ref.color if revive_ref is not None else None
                         # 颜色分配（统一方法）
-                        color = self._assign_curve_color()
+                        color = self._assign_curve_color(revive_color)
                         logger.debug(
-                            "[COLOR] 批量添加颜色分配: var=%s, color=%s",
-                            var_name, color,
+                            "[COLOR] 批量添加颜色分配: var=%s, color=%s, revived=%s",
+                            var_name, color, revive_ref is not None,
                         )
 
+                        initial_visible = (
+                            True if revive_ref is None else revive_ref.visible_preference
+                        )
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
                         # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
                         # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
@@ -537,8 +603,14 @@ class MultiCurveManager:
                             original_index=original_index,
                             color=color,
                             y_format=y_format or '',
-                            visible=True
+                            visible=initial_visible
                         )
+                        if not initial_visible and curve is not None:
+                            try:
+                                if curve.scene() is not None:
+                                    curve.setVisible(False)
+                            except Exception:
+                                logger.debug("复活曲线可见性恢复失败: %s", var_name, exc_info=True)
 
                         success_vars.append(var_name)
 
@@ -570,11 +642,21 @@ class MultiCurveManager:
             "preferred_color=%s, skip_existence_check=%s",
             var_name, len(pw.curves), preferred_color, skip_existence_check,
         )
+        revive_ref = None
         try:
+            # 占位复活：变量在 invalid_curves 中时取其颜色作 preferred_color、
+            # 恢复其可见性偏好，并从占位侧原子移除（用户手动添加同名变量 = 显式复活）
+            revive_ref = self._data_manager._consume_invalid_ref(var_name)
+            if revive_ref is not None and preferred_color is None:
+                preferred_color = revive_ref.color
+
             original_index = None
             if x_values is None or y_values is None:
                 success, error_msg, x_array, y_array, y_format = pw._prepare_plot_data(var_name)
                 if not success:
+                    # 复活失败（数据仍不可用）：把占位还回去，避免资产丢失
+                    if revive_ref is not None:
+                        pw.invalid_curves[var_name] = revive_ref
                     QMessageBox.warning(pw, "错误", error_msg)
                     return False
                 original_index = np.ascontiguousarray(x_array, dtype=np.float32)
@@ -589,6 +671,9 @@ class MultiCurveManager:
 
             # 统一重复检测：始终检查 curves 字典
             if not skip_existence_check and var_name in pw.curves:
+                # 复活失败（重复）：把占位还回去
+                if revive_ref is not None:
+                    pw.invalid_curves[var_name] = revive_ref
                 if show_duplicate_warning:
                     QMessageBox.information(pw, "提示", f"变量 {var_name} 已在绘图中")
                 return False
@@ -600,6 +685,7 @@ class MultiCurveManager:
                 var_name, preferred_color, color, self.pw.current_color_index,
             )
 
+            initial_visible = True if revive_ref is None else revive_ref.visible_preference
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck 快速路径；
             # 含 NaN（ragged CSV 尾部补 NaN）自动断线，避免 NaN 坐标进入 Qt
@@ -618,15 +704,23 @@ class MultiCurveManager:
                 original_index=original_index,
                 color=color,
                 y_format=y_format or '',
-                visible=True
+                visible=initial_visible
             )
+            if not initial_visible and curve is not None:
+                try:
+                    if curve.scene() is not None:
+                        curve.setVisible(False)
+                except Exception:
+                    logger.debug("复活曲线可见性恢复失败: %s", var_name, exc_info=True)
             logger.debug(
-                "[ADD_VAR] CurveInfo 已创建: var_name=%s, x_shape=%s, y_shape=%s, color=%s",
+                "[ADD_VAR] CurveInfo 已创建: var_name=%s, x_shape=%s, y_shape=%s, color=%s, revived=%s",
                 var_name,
                 x_values.shape if x_values is not None else None,
                 y_values.shape if y_values is not None else None,
                 color,
+                revive_ref is not None,
             )
+
 
             batch_adding = getattr(pw, '_batch_adding', False)
             # batch 模式下 header/legend 由调用方在批量循环后统一刷新，
@@ -694,5 +788,8 @@ class MultiCurveManager:
             return True
 
         except Exception as e:
+            # 复活失败（异常）：把占位还回去，避免资产丢失（未成功进 curves 才还）
+            if revive_ref is not None and var_name not in pw.curves:
+                pw.invalid_curves[var_name] = revive_ref
             QMessageBox.critical(pw, "绘图错误", f"添加变量时发生错误: {str(e)}")
             return False

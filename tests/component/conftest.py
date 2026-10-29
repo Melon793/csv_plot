@@ -1,6 +1,8 @@
 """component 测试共享夹具：可独立绘图的 plot widget"""
 
 
+from collections import OrderedDict
+
 import pandas as pd
 import pytest
 
@@ -25,7 +27,7 @@ class FakePlotContext:
     """
 
     def __init__(self):
-        self.value_cache = {}
+        self.value_cache = OrderedDict()
         self.loader = None
         self._enum_text_maps = {}
         # 清除绘图播报落点：记录 (label, curves)，用例断言"报了什么、报了几条"

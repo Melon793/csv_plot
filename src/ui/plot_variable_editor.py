@@ -291,12 +291,17 @@ class PlotVariableEditorDialog(QDialog):
             self.search_bar.search_edit.setFocus()
 
     def load_current_curves(self):
-        """加载当前绘图中的曲线（统一版：始终从 curves 字典加载）"""
+        """加载当前绘图中的曲线（统一版：curves + 失效占位）"""
         # 先清空表格
         self.var_table.setRowCount(0)
 
         for var_name, curve_info in self.plot_widget.curves.items():
             self._add_variable_to_table(var_name, curve_info)
+
+        # 失效占位行置尾部（§6.3）：灰名 +（缺失）+ 占位色块 + visible_preference 复选框
+        invalid = getattr(self.plot_widget, "invalid_curves", {}) or {}
+        for var_name, ref in invalid.items():
+            self._add_invalid_to_table(var_name, ref)
 
         self.update_button_states()
 
@@ -310,8 +315,24 @@ class PlotVariableEditorDialog(QDialog):
         - 其余复杂场景（重排、中间插入、混合增删）：回退 load_current_curves 全量重建。
 
         回退兜底保证正确性：增量路径出错的最坏结果也只是退回全量重建。
+
+        占位相关一律回退全量重建（§6.3）：diff 口径基于 curves，占位行不在
+        curves 中，增量路径会把占位行当作"已删除"误删，或复活后残留灰名
+        "（缺失）"文本。检测到 invalid_curves 非空、或表格已有占位行时直接重建。
         """
         table = self.var_table
+
+        # 占位存在（数据侧或表格侧）→ 全量重建，规避 diff 口径不含 invalid_curves
+        has_invalid_data = bool(getattr(self.plot_widget, "invalid_curves", {}) or {})
+        has_invalid_row = any(
+            (table.item(row, 1) is not None
+             and table.item(row, 1).data(Qt.ItemDataRole.UserRole + 1))
+            for row in range(table.rowCount())
+        )
+        if has_invalid_data or has_invalid_row:
+            self.load_current_curves()
+            return
+
         table_names: list[str] = []
         for row in range(table.rowCount()):
             name_item = table.item(row, 1)
@@ -461,8 +482,54 @@ class PlotVariableEditorDialog(QDialog):
         color_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
         self.var_table.setItem(row, 2, color_item)
 
+    def _add_invalid_to_table(self, var_name, ref):
+        """添加失效占位行到表格（§6.3）
+
+        与真实曲线行的差异：变量名灰色 +（缺失）后缀；复选框绑
+        ``visible_preference``（复活时生效）；颜色块显示占位色（保留原色）。
+        行构造独立于 ``_add_variable_to_table``，避免 CurveInfo/InvalidCurveRef
+        字段不适配（§9 R27）。
+        """
+        row = self.var_table.rowCount()
+        self.var_table.insertRow(row)
+
+        checkbox = QCheckBox()
+        checkbox.setChecked(ref.visible_preference)
+        checkbox.stateChanged.connect(
+            lambda state, name=var_name: self._on_checkbox_changed(name, state)
+        )
+        self.var_table.setCellWidget(row, 0, checkbox)
+
+        unit = self.plot_widget.units.get(var_name, "")
+        base = f"{var_name} ({unit})" if unit else var_name
+        name_item = QTableWidgetItem(f"{base}（缺失）")
+        name_item.setData(Qt.ItemDataRole.UserRole, var_name)
+        # 占位行标记（UserRole+1）：增量刷新据此识别占位行并回退全量重建，
+        # 避免复活后残留灰名"（缺失）"文本（§6.3）
+        name_item.setData(Qt.ItemDataRole.UserRole + 1, True)
+        name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        name_item.setForeground(QColor("gray"))
+        self.var_table.setItem(row, 1, name_item)
+
+        color_widget = QWidget()
+        color_widget.setStyleSheet(
+            f"background-color: {ref.color}; border: 1px solid #333;"
+        )
+        color_widget.setFixedSize(30, 20)
+        self.var_table.setCellWidget(row, 2, color_widget)
+
+        color_item = QTableWidgetItem()
+        color_item.setData(Qt.ItemDataRole.UserRole, var_name)
+        color_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        self.var_table.setItem(row, 2, color_item)
+
     def _on_checkbox_changed(self, var_name, state):
-        """复选框状态变化处理（统一版）"""
+        """复选框状态变化处理（统一版）
+
+        真实曲线切 ``CurveInfo.visible``（立即显隐）；失效占位切
+        ``InvalidCurveRef.visible_preference``（复活时生效，当前无曲线可显隐）。
+        变量名两侧互斥（不变量），故按存在侧分派。
+        """
         is_visible = state == Qt.CheckState.Checked.value
         logger.debug(
             "[EDITOR] _on_checkbox_changed: var=%s, visible=%s", var_name, is_visible
@@ -474,6 +541,11 @@ class PlotVariableEditorDialog(QDialog):
             if ci.curve is not None:
                 ci.curve.setVisible(is_visible)
             self.plot_widget._update_header_for_curves()
+            return
+
+        invalid = getattr(self.plot_widget, "invalid_curves", None)
+        if invalid and var_name in invalid:
+            invalid[var_name].visible_preference = is_visible
 
     def on_selection_changed(self):
         """选择改变时的处理"""
@@ -610,11 +682,16 @@ class PlotVariableEditorDialog(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            invalid = getattr(self.plot_widget, "invalid_curves", {}) or {}
             cleared_count = len(self.plot_widget.curves)
-            logger.debug("[EDITOR] clear_all_variables: 清除 %d 条曲线", cleared_count)
-            # 批量移除（单次刷新链，不 emit）
+            logger.debug(
+                "[EDITOR] clear_all_variables: 清除 %d 条曲线 + %d 条占位",
+                cleared_count, len(invalid),
+            )
+            # 批量移除（单次刷新链，不 emit）。占位不经 clear_plot_item，
+            # remove_variables_from_plot 两侧都查（§6.3），一并列入即显式清占位。
             self.plot_widget.remove_variables_from_plot(
-                list(self.plot_widget.curves)
+                list(self.plot_widget.curves) + list(invalid)
             )
 
             # 清空表格

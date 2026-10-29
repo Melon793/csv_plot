@@ -637,3 +637,70 @@ class TestGroupLevelAccess:
         all_names = loader4.var_names
         # 空关键词匹配所有非时间通道
         assert len(results) >= len(all_names) - 2  # 减去可能的时间通道
+
+
+class TestTimeNamedDataChannel:
+    """恰好叫 ``time`` 的**数据**通道不得被当成主通道（全仓审查 P1-7）。
+
+    ``_load_metadata`` 过去把两个条件写成了 OR：``masters_db`` 指向的通道，**或**
+    名字落在 ``{time, t, timestamp, ...}`` 里的通道。asammdf 给每个 v4 组自动建的
+    主通道本身就叫 ``time``，于是同一组里那个真是数据通道、也只是凑巧同名的
+    ``time`` 也被判成时间轴 → 从变量列表里剔除（用户看到通道凭空消失），
+    同时 ``_group_master_ci[gi]`` 被它顶掉，取时间基时改用数据通道的索引。
+    """
+
+    @staticmethod
+    def _named_data_meta(loader):
+        """返回 (group_index, 名为 time 且不是该组主通道的那条 meta)。"""
+        for gi, metas in loader._raw_metadata.items():
+            master_ci = loader._group_master_ci.get(gi)
+            for meta in metas:
+                if meta.name == "time" and meta.channel_index != master_ci:
+                    return gi, meta
+        return None, None
+
+    @pytest.mark.parametrize("version", ["4.10", "3.30"])
+    def test_channel_stays_visible(self, tmp_path, version):
+        path = write_mdf(
+            tmp_path / f"time_named_{version}.dat",
+            version=version,
+            n=8,
+            with_time_named_data=True,
+        )
+        loader = MDFLazyLoader(str(path))
+
+        assert "time" in loader.var_names, "同名数据通道被误判成时间轴就会从列表消失"
+        assert "Speed" in loader.var_names
+
+    @pytest.mark.parametrize("version", ["4.10", "3.30"])
+    def test_master_stays_the_authoritative_channel(self, tmp_path, version):
+        path = write_mdf(
+            tmp_path / f"time_named_{version}.dat",
+            version=version,
+            n=8,
+            with_time_named_data=True,
+        )
+        loader = MDFLazyLoader(str(path))
+        gi, meta = self._named_data_meta(loader)
+
+        assert gi is not None, "夹具没造出预期的数据通道"
+        assert meta.is_time_channel is False, "数据通道不该被标成时间通道"
+        # 主通道仍以 masters_db 为准：必须是该组的 0 号通道，而不是这条数据通道
+        assert loader._group_master_ci[gi] == 0
+
+    @pytest.mark.parametrize("version", ["4.10", "3.30"])
+    def test_series_returns_the_data_values_not_the_timestamps(self, tmp_path, version):
+        path = write_mdf(
+            tmp_path / f"time_named_{version}.dat",
+            version=version,
+            n=8,
+            with_time_named_data=True,
+        )
+        loader = MDFLazyLoader(str(path))
+
+        series = loader.get_series("time")
+
+        # 夹具里这条通道是 linspace(0, 1, 8)，主通道时间戳是 0, 0.05, 0.10 …
+        assert float(series.iloc[0]) == pytest.approx(0.0, abs=1e-6)
+        assert float(series.iloc[-1]) == pytest.approx(1.0, abs=1e-6)
+        assert float(series.iloc[1]) == pytest.approx(1 / 7, abs=1e-4)

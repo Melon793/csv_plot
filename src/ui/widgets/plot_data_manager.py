@@ -28,7 +28,7 @@ from src.core.config import (
     safe_qt_op,
     is_grouped_loader,
 )
-from src.core.data_types import CurveInfo
+from src.core.data_types import CurveInfo, InvalidCurveRef
 from src.core.logger import get_logger
 
 logger = get_logger("widget.plot_data")
@@ -66,15 +66,25 @@ class PlotDataManager:
             )
         return am.pw
 
-    def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
+    def plot_variable(
+        self,
+        var_name: str,
+        show_duplicate_warning: bool = True,
+        preferred_color: str | None = None,
+    ) -> bool:
         """绘制变量到图表（统一版）
     
         空 plot 时创建首条曲线（蓝色）写入 curves 字典；
         已有曲线时转交 add_variable_to_plot 路径。
+
+        ``preferred_color`` 供模板应用/占位复活指定首绘颜色（缺省蓝色，向后兼容）。
+        首绘分支同样接住失效占位复活：变量在 ``invalid_curves`` 中时取其颜色与
+        可见性偏好复活（§4.1），保证"手动添加同名变量 = 显式复活（同色）"。
     
         Args:
             var_name: 要绘制的变量名称
             show_duplicate_warning: 是否显示重复变量警告
+            preferred_color: 首绘指定颜色（None 时按占位/蓝色规则）
     
         Returns:
             bool: 绘制是否成功
@@ -102,7 +112,8 @@ class PlotDataManager:
             return False
     
         try:
-            # 已有曲线时，转交 add_variable_to_plot 路径（由后者负责 emit curves_changed）
+            # 已有曲线时，转交 add_variable_to_plot 路径（由后者负责 emit curves_changed
+            # 与占位复活）
             if pw.curves:
                 x_values = pw.offset + pw.factor * x_array
                 return pw.add_variable_to_plot(
@@ -111,9 +122,12 @@ class PlotDataManager:
                     y_array,
                     y_format,
                     show_duplicate_warning=show_duplicate_warning,
+                    preferred_color=preferred_color,
                 )
     
             # === 统一路径：始终写入 curves 字典 ===
+            # 占位复活：curves 为空但可能存在同名失效占位，取出其颜色/可见性偏好
+            revive_ref = self._consume_invalid_ref(var_name)
             pw._clear_cursor_items(hide_only=False)
             self._safe_clear_plot_items()
             pw.curves.clear()
@@ -131,8 +145,14 @@ class PlotDataManager:
             y_contiguous = np.ascontiguousarray(y_array, dtype=target_y_dtype)
             x_values = pw.offset + pw.factor * original_index
     
-            # 首条曲线保持蓝色（向后兼容）
-            color = "blue"
+            # 颜色优先级：占位复活色 > 显式 preferred_color > 首条蓝色（向后兼容）
+            if revive_ref is not None:
+                color = revive_ref.color
+            elif preferred_color:
+                color = preferred_color
+            else:
+                color = "blue"
+            initial_visible = True if revive_ref is None else revive_ref.visible_preference
             _pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             # 不显式传 connect/skipFiniteCheck，使用 pyqtgraph 默认 connect='auto'：
             # 数据全有限时自动降级为 'all'+skipFiniteCheck=True（快速路径，性能与
@@ -151,14 +171,20 @@ class PlotDataManager:
                 original_index=original_index,
                 color=color,
                 y_format=y_format or '',
-                visible=True,
+                visible=initial_visible,
             )
+            if not initial_visible and curve is not None:
+                try:
+                    if curve.scene() is not None:
+                        curve.setVisible(False)
+                except Exception:
+                    logger.debug("复活曲线可见性恢复失败: %s", var_name, exc_info=True)
             pw.current_color_index = 1  # 后续曲线从颜色循环第 2 色开始
             logger.debug(
                 "[PLOT_VAR] CurveInfo 已创建: var_name=%s, x_shape=%s, y_shape=%s, "
-                "y_dtype=%s, color=%s",
+                "y_dtype=%s, color=%s, revived=%s",
                 var_name, x_values.shape, y_contiguous.shape,
-                y_contiguous.dtype, color,
+                y_contiguous.dtype, color, revive_ref is not None,
             )
     
             pw._queue_ui_refresh()
@@ -555,8 +581,24 @@ class PlotDataManager:
                 _lru_cache_put(pw.plot_context.value_cache, var_name, (y_values, y_format))
         return y_values, y_format
 
-    def update_time_correction(self, new_factor: float, new_offset: float):
-        """更新时间修正参数（统一版：始终从 CurveInfo.original_index 重算）"""
+    def update_time_correction(
+        self,
+        new_factor: float,
+        new_offset: float,
+        *,
+        scene: bool = True,
+        sync_min_xrange: bool = True,
+    ):
+        """更新时间修正参数（统一版：始终从 CurveInfo.original_index 重算）
+
+        ``scene=False``（非活动页）只做数据层重算（setData / x_data / x_range /
+        局部密度），X limits、vline bounds 与标记区 setRegion 这些场景写入留给
+        切页时补建（设计文档 §6.7 时间修正落地顺序）。
+
+        ``sync_min_xrange`` 只控制当前页的全局 minXRange 汇总。批量修正所有页时
+        逐图传 ``False``，待全部页的局部密度都刷新后由协调者统一同步一次，避免
+        读到半新半旧的跨页密度、也避免反复 setLimits。
+        """
         pw = self.pw
         pw._suppress_pin_update = True
         try:
@@ -588,6 +630,11 @@ class PlotDataManager:
                 ci.x_data = new_x
                 ci.update_x_range()
 
+            # 密度 = N / x跨度，随 factor 反比缩放；局部缓存必须随 x_data 一起刷新。
+            # minXRange 实际读的是 plot_context._global_max_density，批量调用方传
+            # sync_min_xrange=False，待所有页的局部密度都刷新后由协调者统一汇总一次。
+            self._axis_manager._recalc_max_point_density()
+
             # 统一 X limits 计算：始终基于全局数据范围（loader.datalength / global_time_range），
             # 避免使用 per-plot 曲线长度导致与 reload/auto_range 路径不一致
             loader = (
@@ -599,6 +646,18 @@ class PlotDataManager:
             global_result = compute_global_x_limits(
                 loader, factor=pw.factor, offset=pw.offset
             )
+            if not scene:
+                # 非活动页：场景写入全部延后（激活时按全局基准重建）
+                pw.mark_dirty_for_activation()
+                return
+            if sync_min_xrange:
+                # 必须放在 _set_x_limits_with_min_range 之前：当前页 limits 要按
+                # 新全局密度判定 minXRange 扩张，而不是按上一轮的旧密度。
+                main_window = pw.window()
+                if main_window is not None:
+                    cursor_sync = getattr(main_window, "cursor_sync_manager", None)
+                    if cursor_sync is not None:
+                        cursor_sync._sync_min_xrange()
             if global_result is not None:
                 _, _, limits_xMin, limits_xMax = global_result
                 self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
@@ -635,6 +694,54 @@ class PlotDataManager:
 
         safe_qt_op(lambda: self._clear_items_from_scene(pw.plot_item))
 
+    # ========================================================================
+    # 失效占位（方案 B2）：demote / 复活
+    # ========================================================================
+
+    def _consume_invalid_ref(self, var_name: str):
+        """复活取出：从 invalid_curves 原子移除并返回该占位引用（无则 None）。
+
+        三个复活入口（add_variable_to_plot / plot_variable 首绘 /
+        add_variables_to_plot 批量）共用，保证"从占位侧移除→加入 curves 侧"
+        的原子性与同名不重复不变量。
+        """
+        pw = self.pw
+        invalid = getattr(pw, "invalid_curves", None)
+        if not invalid or var_name not in invalid:
+            return None
+        return invalid.pop(var_name)
+
+    def demote_to_invalid(
+        self, var_name: str, color: str, visible_preference: bool = True
+    ) -> None:
+        """把不可绘制的变量降级为失效占位（reload / 模板应用调用）。
+
+        仅当变量确认不可绘制（不存在 / ``df_validity == INVALID``）时调用：
+        从 ``curves`` 移除条目（若有）→ 存入 ``invalid_curves``。不建
+        PlotDataItem、不写场景。reload 场景下曲线项已被 ``_safe_clear_plot_items``
+        + ``curves.clear()`` 清掉，demote 在重建循环内按 saved_state 的
+        color/visible 落 dict，时序自洽。逐条不 emit curves_changed（防循环内
+        信号回环），由调用方在收尾统一补发（§4.5）。
+        """
+        pw = self.pw
+        invalid = pw.invalid_curves
+        # 开发期不变量断言：同名不可同时在两侧
+        assert not (var_name in pw.curves and var_name in invalid), (
+            f"变量 {var_name} 同时在 curves 与 invalid_curves"
+        )
+        if var_name in pw.curves:
+            # 非 reload 场景（模板应用）可能曲线仍在：先轻量移除
+            self._remove_single_curve_light(var_name)
+        invalid[var_name] = InvalidCurveRef(
+            var_name=var_name,
+            color=color or "gray",
+            visible_preference=bool(visible_preference),
+        )
+        logger.debug(
+            "[INVALID] demote_to_invalid: var=%s, color=%s, visible_pref=%s",
+            var_name, color, visible_preference,
+        )
+
     def _clear_items_from_scene(self, plot_item):
         """从场景中逐个清理 plot item"""
         current_scene = plot_item.scene()
@@ -665,8 +772,12 @@ class PlotDataManager:
         if should_remove:
             current_scene.removeItem(item)
 
-    def _clear_plot_data(self):
-        """清除绘图数据（统一版：仅操作 curves 字典）"""
+    def _clear_plot_data(self, clear_invalid: bool = False):
+        """清除绘图数据（统一版：仅操作 curves 字典）
+
+        ``clear_invalid`` 为 True 时连带清 ``invalid_curves`` 占位（用户显式
+        清空 / 模板完整还原）；缺省 False 保留占位（reload 跨清空存活）。
+        """
         pw = self.pw
         try:
             cleared_count = len(pw.curves)
@@ -688,6 +799,10 @@ class PlotDataManager:
                         logger.debug("清理曲线时异常: %s", var_name)
 
             pw.curves.clear()
+            if clear_invalid:
+                invalid = getattr(pw, "invalid_curves", None)
+                if invalid:
+                    invalid.clear()
             pw.current_color_index = 0
             logger.debug("[CLEAR] _clear_plot_data: 已清除 %d 条曲线", cleared_count)
 
@@ -702,10 +817,14 @@ class PlotDataManager:
         except Exception:
             logger.debug("清理绘图数据时异常", exc_info=True)
 
-    def clear_plot_item(self):
-        """清除绘图项"""
+    def clear_plot_item(self, clear_invalid: bool = False):
+        """清除绘图项
+
+        ``clear_invalid`` 语义见 ``_clear_plot_data``：reload 不传（占位存活），
+        模板应用 / 用户显式清空传 True（完整还原，不留孤儿占位）。
+        """
         self._axis_manager._reset_plot_limits()
-        self._clear_plot_data()
+        self._clear_plot_data(clear_invalid=clear_invalid)
 
     # ========================================================================
     # 变量移除（权威实现，设计文档 §3.5）
@@ -768,12 +887,20 @@ class PlotDataManager:
         完整刷新链；不 emit curves_changed（由调用方按需触发，防信号回环）。
         保持编辑器多选删除的现有性能特征（N 选删除 = 1 次全量刷新）。
 
+        两侧都查（§6.3）：变量名可能命中 curves（真实曲线）或 invalid_curves
+        （失效占位）——编辑器"删除选中"须能销毁占位资产。
+
         Returns:
             实际删除成功的变量名列表
         """
+        pw = self.pw
+        invalid = getattr(pw, "invalid_curves", None)
         removed: list[str] = []
         for var_name in var_names or []:
             if self._remove_single_curve_light(var_name):
+                removed.append(var_name)
+            elif invalid is not None and var_name in invalid:
+                del invalid[var_name]
                 removed.append(var_name)
         if removed:
             self._post_remove_refresh()

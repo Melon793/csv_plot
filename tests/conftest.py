@@ -47,12 +47,21 @@ def qapp():
 
 @pytest.fixture
 def app_settings(qapp):
-    """隔离的 AppSettings 单例：每个用例前后重置，指向测试配置目录。"""
+    """隔离的 AppSettings 单例：每个用例前后重置，指向测试配置目录。
+
+    ``auto_save/enabled`` 是持久开关：单测打开后会留在会话级 QSettings 里，
+    泄漏给同 worker 后续的 e2e。下一个 MainWindow 加载数据时就会套用上一个
+    用例关闭时写下的 ``auto_save.yaml``，结果依赖用例顺序。这里每例归零。
+    """
     from src.core.settings import AppSettings
 
     AppSettings._reset_for_tests()
     settings = AppSettings()
+    settings.set_auto_save_enabled(False)
+    settings.sync()
     yield settings
+    settings.set_auto_save_enabled(False)
+    settings.sync()
     AppSettings._reset_for_tests()
 
 

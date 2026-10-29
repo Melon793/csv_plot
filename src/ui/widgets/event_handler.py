@@ -121,6 +121,29 @@ class EventHandler:
         except Exception:
             logger.warning("范围变化处理出错", exc_info=True)
 
+    def _page_sibling_widgets(self) -> list:
+        """本 pw 所在页的全部 plot widget（多页设计 §4.2 P0 项）。
+
+        必须走 ``plot_context.plot_widgets``（= 我所在页）而不是
+        ``window().plot_widgets``（= 当前页）：后台回调触到隐藏页 widget 时，
+        后者会拿当前页的交互标志做跨页误判（误抑制刷新 / 误刷他页）。
+        无 plot_context 的旧替身退回窗口口径。
+        """
+        pw = self.pw
+        ctx = getattr(pw, "plot_context", None)
+        if ctx is not None and hasattr(ctx, "plot_widgets"):
+            containers = ctx.plot_widgets
+        else:
+            main_window = pw.window() if hasattr(pw, "window") else None
+            if main_window is None or not hasattr(main_window, "plot_widgets"):
+                return []
+            containers = main_window.plot_widgets
+        return [
+            container.plot_widget
+            for container in containers
+            if getattr(container, "plot_widget", None) is not None
+        ]
+
     def _sibling_is_interaction_source(self) -> bool:
         """检查是否有兄弟子图正在作为交互源（用户直接操作的子图）。
 
@@ -128,11 +151,7 @@ class EventHandler:
         子图 B-L。这些传播触发的 sigRangeChanged 不需要进入交互模式。
         """
         pw = self.pw
-        main_window = pw.window() if hasattr(pw, 'window') else None
-        if main_window is None or not hasattr(main_window, 'plot_widgets'):
-            return False
-        for container in main_window.plot_widgets:
-            sibling = container.plot_widget
+        for sibling in self._page_sibling_widgets():
             if sibling is not pw and getattr(sibling, '_is_interacting', False):
                 return True
         return False
@@ -166,11 +185,7 @@ class EventHandler:
         交互结束后需统一补刷，确保 symbol/line 切换和光标状态正确。
         """
         pw = self.pw
-        main_window = pw.window() if hasattr(pw, 'window') else None
-        if main_window is None or not hasattr(main_window, 'plot_widgets'):
-            return
-        for container in main_window.plot_widgets:
-            sibling = container.plot_widget
+        for sibling in self._page_sibling_widgets():
             if sibling is pw:
                 continue
             if hasattr(sibling, '_queue_ui_refresh'):
@@ -244,7 +259,9 @@ class EventHandler:
         if pw and pw.plot_context and hasattr(pw.plot_context, "plot_widgets"):
             for idx, c in enumerate(pw.plot_context.plot_widgets):
                 if c.plot_widget is pw:
-                    row, _ = divmod(idx, pw.plot_context._plot_col_max_default)
+                    ctx = pw.plot_context
+                    ncols = getattr(ctx, "grid_cols", 0) or ctx._plot_col_max_default
+                    row, _ = divmod(idx, ncols)
                     pw.plot_context.set_row_height(row, pct)
                     break
 

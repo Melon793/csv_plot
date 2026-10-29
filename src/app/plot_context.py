@@ -37,6 +37,8 @@ class PlotServices(Protocol):
     @property
     def _plot_col_max_default(self) -> int: ...
     @property
+    def grid_cols(self) -> int: ...
+    @property
     def plot_layout(self) -> QGridLayout: ...
     @property
     def _is_loading_new_data(self) -> bool: ...
@@ -123,6 +125,12 @@ class PlotContext:
         return self._services._plot_col_max_default
 
     @property
+    def grid_cols(self) -> int:
+        # 旧替身服务没有 grid_cols 时退回容量列数（单页且建满时两者相等）
+        cols = getattr(self._services, "grid_cols", 0)
+        return cols if cols and cols > 0 else self._services._plot_col_max_default
+
+    @property
     def plot_layout(self) -> QGridLayout:
         return self._services.plot_layout
 
@@ -180,6 +188,11 @@ class PlotContext:
         )
 
     def sync_mark_regions(self, mark_region: Any) -> None:
+        # 页级服务自带所属页；旧替身/无页服务继续走 LayoutManager 默认（广播）
+        handler = getattr(self._services, "sync_mark_regions", None)
+        if handler is not None:
+            handler(mark_region)
+            return
         self._services.layout_manager.sync_mark_regions(mark_region)
 
     def _sync_min_xrange(self) -> None:
@@ -211,3 +224,89 @@ class PlotContext:
 
     def is_cursor_enabled(self) -> bool:
         return self._services.cursor_sync_manager.is_cursor_enabled()
+
+
+class PageServices:
+    """把 MainWindow 的全局服务 + 所属 PlotPage 的页级状态拼成 PlotServices。
+
+    页级状态（§3）：plot_widgets / plot_layout / 行列 / 行高。
+    全局状态（§3）：数据、时间基准、游标、标记区间、密度、缓存 —— 一律经
+    ``__getattr__`` 透传到 MainWindow，保证所有页看到同一份。
+    """
+
+    def __init__(self, main_window: Any, page: Any):
+        object.__setattr__(self, "mw", main_window)
+        object.__setattr__(self, "page", page)
+
+    def __getattr__(self, name: str) -> Any:
+        # 只处理本类没有的名字；mw/page 都在 __dict__，不会递归
+        return getattr(self.mw, name)
+
+    # ---- 全局状态的写入口 ----
+    # __getattr__ 只覆盖读取。若不给这两个高频写入显式转发，PlotContext 的
+    # 赋值会落到代理实例的 __dict__，形成只有本页看得见的影子状态（拖动固定
+    # 游标后 mw.pinned_x_values 仍停在旧值）。这里只转发需要写的两个名字，
+    # 不引入通用 __setattr__，避免误吞页级属性的赋值。
+    @property
+    def pinned_x_values(self) -> list[float]:
+        return self.mw.pinned_x_values
+
+    @pinned_x_values.setter
+    def pinned_x_values(self, value: list[float]) -> None:
+        self.mw.pinned_x_values = list(value)
+
+    @property
+    def cursor_values_hidden(self) -> bool:
+        return self.mw.cursor_values_hidden
+
+    @cursor_values_hidden.setter
+    def cursor_values_hidden(self, value: bool) -> None:
+        self.mw.cursor_values_hidden = bool(value)
+
+    # 标记区间同为全局量：PlotPage.restore_mark_regions 的回读写入若不转发，
+    # 会落成本实例的影子属性，之后隐藏页补建读到过时区间（与 pinned 同病）。
+    @property
+    def saved_mark_range(self):
+        return self.mw.saved_mark_range
+
+    @saved_mark_range.setter
+    def saved_mark_range(self, value) -> None:
+        self.mw.saved_mark_range = value
+
+    # ---- 页级 ----
+    @property
+    def plot_widgets(self):
+        return self.page.plot_widgets
+
+    @property
+    def plot_layout(self):
+        return self.page.plot_layout
+
+    @property
+    def _plot_col_max_default(self) -> int:
+        return self.page.cols_max
+
+    @property
+    def grid_cols(self) -> int:
+        return self.page.grid_cols
+
+    @property
+    def _plot_row_max_default(self) -> int:
+        return self.page.rows_max
+
+    @property
+    def _plot_row_current(self) -> int:
+        return self.page.rows_current
+
+    @property
+    def _plot_col_current(self) -> int:
+        return self.page.cols_current
+
+    @property
+    def row_height_factors(self) -> dict:
+        return self.page.row_height_factors
+
+    # ---- 页作用域动作 ----
+    def sync_mark_regions(self, mark_region: Any) -> None:
+        """只同步本页 region；跨页广播由 LayoutManager（page=None）负责。"""
+        self.layout_manager.sync_mark_regions(mark_region, page=self.page)

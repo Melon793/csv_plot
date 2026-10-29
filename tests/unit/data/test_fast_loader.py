@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.core.data_types import AutoDetectError
@@ -295,3 +296,188 @@ class TestBadLineTolerance:
         times = [float(v) for v in loader.df["time"].iloc[:8]]
         assert times == [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0], "只丢第 5 行，其余不得错位"
         assert loader.df["speed"].iloc[5] == pytest.approx(16.0)
+
+
+class TestBlankLineRowAccounting:
+    """表头之前的空行不得让 skiprows 错位（全仓审查 P1-5）。
+
+    采样时 `auto_detect` 把空行过滤掉再找表头，返回的 header_row 却是
+    **「过滤后列表的下标」**，而下游 pandas 的 `skiprows` 数的是**物理行**。
+    文件里只要出现空行（导出程序爱在描述块和表头之间留一条），就会整段错位：
+    少跳一行 → 把单位行当表头读；多跳一行 → 丢掉首行数据。
+    """
+
+    #: 描述行 2 列 → 表头 3 列（列数更多会被选为表头），中间夹一条空行
+    WITH_BLANK_BEFORE_HEADER = (
+        "note,ver\n"
+        "\n"
+        "time,speed,rpm\n"
+        "s,km/h,rpm\n"
+        "0.0,10.0,800\n"
+        "0.1,10.5,810\n"
+    )
+
+    def _write(self, tmp_path, text, name="blank_line.csv"):
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_header_row_is_counted_in_physical_lines(self, tmp_path):
+        path = self._write(tmp_path, self.WITH_BLANK_BEFORE_HEADER)
+
+        fmt = FastDataLoader.auto_detect(str(path))
+
+        assert fmt.sep == ","
+        assert fmt.has_unit is True
+        # 过滤下标是 1（第 2 个非空行），物理行号是 2（desc + 空行）
+        assert fmt.header_row == 2, "header_row 必须是物理行号口径"
+
+    def test_loader_gets_right_columns_and_keeps_every_row(self, tmp_path):
+        path = self._write(tmp_path, self.WITH_BLANK_BEFORE_HEADER)
+        fmt = FastDataLoader.auto_detect(str(path))
+
+        loader = FastDataLoader(
+            str(path),
+            sep=fmt.sep,
+            desc_rows=fmt.header_row,
+            has_unit=fmt.has_unit,
+            encoding=fmt.encoding,
+        )
+
+        assert loader.var_names == ["time", "speed", "rpm"]
+        assert loader.datalength == 2, "首行数据不得被当成表头/单位吃掉"
+        # 用 approx：默认 downcast_float=True 会把列降成 float32，
+        # 0.1 存成 0.10000000149…（这本身是 P1-8 记的那条精度问题）
+        assert [float(v) for v in loader.df["time"]] == [
+            pytest.approx(0.0), pytest.approx(0.1)
+        ]
+        assert [float(v) for v in loader.df["speed"]] == [
+            pytest.approx(10.0), pytest.approx(10.5)
+        ]
+
+    def test_file_without_blank_lines_is_unchanged(self, tmp_path):
+        """对照组：没有空行时物理行号与过滤下标重合，行为不得变。"""
+        path = self._write(
+            tmp_path,
+            self.WITH_BLANK_BEFORE_HEADER.replace("note,ver\n\n", "note,ver\n"),
+            name="no_blank.csv",
+        )
+
+        fmt = FastDataLoader.auto_detect(str(path))
+
+        assert fmt.header_row == 1
+        assert fmt.has_unit is True
+
+    def test_several_leading_blank_lines(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            "\n\n\n" + self.WITH_BLANK_BEFORE_HEADER,
+            name="leading_blanks.csv",
+        )
+
+        fmt = FastDataLoader.auto_detect(str(path))
+        loader = FastDataLoader(
+            str(path),
+            sep=fmt.sep,
+            desc_rows=fmt.header_row,
+            has_unit=fmt.has_unit,
+            encoding=fmt.encoding,
+        )
+
+        assert fmt.header_row == 5  # 3 条空行 + desc + 1 条空行
+        assert loader.var_names == ["time", "speed", "rpm"]
+        assert loader.datalength == 2
+
+
+class TestLateTextDtypeTolerance:
+    """采样窗口外的非数值文本不得让整文件打不开（全仓审查 P1-6）。
+
+    dtype 是拿前 `max_rows_infer`（默认 200）行推断的，而正式读取带着这个 dtype。
+    文件后段一旦出现文本（现场常见：结尾几行状态标记、传感器故障行写字符串），
+    pandas 直接抛 `ValueError: could not convert string to float` —— 用户看到的
+    不是「少一个点」，而是「这个文件打不开」。
+    """
+
+    @staticmethod
+    def _csv(tmp_path, rows_total=251, bad_at=250, bad_token="SPD_LOST", name=None):
+        rows = []
+        for i in range(rows_total):
+            if i == bad_at:
+                rows.append([f"{i * 0.1:.1f}", bad_token, 800 + i])
+            else:
+                rows.append([f"{i * 0.1:.1f}", f"{10.0 + i * 0.5:.2f}", 800 + i])
+        return write_csv(
+            tmp_path / (name or "late_text.csv"),
+            header=["time", "speed", "rpm"],
+            units=["s", "km/h", "rpm"],
+            rows=rows,
+        )
+
+    def test_file_opens_and_only_the_bad_cell_is_missing(self, tmp_path):
+        loader = FastDataLoader(
+            str(self._csv(tmp_path)), has_unit=True, sep=",", desc_rows=0
+        )
+
+        assert loader.datalength == 251, "整行都该保留，只有那一个单元格缺失"
+        col = loader.df["speed"]
+        assert int(col.isna().sum()) == 1
+        # 只有真混入文本的列进入 repairs；干净的列必须仍是数值 dtype
+        # （重读不带 dtype，不能把所有列都退化成字符串再转）
+        assert loader.dtype_repairs == {"speed": 1}
+        assert pd.api.types.is_numeric_dtype(loader.df["time"])
+        assert pd.api.types.is_numeric_dtype(loader.df["rpm"])
+        # 其余数值不受影响（第 250 行才是坏格，取它的上一行）
+        assert float(col.iloc[0]) == pytest.approx(10.0)
+        assert float(col.iloc[249]) == pytest.approx(10.0 + 249 * 0.5)
+
+    def test_bad_cell_inside_sample_window_behaves_the_same(self, tmp_path):
+        """窗口内的坏格会改变**推断结果**（该列降成文本列），窗口外走容错重读
+        （数值列 + 那一格缺失）。两条路径都必须：文件打得开、行的数量一致、
+        缺的恰好是那一格 —— 坏格落在第几行不再决定文件能否打开。
+        """
+        inside = FastDataLoader(
+            str(self._csv(tmp_path, bad_at=50, name="in.csv")),
+            has_unit=True, sep=",", desc_rows=0,
+        )
+        outside = FastDataLoader(
+            str(self._csv(tmp_path, bad_at=250, name="out.csv")),
+            has_unit=True, sep=",", desc_rows=0,
+        )
+
+        assert inside.datalength == outside.datalength == 251
+        inside_num = pd.to_numeric(inside.df["speed"], errors="coerce")
+        outside_num = pd.to_numeric(outside.df["speed"], errors="coerce")
+        assert int(inside_num.isna().sum()) == int(outside_num.isna().sum()) == 1
+        assert inside_num.index[inside_num.isna()].tolist() == [50]
+        assert outside_num.index[outside_num.isna()].tolist() == [250]
+        assert outside.dtype_repairs.get("speed") == 1
+        # 两列在「都有效的那些行」上取值完全一致
+        both_valid = inside_num.notna() & outside_num.notna()
+        assert int(both_valid.sum()) == 249  # 251 行里两个文件各缺一格，且位置不同
+        assert float((inside_num[both_valid] - outside_num[both_valid]).abs().max()) == 0.0
+
+    def test_na_token_still_counts_as_missing_not_a_repair(self, tmp_path):
+        """`_NA_VALUES` 里的记号本来就走缺失值通道，不该被算进「容错重读」。"""
+        path = write_csv(
+            tmp_path / "na_token.csv",
+            header=["time", "speed", "rpm"],
+            units=["s", "km/h", "rpm"],
+            rows=[["0.0", "10.0", "800"], ["0.1", "N/A", "810"]],
+        )
+        loader = FastDataLoader(str(path), has_unit=True, sep=",", desc_rows=0)
+
+        assert loader.datalength == 2
+        assert getattr(loader, "dtype_repairs", {}) == {}
+
+    @pytest.mark.parametrize(
+        "message, expected",
+        [
+            ("could not convert string to float: 'SPD_LOST'", True),
+            ("Cannot cast array data from dtype('O') to dtype('float32') "
+             "according to the rule 'safe'", True),
+            ("Expected 3 fields in line 4, saw 4", False),
+            ("Unicode strings with encoding declaration are not supported", False),
+        ],
+    )
+    def test_only_the_narrow_dtype_signatures_are_tolerated(self, message, expected):
+        assert FastDataLoader._is_dtype_conversion_error(ValueError(message)) is expected

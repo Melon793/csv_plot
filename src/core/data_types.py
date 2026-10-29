@@ -3,6 +3,7 @@
 包含项目共用的数据类、异常类型和枚举：
 - FormatInfo: 文件格式自动检测结果
 - CurveInfo: 单条曲线元数据
+- InvalidCurveRef: 失效曲线占位（布局资产保留）
 - MarkStatEntry: 标记区域统计条目
 - AutoDetectError: 格式检测失败异常
 """
@@ -80,8 +81,31 @@ class CurveInfo:
 
 
 @dataclass
+class InvalidCurveRef:
+    """失效曲线占位（方案 B2：布局是用户资产，数据只是输入）。
+
+    加载新数据后，某变量不存在或 ``df_validity == INVALID`` 时，曲线不被删除，
+    而是降级为一条轻量占位：保留原颜色与可见性偏好，等该变量再次出现时
+    自动复活。占位与 ``CurveInfo`` 物理隔离（存放在 ``pw.invalid_curves``
+    字典），不建 PlotDataItem、不写场景，因此所有遍历 ``pw.curves`` 的下游
+    消费方（Y 轴 auto_range、密度、cursor、标记统计、导出）天然不受影响。
+
+    不变量：同一变量名绝不同时出现在 ``pw.curves`` 与 ``pw.invalid_curves``。
+    """
+
+    var_name: str
+    color: str = "gray"
+    visible_preference: bool = True  # 复活时恢复用户上次显隐选择
+
+
+@dataclass
 class MarkStatEntry:
-    """标记区域统计条目"""
+    """标记区域统计条目
+
+    ``label`` 保留拼好的 ``"var (unit)"``（导出文本与既有测试兼容）；
+    ``var_name`` / ``unit`` 是未拼接的原始字段，供统计表格独立成列
+    （变量名本身可含括号，从 label 反解不可靠）。
+    """
     x1: float
     x2: float
     y1: float
@@ -93,3 +117,10 @@ class MarkStatEntry:
     y_avg: float
     y_max: float
     y_min: float
+    # ---- 新增（全部带默认值，向后兼容旧构造点）----
+    var_name: str = ""                 # 变量名（未拼单位的原始名，表格"曲线"列）
+    unit: str = ""                     # 单位（独立成列）
+    x_at_y_max: float = float("nan")   # y 最大时的 x 值
+    x_at_y_min: float = float("nan")   # y 最小时的 x 值
+    y_pp: float = float("nan")         # 峰峰值 y_max - y_min
+    count: int = 0                     # 区间内有效样本数

@@ -5,13 +5,12 @@ import numpy as np
 from collections import OrderedDict
 
 from PySide6.QtCore import QSignalBlocker
-from PySide6.QtWidgets import QMessageBox
 
 from src.core.config import (
-    RATIO_RESET_PLOTS,
     MIN_INDEX_LENGTH,
     safe_qt_op,
     is_grouped_loader,
+    compute_global_x_limits,
 )
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -42,48 +41,100 @@ class CursorSyncManager(MainWindowBaseManager):
     def reset_plots_after_loading(
         self, index_xMin, index_xMax, *, reason: str | None = None
     ):
+        containers = self._iter_all_containers()
         try:
-            for container in self.mw.plot_widgets:
+            # 数据层全量：reload 决定重置时，隐藏页的旧曲线也必须清掉（§7.2 #2）
+            for container in containers:
                 container.plot_widget.clear_plot_item()
                 container.plot_widget.reset_plot(index_xMin, index_xMax)
                 container.plot_widget.clear_value_cache()
                 container.plot_widget.reset_pin_state()
+                if self._defers_scene_write(container.plot_widget):
+                    self._mark_dirty(container.plot_widget)
 
             self.mw.cursor_mode = "1 free cursor"
             self.mw.pinned_x_values = []
-            self.mw.saved_mark_range = None
             if self.mw.mark_stats_window:
                 self.mw.mark_stats_window.hide()
-                self.mw.mark_stats_window.tree.clear()
+                self.mw.mark_stats_window.clear_stats()
 
             if self.mw.mark_region_btn.isChecked():
                 self.mw.mark_region_btn.setChecked(False)
                 self.mw.layout_manager.toggle_mark_region(False)
+            # 数据已整体更换：必须在 toggle(False) 之后清——关闭路径会把
+            # 幸存 region 的旧域区间回写到 saved_mark_range（供下次开启），
+            # 先清会被这段回灌复活成对新数据无意义的死值
+            self.mw.saved_mark_range = None
 
             self.mw._enum_text_maps = {}
 
         finally:
-            for container in self.mw.plot_widgets:
+            for container in containers:
                 widget = container.plot_widget
                 try:
                     has_data = bool(widget.curves)
-                    if has_data:
+                    if has_data and not self._defers_scene_write(widget):
                         widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
                     logger.debug("刷新 cursor UI 失败", exc_info=True)
 
+    def _iter_all_containers(self):
+        """跨页容器快照（优先 mw.iter_all_plot_widgets，已过滤销毁项）。"""
+        iter_all = getattr(self.mw, "iter_all_plot_widgets", None)
+        if callable(iter_all):
+            return list(iter_all())
+        return list(getattr(self.mw, "plot_widgets", []) or [])
+
+    def _defers_scene_write(self, widget) -> bool:
+        """非当前页只许写状态：置页脏，切页时由 ``restore_scene`` 补建（§6.3 #3）。"""
+        page = getattr(widget, "page", None)
+        if page is None:
+            return False
+        current = getattr(self.mw, "current_page", None)
+        return current is not None and page is not current
+
+    @staticmethod
+    def _mark_dirty(widget) -> None:
+        marker = getattr(widget, "mark_dirty_for_activation", None)
+        if callable(marker):
+            marker()
+
     def _get_cursor_source_plot(self, source_plot=None):
         if source_plot is not None and hasattr(source_plot, "view_box"):
             return source_plot
-        for container in getattr(self.mw, "plot_widgets", []):
+        # 兜底顺序：当前页可见 → 当前页任意 → 全局任意（§6.3 #5）
+        current = getattr(self.mw, "current_page", None)
+        if current is not None:
+            candidates = list(getattr(current, "plot_widgets", []) or [])
+        else:
+            candidates = list(getattr(self.mw, "plot_widgets", []) or [])
+        for container in candidates:
             widget = getattr(container, "plot_widget", None)
             if widget is not None and container.isVisible():
                 return widget
-        for container in getattr(self.mw, "plot_widgets", []):
+        for container in candidates:
+            widget = getattr(container, "plot_widget", None)
+            if widget is not None:
+                return widget
+        for container in self._iter_all_containers():
             widget = getattr(container, "plot_widget", None)
             if widget is not None:
                 return widget
         return None
+
+    def refresh_cursor_labels(self, page=None) -> None:
+        """清节流时间戳并补刷一次标签（切页/模式切换共用收尾）。"""
+        if page is not None:
+            containers = list(getattr(page, "plot_widgets", []) or [])
+        else:
+            containers = list(getattr(self.mw, "plot_widgets", []) or [])
+        for container in containers:
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if hasattr(widget, "_last_cursor_update_time"):
+                widget._last_cursor_update_time = 0
+            safe_qt_op(widget.update_cursor_label)
 
     def _get_cursor_view_range(self, source_plot=None):
         plot = self._get_cursor_source_plot(source_plot)
@@ -120,9 +171,12 @@ class CursorSyncManager(MainWindowBaseManager):
         return int(np.argmax(distances))
 
     def _apply_cursor_mode_to_plots(self):
-        for container in getattr(self.mw, "plot_widgets", []):
+        for container in self._iter_all_containers():
             widget = getattr(container, "plot_widget", None)
             if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                widget.mark_dirty_for_activation()
                 continue
             widget.apply_cursor_mode(self.mw.cursor_mode, self.mw.pinned_x_values)
 
@@ -197,11 +251,7 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw.cursor_mode = mode
 
         self._apply_cursor_mode_to_plots()
-        for container in getattr(self.mw, "plot_widgets", []):
-            widget = getattr(container, "plot_widget", None)
-            if widget is not None:
-                widget._last_cursor_update_time = 0
-                safe_qt_op(widget.update_cursor_label)
+        self.refresh_cursor_labels()
 
     def set_cursor_enabled(self, enabled: bool) -> None:
         if self.mw.cursor_btn:
@@ -213,10 +263,16 @@ class CursorSyncManager(MainWindowBaseManager):
         return False
 
     def toggle_cursor_all(self, checked):
-        if not self.mw.plot_widgets:
+        containers = self._iter_all_containers()
+        if not containers:
             return
-        for container in self.mw.plot_widgets:
-            widget = container.plot_widget
+        for container in containers:
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                widget.mark_dirty_for_activation()
+                continue
             if checked and self.mw.cursor_values_hidden:
                 widget.toggle_cursor(False, hide_values_only=True)
             else:
@@ -234,7 +290,8 @@ class CursorSyncManager(MainWindowBaseManager):
     def _realign_pinned_cursor_after_time_correction(
         self, old_factor, old_offset, new_factor, new_offset
     ):
-        if not self.mw.plot_widgets:
+        all_containers = self._iter_all_containers()
+        if not all_containers:
             return
 
         if getattr(self.mw, "cursor_mode", "1 free cursor") == "1 free cursor":
@@ -262,7 +319,7 @@ class CursorSyncManager(MainWindowBaseManager):
         if hasattr(self.mw, "loader") and self.mw.loader is not None:
             datalength = max(int(self.mw.loader.datalength), 0)
         else:
-            first_widget = self.mw.plot_widgets[0].plot_widget
+            first_widget = all_containers[0].plot_widget
             first_ci = next(iter(first_widget.curves.values()), None)
             if first_ci is not None and first_ci.original_index is not None:
                 datalength = len(first_ci.original_index)
@@ -283,8 +340,14 @@ class CursorSyncManager(MainWindowBaseManager):
         self.mw.pinned_x_values = new_display_values
         self.mw.pinned_index_values = list(pinned_indices)
 
-        for container in self.mw.plot_widgets:
-            widget = container.plot_widget
+        for container in all_containers:
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                # 隐藏页只记脏：pin 值是全局的，切页时 restore_scene 按新基准重建
+                widget.mark_dirty_for_activation()
+                continue
 
             # 统一版：有可见曲线时用本图曲线域，否则用全局数据 X 域（唯一权威源，
             # 随当前 factor/offset 现算）。曾经这里手写 offset+factor*1 / datalength，
@@ -374,8 +437,14 @@ class CursorSyncManager(MainWindowBaseManager):
     def reset_all_pin_states(self):
         self.mw.cursor_mode = "1 free cursor"
         self.mw.pinned_x_values = []
-        for container in self.mw.plot_widgets:
-            container.plot_widget.reset_pin_state()
+        for container in self._iter_all_containers():
+            widget = getattr(container, "plot_widget", None)
+            if widget is None:
+                continue
+            if self._defers_scene_write(widget):
+                widget.mark_dirty_for_activation()
+                continue
+            widget.reset_pin_state()
 
     def clear_all_plots(self):
         if self.mw.reject_when_loading("清除绘图"):
@@ -384,7 +453,7 @@ class CursorSyncManager(MainWindowBaseManager):
         cleared = sum(len(c.plot_widget.curves) for c in self.mw.plot_widgets)
         for container in self.mw.plot_widgets:
             widget = container.plot_widget
-            widget.clear_plot_item()
+            widget.clear_plot_item(clear_invalid=True)
             widget.clear_value_cache()
             widget.reset_pin_state()
         self.mw.value_cache = OrderedDict()
@@ -453,12 +522,27 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw._baseline_density = 0.0
 
     def _sync_min_xrange(self):
+        # 密度是全局量（§7.2 #12/#18）：跨页收集，取所有页显式可见子图的
+        # max_point_density；隐藏页的子图不是「不可见单元格」，必须用
+        # isHidden() 而不是 isVisible()（R0，否则隐藏页密度被整体漏掉）。
+        def _cell_shown(container) -> bool:
+            is_hidden = getattr(container, "isHidden", None)
+            if callable(is_hidden):
+                return not is_hidden()
+            # 组件测试的轻量替身只实现了 isVisible()
+            is_visible = getattr(container, "isVisible", None)
+            return bool(is_visible()) if callable(is_visible) else True
 
+        iter_all = getattr(self.mw, "iter_all_plot_widgets", None)
+        if callable(iter_all):
+            all_containers = list(iter_all())
+        else:
+            all_containers = list(self.mw.plot_widgets)
         new_max = max(
             (
                 container.plot_widget._max_point_density
-                for container in self.mw.plot_widgets
-                if container.isVisible()
+                for container in all_containers
+                if _cell_shown(container)
                 and container.plot_widget._max_point_density > 0
             ),
             default=0.0,
@@ -471,14 +555,17 @@ class CursorSyncManager(MainWindowBaseManager):
             prev = self.mw._global_max_density
             self.mw._global_max_density = new_max
             min_range = MIN_INDEX_LENGTH / new_max
+            # 场景写入只落在当前页；隐藏页的 limits 在其激活时由
+            # _post_activation 重新应用（S4），此处不跨页碰 ViewBox。
+            current_containers = list(self.mw.plot_widgets)
             logger.debug(
                 "[MIN_XRANGE] _sync_min_xrange: density %.4f -> %.4f, min_range=%.4f, "
                 "syncing to %d visible plots",
                 prev, new_max, min_range,
-                sum(1 for c in self.mw.plot_widgets if c.isVisible()),
+                sum(1 for c in current_containers if _cell_shown(c)),
             )
-            for container in self.mw.plot_widgets:
-                if container.isVisible():
+            for container in current_containers:
+                if _cell_shown(container):
                     container.plot_widget._set_min_x_range(min_range)
         else:
             logger.debug(
@@ -486,21 +573,44 @@ class CursorSyncManager(MainWindowBaseManager):
                 self.mw._global_max_density,
             )
 
-    def auto_range_all_plots(self):
+    def auto_range_page(self, page=None, *, announce: bool = True):
+        """按可见曲线自动缩放 XY：只作用于指定页（默认当前页，§6.7）。
+
+        跨页 autoRange 会重算隐藏页几何，且用户看不到结果；保持页作用域。
+        announce=False 供程序化路径（模板恢复）静默调用，不播报状态栏。
+        """
         if not self.mw.loader or self.mw.loader.datalength == 0:
+            return
+
+        target = page if page is not None else getattr(self.mw, "current_page", None)
+        if target is not None and hasattr(target, "cell_visible"):
+            containers = [
+                container
+                for index, container in enumerate(target.plot_widgets)
+                if target.cell_visible(index)
+            ]
+        else:
+            containers = [
+                container for container in self.mw.plot_widgets
+                if container.isVisible()
+            ]
+        if not containers:
             return
 
         global_min_x, global_max_x = self.collect_global_x_range(
             curves_filter="visible"
         )
+        for container in containers:
+            container.plot_widget.auto_range(
+                external_xmin=global_min_x,
+                external_xmax=global_max_x,
+            )
+        if announce:
+            self.mw._show_status_message("已按全部可见曲线自动缩放 XY 轴")
 
-        for container in self.mw.plot_widgets:
-            if container.isVisible():
-                container.plot_widget.auto_range(
-                    external_xmin=global_min_x,
-                    external_xmax=global_max_x,
-                )
-        self.mw._show_status_message("已按全部可见曲线自动缩放 XY 轴")
+    def auto_range_all_plots(self):
+        """兼容旧名：语义已是「当前页全部子图」。"""
+        self.auto_range_page()
 
     def auto_y_in_x_range(self):
         for container in self.mw.plot_widgets:
@@ -512,7 +622,10 @@ class CursorSyncManager(MainWindowBaseManager):
         # 防止 QGraphicsView 在 items 清空/重建期间处理 paint 事件导致
         # use-after-free 崩溃 (EXC_BAD_ACCESS / SIGSEGV)
         self.mw.setUpdatesEnabled(False)
-        for container in self.mw.plot_widgets:
+        # 数据换了：每页曲线都要重建（§5.5 / §7.2 #2）。非活动页只重建数据层，
+        # cursor/region 场景 item 由 _scene_dirty 延迟到切页。
+        containers = self._iter_all_containers()
+        for container in containers:
             container.plot_widget._is_updating_data = True
             if hasattr(container.plot_widget, "_cancel_ui_refresh"):
                 container.plot_widget._cancel_ui_refresh()
@@ -527,10 +640,13 @@ class CursorSyncManager(MainWindowBaseManager):
                 self.reset_all_pin_states()
 
             all_y_names = []
-            for container in self.mw.plot_widgets:
+            for container in containers:
                 widget = container.plot_widget
-                # 统一：始终从 curves 字典获取变量名
+                # 空态口径（§5.2）：curves ∪ invalid_curves 都算"有资产"。
+                # 仅剩占位时 unique_y_names 也必须非空，否则会误入全清 reset，
+                # 占位被绕过复活逻辑永久滞留。
                 all_y_names.extend(widget.curves.keys())
+                all_y_names.extend(getattr(widget, "invalid_curves", {}).keys())
 
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance.get_column_names())
@@ -545,149 +661,181 @@ class CursorSyncManager(MainWindowBaseManager):
                     x_min, x_max = self.mw.loader.global_time_range
                 else:
                     x_min, x_max = 1, self.mw.loader.datalength
-                self.reset_plots_after_loading(x_min, x_max, reason="no tracked curves")
+                self.reset_plots_after_loading(
+                    x_min, x_max, reason="no curves or placeholders"
+                )
                 skip_var_restore = True
 
-            cleared = []
+            # reload 完成状态栏汇总（§5.6）：取代旧的模态「更新通知」
+            total_rebuilt = 0
+            total_invalid = 0
 
             if not skip_var_restore:
+                self.mw.value_cache = OrderedDict()
+                # 与 value_cache 成对失效：两者在 plot_data_manager 中是
+                # 同一处代码成对写入的（枚举通道同时写文本表与值缓存），
+                # 只清一个会让 cursor 读到旧数据的枚举文本标签。
+                self.mw._enum_text_maps = {}
+
                 var_names_set = set(self.mw.loader.var_names)
-                in_var_names = [y for y in unique_y_names if y in var_names_set]
 
-                if in_var_names:
-                    # 仅排除已知无效(INVALID=-1)的变量，保留 UNKNOWN(-2) 的变量。
-                    # MDF 使用懒加载(lazy loading)不会在加载时扫描全部数据，
-                    # 其 df_validity 统一返回 UNKNOWN(-2)；若使用 >=0 会将所有
-                    # MDF 变量误判为无效，导致重载后已绘变量被错误清除。
-                    # CSV 加载器会主动扫描数据并返回 VALID(1)/CONST(0)/INVALID(-1)，
-                    # 对 CSV 场景 != -1 等价于旧逻辑 >=0，行为不变。
-                    # 注：后期 MDF 有效性检查将改为用户主动触发。
-                    validity_values = [
-                        self.mw.loader.df_validity.get(y, -1) for y in in_var_names
-                    ]
-                    validity_array = np.array(validity_values)
-                    valid_mask = validity_array != -1
-                    found = [in_var_names[i] for i in np.where(valid_mask)[0]]
-                else:
-                    found = []
+                def _var_is_plottable(name: str) -> bool:
+                    """变量在新数据中可绘制：存在且 df_validity != INVALID(-1)。
 
-                ratio = len(found) / len(unique_y_names) if unique_y_names else 0
-
-                if ratio <= RATIO_RESET_PLOTS or len(found) < 1:
-                    if is_mdf:
-                        x_min, x_max = self.mw.loader.global_time_range
-                    else:
-                        x_min, x_max = 1, self.mw.loader.datalength
-                    self.reset_plots_after_loading(
-                        x_min, x_max, reason="insufficient valid vars"
+                    仅排除已知无效(INVALID=-1)，保留 UNKNOWN(-2)：MDF 懒加载
+                    不在加载时扫描全部数据，其 df_validity 统一返回 UNKNOWN(-2)，
+                    用 >=0 会把所有 MDF 变量误判为无效。CSV 主动扫描返回
+                    VALID(1)/CONST(0)/INVALID(-1)，!= -1 等价旧逻辑 >=0。
+                    """
+                    exists = (
+                        (name in var_names_set)
+                        if is_mdf
+                        else (name in self.mw.loader.df.columns)
                     )
-                else:
-                    self.mw.value_cache = OrderedDict()
-                    # 与 value_cache 成对失效：两者在 plot_data_manager 中是
-                    # 同一处代码成对写入的（枚举通道同时写文本表与值缓存），
-                    # 只清一个会让 cursor 读到旧数据的枚举文本标签。
-                    self.mw._enum_text_maps = {}
-                    for idx, container in enumerate(self.mw.plot_widgets):
-                        widget = container.plot_widget
+                    return bool(
+                        exists and self.mw.loader.df_validity.get(name, -1) != -1
+                    )
 
-                        # 游标域 / X limits 的唯一权威源：compute_global_x_limits
-                        # （内部含 min==max 扩展与 ±5% padding），不再在这里手写
-                        # index/时间轴换算，也不在这里重算 padding
+                for idx, container in enumerate(containers):
+                    widget = container.plot_widget
+                    scene = not self._defers_scene_write(widget)
+
+                    # 游标域 / X limits 的唯一权威源：compute_global_x_limits
+                    # （内部含 min==max 扩展与 ±5% padding），不再在这里手写
+                    # index/时间轴换算，也不在这里重算 padding
+                    if scene:
                         domain = widget._apply_cursor_x_domain_and_limits()
-                        min_x, max_x = domain if domain is not None else (None, None)
-
-                        # === 统一 reload 路径：始终从 curves 字典保存/重建 ===
-                        saved_state = {
-                            var_name: {"color": ci.color, "visible": ci.visible}
-                            for var_name, ci in widget.curves.items()
-                        }
-                        logger.debug(
-                            "[RELOAD] Plot[%d] saved_state: %s",
-                            idx, {k: v for k, v in saved_state.items()},
+                    else:
+                        # 隐藏页只算裸数据域供 vline bounds 使用；
+                        # X limits 场景写入留到激活时 restore_cursor_scene
+                        ctx = getattr(widget, "plot_context", None)
+                        limits = compute_global_x_limits(
+                            getattr(ctx, "loader", None),
+                            factor=widget.factor,
+                            offset=widget.offset,
                         )
+                        domain = (limits[0], limits[1]) if limits else None
+                    min_x, max_x = domain if domain is not None else (None, None)
 
-                        # 清空所有状态
-                        widget._clear_cursor_items(hide_only=False)
-                        widget._safe_clear_plot_items()
-                        widget.curves.clear()
-                        widget.current_color_index = 0
-                        # 清空后立即归零密度，避免全清场景下 _sync_min_xrange
-                        # 读取陈旧 _max_point_density 抬高全局 minXRange
-                        widget._recalc_max_point_density()
+                    # === 统一 reload 路径：curves 存状态、invalid_curves 取快照 ===
+                    saved_state = {
+                        var_name: {"color": ci.color, "visible": ci.visible}
+                        for var_name, ci in widget.curves.items()
+                    }
+                    # 复活数据来源（§5.4）：进入 reload 时各页 invalid_curves 的快照。
+                    # 本轮重建循环内刚 demote 的条目不在此快照中，故不参与复活
+                    # （其失效性刚被新数据确认，数据源未变）。
+                    invalid_snapshot = dict(getattr(widget, "invalid_curves", {}))
+                    logger.debug(
+                        "[RELOAD] Plot[%d] saved_state=%s invalid_snapshot=%s",
+                        idx, list(saved_state.keys()), list(invalid_snapshot.keys()),
+                    )
 
-                        # 逐个重建
-                        curves_added = 0
-                        # batch 模式：抑制单曲线级别的 Y 轴调整 / vline bounds /
-                        # 密度重算，全部重建完成（可见性已恢复）后统一执行一次。
-                        # 否则重建中的隐藏曲线以 visible=True 参与自身触发的 Y 轴
-                        # 计算，若其为最后一条重建曲线会污染 Y 范围；且每条曲线都
-                        # 全量扫描已重建数据，总量 O(N²·L)。
-                        widget._batch_adding = True
+                    # 清空 curves（不动 invalid_curves：占位跨清空存活，
+                    # 由下方 demote/复活段重建）
+                    widget._clear_cursor_items(hide_only=False)
+                    widget._safe_clear_plot_items()
+                    widget.curves.clear()
+                    widget.current_color_index = 0
+                    # 清空后立即归零密度，避免全清场景下 _sync_min_xrange
+                    # 读取陈旧 _max_point_density 抬高全局 minXRange
+                    widget._recalc_max_point_density()
+
+                    # 逐个重建 + 复活（同一 _batch_adding 窗口，§5.4）
+                    curves_added = 0
+                    revived = 0
+                    # batch 模式：抑制单曲线级别的 Y 轴调整 / vline bounds /
+                    # 密度重算，全部重建完成（可见性已恢复）后统一执行一次。
+                    # 否则重建中的隐藏曲线以 visible=True 参与自身触发的 Y 轴
+                    # 计算，若其为最后一条重建曲线会污染 Y 范围；且每条曲线都
+                    # 全量扫描已重建数据，总量 O(N²·L)。复活若放窗口外会走非
+                    # batch 路径，逐条触发全量副作用与 _sync_min_xrange（O(N²)）。
+                    widget._batch_adding = True
+                    try:
+                        for var_name, state in saved_state.items():
+                            if not _var_is_plottable(var_name):
+                                # 失效 → 降级为占位（取代旧的 continue 静默删除）
+                                widget.demote_to_invalid(
+                                    var_name, state["color"], state["visible"]
+                                )
+                                logger.debug(
+                                    "[RELOAD] Plot[%d] 变量 %s 失效，降级为占位",
+                                    idx, var_name,
+                                )
+                                continue
+                            success = widget.add_variable_to_plot(
+                                var_name,
+                                skip_existence_check=True,
+                                preferred_color=state["color"],
+                            )
+                            if success:
+                                curves_added += 1
+                                # 恢复可见性
+                                if var_name in widget.curves:
+                                    widget.curves[var_name].visible = state["visible"]
+                                    if widget.curves[var_name].curve is not None:
+                                        try:
+                                            widget.curves[var_name].curve.setVisible(
+                                                state["visible"]
+                                            )
+                                        except Exception:
+                                            logger.debug("恢复曲线可见性失败", exc_info=True)
+
+                        # 复活 invalid_snapshot（仍在 batch 窗口内）：快照中现在
+                        # 有效的变量 → add_variable_to_plot 触发占位查色复活
+                        for var_name, ref in invalid_snapshot.items():
+                            if not _var_is_plottable(var_name):
+                                continue  # 仍失效：占位保持不变
+                            success = widget.add_variable_to_plot(
+                                var_name,
+                                skip_existence_check=True,
+                                preferred_color=ref.color,
+                            )
+                            if success:
+                                curves_added += 1
+                                revived += 1
+                    finally:
+                        widget._batch_adding = False
+
+                    # 更新 UI（统一路径，无需归一化）
+                    widget._update_header_for_curves()
+
+                    # 占位集合变化 → 补发 curves_changed（§4.5）：驱动编辑器增量
+                    # 刷新与搜索栏候选列表（demote 逐条不 emit，纯失效页否则无感知）
+                    final_invalid = set(getattr(widget, "invalid_curves", {}).keys())
+                    if final_invalid != set(invalid_snapshot.keys()):
+                        widget.curves_changed.emit()
+
+                    invalid_count = len(final_invalid)
+                    total_rebuilt += curves_added
+                    total_invalid += invalid_count
+                    logger.debug(
+                        "[RELOAD] Plot[%d] 重建完成: curves_added=%d (复活 %d), 占位=%d",
+                        idx, curves_added, revived, invalid_count,
+                    )
+
+                    if curves_added > 0:
+                        # 复用批量添加收尾的权威实现（_finalize_batch_add）：
+                        # 补偿 batch 模式跳过的 Y 轴/vline bounds/cursor/密度。
+                        # 差异参数：header 上方已单独刷新；全隐藏时回退到
+                        # 全局数据范围（与循环前设置的 vline bounds 一致）；
+                        # minXRange 在所有 plot 重建后统一同步一次；
+                        # 隐藏页 scene=False 只写纯数值并置脏（§5.5）。
                         try:
-                            for var_name, state in saved_state.items():
-                                var_exists = (
-                                    (var_name in self.mw.loader.var_names)
-                                    if is_mdf
-                                    else (var_name in self.mw.loader.df.columns)
-                                )
-                                if not (
-                                    var_exists
-                                    and self.mw.loader.df_validity.get(var_name, -1) != -1
-                                ):
-                                    logger.debug(
-                                        "[RELOAD] Plot[%d] 变量 %s 无效，跳过 (exists=%s)",
-                                        idx, var_name, var_exists,
-                                    )
-                                    continue
-                                success = widget.add_variable_to_plot(
-                                    var_name,
-                                    skip_existence_check=True,
-                                    preferred_color=state["color"],
-                                )
-                                if success:
-                                    curves_added += 1
-                                    # 恢复可见性
-                                    if var_name in widget.curves:
-                                        widget.curves[var_name].visible = state["visible"]
-                                        if widget.curves[var_name].curve is not None:
-                                            try:
-                                                widget.curves[var_name].curve.setVisible(
-                                                    state["visible"]
-                                                )
-                                            except Exception:
-                                                logger.debug("恢复曲线可见性失败", exc_info=True)
-                        finally:
-                            widget._batch_adding = False
-
-                        # 更新 UI（统一路径，无需归一化）
-                        widget._update_header_for_curves()
-                        logger.debug(
-                            "[RELOAD] Plot[%d] 重建完成: curves_added=%d/%d",
-                            idx, curves_added, len(saved_state),
-                        )
-
-                        if curves_added == 0 and saved_state:
-                            cleared.append((idx + 1, "所有变量无效"))
-                        elif curves_added > 0:
-                            # 复用批量添加收尾的权威实现（_finalize_batch_add）：
-                            # 补偿 batch 模式跳过的 Y 轴/vline bounds/cursor/密度。
-                            # 差异参数：header 上方已单独刷新；全隐藏时回退到
-                            # 全局数据范围（与循环前设置的 vline bounds 一致）；
-                            # minXRange 在所有 plot 重建后统一同步一次。
-                            try:
-                                widget._finalize_batch_add(
-                                    update_header=False,
-                                    vline_fallback=(min_x, max_x),
-                                    sync_min_xrange=False,
-                                )
-                            except Exception:
-                                # 补偿失败不中断后续 plot 的重建，
-                                # 避免跨 plot 状态不一致（旧实现中这些调用
-                                # 位于 add_variable_to_plot 内部 try/except）
-                                logger.exception(
-                                    "[RELOAD] Plot[%d] 补偿失败（Y 轴/vline bounds），跳过",
-                                    idx,
-                                )
+                            widget._finalize_batch_add(
+                                update_header=False,
+                                vline_fallback=(min_x, max_x),
+                                sync_min_xrange=False,
+                                scene=scene,
+                            )
+                        except Exception:
+                            # 补偿失败不中断后续 plot 的重建，
+                            # 避免跨 plot 状态不一致（旧实现中这些调用
+                            # 位于 add_variable_to_plot 内部 try/except）
+                            logger.exception(
+                                "[RELOAD] Plot[%d] 补偿失败（Y 轴/vline bounds），跳过",
+                                idx,
+                            )
 
             # 所有 plot 重建完成后统一同步 minXRange
             # （原先每条曲线各触发一次全局同步，现收敛为一次）
@@ -700,26 +848,25 @@ class CursorSyncManager(MainWindowBaseManager):
 
         finally:
             self.mw.setUpdatesEnabled(True)
-            for container in self.mw.plot_widgets:
+            for container in containers:
                 container.plot_widget._is_updating_data = False
 
-            for container in self.mw.plot_widgets:
+            for container in containers:
                 widget = container.plot_widget
                 try:
-                    if hasattr(widget, "view_box") and hasattr(widget, "plot_item"):
-                        has_data = bool(widget.curves)
-                        if has_data:
-                            widget._queue_ui_refresh(immediate=True, stats=False)
+                    has_data = bool(widget.curves)
+                    if has_data and not self._defers_scene_write(widget):
+                        widget._queue_ui_refresh(immediate=True, stats=False)
                 except Exception:
                     logger.debug("刷新 cursor UI 失败", exc_info=True)
 
-        if cleared:
-            # 安全防护：数据重载期间严禁调用 processEvents()，
-            # 否则会泵出 paint 事件导致 QGraphicsView 在 items 重建期间崩溃 (SIGSEGV)
-            if not getattr(self.mw, '_is_loading_new_data', False):
-                from PySide6.QtWidgets import QApplication
-                QApplication.processEvents()
-            msg = "以下图表被清除：\n"
-            for plot_idx, reason in cleared:
-                msg += f"Plot {plot_idx}: {reason}\n"
-            QMessageBox.information(self.mw, "更新通知", msg)
+        # reload 完成状态栏汇总（§5.6 / §6.4）：取代旧模态「更新通知」。
+        # 无失效则保持静默（正常 reload 不刷屏）；processEvents 防护随模态框删除。
+        if total_invalid > 0:
+            show = getattr(self.mw, "_show_status_message", None)
+            if callable(show):
+                show(
+                    f"已重建 {total_rebuilt} 条曲线，"
+                    f"{total_invalid} 条失效保留为占位"
+                )
+

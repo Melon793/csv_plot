@@ -118,3 +118,50 @@ def test_auto_y_covers_extremes_when_zoomed_out(plotted, qapp):
     y_min, y_max = vb.viewRange()[1]
     assert y_max >= 500, f"Y 上界应覆盖极值 500: {y_max}"
     assert y_min <= -300, f"Y 下界应覆盖极值 -300: {y_min}"
+
+
+def test_auto_y_padding_matches_auto_range(plotted, qapp):
+    """Ctrl+Y 与「自动缩放」的 Y padding 必须一致（均 ≈ 0.1）
+
+    defaultPadding 统一前：Ctrl+Y 走 pyqtgraph 动态 suggestPadding
+    （clip(1/√高度px, 0.02, 0.1)，随子图像素高度浮动；offscreen
+    height=0 时退化为 0.02），「自动缩放」固定 setYRange(padding=0.1)，
+    同一数据来回切换时 Y viewRange 非预期跳变。
+
+    断言用相对 padding (视图span/数据span-1)/2 而非绝对范围：两条路径
+    边界计算内核不同（childrenBounds vs np 极值）。注意 autoRange 会把
+    线宽像素当量（pixelPadding=线宽×0.7072，折算≈数据span的0.3%）
+    计入边界，Ctrl+Y 的相对 padding 恒为 0.1+像素当量，与「自动缩放」
+    的精确 0.1 存在固有微小差，故一致性断言容差取 0.005（统一前的
+    动态 padding 偏差 ≈0.055，仍能可靠区分）。
+    """
+    pw, vb = plotted
+    # 核心语义断言：suggestPadding 恒 0.1（与图高无关，含 offscreen
+    # height=0 分支）—— defaultPadding=DEFAULT_PADDING_VAL_Y 的直接效果
+    assert vb.suggestPadding(vb.YAxis) == pytest.approx(0.1, abs=1e-9)
+
+    # 首绘 X 视窗（数据域+5% padding）覆盖全部数据点 →
+    # Ctrl+Y 的 autoVisibleOnly 可见段 = 全量数据，与「自动缩放」同源
+    y_data = pw.curves["y"].y_data
+    data_span = float(np.nanmax(y_data) - np.nanmin(y_data))
+    assert data_span > 0
+
+    # 路径 1：Ctrl+Y（Y autoRange + autoVisibleOnly → suggestPadding）
+    pw.auto_y_in_x_range()
+    qapp.processEvents()
+    qapp.processEvents()
+    y_ctrl_min, y_ctrl_max = vb.viewRange()[1]
+    pad_ctrl = ((y_ctrl_max - y_ctrl_min) / data_span - 1) / 2
+
+    # 路径 2：「自动缩放」（np 极值 → setYRange(padding=DEFAULT_PADDING_VAL_Y)）
+    assert pw.auto_range() is True
+    qapp.processEvents()
+    y_auto_min, y_auto_max = vb.viewRange()[1]
+    pad_auto = ((y_auto_max - y_auto_min) / data_span - 1) / 2
+
+    assert pad_auto == pytest.approx(0.1, abs=1e-6), (
+        f"「自动缩放」的 Y padding 异常: {pad_auto}"
+    )
+    assert abs(pad_ctrl - pad_auto) < 0.005, (
+        f"两条路径的 Y padding 不一致: Ctrl+Y={pad_ctrl}, 自动缩放={pad_auto}"
+    )

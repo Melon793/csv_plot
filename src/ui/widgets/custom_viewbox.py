@@ -319,7 +319,8 @@ class CustomViewBox(pg.ViewBox):
         if not self.plot_widget or not hasattr(self.plot_widget, "plot_context"):
             return 0
         ctx = self.plot_widget.plot_context
-        ncols = ctx._plot_col_max_default
+        # 旧替身 ctx 没有 grid_cols：退回容量列数（单页建满时两者相等）
+        ncols = getattr(ctx, "grid_cols", 0) or ctx._plot_col_max_default
         for idx, container in enumerate(ctx.plot_widgets):
             if container.plot_widget is self.plot_widget:
                 row, _ = divmod(idx, ncols)

@@ -306,6 +306,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """重新计算最大数据点密度 → 委托到 AxisManager"""
         self._axis_manager._recalc_max_point_density()
 
+    def _refresh_global_x_limits(self):
+        """按当前全局密度重写 X limits → 委托到 AxisManager"""
+        self._axis_manager.refresh_global_x_limits()
+
     def _set_safe_y_range(self, min_y: float, max_y: float, set_limits: bool = True):
         """设置 Y 轴的 viewRange 和 limits → 委托到 AxisManager"""
         self._axis_manager._set_safe_y_range(min_y, max_y, set_limits)
@@ -748,9 +752,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """根据当前绘制的数据更新vline bounds → 委托到 CursorManager"""
         return self._cursor_manager._update_vline_bounds_from_data()
     
-    def _update_cursor_after_plot(self, min_x_bound: float, max_x_bound: float):
-        """绘图后更新光标边界和可见性 → 委托到 CursorManager"""
-        self._cursor_manager._update_cursor_after_plot(min_x_bound, max_x_bound)
+    def _update_cursor_after_plot(
+        self, min_x_bound: float, max_x_bound: float, *, scene: bool = True
+    ):
+        """绘图后更新光标边界和可见性 → 委托到 CursorManager
+
+        ``scene=False`` 只写纯数值（vline 边界）并标记所属页场景待重建，
+        供数据重载时处理非活动页使用（设计文档 §5.5）。
+        """
+        self._cursor_manager._update_cursor_after_plot(
+            min_x_bound, max_x_bound, scene=scene
+        )
+
+    def mark_dirty_for_activation(self):
+        """把所属页标记为场景待重建（隐藏页切回时按全局状态补建）。"""
+        page = getattr(self, "page", None)
+        if page is not None and hasattr(page, "mark_dirty_for_activation"):
+            page.mark_dirty_for_activation()
 
     def clear_value_cache(self):
         """清除值缓存 → 委托到 PlotDataManager"""
@@ -764,9 +782,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """根据变量名获取值和格式 → 委托到 PlotDataManager"""
         return self._plot_data_manager.get_value_from_name(var_name)
     
-    def update_time_correction(self, new_factor, new_offset):
+    def update_time_correction(
+        self,
+        new_factor,
+        new_offset,
+        *,
+        scene: bool = True,
+        sync_min_xrange: bool = True,
+    ):
         """更新时间修正参数 → 委托到 PlotDataManager"""
-        self._plot_data_manager.update_time_correction(new_factor, new_offset)
+        self._plot_data_manager.update_time_correction(
+            new_factor,
+            new_offset,
+            scene=scene,
+            sync_min_xrange=sync_min_xrange,
+        )
 
     # ---------------- 拖拽相关 ----------------
     def _build_indicator_text(
@@ -841,8 +871,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         else:
             shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
             if shift_pressed:
-                # Shift + 拖入 = 替换：先清空，再走对应绘制路径
-                self.clear_plot_item()
+                # Shift + 拖入 = 替换：先清空（连带清占位，§7），再走对应绘制路径
+                self.clear_plot_item(clear_invalid=True)
             # 普通拖入 = 添加（统一路径：plot_variable 内部自动判断首绘/追加）
             if len(var_names) > 1:
                 self.add_variables_to_plot(var_names)
@@ -937,9 +967,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """准备绘图数据 → 委托到 PlotDataManager"""
         return self._plot_data_manager._prepare_plot_data(var_name)
 
-    def plot_variable(self, var_name: str, show_duplicate_warning: bool = True) -> bool:
+    def plot_variable(
+        self,
+        var_name: str,
+        show_duplicate_warning: bool = True,
+        preferred_color: str | None = None,
+    ) -> bool:
         """绘制变量到图表 → 委托到 PlotDataManager"""
-        success = self._plot_data_manager.plot_variable(var_name, show_duplicate_warning)
+        success = self._plot_data_manager.plot_variable(
+            var_name, show_duplicate_warning, preferred_color
+        )
         # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）
         if success and len(self.curves) == 1:
             self.curves_changed.emit()
@@ -957,15 +994,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """重置绘图限制 → 委托到 AxisManager"""
         self._axis_manager._reset_plot_limits()
 
-    def _clear_plot_data(self):
+    def _clear_plot_data(self, clear_invalid: bool = False):
         """清除绘图数据 → 委托到 PlotDataManager"""
-        self._plot_data_manager._clear_plot_data()
+        self._plot_data_manager._clear_plot_data(clear_invalid=clear_invalid)
         self.curves_changed.emit()
 
-    def clear_plot_item(self):
-        """清除绘图项 → 委托到 PlotDataManager"""
-        self._plot_data_manager.clear_plot_item()
+    def clear_plot_item(self, clear_invalid: bool = False):
+        """清除绘图项 → 委托到 PlotDataManager
+
+        ``clear_invalid`` 缺省 False：reload 路径保留占位跨清空存活；
+        模板应用 / 用户显式清空传 True（完整还原，不留孤儿占位，§4.3）。
+        """
+        self._plot_data_manager.clear_plot_item(clear_invalid=clear_invalid)
         self.curves_changed.emit()
+
+    def demote_to_invalid(
+        self, var_name: str, color: str, visible_preference: bool = True
+    ) -> None:
+        """把不可绘制的变量降级为失效占位 → 委托到 PlotDataManager（不 emit）"""
+        self._plot_data_manager.demote_to_invalid(var_name, color, visible_preference)
 
     def clear_current_plot(self) -> None:
         """清当前子图 + 播报（右键菜单与双击中键两个用户入口共用）。
@@ -974,9 +1021,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         （plot_config_manager）、Shift 拖入替换、重载重建仍直接调
         clear_plot_item，那些路径各有自己的说法，不该被这句播报认领。
         标记统计刷新仍由各调用点自理（本函数只管清 + 播报）。
+        用户显式清空连带清占位（clear_invalid=True，§7），不留孤儿资产。
         """
         cleared = len(self.curves)  # 必须在清之前取
-        self.clear_plot_item()
+        self.clear_plot_item(clear_invalid=True)
         if self.plot_context:
             self.plot_context.announce_cleared("已清除绘图", cleared)
 
@@ -1096,7 +1144,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 try:
                     if dialog.exec():
                         min_val, max_val = self.view_box.viewRange()[0]
-                        for view in self.window().findChildren(DraggableGraphicsLayoutWidget):
+                        # 广播限本页（多页设计 §6.2：XLink 只在页内，隐藏页
+                        # 的范围由切页跟随管理）；findChildren 会命中所有页。
+                        page = getattr(self, "page", None)
+                        if page is not None:
+                            views = [
+                                container.plot_widget
+                                for container in page.plot_widgets
+                                if getattr(container, "plot_widget", None) is not None
+                            ]
+                        else:
+                            views = self.window().findChildren(DraggableGraphicsLayoutWidget)
+                        for view in views:
                             view.set_xrange_with_link_handling(xmin=min_val, xmax=max_val, padding=DEFAULT_PADDING_VAL_X)
                             view.plot_item.update()
                 finally:
@@ -1173,9 +1232,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """移除标记区域 → 委托到 MarkRegionManager"""
         self._mark_region_manager.remove_mark_region()
 
-    def get_mark_stats(self):
-        """获取标记区域统计 → 委托到 MarkRegionManager"""
-        return self._mark_region_manager.get_mark_stats()
+    def get_mark_stats(self, region=None):
+        """获取标记区域统计 → 委托到 MarkRegionManager
+
+        ``region`` 可选：隐藏页的 region item 尚未补建时按全局区间直接算。
+        """
+        return self._mark_region_manager.get_mark_stats(region)
 
     def _apply_plot_style(self, show_symbols: bool):
         """应用绘图样式 → 委托到 MultiCurveManager"""

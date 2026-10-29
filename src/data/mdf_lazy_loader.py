@@ -192,11 +192,21 @@ class MDFLazyLoader:
             for ci, ch in enumerate(group_obj.channels):
                 ch_name = ch.name
 
-                is_master = (
-                    master_ci is not None and ci == master_ci
-                ) or ch_name.lower() in mdf3_time_channels
+                # 主通道以 masters_db 为准。名字启发式只在 asammdf 没有登记主通道
+                # 时兜底（MDF3 老文件、以及部分 v4 转换器不写 master 的退化场景）。
+                # 以前两个条件是 OR：数据通道恰好叫 time / t / timestamp 时会顶掉
+                # 真正的主通道 —— 它被标记成时间轴、从变量列表里剔除，同时时间基
+                # 换成它的索引。用户看到的是「通道凭空消失」，且 X 轴口径也可能变。
+                is_authority_master = master_ci is not None and ci == master_ci
+                is_name_guess = (
+                    master_ci is None and ch_name.lower() in mdf3_time_channels
+                )
+                is_master = is_authority_master or is_name_guess
 
-                if is_master:
+                if is_authority_master:
+                    self._group_master_ci[gi] = ci
+                elif is_name_guess and gi not in self._group_master_ci:
+                    # 兜底路径里多个通道同时命中名字时，取第一个，避免后来者覆盖
                     self._group_master_ci[gi] = ci
 
                 unit = self._extract_channel_unit(ch)

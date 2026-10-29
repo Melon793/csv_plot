@@ -16,6 +16,22 @@ from src.core.template_models import extract_variables_from_config
 logger = get_logger(__name__)
 
 
+def _config_has_placeholders(config) -> bool:
+    """配置里是否存在失效占位（``invalid_curves`` 非空的子图）。
+
+    纯占位配置（曲线全部失效）同样是布局资产，不应被当成「空配置」。
+    """
+    try:
+        pages = config.normalized_pages()
+    except AttributeError:
+        return False
+    for page in pages:
+        for plot in getattr(page, "plots", None) or ():
+            if getattr(plot, "invalid_curves", None):
+                return True
+    return False
+
+
 class AutoSaveManager(QObject):
     """自动保存管理器"""
 
@@ -95,7 +111,12 @@ class AutoSaveManager(QObject):
         current_vars_set = set(current_vars)
 
         if not config_vars:
-            return False, "Auto-saved config has no variables"
+            # 纯占位配置也值得恢复：拒掉它会让「失效占位进 auto-save」在恢复侧
+            # 落空——用户所有曲线失效后退出，下次加载数据只剩空布局。占位不带
+            # 真实数据，恢复不会画错曲线，故不参与匹配率门槛（分母仍只算 curves）。
+            if not _config_has_placeholders(config):
+                return False, "Auto-saved config has no variables"
+            return True, "Auto-saved config has placeholders only, applying"
 
         if not current_vars_set:
             return True, "No current variables, applying auto-saved config"
