@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from src.core.config import (
+    DEFAULT_PADDING_VAL_Y,
     DEFAULT_SHOW_X_AXIS_LABEL,
     UI_DEBOUNCE_DELAY_MS,
     XRANGE_THRESHOLD_FOR_SYMBOLS,
@@ -550,7 +551,13 @@ class PlotUIManager(BasePlotManager):
         """配置绘图区域基本属性（包含性能优化配置）"""
         from src.ui.widgets.custom_viewbox import CustomViewBox
 
-        pw.plot_item = pw.addPlot(row=1, col=0, colspan=2, viewBox=CustomViewBox())
+        # defaultPadding=0.1：统一 Ctrl+Y（pyqtgraph suggestPadding）与
+        # 「自动缩放」（setYRange padding=DEFAULT_PADDING_VAL_Y）两条路径的
+        # Y 轴留白，消除切换跳变；X 轴无常开 autoRange，不受影响
+        pw.plot_item = pw.addPlot(
+            row=1, col=0, colspan=2,
+            viewBox=CustomViewBox(defaultPadding=DEFAULT_PADDING_VAL_Y),
+        )
         pw.view_box = pw.plot_item.vb
         pw.view_box.plot_widget = pw
         pw._connect_viewbox_signals()
