@@ -145,3 +145,56 @@ def test_load_unrelated_file_demotes_to_placeholder_keeps_region_in_domain(
     assert tuple(pw.mark_region.getRegion()) == new_range
     # 占位不参与标记统计（§9）：无可绘制曲线 → 统计表空
     assert _stat_rows(mw) == []
+
+
+def test_clear_plots_then_new_page_region_stays_in_data_domain(
+    loaded_window, qtbot, qapp
+):
+    """清除绘图后新建页：区间必须落在全局数据域，且不得把 (1/3, 2/3) 回写全局。
+
+    回归点：``clear_all_plots`` 把全局 ``saved_mark_range`` 置 None 但保留标记
+    按钮勾选，此时新建页的 ``restore_mark_regions`` 走 fallback；若拿空页 master
+    的默认 viewRange [0,1] 算中间 1/3，会建出 (0.33, 0.67) 的错位区间，并在
+    下一轮 restore 时把它回写成全局 saved，污染其它页（统计 count=0 / x1=x2 钳边）。
+    """
+    mw = loaded_window
+    pw = mw.pages[0].plot_widgets[0].plot_widget
+    assert pw.plot_variable("speed")
+
+    mw.layout_manager.toggle_mark_region(True)
+    qapp.processEvents()
+    assert mw.saved_mark_range is not None
+
+    mw.cursor_sync_manager.clear_all_plots()
+    qapp.processEvents()
+    # 前提：全局区间已清空但标记按钮仍勾选——这正是 fallback 的触发条件
+    assert mw.saved_mark_range is None
+    assert mw.mark_region_btn.isChecked()
+
+    # 画回曲线使全局数据域可用（loaded_window 为 50 行 → index [1, 50]）
+    assert pw.plot_variable("speed")
+    qapp.processEvents()
+    qtbot.wait(200)
+
+    page2 = mw.new_page()
+    qtbot.waitUntil(lambda: len(page2.plot_widgets) > 0, timeout=3000)
+    qapp.processEvents()
+    qtbot.wait(200)
+
+    mark2 = page2.plot_widgets[0].plot_widget.mark_region
+    assert mark2 is not None, "标记按钮勾选时新页应建出区间"
+    region = tuple(mark2.getRegion())
+    assert region[0] > 1.0, f"新页区间落在空页默认域 (0.33, 0.67)：{region}"
+    assert 1.0 <= region[0] < region[1] <= 50.0
+
+    saved = tuple(mw.saved_mark_range)
+    assert saved[0] > 1.0, f"全局 saved_mark_range 被空页默认域污染：{saved}"
+
+    # 新页区间罩得住数据 → 拖入曲线后统计应有非零样本数（错位区间的病征）
+    pw2 = page2.plot_widgets[0].plot_widget
+    assert pw2.plot_variable("rpm")
+    qapp.processEvents()
+    qtbot.wait(200)
+    rows = [r for r in _stat_rows(mw) if r.page == page2.title]
+    assert rows, "新页拖入曲线后统计表应出现该页行"
+    assert rows[0].entry.count > 1

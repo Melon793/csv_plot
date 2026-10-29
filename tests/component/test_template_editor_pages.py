@@ -241,3 +241,66 @@ def test_save_clamps_out_of_range_active_page(manager):
         assert saved.config["active_page"] == 1
     finally:
         editor.deleteLater()
+
+
+def _placeholder_config() -> PlotSessionConfig:
+    """一页两格：一格真曲线 + 占位，一格纯占位。"""
+    return PlotSessionConfig(
+        pages=[
+            PlotPageConfig(
+                title="page 1",
+                layout_rows=1,
+                layout_cols=2,
+                plots=[
+                    PlotConfig(curves=["speed"], invalid_curves=["ghost"]),
+                    PlotConfig(curves=[], invalid_curves=["only_placeholder"]),
+                ],
+            )
+        ]
+    )
+
+
+def test_yaml_keeps_invalid_curve_placeholders(manager):
+    """失效占位是布局资产：编辑器重新生成的 YAML 必须带上 invalid_curves。
+
+    回归点：生成器只写 curves 时，「编辑模板 → 保存」会静默清空全部占位，
+    而编辑器预览/统计全程不显示占位，用户无从察觉。
+    """
+    editor = _editor(manager, _placeholder_config())
+    try:
+        text = editor._yaml_edit.toPlainText()
+        assert "invalid_curves" in text
+        plots = yaml.safe_load(text)["pages"][0]["plots"]
+        assert plots[0]["curves"] == ["speed"]
+        assert plots[0]["invalid_curves"] == ["ghost"]
+        # 纯占位格子不得因 curves 为空提前 continue 而丢掉占位
+        assert plots[1]["curves"] == []
+        assert plots[1]["invalid_curves"] == ["only_placeholder"]
+        # 解析回来的配置能重建出同样的占位（读侧 from_dict 一直支持）
+        rebuilt = PlotSessionConfig.from_dict(yaml.safe_load(text))
+        assert [
+            plot.invalid_curves
+            for plot in rebuilt.normalized_pages()[0].plots
+        ] == [["ghost"], ["only_placeholder"]]
+    finally:
+        editor.deleteLater()
+
+
+def test_edit_and_save_without_edits_preserves_placeholders(manager, boxes):
+    """完整事故路径：存含占位模板 → 编辑器打开 → 一字不改直接保存 → 占位仍在。"""
+    template = manager.save_template(_placeholder_config(), "with-placeholder")
+    editor = _editor(manager, edit_template_id=template.metadata.id)
+    try:
+        _add_and_save(editor, "with-placeholder")
+    finally:
+        editor.deleteLater()
+    assert not boxes, f"保存不应弹窗：{boxes}"
+    saved = next(
+        item
+        for item in manager.get_all_templates()
+        if item.metadata.name == "with-placeholder"
+    )
+    plots = saved.config["pages"][0]["plots"]
+    assert plots[0]["curves"] == ["speed"]
+    assert plots[0]["invalid_curves"] == ["ghost"]
+    assert plots[1]["invalid_curves"] == ["only_placeholder"]

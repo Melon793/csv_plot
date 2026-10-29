@@ -71,3 +71,30 @@ class TestShouldApply:
         auto_save.auto_save(_make_config(["a"]))
         should, _ = auto_save.should_apply_auto_save([])
         assert should is True
+
+    def test_placeholder_only_config_applies(self, auto_save, app_settings):
+        """纯占位配置（曲线全部失效）是布局资产，必须允许恢复。
+
+        回归点：``extract_variables_from_config`` 只收 ``curves``，占位配置会被
+        当成「无变量」直接拒掉，于是「失效占位进 auto-save」在恢复侧落空——
+        用户所有曲线失效后退出，下次加载数据只剩空布局。
+        """
+        app_settings.set_auto_save_enabled(True)
+        auto_save.auto_save(
+            PlotSessionConfig(
+                plots=[PlotConfig(curves=[], invalid_curves=["ghost_a", "ghost_b"])]
+            )
+        )
+        should, reason = auto_save.should_apply_auto_save(["x", "y"])
+        assert should is True
+        assert "placeholder" in reason
+
+    def test_config_without_curves_or_placeholders_still_rejects(
+        self, auto_save, app_settings
+    ):
+        """既无曲线也无占位的空配置仍须拒绝（不得放宽成无条件恢复）。"""
+        app_settings.set_auto_save_enabled(True)
+        auto_save.auto_save(_make_config([]))
+        should, reason = auto_save.should_apply_auto_save(["x"])
+        assert should is False
+        assert "no variables" in reason

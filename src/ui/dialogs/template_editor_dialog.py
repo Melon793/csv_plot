@@ -295,10 +295,22 @@ class TemplateEditorDialog(QDialog):
                     curves = [curves]
                 if not isinstance(curves, list) or not curves:
                     lines.append("        curves: []")
-                    continue
-                lines.append("        curves:")
-                for curve in curves:
-                    lines.append(f"          - {cls._yaml_scalar(curve)}")
+                else:
+                    lines.append("        curves:")
+                    for curve in curves:
+                        lines.append(f"          - {cls._yaml_scalar(curve)}")
+                # 失效占位与 curves 同为布局资产（R16：不得静默丢弃）。编辑器
+                # 打开模板时用本函数重新生成全文，保存又以此文本为准，因此这里
+                # 漏写 invalid_curves 就等于「编辑 → 保存」清空全部占位。
+                invalid = plot.get("invalid_curves") or []
+                if isinstance(invalid, str):
+                    invalid = [invalid]
+                if isinstance(invalid, list) and invalid:
+                    lines.append("        # 失效占位：变量在当前数据中缺失，")
+                    lines.append("        # 保留格子与名字，数据回来时自动复活")
+                    lines.append("        invalid_curves:")
+                    for name in invalid:
+                        lines.append(f"          - {cls._yaml_scalar(name)}")
 
         return "\n".join(lines) + "\n"
 

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QInputDialog, QToolButton
+from PySide6.QtWidgets import QInputDialog, QMessageBox, QToolButton
 
 from src.ui.widgets.plot_tabs import MAX_PAGES
 
@@ -245,3 +245,46 @@ def test_page_limit_is_enforced(loaded_window, monkeypatch):
     assert mw.new_page() is None
     assert "最多支持 2 个绘图页" in mw._message_text
     assert MAX_PAGES >= 2
+
+
+def test_rename_rejects_duplicate_title(loaded_window, qtbot, monkeypatch):
+    """重命名不得产生重名页。
+
+    回归点：页标题是统计窗口分组键与 ``StatRow.key`` 的组成部分，两页重名会让
+    它们的统计行共用同一个 key，``replace_entries`` 原位刷新时把两条数据写进
+    同一行——表格静默显示错误/过期数字，页筛选也会同时放行两页。
+    """
+    mw = loaded_window
+    p2 = mw.new_page()
+    _wait_new_page_matrix(qtbot, p2)
+    first_title = mw.pages[0].title
+    assert p2.title != first_title
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(
+            lambda parent, title, text, *args, **kwargs: warnings.append(text)
+        ),
+    )
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *args, **kwargs: (first_title, True)),
+    )
+
+    before = p2.title
+    mw._on_tab_rename_requested(mw.plot_tabs.indexOf(p2.widget))
+    assert p2.title == before, "重名标题不得生效"
+    assert mw.plot_tabs.tabText(mw.plot_tabs.indexOf(p2.widget)) == before
+    assert warnings and first_title in warnings[0]
+
+    # 换成不重名的标题仍应正常生效（查重不得误伤正常路径）
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *args, **kwargs: ("分析 B", True)),
+    )
+    mw._on_tab_rename_requested(mw.plot_tabs.indexOf(p2.widget))
+    assert p2.title == "分析 B"

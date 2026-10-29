@@ -588,6 +588,14 @@ class MainWindow(QMainWindow):
         title = (title or "").strip()
         if not ok or not title or title == page.title:
             return
+        # 页标题是统计窗口分组键与 StatRow.key 的组成部分：两页重名会让它们的
+        # 统计行共用同一个 key，原位刷新（replace_entries）把两条数据写进同一行，
+        # 表格静默显示错误数字。故在此拒绝重名。
+        if any(other is not page and other.title == title for other in self.pages):
+            QMessageBox.warning(
+                self, "重命名绘图页", f"已存在名为「{title}」的绘图页，请换一个名称"
+            )
+            return
         page.title = title
         tab_index = self.plot_tabs.indexOf(page.widget)
         if tab_index >= 0:

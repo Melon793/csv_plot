@@ -786,9 +786,16 @@ class PlotPage:
         if saved:
             min_x, max_x = saved
         else:
-            width = view_max - view_min
-            min_x = view_min + width / 3
-            max_x = view_min + 2 * width / 3
+            # 全局 saved 为空（清除绘图后仍勾着标记按钮）时，不能拿空页 master
+            # 的默认 viewRange [0,1] 当数据域：那会建出 (0.33, 0.67) 的错位区间，
+            # 并在下一轮 restore 时经上面第 772 行回写成全局 saved，污染其它页。
+            # 优先取全局数据域（collect_global_x_range 自身会退到 cursor_x_domain）。
+            g_min, g_max = services.cursor_sync_manager.collect_global_x_range()
+            if g_min is None or g_max is None:
+                g_min, g_max = view_min, view_max
+            width = g_max - g_min
+            min_x = g_min + width / 3
+            max_x = g_min + 2 * width / 3
 
         for index, container in enumerate(self.plot_widgets):
             if self.cell_visible(index):
