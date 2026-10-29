@@ -764,13 +764,6 @@ class CursorManager:
 
         pw = self.pw
         view_box = pw.plot_item.getViewBox()
-        view_width_pixels = max(1, view_box.width())
-        view_height_pixels = max(1, view_box.height())
-
-        x_range = x_max - x_min
-        y_range = y_max - y_min
-        pixel_to_data_x = x_range / view_width_pixels
-        pixel_to_data_y = y_range / view_height_pixels
 
         # 缓存 font metrics
         if not hasattr(self, '_cached_font_metrics'):
@@ -779,9 +772,8 @@ class CursorManager:
             self._cached_font_metrics = QFontMetrics(text_font)
             self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
 
-        font_metrics = self._cached_font_metrics
         label_height_pixels = self._cached_label_height_pixels
-        label_height_data = label_height_pixels * pixel_to_data_y
+        font_metrics = self._cached_font_metrics
 
         # 按 cursor_id 分组（保留原始索引）
         cursor_groups = {}
@@ -797,8 +789,7 @@ class CursorManager:
         for cid, group_values in sorted(cursor_groups.items()):
             # --- Phase 1: 数据过滤 ---
             visible_labels, filtered_out_indices = self._filter_labels_phase1(
-                group_values, x_min, x_max, y_min, y_max,
-                label_height_data, font_metrics,
+                group_values, x_min, x_max,
             )
             all_filtered_out_indices.update(filtered_out_indices)
             if not visible_labels:
@@ -839,25 +830,23 @@ class CursorManager:
         cursor_values: list,
         x_min: float,
         x_max: float,
-        y_min: float,
-        y_max: float,
-        label_height_data: float,
-        font_metrics,
     ) -> tuple:
-        """Phase 1: 在上游过滤基础上增加边界余量二次过滤
+        """Phase 1: 在上游过滤基础上二次过滤（仅 x 方向）
 
         返回 (visible_labels, filtered_out_indices)。
         visible_labels: 按 y_pos 降序排列的可见标签列表（高 y 值在上，保留原始索引）。
         filtered_out_indices: 被过滤掉的标签 pool index 集合（延迟到所有 cursor group
         处理完毕后统一隐藏，避免多 cursor 共享 pool 时相互干扰）。
         注意：cursor_values 中的 item 应已包含 '_orig_idx' 字段。
-        """
-        margin = label_height_data * 0.5
 
+        y 方向不做死区过滤：交点靠上/下边缘时标签由 _layout_column 的
+        边界 clamp 吸附到边缘内侧完整显示（设计原则：交点在视图内时
+        标签必须可见，宁可在视口内重叠也不画出视口消失）；y 出界的
+        交点已在上游 update_cursor_label 过滤（circle 与标签都不显示）。
+        """
         visible = [
             v for v in cursor_values
-            if y_min + margin < v['y_pos'] < y_max - margin
-            and x_min < v['x_pos'] < x_max
+            if x_min < v['x_pos'] < x_max
         ]
 
         # 收集被过滤掉的 pool index（不立即隐藏，由调用方统一处理）
@@ -934,23 +923,39 @@ class CursorManager:
         # 计算列容量
         margin_pixels_scene = label_height_pixels * 0.1
         available_height = scene_height - 2 * margin_pixels_scene
-        per_column_capacity = max(1, int(available_height / label_height_total))
+        raw_capacity = int(available_height / label_height_total)
+
+        # 极限保护：图高连一行标签都放不下（< 标签高+间距+2×margin）→
+        # 返回该 cursor 组全部 pool index 供统一隐藏。
+        # 必须位于 _apply_column_hysteresis 之前：若在滞回计算之后早退，
+        # 滞回状态已被喂入 new_column_count = n_labels，窗口恢复正常
+        # 尺寸后需连续 3 帧（HYSTERESIS_THRESHOLD）才收敛。
+        if raw_capacity < 1:
+            hide_indices = {item['_orig_idx'] for item in visible_labels}
+            return [], hide_indices
+
+        per_column_capacity = max(1, raw_capacity)
 
         # 列数计算（带滞回）
         n_labels = len(visible_labels)
         new_column_count = max(1, int(np.ceil(n_labels / per_column_capacity)))
         column_count = self._apply_column_hysteresis(new_column_count)
 
-        # 总标签高度超 plot 高度时的极限保护
-        if per_column_capacity < 1:
-            # 窗口极小，返回所有标签的 pool index 供调用方统一隐藏
-            hide_indices = {item['_orig_idx'] for item in visible_labels}
-            return [], hide_indices
-
         # 计算列放置方向
         cursor_scene_x = cursor_scene_pos.x() if cursor_scene_pos else 0
         right_available = x_max_scene - cursor_scene_x - gap_to_cursor
         left_available = cursor_scene_x - gap_to_cursor - x_min_scene
+
+        # 列数按可用宽度截断：溢出列会被 _compute_column_positions 压缩到
+        # 右侧、绘制在视口外被裁剪（消失）。截断后超容量标签由
+        # _layout_column 的防重叠 Pass 压缩间距消化——最坏情况列内重叠，
+        # 但全部在视口内（重叠严格优于消失）。
+        col_width = max_label_width_px + col_gap_pixels
+        max_cols = (
+            self._possible_columns(right_available, col_width)
+            + self._possible_columns(left_available, col_width)
+        )
+        column_count = max(1, min(column_count, max_cols))
 
         # 分配列到两侧
         column_sides = self._compute_column_positions(
@@ -1003,6 +1008,11 @@ class CursorManager:
             self._column_hysteresis_counter = 0
         return self._column_count
 
+    @staticmethod
+    def _possible_columns(available: float, col_width: float) -> int:
+        """单侧可容纳的列数（与 _compute_column_positions 同口径）"""
+        return max(0, int(available / col_width)) if available > col_width else 0
+
     def _compute_column_positions(
         self,
         column_count: int,
@@ -1017,8 +1027,8 @@ class CursorManager:
         """
         sides = []
         col_width = max_label_width + col_gap
-        right_cols_possible = max(0, int(right_available / col_width)) if right_available > col_width else 0
-        left_cols_possible = max(0, int(left_available / col_width)) if left_available > col_width else 0
+        right_cols_possible = self._possible_columns(right_available, col_width)
+        left_cols_possible = self._possible_columns(left_available, col_width)
 
         # 优先填充右侧
         right_used = min(column_count, right_cols_possible)
@@ -1057,6 +1067,25 @@ class CursorManager:
             start += size
         return result
 
+    @staticmethod
+    def _clamp_label_y(
+        target_y: float,
+        col_y_min: float,
+        col_y_max: float,
+        half_height: float,
+    ) -> float:
+        """标签垂直位置边界 clamp（含倒挂防御）
+
+        正常情况夹到 [col_y_min+half, col_y_max-half]；极矮图（图高 <
+        标签高+2×margin）时区间倒挂（下界 > 上界），返回列垂直中心，
+        保证标签中心不出界（至多半截贴边，好于完全按倒挂区间推出界外）。
+        """
+        lo = col_y_min + half_height
+        hi = col_y_max - half_height
+        if lo > hi:
+            return (col_y_min + col_y_max) / 2
+        return max(lo, min(hi, target_y))
+
     def _layout_column(
         self,
         labels: list,
@@ -1079,8 +1108,9 @@ class CursorManager:
             label = labels[0]
             scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
             target_y = scene_pos.y() - self.LABEL_Y_OFFSET  # 向上偏移
-            target_y = max(col_y_min + half_height,
-                           min(col_y_max - half_height, target_y))
+            target_y = self._clamp_label_y(
+                target_y, col_y_min, col_y_max, half_height
+            )
             return [LabelLayout(
                 layout_x=col_scene_x, layout_y=target_y,
                 index=label['_orig_idx'],
@@ -1116,9 +1146,10 @@ class CursorManager:
             # 与上一个标签防重叠（包括第一个标签与列顶部的约束）
             target_y = max(target_y, prev_bottom + gap_pixels + half_height)
 
-            # 边界 clamp
-            target_y = max(col_y_min + half_height,
-                           min(col_y_max - half_height, target_y))
+            # 边界 clamp（含倒挂防御）
+            target_y = self._clamp_label_y(
+                target_y, col_y_min, col_y_max, half_height
+            )
 
             results.append(LabelLayout(
                 layout_x=col_scene_x, layout_y=target_y,
