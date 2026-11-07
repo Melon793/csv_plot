@@ -855,7 +855,7 @@ class FastDataLoader(BaseDataLoader):
         if self._progress_cb:
             self._progress_cb(20)
 
-        _LARGE_FILE_THRESHOLD = 2 * 1024 * 1024 * 1024  # 2GB
+        _LARGE_FILE_THRESHOLD = 1 * 1024 * 1024 * 1024  # 1GB
         try:
             file_size = os.path.getsize(path)
         except OSError:
@@ -883,7 +883,7 @@ class FastDataLoader(BaseDataLoader):
                 # 额外占用 ~1× 内存。
                 kwargs["low_memory"] = False
                 return pd.read_csv(path, **kwargs)
-            # —— 超大文件（>2GB 或无法获取大小）：保留 chunksize 分批读取防止 OOM
+            # —— 超大文件（>1GB 或无法获取大小）：保留 chunksize 分批读取防止 OOM
             kwargs["low_memory"] = True  # 超大文件分列推断，减少峰值内存
             chunks: list[pd.DataFrame] = []
             for idx, chunk in enumerate(
