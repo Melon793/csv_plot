@@ -317,7 +317,7 @@ exe = EXE(
     name=NAME,
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,           # 剥离符号表, 减小体积
+    strip=not is_win,     # 剥离符号表减小体积; Windows 无 GNU strip.exe, 开了构建必失败
     upx=False,             # 禁用 UPX 压缩, 避免解压开销
     upx_exclude=[
         "vcruntime140.dll",
@@ -342,7 +342,7 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=True,
+    strip=not is_win,  # 同 EXE: Windows 无 GNU strip.exe
     upx=False,
     upx_exclude=[],
     name=NAME,
