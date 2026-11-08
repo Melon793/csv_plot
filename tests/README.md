@@ -8,29 +8,35 @@
 
 | 层 | 用例数 | 实测耗时（串行） | 状态 |
 |---|---|---|---|
-| unit（纯逻辑，无 Qt） | 588 | ~2.8s | 稳定运行 |
-| component（offscreen 控件级） | 456 | ~11.5s | 稳定运行 |
-| e2e（主窗口冒烟） | 82 | ~11.1s | 稳定运行 |
-| **全量** | **1126** | **~25.7s**（并行 `-n 4 --dist loadfile` **9.3s**；带 `--cov` 约 30s） | `1126 passed` |
+| unit（纯逻辑，无 Qt） | 860 | ~5.4s | 稳定运行 |
+| component（offscreen 控件级） | 742 | ~18.3s | 稳定运行 |
+| e2e（主窗口冒烟） | 146 | ~29.3s | 稳定运行 |
+| **全量** | **1748** | **~54.5s**（并行 `-n 4 --dist loadfile` **17.6s**；带 `--cov` **60.8s**） | `1748 passed` |
 
-> 上表数字为 **2026-09-22 在 macOS arm64 / offscreen 实测**（`--durations=20` 口径）。
-> 优化前的同日基线是 **1127 例 / 73.5s**：用例数 **+1 −2**（补 1 条 4×3 显式矩阵用例、
-> 合并 4 条重复的抽屉门禁用例为 2 条参数化），耗时差的 48s 来自固化等待改造与并行化；
-> component 层从 41.6s 降到 11.5s 而用例数不变（只改等待，不删断言），e2e 27.4s → 11.1s。
-> 更早的 214 例 / ~4.2s 是 Phase 1 快照，早已过期——改数字时请重跑，别顺手上调。
+> 上表数字为 **2026-10-30 在 macOS arm64 / offscreen 实测**（`-q` 口径，串行）。
+> 相对 2026-09-22 的基线（1126 例 / 25.7s），用例数 **+622**：多标签页、统计窗口重构、
+> 失效曲线占位、数据层容错与 BLF 解码等模块落地；三层按比例增长（unit 588→860、
+> component 456→742、e2e 82→146），单例均值 6.3ms / 24.6ms / 200ms，无效率退化。
+> 更早的沿革仅作记录：2026-09-22 之前是 1127 例 / 73.5s（差异来自固化等待改造与并行化，
+> component 41.6s→11.5s、e2e 27.4s→11.1s，只改等待不删断言）；214 例 / ~4.2s 是
+> Phase 1 快照。**改数字时请重跑，别顺手上调。**
 
-覆盖率现状（`--cov=src`）：
+覆盖率现状（`--cov=src`，2026-10-30 实测）：
 
-- 总体 **71%**（15910 语句 / 4671 未覆盖）；
-- 已建测试的模块：`main_window` 85%、`excel_loader` 87%、`mdf_lazy_loader` 80%、
-  `mark_region_manager` 77%、`font_cache` 67%、`plot_widget` 64%、`layout_manager` 60%、
-  `cursor_manager` 55%、`file_loader_manager` 49%、`curve_strategy` 47%、`variable_list` 44%；
-- 满分：`template_models` / `plot_config` / `utils.paths` 均 100%；
-- 仍是短板的三个：`splash_screen` **15%**（142 语句里 120 未中，启动画面无冒烟用例）、
-  `time_correction` **21%**（39 语句里 31 未中，只有抽屉侧的间接覆盖）、
-  `curve_strategy` **47%**（32 语句里 17 未中）。
-  `cursor_sync_manager` 已从早期快照的 8% 升到 **48%**（460 语句里 240 未中）——旧数字
-  是 `cursor_x_domain` 系列用例落地前的，别再照抄。
+- 总体 **79%**（20905 语句 / 4355 未覆盖），较 2026-09-22 的 71%（15910/4671）提升；
+- 本版新模块：`plot_tabs` **98%**、`status_drawer` **96%**、`plot_page` **81%**、
+  `mark_stats` **78%**、`plot_context` **81%**、`gc_guard` **100%**、`theme` **100%**；
+- 已建测试模块的提升：`cursor_manager` 80%（原 55%）、`file_loader_manager` 70%（原 49%）、
+  `cursor_sync_manager` 71%（原 48%）、`variable_list` 66%（原 44%）、`layout_manager` 67%（原 60%）、
+  `plot_widget` 68%（原 64%）、`main_window` 84%、`excel_loader` 87%、`mdf_lazy_loader` 80%、
+  `mark_region_manager` 83%、`font_cache` 67%、`curve_strategy` 51%；
+- 满分：`data_types` / `gc_guard` / `plot_config` / `template_models` / `theme` /
+  `can_db_banner` / `sheet_selector` / `utils.paths` 均 100%；
+- 仍是短板：`time_correction` **21%**（39 语句里 31 未中，只有抽屉侧的间接覆盖）、
+  `splash_screen` **38%**（158 语句里 98 未中，已从 15% 提升，缺启动动画与进度分支）、
+  `curve_strategy` **51%**（35 语句里 17 未中）、`plot_variable_editor` **54%**
+  （474 语句里 218 未中，绝对缺口最大的非表格模块）、`log_viewer` **55%**。
+  `table_dialog` 70%（1764 语句里 528 未中）是绝对缺口最大的单文件。
 
 
 ## 2. 快速开始
@@ -44,14 +50,14 @@ uv sync --group dev
 
 | 命令 | 用途 | 实测结果 |
 |---|---|---|
-| `uv run pytest -m unit` | 日常开发高频回归（秒级） | 588 passed / ~2.8s |
-| `uv run pytest -m "unit or component"` | 提交前自检 | 1044 passed / ~14.3s |
-| `uv run pytest` | CI 全量 | 1126 passed / ~25.7s |
-| `uv run pytest -m e2e` | e2e 冒烟（含真实主窗口） | 82 passed / ~11.1s |
-| `uv run pytest --cov=src --cov-report=term-missing` | 覆盖率（含未覆盖行号） | 总体 71% |
-| `uv run pytest -m component -k legend` | 精准过滤（marker + 关键字组合） | 46 passed / ~0.9s |
-| `uv run pytest -m "unit or component" -n 4 --dist loadfile` | 提交前自检（并行） | 1044 passed / ~6.1s |
-| `uv run pytest -n 4 --dist loadfile` | CI 全量（并行） | 1126 passed / ~9.3s |
+| `uv run pytest -m unit` | 日常开发高频回归（秒级） | 860 passed / ~5.4s |
+| `uv run pytest -m "unit or component"` | 提交前自检 | 1602 passed / ~22.9s |
+| `uv run pytest` | CI 全量 | 1748 passed / ~54.5s |
+| `uv run pytest -m e2e` | e2e 冒烟（含真实主窗口） | 146 passed / ~29.3s |
+| `uv run pytest --cov=src --cov-report=term-missing` | 覆盖率（含未覆盖行号） | 总体 79% |
+| `uv run pytest -m component -k legend` | 精准过滤（marker + 关键字组合） | 49 passed / ~1.0s |
+| `uv run pytest -m "unit or component" -n 4 --dist loadfile` | 提交前自检（并行） | 1602 passed / ~8.6s |
+| `uv run pytest -n 4 --dist loadfile` | CI 全量（并行） | 1748 passed / ~17.6s |
 
 > 注：本机 `uv` 不在 PATH 时使用绝对路径 `~/.local/bin/uv`，或先将其加入 shell 配置。
 
@@ -59,14 +65,15 @@ uv sync --group dev
 
 `pytest-xdist` 与 `pytest-timeout` 已在 dev 组：`uv sync --group dev` 即可。
 
-**并行口径**（2026-09-22 实测：`unit or component` 串行 14.2s → `-n 4 --dist loadfile` 6.1s；
-全量串行 25.7s → 9.3s）。选型结论：
+**并行口径**（2026-10-30 实测：`unit or component` 串行 22.9s → `-n 4 --dist loadfile` 8.6s；
+全量串行 54.5s → 17.6s）。选型结论：
 
 - 用 `--dist loadfile`：同文件的用例落在同一 worker，避免"同文件内的用例互相踩环境"
-  （`-m unit -n auto` 实测 **无收益**——unit 只有 3.2s，worker 启动与 import 开销吃掉全部节省，
+  （`-m unit -n auto` 实测 **无收益**——unit 只有 5.4s，worker 启动与 import 开销吃掉全部节省，
   日常单跑 unit 直接用串行）；
-- e2e 并行实测稳定（1126 passed × 多次），未发现 README 陷阱 #3 类的顺序依赖——因为
-  `CSV_PLOT_CONFIG_DIR` 由 `tempfile.mkdtemp` 每进程一份，worker 之间本就隔离；
+- e2e 并行整体稳定，但**仍有偶发挂起**：2026-10-30 的三次并行全量中有 1 次 4 个 worker
+  全部 0% CPU 卡住（陷阱 #10 的残余窗口，其中一个 worker 还被重启过），重跑 17.6s 通过。
+  撞到 `--timeout=120` 报出全线程栈时按该条排查并重跑，不要当成新回归；
 - 本机 10 核（4 性能核）：`-n 4` 与 `-n auto` 的差别在 1s 内，选 `-n 4` 留出余量给
   后台任务，也避免 10 个 worker 争用导致时序敏感用例抖动。
 
@@ -75,7 +82,7 @@ uv sync --group dev
 | 护栏 | 行为 |
 |---|---|
 | `--timeout=120 --timeout-method=thread` | 任何用例超 120s 立即中断并打印全线程栈。历史上"永久挂起"（陷阱 #1/#4/#10）从此是**可诊断失败**而不是静默卡死；实测把 `--timeout=0.05` 加到一个 0.3s 用例上，能准确点名 `tests/component/test_table_dialog_close_destroys.py:54` |
-| `--durations=20` + `>1s` 点名 | 每轮收尾都列最慢 20 条；另有 `SLOW_TEST_SECONDS = 1.0` 的钩子（`tests/conftest.py`）把超过 1s 的用例红字点名——当前最慢单例仅 0.30s，留 3× 余量，优化被吃回去时当场可见 |
+| `--durations=20` + `>1s` 点名 | 每轮收尾都列最慢 20 条；另有 `SLOW_TEST_SECONDS = 1.0` 的钩子（`tests/conftest.py`）把超过 1s 的用例红字点名——当前最慢单例 **1.42s**（`test_blf_import_flow::test_a_given_up_restart_clears_the_force_dialog_flags`），已触及点名线；紧随其后的 0.68s（多标签页标记区间域）与 0.42s 仍在余量内。该例是首条超线用例，下轮若继续增长应优先优化 |
 
 > 护栏的"点名"钩子在 xdist 下由控制器汇总各 worker 的报告，只打印一次（已实测）。
 
@@ -86,23 +93,26 @@ tests/
 ├── conftest.py                  # 全局环境：offscreen、路径隔离、marker 自动分层、>1s 耗时护栏
 ├── fixtures/
 │   ├── data_factory.py          # 合成数据工厂（make_timeseries / write_csv / write_xlsx / write_mdf）
-│   └── waits.py                 # 等待工具：wait_until / settle / flush_deferred_deletes / pump
-├── unit/                        # unit 层：无 Qt 依赖的纯逻辑测试
-│   ├── core/                    #   config / plot_config / settings / storage /
-│   │                            #   template_* / auto_save
-│   ├── data/                    #   loader / metadata / excel / var_info …
+│   ├── waits.py                 # 等待工具：wait_until / settle / flush_deferred_deletes / pump
+│   ├── bus_data_access.py       # 公开 BLF / DBC / ARXML 样本的定位与完整性校验
+│   └── bus_data/                # 公开总线样本 + manifest + licenses（非合成夹具的唯一例外）
+├── unit/                        # unit 层：无 Qt 依赖的纯逻辑测试（27 个用例文件）
+│   ├── core/                    #   config / plot_config / settings / storage / template_* /
+│   │                            #   auto_save / crash_handler / font_family_memo
+│   ├── data/                    #   loader / excel / mdf / blf / can_* / var_info / file_info …
 │   │   ├── conftest.py          #   var_info 共用的合成 loader 夹具（mdf4/mdf3/attr4/attr3/csv）
-│   │   └── test_var_info_{mdf,stats}.py   # var_info 用例按 MDF 侧 / 统计侧分文件
-│   ├── ui/                      #   status_drawer_reveal
+│   │   └── test_var_info_{mdf,stats,blf}.py  # var_info 用例按数据源分文件
+│   ├── ui/                      #   status_drawer_reveal / plot_style_threshold
 │   └── utils/                   #   paths
-├── component/                   # component 层：offscreen + pytest-qt 控件级测试（47 个用例文件）
+├── component/                   # component 层：offscreen + pytest-qt 控件级测试（70 个用例文件）
 │   ├── conftest.py              #   plot_factory + legend/表格/变量信息弹窗的共享夹具
 │   ├── _vid_shared.py           #   变量信息弹窗的替身主窗口与等待 helper（非用例文件）
 │   ├── _tab_mode_shared.py      #   数值表 tab 模式的 loader 替身（非用例文件）
-│   └── test_*.py                #   legend / viewbox / 表格 / 游标 / 抽屉 / 生命周期
-└── e2e/                         # e2e 层：真实 MainWindow 冒烟（9 个用例文件）
+│   ├── blf_flow_doubles.py      #   BLF 导入流的后台线程 / 对话框替身（非用例文件）
+│   └── test_*.py                #   legend / viewbox / 表格 / 游标 / 抽屉 / 多页 / 生命周期
+└── e2e/                         # e2e 层：真实 MainWindow 冒烟（17 个用例文件）
     ├── conftest.py              #   dialog_stubs / main_window / loaded_window 夹具 + 清理竞态过滤
-    └── test_*.py                #   启动 / 加载绘图 / 状态栏 / 抽屉 / 窗口几何
+    └── test_*.py                #   启动 / 加载绘图 / 状态栏 / 抽屉 / 多页 / 模板恢复 / 窗口几何
 ```
 
 四层职责与运行策略：
@@ -230,7 +240,9 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 
 ## 7. tmp/ 脚本转正流程（五步法）
 
-历史经验：`tmp/` 下的 offscreen 验证脚本是最有价值的测试资产来源，但**不能直接搬运**。标准转正流程：
+历史经验：`tmp/` 下的 offscreen 验证脚本是最有价值的测试资产来源，但**不能直接搬运**。
+`tmp/` 现已改为按日期归档且被 gitignore，下表提到的脚本在仓库中已不可见、仅作历史记录；
+其中已转正的能力见「状态」列的 ✅ 项，其余如需追溯请查 git 历史。标准转正流程：
 
 1. **依赖审计**：grep 脚本对分支特定模块（如 `viewbox_state_compat`、`batched_xlink`）的引用，仅在当前分支存在的才可转正；
 2. **API 核对**：对照当前分支现行语义（如 legend 拖拽"默认移动 / Ctrl 复制 / Shift 忽略"），基于旧设计的脚本须按现行语义重写；
@@ -258,30 +270,42 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 
 | 模块 | 语句数 | 覆盖率 | 破冰/深化途径 |
 |---|---|---|---|
-| `src/ui/splash_screen.py` | 142 | **15%** | `src/ui` 最深的洞，且从无冒烟用例：`test_splash_screen.py` 起停 + 进度回调 |
-| `src/ui/dialogs/time_correction.py` | 39 | **21%** | 只有抽屉/游标用例的间接覆盖：补 `test_time_correction.py`（偏移解析与越界分支） |
-| `src/ui/cursor_sync_manager.py` | 460 | 48% | ✅ 已破冰（`cursor_x_domain` 系列）；深化：链接/解链与恢复路径 |
-| `src/ui/variable_list.py` | 328 | 44% | ✅ 已破冰；深化：搜索/多选/拖拽出口 |
-| `src/ui/file_loader_manager.py` | 869 | 49% | ✅ 已破冰；深化：reload 全流程、错误路径 |
-| `src/ui/layout_manager.py` | 633 | 60% | ✅ 已破冰；深化：多子图布局/拖拽重排 |
-| `src/ui/main_window.py` | 780 | 85% | ✅ 已破冰；深化：模板菜单/快捷键全集 |
+| `src/ui/dialogs/time_correction.py` | 39 | **21%** | 唯一仍在 20% 量级的洞：补 `test_time_correction.py`（偏移解析与越界分支） |
+| `src/ui/splash_screen.py` | 158 | **38%** | 已从 15% 提升（`test_splash_startup_guard.py`）；剩余为启动动画与进度回调分支 |
+| `src/core/curve_strategy.py` | 35 | **51%** | 纯逻辑：补单/多曲线切换与替身降级分支 |
+| `src/ui/plot_variable_editor.py` | 474 | **54%** | 绝对缺口 218 行：编辑器增删行/排序/颜色/搜索联动 |
+| `src/ui/widgets/log_viewer.py` | 220 | **55%** | 日志窗口过滤/清空/自动滚动 |
+| `src/ui/dialogs/axis.py` | 60 | **60%** | 只有打开路径覆盖：补校验与越界分支 |
+| `src/ui/widgets/variable_search_bar.py` | 336 | **62%** | 搜索/键盘导航/空结果 |
+| `src/ui/layout_manager.py` | 635 | 67% | ✅ 已破冰（60%→67%）；深化拖拽重排与隐藏页脏补建 |
+| `src/ui/widgets/event_handler.py` | 184 | 69% | 交互入口分支（框选/双击/中键） |
+| `src/ui/plot_config_manager.py` | 272 | 69% | 模板应用失败回退与匹配率提示 |
+| `src/ui/table_dialog.py` | 1764 | 70% | 绝对缺口 528 行：tab 模式/冻结列/散点图分支 |
+| `src/ui/file_loader_manager.py` | 1341 | 70% | ✅ 已从 49% 提升；深化 reload 错误路径与取消 |
+| `src/ui/cursor_sync_manager.py` | 539 | 71% | ✅ 已破冰（48%→71%）；深化链接/解链与恢复路径 |
+| `src/ui/main_window.py` | 1174 | 84% | ✅ 已破冰；深化模板菜单/快捷键全集 |
 
 ### Phase 3：e2e 从 0 到 1（已完成 ✅ / 剩余项）
 
 - ✅ `test_app_boot.py`：启动 → 主窗口构建 → 初始状态 → 空重载防护；
 - ✅ `test_load_and_plot.py`：加载 CSV → 变量列表 → 拖拽绘图 → Ctrl+R/Ctrl+Y 快捷键；
-- `test_template_roundtrip.py`：保存模板 → 清空 → 应用恢复（含冲突路径）；
-- reload 全流程用例（历史 bug 密集区：游标链接、Y 轴可见性、变量搜索栏数据源）；
-- `test_splash_screen.py`：启动画面冒烟（15%，`src/ui` 里最深的洞）。
+- ✅ 模板恢复：`test_template_restore_range.py`（应用模板后视图对齐数据域）、
+  `test_invalid_curve_template.py`（占位进模板的往返不丢不重）、
+  `test_plot_tabs_reload_template.py`（多页重载与模板 v2）；
+- ✅ reload 全流程：`test_async_load_unlock.py`（加载中解锁）、
+  `test_load_failure_state_recovery.py`（失败不清旧数据）、
+  `test_plot_tabs_reload_template.py`（隐藏页重载）；
+- ✅ 启动冒烟：`test_splash_startup_guard.py`（splash 覆盖率 15%→38%，剩余动画/进度分支）。
 
 ### unit / component 补强
 
-- `time_correction`（21%）与 `curve_strategy`（47%）、`font_cache`（67%）：src 层遗留空白，
+- `time_correction`（21%）、`curve_strategy`（51%）、`font_cache`（67%）：src 层遗留空白，
   纯逻辑单元测试即可覆盖；
 - `mdf_lazy_loader`（80%）：剩余集中在 asammdf 通道枚举与文件尾解析分支，用合成小型 MDF 补；
 - `excel_loader`（87%）：calamine 快路径已覆盖，缺的是 openpyxl 回退与多 sheet 选择分支；
-- component：Y 冻结转正（第 7 节清单）、游标管理（`cursor_manager` 904 语句 55%）、
-  区间标记（`mark_region_manager` 105 语句 77%）。
+- component：游标管理 `cursor_manager`（916 语句 80%）、区间标记 `mark_region_manager`
+  （124 语句 83%）已大幅补强；下一步是 `plot_variable_editor`（474 语句 54%）与
+  `table_dialog`（1764 语句 70%，绝对缺口 528 行）。
 
 ### Phase 4：护栏与 CI
 
@@ -289,7 +313,7 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 - ✅ 耗时护栏：`--durations=20` + `tests/conftest.py` 的 `>1s` 点名钩子；
 - ✅ 并行：`pytest-xdist` 全量 `-n 4 --dist loadfile`（见 2.1；`-m unit -n auto` 实测无收益，已否）；
 - GitHub Actions 三平台矩阵（macOS / Windows / Linux，offscreen 模式无需 xvfb）；
-- 覆盖率基线护栏：`--cov-fail-under=65` 防回退（2026-09-22 实测总体 71%，留 6 点余量；
-  原先计划的 30 早已低于真实值，起不到防回退作用）；
+- 覆盖率基线护栏（**待落地**）：计划加 `--cov-fail-under=75` 防回退（2026-10-30 实测总体
+  79%，若沿用原计划的 65 只剩 14 点余量、门槛偏松；先确认 CI 平台差异再定值）；
 - `pytest-benchmark` 加载/降采样基线，守护滚轮合并节流等历史优化成果；
 - 可选：`hypothesis` 属性测试覆盖 loader 边界输入。

@@ -79,9 +79,18 @@ csv_plot/
 │   ├── build_exe_pyinstaller    # macOS/Linux PyInstaller 打包脚本
 │   ├── build_exe_pyinstaller.bat # Windows PyInstaller 打包批处理
 │   ├── build_win.py             # Windows Nuitka 编译脚本
-│   └── csv_plot_pyinstaller.spec # PyInstaller spec 配置
+│   ├── csv_plot_pyinstaller.spec # PyInstaller spec 配置
+│   ├── fetch_blf_fixtures.py    # BLF / DBC / ARXML 测试样本拉取（含 licenses 清单）
+│   └── generate_build_info.py   # 从 pyproject 生成 _build_info.py（打包期版本注入）
+├── tests/                       # 测试体系（详见 tests/README.md）
+│   ├── conftest.py              #   全局环境：offscreen、路径隔离、marker 分层、耗时护栏
+│   ├── fixtures/                #   合成数据工厂 data_factory / waits / bus_data 样本
+│   ├── unit/                    #   纯逻辑（无 Qt）
+│   ├── component/               #   offscreen 控件级
+│   └── e2e/                     #   真实 MainWindow 冒烟
 └── src/                         # 模块化源码
     ├── __init__.py
+    ├── _version.py              # 版本解析：_build_info > pyproject > importlib.metadata
     ├── app/
     │   └── plot_context.py      # PlotContext 服务层（依赖注入）
     ├── core/
@@ -91,6 +100,8 @@ csv_plot/
     │   ├── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
     │   ├── font_cache.py        # 字体缓存（基于 AppSettings）
     │   ├── logger.py            # Logger 日志管理器
+    │   ├── crash_handler.py     # 未处理异常写崩溃日志（打包版无控制台时的兜底）
+    │   ├── gc_guard.py          # worker 线程屏蔽自动 GC（跨线程析构死锁防护）
     │   ├── settings.py          # AppSettings 统一配置管理器 + ConfigKey 枚举
     │   ├── plot_config.py       # PlotSessionConfig / PlotConfig 配置模型
     │   ├── template_models.py   # PlotTemplate / TemplateMetadata 模板数据模型
@@ -102,19 +113,24 @@ csv_plot/
     │   ├── excel_loader.py      # ExcelDataLoader Excel 加载（calamine / openpyxl）
     │   ├── base_loader.py       # BaseDataLoader 基础加载器父类
     │   ├── mdf_lazy_loader.py   # MDFLazyLoader MDF4/DAT 按需加载 + LRU 缓存
+    │   ├── mdf_attribution.py   # MDF 变量归属提取（纯函数，无 Qt / asammdf 依赖）
     │   ├── blf_loader.py        # BLFLazyLoader BLF 报文扫描分桶 + 按需解码
     │   ├── can_database.py      # CanDatabaseSet DBC / ARXML 语义层（canmatrix）
     │   ├── can_decode.py        # numpy 向量化位段解码（含 float / 补码 / mux）
+    │   ├── var_info.py          # 变量信息统一模型（MDF 枚举 / BLF 信号 / 统计）
+    │   ├── file_info.py         # 文件级信息（状态栏「文件信息」抽屉数据源）
     │   └── metadata.py          # VarMetadata 数据类 + 有效性分类工具
     ├── utils/
     │   ├── paths.py             # resource_path 资源路径解析
     │   └── platform_setup.py    # 平台初始化（字体/DPI）
     └── ui/
         ├── main_window.py       # MainWindow 主窗口
+        ├── theme.py             # 界面色板与文字层级（网格选择器 / 状态栏抽屉共用）
         ├── drag_drop.py         # 拖放解析
         ├── table_dialog.py      # DataTableDialog + PandasTableModel + XYScatterPlotDialog
         ├── variable_list.py     # MyTableWidget 变量列表面板
-        ├── mark_stats.py        # MarkStatsWindow 标记统计窗口
+        ├── variable_actions.py  # 变量操作共享实现（右键菜单 / 变量信息联动按钮）
+        ├── mark_stats.py        # MarkStatsWindow 标记统计窗口（扁平表格 + 筛选/排序/导出）
         ├── plot_config_manager.py  # PlotConfigManager 配置协调
         ├── plot_variable_editor.py  # PlotVariableEditorDialog 变量编辑器
         ├── main_window_base_manager.py  # MainWindow 基础管理器
@@ -129,6 +145,7 @@ csv_plot/
         │   ├── time_correction.py  # TimeCorrectionDialog 时间修正
         │   ├── sheet_selector.py  # SheetSelectorDialog Excel 工作表选择
         │   ├── log_window.py    # LogWindow 日志窗口
+        │   ├── variable_info_dialog.py  # VariableInfoDialog 变量信息窗口（全局单例 + 标签累积）
         │   ├── can_db_selector.py  # CanDatabaseSelectorDialog 指定 DBC / ARXML（可调优先级）
         │   ├── can_unmatched_dialog.py  # CanUnmatchedDialog 未在数据库中定义的报文 ID
         │   ├── template_editor_dialog.py  # TemplateEditorDialog 模板编辑器
@@ -139,6 +156,8 @@ csv_plot/
             ├── custom_viewbox.py # 信号化 CustomViewBox
             ├── plot_widget.py   # PlotWidget 主绘图组件
             ├── plot_container.py # PlotContainerWidget 绘图容器
+            ├── plot_page.py     # PlotPage 页级模型（每页一份网格与视图状态）
+            ├── plot_tabs.py     # PlotTabsWidget 多页标签栏（可拖动 / 自绘关闭按钮 / ＋）
             ├── plot_ui_manager.py # PlotUIManager 绘图 UI 管理器
             ├── plot_data_manager.py # PlotDataManager 绘图数据管理器
             ├── axis_manager.py  # AxisManager 坐标轴管理器
@@ -146,6 +165,7 @@ csv_plot/
             ├── multi_curve_manager.py # MultiCurveManager 多曲线管理器
             ├── mark_region_manager.py # MarkRegionManager 标记区域管理器
             ├── event_handler.py # EventHandler 事件处理器
+            ├── status_drawer.py # StatusDrawer 状态栏上翻抽屉（文件信息 / x 轴 / CAN）
             ├── log_viewer.py    # LogViewer 日志查看器
             ├── can_db_banner.py # CanDbBanner BLF 数据库三态横幅（CAN 抽屉头部，非阻塞反馈）
             └── variable_search_bar.py # VariableSearchBar 绘图变量编辑器内嵌搜索栏
