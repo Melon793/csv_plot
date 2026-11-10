@@ -727,6 +727,10 @@ class MultiCurveManager:
             # 避免逐曲线重拼 legend 的 O(N²) 开销
             if not batch_adding:
                 self._update_header_for_curves()
+                # 先捕获用户当前 Y 视野：下方全量 _set_safe_y_range 会无条件
+                # setYRange 覆盖视野，之后再读 viewRange 只会拿到被污染的
+                # 全量范围，使 has_other_curves 并集退化成全量数据范围
+                pre_view_y = tuple(pw.view_box.viewRange()[1])
                 y_arrays = pw._collect_visible_curve_arrays('y_data')
                 if y_arrays:
                     combined_y = np.concatenate(y_arrays)
@@ -743,14 +747,25 @@ class MultiCurveManager:
                     if not has_other_curves:
                         pw._set_safe_y_range(min_y, max_y, set_limits=False)
                     else:
-                        current_y_range = pw.view_box.viewRange()[1]
-                        current_min_y, current_max_y = current_y_range
-                        final_min_y = min(current_min_y, min_y)
-                        final_max_y = max(current_max_y, max_y)
-                        pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                        # 用覆盖前捕获的用户视野做并集；并集未超出用户视野时
+                        # 精确还原（全量调用已覆盖过），避免 padding 二次膨胀
+                        final_min_y = min(pre_view_y[0], min_y)
+                        final_max_y = max(pre_view_y[1], max_y)
+                        if final_min_y < pre_view_y[0] or final_max_y > pre_view_y[1]:
+                            pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                        else:
+                            pw.view_box.setYRange(pre_view_y[0], pre_view_y[1], padding=0)
                 else:
                     # v5.x 修复问题 B：用 viewRange 与新数据范围的交集，而非旧 viewRange
                     x_min, x_max = self._get_x_window_intersected(x_values)
+                    # 交集为空、窗口内无采样点、或窗口内 y 全无效时，
+                    # _get_y_range_in_x_window 会回退到新曲线全量范围；
+                    # 窗口内看不到这些数据，不应以其全量范围扩张视野
+                    window_mask = (x_values >= x_min) & (x_values <= x_max)
+                    window_has_data = x_min <= x_max and bool(
+                        np.any(np.isfinite(y_values[window_mask]))
+                        if window_mask.any() else False
+                    )
 
                     new_min_y, new_max_y = pw._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
                     has_other_curves = len(pw.curves) > 1
@@ -758,11 +773,16 @@ class MultiCurveManager:
                     if not has_other_curves:
                         pw._set_safe_y_range(new_min_y, new_max_y, set_limits=False)
                     else:
-                        current_y_range = pw.view_box.viewRange()[1]
-                        current_min_y, current_max_y = current_y_range
-                        final_min_y = min(current_min_y, new_min_y)
-                        final_max_y = max(current_max_y, new_max_y)
-                        pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                        if window_has_data:
+                            final_min_y = min(pre_view_y[0], new_min_y)
+                            final_max_y = max(pre_view_y[1], new_max_y)
+                        else:
+                            final_min_y, final_max_y = pre_view_y
+                        if final_min_y < pre_view_y[0] or final_max_y > pre_view_y[1]:
+                            pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
+                        else:
+                            # 并集未超出用户视野：精确还原用户视野
+                            pw.view_box.setYRange(pre_view_y[0], pre_view_y[1], padding=0)
 
             # batch 模式下跳过 vline bounds / cursor 更新 / 密度重算，
             # 由调用方在批量循环完成后统一补偿（可见性已恢复）
