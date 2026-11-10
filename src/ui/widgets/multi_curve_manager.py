@@ -507,14 +507,18 @@ class MultiCurveManager:
             all_data_min_y, all_data_max_y, set_limits=True
         )
 
+        if not allow_y_expand:
+            # 隐藏/删除等未新增可见数据的场景：limits 已重算完毕，
+            # 跳过 special_limits 与窗口交集的扫描，视野原值还原即可
+            self._apply_y_view_expand_only(pre_view_y, None)
+            return
+
         special_limits = self._data_manager.handle_single_point_limits(
             x_values, y_values
         )
         if special_limits:
             min_x, max_x, min_y, max_y = special_limits
-            self._apply_y_view_expand_only(
-                pre_view_y, (min_y, max_y) if allow_y_expand else None
-            )
+            self._apply_y_view_expand_only(pre_view_y, (min_y, max_y))
         else:
             # v5.x 修复问题 B：用 viewRange 与新数据范围的交集，而非旧 viewRange
             x_min, x_max = self._get_x_window_intersected(x_values)
@@ -523,7 +527,7 @@ class MultiCurveManager:
             # 不参与（_get_y_range_in_x_window 会回退到其全量范围，而窗口内
             # 看不到这些数据，不应借它扩张视野）
             ranges: list[tuple[float, float]] = []
-            if allow_y_expand and x_min <= x_max:
+            if x_min <= x_max:
                 for x_arr, y_arr in pairs:
                     mask = (x_arr >= x_min) & (x_arr <= x_max)
                     if not mask.any() or not np.isfinite(y_arr[mask]).any():
