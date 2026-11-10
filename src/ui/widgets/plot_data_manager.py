@@ -859,6 +859,13 @@ class PlotDataManager:
             # 完全清除对象池，避免复用异常状态的 items
             pw._clear_cursor_items(hide_only=False)
             pw._safe_clear_plot_items()
+        else:
+            # 剩余曲线：重算 Y limits，使「最大可调范围」随可见集合收缩，
+            # 不残留已删曲线的旧值（否则可缩放到已无数据的区间）。
+            # 删除未新增可见数据 → 禁扩张，视野保持原值。
+            # 若剩余曲线全部被隐藏，_update_axes_for_multi_curve 内部提前
+            # 返回，limits 保持原值；重新显示任一曲线时会重算。
+            pw._update_axes_for_multi_curve(allow_y_expand=False)
         pw._recalc_max_point_density()
         main_window = pw.window()
         if main_window is not None and hasattr(main_window, "cursor_sync_manager"):

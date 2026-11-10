@@ -1094,9 +1094,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """Legend 锚点点击 → 委托到 MultiCurveManager"""
         self._multi_curve_manager._on_legend_anchor_clicked(url)
     
-    def _update_axes_for_multi_curve(self, update_x_range: bool = False):
+    def _update_axes_for_multi_curve(
+        self, update_x_range: bool = False, *, allow_y_expand: bool = True
+    ):
         """为多曲线更新坐标轴范围 → 委托到 MultiCurveManager"""
-        self._multi_curve_manager._update_axes_for_multi_curve(update_x_range)
+        self._multi_curve_manager._update_axes_for_multi_curve(
+            update_x_range, allow_y_expand=allow_y_expand
+        )
 
     def open_variable_editor(self):
         """打开绘图变量编辑器（唯一实现）。

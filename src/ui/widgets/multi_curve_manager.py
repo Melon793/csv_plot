@@ -173,7 +173,8 @@ class MultiCurveManager:
 
         self.update_legend()
 
-        self._update_axes_for_multi_curve()
+        # 仅「显示」时允许按数据扩张视野；隐藏不新增可见数据，不拉远用户视野
+        self._update_axes_for_multi_curve(allow_y_expand=new_visible)
 
         if pw.vline.isVisible():
             pw.update_cursor_label()
@@ -229,7 +230,10 @@ class MultiCurveManager:
             except Exception:
                 self._recreate_curve(name)
         self.update_legend()
-        self._update_axes_for_multi_curve()
+        # 只要本次有曲线被显示就允许扩张；仅隐藏时不拉远用户视野
+        self._update_axes_for_multi_curve(
+            allow_y_expand=any(changes.values())
+        )
         if pw.vline.isVisible():
             pw.update_cursor_label()
         return True
@@ -424,13 +428,60 @@ class MultiCurveManager:
             return (None, None)
         return (min(mins), max(maxs))
 
-    def _update_axes_for_multi_curve(self, _update_x_range: bool = False):
+    def _apply_y_view_expand_only(
+        self,
+        pre_view_y: tuple[float, float],
+        data_range: tuple[float, float] | None = None,
+    ) -> None:
+        """按「只扩不缩」更新 Y 视野（单量添加 / 显隐切换 / 批量重建共用）。
+
+        调用方必须在会覆盖视野的 ``_set_safe_y_range`` 之前捕获
+        ``pre_view_y``：该函数无条件 setYRange，之后再读 viewRange 只会
+        拿到被污染的全量范围。
+
+        Args:
+            pre_view_y: 覆盖前的用户视野
+            data_range: 希望纳入视野的数据范围；None 或含非有限值时只还原
+                用户视野（窗口内看不到的数据不扩张视野）
+        """
+        pw = self.pw
+        if data_range is not None:
+            data_min_y, data_max_y = data_range
+            if np.isfinite(data_min_y) and np.isfinite(data_max_y):
+                final_min_y = min(pre_view_y[0], data_min_y)
+                final_max_y = max(pre_view_y[1], data_max_y)
+                if final_min_y < pre_view_y[0] or final_max_y > pre_view_y[1]:
+                    pw._set_safe_y_range(
+                        final_min_y, final_max_y, set_limits=False
+                    )
+                    return
+        # 无需扩张：全量调用已覆盖过视野，用 padding=0 精确还原，
+        # 避免把已含 padding 的视野再 pad 一次
+        pw.view_box.setYRange(pre_view_y[0], pre_view_y[1], padding=0)
+
+    def _update_axes_for_multi_curve(
+        self,
+        _update_x_range: bool = False,
+        *,
+        allow_y_expand: bool = True,
+    ):
         """为多曲线更新坐标轴范围。
 
         计算所有可见曲线的数据范围，并更新坐标轴显示范围。
         只考虑 visible=True 的曲线，忽略隐藏的曲线。
 
+        Y 视野遵循「只扩不缩」：隐藏曲线不缩小用户视野（显隐切换不再
+        重设视野），新可见曲线在窗口内的数据超出视野时才扩张。
+
+        Args:
+            allow_y_expand: 是否允许按窗口内数据扩张 Y 视野。隐藏曲线、
+                删除曲线等「未新增可见数据」的场景传 False：只重算
+                limits，视野原值还原，避免把用户放大的视野拉远。
+
         注意:
+            limits 随可见集合收缩时（隐藏/删除曲线后），若用户视野完全落在
+            剩余曲线 limits 之外，pyqtgraph 会把视野钳制回 limits —— 这属
+            预期：此时用户停留在已不可见数据的区间，需拉回仍可查看的范围。
             _update_x_range 参数已废弃（保留仅为 API 兼容）。
             X 轴 limits 由 compute_global_x_limits 统一管理。
         """
@@ -447,6 +498,9 @@ class MultiCurveManager:
         if x_values.size == 0 or y_values.size == 0:
             return
 
+        # 先捕获用户视野：下方 set_limits=True 的全量调用会覆盖它
+        pre_view_y = tuple(pw.view_box.viewRange()[1])
+
         all_data_min_y = np.nanmin(y_values)
         all_data_max_y = np.nanmax(y_values)
         self.pw._set_safe_y_range(
@@ -458,24 +512,33 @@ class MultiCurveManager:
         )
         if special_limits:
             min_x, max_x, min_y, max_y = special_limits
-            self.pw._set_safe_y_range(min_y, max_y, set_limits=False)
+            self._apply_y_view_expand_only(
+                pre_view_y, (min_y, max_y) if allow_y_expand else None
+            )
         else:
             # v5.x 修复问题 B：用 viewRange 与新数据范围的交集，而非旧 viewRange
             x_min, x_max = self._get_x_window_intersected(x_values)
 
-            all_y_in_range = []
-            for x_arr, y_arr in pairs:
-                min_y, max_y = pw._get_y_range_in_x_window(
-                    x_arr, y_arr, x_min, x_max
-                )
-                all_y_in_range.extend([min_y, max_y])
+            # 逐曲线取窗口内有效数据范围：窗口内无采样点或 y 全无效的曲线
+            # 不参与（_get_y_range_in_x_window 会回退到其全量范围，而窗口内
+            # 看不到这些数据，不应借它扩张视野）
+            ranges: list[tuple[float, float]] = []
+            if allow_y_expand and x_min <= x_max:
+                for x_arr, y_arr in pairs:
+                    mask = (x_arr >= x_min) & (x_arr <= x_max)
+                    if not mask.any() or not np.isfinite(y_arr[mask]).any():
+                        continue
+                    ranges.append(
+                        pw._get_y_range_in_x_window(x_arr, y_arr, x_min, x_max)
+                    )
 
-            if all_y_in_range:
-                final_min_y = np.nanmin(all_y_in_range)
-                final_max_y = np.nanmax(all_y_in_range)
-                self.pw._set_safe_y_range(
-                    final_min_y, final_max_y, set_limits=False
+            data_range = None
+            if ranges:
+                data_range = (
+                    float(min(r[0] for r in ranges)),
+                    float(max(r[1] for r in ranges)),
                 )
+            self._apply_y_view_expand_only(pre_view_y, data_range)
 
     def _on_legend_anchor_clicked(self, url):
         """锚点点击：解析 href 中的变量名并切换曲线显隐
@@ -747,14 +810,7 @@ class MultiCurveManager:
                     if not has_other_curves:
                         pw._set_safe_y_range(min_y, max_y, set_limits=False)
                     else:
-                        # 用覆盖前捕获的用户视野做并集；并集未超出用户视野时
-                        # 精确还原（全量调用已覆盖过），避免 padding 二次膨胀
-                        final_min_y = min(pre_view_y[0], min_y)
-                        final_max_y = max(pre_view_y[1], max_y)
-                        if final_min_y < pre_view_y[0] or final_max_y > pre_view_y[1]:
-                            pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
-                        else:
-                            pw.view_box.setYRange(pre_view_y[0], pre_view_y[1], padding=0)
+                        self._apply_y_view_expand_only(pre_view_y, (min_y, max_y))
                 else:
                     # v5.x 修复问题 B：用 viewRange 与新数据范围的交集，而非旧 viewRange
                     x_min, x_max = self._get_x_window_intersected(x_values)
@@ -773,16 +829,10 @@ class MultiCurveManager:
                     if not has_other_curves:
                         pw._set_safe_y_range(new_min_y, new_max_y, set_limits=False)
                     else:
-                        if window_has_data:
-                            final_min_y = min(pre_view_y[0], new_min_y)
-                            final_max_y = max(pre_view_y[1], new_max_y)
-                        else:
-                            final_min_y, final_max_y = pre_view_y
-                        if final_min_y < pre_view_y[0] or final_max_y > pre_view_y[1]:
-                            pw._set_safe_y_range(final_min_y, final_max_y, set_limits=False)
-                        else:
-                            # 并集未超出用户视野：精确还原用户视野
-                            pw.view_box.setYRange(pre_view_y[0], pre_view_y[1], padding=0)
+                        self._apply_y_view_expand_only(
+                            pre_view_y,
+                            (new_min_y, new_max_y) if window_has_data else None,
+                        )
 
             # batch 模式下跳过 vline bounds / cursor 更新 / 密度重算，
             # 由调用方在批量循环完成后统一补偿（可见性已恢复）
