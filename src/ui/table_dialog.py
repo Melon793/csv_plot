@@ -2027,6 +2027,24 @@ class DataTableDialog(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "未知错误", f"绘图时发生错误: {e}")
 
+    @staticmethod
+    def _rows_to_tsv_lines(sub: pd.DataFrame) -> list[str]:
+        """P1-M（上轮 P1-11）：整块子矩阵一次取出、按行拼 TSV，替代逐格 df.iloc。
+
+        逐格 ``df.iloc[r, c]`` 单次标量访问约几十微秒，10 万行 × 20 列的
+        「复制全部」是 200 万次调用，GUI 线程冻结分钟级（用户以为程序死了）。
+        文本语义保持不变：NaN → 空串；其余 ``str(val)``——``to_numpy(object)``
+        取出的 numpy 标量与原 ``df.iloc`` 元素的 ``str()`` 行为一致。
+        """
+        if sub.shape[0] == 0 or sub.shape[1] == 0:
+            return []
+        values = sub.to_numpy(dtype=object)
+        mask = sub.isna().to_numpy()
+        out = np.empty(values.shape, dtype=object)
+        out[mask] = ""
+        out[~mask] = [str(v) for v in values[~mask]]
+        return ["\t".join(row) for row in out.tolist()]
+
     def _copy_selected_to_clipboard(
         self, ordered_cols: list[int], rows_order: list[int], df=None
     ):
@@ -2043,20 +2061,13 @@ class DataTableDialog(QMainWindow):
         var_names = [str(df.columns[c]) for c in ordered_cols]
         units = [self.units.get(name, "") for name in var_names]
 
-        # 组装数据（按行）
+        # 组装数据（按行）——P1-M：整块 iloc 取子矩阵后向量化转字符串
         lines = []
         lines.append("\t".join(var_names))
         lines.append("\t".join(units))
-
-        for r in rows_order:
-            row_vals = []
-            for c in ordered_cols:
-                val = df.iloc[r, c]
-                if pd.isna(val):
-                    row_vals.append("")
-                else:
-                    row_vals.append(str(val))
-            lines.append("\t".join(row_vals))
+        lines.extend(
+            self._rows_to_tsv_lines(df.iloc[list(rows_order), list(ordered_cols)])
+        )
 
         text = "\n".join(lines)
         QApplication.clipboard().setText(text)
@@ -2096,16 +2107,8 @@ class DataTableDialog(QMainWindow):
         lines = []
         lines.append("\t".join(var_names))
         lines.append("\t".join(units))
-
-        for r in range(df.shape[0]):
-            row_vals = []
-            for c in ordered_cols:
-                val = df.iloc[r, c]
-                if pd.isna(val):
-                    row_vals.append("")
-                else:
-                    row_vals.append(str(val))
-            lines.append("\t".join(row_vals))
+        # P1-M：整块 iloc 取列重排后的子矩阵，向量化转字符串（见 _rows_to_tsv_lines）
+        lines.extend(self._rows_to_tsv_lines(df.iloc[:, list(ordered_cols)]))
 
         text = "\n".join(lines)
         QApplication.clipboard().setText(text)

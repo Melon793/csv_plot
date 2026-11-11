@@ -93,6 +93,62 @@ class TestTemplateStorage:
         with pytest.raises(TemplateStorageError):
             storage.write_template(other)
 
+    def test_filename_collision_after_sanitize_raises(self, storage):
+        """P1-K：不同名字安全化后落到同一文件名时必须拒绝，防止互相覆盖。"""
+        storage.write_template(_make_template(template_id="id1", name="a:b"))
+        other = _make_template(template_id="id2", name="a_b")
+        with pytest.raises(TemplateStorageError):
+            storage.write_template(other)
+        # 被拒的模板不得进入缓存或磁盘
+        assert storage.read_template("id2") is None
+
+    def test_same_id_rewrite_of_colliding_name_ok(self, storage):
+        """同一模板改名后重写自身（缓存里同 id）不应被碰撞检查误伤。"""
+        tpl = _make_template(template_id="id1", name="a:b")
+        storage.write_template(tpl)
+        tpl.metadata.name = "a:b renamed"
+        assert storage.write_template(tpl) is True
+        assert storage.read_template("id1").metadata.name == "a:b renamed"
+
+    def test_existing_untracked_file_on_disk_not_overwritten(self, storage, tmp_path):
+        """B1：磁盘上已有但不在缓存的文件（如损坏 yaml）不得被静默覆盖。"""
+        taken = tmp_path / "templates" / "taken.yaml"
+        taken.write_text("not: [valid template", encoding="utf-8")
+        with pytest.raises(TemplateStorageError):
+            storage.write_template(
+                _make_template(template_id="id9", name="taken")
+            )
+        assert taken.read_text(encoding="utf-8") == "not: [valid template"
+
+    def test_case_only_rename_same_id_keeps_file(self, storage):
+        """同 id 仅大小写改名：大小写不敏感文件系统上新旧路径同一文件，
+        replace 后的旧文件 unlink 不得把它误删。"""
+        tpl = _make_template(template_id="id1", name="a_b")
+        storage.write_template(tpl)
+        tpl.metadata.name = "A_B"
+        assert storage.write_template(tpl) is True
+        restored = storage.read_template("id1")
+        assert restored is not None
+        assert restored.metadata.name == "A_B"
+
+    def test_case_variant_collision_raises_on_insensitive_fs(
+        self, storage, tmp_path
+    ):
+        """B1："A_b" 与既有 "a:b"（消毒后 a_b）在大小写不敏感盘上同文件。"""
+        probe = tmp_path / "case_probe.tmp"
+        probe.write_text("x", encoding="utf-8")
+        insensitive = (tmp_path / "CASE_PROBE.TMP").exists()
+        probe.unlink()
+        if not insensitive:
+            pytest.skip("文件系统大小写敏感，无此碰撞路径")
+
+        storage.write_template(_make_template(template_id="id1", name="a:b"))
+        other = _make_template(template_id="id2", name="A_b")
+        with pytest.raises(TemplateStorageError):
+            storage.write_template(other)
+        # 既有模板必须完好
+        assert storage.read_template("id1") is not None
+
     def test_scan_directory_loads_existing_files(self, qapp, tmp_path):
         s1 = TemplateStorage(storage_path=tmp_path / "tpl")
         s1.write_template(_make_template())

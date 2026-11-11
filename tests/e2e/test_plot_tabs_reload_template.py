@@ -212,3 +212,51 @@ def test_v1_template_still_applies_as_single_page(loaded_window, qtbot):
         expected_density
     )
     assert mw._global_max_density == pytest.approx(expected_density)
+
+
+@pytest.mark.full_matrix
+def test_export_apply_keeps_curve_in_its_cell_when_first_cell_empty(
+    loaded_window, qtbot
+):
+    """P1-L（上轮 P1-10）：空格子不得让模板曲线套用时前移错位。
+
+    1×2 布局只在第 2 格画曲线，导出的 plots[0] 必须带 cell_index=1；
+    清场重套后曲线应回到第 2 格、第 1 格保持为空（旧实现按 enumerate
+    对位，会把曲线画进第 1 格）。
+
+    full_matrix：e2e 默认替身把页容量钳成 1×1，撑不开 1×2 布局。
+    """
+    mw = loaded_window
+    page = mw.current_page
+    for container in page.plot_widgets:
+        container.plot_widget.clear_plot_item()
+    mw.layout_manager.set_plots_visible(1, 2)
+    qtbot.waitUntil(lambda: len(page.plot_widgets) >= 2, timeout=3000)
+    qtbot.waitUntil(lambda: page.cell_visible(1), timeout=3000)
+    assert not page.plot_widgets[0].plot_widget.curves
+    assert page.plot_widgets[1].plot_widget.plot_variable("speed")
+
+    manager = mw.plot_config_manager
+    config = manager.export_current_config(mw)
+    page_cfg = config.pages[0]
+    assert (page_cfg.layout_rows, page_cfg.layout_cols) == (1, 2)
+    assert len(page_cfg.plots) == 1
+    assert page_cfg.plots[0].curves == ["speed"]
+    assert page_cfg.plots[0].cell_index == 1
+
+    # JSON 往返：cell_index 必须能过序列化
+    restored = PlotSessionConfig.from_dict(
+        json.loads(json.dumps(config.to_dict()))
+    )
+    assert restored.pages[0].plots[0].cell_index == 1
+
+    # 打乱现状：两格全清
+    for container in page.plot_widgets[:2]:
+        container.plot_widget.clear_plot_item()
+
+    assert manager.apply_config(mw, restored) is True
+    qtbot.waitUntil(
+        lambda: bool(page.plot_widgets[1].plot_widget.curves), timeout=3000
+    )
+    assert set(page.plot_widgets[1].plot_widget.curves) == {"speed"}
+    assert not page.plot_widgets[0].plot_widget.curves, "曲线被错位到第 1 格"

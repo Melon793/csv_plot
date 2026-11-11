@@ -62,7 +62,7 @@ class PlotConfigManager(QObject):
             config.layout_rows = main_window._plot_row_current
             config.layout_cols = main_window._plot_col_current
             plots = []
-            for container in main_window.plot_widgets:
+            for cell_index, container in enumerate(main_window.plot_widgets):
                 if container.isHidden():
                     continue
                 strategy = container.plot_widget.curve_strategy
@@ -73,6 +73,7 @@ class PlotConfigManager(QObject):
                         PlotConfig(
                             curves=list(curve_names),
                             invalid_curves=list(invalid_names),
+                            cell_index=cell_index,
                         )
                     )
             config.plots = plots
@@ -121,6 +122,9 @@ class PlotConfigManager(QObject):
                     PlotConfig(
                         curves=list(curve_names),
                         invalid_curves=list(invalid_names),
+                        # P1-L：记真实格子索引——空格子不进列表，套用端按
+                        # enumerate 对位会错位（上轮 P1-10，多页语境下页内错位）
+                        cell_index=index,
                     )
                 )
         return page_config
@@ -231,10 +235,27 @@ class PlotConfigManager(QObject):
 
                 for index, plot_config in enumerate(page_config.plots):
                     total_plots += 1
-                    if index >= len(visible_containers):
-                        logger.warning("Plot[%d] 超出页面可见格子，跳过", index)
-                        continue
-                    plot_widget = visible_containers[index].plot_widget
+                    # P1-L：优先按 cell_index 落位（导出端记录的真实格子索引）；
+                    # 旧档无该字段（None）时回退 enumerate 对位（旧行为，零回归）
+                    cell = plot_config.cell_index
+                    if cell is not None:
+                        if (
+                            cell < 0
+                            or cell >= len(page.plot_widgets)
+                            or not page.cell_visible(cell)
+                        ):
+                            logger.warning(
+                                "Plot[%d] cell_index=%s 超出页面可见格子，跳过",
+                                index, cell,
+                            )
+                            continue
+                        container = page.plot_widgets[cell]
+                    else:
+                        if index >= len(visible_containers):
+                            logger.warning("Plot[%d] 超出页面可见格子，跳过", index)
+                            continue
+                        container = visible_containers[index]
+                    plot_widget = container.plot_widget
                     if self._apply_plot_config(
                         plot_widget, plot_config, main_window, index, scene=scene
                     ):

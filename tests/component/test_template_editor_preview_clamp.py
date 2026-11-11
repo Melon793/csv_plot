@@ -109,3 +109,48 @@ def test_non_dict_page_entry_falls_back_without_crash(editor):
     assert editor._page_combo.count() == 1
     assert _cell_count(editor) == 1
     assert "pages: 1" in editor._stats_label.text()
+
+
+def _cell_label_text(dlg, cell_index: int) -> str:
+    from PySide6.QtWidgets import QLabel
+
+    frame = dlg._preview_layout.itemAt(cell_index).widget()
+    return "\n".join(label.text() for label in frame.findChildren(QLabel))
+
+
+def test_preview_places_curve_by_cell_index(editor):
+    """P1-L：预览按 cell_index 落位——空格子不再把曲线前移。"""
+    editor._yaml_edit.setPlainText(
+        "layout_rows: 1\nlayout_cols: 2\nplots:\n"
+        "  - curves:\n      - speed\n    cell_index: 1\n"
+    )
+    assert _cell_count(editor) == 2
+    assert "speed" not in _cell_label_text(editor, 0)
+    assert "speed" in _cell_label_text(editor, 1)
+
+
+def test_preview_positional_fallback_without_cell_index(editor):
+    """旧档无 cell_index：回退 enumerate 对位，与套用端口径一致（零回归）。"""
+    editor._yaml_edit.setPlainText(
+        "layout_rows: 1\nlayout_cols: 2\nplots:\n"
+        "  - curves:\n      - speed\n"
+    )
+    assert _cell_count(editor) == 2
+    assert "speed" in _cell_label_text(editor, 0)
+    assert "speed" not in _cell_label_text(editor, 1)
+
+
+def test_yaml_regeneration_carries_cell_index():
+    """编辑器「打开 → 保存」以再生成全文为准：漏写 cell_index 等于抹掉对位。"""
+    config = {
+        "pages": [
+            {
+                "title": "p",
+                "layout_rows": 1,
+                "layout_cols": 2,
+                "plots": [{"curves": ["speed"], "cell_index": 1}],
+            }
+        ]
+    }
+    text = TemplateEditorDialog._generate_yaml_with_comments(config)
+    assert "cell_index: 1" in text

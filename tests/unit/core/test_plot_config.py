@@ -41,6 +41,22 @@ class TestPlotConfig:
         assert cfg.curves == ["a"]
         assert cfg.invalid_curves == []
 
+    def test_cell_index_defaults_none_and_omitted_in_to_dict(self):
+        """P1-L：cell_index 缺省 None，为空不写键（旧档字节兼容）。"""
+        cfg = PlotConfig(curves=["a"])
+        assert cfg.cell_index is None
+        assert "cell_index" not in cfg.to_dict()
+
+    def test_cell_index_roundtrip(self):
+        cfg = PlotConfig(curves=["a"], cell_index=3)
+        assert cfg.to_dict()["cell_index"] == 3
+        assert PlotConfig.from_dict(cfg.to_dict()).cell_index == 3
+
+    def test_cell_index_from_dict_bad_values_fall_back_none(self):
+        assert PlotConfig.from_dict({"cell_index": "abc"}).cell_index is None
+        assert PlotConfig.from_dict({"cell_index": None}).cell_index is None
+        assert PlotConfig.from_dict({}).cell_index is None
+
 
 class TestPlotSessionConfig:
     def test_created_at_auto_filled(self):

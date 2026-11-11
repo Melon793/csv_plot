@@ -157,3 +157,76 @@ class TestPreservedContext:
 
         assert killed == [False]
         assert bool(vb.state["autoRange"][1]) is True
+
+class TestDrawPathsPreserveUserAutoRange:
+    """P1-N（上轮 P1-12）：绘图路径的程序化 Y 重算不得静默废除 Ctrl+Y。
+
+    _set_safe_y_range / setYRange 按 pyqtgraph 默认语义 disableAutoRange，
+    加曲线与显隐/删除路径要经 y_autorange_preserved 复原标记；首绘例外
+    （此时标志多半是建图默认「开」，不是用户意图，见下方反向对照）。
+    重绘（clear_plot_item 后）不在本守卫范围：clear_plot_item 自己就会
+    关掉标志，reload 场景的 Ctrl+Y 保留属另一层问题（记录为 P2）。
+    """
+
+    @pytest.fixture()
+    def two_cols(self, plot_factory, qapp):
+        y = np.sin(np.linspace(0, 100, N) / 5.0) * 10 + 50
+        z = np.cos(np.linspace(0, 100, N) / 5.0) * 8 + 50
+        pw = plot_factory(pd.DataFrame({"y": y, "z": z}))
+        pw.resize(800, 600)
+        pw.window().show()
+        pw.show()
+        qapp.processEvents()
+        return pw
+
+    def test_add_second_curve_keeps_y_autorange(self, two_cols, qapp):
+        pw = two_cols
+        assert pw.plot_variable("y")
+        set_y_autorange(pw.view_box)
+        qapp.processEvents()
+        assert bool(pw.view_box.state["autoRange"][1]) is True
+
+        assert pw.add_variable_to_plot("z")
+        qapp.processEvents()
+
+        assert bool(pw.view_box.state["autoRange"][1]) is True
+
+    def test_visibility_toggle_keeps_y_autorange(self, two_cols, qapp):
+        pw = two_cols
+        assert pw.plot_variable("y")
+        assert pw.add_variable_to_plot("z")
+        set_y_autorange(pw.view_box)
+        qapp.processEvents()
+
+        pw.toggle_curve_visibility_by_name("z")  # 隐藏
+        qapp.processEvents()
+        assert bool(pw.view_box.state["autoRange"][1]) is True
+
+        pw.toggle_curve_visibility_by_name("z")  # 恢复显示
+        qapp.processEvents()
+        assert bool(pw.view_box.state["autoRange"][1]) is True
+
+    def test_first_draw_leaves_default_autorange_off(self, two_cols, qapp):
+        """反向对照：首绘不得把建图默认「开」当成用户意图保留下来。
+
+        首绘路径若无条件走守卫，Y autoRange 会滞留为 True，之后 X 缩放
+        联动把 Y 视野拉回全量数据——正是 b9a4b78/def66c5 修掉的 UX。
+        """
+        pw = two_cols
+        assert pw.plot_variable("y")
+        qapp.processEvents()
+        assert bool(pw.view_box.state["autoRange"][1]) is False
+
+    def test_first_curve_via_add_also_leaves_autorange_off(
+        self, plot_factory, qapp
+    ):
+        """add_variable_to_plot 画首条曲线时同理：守卫只在多曲线时生效。"""
+        df = pd.DataFrame({"y": np.arange(100, dtype=float)})
+        pw = plot_factory(df)
+        pw.resize(800, 600)
+        pw.window().show()
+        pw.show()
+        qapp.processEvents()
+        assert pw.add_variable_to_plot("y")
+        qapp.processEvents()
+        assert bool(pw.view_box.state["autoRange"][1]) is False

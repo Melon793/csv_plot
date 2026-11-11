@@ -120,18 +120,57 @@ class TemplateStorage(QObject):
                     f"Name '{name}' already used by template {existing_id}"
                 )
 
+            # P1-K（上轮 P1-9）：_make_filename 的消毒/截断会把不同显示名洗成
+            # 同一文件名（"a:b" 与 "a_b"、前 120 字符相同的长名），显示名查重
+            # 拦不住，os.replace 会静默覆盖他人模板文件（磁盘数据丢失）。落盘前
+            # 按文件名反查归属（scan_directory 在 __init__ 已填充缓存），碰撞抛错
+            # 交调用方呈现。
+            for other_id, other_filename in self._id_to_filename.items():
+                if (
+                    other_filename == new_filename
+                    and other_id != template.metadata.id
+                ):
+                    raise TemplateStorageError(
+                        f"Filename '{new_filename}' (from name '{name}') "
+                        f"collides with template {other_id}"
+                    )
+
             # 重命名场景：先记录旧文件，等新文件写入成功后再删除，
             # 避免"先删后写"期间进程崩溃导致模板丢失。
             # 旧文件名取自 _id_to_filename（实际落盘记录），而非从缓存对象重建——
             # 调用方可能就地修改缓存模板的 name，重建文件名会与实际文件不一致
+            file = self._storage_path / new_filename
+
+            # B1（评审批次4）：缓存字符串比较拦不住大小写不敏感文件系统
+            # （macOS/Windows）上 "A_b" 与 "a_b" 落同一文件，scan_directory
+            # 读不进的损坏 yaml 也不在 _id_to_filename 缓存里。写盘前按磁盘
+            # 实况判定归属：目标路径已存在且不是本模板自己的文件 → 抛错。
+            if file.exists():
+                is_own = False
+                own_filename = self._id_to_filename.get(template.metadata.id)
+                if own_filename:
+                    own_file = self._storage_path / own_filename
+                    try:
+                        is_own = os.path.samefile(file, own_file)
+                    except OSError:
+                        is_own = own_filename == new_filename
+                if not is_own:
+                    raise TemplateStorageError(
+                        f"File '{new_filename}' (from name '{name}') "
+                        f"already exists on disk and belongs to another template"
+                    )
+
             old_file: Optional[Path] = None
             old_filename = self._id_to_filename.get(template.metadata.id)
             if old_filename and old_filename != new_filename:
                 candidate = self._storage_path / old_filename
-                if candidate.exists():
+                # B1：仅大小写不同的改名在大小写不敏感文件系统上新旧路径是
+                # 同一文件，误记为 old_file 会在 replace 后把刚写好的模板删掉
+                if candidate.exists() and not (
+                    file.exists() and os.path.samefile(candidate, file)
+                ):
                     old_file = candidate
 
-            file = self._storage_path / new_filename
             tmp_file = file.with_suffix(".yaml.tmp")
             with open(tmp_file, "w", encoding="utf-8") as f:
                 yaml.dump(template.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)

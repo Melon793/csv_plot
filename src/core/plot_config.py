@@ -17,20 +17,33 @@ class PlotConfig:
     """
     curves: list[str] = field(default_factory=list)  # 曲线变量名列表
     invalid_curves: list[str] = field(default_factory=list)  # 失效占位变量名列表
+    #: P1-L（上轮 P1-10）：本格在页内的真实格子索引（row*grid_cols+col）。
+    #: 空可见格子不进导出列表，套用端若按 enumerate 对位会把后面的曲线整体
+    #: 前移错位。可选字段——仅非 None 才写键；旧档缺省 None，套用端回退
+    #: enumerate 对位（旧行为，零回归）。
+    cell_index: int | None = None
 
     def to_dict(self) -> dict:
-        """序列化为字典（invalid_curves 仅非空才写，保持 v1 视图与旧档兼容）"""
+        """序列化为字典（invalid_curves/cell_index 仅有值才写，保持旧档兼容）"""
         data = {"curves": self.curves}
         if self.invalid_curves:
             data["invalid_curves"] = list(self.invalid_curves)
+        if self.cell_index is not None:
+            data["cell_index"] = int(self.cell_index)
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlotConfig":
-        """从字典反序列化（缺省 invalid_curves 容错为空列表）"""
+        """从字典反序列化（缺省 invalid_curves 容错为空列表；cell_index 容错 None）"""
+        raw_cell = data.get("cell_index")
+        try:
+            cell_index = None if raw_cell is None else int(raw_cell)
+        except (TypeError, ValueError):
+            cell_index = None
         return cls(
             curves=data.get("curves", []),
             invalid_curves=data.get("invalid_curves", []) or [],
+            cell_index=cell_index,
         )
 
 

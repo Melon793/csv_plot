@@ -311,6 +311,14 @@ class TemplateEditorDialog(QDialog):
                     lines.append("        invalid_curves:")
                     for name in invalid:
                         lines.append(f"          - {cls._yaml_scalar(name)}")
+                # P1-L：格子索引必须随全文再生成携带——漏写等于「编辑 → 保存」
+                # 抹掉空格子对位信息，套用时曲线整体前移错位（上轮 P1-10）
+                cell_index = plot.get("cell_index")
+                if cell_index is not None:
+                    try:
+                        lines.append(f"        cell_index: {int(cell_index)}")
+                    except (TypeError, ValueError):
+                        pass
 
         return "\n".join(lines) + "\n"
 
@@ -453,6 +461,18 @@ class TemplateEditorDialog(QDialog):
         if not isinstance(plots, list):
             plots = []
 
+        # P1-L：导出端为稀疏格子记了 cell_index，预览必须按它落位；
+        # 旧档无该字段时回退 enumerate 对位（与 apply 端口径一致）
+        cell_plots = {}
+        for fallback_index, plot in enumerate(plots):
+            if not isinstance(plot, dict):
+                continue
+            ci = plot.get("cell_index")
+            if isinstance(ci, int) and not isinstance(ci, bool) and ci >= 0:
+                cell_plots.setdefault(ci, plot)
+            else:
+                cell_plots.setdefault(fallback_index, plot)
+
         for row in range(rows):
             for col in range(cols):
                 cell_index = row * cols + col
@@ -463,12 +483,7 @@ class TemplateEditorDialog(QDialog):
                 frame_layout = QVBoxLayout(frame)
                 frame_layout.setContentsMargins(5, 5, 5, 5)
 
-                plot_config = (
-                    plots[cell_index]
-                    if cell_index < len(plots)
-                    and isinstance(plots[cell_index], dict)
-                    else {}
-                )
+                plot_config = cell_plots.get(cell_index, {})
                 curves = plot_config.get("curves") or []
                 if isinstance(curves, str):
                     curves = [curves]
