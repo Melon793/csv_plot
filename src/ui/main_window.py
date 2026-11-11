@@ -577,6 +577,11 @@ class MainWindow(QMainWindow):
             if next_page is None and self.pages:
                 next_page = self.pages[0]
             self.activate_page(next_page)
+        elif layout_manager is not None:
+            # 关非当前页没有激活链兜底（P1-F）：非模态统计窗口会滞留已销毁页
+            # 的行与幽灵页筛选项，直到下一次拖动/切页。补一次刷新收口
+            # （无统计窗口时 request_mark_stats_refresh 自身 no-op）。
+            layout_manager.request_mark_stats_refresh(immediate=True)
 
     def _on_tab_rename_requested(self, index: int) -> None:
         page = self.page_at_tab(index)

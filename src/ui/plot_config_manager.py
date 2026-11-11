@@ -142,12 +142,23 @@ class PlotConfigManager(QObject):
     def _apply_page_title(self, main_window, page, title: str) -> None:
         if not title:
             return
-        page.title = title
+        # 页标题是统计窗口分组键（StatRow.key 首段）：交互重命名入口已拒绝
+        # 重名（main_window._on_tab_rename_requested，3cdb64c），模板路径同样
+        # 要设防——手写/编辑器产出的重名模板会让两页统计行写进同一 key，
+        # 表格静默显示错误数字（P1-G）。程序化路径不弹框：撞名自动加 " (N)"
+        # 后缀，与 import_template 的后缀策略对齐。
+        final = title
+        suffix = 2
+        pages = list(getattr(main_window, "pages", []) or [])
+        while any(other is not page and other.title == final for other in pages):
+            final = f"{title} ({suffix})"
+            suffix += 1
+        page.title = final
         tabs = getattr(main_window, "plot_tabs", None)
         if tabs is not None:
             index = tabs.indexOf(page.widget)
             if index >= 0:
-                tabs.setTabText(index, title)
+                tabs.setTabText(index, final)
 
     @staticmethod
     @contextmanager

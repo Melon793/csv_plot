@@ -449,13 +449,21 @@ class CursorSyncManager(MainWindowBaseManager):
     def clear_all_plots(self):
         if self.mw.reject_when_loading("清除绘图"):
             return
+        # 跨页口径（P1-E）：按钮播报「已清除全部绘图」、CAN 数据库重选调用点
+        # 注释「一律清除」，都要求清所有页——只清当前页会让隐藏页旧曲线在
+        # 随后的 _apply_loader(is_reload=True) 里按同名静默重绑到新数据。
+        # 与 reset_plots_after_loading 同模式：隐藏页清数据层后置脏，
+        # 场景补建留给激活链。
+        containers = self._iter_all_containers()
         # 播报里的数目在清之前取（全部子图，含不可见的容器——它们同样被清）
-        cleared = sum(len(c.plot_widget.curves) for c in self.mw.plot_widgets)
-        for container in self.mw.plot_widgets:
+        cleared = sum(len(c.plot_widget.curves) for c in containers)
+        for container in containers:
             widget = container.plot_widget
             widget.clear_plot_item(clear_invalid=True)
             widget.clear_value_cache()
             widget.reset_pin_state()
+            if self._defers_scene_write(widget):
+                self._mark_dirty(widget)
         self.mw.value_cache = OrderedDict()
         self.mw._enum_text_maps = {}
         self.mw.saved_mark_range = None
