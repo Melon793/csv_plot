@@ -1219,6 +1219,9 @@ class FileLoaderManager(MainWindowBaseManager):
                 "文件不可读",
                 f"无法读取文件大小，文件可能已被移动或删除：\n{file_path}\n\n错误详情: {e}",
             )
+            # 与上方三个「未上锁就返回」的早退分支同口径：调用方进来前已把
+            # load_btn 灰掉，这里必须自己点亮，否则导入按钮永久灰（P1-B）。
+            self.mw.load_btn.setEnabled(True)
             return
 
         self._begin_data_reload()
@@ -1669,12 +1672,29 @@ class FileLoaderManager(MainWindowBaseManager):
             else:
                 QMessageBox.warning(self.mw, "报文数超上限", BLF_TEXT_TRUNCATED)
 
-        self._swap_loader(new_loader, is_reload=is_reload)
-        self._end_data_reload()
-        self.set_button_status(True)
-        self.mw.load_btn.setEnabled(True)
-        self._reload_in_progress = False
-        self.mw.reload_btn.setEnabled(True)
+        # 与 _on_load_done 的 P0-3 同口径（P1-C）：_swap_loader → _apply_loader
+        # 链上任一异常都不得跳过解锁，否则 _is_loading_new_data /
+        # _reload_in_progress 永久卡死（_end_data_reload 未执行 → safety timer
+        # 也不会启动，只能重启应用）。BLF 侧此前没有这层保护。
+        applied = True
+        try:
+            self._swap_loader(new_loader, is_reload=is_reload)
+        except Exception as e:
+            applied = False
+            logger.error("应用 BLF 加载结果失败: %s", e, exc_info=True)
+            QMessageBox.critical(self.mw, "读取失败", f"应用数据时发生错误: {str(e)}")
+        finally:
+            self._end_data_reload()
+            if applied:
+                self.set_button_status(True)
+            else:
+                # 应用失败按「当前是否还有有效数据」恢复，并收掉忙等光标/秒表
+                self._finish_load_failure(is_reload=is_reload)
+            self.mw.load_btn.setEnabled(True)
+            self._reload_in_progress = False
+            self.mw.reload_btn.setEnabled(True)
+        if not applied:
+            return
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
         self._schedule_delayed(
             0, lambda: self._post_load_actions(file_path, is_reload=is_reload)
@@ -1696,17 +1716,21 @@ class FileLoaderManager(MainWindowBaseManager):
             self._close_blf_progress()
             return
         logger.error("BLF 后台加载失败: %s", msg)
-        self._close_blf_progress()
-        self.mw.end_load_feedback(f"加载失败：{msg}", level="error")
-        QMessageBox.critical(self.mw, "读取失败", msg)
-        # 与本轮取消同口径：_begin_data_reload 已把曲线摘掉，而失败路径不释放
-        # 旧 loader（host.loader 仍是导入前那份），必须显式重绘回来（评审 A6）。
-        self._restore_curves_after_abort()
-        self._end_data_reload()
-        self.mw.load_btn.setEnabled(True)
-        self.set_button_status(self._has_valid_data)
-        self._reload_in_progress = False
-        self.mw.reload_btn.setEnabled(True)
+        # P1-C：收口段自身抛异常（控件已销毁、恢复链失败等）也不得跳过解锁，
+        # 与 _on_load_done / _on_blf_done 成功尾段的 try/finally 同口径。
+        try:
+            self._close_blf_progress()
+            self.mw.end_load_feedback(f"加载失败：{msg}", level="error")
+            QMessageBox.critical(self.mw, "读取失败", msg)
+            # 与本轮取消同口径：_begin_data_reload 已把曲线摘掉，而失败路径不释放
+            # 旧 loader（host.loader 仍是导入前那份），必须显式重绘回来（评审 A6）。
+            self._restore_curves_after_abort()
+        finally:
+            self._end_data_reload()
+            self.mw.load_btn.setEnabled(True)
+            self.set_button_status(self._has_valid_data)
+            self._reload_in_progress = False
+            self.mw.reload_btn.setEnabled(True)
 
     def _restart_blf_import(self, file_path: str, attempt: int = 0) -> None:
         """F 路径重开导入：等上一轮 reload 生命周期完全收尾后再走。

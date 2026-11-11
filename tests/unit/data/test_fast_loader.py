@@ -481,3 +481,54 @@ class TestLateTextDtypeTolerance:
     )
     def test_only_the_narrow_dtype_signatures_are_tolerated(self, message, expected):
         assert FastDataLoader._is_dtype_conversion_error(ValueError(message)) is expected
+
+
+class TestChunkedFallbackReleasesTraceback:
+    """P1-D（第 4 轮全仓审查）：分块容错回退不得让首读 chunks 被 traceback 钉住。
+
+    >1GB 文件走 chunksize 路径；后段文本触发 ValueError 后在 except 块内不带
+    dtype 全量重读。修复前 ``e.__traceback__`` 持有首读 ``_read`` 的栈帧，帧内
+    局部 ``chunks``（已解析的 GB 级 DataFrame 列表）在重读 + concat 期间不释放，
+    内存峰值叠成「首读部分 chunks + 二次全量 + concat 副本」。
+    修复方式：重读前 ``e = e.with_traceback(None)`` 释放栈帧。
+    """
+
+    def test_reread_starts_with_traceback_released(self, tmp_path, monkeypatch):
+        import sys
+
+        from src.data import loader as loader_mod
+
+        path = TestLateTextDtypeTolerance._csv(tmp_path)
+
+        # 伪造 >1GB：让 _read_chunks 走 chunksize 分支（真实分支判据只有 getsize）
+        monkeypatch.setattr(
+            loader_mod.os.path, "getsize", lambda p: 2 * 1024 * 1024 * 1024
+        )
+
+        real_read_csv = loader_mod.pd.read_csv
+        seen = {"reread_calls": 0, "reread_tb": "unset", "reread_exc_type": None}
+
+        def spy_read_csv(*args, **kwargs):
+            # 只认「不带 dtype 的分块重读」：采样推断等其它 read_csv 调用
+            # 同样没有 dtype，但不带 chunksize，不会误报
+            if kwargs.get("dtype") is None and "chunksize" in kwargs:
+                seen["reread_calls"] += 1
+                exc = sys.exc_info()[1]
+                seen["reread_exc_type"] = type(exc) if exc is not None else None
+                seen["reread_tb"] = None if exc is None else exc.__traceback__
+            return real_read_csv(*args, **kwargs)
+
+        monkeypatch.setattr(loader_mod.pd, "read_csv", spy_read_csv)
+
+        loader = loader_mod.FastDataLoader(
+            str(path), has_unit=True, sep=",", desc_rows=0
+        )
+
+        assert seen["reread_calls"] == 1, "必须真的走了分块 + dtype 容错回退路径"
+        assert seen["reread_exc_type"] is ValueError
+        assert seen["reread_tb"] is None, (
+            "重读开始时异常栈帧必须已释放，否则首读 chunks 被钉在内存里"
+        )
+        # 回退语义不受影响：文件照常打开，只有坏格缺失
+        assert loader.datalength == 251
+        assert loader.dtype_repairs == {"speed": 1}

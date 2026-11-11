@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -308,3 +309,129 @@ class TestAsyncFailureRestoresUiState:
         assert mgr._reload_in_progress is False
         assert _status_buttons_enabled(mw) == [False] * len(_STATUS_BUTTONS)
         assert post_actions == [], "失败路径不得继续走加载后动作"
+
+
+class TestGetsizeFailureRestoresLoadButton:
+    """P1-B（第 4 轮全仓审查）：getsize OSError 早退分支必须自己点亮 load_btn。"""
+
+    def test_getsize_oserror_reenables_load_btn(
+        self, host, dialogs, csv_file, monkeypatch
+    ):
+        """isfile 校验后文件被占用/删除：弹「文件不可读」且导入按钮恢复。
+
+        _check_file_size（第一处 getsize）放行，_load_file 上锁前的第二处
+        getsize 抛 OSError —— 修复前该分支裸 return，load_btn 永久灰。
+        """
+        mw, mgr = host
+        monkeypatch.setattr(
+            "src.ui.file_loader_manager.FastDataLoader.auto_detect",
+            staticmethod(lambda path: _fake_fmt()),
+        )
+        real_getsize = os.path.getsize
+        calls = {"n": 0}
+
+        def flaky_getsize(path):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise OSError(13, "Permission denied")
+            return real_getsize(path)
+
+        monkeypatch.setattr(os.path, "getsize", flaky_getsize)
+        _disable_buttons(mw)
+
+        mgr.load_csv_file(str(csv_file))
+
+        assert calls["n"] >= 2, "必须真的走到第二处 getsize（否则测的不是目标分支）"
+        assert [t for t, _ in dialogs["critical"]] == ["文件不可读"]
+        assert mw.load_btn.isEnabled() is True, "早退分支必须恢复导入按钮"
+        assert mw._is_loading_new_data is False, "该分支在上锁之前，不得留下锁"
+        # 没进 begin_load_feedback，不该冒出「加载失败」横幅
+        assert mw.feedback_calls == []
+
+
+class TestBlfHandlersUnlockOnFailure:
+    """P1-C（第 4 轮全仓审查）：BLF 完成/失败回调与 _on_load_done 的 P0-3 同口径。"""
+
+    @staticmethod
+    def _fake_blf_loader():
+        return SimpleNamespace(
+            var_names=["speed"],
+            load_errors=[],
+            truncated=False,
+            db_paths=[],
+            datalength=10,
+            units={},
+        )
+
+    def test_on_blf_done_apply_failure_unlocks(self, host, dialogs, monkeypatch):
+        """_swap_loader 抛异常：解锁序列一步都不能少，且不进加载后动作。"""
+        mw, mgr = host
+        monkeypatch.setattr(
+            mgr,
+            "_swap_loader",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("应用数据失败")),
+        )
+        post_actions = []
+        monkeypatch.setattr(
+            mgr, "_post_load_actions", lambda *a, **k: post_actions.append(1)
+        )
+        mgr._begin_data_reload()
+        mgr._reload_in_progress = True
+        mw.reload_btn.setEnabled(False)
+        _disable_buttons(mw)
+
+        mgr._on_blf_done(self._fake_blf_loader(), "demo.blf")
+
+        assert mgr._reload_in_progress is False, "互斥锁必须释放，否则后续加载全被静默拒绝"
+        # _end_data_reload 已执行（兜底定时器就位）；_is_loading_new_data 由它
+        # 调度的 _post_reload_ui_refresh 在下一轮事件循环里放平（与既有异步用例同口径）
+        assert mgr._safety_unlock_version == mw._data_version
+        assert mw.load_btn.isEnabled() is True
+        assert mw.reload_btn.isEnabled() is True
+        assert [t for t, _ in dialogs["critical"]] == ["读取失败"]
+        assert ("end", "加载失败", "error") in mw.feedback_calls
+        assert post_actions == [], "失败路径不得继续走加载后动作"
+
+    def test_on_blf_done_success_path_unchanged(self, host, dialogs, monkeypatch):
+        """正向对照：成功路径的 swap/解锁/按钮恢复行为不变。"""
+        mw, mgr = host
+        swapped = []
+        monkeypatch.setattr(mgr, "_swap_loader", lambda *a, **k: swapped.append(a))
+        monkeypatch.setattr(mgr, "_post_load_actions", lambda *a, **k: None)
+        mgr._begin_data_reload()
+        mgr._reload_in_progress = True
+        mw.reload_btn.setEnabled(False)
+        _disable_buttons(mw)
+
+        mgr._on_blf_done(self._fake_blf_loader(), "demo.blf")
+
+        assert len(swapped) == 1
+        assert mgr._reload_in_progress is False
+        assert mw.load_btn.isEnabled() is True
+        assert mw.reload_btn.isEnabled() is True
+        assert _status_buttons_enabled(mw) == [True] * len(_STATUS_BUTTONS)
+
+    def test_on_blf_error_unlocks_even_when_teardown_raises(
+        self, host, dialogs, monkeypatch
+    ):
+        """收口段自身抛异常（如进度框已销毁）：finally 仍须放锁。"""
+        mw, mgr = host
+
+        def boom():
+            raise RuntimeError("进度框已销毁")
+
+        monkeypatch.setattr(mgr, "_close_blf_progress", boom)
+        mgr._begin_data_reload()
+        mgr._reload_in_progress = True
+        mw.reload_btn.setEnabled(False)
+        _disable_buttons(mw)
+
+        with pytest.raises(RuntimeError):
+            mgr._on_blf_error("扫描失败")
+
+        assert mgr._reload_in_progress is False
+        assert mgr._safety_unlock_version == mw._data_version, (
+            "finally 里的 _end_data_reload 必须已执行"
+        )
+        assert mw.load_btn.isEnabled() is True
+        assert mw.reload_btn.isEnabled() is True

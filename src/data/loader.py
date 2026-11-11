@@ -916,6 +916,11 @@ class FastDataLoader(BaseDataLoader):
                 "改用不带 dtype 重读: %s",
                 e,
             )
+            # P1-D：释放异常栈帧后再重读。e.__traceback__ 持有首读 _read 的栈帧，
+            # 帧内局部 chunks（已解析的 GB 级 DataFrame 列表）在 except 块退出前
+            # 不释放——第二次全量重读 + concat 期间内存峰值会叠成「首读部分
+            # chunks + 二次全量 + concat 副本」，恰恰在最大文件上最易 OOM。
+            e = e.with_traceback(None)
             df = _read(None, parse_dates)
             self._coerce_expected_numeric(df, expected, path)
 
