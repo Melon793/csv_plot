@@ -196,3 +196,74 @@ def test_restore_keeps_curves_and_aligns(loaded_window, qtbot, curves):
     pw = page.plot_widgets[0].plot_widget
     assert set(pw.curves) == set(curves)
     assert_view_matches_data(pw)
+
+
+# ----------------------------------------------------------------------
+# P1-J（第 4 轮全仓审查）：saved_mark_range 模板往返保真
+# ----------------------------------------------------------------------
+
+@pytest.fixture()
+def _mark_stats_cleanup(qapp):
+    from src.ui.mark_stats import MarkStatsWindow
+
+    yield
+    window = MarkStatsWindow._instance
+    MarkStatsWindow._instance = None
+    if window is None:
+        return
+    try:
+        window.hide()
+        window.deleteLater()
+    except RuntimeError:
+        pass
+    qapp.processEvents()
+
+
+def test_saved_mark_range_survives_view_alignment(
+    loaded_window, qtbot, _mark_stats_cleanup
+):
+    """模板 saved_mark_range 不得在视图对齐之前被旧视野钳制。
+
+    修复前时序：apply_config 同步调 toggle_mark_region(True)，而 activate_page
+    只排了 0ms 定时器——视图还停在套用前的旧视野；模板区间落在旧视野外时被
+    钳成旧视野中间 1/3 并覆写全局 saved_mark_range，视图对齐后
+    restore_mark_regions 回读钳制值，模板区间永久丢失。
+    修复后：apply_config 只置 pending 标志，_post_activation 在 _range_dirty
+    对齐之后消费开启标记区。
+    """
+    mw = loaded_window
+    qtbot.waitUntil(lambda: not mw._is_loading_new_data, timeout=5000)
+    assert mw.plot_config_manager.apply_config(mw, _single_page_config(("speed",)))
+    page = mw.pages[0]
+    qtbot.waitUntil(lambda: not page._range_dirty, timeout=3000)
+    pw = page.master_container().plot_widget
+    qtbot.waitUntil(lambda: "speed" in pw.curves, timeout=3000)
+    x0, x1, _, _ = _data_domain(pw)
+    m1 = x0 + (x1 - x0) * 0.2
+    m2 = x0 + (x1 - x0) * 0.4
+
+    # 开标记区并把区间拖到目标位置
+    mw.layout_manager.toggle_mark_region(True)
+    assert mw.mark_region_btn.isChecked()
+    qtbot.waitUntil(lambda: pw.mark_region is not None, timeout=3000)
+    pw.mark_region.setRegion([m1, m2])
+    assert tuple(mw.saved_mark_range) == pytest.approx((m1, m2))
+
+    # 导出配置（标记按钮开着 → saved_mark_range 进配置），随后把视图挪到
+    # 数据域末端：旧视野不含模板区间——正是修复前的钳制触发条件
+    config = mw.plot_config_manager.export_current_config(mw)
+    assert config.saved_mark_range == pytest.approx([m1, m2])
+    pw.view_box.setXRange(x0 + (x1 - x0) * 0.8, x1, padding=0)
+
+    # 重新套用同一份配置（等价于模板恢复）
+    assert mw.plot_config_manager.apply_config(mw, config)
+    page = mw.pages[0]
+    qtbot.waitUntil(lambda: not page._range_dirty, timeout=3000)
+    qtbot.waitUntil(lambda: mw._pending_activation is None, timeout=3000)
+    pw2 = page.master_container().plot_widget
+    qtbot.waitUntil(lambda: pw2.mark_region is not None, timeout=3000)
+
+    assert tuple(mw.saved_mark_range) == pytest.approx((m1, m2)), (
+        "全局 saved_mark_range 必须等于模板值，不得被旧视野钳成中间 1/3"
+    )
+    assert tuple(pw2.mark_region.getRegion()) == pytest.approx((m1, m2))

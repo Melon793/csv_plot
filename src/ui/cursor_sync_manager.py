@@ -775,6 +775,7 @@ class CursorSyncManager(MainWindowBaseManager):
                                 var_name,
                                 skip_existence_check=True,
                                 preferred_color=state["color"],
+                                quiet=True,
                             )
                             if success:
                                 curves_added += 1
@@ -788,6 +789,20 @@ class CursorSyncManager(MainWindowBaseManager):
                                             )
                                         except Exception:
                                             logger.debug("恢复曲线可见性失败", exc_info=True)
+                            else:
+                                # P1-H：可绘制判定通过（列存在且 df_validity≠-1）
+                                # 但备数据失败（如整列 CAN 哨兵值被过滤成全 NaN，
+                                # validity=0 的常量列）：与「变量不存在」同归宿，
+                                # 降级为占位——不得静默丢失用户的曲线资产。
+                                # quiet=True 保证失败不在 reload 中途弹模态框
+                                # （半重建状态 + 嵌套事件循环，行为未定义）。
+                                widget.demote_to_invalid(
+                                    var_name, state["color"], state["visible"]
+                                )
+                                logger.debug(
+                                    "[RELOAD] Plot[%d] 变量 %s 重建失败，降级为占位",
+                                    idx, var_name,
+                                )
 
                         # 复活 invalid_snapshot（仍在 batch 窗口内）：快照中现在
                         # 有效的变量 → add_variable_to_plot 触发占位查色复活
@@ -798,6 +813,7 @@ class CursorSyncManager(MainWindowBaseManager):
                                 var_name,
                                 skip_existence_check=True,
                                 preferred_color=ref.color,
+                                quiet=True,
                             )
                             if success:
                                 curves_added += 1

@@ -456,6 +456,13 @@ class MainWindow(QMainWindow):
                 cursor_sync._sync_min_xrange()
                 # 切页收尾：清节流时间戳并补刷一次标签（§6.3 #4）
                 cursor_sync.refresh_cursor_labels(page)
+            if getattr(self, "_pending_mark_region_restore", False):
+                # P1-J：模板/auto-save 的标记区恢复推迟到视图对齐之后开启
+                # （时序论证见 PlotConfigManager.apply_config 的注释）。无论
+                # 按钮此前是否已勾选都重走 toggle：已勾选时若不重走，
+                # restore_mark_regions 会把既有 region 的旧值回读覆盖模板值。
+                self._pending_mark_region_restore = False
+                self.layout_manager.toggle_mark_region(True)
             if self.mark_region_btn.isChecked():
                 page.restore_mark_regions()
         finally:
@@ -747,6 +754,9 @@ class MainWindow(QMainWindow):
         # file_loader_manager._restore_cursor_state_after_reload 等延迟回调靠它
         # 判断主窗口是否已在退出：缺这行时 getattr(..., False) 恒假，守卫空转
         self._is_being_destroyed = False
+        # P1-J：模板/auto-save 的标记区恢复标志（PlotConfigManager.apply_config
+        # 置位，_post_activation 在视图对齐后消费开启标记区）
+        self._pending_mark_region_restore = False
 
         self._data_version = 0
         self._pending_crosshair_x = None

@@ -701,8 +701,13 @@ class MultiCurveManager:
 
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
-                             show_duplicate_warning: bool = True, preferred_color: str | None = None) -> bool:
-        """添加变量到曲线绘图（统一版：无模式切换，始终写入 curves 字典）"""
+                             show_duplicate_warning: bool = True, preferred_color: str | None = None,
+                             quiet: bool = False) -> bool:
+        """添加变量到曲线绘图（统一版：无模式切换，始终写入 curves 字典）
+
+        ``quiet=True`` 供 reload/模板套用等程序化批量路径使用：失败不弹
+        模态框（调用方负责降级为占位并汇总播报），只落日志。
+        """
         pw = self.pw
         logger.debug(
             "[ADD_VAR] add_variable_to_plot 入口: var_name=%s, 当前 curves 数量=%d, "
@@ -724,7 +729,12 @@ class MultiCurveManager:
                     # 复活失败（数据仍不可用）：把占位还回去，避免资产丢失
                     if revive_ref is not None:
                         pw.invalid_curves[var_name] = revive_ref
-                    QMessageBox.warning(pw, "错误", error_msg)
+                    if quiet:
+                        logger.warning(
+                            "[ADD_VAR] 备数据失败（quiet）: %s — %s", var_name, error_msg
+                        )
+                    else:
+                        QMessageBox.warning(pw, "错误", error_msg)
                     return False
                 original_index = np.ascontiguousarray(x_array, dtype=np.float32)
                 x_values = pw.offset + pw.factor * original_index
@@ -741,7 +751,7 @@ class MultiCurveManager:
                 # 复活失败（重复）：把占位还回去
                 if revive_ref is not None:
                     pw.invalid_curves[var_name] = revive_ref
-                if show_duplicate_warning:
+                if show_duplicate_warning and not quiet:
                     QMessageBox.information(pw, "提示", f"变量 {var_name} 已在绘图中")
                 return False
 
@@ -865,5 +875,11 @@ class MultiCurveManager:
             # 复活失败（异常）：把占位还回去，避免资产丢失（未成功进 curves 才还）
             if revive_ref is not None and var_name not in pw.curves:
                 pw.invalid_curves[var_name] = revive_ref
-            QMessageBox.critical(pw, "绘图错误", f"添加变量时发生错误: {str(e)}")
+            if quiet:
+                logger.error(
+                    "[ADD_VAR] 添加变量异常（quiet）: %s — %s", var_name, e,
+                    exc_info=True,
+                )
+            else:
+                QMessageBox.critical(pw, "绘图错误", f"添加变量时发生错误: {str(e)}")
             return False

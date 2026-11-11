@@ -326,3 +326,36 @@ def test_all_valid_reload_stays_silent(env, modal_records):
     assert not pw.invalid_curves
     assert not modal_records
     assert not any("失效" in m for m in host.status_messages)
+
+
+# ---------- P1-H: 可绘制判定通过但备数据失败（第 4 轮全仓审查） ----------
+
+def test_prepare_failure_demotes_to_placeholder_no_modal(env, modal_records):
+    """全哨兵列（validity=0，≠-1 → 可绘制判定通过）过滤后全 NaN 备数据失败：
+    降级为占位保住颜色/可见性偏好，不得静默丢失，也不得在 reload 中途弹模态框。
+
+    修复前：重建循环对 add_variable_to_plot 失败无 else 分支——变量既不进
+    curves 也不进 invalid_curves（占位机制被绕过），且 multi_curve_manager
+    在 batch 半重建状态下弹 QMessageBox.warning 开嵌套事件循环。
+    """
+    host, manager, pw, loader, reload_with = env
+    assert pw.plot_variable("a")
+    assert pw.add_variable_to_plot("b")
+    pw.curves["b"].color = "red"
+    pw.curves["b"].visible = False
+
+    reload_with(
+        {
+            "a": list(np.arange(N, dtype=float)),
+            "b": [-1.7e38] * N,
+        },
+        validity={"a": 1, "b": 0},
+    )
+
+    assert "a" in pw.curves
+    assert "b" not in pw.curves
+    assert "b" in pw.invalid_curves, "备数据失败必须 demote 兜底，不得静默丢资产"
+    assert pw.invalid_curves["b"].color == "red"
+    assert pw.invalid_curves["b"].visible_preference is False
+    _assert_disjoint(pw)
+    assert not modal_records, f"reload 重建中途不得弹模态框: {modal_records}"

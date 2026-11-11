@@ -71,6 +71,7 @@ class PlotDataManager:
         var_name: str,
         show_duplicate_warning: bool = True,
         preferred_color: str | None = None,
+        quiet: bool = False,
     ) -> bool:
         """绘制变量到图表（统一版）
     
@@ -85,6 +86,8 @@ class PlotDataManager:
             var_name: 要绘制的变量名称
             show_duplicate_warning: 是否显示重复变量警告
             preferred_color: 首绘指定颜色（None 时按占位/蓝色规则）
+            quiet: 程序化批量路径（reload/模板套用）传 True：失败不弹
+                模态框，只落日志（调用方负责降级为占位并汇总播报）
     
         Returns:
             bool: 绘制是否成功
@@ -97,18 +100,24 @@ class PlotDataManager:
     
         is_valid, error_msg = self._validate_plot_data(var_name)
         if not is_valid:
-            from PySide6.QtWidgets import QMessageBox
+            if quiet:
+                logger.warning("[PLOT_VAR] 校验失败（quiet）: %s — %s", var_name, error_msg)
+            else:
+                from PySide6.QtWidgets import QMessageBox
     
-            QMessageBox.warning(pw, "错误", error_msg)
+                QMessageBox.warning(pw, "错误", error_msg)
             return False
     
         success, error_msg, x_array, y_array, y_format = self._prepare_plot_data(
             var_name
         )
         if not success:
-            from PySide6.QtWidgets import QMessageBox
+            if quiet:
+                logger.warning("[PLOT_VAR] 备数据失败（quiet）: %s — %s", var_name, error_msg)
+            else:
+                from PySide6.QtWidgets import QMessageBox
     
-            QMessageBox.warning(pw, "错误", error_msg)
+                QMessageBox.warning(pw, "错误", error_msg)
             return False
     
         try:
@@ -123,6 +132,7 @@ class PlotDataManager:
                     y_format,
                     show_duplicate_warning=show_duplicate_warning,
                     preferred_color=preferred_color,
+                    quiet=quiet,
                 )
     
             # === 统一路径：始终写入 curves 字典 ===
@@ -234,9 +244,15 @@ class PlotDataManager:
             return True
     
         except Exception as e:
-            from PySide6.QtWidgets import QMessageBox
+            if quiet:
+                logger.error(
+                    "[PLOT_VAR] 绘制变量异常（quiet）: %s — %s", var_name, e,
+                    exc_info=True,
+                )
+            else:
+                from PySide6.QtWidgets import QMessageBox
     
-            QMessageBox.critical(pw, "绘图错误", f"绘制变量时发生错误: {str(e)}")
+                QMessageBox.critical(pw, "绘图错误", f"绘制变量时发生错误: {str(e)}")
             return False
 
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:

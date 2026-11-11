@@ -270,9 +270,14 @@ class PlotConfigManager(QObject):
                 if cursor_sync is not None:
                     cursor_sync.set_cursor_mode(config.cursor_mode)
             if config.saved_mark_range:
-                # 区间在保存时存在 ⇒ 当时标记区是开着的，恢复时一并打开
+                # 区间在保存时存在 ⇒ 当时标记区是开着的，恢复时一并打开。
+                # P1-J：不能在这里同步 toggle——activate_page 只排了 0ms 定时器，
+                # 此刻视图还是套用前的旧视野，toggle_mark_region 会把落在旧视野外
+                # 的模板区间钳成旧视野中间 1/3，对齐后钳制值又经 restore_mark_regions
+                # 回写全局，模板区间永久丢失。改为挂 pending 标志，由
+                # _post_activation 在 _range_dirty 对齐之后消费。
                 main_window.saved_mark_range = tuple(config.saved_mark_range)
-                main_window.layout_manager.toggle_mark_region(True)
+                main_window._pending_mark_region_restore = True
 
             logger.info(
                 "已成功应用 %d/%d 个 Plot 配置（%d 页）",
@@ -342,11 +347,34 @@ class PlotConfigManager(QObject):
             for i, var_name in enumerate(curve_names):
                 if has_loader and var_name in available:
                     logger.debug("Plot[%d] 添加曲线: %s", plot_index, var_name)
+                    # quiet=True：套用是程序化批量路径，失败不在中途弹模态框
                     if single_scene_first and i == 0:
-                        plot_widget.plot_variable(var_name)
+                        ok = plot_widget.plot_variable(var_name, quiet=True)
                     else:
-                        plot_widget.add_variable_to_plot(var_name)
-                    added_count += 1
+                        ok = plot_widget.add_variable_to_plot(var_name, quiet=True)
+                    if ok:
+                        added_count += 1
+                    elif var_name in plot_widget.curves:
+                        # 畸形模板的重名条目（curves=["a","a"]）：失败原因是
+                        # 「已在绘图中」而非「不可绘制」，不得 demote——demote
+                        # 会经 _remove_single_curve_light 把已画好的曲线移除。
+                        # 与下方 invalid_names 循环的既有防护同口径。
+                        logger.debug(
+                            "Plot[%d] 曲线 '%s' 在模板中重复，跳过",
+                            plot_index, var_name,
+                        )
+                    else:
+                        # P1-I：变量存在于数据但不可绘制（文本列 validity=-1、
+                        # 全哨兵列被过滤成全 NaN 等）——与「不存在」同归宿降级
+                        # 为占位，且不计数（修复前失败仍 added_count+=1，
+                        # 「已应用 N/M」虚高、格子静默留空）。
+                        logger.warning(
+                            "Plot[%d] 曲线 '%s' 存在于数据但绘制失败，降级为占位",
+                            plot_index, var_name,
+                        )
+                        plot_widget.demote_to_invalid(
+                            var_name, INVALID_CURVE_COLOR, True
+                        )
                 else:
                     # 变量不存在 → 降级为占位（模板来源落固定灰色，不用
                     # _assign_curve_color：避免同一模板多次应用占位色随索引漂移）
