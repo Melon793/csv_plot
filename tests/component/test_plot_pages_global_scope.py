@@ -282,7 +282,10 @@ class _Container:
         return False
 
 
-def test_layout_time_correction_traverses_all_pages_with_scene_flag():
+def test_layout_time_correction_traverses_all_pages_with_scene_flag(qapp):
+    # qapp 必须显式声明：_Host 直接创建 QPushButton。缺了它，xdist 分发下
+    # 本用例可能成为某 worker 首个触 Widget 的用例 → 无 QApplication → 整个
+    # worker Abort，同 worker 在途用例被连坐标红（2026-11-11 全量基线实测）。
     events: list[str] = []
     current_pw = _RecordingPW(events)
     hidden_pw = _RecordingPW(events)
