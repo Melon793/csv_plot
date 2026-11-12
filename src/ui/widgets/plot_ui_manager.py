@@ -17,14 +17,15 @@ from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, QPoint
 from PySide6.QtGui import (
+    QAction,
     QFontMetrics,
+    QPainter,
     QPen,
     QColor,
     QDrag,
-    QIcon,
-    QPixmap,
 )
 from PySide6.QtWidgets import (
+    QGridLayout,
     QMenu,
     QSizePolicy,
     QGraphicsProxyWidget,
@@ -36,6 +37,8 @@ from PySide6.QtWidgets import (
     QToolTip,
     QTextBrowser,
     QFrame,
+    QWidget,
+    QWidgetAction,
 )
 import pyqtgraph as pg
 
@@ -87,6 +90,124 @@ LEGEND_SCROLLBAR_QSS = """
         background: transparent;
     }
 """
+
+# 调色板网格（方案 A）：5 列 × 2 行色块，中文色名只用于 tooltip / 无障碍名
+PALETTE_COLUMNS = 5
+_SWATCH_SIZE = 26      # 色块边长（逻辑像素，Qt 按 DPR 缩放）
+_SWATCH_RADIUS = 5     # 圆角半径
+_SWATCH_HOVER_RING = QColor("#bdbdbd")
+_SWATCH_SELECT_RING = QColor("#1a73e8")
+_COLOR_LABELS = {
+    "blue": "蓝色",
+    "red": "红色",
+    "green": "绿色",
+    "orange": "橙色",
+    "purple": "紫色",
+    "brown": "棕色",
+    "pink": "粉色",
+    "gray": "灰色",
+    "olive": "橄榄色",
+    "cyan": "青色",
+}
+
+
+class _ColorSwatch(QWidget):
+    """调色板网格中的单个色块。
+
+    只负责视觉与命中：填充色、hover 环、选中双环（当前色）、中文
+    tooltip。左键在 press 记录、release 时指针仍在色块内才回调——若在
+    press 内就关闭菜单，同一次物理 release 会漏到下层图例/绘图区，
+    可能误触发显隐或框选（评审实测项）。
+    """
+
+    def __init__(
+        self,
+        color_name: str,
+        label: str,
+        selected: bool,
+        on_pick,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.color_name = color_name
+        self._selected = bool(selected)
+        self._on_pick = on_pick
+        self._pressed = False
+        self._hovered = False
+        self.setFixedSize(_SWATCH_SIZE, _SWATCH_SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip(f"{label}（当前）" if selected else label)
+        self.setAccessibleName(label)
+
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._pressed = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit = self._pressed and self.rect().contains(
+                event.position().toPoint()
+            )
+            self._pressed = False
+            if hit:
+                event.accept()
+                self._on_pick(self.color_name)
+            else:
+                # 按下后拖出色块再松开：不消费事件，交回 QMenu 处理
+                # （点菜单外即关闭，保持原生菜单手感）
+                event.ignore()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Space,
+        ):
+            event.accept()
+            self._on_pick(self.color_name)
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self.color_name))
+        body = self.rect().adjusted(3, 3, -3, -3)
+        painter.drawRoundedRect(body, _SWATCH_RADIUS, _SWATCH_RADIUS)
+
+        active = self._selected or self.hasFocus()
+        if active or self._hovered:
+            painter.setPen(
+                QPen(
+                    _SWATCH_SELECT_RING if active else _SWATCH_HOVER_RING,
+                    2 if active else 1,
+                )
+            )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            ring = self.rect().adjusted(1, 1, -1, -1)
+            painter.drawRoundedRect(ring, _SWATCH_RADIUS + 2, _SWATCH_RADIUS + 2)
+        painter.end()
 
 
 class LegendTextBrowser(QTextBrowser):
@@ -390,8 +511,44 @@ class LegendTextBrowser(QTextBrowser):
             if callable(show):
                 show(f"已移除 {var_name}")
 
+    def _build_color_palette_menu(
+        self, current: str, on_pick
+    ) -> tuple[QMenu, QAction]:
+        """构建 5×2 网格色板菜单。
+
+        预设色顺序沿用 ``pw.curve_colors``（行优先），当前色以双环标注；
+        末尾保留「更多颜色…」普通项。网格用 QWidgetAction 内嵌，窗口
+        尺寸由布局自适应，菜单关闭后随 deleteLater 级联释放。
+
+        Returns:
+            (menu, act_more)：``act_more`` 供 ``exec`` 返回值分发。
+        """
+        menu = QMenu(self._pw)
+        grid_host = QWidget(menu)
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(8, 8, 8, 4)
+        grid.setSpacing(6)
+        for index, color_name in enumerate(self._pw.curve_colors):
+            swatch = _ColorSwatch(
+                color_name,
+                _COLOR_LABELS.get(color_name, color_name),
+                color_name == current,
+                on_pick,
+            )
+            grid.addWidget(swatch, index // PALETTE_COLUMNS, index % PALETTE_COLUMNS)
+
+        widget_act = QWidgetAction(menu)
+        widget_act.setDefaultWidget(grid_host)
+        menu.addAction(widget_act)
+        menu.addSeparator()
+        act_more = menu.addAction("更多颜色…")
+        # 压掉 QMenu 默认项内边距，避免网格四周多出一圈空白；
+        # 不设 border，保留 macOS 原生菜单边框/圆角/阴影
+        menu.setStyleSheet("QMenu { padding: 2px; }")
+        return menu, act_more
+
     def _exec_color_menu(self, var_name: str, global_pos: QPoint) -> None:
-        """色块左键：弹出预设调色板菜单（当前色打勾）+「更多颜色…」。
+        """色块左键：弹出 5×2 网格调色板（当前色双环）+「更多颜色…」。
 
         图例快速改色入口（快速改色方案 §2.4）：与编辑器 QColorDialog
         同源，改色动作统一走 MultiCurveManager.apply_curve_color。
@@ -399,7 +556,7 @@ class LegendTextBrowser(QTextBrowser):
         菜单 exec 返回后立即复查一次（已删则不再弹对话框），对话框
         返回后再复查一次（打开期间曲线可能被 reload/编辑器删除，
         §6 R3 口径），同色选择为 no-op。菜单用 deleteLater 释放，
-        避免 QMenu/QIcon 挂在 pw 下累积。
+        避免 QMenu/内嵌网格挂在 pw 下累积。
         """
         if not widget_alive(self) or not widget_alive(self._pw):
             logger.debug("legend 调色板菜单跳过：控件已销毁")
@@ -409,24 +566,25 @@ class LegendTextBrowser(QTextBrowser):
             return
         current = pw.curves[var_name].color
 
-        menu = QMenu(pw)
-        for color_name in pw.curve_colors:
-            pixmap = QPixmap(14, 14)
-            pixmap.fill(QColor(color_name))
-            act = menu.addAction(QIcon(pixmap), color_name)
-            if color_name == current:
-                act.setCheckable(True)
-                act.setChecked(True)
-        menu.addSeparator()
-        act_more = menu.addAction("更多颜色…")
+        picked: dict[str, str] = {}
+        holder: list[QMenu] = []
 
+        def _on_pick(color_name: str) -> None:
+            picked["color"] = color_name
+            if holder:
+                # 选色即关菜单（release 内同步 close，exec 随后返回 None）；
+                # 不用 singleShot，避免定时器仍持有即将 deleteLater 的菜单
+                holder[0].close()
+
+        menu, act_more = self._build_color_palette_menu(current, _on_pick)
+        holder.append(menu)
         chosen = menu.exec(global_pos)
-        if chosen is None:
-            menu.deleteLater()
-            return
-        is_more = chosen is act_more
-        chosen_name = None if is_more else chosen.text()
         menu.deleteLater()
+
+        is_more = chosen is act_more
+        chosen_name = picked.get("color")
+        if not is_more and chosen_name is None:
+            return  # Esc / 点菜单外：取消
 
         # 菜单关闭后立即复查：打开期间曲线可能已被 reload/编辑器删除，
         # 已删则不再弹对话框（避免为一个不存在的变量开颜色面板）
