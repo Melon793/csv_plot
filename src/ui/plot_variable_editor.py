@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 from src.core.data_types import (
     DRAW_MODE_AUTO,
+    DRAW_MODE_SOURCE_AUTO,
     DRAW_MODE_STEP_POST,
     DRAW_MODE_STEP_PRE,
     SYMBOL_POLICY_AUTO,
@@ -491,6 +492,7 @@ class PlotVariableEditorDialog(QDialog):
                     )
                     if index >= 0:
                         draw_combo.setCurrentIndex(index)
+                draw_combo.setToolTip(self._draw_mode_tooltip(curve_info))
             symbol_combo = table.cellWidget(row, 4)
             if symbol_combo is not None:
                 with QSignalBlocker(symbol_combo):
@@ -720,6 +722,7 @@ class PlotVariableEditorDialog(QDialog):
             getattr(curve_info, "draw_mode", DRAW_MODE_AUTO),
             lambda mode, label, name=var_name: self._on_draw_mode_changed(name, mode, label),
         )
+        draw_combo.setToolTip(self._draw_mode_tooltip(curve_info))
         self.var_table.setCellWidget(row, 3, draw_combo)
 
         symbol_combo = _mode_combo(
@@ -728,6 +731,19 @@ class PlotVariableEditorDialog(QDialog):
             lambda policy, label, name=var_name: self._on_symbol_policy_changed(name, policy, label),
         )
         self.var_table.setCellWidget(row, 4, symbol_combo)
+
+    @staticmethod
+    def _draw_mode_tooltip(curve_info) -> str:
+        """绘制方式下拉 tooltip：标注枚举通道自动判定来源（可解释性）。"""
+        if (
+            getattr(curve_info, "draw_mode", DRAW_MODE_AUTO) == DRAW_MODE_STEP_POST
+            and getattr(curve_info, "draw_mode_source", "") == DRAW_MODE_SOURCE_AUTO
+        ):
+            return (
+                "枚举通道自动判定：枚举无中间态，已用阶梯(后)显示；"
+                "手动选择其他方式后以手动为准"
+            )
+        return ""
 
     def _on_draw_mode_changed(self, var_name: str, draw_mode, label: str):
         """绘制方式下拉变更：委托 MultiCurveManager 应用到曲线。"""

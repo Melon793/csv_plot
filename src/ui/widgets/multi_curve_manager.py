@@ -24,7 +24,9 @@ from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 from src.core.data_types import (
     DRAW_MODES,
+    DRAW_MODE_SOURCE_AUTO,
     DRAW_MODE_SOURCE_USER,
+    DRAW_MODE_STEP_POST,
     SYMBOL_POLICIES,
     CurveInfo,
     resolve_symbol_show,
@@ -353,6 +355,30 @@ class MultiCurveManager:
             if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
                 main_window.cursor_sync_manager._sync_min_xrange()
 
+    def _announce_auto_step(self, var_names: list, *, batch: bool = False) -> None:
+        """播报本批新增曲线中自动判为阶梯的枚举通道（仅 'auto' 来源）。
+
+        交互入口（拖入/编辑器添加）调用；quiet 程序化路径
+        （reload/模板恢复/_recreate_curve 重建）不调用，避免刷屏。
+        batch=True 时即使只有 1 条也用汇总文案（批量拖入语境）。
+        """
+        stepped = [
+            n for n in var_names
+            if (ci := self.pw.curves.get(n)) is not None
+            and ci.draw_mode_source == DRAW_MODE_SOURCE_AUTO
+            and ci.draw_mode == DRAW_MODE_STEP_POST
+        ]
+        if not stepped:
+            return
+        main_window = self.pw.window()
+        show = getattr(main_window, "_show_status_message", None)
+        if not callable(show):
+            return
+        if not batch and len(stepped) == 1:
+            show(f"通道 {stepped[0]} 为枚举量，已用阶梯显示（枚举无中间态）")
+        else:
+            show(f"{len(stepped)} 个枚举通道已用阶梯显示（枚举无中间态）")
+
     def _recreate_curve(self, var_name: str):
         """重新创建失效的曲线"""
         pw = self.pw
@@ -363,6 +389,7 @@ class MultiCurveManager:
                     var_name,
                     skip_existence_check=True,
                     preferred_color=ci.color,
+                    announce_step=False,
                 )
         except Exception:
             logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)
@@ -856,6 +883,9 @@ class MultiCurveManager:
                 # 显隐切换静默跳过 header/vline/密度等全部刷新
                 pw._batch_adding = False
 
+            # 批量拖入：枚举自动阶梯汇总播报（单条，不逐条刷屏）
+            self._announce_auto_step(names, batch=True)
+
             if invalid_vars or duplicate_vars:
                 msg_parts = []
                 if invalid_vars:
@@ -869,11 +899,13 @@ class MultiCurveManager:
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
                              show_duplicate_warning: bool = True, preferred_color: str | None = None,
-                             quiet: bool = False) -> bool:
+                             quiet: bool = False, announce_step: bool = True) -> bool:
         """添加变量到曲线绘图（统一版：无模式切换，始终写入 curves 字典）
 
         ``quiet=True`` 供 reload/模板套用等程序化批量路径使用：失败不弹
         模态框（调用方负责降级为占位并汇总播报），只落日志。
+        ``announce_step=False`` 供程序化重建（_recreate_curve）抑制
+        枚举自动阶梯的状态栏播报。
         """
         pw = self.pw
         logger.debug(
@@ -1051,6 +1083,10 @@ class MultiCurveManager:
                 main_window = pw.window()
                 if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
                     main_window.cursor_sync_manager._sync_min_xrange()
+
+                # 枚举通道自动阶梯播报（交互入口；quiet/批量/重建路径静默）
+                if announce_step and not quiet:
+                    self._announce_auto_step([var_name])
 
             return True
 

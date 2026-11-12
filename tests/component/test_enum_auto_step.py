@@ -366,3 +366,74 @@ def test_reload_continuous_stays_line(reload_env):
     reload_with({"v": list(_enum_df(30)["v"]), "c": list(np.linspace(0.0, 1.0, 30))})
     assert pw.curves["c"].draw_mode == DRAW_MODE_AUTO
     assert pw.curves["c"].curve.opts["stepMode"] is None
+
+
+# ---------------------------------------------------------------------------
+# 状态栏播报：交互入口播报，quiet 程序化路径静默
+# ---------------------------------------------------------------------------
+
+class _StatusHost(QWidget):
+    """最小宿主：收集 _show_status_message 播报。"""
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def _show_status_message(self, message: str):
+        self.messages.append(message)
+
+
+def _attach_host(pw):
+    host = _StatusHost()
+    pw.setParent(host)
+    pw._announce_host = host  # 保活引用：host 被 GC 会连带删除 pw
+    return host
+
+
+def test_announce_single_enum(plot_factory, qapp):
+    """单条添加枚举通道 → 播报 1 条（无中间态说明）。"""
+    pw = plot_factory(_enum_df())
+    pw.plot_context.loader = _mock_loader({"v": _enum_meta("v")})
+    host = _attach_host(pw)
+    assert pw.add_variable_to_plot("v")
+    settle()
+    assert any("枚举" in m and "v" in m for m in host.messages)
+
+
+def test_no_announce_for_continuous(plot_factory, qapp):
+    """连续通道添加 → 不播报。"""
+    df = _enum_df()
+    df["c"] = np.linspace(0.0, 1.0, 20)
+    pw = plot_factory(df)
+    pw.plot_context.loader = _mock_loader({
+        "v": _enum_meta("v"), "c": VarMetadata(name="c", unit="V"),
+    })
+    host = _attach_host(pw)
+    assert pw.add_variable_to_plot("c")
+    settle()
+    assert host.messages == []
+
+
+def test_announce_batch_summary(plot_factory, qapp):
+    """批量拖入（v 枚举 + c 连续）→ 只播报 1 条汇总，不逐条刷屏。"""
+    df = _enum_df()
+    df["c"] = np.linspace(0.0, 1.0, 20)
+    pw = plot_factory(df)
+    pw.plot_context.loader = _mock_loader({
+        "v": _enum_meta("v"), "c": VarMetadata(name="c", unit="V"),
+    })
+    host = _attach_host(pw)
+    pw._multi_curve_manager.add_variables_to_plot(["v", "c"])
+    settle()
+    step_msgs = [m for m in host.messages if "枚举" in m]
+    assert len(step_msgs) == 1
+    assert "1 个枚举通道" in step_msgs[0]
+
+
+def test_no_announce_on_reload(reload_env):
+    """reload（quiet 路径）→ 不播报枚举阶梯。"""
+    host, pw, reload_with = reload_env
+    assert pw.curves["v"].draw_mode == DRAW_MODE_STEP_POST
+    host.status_messages.clear()
+    reload_with({"v": list(_enum_df(30)["v"]), "c": list(np.linspace(0.0, 1.0, 30))})
+    assert host.status_messages == []

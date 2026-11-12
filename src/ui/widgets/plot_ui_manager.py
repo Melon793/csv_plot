@@ -52,6 +52,7 @@ from src.core.config import (
 from src.core.logger import get_logger
 from src.core.data_types import (
     DRAW_MODE_AUTO,
+    DRAW_MODE_SOURCE_AUTO,
     DRAW_MODE_STEP_POST,
     DRAW_MODE_STEP_PRE,
     SYMBOL_POLICY_AUTO,
@@ -500,8 +501,15 @@ class LegendTextBrowser(QTextBrowser):
         # 绘制方式 / 数据点（方案 A：单曲线粒度样式入口，与变量编辑器同源，
         # 均汇聚到 MultiCurveManager.apply_curve_draw_mode / apply_curve_symbol_policy）
         ci = pw.curves[var_name]
+        # 枚举通道自动阶梯时在子菜单标题标注来源（可解释性；手动选择无标注）
+        auto_step = (
+            getattr(ci, "draw_mode", DRAW_MODE_AUTO) == DRAW_MODE_STEP_POST
+            and getattr(ci, "draw_mode_source", "") == DRAW_MODE_SOURCE_AUTO
+        )
         draw_entries: list[tuple[QAction, str]] = []
-        sub_draw = menu.addMenu("绘制方式")
+        sub_draw = menu.addMenu(
+            "绘制方式（枚举通道自动）" if auto_step else "绘制方式"
+        )
         for text, mode in (
             ("直线", DRAW_MODE_AUTO),
             ("阶梯(后)", DRAW_MODE_STEP_POST),
