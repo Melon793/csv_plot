@@ -48,10 +48,20 @@ class _BroadcastRecorder:
 
 
 def _middle_double_click(pw, qapp):
+    """在绘图区中心（view_box 内，图例护栏之外）注入中键双击。
+
+    快速删除方案引入 view 层护栏后，中键双击的清空前提是「位置在
+    图例区外」；未 show 时布局未激活、图例 proxy 覆盖左上角，固定
+    (10,10) 会误中护栏，故取绘图区中心（对布局状态鲁棒）。
+    """
+    center = pw.view_box.mapToScene(pw.view_box.boundingRect().center())
+    vp = pw.mapFromScene(center)
+    pw.show()
+    qapp.processEvents()  # 激活布局：护栏依赖图例 proxy 的真实几何
     ev = QMouseEvent(
         QEvent.Type.MouseButtonDblClick,
-        QPointF(10.0, 10.0),
-        QPointF(10.0, 10.0),
+        QPointF(vp),
+        QPointF(vp),
         Qt.MouseButton.MiddleButton,
         Qt.MouseButton.MiddleButton,
         Qt.KeyboardModifier.NoModifier,

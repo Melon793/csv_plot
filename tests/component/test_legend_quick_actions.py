@@ -18,6 +18,7 @@ import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QColor, QMouseEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QColorDialog
 
 from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
@@ -247,6 +248,11 @@ def _rmb(event_type, pos):
                         Qt.MouseButton.RightButton, Qt.MouseButton.RightButton)
 
 
+def _mid(event_type, pos):
+    return _mouse_event(event_type, pos,
+                        Qt.MouseButton.MiddleButton, Qt.MouseButton.MiddleButton)
+
+
 def test_t1_legend_html_anchor_pairs(plot_factory):
     """可见/隐藏条目各产出 color:/// + curve:/// 一对锚点，顺序稳定。"""
     pw = plot_factory()
@@ -448,3 +454,191 @@ def test_t13_right_click_on_color_block_opens_menu(plot_factory, monkeypatch, qa
     acts = [a.text() for a in menus[0].actions() if a.text()]
     assert acts[0] == "仅显示此变量"
     assert acts[-1] == "绘图变量编辑器"
+
+
+# ---------------------------------------------------------------------------
+# Step 3b：中键单击删除（含 view 层双击护栏）
+# ---------------------------------------------------------------------------
+
+def test_t8_middle_click_deletes_curve(plot_factory, monkeypatch, qapp):
+    """中键 release 在锚点上：删除曲线 + mark_stats 刷新 + 状态栏播报。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    assert pw.plot_variable("b")
+    browser = pw.legend_label
+    pos = _find_anchor_pos(browser, "curve", "a")  # 宽松解析：中键名称锚点命中
+
+    refresh = []
+    monkeypatch.setattr(
+        pw.window().layout_manager,
+        "request_mark_stats_refresh",
+        lambda *a, **k: refresh.append(1),
+    )
+    msgs = []
+    pw.window()._show_status_message = lambda msg: msgs.append(msg)
+
+    browser.mousePressEvent(_mid(QEvent.Type.MouseButtonPress, pos))
+    browser.mouseReleaseEvent(_mid(QEvent.Type.MouseButtonRelease, pos))
+    qapp.processEvents()  # singleShot(0) 落地
+
+    assert "a" not in pw.curves
+    assert "b" in pw.curves
+    assert refresh, "request_mark_stats_refresh 应被调用"
+    assert msgs == ["已移除 a"]
+
+
+def test_t9_middle_click_deletes_placeholder(plot_factory, qapp):
+    """中键在失效占位上：删除占位 + curves_changed emit。"""
+    from src.core.data_types import InvalidCurveRef
+
+    pw = plot_factory()
+    pw.invalid_curves["ghost"] = InvalidCurveRef(var_name="ghost", color="gray")
+    pw._update_header_for_curves()  # 渲染占位条目
+    browser = pw.legend_label
+    pos = _find_anchor_pos(browser, "curve", "ghost")
+
+    fired = []
+    pw.curves_changed.connect(lambda: fired.append(1))
+    browser.mousePressEvent(_mid(QEvent.Type.MouseButtonPress, pos))
+    browser.mouseReleaseEvent(_mid(QEvent.Type.MouseButtonRelease, pos))
+    qapp.processEvents()
+
+    assert "ghost" not in pw.invalid_curves
+    assert fired == [1]
+
+
+def test_t10_middle_drag_cancels_delete(plot_factory, monkeypatch, qapp):
+    """中键位移 ≥ startDragDistance：不删除。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+    pos = _find_anchor_pos(browser, "curve", "a")
+
+    called = []
+    monkeypatch.setattr(
+        browser, "_exec_middle_delete", lambda *a, **k: called.append(a)
+    )
+
+    far = pos + QPoint(QApplication.startDragDistance() + 10, 0)
+    browser.mousePressEvent(_mid(QEvent.Type.MouseButtonPress, pos))
+    browser.mouseReleaseEvent(_mid(QEvent.Type.MouseButtonRelease, far))
+    qapp.processEvents()
+
+    assert not called
+    assert "a" in pw.curves
+
+
+def test_t10b_middle_double_click_no_double_delete(plot_factory, qapp):
+    """中键连击两次：第二次 release 因二次复查归属静默 no-op（幂等）。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    assert pw.plot_variable("b")
+    browser = pw.legend_label
+    pos = _find_anchor_pos(browser, "curve", "a")
+    msgs = []
+    pw.window()._show_status_message = lambda msg: msgs.append(msg)
+
+    # 双击事件序列的两次 press/release 连发（删除在 singleShot 中落地，
+    # 第二次调度转回事件循环时变量已删 → 静默）
+    browser.mousePressEvent(_mid(QEvent.Type.MouseButtonPress, pos))
+    browser.mouseReleaseEvent(_mid(QEvent.Type.MouseButtonRelease, pos))
+    browser.mousePressEvent(_mid(QEvent.Type.MouseButtonPress, pos))
+    browser.mouseReleaseEvent(_mid(QEvent.Type.MouseButtonRelease, pos))
+    qapp.processEvents()
+
+    assert "a" not in pw.curves
+    assert "b" in pw.curves
+    assert msgs == ["已移除 a"], "第二次删除应被二次复查拦截"
+
+
+def test_t11_middle_click_blank_no_action(plot_factory, monkeypatch, qapp):
+    """中键在无锚点空白处：无动作。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+
+    blank = None
+    for y in range(1, 40):
+        for x in range(1, 200, 4):
+            if browser.anchorAt(QPoint(x, y)) == "":
+                blank = QPoint(x, y)
+                break
+        if blank is not None:
+            break
+    assert blank is not None
+
+    called = []
+    monkeypatch.setattr(
+        browser, "_exec_middle_delete", lambda *a, **k: called.append(a)
+    )
+    browser.mousePressEvent(_mid(QEvent.Type.MouseButtonPress, blank))
+    browser.mouseReleaseEvent(_mid(QEvent.Type.MouseButtonRelease, blank))
+    qapp.processEvents()
+
+    assert not called
+    assert "a" in pw.curves
+
+
+def _inject_middle_double_click(pw, vp_pos, qapp):
+    """经真实链路（QTest→viewport→view→scene→proxy）注入中键双击序列。"""
+    QTest.mousePress(
+        pw.viewport(), Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier, vp_pos,
+    )
+    QTest.mouseRelease(
+        pw.viewport(), Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier, vp_pos,
+    )
+    QTest.mouseDClick(
+        pw.viewport(), Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier, vp_pos,
+    )
+    QTest.mouseRelease(
+        pw.viewport(), Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier, vp_pos,
+    )
+    qapp.processEvents()
+
+
+def test_t0b_legend_middle_dblclick_does_not_clear_plot(plot_factory, qapp):
+    """T0 探针回归：图例锚点上中键双击不清空本格（view 层护栏生效）。
+
+    语义上双击 = 两次单击删除 = 删除一次（幂等）；关键是不触发
+    clear_current_plot。
+    """
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    assert pw.plot_variable("b")
+    pw.show()
+    qapp.processEvents()
+
+    browser = pw.legend_label
+    proxy = browser.graphicsProxyWidget()
+    local = _find_anchor_pos(browser, "curve", "a")
+    vp_pos = pw.mapFromScene(proxy.mapToScene(QPointF(local)))
+
+    clear_calls = []
+    pw.clear_current_plot = lambda: clear_calls.append(1)
+
+    _inject_middle_double_click(pw, vp_pos, qapp)
+
+    assert not clear_calls, "图例上中键双击不得触发 clear_current_plot"
+    assert set(pw.curves) == {"b"}, "双击 = 删除一次（幂等），b 保留"
+
+
+def test_t0c_plot_area_middle_dblclick_still_clears(plot_factory, qapp):
+    """护栏不误伤：绘图区中键双击仍清空本格。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    pw.show()
+    qapp.processEvents()
+
+    center_scene = pw.view_box.mapToScene(pw.view_box.boundingRect().center())
+    vp_pos = pw.mapFromScene(center_scene)
+
+    clear_calls = []
+    pw.clear_current_plot = lambda: clear_calls.append(1)
+
+    _inject_middle_double_click(pw, vp_pos, qapp)
+
+    assert clear_calls == [1], "绘图区中键双击清空行为保持不变"

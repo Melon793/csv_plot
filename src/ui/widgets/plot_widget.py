@@ -1128,13 +1128,31 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return dialog
 
     # ---------------- 双击轴弹出对话框 ----------------
+    def _is_pos_over_legend(self, view_pos) -> bool:
+        """双击位置是否落在图例 proxy 内（中键双击清空护栏）。
+
+        view 层 mouseDoubleClickEvent 先于 scene 分发（T0 探针实证：
+        tmp/2026-11-12/probe_legend_middle_button.py，图例上中键双击
+        会清空本格），故中键清空前先查位置：图例区内交回 super() 走
+        scene→proxy 链，由 LegendTextBrowser 就地终结（中键删除手势）。
+        """
+        proxy = self.legend_label.graphicsProxyWidget()
+        if proxy is None:
+            return False
+        scene_pos = self.mapToScene(view_pos)
+        return proxy.boundingRect().contains(proxy.mapFromScene(scene_pos))
+
     def mouseDoubleClickEvent(self, event):
         if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             super().mouseDoubleClickEvent(event)
             return
         from src.ui.dialogs.axis import AxisDialog
-        
+
         if event.button() == Qt.MouseButton.MiddleButton:
+            # 图例区内中键手势归图例（快速删除），不清空本格
+            if self._is_pos_over_legend(event.pos()):
+                super().mouseDoubleClickEvent(event)
+                return
             self.clear_current_plot()
             self.window().layout_manager.request_mark_stats_refresh(immediate=True)
             return

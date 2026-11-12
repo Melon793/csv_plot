@@ -99,6 +99,9 @@ class LegendTextBrowser(QTextBrowser):
         self._drag_var_name: str | None = None
         self._ctx_press_pos: QPoint | None = None
         self._ctx_var_name: str | None = None
+        # 中键手势状态（快速删除方案 §2.6）：press 记录、release 校验
+        self._mid_press_pos: QPoint | None = None
+        self._mid_var_name: str | None = None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -118,6 +121,18 @@ class LegendTextBrowser(QTextBrowser):
             )
             self._ctx_var_name = parsed[1] if parsed else None
             self._ctx_press_pos = event.position().toPoint()
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            # 中键：记录锚点与按压位置，release 校验位移后删除（§2.6）。
+            # 宽松解析：名称/色块/占位锚点均命中。press 显式 accept 且
+            # 不进 QTextBrowser 处理链（中键无文本语义），避免未 accept
+            # 的事件沿 scene 向下传播。
+            parsed = parse_legend_anchor(
+                self.anchorAt(event.position().toPoint())
+            )
+            self._mid_var_name = parsed[1] if parsed else None
+            self._mid_press_pos = event.position().toPoint()
+            event.accept()
+            return
         super().mousePressEvent(event)  # 保留链接高亮/anchor 内部状态
 
     def mouseMoveEvent(self, event):
@@ -133,6 +148,31 @@ class LegendTextBrowser(QTextBrowser):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            # 中键 release：位移小于拖拽阈值且锚点命中才删除（按住拖出
+            # 视为取消，与左键/右键手势对称）。显式 accept 阻断沿
+            # proxy→header→scene 传播（widget 侧护栏，view 侧见
+            # PlotWidget.mouseDoubleClickEvent）。
+            var_name = self._mid_var_name
+            press_pos = self._mid_press_pos
+            self._mid_var_name = None
+            self._mid_press_pos = None
+            event.accept()
+            in_curves = var_name in self._pw.curves
+            in_invalid = var_name in (getattr(self._pw, "invalid_curves", {}) or {})
+            if (
+                var_name
+                and press_pos is not None
+                and (event.position().toPoint() - press_pos).manhattanLength()
+                < QApplication.startDragDistance()
+                and (in_curves or in_invalid)
+            ):
+                # singleShot(0)：不在 release 处理器内改 scene / 重建
+                # legend HTML（与右键菜单 singleShot 同构）
+                QTimer.singleShot(
+                    0, lambda: self._exec_middle_delete(var_name)
+                )
+            return
         if event.button() == Qt.MouseButton.RightButton:
             # 右键 release：位移小于拖拽阈值才弹菜单（按住拖出 legend 视为
             # 取消，与左键手势对称）；锚点解析失败或曲线已陈旧则静默不弹。
@@ -163,6 +203,18 @@ class LegendTextBrowser(QTextBrowser):
         self._drag_press_pos = None
         self._drag_var_name = None
         super().mouseReleaseEvent(event)  # 未拖拽时正常触发 anchorClicked
+
+    def mouseDoubleClickEvent(self, event):
+        """中键双击在图例内终结（T0 探针实证的护栏第二层）。
+
+        view 层（PlotWidget.mouseDoubleClickEvent）对图例区内中键双击
+        放行进 scene 后，到达本控件时显式 accept：中键无文本双击语义，
+        未处理的事件会沿 scene 继续传播（ViewBox 等），必须就地终结。
+        """
+        if event.button() == Qt.MouseButton.MiddleButton:
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
         """纯抑制器：静默消费，不调 super（屏蔽 QTextBrowser 默认富文本菜单）。
@@ -268,6 +320,33 @@ class LegendTextBrowser(QTextBrowser):
             del invalid[var_name]
             pw._update_header_for_curves()
             pw.curves_changed.emit()
+
+    def _exec_middle_delete(self, var_name: str) -> None:
+        """中键单击条目：删除曲线（或失效占位），状态栏播报回执。
+
+        快捷手势无菜单确认（快速删除方案 §2.6），成功时以状态栏播报
+        作为可见回执，失败静默。执行前二次复查归属：singleShot(0) 转回
+        事件循环期间 curves/invalid 可能已变（含中键双击第二次 release
+        调度的天然幂等）。动作分支与右键菜单删除/占位删除完全一致。
+        """
+        if not widget_alive(self) or not widget_alive(self._pw):
+            return
+        pw = self._pw
+        main_window = pw.window()
+        show = getattr(main_window, "_show_status_message", None)
+
+        if var_name in pw.curves:
+            pw.remove_variable_from_plot(var_name)
+            if main_window is not None and hasattr(main_window, "layout_manager"):
+                main_window.layout_manager.request_mark_stats_refresh()
+            if callable(show):
+                show(f"已移除 {var_name}")
+        elif var_name in (getattr(pw, "invalid_curves", {}) or {}):
+            del pw.invalid_curves[var_name]
+            pw._update_header_for_curves()
+            pw.curves_changed.emit()
+            if callable(show):
+                show(f"已移除 {var_name}")
 
     def _exec_color_menu(self, var_name: str, global_pos: QPoint) -> None:
         """色块左键：弹出预设调色板菜单（当前色打勾）+「更多颜色…」。
