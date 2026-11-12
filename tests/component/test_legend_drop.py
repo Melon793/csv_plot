@@ -219,3 +219,76 @@ def test_varlist_plain_add_unchanged(two_plots, silent_dialogs):
     dst.dropEvent(ev)
 
     assert list(dst.curves) == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# 样式继承（方案 A）：drop 时从源 plot 读颜色走 preferred_color 通道。
+# 断言一律用 drop 前快照的源色，与色板内容解耦。
+# ---------------------------------------------------------------------------
+
+
+def _pen_color_hex(ci) -> str:
+    """取 CurveInfo.pen 的 hex 色（opts["pen"] 为 QPen）"""
+    from PySide6.QtGui import QColor
+    return QColor(ci.curve.opts["pen"].color()).name()
+
+
+def test_move_preserves_color_to_empty_target(two_plots, silent_dialogs):
+    """移动到空目标：继承源曲线颜色（快照断言，与色板内容解耦）"""
+    src, dst, qapp = two_plots
+    assert src.plot_variable("a")
+    assert src.plot_variable("b")
+    want = src.curves["b"].color
+
+    _drop_legend(dst, src, "b")
+    qapp.processEvents()
+
+    assert "b" in dst.curves
+    assert dst.curves["b"].color == want
+    from PySide6.QtGui import QColor
+    assert _pen_color_hex(dst.curves["b"]) == QColor(want).name()
+
+
+def test_move_preserves_color_to_nonempty_target(two_plots, silent_dialogs):
+    """移动到非空目标：新曲线继承源色，既有曲线颜色不变"""
+    src, dst, qapp = two_plots
+    assert src.plot_variable("a")
+    assert src.plot_variable("b")
+    want_b = src.curves["b"].color
+    assert dst.plot_variable("c")
+    want_c = dst.curves["c"].color
+
+    _drop_legend(dst, src, "b")
+    qapp.processEvents()
+
+    assert dst.curves["b"].color == want_b
+    assert dst.curves["c"].color == want_c
+
+
+def test_ctrl_copy_preserves_custom_hex_color(two_plots, silent_dialogs):
+    """Ctrl 复制：自定义 hex 色同样继承，且源曲线保留"""
+    src, dst, _ = two_plots
+    assert src.plot_variable("a")
+    assert src._multi_curve_manager.apply_curve_color("a", "#123456")
+
+    _drop_legend(dst, src, "a", ctrl=True)
+
+    assert dst.curves["a"].color == "#123456"
+    assert _pen_color_hex(dst.curves["a"]) == "#123456"
+    assert "a" in src.curves  # 复制语义：源保留
+    assert src.curves["a"].color == "#123456"
+
+
+def test_ctrl_copy_preserves_color_to_nonempty_target(two_plots, silent_dialogs):
+    """Ctrl 复制到非空目标：继承源色，目标既有曲线不受影响"""
+    src, dst, _ = two_plots
+    assert src.plot_variable("a")
+    want_a = src.curves["a"].color
+    assert dst.plot_variable("c")
+    want_c = dst.curves["c"].color
+
+    _drop_legend(dst, src, "a", ctrl=True)
+
+    assert dst.curves["a"].color == want_a
+    assert dst.curves["c"].color == want_c
+    assert "a" in src.curves

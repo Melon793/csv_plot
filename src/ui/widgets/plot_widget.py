@@ -900,6 +900,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         # 反转：无修饰键=移动，Ctrl=复制（Shift 忽略）
         copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        # 样式继承（方案 A）：drop 时从源 plot 读取颜色，走既有 preferred_color
+        # 通道。source 已由 get_active_legend_drag_source 做过存活校验，
+        # source.curves 是纯 Python dict，无需再包 try/except。
+        # 目标空图存在同名占位时占位色优先（既有复活规则），源色不生效。
+        preferred_color: str | None = None
+        if source is not None:
+            src_ci = source.curves.get(name)
+            if src_ci is not None:
+                preferred_color = src_ci.color
         # 前置判重而非依赖 plot_variable 返回值：后者无法区分
         # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
         already = name in self.curves
@@ -910,7 +919,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
             else:
-                self.plot_variable(name, show_duplicate_warning=False)
+                self.plot_variable(
+                    name, show_duplicate_warning=False, preferred_color=preferred_color
+                )
         else:
             # 移动语义（默认）：目标已含该变量则弹确认窗（与复制反馈对齐），取消则两边都留
             from PySide6.QtWidgets import QMessageBox
@@ -929,7 +940,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     remove_source = reply == QMessageBox.StandardButton.Yes
             else:
                 # 目标未含：正常添加，添加成功则删源
-                added = self.plot_variable(name, show_duplicate_warning=False)
+                added = self.plot_variable(
+                    name,
+                    show_duplicate_warning=False,
+                    preferred_color=preferred_color,
+                )
                 remove_source = bool(added) and source is not None
 
             if remove_source:
