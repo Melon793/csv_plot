@@ -50,7 +50,27 @@ from src.core.config import (
     widget_alive,
 )
 from src.core.logger import get_logger
-from src.core.data_types import resolve_symbol_show
+from src.core.data_types import (
+    DRAW_MODE_AUTO,
+    DRAW_MODE_STEP_POST,
+    DRAW_MODE_STEP_PRE,
+    SYMBOL_POLICY_AUTO,
+    SYMBOL_POLICY_OFF,
+    SYMBOL_POLICY_ON,
+    resolve_symbol_show,
+)
+
+# 图例菜单/状态栏用的中文短标签（键为 data_types 常量）
+DRAW_MODE_LABELS = {
+    DRAW_MODE_AUTO: "直线",
+    DRAW_MODE_STEP_POST: "阶梯(后)",
+    DRAW_MODE_STEP_PRE: "阶梯(前)",
+}
+SYMBOL_POLICY_LABELS = {
+    SYMBOL_POLICY_AUTO: "自动",
+    SYMBOL_POLICY_ON: "始终显示",
+    SYMBOL_POLICY_OFF: "始终隐藏",
+}
 from src.ui.drag_drop import (
     build_legend_var_mimedata,
     clear_active_legend_drag,
@@ -477,6 +497,32 @@ class LegendTextBrowser(QTextBrowser):
         act_show_all = menu.addAction("显示全部变量")
         act_show_all.setEnabled(pw.can_show_all())
         menu.addSeparator()
+        # 绘制方式 / 数据点（方案 A：单曲线粒度样式入口，与变量编辑器同源，
+        # 均汇聚到 MultiCurveManager.apply_curve_draw_mode / apply_curve_symbol_policy）
+        ci = pw.curves[var_name]
+        draw_entries: list[tuple[QAction, str]] = []
+        sub_draw = menu.addMenu("绘制方式")
+        for text, mode in (
+            ("直线", DRAW_MODE_AUTO),
+            ("阶梯(后)", DRAW_MODE_STEP_POST),
+            ("阶梯(前)", DRAW_MODE_STEP_PRE),
+        ):
+            act = sub_draw.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(getattr(ci, "draw_mode", DRAW_MODE_AUTO) == mode)
+            draw_entries.append((act, mode))
+        symbol_entries: list[tuple[QAction, str]] = []
+        sub_symbol = menu.addMenu("数据点")
+        for text, policy in (
+            ("自动", SYMBOL_POLICY_AUTO),
+            ("始终显示", SYMBOL_POLICY_ON),
+            ("始终隐藏", SYMBOL_POLICY_OFF),
+        ):
+            act = sub_symbol.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO) == policy)
+            symbol_entries.append((act, policy))
+        menu.addSeparator()
         act_remove = menu.addAction("删除变量")
         act_copy = menu.addAction("复制变量名")
         act_info = menu.addAction("变量信息")
@@ -484,11 +530,25 @@ class LegendTextBrowser(QTextBrowser):
         act_editor = menu.addAction("绘图变量编辑器")
 
         chosen = menu.exec(global_pos)
+        menu.deleteLater()
         if chosen is None:
             return
         if var_name not in pw.curves:  # 菜单打开期间可能已陈旧
             return
         main_window = pw.window()
+        show = getattr(main_window, "_show_status_message", None)
+        for act, mode in draw_entries:
+            if chosen is act:
+                if pw._multi_curve_manager.apply_curve_draw_mode(var_name, mode):
+                    if callable(show):
+                        show(f"已切换 {var_name} 绘制方式：{DRAW_MODE_LABELS[mode]}")
+                return
+        for act, policy in symbol_entries:
+            if chosen is act:
+                if pw._multi_curve_manager.apply_curve_symbol_policy(var_name, policy):
+                    if callable(show):
+                        show(f"已切换 {var_name} 数据点显示：{SYMBOL_POLICY_LABELS[policy]}")
+                return
         if chosen is act_copy:
             QApplication.clipboard().setText(var_name)
         elif chosen is act_remove:

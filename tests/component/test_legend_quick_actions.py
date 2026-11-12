@@ -192,6 +192,7 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
     class _FakeMenu:
         def __init__(self, parent=None):
             self._acts = []
+            self._subs = []
             self.deleted = False
             menus.append(self)
 
@@ -203,6 +204,14 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def addSeparator(self):
             self._acts.append(_FakeAction(""))
 
+        def addMenu(self, title):
+            # 子菜单在父菜单 actions() 里占一个同名项；exec 可选中
+            # 子菜单内动作（与真实 QMenu.exec 返回任意层级 action 一致）
+            self._acts.append(_FakeAction(title))
+            sub = _FakeMenu()
+            self._subs.append(sub)
+            return sub
+
         def actions(self):
             return list(self._acts)
 
@@ -212,12 +221,18 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def close(self):
             pass
 
+        def _iter_all_acts(self):
+            for act in self._acts:
+                yield act
+            for sub in self._subs:
+                yield from sub._iter_all_acts()
+
         def exec(self, pos=None):
             if before_return is not None:
                 before_return()
             if choose_text is None:
                 return None
-            for act in self._acts:
+            for act in self._iter_all_acts():
                 if act.text() == choose_text and act.enabled:
                     return act
             return None

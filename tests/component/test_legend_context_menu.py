@@ -41,14 +41,22 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def __init__(self, text):
             self.text = text
             self.enabled = True
+            self.checked = False
 
         def setEnabled(self, enabled):
             # 真实 QMenu 上置灰项不可选中，exec 同步尊重该标志
             self.enabled = bool(enabled)
 
+        def setCheckable(self, _checkable):
+            pass
+
+        def setChecked(self, checked):
+            self.checked = bool(checked)
+
     class _FakeMenu:
         def __init__(self, parent=None):
             self._acts = []
+            self._subs = []
             menus.append(self)
 
         def addAction(self, text):
@@ -59,18 +67,35 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def addSeparator(self):
             self._acts.append(_FakeAction(""))
 
+        def addMenu(self, title):
+            # 子菜单在父菜单 actions() 里占一个同名项；exec 可选中
+            # 子菜单内动作（与真实 QMenu.exec 返回任意层级 action 一致）
+            self._acts.append(_FakeAction(title))
+            sub = _FakeMenu()
+            self._subs.append(sub)
+            return sub
+
         def actions(self):
             return list(self._acts)
+
+        def _iter_all_acts(self):
+            for act in self._acts:
+                yield act
+            for sub in self._subs:
+                yield from sub._iter_all_acts()
 
         def exec(self, pos=None):
             if before_return is not None:
                 before_return()
             if choose_text is None:
                 return None
-            for act in self._acts:
+            for act in self._iter_all_acts():
                 if act.text == choose_text and act.enabled:
                     return act
             return None
+
+        def deleteLater(self):
+            pass
 
     import src.ui.widgets.plot_ui_manager as pum
     monkeypatch.setattr(pum, "QMenu", _FakeMenu)
@@ -296,11 +321,15 @@ def test_t7b_menu_layout_and_separators(plot_factory, monkeypatch):
     pw.legend_label._exec_var_menu("a", QPoint(0, 0))
 
     acts = menus[0].actions()
-    # "" 为分隔线占位：显隐组/操作组之间一条，操作组与编辑器之间一条；
-    # 复制变量名/变量信息之间无分隔线
+    # "" 为分隔线占位：显隐组与样式组之间一条，样式组与操作组之间一条，
+    # 操作组与编辑器之间一条；复制变量名/变量信息之间无分隔线。
+    # 「绘制方式」「数据点」为子菜单占位项（方案 A 样式入口）。
     assert [a.text for a in acts] == [
         "仅显示此变量",
         "显示全部变量",
+        "",
+        "绘制方式",
+        "数据点",
         "",
         "删除变量",
         "复制变量名",
