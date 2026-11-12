@@ -900,15 +900,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
         # 反转：无修饰键=移动，Ctrl=复制（Shift 忽略）
         copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
-        # 样式继承（方案 A）：drop 时从源 plot 读取颜色，走既有 preferred_color
-        # 通道。source 已由 get_active_legend_drag_source 做过存活校验，
+        # 样式继承（方案 A）：drop 时从源 plot 读取颜色/显隐状态，颜色走既有
+        # preferred_color 通道，显隐经 _schedule_visibility_restore 幂等恢复。
+        # source 已由 get_active_legend_drag_source 做过存活校验，
         # source.curves 是纯 Python dict，无需再包 try/except。
         # 目标空图存在同名占位时占位色优先（既有复活规则），源色不生效。
         preferred_color: str | None = None
+        preferred_visible: bool | None = None
         if source is not None:
             src_ci = source.curves.get(name)
             if src_ci is not None:
                 preferred_color = src_ci.color
+                preferred_visible = src_ci.visible
         # 前置判重而非依赖 plot_variable 返回值：后者无法区分
         # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
         already = name in self.curves
@@ -919,9 +922,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
             else:
-                self.plot_variable(
+                added = self.plot_variable(
                     name, show_duplicate_warning=False, preferred_color=preferred_color
                 )
+                if added and preferred_visible is False:
+                    self._schedule_visibility_restore(name, preferred_visible)
         else:
             # 移动语义（默认）：目标已含该变量则弹确认窗（与复制反馈对齐），取消则两边都留
             from PySide6.QtWidgets import QMessageBox
@@ -946,6 +951,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     preferred_color=preferred_color,
                 )
                 remove_source = bool(added) and source is not None
+                if added and preferred_visible is False:
+                    self._schedule_visibility_restore(name, preferred_visible)
 
             if remove_source:
                 # 延迟一拍执行源端删除：dropEvent 调用栈内直接对源 scene
@@ -959,6 +966,28 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                         logger.debug("legend 移动拖拽：源 plot 已销毁，跳过删除")
 
                 QTimer.singleShot(0, _deferred_remove)
+
+    def _schedule_visibility_restore(self, var_name: str, want: bool) -> None:
+        """legend 拖拽后的显隐继承（方案 A Step 2）：延迟一拍幂等恢复。
+
+        - singleShot(0)：与源端删除同构，避开 dropEvent 调用栈内的场景
+          BSP 中间态与 paint 并发（项目历史踩坑）。
+        - 幂等比对：目标可能因"同名占位复活"（visible_preference=False）
+          本已隐藏，无条件 toggle 会把隐藏态翻成可见；visible 一致直接返回。
+        - toggle_curve_visibility_by_name 在 curve 不在场景中时走
+          _recreate_curve（重建后为可见），该极端场景下隐藏态丢失——
+          继承自既有行为的已知限制，非本次引入，正常 drop 路径不触发。
+        """
+        def _restore(target=self, var=var_name):
+            try:
+                ci = target.curves.get(var)
+                if ci is None or ci.visible == want:
+                    return
+                target._multi_curve_manager.toggle_curve_visibility_by_name(var)
+            except RuntimeError:
+                logger.debug("legend 拖拽：目标 plot 已销毁，跳过显隐恢复")
+
+        QTimer.singleShot(0, _restore)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区 → 委托到 MultiCurveManager"""

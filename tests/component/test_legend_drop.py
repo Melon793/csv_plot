@@ -292,3 +292,65 @@ def test_ctrl_copy_preserves_color_to_nonempty_target(two_plots, silent_dialogs)
     assert dst.curves["a"].color == want_a
     assert dst.curves["c"].color == want_c
     assert "a" in src.curves
+
+
+# ---------------------------------------------------------------------------
+# 显隐继承（Step 2）：源隐藏 → 目标保持隐藏（幂等恢复，延迟一拍生效）
+# ---------------------------------------------------------------------------
+
+
+def test_move_preserves_hidden_state(two_plots, silent_dialogs):
+    """源隐藏曲线移动后：目标保持隐藏（singleShot 后落地）"""
+    src, dst, qapp = two_plots
+    assert src.plot_variable("a")
+    src._multi_curve_manager.toggle_curve_visibility_by_name("a")
+    assert src.curves["a"].visible is False
+
+    _drop_legend(dst, src, "a")
+    qapp.processEvents()  # 让显隐恢复 singleShot(0) 落地
+
+    assert dst.curves["a"].visible is False
+    assert dst.curves["a"].curve.isVisible() is False
+    assert "a" not in src.curves  # 移动语义：源删除
+
+
+def test_move_to_hidden_placeholder_keeps_hidden(two_plots, silent_dialogs):
+    """目标存在同名隐藏占位（visible_preference=False）：复活即隐藏，
+    占位色优先于源色（既有复活规则）；且显隐恢复幂等早退不翻转。
+    本用例源曲线可见（不调度显隐恢复），锁定占位复活路径本身"""
+    src, dst, qapp = two_plots
+    assert src.plot_variable("a")
+    src._multi_curve_manager.apply_curve_color("a", "#123456")
+    assert dst.plot_variable("a")
+    dst.demote_to_invalid("a", "green", visible_preference=False)
+    assert "a" in dst.invalid_curves
+
+    _drop_legend(dst, src, "a")
+    qapp.processEvents()
+
+    # 占位复活色优先：源 #123456 不生效
+    assert dst.curves["a"].color == "green"
+    # 复活恢复 visible_preference=False；幂等恢复不得翻转
+    assert dst.curves["a"].visible is False
+    assert dst.curves["a"].curve.isVisible() is False
+    # 移动语义：源已删除
+    assert "a" not in src.curves
+
+
+def test_move_hidden_to_hidden_placeholder_idempotent(two_plots, silent_dialogs):
+    """源隐藏 + 目标同名隐藏占位：显隐恢复被调度但幂等早退，
+    复活曲线保持隐藏（若实现为无条件 toggle，此处会被翻成可见）"""
+    src, dst, qapp = two_plots
+    assert src.plot_variable("a")
+    src._multi_curve_manager.toggle_curve_visibility_by_name("a")
+    assert src.curves["a"].visible is False
+    assert dst.plot_variable("a")
+    dst.demote_to_invalid("a", "green", visible_preference=False)
+    assert "a" in dst.invalid_curves
+
+    _drop_legend(dst, src, "a")
+    qapp.processEvents()  # 显隐恢复 singleShot(0) 落地
+
+    # 复活恢复 visible_preference=False；幂等早退：ci.visible(False) == want(False)
+    assert dst.curves["a"].visible is False
+    assert dst.curves["a"].curve.isVisible() is False
