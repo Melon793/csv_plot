@@ -1,13 +1,16 @@
 """绘图变量编辑器"""
 
 from __future__ import annotations
+import re
 import sys
-from PySide6.QtCore import Qt, QSignalBlocker
+from PySide6.QtCore import QItemSelectionModel, Qt, QSignalBlocker
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
+    QMenu,
     QPushButton,
     QLabel,
     QMessageBox,
@@ -25,6 +28,21 @@ from src.ui.widgets.variable_search_bar import VariableSearchBar
 logger = get_logger(__name__)
 
 
+def natural_sort_key(name: str) -> list:
+    """自然排序键：字母段按小写比较，数字段按数值比较
+
+    保证 ``AI05_2 < AI05_10``（纯字典序会把 "10" 排在 "2" 前面）。
+    段统一编码为 ``(类型标记, 值)`` 元组：仅同类型段内比值，避免 str/int 混比报错。
+    """
+    key: list = []
+    for part in re.split(r"(\d+)", name):
+        if part.isdigit():
+            key.append((1, int(part)))
+        elif part:
+            key.append((0, part.lower()))
+    return key
+
+
 class PlotVariableEditorDialog(QDialog):
     """
     绘图变量编辑器对话框类
@@ -39,6 +57,9 @@ class PlotVariableEditorDialog(QDialog):
         self.setModal(False)
         self.resize(600, 600)  # 高度从 400 调到 600，留出候选列表空间
         self.setAcceptDrops(True)
+
+        # 最近一次排序前的行序快照（单层，供"撤销上次排序"回退）
+        self._last_sort_order: list[str] | None = None
 
         # 高DPI支持 - PySide6中不需要WA_UseHighDpiPixmaps
         # PySide6默认支持高DPI，通过样式表控制字体大小
@@ -101,6 +122,11 @@ class PlotVariableEditorDialog(QDialog):
         # 设置表格属性
         self.var_table.setDragDropMode(QTableWidget.DragDropMode.DropOnly)
         self.var_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # 扩展选择：Cmd/Ctrl+点击、Shift 范围多选
+        # （"仅排序选中行"与"删除选中"的多行场景依赖此模式）
+        self.var_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.var_table.setAlternatingRowColors(True)
         self.var_table.setStyleSheet("""
             QTableWidget {
@@ -133,6 +159,18 @@ class PlotVariableEditorDialog(QDialog):
 
         # 按钮区域
         button_layout = QHBoxLayout()
+
+        # 排序按钮（下拉菜单：升序/降序/仅排序选中行/撤销上次排序）
+        self.sort_btn = QPushButton("排序 ▾")
+        self.sort_menu = QMenu(self)
+        self._add_sort_actions(self.sort_menu)
+        # 弹出前刷新动作可用态（选中数/可撤销状态是动态的）
+        self.sort_menu.aboutToShow.connect(
+            lambda: self._update_sort_menu_actions(self.sort_menu)
+        )
+        self.sort_btn.setMenu(self.sort_menu)
+        self.sort_btn.setEnabled(False)
+        button_layout.addWidget(self.sort_btn)
 
         # 上移/下移按钮
         self.move_up_btn = QPushButton("上移")
@@ -189,6 +227,11 @@ class PlotVariableEditorDialog(QDialog):
         # 连接信号
         self.var_table.itemSelectionChanged.connect(self.on_selection_changed)
         self.var_table.cellClicked.connect(self.on_cell_clicked)
+        # 右键菜单：与"排序 ▾"按钮共用同一组排序动作
+        self.var_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.var_table.customContextMenuRequested.connect(
+            self._show_table_context_menu
+        )
         # 不再需要itemChanged信号，因为使用QCheckBox控件
         # 拖拽添加等外部变化时刷新表格（必需，否则拖拽后表格不更新）
         # 性能优化（方案 A）：改走增量更新，仅增删变化行；复杂场景内部回退全量重建
@@ -421,6 +464,8 @@ class PlotVariableEditorDialog(QDialog):
             return
 
         order[current_row], order[target_row] = order[target_row], order[current_row]
+        # 手动移动后行序已变，"撤销上次排序"快照失效，作废之
+        self._last_sort_order = None
         self._apply_curve_order(order)
         self.load_current_curves()
         self.var_table.selectRow(target_row)
@@ -443,6 +488,131 @@ class PlotVariableEditorDialog(QDialog):
         self.plot_widget._clear_cursor_items()
         if self.plot_widget.vline.isVisible():
             self.plot_widget.update_cursor_label()
+
+    def _add_sort_actions(self, menu: QMenu):
+        """向目标菜单注入排序动作组（"排序 ▾"按钮菜单与表格右键菜单共用）"""
+        act_asc = menu.addAction("按名称升序")
+        act_asc.setData("asc")
+        act_asc.triggered.connect(lambda: self._sort_variables(descending=False))
+        act_desc = menu.addAction("按名称降序")
+        act_desc.setData("desc")
+        act_desc.triggered.connect(lambda: self._sort_variables(descending=True))
+        menu.addSeparator()
+        act_sel = menu.addAction("仅排序选中行")
+        act_sel.setData("sel")
+        act_sel.triggered.connect(
+            lambda: self._sort_variables(descending=False, selected_only=True)
+        )
+        menu.addSeparator()
+        act_undo = menu.addAction("撤销上次排序")
+        act_undo.setData("undo")
+        act_undo.triggered.connect(self._undo_last_sort)
+
+    def _update_sort_menu_actions(self, menu: QMenu):
+        """排序菜单弹出前刷新各动作可用态"""
+        selected_rows = {item.row() for item in self.var_table.selectedItems()}
+        for action in menu.actions():
+            act = action.data()
+            if act in ("asc", "desc"):
+                action.setEnabled(self.var_table.rowCount() >= 2)
+            elif act == "sel":
+                action.setEnabled(len(selected_rows) >= 2)
+            elif act == "undo":
+                action.setEnabled(self._last_sort_order is not None)
+
+    def _show_table_context_menu(self, pos):
+        """表格右键菜单：就地构建排序动作组并按当前状态刷新可用态"""
+        menu = QMenu(self.var_table)
+        self._add_sort_actions(menu)
+        self._update_sort_menu_actions(menu)
+        menu.exec(self.var_table.viewport().mapToGlobal(pos))
+        # 带 parent 的 QMenu 归 C++ 父对象所有，exec 后须显式回收，
+        # 否则每次右键都会在 var_table 下累积一份菜单对象
+        menu.deleteLater()
+
+    def _table_order(self) -> list[str]:
+        """按表格行序收集变量名（含失效占位行）"""
+        order = []
+        for row in range(self.var_table.rowCount()):
+            name_item = self.var_table.item(row, 1)
+            if name_item is not None:
+                order.append(name_item.data(Qt.ItemDataRole.UserRole))
+        return order
+
+    def _selected_var_names(self) -> set[str]:
+        """收集当前选中行对应的变量名集合"""
+        names = set()
+        for row in {item.row() for item in self.var_table.selectedItems()}:
+            name_item = self.var_table.item(row, 1)
+            if name_item is not None:
+                name = name_item.data(Qt.ItemDataRole.UserRole)
+                if name:
+                    names.add(name)
+        return names
+
+    def _sort_variables(self, descending: bool = False, selected_only: bool = False):
+        """按变量名自然排序重排行序（升序/降序/仅排序选中行）
+
+        - 全列表排序：所有行参与；失效占位行由 load_current_curves 置回尾部
+        - 仅排序选中行：选中行只在其占用的位置槽内重排，未选中行位置不变
+        - 排序前记录单层行序快照供"撤销上次排序"；对已有序列表重复排序时
+          提前返回，不覆盖快照
+        - 排序后选中跟随行移动（按变量名恢复选中）
+        """
+        order = self._table_order()
+        if len(order) < 2:
+            return
+        selected_names = self._selected_var_names()
+        if selected_only:
+            if len(selected_names) < 2:
+                return
+            sorted_selected = sorted(selected_names, key=natural_sort_key)
+            if descending:
+                sorted_selected.reverse()
+            slot_iter = iter(sorted_selected)
+            new_order = [
+                next(slot_iter) if name in selected_names else name
+                for name in order
+            ]
+        else:
+            new_order = sorted(order, key=natural_sort_key, reverse=descending)
+        if new_order == order:
+            return
+        self._last_sort_order = order
+        self._apply_curve_order(new_order)
+        self.load_current_curves()
+        self._reselect_rows_by_names(selected_names)
+        self.update_button_states()
+
+    def _undo_last_sort(self):
+        """回退到最近一次排序前的行序（快照用后即清，单层撤销）"""
+        if not self._last_sort_order:
+            return
+        selected_names = self._selected_var_names()
+        self._apply_curve_order(list(self._last_sort_order))
+        self._last_sort_order = None
+        self.load_current_curves()
+        self._reselect_rows_by_names(selected_names)
+        self.update_button_states()
+
+    def _reselect_rows_by_names(self, names: set[str]):
+        """按变量名集合恢复选中行（排序后选中跟随）"""
+        table = self.var_table
+        table.clearSelection()
+        if not names:
+            return
+        flags = (
+            QItemSelectionModel.SelectionFlag.Select
+            | QItemSelectionModel.SelectionFlag.Rows
+        )
+        selection = table.selectionModel()
+        for row in range(table.rowCount()):
+            name_item = table.item(row, 1)
+            if (
+                name_item is not None
+                and name_item.data(Qt.ItemDataRole.UserRole) in names
+            ):
+                selection.select(table.model().index(row, 0), flags)
 
     def _add_variable_to_table(self, var_name, curve_info):
         """添加变量到表格"""
@@ -562,6 +732,8 @@ class PlotVariableEditorDialog(QDialog):
         self.remove_btn.setEnabled(has_selection)
         self.clear_btn.setEnabled(has_items)
         self.reset_color_btn.setEnabled(has_items)
+        # 行数 < 2 时排序无意义（与按钮行其他按钮的禁用口径一致）
+        self.sort_btn.setEnabled(self.var_table.rowCount() > 1)
 
         selected_row = self._get_selected_row()
         can_move = (
