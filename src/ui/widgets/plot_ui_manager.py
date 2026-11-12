@@ -16,7 +16,14 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, QPoint
-from PySide6.QtGui import QFontMetrics, QPen, QColor, QDrag, QIcon, QPixmap
+from PySide6.QtGui import (
+    QFontMetrics,
+    QPen,
+    QColor,
+    QDrag,
+    QIcon,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QMenu,
     QSizePolicy,
@@ -26,6 +33,7 @@ from PySide6.QtWidgets import (
     QRubberBand,
     QApplication,
     QColorDialog,
+    QToolTip,
     QTextBrowser,
     QFrame,
 )
@@ -87,7 +95,14 @@ class LegendTextBrowser(QTextBrowser):
     点击（位移 < startDragDistance）保持原有 anchorClicked 切换显隐行为；
     超过阈值才发起 QDrag，两种手势物理互斥（见设计文档 §3.4）。
     右键（位移 < startDragDistance）弹出单变量操作菜单（设计 v1.2 方案 B）。
+    图例快速操作（快速改色/快速删除方案）：色块左键弹调色板、中键单击
+    删除条目，hover 锚点时以 tooltip 说明手势。
     """
+
+    # 锚点 tooltip 引导文案（方案 §2.8）：按锚点类型区分
+    _TOOLTIP_COLOR = "单击：改色"
+    _TOOLTIP_TOGGLE = "单击：显示/隐藏 · 中键：删除"
+    _TOOLTIP_INVALID = "失效占位 · 中键：删除"
 
     def __init__(self, plot_widget):
         super().__init__()
@@ -104,6 +119,7 @@ class LegendTextBrowser(QTextBrowser):
         self._mid_var_name: str | None = None
 
     def mousePressEvent(self, event):
+        QToolTip.hideText()  # 任何按下即隐藏手势引导（§2.8）
         if event.button() == Qt.MouseButton.LeftButton:
             href = self.anchorAt(event.position().toPoint())
             # 按压瞬间解析变量名（拖拽期间 setHtml 重建文档也不影响）。
@@ -145,7 +161,33 @@ class LegendTextBrowser(QTextBrowser):
         ):
             self._start_var_drag()
             return
+        self._update_anchor_tooltip(event.position().toPoint())
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def _update_anchor_tooltip(self, pos: QPoint) -> None:
+        """hover 锚点时显示手势引导 tooltip（快速改色方案 §2.8）。
+
+        按锚点类型区分文案（色块/名称/失效占位）；空白处、陈旧锚点
+        （变量刚被删、legend 尚未重建）隐藏。QToolTip 为全局浮层，
+        需换算 viewport → global 坐标。
+        """
+        parsed = parse_legend_anchor(self.anchorAt(pos))
+        if parsed is None:
+            QToolTip.hideText()
+            return
+        action, var_name = parsed
+        if var_name in self._pw.curves:
+            text = self._TOOLTIP_COLOR if action == "color" else self._TOOLTIP_TOGGLE
+        elif var_name in (getattr(self._pw, "invalid_curves", {}) or {}):
+            text = self._TOOLTIP_INVALID
+        else:
+            QToolTip.hideText()
+            return
+        QToolTip.showText(self.viewport().mapToGlobal(pos), text, self)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:

@@ -19,7 +19,7 @@ import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QColorDialog
+from PySide6.QtWidgets import QApplication, QColorDialog, QToolTip
 
 from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -642,3 +642,86 @@ def test_t0c_plot_area_middle_dblclick_still_clears(plot_factory, qapp):
     _inject_middle_double_click(pw, vp_pos, qapp)
 
     assert clear_calls == [1], "绘图区中键双击清空行为保持不变"
+
+
+# ---------------------------------------------------------------------------
+# Step 4：tooltip 手势引导（§2.8）
+# ---------------------------------------------------------------------------
+
+def _hover_move(pos):
+    return _mouse_event(QEvent.Type.MouseMove, pos,
+                        Qt.MouseButton.NoButton, Qt.MouseButton.NoButton)
+
+
+def _spy_tooltip(monkeypatch):
+    """替换 QToolTip 类级静态方法（showText/hideText 为类访问，直接生效）"""
+    shown, hidden = [], []
+
+    def _fake_show(pos, text, *a, **k):
+        shown.append((pos, text))
+
+    monkeypatch.setattr(QToolTip, "showText", staticmethod(_fake_show))
+    monkeypatch.setattr(QToolTip, "hideText", staticmethod(lambda *a, **k: hidden.append(1)))
+    return shown, hidden
+
+
+def test_tooltip_by_anchor_type(plot_factory, monkeypatch):
+    """hover 色块/名称锚点：文案随锚点类型变化。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+    shown, _ = _spy_tooltip(monkeypatch)
+
+    color_pos = _find_anchor_pos(browser, COLOR_SCHEME, "a")
+    name_pos = _find_anchor_pos(browser, "curve", "a")
+
+    browser.mouseMoveEvent(_hover_move(color_pos))
+    assert shown[-1][1] == browser._TOOLTIP_COLOR
+    browser.mouseMoveEvent(_hover_move(name_pos))
+    assert shown[-1][1] == browser._TOOLTIP_TOGGLE
+
+
+def test_tooltip_placeholder_and_blank(plot_factory, monkeypatch):
+    """hover 失效占位：占位文案；hover 空白：隐藏 tooltip。"""
+    from src.core.data_types import InvalidCurveRef
+
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    pw.invalid_curves["ghost"] = InvalidCurveRef(var_name="ghost", color="gray")
+    pw._update_header_for_curves()
+    browser = pw.legend_label
+    shown, hidden = _spy_tooltip(monkeypatch)
+
+    ghost_pos = _find_anchor_pos(browser, "curve", "ghost")
+    browser.mouseMoveEvent(_hover_move(ghost_pos))
+    assert shown[-1][1] == browser._TOOLTIP_INVALID
+
+    blank = None
+    for y in range(1, 40):
+        for x in range(1, 200, 4):
+            if browser.anchorAt(QPoint(x, y)) == "":
+                blank = QPoint(x, y)
+                break
+        if blank is not None:
+            break
+    assert blank is not None
+    browser.mouseMoveEvent(_hover_move(blank))
+    assert hidden, "空白处应隐藏 tooltip"
+
+
+def test_tooltip_hidden_on_press_and_leave(plot_factory, monkeypatch):
+    """任何按下 / 鼠标离开：隐藏 tooltip。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+    _, hidden = _spy_tooltip(monkeypatch)
+
+    name_pos = _find_anchor_pos(browser, "curve", "a")
+    browser.mouseMoveEvent(_hover_move(name_pos))
+    hidden.clear()
+
+    browser.mousePressEvent(_lmb(QEvent.Type.MouseButtonPress, name_pos))
+    assert hidden, "按下应隐藏 tooltip"
+
+    browser.leaveEvent(QEvent(QEvent.Type.Leave))
+    assert len(hidden) == 2, "离开应再次隐藏 tooltip"
