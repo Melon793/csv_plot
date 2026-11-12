@@ -16,7 +16,7 @@ QMessageBox 静态方法用 monkeypatch 替身避免模态阻塞。
 import pytest
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QDropEvent
+from PySide6.QtGui import QColor, QDropEvent
 from PySide6.QtWidgets import QMessageBox
 
 from src.ui.drag_drop import (
@@ -228,8 +228,7 @@ def test_varlist_plain_add_unchanged(two_plots, silent_dialogs):
 
 
 def _pen_color_hex(ci) -> str:
-    """取 CurveInfo.pen 的 hex 色（opts["pen"] 为 QPen）"""
-    from PySide6.QtGui import QColor
+    """取曲线 pen 的 hex 色（PlotDataItem.opts["pen"] 为 QPen）"""
     return QColor(ci.curve.opts["pen"].color()).name()
 
 
@@ -245,7 +244,6 @@ def test_move_preserves_color_to_empty_target(two_plots, silent_dialogs):
 
     assert "b" in dst.curves
     assert dst.curves["b"].color == want
-    from PySide6.QtGui import QColor
     assert _pen_color_hex(dst.curves["b"]) == QColor(want).name()
 
 
@@ -316,8 +314,9 @@ def test_move_preserves_hidden_state(two_plots, silent_dialogs):
 
 def test_move_to_hidden_placeholder_keeps_hidden(two_plots, silent_dialogs):
     """目标存在同名隐藏占位（visible_preference=False）：复活即隐藏，
-    占位色优先于源色（既有复活规则）；且显隐恢复幂等早退不翻转。
-    本用例源曲线可见（不调度显隐恢复），锁定占位复活路径本身"""
+    占位色优先于源色（既有复活规则）。
+    本用例源曲线可见（不调度显隐恢复），锁定占位复活路径本身；
+    幂等早退由 test_move_hidden_to_hidden_placeholder_idempotent 覆盖"""
     src, dst, qapp = two_plots
     assert src.plot_variable("a")
     src._multi_curve_manager.apply_curve_color("a", "#123456")
