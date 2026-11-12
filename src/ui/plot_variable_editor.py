@@ -18,8 +18,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QWidget,
 )
-import pyqtgraph as pg
-from src.core.config import DEFAULT_LINE_WIDTH
 from src.core.logger import get_logger
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.ui.widgets.variable_search_bar import VariableSearchBar
@@ -724,43 +722,16 @@ class PlotVariableEditorDialog(QDialog):
         if selected_row is not None and selected_row < self.var_table.rowCount():
             self.var_table.selectRow(selected_row)
 
-    def _apply_color_to_curve(self, var_name: str, color_name: str):
-        """将指定变量的颜色更新为给定颜色（统一版）"""
-        updated = False
-        if var_name in self.plot_widget.curves:
-            ci = self.plot_widget.curves[var_name]
-            ci.color = color_name
-            if ci.curve is not None:
-                curve_obj = ci.curve
-                old_pen = curve_obj.opts.get("pen")
-                width = DEFAULT_LINE_WIDTH
-                if hasattr(old_pen, "widthF"):
-                    width = old_pen.widthF()
-                elif hasattr(old_pen, "width"):
-                    width = old_pen.width()
-                curve_obj.setPen(pg.mkPen(color=color_name, width=width))
+    def _apply_color_to_curve(self, var_name: str, color_name: str) -> bool:
+        """将指定变量的颜色更新为给定颜色（委托 manager，返回是否实际应用）。
 
-                # 如果curve当前有symbols，也需要更新symbol的颜色
-                if hasattr(curve_obj, "_has_symbols") and curve_obj._has_symbols:
-                    curve_obj.setSymbolPen(color_name)
-                    curve_obj.setSymbolBrush(color_name)
-
-                # 清除缓存标志，强制下次刷新时重新应用样式
-                if hasattr(curve_obj, "_cached_pen_key"):
-                    delattr(curve_obj, "_cached_pen_key")
-
-            updated = True
-
-        if updated:
-            self.plot_widget.update_legend()
-            # 重新应用样式以确保symbol/线宽保持一致
-            if hasattr(self.plot_widget, "_queue_ui_refresh"):
-                self.plot_widget._queue_ui_refresh(immediate=True)
-            self.plot_widget._clear_cursor_items()
-            if hasattr(self.plot_widget, "_last_cursor_update_time"):
-                self.plot_widget._last_cursor_update_time = 0
-            if self.plot_widget.vline.isVisible():
-                self.plot_widget.update_cursor_label()
+        刷新链已整体下沉到 MultiCurveManager.apply_curve_color（图例
+        调色板与编辑器共用入口）；本方法保留薄壳维持既有调用点签名，
+        表格色块样式由调用方按返回值决定是否刷新。
+        """
+        return self.plot_widget._multi_curve_manager.apply_curve_color(
+            var_name, color_name
+        )
 
     def set_variable_color(self, row=None):
         """设置变量颜色"""
@@ -785,13 +756,14 @@ class PlotVariableEditorDialog(QDialog):
         color = QColorDialog.getColor(QColor(current_color), self, "选择颜色")
 
         if color.isValid():
-            self._apply_color_to_curve(var_name, color.name())
-            # 更新表格项颜色
-            color_widget = self.var_table.cellWidget(row, 2)
-            if color_widget:
-                color_widget.setStyleSheet(
-                    f"background-color: {color.name()}; border: 1px solid #333;"
-                )
+            updated = self._apply_color_to_curve(var_name, color.name())
+            # 更新表格项颜色（仅当颜色实际应用时；变量已删则不刷）
+            if updated:
+                color_widget = self.var_table.cellWidget(row, 2)
+                if color_widget:
+                    color_widget.setStyleSheet(
+                        f"background-color: {color.name()}; border: 1px solid #333;"
+                    )
 
     def dragEnterEvent(self, event):
         """拖拽进入事件"""

@@ -551,6 +551,57 @@ class MultiCurveManager:
                     )
                 self._apply_y_view_expand_only(pre_view_y, data_range)
 
+    def apply_curve_color(self, var_name: str, color_name: str) -> bool:
+        """将指定曲线的颜色更新为给定颜色（编辑器与图例调色板共用入口）。
+
+        从 plot_variable_editor._apply_color_to_curve 整体下沉（刷新链
+        逐项不变）：ci.color → pen（保留原宽）→ symbol pen/brush → 清
+        缓存 pen key → update_legend → 立即 UI 刷新 → 清游标项 → 重置
+        游标节流 → 游标标签。
+
+        Args:
+            var_name: 变量名
+            color_name: 颜色名（预设色名或 QColor.name()）
+
+        Returns:
+            是否实际应用。变量不存在时静默返回 False（守卫），调用方按
+            返回值决定自身后续刷新（编辑器表格色块样式等）。
+        """
+        pw = self.pw
+        if var_name not in pw.curves:
+            return False
+        ci = pw.curves[var_name]
+        ci.color = color_name
+        if ci.curve is not None:
+            curve_obj = ci.curve
+            old_pen = curve_obj.opts.get("pen")
+            width = DEFAULT_LINE_WIDTH
+            if hasattr(old_pen, "widthF"):
+                width = old_pen.widthF()
+            elif hasattr(old_pen, "width"):
+                width = old_pen.width()
+            curve_obj.setPen(pg.mkPen(color=color_name, width=width))
+
+            # 如果curve当前有symbols，也需要更新symbol的颜色
+            if hasattr(curve_obj, "_has_symbols") and curve_obj._has_symbols:
+                curve_obj.setSymbolPen(color_name)
+                curve_obj.setSymbolBrush(color_name)
+
+            # 清除缓存标志，强制下次刷新时重新应用样式
+            if hasattr(curve_obj, "_cached_pen_key"):
+                delattr(curve_obj, "_cached_pen_key")
+
+        pw.update_legend()
+        # 重新应用样式以确保symbol/线宽保持一致
+        if hasattr(pw, "_queue_ui_refresh"):
+            pw._queue_ui_refresh(immediate=True)
+        pw._clear_cursor_items()
+        if hasattr(pw, "_last_cursor_update_time"):
+            pw._last_cursor_update_time = 0
+        if pw.vline.isVisible():
+            pw.update_cursor_label()
+        return True
+
     def _on_legend_anchor_clicked(self, url):
         """锚点点击：解析 href 中的变量名并切换曲线显隐
 
