@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QWidget,
 )
+from src.core.config import DEFAULT_CURVE_COLORS
 from src.core.data_types import (
     DRAW_MODE_AUTO,
     DRAW_MODE_SOURCE_AUTO,
@@ -1056,7 +1057,16 @@ class PlotVariableEditorDialog(QDialog):
         if var_name in self.plot_widget.curves:
             current_color = self.plot_widget.curves[var_name].color
 
-        color = QColorDialog.getColor(QColor(current_color), self, "选择颜色")
+        # macOS 原生面板不支持 Qt 自定义色，统一用 Qt 自绘对话框，
+        # 并把默认色板预填到“自定义颜色”，方便直接点选。
+        for index, hex_color in enumerate(DEFAULT_CURVE_COLORS):
+            QColorDialog.setCustomColor(index, QColor(hex_color))
+        color = QColorDialog.getColor(
+            QColor(current_color),
+            self,
+            "选择颜色",
+            QColorDialog.ColorDialogOption.DontUseNativeDialog,
+        )
 
         if color.isValid():
             updated = self._apply_color_to_curve(var_name, color.name())
