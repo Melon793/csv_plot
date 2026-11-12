@@ -65,6 +65,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             lambda *_: setattr(self, "_is_being_destroyed", True)
         )
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
+        self._mid_press_over_legend = False  # 本次中键按下的起点是否在图例内
         self._cursor_label_busy = False
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
         self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
@@ -1129,12 +1130,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     # ---------------- 双击轴弹出对话框 ----------------
     def _is_pos_over_legend(self, view_pos) -> bool:
-        """双击位置是否落在图例 proxy 内（中键双击清空护栏）。
+        """位置是否落在图例 proxy 内（中键双击清空护栏的几何判定）。
 
         view 层 mouseDoubleClickEvent 先于 scene 分发（T0 探针实证：
         tmp/2026-11-12/probe_legend_middle_button.py，图例上中键双击
         会清空本格），故中键清空前先查位置：图例区内交回 super() 走
         scene→proxy 链，由 LegendTextBrowser 就地终结（中键删除手势）。
+
+        注意该几何会随内容变化：中键单击删除条目后图例立即变矮，所以
+        双击判定不能只用当前位置，还要并上按下瞬间的命中结果
+        （_mid_press_over_legend，见 mouseDoubleClickEvent）。
         """
         proxy = self.legend_label.graphicsProxyWidget()
         if proxy is None:
@@ -1149,8 +1154,16 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         from src.ui.dialogs.axis import AxisDialog
 
         if event.button() == Qt.MouseButton.MiddleButton:
-            # 图例区内中键手势归图例（快速删除），不清空本格
-            if self._is_pos_over_legend(event.pos()):
+            # 图例区内中键手势归图例（快速删除），不清空本格。
+            # 判定 = 本次按下命中 ∪ 当前位置命中：双击序列的第一次
+            # release 已在 singleShot 里删掉条目并使图例变矮，到 dblclick
+            # 时同一坐标可能已落在图例矩形之外（多行图例实测可复现），
+            # 只看当前位置会误清空整格。
+            pressed_over_legend = self._mid_press_over_legend
+            self._mid_press_over_legend = False  # 一次手势只消费一次
+            if pressed_over_legend or self._is_pos_over_legend(
+                event.position().toPoint()
+            ):
                 super().mouseDoubleClickEvent(event)
                 return
             self.clear_current_plot()
@@ -1211,6 +1224,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            # 记录本次中键手势的起点是否在图例内，供 mouseDoubleClickEvent
+            # 判定（双击序列的第二次 press 被 dblclick 取代，必须在此留存）
+            self._mid_press_over_legend = self._is_pos_over_legend(
+                event.position().toPoint()
+            )
+            super().mousePressEvent(event)
+            return
         if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             self.origin = event.pos()
             self.rubberBand.setGeometry(QRect(self.origin, QSize()))

@@ -14,6 +14,7 @@ import types
 
 from urllib.parse import quote
 
+import pandas as pd
 import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QColorDialog, QToolTip
 
 from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
+from tests.fixtures.waits import settle
 
 RED_NAME = QColor("red").name()  # "#ff0000"
 
@@ -624,6 +626,127 @@ def test_t0b_legend_middle_dblclick_does_not_clear_plot(plot_factory, qapp):
 
     assert not clear_calls, "图例上中键双击不得触发 clear_current_plot"
     assert set(pw.curves) == {"b"}, "双击 = 删除一次（幂等），b 保留"
+
+
+def test_t0d_guard_uses_press_hit_when_geometry_shrinks(plot_factory, qapp):
+    """护栏取「按下命中 ∪ 当前位置命中」：几何失效时仍不清空（#1 回归）。
+
+    直接构造「按下在图例内、dblclick 时刻当前位置在图例区外」的状态，
+    固定 view 层判定逻辑本身（不依赖布局能否复现变矮）。
+    """
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    pw.show()
+    qapp.processEvents()
+
+    center = pw.view_box.mapToScene(pw.view_box.boundingRect().center())
+    vp = pw.mapFromScene(center)
+    assert not pw._is_pos_over_legend(vp)  # 前置：当前位置在图例区外
+
+    pw._mid_press_over_legend = True  # 模拟「按下在图例内、其后图例变矮」
+    clear_calls = []
+    pw.clear_current_plot = lambda: clear_calls.append(1)
+
+    ev = QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        QPointF(vp), QPointF(vp),
+        Qt.MouseButton.MiddleButton, Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    pw.mouseDoubleClickEvent(ev)
+    qapp.processEvents()
+
+    assert not clear_calls, "按下命中图例时应吞掉双击，不得清空"
+    assert pw._mid_press_over_legend is False, "手势状态应被消费"
+
+
+def test_t0e_multiline_legend_middle_dblclick_does_not_clear(plot_factory, qapp, monkeypatch):
+    """多行图例真实序列：删除落地使图例变矮后，同一坐标的 dblclick 不清空（#1）。
+
+    前置条件由实测构造（tmp/2026-11-12/probe_multiline_legend.py）：
+    5 条 20 字符长名 → 图例 3 行；删末尾条目后降到 2 行，末尾条目
+    原坐标落到矩形外。
+    """
+    names = [f"chn{i:02d}_" + "x" * 20 for i in range(1, 12)]
+    df = pd.DataFrame({n: [1.0, 2.0, 3.0] for n in names})
+    pw = plot_factory(df)
+    # 固定窄宽度：确保长名条目折行成多行（宽度随父布局变化时结论不稳）
+    pw.setFixedSize(430, 420)
+    pw.show()
+    qapp.processEvents()
+
+    browser = pw.legend_label
+    proxy = browser.graphicsProxyWidget()
+
+    # 自适应定位「把图例撑出新行」的那一条：删掉它高度必然回退
+    # （不依赖具体字体宽度/窗口尺寸，避免前置条件随环境漂移）
+    prev_h = browser.height()
+    target = None
+    plotted = []
+    for n in names:
+        assert pw.plot_variable(n)
+        qapp.processEvents()
+        h = browser.height()
+        if h > prev_h:
+            target = n
+            prev_h = h
+            break
+        plotted.append(n)
+    assert target is not None, "未能构造出跨行条目（图例始终单行）"
+    assert plotted, "跨行条目应是第 2 条及以后"
+
+    last = target
+    href = f"curve:///{quote(last, safe='')}"
+    local = None
+    for y in range(browser.height() - 1, -1, -1):
+        for x in range(0, browser.width(), 3):
+            if browser.anchorAt(QPoint(x, y)) == href:
+                local = QPoint(x, y)
+                break
+        if local is not None:
+            break
+    assert local is not None, "未定位到末尾条目锚点"
+    vp_pos = pw.mapFromScene(proxy.mapToScene(QPointF(local)))
+
+    h_before = browser.height()
+    assert pw._is_pos_over_legend(vp_pos)
+
+    clear_calls = []
+    pw.clear_current_plot = lambda: clear_calls.append(1)
+
+    # 真实单击：press → release → 删除在 singleShot 中落地
+    QTest.mousePress(
+        pw.viewport(), Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier, vp_pos,
+    )
+    QTest.mouseRelease(
+        pw.viewport(), Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier, vp_pos,
+    )
+    qapp.processEvents()
+
+    assert last not in pw.curves
+    settle(30)  # 文档重排 + 图例高度联动在事件循环内完成
+    assert browser.height() < h_before, (
+        f"前置条件：删除后图例应变矮（h={browser.height()}，"
+        f"before={h_before}，width={browser.width()}）"
+    )
+
+    # 模拟「dblclick 时当前位置已不在图例内」：删除改变了 header/plot 布局，
+    # 实际映射结果随环境漂移（本机实测仍可能命中），故显式固定该前置，
+    # 让断言只检验修复点本身——press 瞬间的命中必须留存下来并生效。
+    monkeypatch.setattr(pw, "_is_pos_over_legend", lambda *a, **k: False)
+
+    # 双击第二拍：同一坐标
+    QTest.mouseDClick(
+        pw.viewport(), Qt.MouseButton.MiddleButton,
+        Qt.KeyboardModifier.NoModifier, vp_pos,
+    )
+    qapp.processEvents()
+
+    assert not clear_calls, "图例上中键双击不得清空整格"
+    assert pw._mid_press_over_legend is False, "按下状态应被双击消费"
+    assert set(pw.curves) == set(plotted)
 
 
 def test_t0c_plot_area_middle_dblclick_still_clears(plot_factory, qapp):
