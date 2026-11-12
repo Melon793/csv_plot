@@ -51,6 +51,11 @@ from src.core.config import (
     widget_alive,
 )
 from src.core.logger import get_logger
+from src.core.data_types import (
+    SYMBOL_POLICY_AUTO,
+    SYMBOL_POLICY_OFF,
+    SYMBOL_POLICY_ON,
+)
 from src.ui.drag_drop import (
     build_legend_var_mimedata,
     clear_active_legend_drag,
@@ -1146,26 +1151,16 @@ class PlotUIManager(BasePlotManager):
         if hasattr(pw, "view_box") and hasattr(pw, "plot_item"):
             self.update_plot_style(pw, pw.view_box, pw.view_box.viewRange(), None)
 
-    def _resolve_visible_density(self, pw: Any) -> float:
-        """获取当前子图的可见曲线采样密度（单位：点 / x轴单位，取最大值）。
-
-        只统计可见曲线：隐藏曲线不参与渲染，不应驱动 symbol 视觉开关；
-        per-plot 口径避免混合采样率时低采样子图被全局最大密度"连坐"。
-        """
-        densities = [
-            ci.point_density
-            for ci in pw.curves.values()
-            if ci.visible and ci.point_density > 0
-        ]
-        return max(densities) if densities else 0.0
-
     def update_plot_style(self, pw: Any, view_box, range, rect=None):
-        """更新绘图样式 - 基于估算可见点数判断细线+symbol或粗线无symbol
+        """更新绘图样式 - 逐曲线判定 symbol 开关（per-curve，方案 A）
 
-        判据：x宽度 × 采样密度（=估算可见点数）< XRANGE_THRESHOLD_FOR_SYMBOLS
-        时显示 symbols（细线+点），否则粗线无 symbol。
+        每条曲线各自估算可见点数：x宽度 × 该曲线采样密度
+        < XRANGE_THRESHOLD_FOR_SYMBOLS 时显示 symbols（细线+点），否则
+        粗线无 symbol。稀疏曲线不再被同图密集曲线"连坐"。
+        ``symbol_policy`` 非 'auto' 时以用户显式钉住值覆盖判定。
         与 factor 无关：无论 x 轴是行号（CSV）还是秒（MDF/BLF），
         阈值语义统一为"可见点数 < 100"。
+        pen/symbol 缓存短路在 ``_apply_curve_style`` 内完成，无变化曲线零开销。
         """
         try:
             _mw = pw.window()
@@ -1186,17 +1181,23 @@ class PlotUIManager(BasePlotManager):
 
             x_min, x_max = range[0]
             x_width = x_max - x_min
-            density = self._resolve_visible_density(pw)
-            visible_points = x_width * density
-            show_symbols = visible_points < XRANGE_THRESHOLD_FOR_SYMBOLS
+
+            symbol_on = 0
+            for var_name, ci in pw.curves.items():
+                policy = getattr(ci, 'symbol_policy', SYMBOL_POLICY_AUTO)
+                if policy == SYMBOL_POLICY_ON:
+                    show_i = True
+                elif policy == SYMBOL_POLICY_OFF:
+                    show_i = False
+                else:
+                    show_i = x_width * ci.point_density < XRANGE_THRESHOLD_FOR_SYMBOLS
+                symbol_on += 1 if show_i else 0
+                pw._apply_curve_style(var_name, show_i)
 
             logger.debug(
-                "[PLOT_STYLE] x_width=%.4g, density=%.4g, visible_points=%.4g, "
-                "show_symbols=%s",
-                x_width, density, visible_points, show_symbols,
+                "[PLOT_STYLE] x_width=%.4g, curves=%d, symbol_on=%d",
+                x_width, len(pw.curves), symbol_on,
             )
-
-            pw._apply_plot_style(show_symbols)
 
         except Exception as e:
             logger.error("更新绘图样式时出错: %s", e)

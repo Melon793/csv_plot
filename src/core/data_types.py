@@ -38,6 +38,38 @@ class FormatInfo:
     sheet_name: str | None = None  # 选中的 Sheet 名（仅 Excel 使用）
 
 
+# ---- 曲线绘制方式（draw_mode）与 symbol 策略（symbol_policy）取值 ----
+# draw_mode：'auto' = 直线连接（默认，与既有行为一致）；'step-post' = 阶梯
+# 且跳变穿过采样时刻（采样时刻记录当前值，matplotlib steps-post 语义，
+# 对应 pyqtgraph stepMode='left'）；'step-pre' = 阶梯且跳变提前一个采样
+# 间隔（采样时刻记录上一区间的值，matplotlib steps-pre 语义，对应
+# pyqtgraph stepMode='right'）。
+DRAW_MODE_AUTO = "auto"
+DRAW_MODE_STEP_POST = "step-post"
+DRAW_MODE_STEP_PRE = "step-pre"
+DRAW_MODES = (DRAW_MODE_AUTO, DRAW_MODE_STEP_POST, DRAW_MODE_STEP_PRE)
+
+# symbol_policy：'auto' = 按可见点数阈值自动切换（既有行为）；'on'/'off'
+# = 用户显式钉住（始终显示 / 始终隐藏），与 draw_mode 正交。
+SYMBOL_POLICY_AUTO = "auto"
+SYMBOL_POLICY_ON = "on"
+SYMBOL_POLICY_OFF = "off"
+SYMBOL_POLICIES = (SYMBOL_POLICY_AUTO, SYMBOL_POLICY_ON, SYMBOL_POLICY_OFF)
+
+
+def step_mode_for(draw_mode: str) -> str | None:
+    """draw_mode → pyqtgraph PlotDataItem 的 stepMode 参数。
+
+    'auto' → None（直线，pyqtgraph 默认）；'step-post' → 'left'；
+    'step-pre' → 'right'。未知值按 'auto' 处理（防御）。
+    """
+    if draw_mode == DRAW_MODE_STEP_POST:
+        return "left"
+    if draw_mode == DRAW_MODE_STEP_PRE:
+        return "right"
+    return None
+
+
 @dataclass
 class CurveInfo:
     """单条曲线的元数据。
@@ -57,6 +89,9 @@ class CurveInfo:
     x_min: float = 0.0
     x_max: float = 0.0
     point_density: float = 0.0
+    # 绘制方式与 symbol 策略（与线色同口径：会话内存活，不持久化）
+    draw_mode: str = DRAW_MODE_AUTO       # 'auto' | 'step-post' | 'step-pre'
+    symbol_policy: str = SYMBOL_POLICY_AUTO  # 'auto' | 'on' | 'off'
 
     def __post_init__(self):
         """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""

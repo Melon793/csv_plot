@@ -653,41 +653,59 @@ class MultiCurveManager:
                 show(f"变量 {var_name} 不在当前数据中（失效占位）")
 
     def _apply_plot_style(self, show_symbols: bool = False):
-        """应用绘图样式 - 细线+symbol 或 粗线无symbol（含内存优化pen缓存，统一版）"""
+        """应用绘图样式（批量入口）：所有曲线统一 symbol 开关。
+
+        委托单曲线粒度实现；逐曲线独立判定走 PlotUIManager.update_plot_style
+        的 per-curve 路径（``_apply_curve_style``）。此批量入口保留给需要
+        统一切换的调用方。
+        """
         pw = self.pw
         try:
-            for var_name, ci in pw.curves.items():
-                if ci.curve is None:
-                    continue
-
-                curve = ci.curve
-                color = ci.color
-
-                if show_symbols:
-                    cache_key = f'thin_{color}'
-                    if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
-                        curve.setPen(pen)
-                        curve._cached_pen_key = cache_key
-
-                    if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
-                        curve.setSymbol('s')
-                        curve.setSymbolSize(3)
-                        curve.setSymbolPen(color)
-                        curve.setSymbolBrush(color)
-                        curve._has_symbols = True
-                else:
-                    cache_key = f'thick_{color}'
-                    if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                        curve.setPen(pen)
-                        curve._cached_pen_key = cache_key
-
-                    if not hasattr(curve, '_has_symbols') or curve._has_symbols:
-                        curve.setSymbol(None)
-                        curve._has_symbols = False
+            for var_name in pw.curves:
+                self._apply_curve_style(var_name, show_symbols)
         except Exception as e:
             logger.error("应用绘图样式时出错: %s", e)
+
+    def _apply_curve_style(self, var_name: str, show_symbols: bool):
+        """单曲线粒度应用样式：细线+symbol 或 粗线无 symbol（含 pen 缓存）。
+
+        每条曲线只按自身的 symbol 开关刷 pen/点标记；pen 与 symbol 均有
+        缓存短路（``_cached_pen_key`` / ``_has_symbols``），热路径缩放/滚动
+        中无变化的曲线零开销。曲线不存在（刚被删除/替换）时静默跳过。
+        """
+        pw = self.pw
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return
+        try:
+            curve = ci.curve
+            color = ci.color
+
+            if show_symbols:
+                cache_key = f'thin_{color}'
+                if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                    pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                    curve.setPen(pen)
+                    curve._cached_pen_key = cache_key
+
+                if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
+                    curve.setSymbol('s')
+                    curve.setSymbolSize(3)
+                    curve.setSymbolPen(color)
+                    curve.setSymbolBrush(color)
+                    curve._has_symbols = True
+            else:
+                cache_key = f'thick_{color}'
+                if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                    pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                    curve.setPen(pen)
+                    curve._cached_pen_key = cache_key
+
+                if not hasattr(curve, '_has_symbols') or curve._has_symbols:
+                    curve.setSymbol(None)
+                    curve._has_symbols = False
+        except Exception as e:
+            logger.error("应用曲线样式时出错: var=%s, %s", var_name, e)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区（统一版）"""

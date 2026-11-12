@@ -1338,8 +1338,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return self._mark_region_manager.get_mark_stats(region)
 
     def _apply_plot_style(self, show_symbols: bool):
-        """应用绘图样式 → 委托到 MultiCurveManager"""
+        """应用绘图样式（批量） → 委托到 MultiCurveManager"""
         self._multi_curve_manager._apply_plot_style(show_symbols)
+
+    def _apply_curve_style(self, var_name: str, show_symbols: bool):
+        """应用单曲线绘图样式（逐曲线 symbol 判定路径） → 委托到 MultiCurveManager"""
+        self._multi_curve_manager._apply_curve_style(var_name, show_symbols)
 
     def update_plot_style(self, view_box, range, rect=None):
         """更新绘图样式 → 委托到 PlotUIManager"""
