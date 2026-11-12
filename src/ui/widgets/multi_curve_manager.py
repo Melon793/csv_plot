@@ -27,7 +27,6 @@ from src.core.logger import get_logger
 from src.ui.drag_drop import (
     ANCHOR_SCHEME,
     COLOR_SCHEME,
-    parse_anchor_var_name,
     parse_legend_anchor,
 )
 from src.ui.widgets.axis_manager import y_autorange_preserved
