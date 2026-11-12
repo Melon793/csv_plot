@@ -81,6 +81,50 @@ def step_mode_for(draw_mode: str) -> str | None:
     return None
 
 
+# draw_mode 来源标记：'auto' = 默认/自动判定（枚举通道→step-post）；
+# 'user' = 用户显式选择（变量编辑器/图例菜单），会话内不被自动判定覆盖
+DRAW_MODE_SOURCE_AUTO = "auto"
+DRAW_MODE_SOURCE_USER = "user"
+
+
+def decide_draw_mode(meta, y_format: str = "") -> str:
+    """按通道元数据判定初始绘制方式（保守版，v1）。
+
+    规则（优先级从高到低，全部为 O(1) 元数据查表，不扫描数据）：
+    1. 全局开关 DRAW_MODE_ENUM_AS_STEP 关闭 → 'auto'（直线）
+    2. meta 为 None（loader 无 get_metadata / CSV / Excel / 查询失败）→ 'auto'
+    3. 时间/日期通道（is_time_channel / is_date / is_time_of_day）→ 'auto'
+       （防御性否决：正常枚举不会是时间通道，元数据异常时宁可不画阶梯）
+    4. meta.is_enum 或 y_format == 'enum' → 'step-post'
+       （枚举码值离散、无中间态；y_format 条件是下游现象，与 is_enum
+       为包含关系，保留作双保险——覆盖 meta 接口与 y_format 来源不一致的
+       调用方）
+    5. 其余（连续量）→ 'auto'
+
+    刻意不做：统计推断（唯一值/零差分）、bool 推断（MDF 规范无 bool 类型，
+    bit_count==1 不判）、step-pre 自动化（时间戳区间语义无法从数据推断）。
+
+    Args:
+        meta: VarMetadata 实例（src/data/metadata.py），或 None
+        y_format: 曲线 y 格式串（'enum' / 'number' / ...），仅规则 4 使用
+
+    Returns:
+        DRAW_MODE_AUTO 或 DRAW_MODE_STEP_POST
+    """
+    from src.core.config import DRAW_MODE_ENUM_AS_STEP
+
+    if not DRAW_MODE_ENUM_AS_STEP:
+        return DRAW_MODE_AUTO
+    if meta is None:
+        return DRAW_MODE_AUTO
+    if getattr(meta, "is_time_channel", False) or getattr(meta, "is_date", False) \
+            or getattr(meta, "is_time_of_day", False):
+        return DRAW_MODE_AUTO
+    if getattr(meta, "is_enum", False) or y_format == "enum":
+        return DRAW_MODE_STEP_POST
+    return DRAW_MODE_AUTO
+
+
 def resolve_symbol_show(ci: "CurveInfo", x_width: float) -> bool:
     """单曲线 symbol 判定：symbol_policy 钉住优先，auto 按可见点数阈值。
 
@@ -119,6 +163,10 @@ class CurveInfo:
     # 绘制方式与 symbol 策略（与线色同口径：会话内存活，不持久化）
     draw_mode: str = DRAW_MODE_AUTO       # 'auto' | 'step-post' | 'step-pre'
     symbol_policy: str = SYMBOL_POLICY_AUTO  # 'auto' | 'on' | 'off'
+    # draw_mode 来源：'auto' = 默认/枚举通道自动判定；'user' = 用户显式
+    # 选择（编辑器/图例菜单），会话内不被自动判定覆盖。reload 后经
+    # saved_state 恢复（见 cursor_sync_manager.replots_after_loading）
+    draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
 
     def __post_init__(self):
         """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""

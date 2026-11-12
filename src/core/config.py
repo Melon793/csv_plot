@@ -134,6 +134,11 @@ DEFAULT_LINE_WIDTH = 2  # 默认线宽
 THICK_LINE_WIDTH = 2  # 粗线宽
 THIN_LINE_WIDTH = 1  # 细线宽
 UI_DEBOUNCE_DELAY_MS = 50  # UI事件防抖延迟时间
+# 枚举通道自动阶梯显示总开关：True 时 MDF/BLF 的枚举通道（is_enum）在
+# 绘图时自动用 step-post 连线（枚举码值离散、无中间态，线性插值会画出
+# 物理上不存在的过渡值）；False 完全回到直线默认。只影响通道类数据源
+# （loader 有 get_metadata），CSV/Excel 永不判定
+DRAW_MODE_ENUM_AS_STEP = True
 # 变量信息窗口（变量列表右键"变量信息"）
 VAR_INFO_MAX_TABS = 50  # 单次提交的最大标签页数，超出截断并提示
 VAR_INFO_ENUM_DISPLAY_LIMIT = 200  # 枚举文本表在信息页最多展示条目数
