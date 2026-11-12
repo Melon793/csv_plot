@@ -31,6 +31,16 @@ VAR_SEPARATOR = ";;"
 # legend 锚点 URL 协议（curve:///URL编码变量名），与 multi_curve_manager 共用
 ANCHOR_SCHEME = "curve"
 
+# legend 色块锚点协议（color:///URL编码变量名）：左键弹调色板菜单（图例快速改色）
+COLOR_SCHEME = "color"
+
+# 锚点 scheme → 动作映射：curve:/// 切显隐（失效占位条目同协议，由分发端
+# 按变量归属区分），color:/// 打开调色板
+_LEGEND_ANCHOR_ACTIONS: dict[str, str] = {
+    ANCHOR_SCHEME: "toggle",
+    COLOR_SCHEME: "color",
+}
+
 # legend 来源拖拽的自定义 MIME 格式（text/plain 保持兼容层不变）
 LEGEND_MIME_FORMAT = "application/x-csvplot-legend"
 
@@ -88,6 +98,25 @@ def parse_anchor_var_name(href: str) -> str | None:
         return None
     name = unquote(href[len(prefix):])
     return name or None
+
+
+def parse_legend_anchor(href: str) -> tuple[str, str] | None:
+    """解析 legend 锚点 → (action, var_name)；action ∈ {"toggle", "color"}。
+
+    toggle 即原 curve:/// 显隐锚点（失效占位条目同协议，由分发端按变量
+    归属区分），color 为色块改色锚点。非法/空/空变量名返回 None。
+    供 LegendTextBrowser（press 宽松解析：两种 scheme 都可发起拖拽/
+    右键菜单）与 MultiCurveManager._on_legend_anchor_clicked（按 scheme
+    分发）共用；parse_anchor_var_name 原样保留给既有调用方。
+    """
+    if not href:
+        return None
+    for scheme, action in _LEGEND_ANCHOR_ACTIONS.items():
+        prefix = f"{scheme}:///"
+        if href.startswith(prefix):
+            name = unquote(href[len(prefix):])
+            return (action, name) if name else None
+    return None
 
 
 def set_active_legend_drag(source_plot: Any, var_names: list[str]) -> None:
