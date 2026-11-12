@@ -79,21 +79,39 @@ def test_symbol_policy_combo_pins_symbols(editor_env):
 
 
 def test_refresh_rows_in_place_updates_combos(editor_env):
-    """外部变更（图例菜单路径）后 _refresh_rows_in_place 就地回填下拉。"""
+    """外部变更（图例菜单路径）经 curves_changed 自动回填下拉（真实信号链）。
+
+    apply_curve_draw_mode / apply_curve_symbol_policy 成功后 emit
+    curves_changed，编辑器增量刷新场景 1 就地回填下拉——不再手动调
+    _refresh_rows_in_place（曾掩盖链路断裂）。
+    """
     dlg, pw = editor_env
     var_name = dlg.var_table.item(0, 1).data(Qt.ItemDataRole.UserRole)
-    # 模拟外部入口改了 draw_mode / symbol_policy
-    pw._multi_curve_manager.apply_curve_draw_mode(var_name, DRAW_MODE_STEP_POST)
+    # 模拟图例菜单入口改 draw_mode / symbol_policy
+    assert pw._multi_curve_manager.apply_curve_draw_mode(var_name, DRAW_MODE_STEP_POST)
     pw.curves[var_name].symbol_policy = SYMBOL_POLICY_ON
+    pw.curves_changed.emit()  # 后者直改字段，补一次信号（等价链路）
 
-    dlg._refresh_rows_in_place()
     draw_combo = dlg.var_table.cellWidget(0, 3)
     assert draw_combo.currentData() == DRAW_MODE_STEP_POST
     symbol_combo = dlg.var_table.cellWidget(0, 4)
     assert symbol_combo.currentData() == SYMBOL_POLICY_ON
-    # 回填路径带 QSignalBlocker：不应再触发一次 apply（draw_mode 已是目标值，
-    # 幂等无副作用；断言 stepMode 仍正确即可）
     assert pw.curves[var_name].curve.opts["stepMode"] == "left"
+
+
+def test_status_message_reports_chinese_label(editor_env):
+    """状态栏回执：区分绘制方式/数据点且播报中文标签（与图例菜单同口径）。"""
+    dlg, pw = editor_env
+    msgs = []
+    pw.window()._show_status_message = lambda msg: msgs.append(msg)
+    draw_combo = dlg.var_table.cellWidget(0, 3)
+    draw_combo.setCurrentIndex(draw_combo.findData(DRAW_MODE_STEP_POST))
+    assert any("绘制方式" in m and "阶梯(后)" in m for m in msgs)
+    assert not any("auto" in m for m in msgs)  # 不播报内部常量
+
+    symbol_combo = dlg.var_table.cellWidget(0, 4)
+    symbol_combo.setCurrentIndex(symbol_combo.findData(SYMBOL_POLICY_ON))
+    assert any("数据点" in m and "始终显示" in m for m in msgs)
 
 
 def test_invalid_placeholder_rows_have_no_combos(plot_factory, qapp):

@@ -650,6 +650,9 @@ class MultiCurveManager:
         except Exception:
             logger.error("切换绘制方式失败: var=%s, mode=%s", var_name, draw_mode, exc_info=True)
             return False
+        # 曲线集合不变，但已打开的变量编辑器下拉需要就地回填新值
+        # （curves_changed 增量刷新场景 1），与改色路径同口径
+        pw.curves_changed.emit()
         return True
 
     def apply_curve_symbol_policy(self, var_name: str, policy: str) -> bool:
@@ -678,6 +681,9 @@ class MultiCurveManager:
             pw._apply_curve_style(var_name, show)
         except Exception:
             logger.error("应用 symbol 策略失败: var=%s", var_name, exc_info=True)
+            return False
+        # 同 apply_curve_draw_mode：让已打开的编辑器下拉就地回填
+        pw.curves_changed.emit()
         return True
 
     def _on_legend_anchor_clicked(self, url):
@@ -712,20 +718,6 @@ class MultiCurveManager:
             show = getattr(main_window, "_show_status_message", None)
             if callable(show):
                 show(f"变量 {var_name} 不在当前数据中（失效占位）")
-
-    def _apply_plot_style(self, show_symbols: bool = False):
-        """应用绘图样式（批量入口）：所有曲线统一 symbol 开关。
-
-        委托单曲线粒度实现；逐曲线独立判定走 PlotUIManager.update_plot_style
-        的 per-curve 路径（``_apply_curve_style``）。此批量入口保留给需要
-        统一切换的调用方。
-        """
-        pw = self.pw
-        try:
-            for var_name in pw.curves:
-                self._apply_curve_style(var_name, show_symbols)
-        except Exception as e:
-            logger.error("应用绘图样式时出错: %s", e)
 
     def _apply_curve_style(self, var_name: str, show_symbols: bool):
         """单曲线粒度应用样式：细线+symbol 或 粗线无 symbol（含 pen 缓存）。

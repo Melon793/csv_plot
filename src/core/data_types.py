@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from src.core.config import XRANGE_THRESHOLD_FOR_SYMBOLS
+
 if TYPE_CHECKING:
     import numpy as np
     import pyqtgraph as pg
@@ -78,8 +80,6 @@ def resolve_symbol_show(ci: "CurveInfo", x_width: float) -> bool:
     （update_plot_style 热路径与 apply_curve_symbol_policy 显式
     用户动作共用），x_width 取当前可见区间宽度。
     """
-    from src.core.config import XRANGE_THRESHOLD_FOR_SYMBOLS
-
     policy = getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO)
     if policy == SYMBOL_POLICY_ON:
         return True
