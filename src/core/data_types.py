@@ -70,6 +70,24 @@ def step_mode_for(draw_mode: str) -> str | None:
     return None
 
 
+def resolve_symbol_show(ci: "CurveInfo", x_width: float) -> bool:
+    """单曲线 symbol 判定：symbol_policy 钉住优先，auto 按可见点数阈值。
+
+    判据：估算可见点数 = x宽度 × 该曲线采样密度
+    < XRANGE_THRESHOLD_FOR_SYMBOLS 时显示 symbol。逐曲线口径
+    （update_plot_style 热路径与 apply_curve_symbol_policy 显式
+    用户动作共用），x_width 取当前可见区间宽度。
+    """
+    from src.core.config import XRANGE_THRESHOLD_FOR_SYMBOLS
+
+    policy = getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO)
+    if policy == SYMBOL_POLICY_ON:
+        return True
+    if policy == SYMBOL_POLICY_OFF:
+        return False
+    return x_width * ci.point_density < XRANGE_THRESHOLD_FOR_SYMBOLS
+
+
 @dataclass
 class CurveInfo:
     """单条曲线的元数据。

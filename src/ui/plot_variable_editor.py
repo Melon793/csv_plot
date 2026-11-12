@@ -7,6 +7,7 @@ from PySide6.QtCore import QItemSelectionModel, Qt, QSignalBlocker
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -21,11 +22,47 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QWidget,
 )
+from src.core.data_types import (
+    DRAW_MODE_AUTO,
+    DRAW_MODE_STEP_POST,
+    DRAW_MODE_STEP_PRE,
+    SYMBOL_POLICY_AUTO,
+    SYMBOL_POLICY_OFF,
+    SYMBOL_POLICY_ON,
+)
 from src.core.logger import get_logger
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.ui.widgets.variable_search_bar import VariableSearchBar
 
 logger = get_logger(__name__)
+
+# 绘制方式 / 数据点下拉选项（itemData 存 data_types 常量，变更时取
+# currentData() 直接透传给 MultiCurveManager）
+_DRAW_MODE_OPTIONS = [
+    ("直线", DRAW_MODE_AUTO),
+    ("阶梯(后)", DRAW_MODE_STEP_POST),
+    ("阶梯(前)", DRAW_MODE_STEP_PRE),
+]
+_SYMBOL_POLICY_OPTIONS = [
+    ("自动", SYMBOL_POLICY_AUTO),
+    ("始终显示", SYMBOL_POLICY_ON),
+    ("始终隐藏", SYMBOL_POLICY_OFF),
+]
+
+
+def _mode_combo(options, current, on_change):
+    """构建选项下拉框：itemData 绑常量值，初始值以 QSignalBlocker 静默设置。"""
+    combo = QComboBox()
+    for text, value in options:
+        combo.addItem(text, value)
+    with QSignalBlocker(combo):
+        index = combo.findData(current)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+    combo.currentIndexChanged.connect(
+        lambda _idx, cb=combo: on_change(cb.currentData())
+    )
+    return combo
 
 
 def natural_sort_key(name: str) -> list:
@@ -116,8 +153,10 @@ class PlotVariableEditorDialog(QDialog):
 
         # 创建表格
         self.var_table = QTableWidget()
-        self.var_table.setColumnCount(3)
-        self.var_table.setHorizontalHeaderLabels(["显示", "变量名", "颜色"])
+        self.var_table.setColumnCount(5)
+        self.var_table.setHorizontalHeaderLabels(
+            ["显示", "变量名", "颜色", "绘制方式", "数据点"]
+        )
 
         # 设置表格属性
         self.var_table.setDragDropMode(QTableWidget.DragDropMode.DropOnly)
@@ -152,8 +191,12 @@ class PlotVariableEditorDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)  # 显示列固定宽度
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # 变量名列自适应
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  # 颜色列固定宽度
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)  # 绘制方式列固定宽度
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)  # 数据点列固定宽度
         self.var_table.setColumnWidth(0, 60)  # 显示列
         self.var_table.setColumnWidth(2, 80)  # 颜色列
+        self.var_table.setColumnWidth(3, 78)  # 绘制方式列
+        self.var_table.setColumnWidth(4, 84)  # 数据点列
 
         layout.addWidget(self.var_table)
 
@@ -416,9 +459,10 @@ class PlotVariableEditorDialog(QDialog):
         self.update_button_states()
 
     def _refresh_rows_in_place(self):
-        """就地刷新表格行的可见性与颜色（不重建控件）
+        """就地刷新表格行的可见性/颜色/绘制方式/数据点（不重建控件）
 
-        用于 curves 集合与顺序均未变的场景（如颜色修改、外部可见性变更）。
+        用于 curves 集合与顺序均未变的场景（如颜色修改、外部可见性变更，
+        或图例右键菜单切换绘制方式后的回填）。
         """
         table = self.var_table
         for row in range(table.rowCount()):
@@ -435,6 +479,22 @@ class PlotVariableEditorDialog(QDialog):
                 color_widget.setStyleSheet(
                     f"background-color: {curve_info.color}; border: 1px solid #333;"
                 )
+            draw_combo = table.cellWidget(row, 3)
+            if draw_combo is not None:
+                with QSignalBlocker(draw_combo):
+                    index = draw_combo.findData(
+                        getattr(curve_info, "draw_mode", DRAW_MODE_AUTO)
+                    )
+                    if index >= 0:
+                        draw_combo.setCurrentIndex(index)
+            symbol_combo = table.cellWidget(row, 4)
+            if symbol_combo is not None:
+                with QSignalBlocker(symbol_combo):
+                    index = symbol_combo.findData(
+                        getattr(curve_info, "symbol_policy", SYMBOL_POLICY_AUTO)
+                    )
+                    if index >= 0:
+                        symbol_combo.setCurrentIndex(index)
 
     def _get_selected_row(self) -> int | None:
         """获取当前选中的行号"""
@@ -649,6 +709,59 @@ class PlotVariableEditorDialog(QDialog):
         color_item.setData(Qt.ItemDataRole.UserRole, var_name)
         color_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
         self.var_table.setItem(row, 2, color_item)
+
+        # 绘制方式 / 数据点（下拉框；itemData 绑 data_types 常量）
+        draw_combo = _mode_combo(
+            _DRAW_MODE_OPTIONS,
+            getattr(curve_info, "draw_mode", DRAW_MODE_AUTO),
+            lambda mode, name=var_name: self._on_draw_mode_changed(name, mode),
+        )
+        self.var_table.setCellWidget(row, 3, draw_combo)
+
+        symbol_combo = _mode_combo(
+            _SYMBOL_POLICY_OPTIONS,
+            getattr(curve_info, "symbol_policy", SYMBOL_POLICY_AUTO),
+            lambda policy, name=var_name: self._on_symbol_policy_changed(name, policy),
+        )
+        self.var_table.setCellWidget(row, 4, symbol_combo)
+
+    def _on_draw_mode_changed(self, var_name: str, draw_mode):
+        """绘制方式下拉变更：委托 MultiCurveManager 应用到曲线。"""
+        if draw_mode is None or var_name not in self.plot_widget.curves:
+            return
+        applied = self.plot_widget._multi_curve_manager.apply_curve_draw_mode(
+            var_name, draw_mode
+        )
+        if applied:
+            logger.debug(
+                "[EDITOR] 绘制方式变更: var=%s, mode=%s", var_name, draw_mode
+            )
+            self._notify_style_change(var_name)
+
+    def _on_symbol_policy_changed(self, var_name: str, policy):
+        """数据点下拉变更：委托 MultiCurveManager 应用到曲线。"""
+        if policy is None or var_name not in self.plot_widget.curves:
+            return
+        applied = self.plot_widget._multi_curve_manager.apply_curve_symbol_policy(
+            var_name, policy
+        )
+        if applied:
+            logger.debug(
+                "[EDITOR] symbol 策略变更: var=%s, policy=%s", var_name, policy
+            )
+            self._notify_style_change(var_name)
+
+    def _notify_style_change(self, var_name: str):
+        """样式类变更的状态栏回执（编辑器是顶层 Tool 窗，经 pw 取宿主）。"""
+        pw = self.plot_widget
+        if pw is None:
+            return
+        main_window = pw.window()
+        show = getattr(main_window, "_show_status_message", None)
+        if callable(show):
+            ci = pw.curves.get(var_name)
+            mode = getattr(ci, "draw_mode", DRAW_MODE_AUTO) if ci else DRAW_MODE_AUTO
+            show(f"已更新 {var_name} 的绘制样式（{mode}）")
 
     def _add_invalid_to_table(self, var_name, ref):
         """添加失效占位行到表格（§6.3）

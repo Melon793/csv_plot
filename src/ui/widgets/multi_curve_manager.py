@@ -26,6 +26,7 @@ from src.core.data_types import (
     DRAW_MODES,
     SYMBOL_POLICIES,
     CurveInfo,
+    resolve_symbol_show,
     step_mode_for,
 )
 from src.core.logger import get_logger
@@ -654,9 +655,11 @@ class MultiCurveManager:
     def apply_curve_symbol_policy(self, var_name: str, policy: str) -> bool:
         """切换单曲线 symbol 策略：自动 / 始终显示 / 始终隐藏。
 
-        只写 ``ci.symbol_policy``，实际 pen/symbol 应用统一走
-        update_plot_style 的逐曲线判定路径（立即同步刷新一次，给出
-        即时视觉反馈；后续缩放/滚动按同口径自动重判）。
+        只写 ``ci.symbol_policy`` 并按当前可见区间立即应用一次
+        （resolve_symbol_show 共用逐曲线判定；显式用户动作不走
+        update_plot_style 的交互/重载守卫——编辑器/菜单操作时防抖
+        残留的 ``_is_interacting`` 不应吞掉即时反馈）。后续缩放/滚动
+        仍由 update_plot_style 热路径按同口径自动重判。
 
         Returns:
             是否实际应用。变量不存在或 policy 非法时返回 False。
@@ -670,7 +673,9 @@ class MultiCurveManager:
             return False
         ci.symbol_policy = policy
         try:
-            pw.update_plot_style(pw.view_box, pw.view_box.viewRange(), None)
+            x_min, x_max = pw.view_box.viewRange()[0]
+            show = resolve_symbol_show(ci, x_max - x_min)
+            pw._apply_curve_style(var_name, show)
         except Exception:
             logger.error("应用 symbol 策略失败: var=%s", var_name, exc_info=True)
         return True

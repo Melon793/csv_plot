@@ -47,15 +47,10 @@ from src.core.config import (
     DEFAULT_PADDING_VAL_Y,
     DEFAULT_SHOW_X_AXIS_LABEL,
     UI_DEBOUNCE_DELAY_MS,
-    XRANGE_THRESHOLD_FOR_SYMBOLS,
     widget_alive,
 )
 from src.core.logger import get_logger
-from src.core.data_types import (
-    SYMBOL_POLICY_AUTO,
-    SYMBOL_POLICY_OFF,
-    SYMBOL_POLICY_ON,
-)
+from src.core.data_types import resolve_symbol_show
 from src.ui.drag_drop import (
     build_legend_var_mimedata,
     clear_active_legend_drag,
@@ -1184,13 +1179,7 @@ class PlotUIManager(BasePlotManager):
 
             symbol_on = 0
             for var_name, ci in pw.curves.items():
-                policy = getattr(ci, 'symbol_policy', SYMBOL_POLICY_AUTO)
-                if policy == SYMBOL_POLICY_ON:
-                    show_i = True
-                elif policy == SYMBOL_POLICY_OFF:
-                    show_i = False
-                else:
-                    show_i = x_width * ci.point_density < XRANGE_THRESHOLD_FOR_SYMBOLS
+                show_i = resolve_symbol_show(ci, x_width)
                 symbol_on += 1 if show_i else 0
                 pw._apply_curve_style(var_name, show_i)
 
