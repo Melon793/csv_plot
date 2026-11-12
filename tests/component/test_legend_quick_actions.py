@@ -17,13 +17,19 @@ from urllib.parse import quote
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QColorDialog, QToolTip
+from PySide6.QtWidgets import (
+    QApplication,
+    QColorDialog,
+    QGridLayout,
+    QToolTip,
+)
 
 from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
+from src.ui.widgets.plot_ui_manager import PALETTE_COLUMNS, LegendTextBrowser
 from tests.fixtures.waits import settle
 
 RED_NAME = QColor("red").name()  # "#ff0000"
@@ -148,12 +154,11 @@ def test_editor_set_variable_color_updates_table_on_success(
 # ---------------------------------------------------------------------------
 
 def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
-    """patch plot_ui_manager.QMenu 为纯 Python 替身（替身扩展版）。
+    """patch plot_ui_manager.QMenu 为纯 Python 替身（右键/中键菜单用）。
 
-    相比 test_legend_context_menu 的版本：addAction 兼容 (text) 与
-    (icon, text) 两种签名（调色板项带 QIcon 色块），action 支持
-    setCheckable/setChecked。图标视觉在替身下不做断言（评审必修项 2），
-    只断文案序列 + checked 状态。
+    addAction 兼容 (text) 与 (action 对象) 两种签名，action 支持
+    setEnabled/setCheckable/setChecked。调色板网格菜单不走本替身
+    （见 _fake_palette_env），避免替身假绿。
 
     Returns:
         menus：每次弹出的菜单实例列表
@@ -161,10 +166,7 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
     menus = []
 
     class _FakeAction:
-        """贴近 QAction 真实接口：text()/isChecked() 为方法，其余属性。
-
-        生产代码 _exec_color_menu 会调用 chosen.text()，替身必须同签名。
-        """
+        """贴近 QAction 真实接口：text()/isChecked() 为方法，其余属性。"""
 
         def __init__(self, text):
             self._text = text
@@ -207,6 +209,9 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def deleteLater(self):
             self.deleted = True
 
+        def close(self):
+            pass
+
         def exec(self, pos=None):
             if before_return is not None:
                 before_return()
@@ -219,6 +224,68 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
 
     import src.ui.widgets.plot_ui_manager as pum
     monkeypatch.setattr(pum, "QMenu", _FakeMenu)
+    return menus
+
+
+def _fake_palette_env(
+    monkeypatch, pick_color=None, choose_more=False, before_return=None
+):
+    """patch ``LegendTextBrowser._build_color_palette_menu`` 为替身。
+
+    行为用例只关心 ``exec`` 的分发结果（选色 / 更多颜色… / 取消），
+    网格结构与真实点击由 T5a/T5b/T5d 用真实 builder 覆盖。
+
+    Returns:
+        menus：每次构建的菜单替身列表
+    """
+    menus = []
+
+    class _FakeAction:
+        def __init__(self, text):
+            self._text = text
+            self.enabled = True
+
+        def text(self):
+            return self._text
+
+        def setEnabled(self, enabled):
+            self.enabled = bool(enabled)
+
+    class _FakeMenu:
+        def __init__(self, parent=None):
+            self.deleted = False
+            self.closed = False
+            self.on_pick = None
+            self._more = None
+            self._acts = []
+            menus.append(self)
+
+        def deleteLater(self):
+            self.deleted = True
+
+        def close(self):
+            self.closed = True
+
+        def exec(self, pos=None):
+            if before_return is not None:
+                before_return()
+            if pick_color is not None:
+                self.on_pick(pick_color)
+                return None
+            if choose_more:
+                return self._more
+            return None
+
+    def _fake_build(self, current, on_pick):
+        menu = _FakeMenu()
+        menu.on_pick = on_pick
+        menu._more = _FakeAction("更多颜色…")
+        menu._acts.append(menu._more)
+        return menu, menu._more
+
+    monkeypatch.setattr(
+        LegendTextBrowser, "_build_color_palette_menu", _fake_build
+    )
     return menus
 
 
@@ -328,10 +395,10 @@ def test_t3b_name_click_still_toggles(plot_factory):
 
 
 def test_t4_palette_preset_applies(plot_factory, monkeypatch):
-    """调色板选预设色：ci.color 更新 + legend 重建。"""
+    """调色板选预设色：ci.color 更新 + legend 重建 + 菜单关闭/释放。"""
     pw = plot_factory()
     assert pw.plot_variable("a")  # 首条固定 blue
-    _fake_menu_env(monkeypatch, choose_text="red")
+    menus = _fake_palette_env(monkeypatch, pick_color="red")
 
     legend_calls = []
     monkeypatch.setattr(
@@ -342,28 +409,132 @@ def test_t4_palette_preset_applies(plot_factory, monkeypatch):
 
     assert pw.curves["a"].color == "red"
     assert legend_calls
+    assert menus[0].closed is True, "选色后应关闭菜单"
+    assert menus[0].deleted is True, "QMenu 应经 deleteLater 释放"
 
 
-def test_t5_current_color_checked(plot_factory, monkeypatch):
-    """菜单结构：十预设色 + 「更多颜色…」；当前色 checked，其余未选。"""
+def test_t5a_palette_grid_structure(plot_factory):
+    """真实 builder：10 个色块按行优先 5×2 排布，当前色唯一双环标记。"""
     pw = plot_factory()
     assert pw.plot_variable("a")  # 首条固定 blue
-    menus = _fake_menu_env(monkeypatch)
+    menu, act_more = pw.legend_label._build_color_palette_menu(
+        "blue", lambda name: None
+    )
+    try:
+        grid_host = menu.actions()[0].defaultWidget()
+        assert grid_host is not None, "网格应以 QWidgetAction 内嵌"
+        grid = grid_host.layout()
+        assert isinstance(grid, QGridLayout)
+
+        swatches = [grid.itemAt(i).widget() for i in range(grid.count())]
+        assert [s.color_name for s in swatches] == pw.curve_colors
+        # 行优先：逐项校验 (row, col)，比只断行列数更能表达 5×2
+        for index, swatch in enumerate(swatches):
+            assert grid.getItemPosition(index)[:2] == (
+                index // PALETTE_COLUMNS, index % PALETTE_COLUMNS
+            ), f"{swatch.color_name} 网格位置错误"
+        assert grid.columnCount() == PALETTE_COLUMNS
+        assert grid.rowCount() == 2
+
+        assert act_more.text() == "更多颜色…"
+
+        selected = [s for s in swatches if s.is_selected()]
+        assert [s.color_name for s in selected] == ["blue"]
+        for swatch in swatches:
+            assert swatch.toolTip(), "每个色块应有中文 tooltip"
+            assert re.search(r"[\u4e00-\u9fff]", swatch.toolTip())
+        assert selected[0].toolTip().endswith("（当前）")
+    finally:
+        menu.deleteLater()
+
+
+def test_t5b_swatch_click_and_keyboard(plot_factory, qapp):
+    """真实 builder：鼠标点击与 Enter 键都能选中色块（菜单已 popup）。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    picked = []
+    menu, _ = pw.legend_label._build_color_palette_menu("blue", picked.append)
+    grid_host = menu.actions()[0].defaultWidget()
+    grid = grid_host.layout()
+    red_swatch = next(
+        grid.itemAt(i).widget()
+        for i in range(grid.count())
+        if grid.itemAt(i).widget().color_name == "red"
+    )
+
+    menu.popup(QPoint(50, 50))
+    qapp.processEvents()
+    try:
+        QTest.mouseClick(red_swatch, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert picked == ["red"]
+
+        QTest.keyClick(red_swatch, Qt.Key.Key_Return)
+        qapp.processEvents()
+        assert picked == ["red", "red"]
+    finally:
+        menu.close()
+        menu.deleteLater()
+
+
+def test_t5c_cancel_is_noop(plot_factory, monkeypatch):
+    """取消（exec 返回 None，等价 Esc/点菜单外）：不改色、不弹对话框。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    _fake_palette_env(monkeypatch)  # 既不选色也不选「更多颜色…」
+
+    dialog_calls = []
+    monkeypatch.setattr(
+        QColorDialog,
+        "getColor",
+        staticmethod(lambda *a, **k: dialog_calls.append(1) or QColor("#123456")),
+    )
 
     pw.legend_label._exec_color_menu("a", QPoint(0, 0))
 
-    acts = [a for a in menus[0].actions() if a.text()]  # 滤掉分隔线占位
-    assert [a.text() for a in acts] == pw.curve_colors + ["更多颜色…"]
-    checked = [a.text() for a in acts if a.isChecked()]
-    assert checked == ["blue"]
-    assert not any(a.checkable and not a.isChecked() for a in acts)
+    assert pw.curves["a"].color == "blue"
+    assert not dialog_calls
+
+
+def test_t5d_real_exec_click_applies(plot_factory, monkeypatch):
+    """真实 QMenu.exec + 点击色块：exec 正常返回并应用颜色（关闭/回收路径）。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    built = []
+    orig_build = LegendTextBrowser._build_color_palette_menu
+
+    def _build_and_click(self, current, on_pick):
+        menu, act_more = orig_build(self, current, on_pick)
+        built.append(menu)
+
+        def _click_red():
+            if not menu.isVisible():
+                return  # exec 提前返回、菜单已释放时不得再摸控件
+            grid = menu.actions()[0].defaultWidget().layout()
+            for i in range(grid.count()):
+                swatch = grid.itemAt(i).widget()
+                if swatch.color_name == "red":
+                    QTest.mouseClick(swatch, Qt.MouseButton.LeftButton)
+                    return
+
+        QTimer.singleShot(0, _click_red)
+        return menu, act_more
+
+    monkeypatch.setattr(
+        LegendTextBrowser, "_build_color_palette_menu", _build_and_click
+    )
+
+    pw.legend_label._exec_color_menu("a", QPoint(20, 20))
+
+    assert pw.curves["a"].color == "red"
+    assert built, "真实菜单应被构建"
 
 
 def test_t6_more_colors_dialog_applies(plot_factory, monkeypatch):
     """「更多颜色…」→ QColorDialog 返回合法色 → 应用。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    _fake_menu_env(monkeypatch, choose_text="更多颜色…")
+    _fake_palette_env(monkeypatch, choose_more=True)
 
     captured = {}
 
@@ -383,7 +554,7 @@ def test_t6b_more_colors_invalid_noop(plot_factory, monkeypatch):
     """「更多颜色…」→ 无效色（取消）：颜色不变。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    _fake_menu_env(monkeypatch, choose_text="更多颜色…")
+    _fake_palette_env(monkeypatch, choose_more=True)
     monkeypatch.setattr(
         QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor())
     )
@@ -395,8 +566,8 @@ def test_t7_stale_curve_guard_after_menu(plot_factory, monkeypatch):
     """菜单打开期间曲线被删（reload/编辑器）：分发复查后不应用、不崩溃。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    menus = _fake_menu_env(
-        monkeypatch, choose_text="red", before_return=lambda: pw.curves.pop("a")
+    menus = _fake_palette_env(
+        monkeypatch, pick_color="red", before_return=lambda: pw.curves.pop("a")
     )
     pw.legend_label._exec_color_menu("a", QPoint(0, 0))
 
@@ -408,7 +579,7 @@ def test_t7b_stale_curve_guard_after_dialog(plot_factory, monkeypatch):
     """对话框打开期间曲线被删：同样不应用（二次复查口径）。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    _fake_menu_env(monkeypatch, choose_text="更多颜色…")
+    _fake_palette_env(monkeypatch, choose_more=True)
 
     def _fake_get_color(*a, **k):
         pw.curves.pop("a", None)  # 模拟对话框阻塞期间被 reload/删除
@@ -425,8 +596,8 @@ def test_t7c_menu_released_and_dialog_skipped_when_curve_deleted(
     """菜单打开期间变量被删：菜单仍释放，且不再弹颜色对话框（#6）。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    menus = _fake_menu_env(
-        monkeypatch, choose_text="更多颜色…",
+    menus = _fake_palette_env(
+        monkeypatch, choose_more=True,
         before_return=lambda: pw.curves.pop("a"),
     )
     dialog_calls = []
