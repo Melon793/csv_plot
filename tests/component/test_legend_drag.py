@@ -19,6 +19,7 @@ from src.ui.drag_drop import (
     LEGEND_MIME_FORMAT,
     build_legend_var_mimedata,
     parse_anchor_var_name,
+    parse_legend_anchor,
     parse_var_names_from_mimedata,
 )
 
@@ -102,12 +103,15 @@ def test_build_legend_html_anchor_roundtrip():
     mgr = MultiCurveManager(SimpleNamespace(pw=pw))
     html = mgr._build_legend_html()
 
-    # 锚点协议不变：curve:///URL编码变量名
+    # 锚点拆分（快速改色方案 §2.2）：每条目产出两个锚点——色块
+    # color:/// + 名称 curve:///，先色块后名称，变量顺序与 curves 键一致
     hrefs = re.findall(r"href='([^']+)'", html)
-    assert len(hrefs) == 2
-    assert all(h.startswith("curve:///") for h in hrefs)
-    # 解析闭环：href → 变量名与 curves 键一致
-    assert [parse_anchor_var_name(h) for h in hrefs] == list(pw.curves.keys())
+    assert len(hrefs) == 4
+    parsed = [parse_legend_anchor(h) for h in hrefs]
+    assert parsed == [
+        ("color", "var A"), ("toggle", "var A"),
+        ("color", "中文变量"), ("toggle", "中文变量"),
+    ]
 
 
 # ---------------------------------------------------------------------------

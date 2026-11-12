@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, QPoint
-from PySide6.QtGui import QFontMetrics, QPen, QColor, QDrag
+from PySide6.QtGui import QFontMetrics, QPen, QColor, QDrag, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QMenu,
     QSizePolicy,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QGraphicsWidget,
     QRubberBand,
     QApplication,
+    QColorDialog,
     QTextBrowser,
     QFrame,
 )
@@ -42,7 +43,7 @@ from src.ui.drag_drop import (
     build_legend_var_mimedata,
     clear_active_legend_drag,
     create_drag_pixmap,
-    parse_anchor_var_name,
+    parse_legend_anchor,
     set_active_legend_drag,
 )
 
@@ -102,15 +103,20 @@ class LegendTextBrowser(QTextBrowser):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             href = self.anchorAt(event.position().toPoint())
-            # 按压瞬间解析变量名（拖拽期间 setHtml 重建文档也不影响）
-            self._drag_var_name = parse_anchor_var_name(href)
+            # 按压瞬间解析变量名（拖拽期间 setHtml 重建文档也不影响）。
+            # 宽松解析（快速改色方案 §2.7）：curve:/// 与 color:/// 均可
+            # 发起拖拽（色块上按住也能拖出），忽略 action 只取变量名。
+            parsed = parse_legend_anchor(href)
+            self._drag_var_name = parsed[1] if parsed else None
             self._drag_press_pos = event.position().toPoint()
         elif event.button() == Qt.MouseButton.RightButton:
             # 右键：记录锚点与按压位置，release 时校验位移后弹菜单
-            # （设计 v1.2 §3.2；与左键拖拽状态机同构）
-            self._ctx_var_name = parse_anchor_var_name(
+            # （设计 v1.2 §3.2；与左键拖拽状态机同构）。同上宽松解析：
+            # 色块上右键也弹单变量菜单。
+            parsed = parse_legend_anchor(
                 self.anchorAt(event.position().toPoint())
             )
+            self._ctx_var_name = parsed[1] if parsed else None
             self._ctx_press_pos = event.position().toPoint()
         super().mousePressEvent(event)  # 保留链接高亮/anchor 内部状态
 
@@ -262,6 +268,55 @@ class LegendTextBrowser(QTextBrowser):
             del invalid[var_name]
             pw._update_header_for_curves()
             pw.curves_changed.emit()
+
+    def _exec_color_menu(self, var_name: str, global_pos: QPoint) -> None:
+        """色块左键：弹出预设调色板菜单（当前色打勾）+「更多颜色…」。
+
+        图例快速改色入口（快速改色方案 §2.4）：与编辑器 QColorDialog
+        同源，改色动作统一走 MultiCurveManager.apply_curve_color。
+        调用方（anchorClicked 分发）经 singleShot(0) 进入，先问存活；
+        菜单与对话框各自 exec 返回后复查 var in pw.curves（打开期间
+        曲线可能被 reload/编辑器删除，§6 R3 口径），同色选择为 no-op。
+        """
+        if not widget_alive(self) or not widget_alive(self._pw):
+            logger.debug("legend 调色板菜单跳过：控件已销毁")
+            return
+        pw = self._pw
+        if var_name not in pw.curves:
+            return
+        current = pw.curves[var_name].color
+
+        menu = QMenu(pw)
+        for color_name in pw.curve_colors:
+            pixmap = QPixmap(14, 14)
+            pixmap.fill(QColor(color_name))
+            act = menu.addAction(QIcon(pixmap), color_name)
+            if color_name == current:
+                act.setCheckable(True)
+                act.setChecked(True)
+        menu.addSeparator()
+        act_more = menu.addAction("更多颜色…")
+
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if chosen is act_more:
+            # 对话框在菜单 exec 返回后打开（不在嵌套事件循环内再嵌套）
+            color = QColorDialog.getColor(QColor(current), pw, "选择颜色")
+            if not color.isValid():
+                return
+            color_name = color.name()
+        else:
+            color_name = chosen.text()
+
+        # 关闭后二次复查 + 同色 no-op
+        if var_name not in pw.curves or pw.curves[var_name].color == color_name:
+            return
+        if pw._multi_curve_manager.apply_curve_color(var_name, color_name):
+            main_window = pw.window()
+            show = getattr(main_window, "_show_status_message", None)
+            if callable(show):
+                show(f"已修改 {var_name} 颜色")
 
     def _start_var_drag(self):
         var_name = self._drag_var_name

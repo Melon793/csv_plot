@@ -9,15 +9,18 @@
 FakeMenu 替身模式（见 test_legend_context_menu.py 模块注释）。
 """
 
+import re
 import types
 
-import numpy as np
+from urllib.parse import quote
+
 import pytest
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QColorDialog
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
+from PySide6.QtGui import QColor, QMouseEvent
+from PySide6.QtWidgets import QApplication, QColorDialog
 
+from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 RED_NAME = QColor("red").name()  # "#ff0000"
@@ -134,3 +137,314 @@ def test_editor_set_variable_color_updates_table_on_success(
     )
     dlg.set_variable_color()
     assert pw.curves["a"].color == "#123456"
+
+
+# ---------------------------------------------------------------------------
+# Step 3a：图例锚点拆分 + 调色板菜单
+# ---------------------------------------------------------------------------
+
+def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
+    """patch plot_ui_manager.QMenu 为纯 Python 替身（替身扩展版）。
+
+    相比 test_legend_context_menu 的版本：addAction 兼容 (text) 与
+    (icon, text) 两种签名（调色板项带 QIcon 色块），action 支持
+    setCheckable/setChecked。图标视觉在替身下不做断言（评审必修项 2），
+    只断文案序列 + checked 状态。
+
+    Returns:
+        menus：每次弹出的菜单实例列表
+    """
+    menus = []
+
+    class _FakeAction:
+        """贴近 QAction 真实接口：text()/isChecked() 为方法，其余属性。
+
+        生产代码 _exec_color_menu 会调用 chosen.text()，替身必须同签名。
+        """
+
+        def __init__(self, text):
+            self._text = text
+            self.enabled = True
+            self.checkable = False
+            self._checked = False
+
+        def text(self):
+            return self._text
+
+        def setEnabled(self, enabled):
+            self.enabled = bool(enabled)
+
+        def setCheckable(self, checkable):
+            self.checkable = bool(checkable)
+
+        def setChecked(self, checked):
+            self._checked = bool(checked)
+
+        def isChecked(self):
+            return self._checked
+
+    class _FakeMenu:
+        def __init__(self, parent=None):
+            self._acts = []
+            menus.append(self)
+
+        def addAction(self, *args):
+            act = _FakeAction(args[-1])  # 末参恒为文案
+            self._acts.append(act)
+            return act
+
+        def addSeparator(self):
+            self._acts.append(_FakeAction(""))
+
+        def actions(self):
+            return list(self._acts)
+
+        def exec(self, pos=None):
+            if before_return is not None:
+                before_return()
+            if choose_text is None:
+                return None
+            for act in self._acts:
+                if act.text() == choose_text and act.enabled:
+                    return act
+            return None
+
+    import src.ui.widgets.plot_ui_manager as pum
+    monkeypatch.setattr(pum, "QMenu", _FakeMenu)
+    return menus
+
+
+def _find_anchor_pos(browser, scheme, var_name):
+    """扫描 legend viewport 找到指定 scheme 锚点命中坐标。"""
+    href = f"{scheme}:///{quote(var_name, safe='')}"
+    for y in range(1, 40, 2):
+        for x in range(1, 200, 2):
+            if browser.anchorAt(QPoint(x, y)) == href:
+                return QPoint(x, y)
+    pytest.fail(f"legend 中未找到 {scheme}:/// 锚点坐标：{var_name}")
+
+
+def _mouse_event(event_type, pos, button, buttons):
+    f = QPointF(pos)
+    return QMouseEvent(
+        event_type, f, f, QPointF(0.0, 0.0), button, buttons,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _lmb(event_type, pos):
+    return _mouse_event(event_type, pos,
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+
+
+def _lmb_move(pos):
+    return _mouse_event(QEvent.Type.MouseMove, pos,
+                        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+
+
+def _rmb(event_type, pos):
+    return _mouse_event(event_type, pos,
+                        Qt.MouseButton.RightButton, Qt.MouseButton.RightButton)
+
+
+def test_t1_legend_html_anchor_pairs(plot_factory):
+    """可见/隐藏条目各产出 color:/// + curve:/// 一对锚点，顺序稳定。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    assert pw.plot_variable("b")
+    pw.toggle_curve_visibility_by_name("b")  # b → 隐藏
+
+    html = pw._multi_curve_manager._build_legend_html()
+    parsed = [
+        parse_legend_anchor(h)
+        for h in re.findall(r"href='([^']+)'", html)
+    ]
+    assert parsed == [
+        ("color", "a"), ("toggle", "a"),
+        ("color", "b"), ("toggle", "b"),
+    ]
+
+
+def test_t2_invalid_placeholder_single_anchor(plot_factory):
+    """失效占位条目保持单锚点 curve:///，无 color 锚点。"""
+    from src.core.data_types import InvalidCurveRef
+
+    pw = plot_factory()
+    pw.invalid_curves["ghost"] = InvalidCurveRef(var_name="ghost", color="gray")
+
+    html = pw._multi_curve_manager._build_legend_html()
+    parsed = [
+        parse_legend_anchor(h)
+        for h in re.findall(r"href='([^']+)'", html)
+    ]
+    assert parsed == [("toggle", "ghost")]
+
+
+def test_t3_color_block_click_does_not_toggle(plot_factory, monkeypatch, qapp):
+    """点色块：显隐不变、_exec_color_menu 被调度（行为变更回归）。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+
+    called = []
+    monkeypatch.setattr(
+        browser, "_exec_color_menu", lambda *a, **k: called.append(a)
+    )
+    visible_before = pw.curves["a"].visible
+
+    pw._on_legend_anchor_clicked(QUrl(f"{COLOR_SCHEME}:///{quote('a', safe='')}"))
+    qapp.processEvents()  # singleShot(0) 落地
+
+    assert called, "色块点击应调度调色板菜单"
+    assert pw.curves["a"].visible == visible_before, "点色块不得切显隐"
+
+
+def test_t3b_name_click_still_toggles(plot_factory):
+    """点名称：显隐切换保持不变。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    pw._on_legend_anchor_clicked(QUrl(f"curve:///{quote('a', safe='')}"))
+    assert pw.curves["a"].visible is False
+
+
+def test_t4_palette_preset_applies(plot_factory, monkeypatch):
+    """调色板选预设色：ci.color 更新 + legend 重建。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")  # 首条固定 blue
+    _fake_menu_env(monkeypatch, choose_text="red")
+
+    legend_calls = []
+    orig_update = pw.update_legend_label
+    pw.update_legend_label = lambda html: legend_calls.append(html)
+
+    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+
+    assert pw.curves["a"].color == "red"
+    assert legend_calls
+
+
+def test_t5_current_color_checked(plot_factory, monkeypatch):
+    """菜单结构：十预设色 + 「更多颜色…」；当前色 checked，其余未选。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")  # 首条固定 blue
+    menus = _fake_menu_env(monkeypatch)
+
+    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+
+    acts = [a for a in menus[0].actions() if a.text()]  # 滤掉分隔线占位
+    assert [a.text() for a in acts] == pw.curve_colors + ["更多颜色…"]
+    checked = [a.text() for a in acts if a.isChecked()]
+    assert checked == ["blue"]
+    assert not any(a.checkable and not a.isChecked() for a in acts)
+
+
+def test_t6_more_colors_dialog_applies(plot_factory, monkeypatch):
+    """「更多颜色…」→ QColorDialog 返回合法色 → 应用。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    _fake_menu_env(monkeypatch, choose_text="更多颜色…")
+
+    captured = {}
+
+    def _fake_get_color(initial=None, parent=None, title="", *a, **k):
+        captured.update(initial=initial.name(), title=title, parent=parent)
+        return QColor("#123456")
+
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(_fake_get_color))
+    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+
+    assert pw.curves["a"].color == "#123456"
+    assert captured["title"] == "选择颜色"
+    assert captured["parent"] is pw
+
+
+def test_t6b_more_colors_invalid_noop(plot_factory, monkeypatch):
+    """「更多颜色…」→ 无效色（取消）：颜色不变。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    _fake_menu_env(monkeypatch, choose_text="更多颜色…")
+    monkeypatch.setattr(
+        QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor())
+    )
+    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    assert pw.curves["a"].color == "blue"
+
+
+def test_t7_stale_curve_guard_after_menu(plot_factory, monkeypatch):
+    """菜单打开期间曲线被删（reload/编辑器）：分发复查后不应用、不崩溃。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    menus = _fake_menu_env(
+        monkeypatch, choose_text="red", before_return=lambda: pw.curves.pop("a")
+    )
+    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+
+    assert menus, "菜单应弹出"
+    assert "a" not in pw.curves  # 二次复查拦截，无崩溃即通过
+
+
+def test_t7b_stale_curve_guard_after_dialog(plot_factory, monkeypatch):
+    """对话框打开期间曲线被删：同样不应用。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    _fake_menu_env(
+        monkeypatch, choose_text="更多颜色…",
+        before_return=lambda: pw.curves.pop("a"),
+    )
+    monkeypatch.setattr(
+        QColorDialog, "getColor",
+        staticmethod(lambda *a, **k: QColor("#123456")),
+    )
+    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    assert "a" not in pw.curves
+
+
+def test_t12_drag_from_color_block(plot_factory, monkeypatch, qapp):
+    """色块上按住拖出 ≥ startDragDistance：宽松解析生效，正常发起拖拽。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+    pos = _find_anchor_pos(browser, COLOR_SCHEME, "a")
+
+    started = []
+    monkeypatch.setattr(browser, "_start_var_drag", lambda: started.append(1))
+
+    browser.mousePressEvent(_lmb(QEvent.Type.MouseButtonPress, pos))
+    moved = pos + QPoint(QApplication.startDragDistance() + 5, 0)
+    browser.mouseMoveEvent(_lmb_move(moved))
+    assert started, "色块上拖拽应正常发起"
+
+
+def test_t12b_drag_still_works_from_name(plot_factory, monkeypatch, qapp):
+    """名称上拖拽回归：宽松解析后仍正常发起。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+    pos = _find_anchor_pos(browser, "curve", "a")
+
+    started = []
+    monkeypatch.setattr(browser, "_start_var_drag", lambda: started.append(1))
+
+    browser.mousePressEvent(_lmb(QEvent.Type.MouseButtonPress, pos))
+    moved = pos + QPoint(QApplication.startDragDistance() + 5, 0)
+    browser.mouseMoveEvent(_lmb_move(moved))
+    assert started
+
+
+def test_t13_right_click_on_color_block_opens_menu(plot_factory, monkeypatch, qapp):
+    """色块上右键 press/release：宽松解析生效，弹出与名称右键相同菜单。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+    pos = _find_anchor_pos(browser, COLOR_SCHEME, "a")
+
+    menus = _fake_menu_env(monkeypatch, choose_text="复制变量名")
+    QApplication.clipboard().setText("SENTINEL")
+    browser.mousePressEvent(_rmb(QEvent.Type.MouseButtonPress, pos))
+    browser.mouseReleaseEvent(_rmb(QEvent.Type.MouseButtonRelease, pos))
+    qapp.processEvents()
+
+    assert QApplication.clipboard().text() == "a"
+    acts = [a.text() for a in menus[0].actions() if a.text()]
+    assert acts[0] == "仅显示此变量"
+    assert acts[-1] == "绘图变量编辑器"

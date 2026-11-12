@@ -18,11 +18,18 @@ from urllib.parse import quote
 
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 from src.core.data_types import CurveInfo
 from src.core.logger import get_logger
-from src.ui.drag_drop import ANCHOR_SCHEME, parse_anchor_var_name
+from src.ui.drag_drop import (
+    ANCHOR_SCHEME,
+    COLOR_SCHEME,
+    parse_anchor_var_name,
+    parse_legend_anchor,
+)
 from src.ui.widgets.axis_manager import y_autorange_preserved
 
 logger = get_logger("widget.multi_curve")
@@ -96,7 +103,13 @@ class MultiCurveManager:
         self._update_header_for_curves()
 
     def _build_legend_html(self) -> str:
-        """构建图例 HTML（唯一样式来源，供显示与测试复用）"""
+        """构建图例 HTML（唯一样式来源，供显示与测试复用）
+
+        锚点拆分（图例快速改色方案 §2.2）：色块 ■/□ 用 color:/// 锚点
+        （左键弹调色板），名称用 curve:/// 锚点（左键切显隐），每条目
+        产出两个锚点。失效占位条目保持单锚点 curve:/// 不变（✕ 仍走
+        状态栏提示路径，中键可删占位）。
+        """
         pw = self.pw
         legend_items = []
         for var_name, ci in pw.curves.items():
@@ -107,15 +120,20 @@ class MultiCurveManager:
 
             if ci.visible:
                 legend_items.append(
+                    f"<a href='{COLOR_SCHEME}:///{encoded}' "
+                    f"style='color: {color}; text-decoration: none;'>"
+                    f"<span style='font-weight: bold;'>■</span></a>&nbsp;"
                     f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
                     f"style='color: {color}; text-decoration: none;'>"
-                    f"<span style='font-weight: bold;'>■</span>&nbsp;{legend_text}</a>"
+                    f"{legend_text}</a>"
                 )
             else:
                 legend_items.append(
+                    f"<a href='{COLOR_SCHEME}:///{encoded}' "
+                    f"style='text-decoration: none;'>"
+                    f"<span style='color: {color}; opacity: 0.5;'>□</span></a>&nbsp;"
                     f"<a href='{ANCHOR_SCHEME}:///{encoded}' "
                     f"style='text-decoration: none;'>"
-                    f"<span style='color: {color}; opacity: 0.5;'>□</span>&nbsp;"
                     f"<span style='color: gray;'>{legend_text}</span></a>"
                 )
 
@@ -603,18 +621,30 @@ class MultiCurveManager:
         return True
 
     def _on_legend_anchor_clicked(self, url):
-        """锚点点击：解析 href 中的变量名并切换曲线显隐
+        """锚点点击按 scheme 分发（图例快速改色方案 §2.3）
 
-        变量名存放在 URL path 部分（curve:///name）：QUrl 会将 host 强制
-        转小写并对非 ASCII 做 IDNA 编码，故用 toString + unquote 解析
-        （封装在 parse_anchor_var_name，与 legend 拖拽发起端共用）。
+        - color:///（色块）：弹调色板菜单——anchorClicked 在 release 处理
+          器链内发出，QMenu.exec 不得嵌套其中，singleShot(0) 延迟（与
+          右键菜单 singleShot 同构）；
+        - curve:///（名称）：切换显隐；失效占位仅状态栏提示、不切换
+          显隐（§12.1 已拍板，无曲线可切）。
 
-        失效占位（§12.1 已拍板）：仅状态栏提示、不切换显隐（无曲线可切）。
+        变量名存放在 URL path 部分：QUrl 会将 host 强制转小写并对非
+        ASCII 做 IDNA 编码，故用 toString + unquote 解析（封装在
+        parse_legend_anchor，与 legend 拖拽发起端共用）。
         """
-        var_name = parse_anchor_var_name(url.toString())
-        if not var_name:
+        parsed = parse_legend_anchor(url.toString())
+        if not parsed:
             return
+        action, var_name = parsed
         pw = self.pw
+        if action == "color":
+            if var_name in pw.curves:
+                label = pw.legend_label
+                QTimer.singleShot(
+                    0, lambda: label._exec_color_menu(var_name, QCursor.pos())
+                )
+            return
         if var_name in pw.curves:
             self.toggle_curve_visibility_by_name(var_name)
         elif var_name in (getattr(pw, "invalid_curves", {}) or {}):
