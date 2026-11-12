@@ -12,6 +12,7 @@ from src.core.config import (
     is_grouped_loader,
     compute_global_x_limits,
 )
+from src.core.data_types import DRAW_MODE_SOURCE_USER, step_mode_for
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
@@ -726,8 +727,20 @@ class CursorSyncManager(MainWindowBaseManager):
                     min_x, max_x = domain if domain is not None else (None, None)
 
                     # === 统一 reload 路径：curves 存状态、invalid_curves 取快照 ===
+                    # draw_mode 仅在用户显式钉住（source=='user'）时跨 reload
+                    # 保留；'auto' 来源让重建按新数据元数据重新判定（枚举通道
+                    # 自动 step-post 的自动语义不因 reload 丢失）
                     saved_state = {
-                        var_name: {"color": ci.color, "visible": ci.visible}
+                        var_name: {
+                            "color": ci.color,
+                            "visible": ci.visible,
+                            "draw_mode": (
+                                ci.draw_mode
+                                if getattr(ci, "draw_mode_source", "auto")
+                                == DRAW_MODE_SOURCE_USER
+                                else None
+                            ),
+                        }
                         for var_name, ci in widget.curves.items()
                     }
                     # 复活数据来源（§5.4）：进入 reload 时各页 invalid_curves 的快照。
@@ -779,8 +792,27 @@ class CursorSyncManager(MainWindowBaseManager):
                             )
                             if success:
                                 curves_added += 1
-                                # 恢复可见性
                                 if var_name in widget.curves:
+                                    # 恢复用户钉住的绘制方式（枚举自动判定
+                                    # 只兜 'auto' 来源；不 emit curves_changed，
+                                    # reload 循环内逐条 emit 会造成 O(N) 刷新）
+                                    pinned_mode = state.get("draw_mode")
+                                    if pinned_mode:
+                                        ci = widget.curves[var_name]
+                                        ci.draw_mode = pinned_mode
+                                        ci.draw_mode_source = DRAW_MODE_SOURCE_USER
+                                        if ci.curve is not None:
+                                            try:
+                                                ci.curve.setData(
+                                                    ci.x_data, ci.y_data,
+                                                    stepMode=step_mode_for(pinned_mode),
+                                                )
+                                            except Exception:
+                                                logger.debug(
+                                                    "reload 恢复绘制方式失败: %s",
+                                                    var_name, exc_info=True,
+                                                )
+                                    # 恢复可见性
                                     widget.curves[var_name].visible = state["visible"]
                                     if widget.curves[var_name].curve is not None:
                                         try:

@@ -178,3 +178,191 @@ def test_user_switch_to_step_on_csv(csv_plot):
     assert pw._multi_curve_manager.apply_curve_draw_mode("v", DRAW_MODE_STEP_POST)
     assert pw.curves["v"].curve.opts["stepMode"] == "right"
     assert pw.curves["v"].draw_mode_source == DRAW_MODE_SOURCE_USER
+
+
+# ---------------------------------------------------------------------------
+# reload：用户钉住的 draw_mode 跨 reload 保留（replots_after_loading 路径）
+# ---------------------------------------------------------------------------
+
+from collections import OrderedDict  # noqa: E402
+
+from PySide6.QtWidgets import QPushButton, QWidget  # noqa: E402
+
+from src.ui.cursor_sync_manager import CursorSyncManager  # noqa: E402
+from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget  # noqa: E402
+
+
+class EnumMutableLoader:
+    """通道类 loader 替身：df 可替换 + get_metadata 返回枚举/连续元数据。"""
+
+    LOADER_TYPE = "mdf"
+
+    def __init__(self, df: pd.DataFrame, metas: dict[str, VarMetadata]):
+        self.df = df
+        self.metas = metas
+        self.datalength = int(len(df))
+        self.var_names = list(df.columns)
+        self.df_validity = {v: 1 for v in df.columns}
+        self.units = {}
+        self.time_channels_info = {}
+        self.time_column_name = None
+        self.time_axis_label = "Time"
+
+    def get_metadata(self, var_name: str):
+        return self.metas.get(var_name)
+
+    def get_series(self, var_name: str):
+        return self.df[var_name]
+
+    @property
+    def global_time_range(self) -> tuple[float, float]:
+        return (0.0, float(self.datalength))
+
+
+class _ReloadHost(QWidget):
+    """最小宿主：覆盖 replots_after_loading 链路访问的成员。"""
+
+    def __init__(self):
+        super().__init__()
+        self.cursor_btn = QPushButton()
+        self.cursor_btn.setCheckable(True)
+        self.cursor_btn.setChecked(True)
+        self.cursor_values_hidden = False
+        self.cursor_mode = "1 free cursor"
+        self.pinned_x_values = []
+        self._is_loading_new_data = False
+        self._is_syncing_crosshair = False
+        self._pending_crosshair_x = None
+        self._crosshair_update_timer = None
+        self.plot_widgets = []
+        self.loader = None
+        self.value_cache = OrderedDict()
+        self._enum_text_maps = {}
+        self._baseline_density = 0.0
+        self._global_max_density = 0.0
+        self.cursor_sync_manager = None
+        self.mark_stats_window = None
+        self.status_messages: list[str] = []
+
+    def _show_status_message(self, message: str):
+        self.status_messages.append(message)
+
+
+class _ReloadCtx:
+    def __init__(self, host, loader):
+        self._host = host
+        self.loader = loader
+        self.plot_widgets = []
+        self.cleared_announces = []
+
+    @property
+    def value_cache(self):
+        return self._host.value_cache
+
+    def request_mark_stats_refresh(self, immediate: bool = False):
+        pass
+
+
+class _Container:
+    def __init__(self, pw):
+        self.plot_widget = pw
+
+    def isVisible(self):
+        return True
+
+
+@pytest.fixture()
+def reload_env(qapp):
+    """单页 + 通道类 loader（v 枚举 / c 连续）+ 真实 CursorSyncManager。"""
+    df = _enum_df(30)
+    df["c"] = np.linspace(0.0, 1.0, 30)
+    metas = {"v": _enum_meta("v"), "c": VarMetadata(name="c", unit="V")}
+    loader = EnumMutableLoader(df, metas)
+
+    host = _ReloadHost()
+    ctx = _ReloadCtx(host, loader)
+    pw = DraggableGraphicsLayoutWidget({}, df)
+    pw.plot_context = ctx
+    pw.setParent(host)
+    pw.resize(700, 260)
+    pw.show()
+
+    container = _Container(pw)
+    host.plot_widgets.append(container)
+    ctx.plot_widgets = list(host.plot_widgets)
+    host.loader = loader
+
+    manager = CursorSyncManager(host)
+    host.cursor_sync_manager = manager
+
+    # 初始曲线：v（枚举，自动 step-post）+ c（连续，直线）
+    assert pw.add_variable_to_plot("v")
+    assert pw.add_variable_to_plot("c")
+    settle()
+
+    def reload_with(columns: dict[str, list]):
+        new_df = pd.DataFrame(columns)
+        loader.df = new_df
+        loader.datalength = len(new_df)
+        loader.var_names = list(new_df.columns)
+        loader.df_validity = {v: 1 for v in new_df.columns}
+        for c in host.plot_widgets:
+            c.plot_widget.data = new_df
+        manager.replots_after_loading()
+
+    yield host, pw, reload_with
+
+    pw._is_being_destroyed = True
+    pw.deleteLater()
+    host.deleteLater()
+
+
+def test_reload_keeps_user_pinned_step(reload_env):
+    """用户钉住 step-post → reload → 阶梯与 'user' 来源都保留。"""
+    host, pw, reload_with = reload_env
+    assert pw._multi_curve_manager.apply_curve_draw_mode("c", DRAW_MODE_STEP_POST)
+    assert pw.curves["c"].draw_mode_source == DRAW_MODE_SOURCE_USER
+
+    reload_with({"v": list(_enum_df(30)["v"]), "c": list(np.linspace(0.0, 1.0, 30))})
+
+    assert "c" in pw.curves
+    ci = pw.curves["c"]
+    assert ci.draw_mode == DRAW_MODE_STEP_POST
+    assert ci.draw_mode_source == DRAW_MODE_SOURCE_USER
+    assert ci.curve.opts["stepMode"] == "right"
+
+
+def test_reload_keeps_user_pinned_line_on_enum(reload_env):
+    """枚举通道用户改回直线 → reload → 不被自动判定翻回阶梯。"""
+    host, pw, reload_with = reload_env
+    assert pw.curves["v"].draw_mode == DRAW_MODE_STEP_POST  # 自动判定生效
+    assert pw._multi_curve_manager.apply_curve_draw_mode("v", DRAW_MODE_AUTO)
+
+    reload_with({"v": list(_enum_df(30)["v"]), "c": list(np.linspace(0.0, 1.0, 30))})
+
+    ci = pw.curves["v"]
+    assert ci.draw_mode == DRAW_MODE_AUTO
+    assert ci.draw_mode_source == DRAW_MODE_SOURCE_USER
+    assert ci.curve.opts["stepMode"] is None
+
+
+def test_reload_redecides_auto_source(reload_env):
+    """'auto' 来源的自动阶梯 → reload → 按元数据重新判定，仍 step-post。"""
+    host, pw, reload_with = reload_env
+    assert pw.curves["v"].draw_mode == DRAW_MODE_STEP_POST
+    assert pw.curves["v"].draw_mode_source == DRAW_MODE_SOURCE_AUTO
+
+    reload_with({"v": list(_enum_df(30)["v"]), "c": list(np.linspace(0.0, 1.0, 30))})
+
+    ci = pw.curves["v"]
+    assert ci.draw_mode == DRAW_MODE_STEP_POST
+    assert ci.draw_mode_source == DRAW_MODE_SOURCE_AUTO
+    assert ci.curve.opts["stepMode"] == "right"
+
+
+def test_reload_continuous_stays_line(reload_env):
+    """连续通道 reload 后仍直线（自动判定与 reload 均不改）。"""
+    host, pw, reload_with = reload_env
+    reload_with({"v": list(_enum_df(30)["v"]), "c": list(np.linspace(0.0, 1.0, 30))})
+    assert pw.curves["c"].draw_mode == DRAW_MODE_AUTO
+    assert pw.curves["c"].curve.opts["stepMode"] is None
