@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from src.core.config import (
+    DEFAULT_CURVE_COLORS,
     DEFAULT_PADDING_VAL_Y,
     DEFAULT_SHOW_X_AXIS_LABEL,
     UI_DEBOUNCE_DELAY_MS,
@@ -98,16 +99,16 @@ _SWATCH_RADIUS = 5     # 圆角半径
 _SWATCH_HOVER_RING = QColor("#bdbdbd")
 _SWATCH_SELECT_RING = QColor("#1a73e8")
 _COLOR_LABELS = {
-    "blue": "蓝色",
-    "red": "红色",
-    "green": "绿色",
-    "orange": "橙色",
-    "purple": "紫色",
-    "brown": "棕色",
-    "pink": "粉色",
-    "gray": "灰色",
-    "olive": "橄榄色",
-    "cyan": "青色",
+    "#0072B2": "蓝色",
+    "#D62728": "红色",
+    "#009E73": "青绿",
+    "#CC79A7": "粉紫",
+    "#E69F00": "橙色",
+    "#56B4E9": "天蓝",
+    "#6A3D9A": "深紫",
+    "#8C564B": "棕色",
+    "#999933": "橄榄色",
+    "#882255": "酒红",
 }
 
 
@@ -691,18 +692,7 @@ class PlotUIManager(BasePlotManager):
         # 不变量：同一变量名绝不同时出现在 curves 与 invalid_curves。
         pw.invalid_curves = {}
         pw._batch_adding = False
-        pw.curve_colors = [
-            "blue",
-            "red",
-            "green",
-            "orange",
-            "purple",
-            "brown",
-            "pink",
-            "gray",
-            "olive",
-            "cyan",
-        ]
+        pw.curve_colors = list(DEFAULT_CURVE_COLORS)
         pw.current_color_index = 0
         pw._max_point_density: float = 0.0
 

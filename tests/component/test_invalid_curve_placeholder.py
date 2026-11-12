@@ -124,10 +124,10 @@ def test_revive_via_plot_variable_first_render(plot_factory, silent_dialogs):
 
 
 def test_plot_variable_first_render_default_blue_without_placeholder(plot_factory, silent_dialogs):
-    """无占位的首绘仍是蓝色（向后兼容）"""
+    """无占位的首绘仍是色板首色（向后兼容）"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    assert pw.curves["a"].color == "blue"
+    assert pw.curves["a"].color == pw.curve_colors[0]
 
 
 def test_plot_variable_preferred_color_param(plot_factory, silent_dialogs):

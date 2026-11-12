@@ -20,6 +20,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QSignalBlocker
 
 from src.core.config import (
+    DEFAULT_CURVE_COLOR,
     DEFAULT_LINE_WIDTH,
     DEFAULT_PADDING_VAL_X,
     DEFAULT_PADDING_VAL_Y,
@@ -75,17 +76,17 @@ class PlotDataManager:
     ) -> bool:
         """绘制变量到图表（统一版）
     
-        空 plot 时创建首条曲线（蓝色）写入 curves 字典；
+        空 plot 时创建首条曲线（色板首色）写入 curves 字典；
         已有曲线时转交 add_variable_to_plot 路径。
 
-        ``preferred_color`` 供模板应用/占位复活指定首绘颜色（缺省蓝色，向后兼容）。
+        ``preferred_color`` 供模板应用/占位复活指定首绘颜色（缺省色板首色，向后兼容）。
         首绘分支同样接住失效占位复活：变量在 ``invalid_curves`` 中时取其颜色与
         可见性偏好复活（§4.1），保证"手动添加同名变量 = 显式复活（同色）"。
     
         Args:
             var_name: 要绘制的变量名称
             show_duplicate_warning: 是否显示重复变量警告
-            preferred_color: 首绘指定颜色（None 时按占位/蓝色规则）
+            preferred_color: 首绘指定颜色（None 时按占位/色板首色规则）
             quiet: 程序化批量路径（reload/模板套用）传 True：失败不弹
                 模态框，只落日志（调用方负责降级为占位并汇总播报）
     
@@ -155,13 +156,13 @@ class PlotDataManager:
             y_contiguous = np.ascontiguousarray(y_array, dtype=target_y_dtype)
             x_values = pw.offset + pw.factor * original_index
     
-            # 颜色优先级：占位复活色 > 显式 preferred_color > 首条蓝色（向后兼容）
+            # 颜色优先级：占位复活色 > 显式 preferred_color > 色板首色
             if revive_ref is not None:
                 color = revive_ref.color
             elif preferred_color:
                 color = preferred_color
             else:
-                color = "blue"
+                color = DEFAULT_CURVE_COLOR
             initial_visible = True if revive_ref is None else revive_ref.visible_preference
             _pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             # 不显式传 connect/skipFiniteCheck，使用 pyqtgraph 默认 connect='auto'：

@@ -397,7 +397,7 @@ def test_t3b_name_click_still_toggles(plot_factory):
 def test_t4_palette_preset_applies(plot_factory, monkeypatch):
     """调色板选预设色：ci.color 更新 + legend 重建 + 菜单关闭/释放。"""
     pw = plot_factory()
-    assert pw.plot_variable("a")  # 首条固定 blue
+    assert pw.plot_variable("a")  # 首条固定为色板首色
     menus = _fake_palette_env(monkeypatch, pick_color="red")
 
     legend_calls = []
@@ -416,9 +416,10 @@ def test_t4_palette_preset_applies(plot_factory, monkeypatch):
 def test_t5a_palette_grid_structure(plot_factory):
     """真实 builder：10 个色块按行优先 5×2 排布，当前色唯一双环标记。"""
     pw = plot_factory()
-    assert pw.plot_variable("a")  # 首条固定 blue
+    assert pw.plot_variable("a")  # 首条固定为色板首色
+    first_color = pw.curve_colors[0]
     menu, act_more = pw.legend_label._build_color_palette_menu(
-        "blue", lambda name: None
+        first_color, lambda name: None
     )
     try:
         grid_host = menu.actions()[0].defaultWidget()
@@ -439,7 +440,7 @@ def test_t5a_palette_grid_structure(plot_factory):
         assert act_more.text() == "更多颜色…"
 
         selected = [s for s in swatches if s.is_selected()]
-        assert [s.color_name for s in selected] == ["blue"]
+        assert [s.color_name for s in selected] == [first_color]
         for swatch in swatches:
             assert swatch.toolTip(), "每个色块应有中文 tooltip"
             assert re.search(r"[\u4e00-\u9fff]", swatch.toolTip())
@@ -453,25 +454,28 @@ def test_t5b_swatch_click_and_keyboard(plot_factory, qapp):
     pw = plot_factory()
     assert pw.plot_variable("a")
     picked = []
-    menu, _ = pw.legend_label._build_color_palette_menu("blue", picked.append)
+    second_color = pw.curve_colors[1]
+    menu, _ = pw.legend_label._build_color_palette_menu(
+        pw.curve_colors[0], picked.append
+    )
     grid_host = menu.actions()[0].defaultWidget()
     grid = grid_host.layout()
-    red_swatch = next(
+    second_swatch = next(
         grid.itemAt(i).widget()
         for i in range(grid.count())
-        if grid.itemAt(i).widget().color_name == "red"
+        if grid.itemAt(i).widget().color_name == second_color
     )
 
     menu.popup(QPoint(50, 50))
     qapp.processEvents()
     try:
-        QTest.mouseClick(red_swatch, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(second_swatch, Qt.MouseButton.LeftButton)
         qapp.processEvents()
-        assert picked == ["red"]
+        assert picked == [second_color]
 
-        QTest.keyClick(red_swatch, Qt.Key.Key_Return)
+        QTest.keyClick(second_swatch, Qt.Key.Key_Return)
         qapp.processEvents()
-        assert picked == ["red", "red"]
+        assert picked == [second_color, second_color]
     finally:
         menu.close()
         menu.deleteLater()
@@ -492,7 +496,7 @@ def test_t5c_cancel_is_noop(plot_factory, monkeypatch):
 
     pw.legend_label._exec_color_menu("a", QPoint(0, 0))
 
-    assert pw.curves["a"].color == "blue"
+    assert pw.curves["a"].color == pw.curve_colors[0]
     assert not dialog_calls
 
 
@@ -507,17 +511,17 @@ def test_t5d_real_exec_click_applies(plot_factory, monkeypatch):
         menu, act_more = orig_build(self, current, on_pick)
         built.append(menu)
 
-        def _click_red():
+        def _click_second():
             if not menu.isVisible():
                 return  # exec 提前返回、菜单已释放时不得再摸控件
             grid = menu.actions()[0].defaultWidget().layout()
             for i in range(grid.count()):
                 swatch = grid.itemAt(i).widget()
-                if swatch.color_name == "red":
+                if swatch.color_name == pw.curve_colors[1]:
                     QTest.mouseClick(swatch, Qt.MouseButton.LeftButton)
                     return
 
-        QTimer.singleShot(0, _click_red)
+        QTimer.singleShot(0, _click_second)
         return menu, act_more
 
     monkeypatch.setattr(
@@ -526,7 +530,7 @@ def test_t5d_real_exec_click_applies(plot_factory, monkeypatch):
 
     pw.legend_label._exec_color_menu("a", QPoint(20, 20))
 
-    assert pw.curves["a"].color == "red"
+    assert pw.curves["a"].color == pw.curve_colors[1]
     assert built, "真实菜单应被构建"
 
 
@@ -559,7 +563,7 @@ def test_t6b_more_colors_invalid_noop(plot_factory, monkeypatch):
         QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor())
     )
     pw.legend_label._exec_color_menu("a", QPoint(0, 0))
-    assert pw.curves["a"].color == "blue"
+    assert pw.curves["a"].color == pw.curve_colors[0]
 
 
 def test_t7_stale_curve_guard_after_menu(plot_factory, monkeypatch):

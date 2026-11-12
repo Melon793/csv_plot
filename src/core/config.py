@@ -107,6 +107,22 @@ FILE_SIZE_LIMIT_BACKGROUND_LOADING = (
 )
 RATIO_RESET_PLOTS = 0.3  # 重置plot比例，超过此比例时，重置plot
 INVALID_CURVE_COLOR = "gray"  # 失效占位默认色（模板来源占位固定灰色，§8.3/§12.2：不取 _assign_curve_color，避免同一模板多次应用占位色随索引漂移）
+# 默认曲线色板（按分配顺序）。以 Okabe–Ito 色盲安全集为基础，替换了白底对比
+# 不足的颜色，第 9–10 色为扩展位；gray 保留给失效占位，不进入循环。超过 10 条
+# 曲线时颜色会重复，需要额外编码时再引入线型/标记。
+DEFAULT_CURVE_COLORS = (
+    "#0072B2",  # 蓝
+    "#D62728",  # 红
+    "#009E73",  # 青绿
+    "#CC79A7",  # 粉紫
+    "#E69F00",  # 橙
+    "#56B4E9",  # 天蓝
+    "#6A3D9A",  # 深紫
+    "#8C564B",  # 棕
+    "#999933",  # 橄榄
+    "#882255",  # 酒红
+)
+DEFAULT_CURVE_COLOR = DEFAULT_CURVE_COLORS[0]
 FROZEN_VIEW_WIDTH_DEFAULT = 180  # 冻结视图宽度，默认值为180px
 XRANGE_THRESHOLD_FOR_SYMBOLS = 100.0  # 可见点数阈值：估算可见点数（x轴宽度×采样密度）小于此值显示symbols（细线+symbol），否则粗线无symbol
 BLINK_PULSE = 200

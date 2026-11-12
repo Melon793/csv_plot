@@ -59,7 +59,7 @@ class MultiCurveManager:
     def _assign_curve_color(self, preferred_color: str | None = None) -> str:
         """为曲线分配颜色。
 
-        - 首条曲线固定蓝色（无 preferred_color 时）
+        - 首条曲线固定色板首色（无 preferred_color 时）
         - 指定 preferred_color 时使用该颜色
         - 否则按 curve_colors 顺序轮转
         - 索引在所有分支统一推进（含 preferred_color 场景），
@@ -71,7 +71,7 @@ class MultiCurveManager:
         if preferred_color:
             color = preferred_color
         elif is_first_curve:
-            color = "blue"
+            color = pw.curve_colors[0]
         else:
             color = pw.curve_colors[pw.current_color_index % len(pw.curve_colors)]
 
