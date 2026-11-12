@@ -93,7 +93,7 @@ LEGEND_SCROLLBAR_QSS = """
 """
 
 # 调色板网格（方案 A）：5 列 × 2 行色块，中文色名只用于 tooltip / 无障碍名
-PALETTE_COLUMNS = 5
+PALETTE_COLUMNS = 6
 _SWATCH_SIZE = 26      # 色块边长（逻辑像素，Qt 按 DPR 缩放）
 _SWATCH_RADIUS = 5     # 圆角半径
 _SWATCH_HOVER_RING = QColor("#bdbdbd")
@@ -109,6 +109,8 @@ _COLOR_LABELS = {
     "#8C564B": "棕色",
     "#999933": "橄榄色",
     "#882255": "酒红",
+    "#006D77": "深青",
+    "#8B1A1A": "深红",
 }
 
 

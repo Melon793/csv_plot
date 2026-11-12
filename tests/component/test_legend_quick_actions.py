@@ -429,7 +429,7 @@ def test_t5a_palette_grid_structure(plot_factory):
 
         swatches = [grid.itemAt(i).widget() for i in range(grid.count())]
         assert [s.color_name for s in swatches] == pw.curve_colors
-        # 行优先：逐项校验 (row, col)，比只断行列数更能表达 5×2
+        # 行优先：逐项校验 (row, col)，比只断行列数更能表达 6×2
         for index, swatch in enumerate(swatches):
             assert grid.getItemPosition(index)[:2] == (
                 index // PALETTE_COLUMNS, index % PALETTE_COLUMNS
