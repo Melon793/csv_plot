@@ -23,11 +23,13 @@ _keep_alive: list = []
 
 @pytest.mark.full_matrix
 def test_default_matrix_builds_full_grid(loaded_window):
-    """默认布局按 4×3 建满矩阵，并只显示默认可见区（3×1）。
+    """默认布局按 5×3 建满矩阵，并只显示默认可见区（3×1）。
 
     e2e 其余用例由 conftest 的 `_small_plot_matrix` 替身压到 1×1 提速
-    （每例省约 95ms）；本用例以 `full_matrix` marker 跳过替身，把原先
+    （每例省约 124ms）；本用例以 `full_matrix` marker 跳过替身，把原先
     "54 例顺带覆盖"的建满矩阵行为显式锁定。
+
+    容量（5×3）与默认可见（3×1）分开断言：提容量不得顺带改启动观感。
     """
     from src.core.config import (
         PLOT_COL_CURRENT_DEFAULT,
@@ -37,8 +39,8 @@ def test_default_matrix_builds_full_grid(loaded_window):
     )
 
     mw = loaded_window
-    assert (PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT) == (4, 3)
-    assert len(mw.plot_widgets) == PLOT_ROW_MAX_DEFAULT * PLOT_COL_MAX_DEFAULT == 12
+    assert (PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT) == (5, 3)
+    assert len(mw.plot_widgets) == PLOT_ROW_MAX_DEFAULT * PLOT_COL_MAX_DEFAULT == 15
     visible = [c for c in mw.plot_widgets if c.isVisible()]
     assert len(visible) == PLOT_ROW_CURRENT_DEFAULT * PLOT_COL_CURRENT_DEFAULT == 3
 

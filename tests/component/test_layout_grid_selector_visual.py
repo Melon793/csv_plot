@@ -6,7 +6,11 @@
 3. 渲染签名缓存（重复刷新不重设样式，反向验证性能意图）；
 4. 网格几何（行列间距、不重叠）与尺寸约束（不锁小、hover 不抖动）；
 5. 提示区双层文案格式、行列标尺、accessibleName；
-6. values() 接口与方向键起点等既有语义未回归。
+6. values() 接口与方向键起点等既有语义未回归；
+7. 出厂默认容量与 config 常量一致（防默认形参副本漂移）。
+
+注：除第 7 条外，其余用例的 fixture 显式传 4×3，测的是"给定参数下的控件
+行为"，与出厂容量无关 —— 改容量常量不需要动它们。
 """
 
 import pytest
@@ -335,3 +339,25 @@ def test_key_move_starts_from_current_layout(selector):
     # 第 3 行已不在预览范围内，但仍属于当前布局 -> 回退为淡蓝 current
     assert _state(selector, 2, 0) == _S_CURRENT
     assert selector.result() == 0
+
+
+# ---------- 出厂默认容量（防常量与形参漂移）----------
+
+def test_default_capacity_matches_config_constants(qtbot):
+    """不传参构造时，容量必须等于 config 的出厂常量。
+
+    选择器刻意不引 config（只依赖 theme），默认形参是常量的**副本**；真实
+    调用方 LayoutManager.open_layout_dialog 总是显式传页容量，因此副本漂移
+    不会被任何业务用例发现。本文件其余用例都显式传 4×3 测控件行为，同样
+    盯不住出厂值 —— 这条护栏专门补这个缺口。
+    """
+    from src.core.config import PLOT_COL_MAX_DEFAULT, PLOT_ROW_MAX_DEFAULT
+
+    dlg = LayoutGridSelector()
+    qtbot.addWidget(dlg)
+    assert (dlg.max_rows, dlg.max_cols) == (
+        PLOT_ROW_MAX_DEFAULT,
+        PLOT_COL_MAX_DEFAULT,
+    )
+    assert len(dlg.cells) == PLOT_ROW_MAX_DEFAULT
+    assert all(len(row) == PLOT_COL_MAX_DEFAULT for row in dlg.cells)
