@@ -66,7 +66,7 @@ _STYLE_HINT_MAIN = (
 # 就被 QStyleSheetStyle 接管、退出平台绘制 —— 实测同一枚原生按钮在 macOS /
 # Windows / Fusion 下是 78x33 / 100x30 / 80x27 且跟着 palette 变深浅，而这枚
 # 带 QSS 的「取消」三档一律 106x31、深浅两态像素不变，于是和顶栏按钮成了两套。
-# 上面那 12 枚网格方块不在此列：三态色是这扇对话框唯一的信息通道（浅灰=未选 /
+# 上面那 15 枚网格方块不在此列：三态色是这扇对话框唯一的信息通道（浅灰=未选 /
 # 淡蓝=当前 / 实心蓝=将要切换，且"当前"与"将要"要同框），原生布尔态表达不了。
 
 
@@ -187,7 +187,7 @@ class LayoutGridSelector(QDialog):
 
     def __init__(
         self,
-        max_rows: int = 4,
+        max_rows: int = 5,
         max_cols: int = 3,
         cur_rows: int = 3,
         cur_cols: int = 1,
@@ -196,6 +196,11 @@ class LayoutGridSelector(QDialog):
         super().__init__(parent)
         self.setWindowTitle("设置图表布局")
 
+        # 默认形参是 config.PLOT_ROW_MAX_DEFAULT / PLOT_COL_MAX_DEFAULT 的副本
+        # （本文件只依赖 theme，不引 config，避免对话框反向依赖核心配置）。
+        # 真实调用方 LayoutManager.open_layout_dialog 总是显式传页容量，这里的
+        # 默认值只服务直接构造；改容量常量时必须同步这里，护栏用例见
+        # tests/component/test_layout_grid_selector_visual.py。
         # 钳制参数到合法范围，避免越界
         self.max_rows = max(1, max_rows)
         self.max_cols = max(1, max_cols)

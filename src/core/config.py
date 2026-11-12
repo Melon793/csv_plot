@@ -311,7 +311,13 @@ def is_grouped_loader(loader) -> bool:
     return getattr(loader, "LOADER_TYPE", "") in GROUPED_LOADER_TYPES
 
 # 默认绘图布局配置
-PLOT_ROW_MAX_DEFAULT = 4
+# MAX = 网格容量上限：「修改布局」对话框里可选的格子数，首次加载即按它建满
+#       （实测建图约 8.8 ms/图，5×3=15 图约 136 ms）。
+# CURRENT = 打开数据后默认可见的行列。与容量刻意分开：容量给到 5×3，默认仍
+#       只显示 3×1，用户按需扩，启动观感不变。
+# 注：LayoutGridSelector 的默认形参是 MAX 的副本，改这里必须同步那边
+#       （test_layout_grid_selector_visual.py 有护栏用例盯着漂移）。
+PLOT_ROW_MAX_DEFAULT = 5
 PLOT_COL_MAX_DEFAULT = 3
 PLOT_ROW_CURRENT_DEFAULT = 3
 PLOT_COL_CURRENT_DEFAULT = 1
