@@ -22,7 +22,12 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
-from src.core.data_types import CurveInfo
+from src.core.data_types import (
+    DRAW_MODES,
+    SYMBOL_POLICIES,
+    CurveInfo,
+    step_mode_for,
+)
 from src.core.logger import get_logger
 from src.ui.drag_drop import (
     ANCHOR_SCHEME,
@@ -617,6 +622,57 @@ class MultiCurveManager:
             pw._last_cursor_update_time = 0
         if pw.vline.isVisible():
             pw.update_cursor_label()
+        return True
+
+    def apply_curve_draw_mode(self, var_name: str, draw_mode: str) -> bool:
+        """切换单曲线绘制方式：直线 / 阶梯后（step-post）/ 阶梯前（step-pre）。
+
+        通过 ``ci.curve.setData(x, y, stepMode=...)`` 重建路径；pen/symbol/
+        connect 等既有 opts 不受影响（symbol 仍画在原始数据点上）。
+        'auto' → stepMode=None（回到直线）。
+
+        与线色同口径：仅会话内存活，reload/重开后回到默认 'auto'。
+
+        Returns:
+            是否实际应用。变量不存在或 draw_mode 非法时返回 False。
+        """
+        pw = self.pw
+        if draw_mode not in DRAW_MODES:
+            logger.warning("[DRAW_MODE] 非法取值: %s", draw_mode)
+            return False
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return False
+        ci.draw_mode = draw_mode
+        try:
+            ci.curve.setData(ci.x_data, ci.y_data, stepMode=step_mode_for(draw_mode))
+        except Exception:
+            logger.error("切换绘制方式失败: var=%s, mode=%s", var_name, draw_mode, exc_info=True)
+            return False
+        return True
+
+    def apply_curve_symbol_policy(self, var_name: str, policy: str) -> bool:
+        """切换单曲线 symbol 策略：自动 / 始终显示 / 始终隐藏。
+
+        只写 ``ci.symbol_policy``，实际 pen/symbol 应用统一走
+        update_plot_style 的逐曲线判定路径（立即同步刷新一次，给出
+        即时视觉反馈；后续缩放/滚动按同口径自动重判）。
+
+        Returns:
+            是否实际应用。变量不存在或 policy 非法时返回 False。
+        """
+        pw = self.pw
+        if policy not in SYMBOL_POLICIES:
+            logger.warning("[SYMBOL_POLICY] 非法取值: %s", policy)
+            return False
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return False
+        ci.symbol_policy = policy
+        try:
+            pw.update_plot_style(pw.view_box, pw.view_box.viewRange(), None)
+        except Exception:
+            logger.error("应用 symbol 策略失败: var=%s", var_name, exc_info=True)
         return True
 
     def _on_legend_anchor_clicked(self, url):

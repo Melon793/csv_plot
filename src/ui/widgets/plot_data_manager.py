@@ -29,7 +29,7 @@ from src.core.config import (
     safe_qt_op,
     is_grouped_loader,
 )
-from src.core.data_types import CurveInfo, InvalidCurveRef
+from src.core.data_types import CurveInfo, InvalidCurveRef, step_mode_for
 from src.core.logger import get_logger
 
 logger = get_logger("widget.plot_data")
@@ -643,7 +643,11 @@ class PlotDataManager:
                     new_x = pw.offset + pw.factor * np.arange(
                         1, len(ci.y_data) + 1, dtype=np.float32
                     )
-                ci.curve.setData(new_x, ci.y_data)
+                # stepMode 透传：阶梯曲线在时间修正重算 x 后保持
+                # step-post/step-pre 语义（'auto' → None = 直线）
+                ci.curve.setData(
+                    new_x, ci.y_data, stepMode=step_mode_for(ci.draw_mode)
+                )
                 ci.x_data = new_x
                 ci.update_x_range()
 
