@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
 from src.core.data_types import (
     DRAW_MODES,
+    DRAW_MODE_SOURCE_USER,
     SYMBOL_POLICIES,
     CurveInfo,
     resolve_symbol_show,
@@ -645,6 +646,8 @@ class MultiCurveManager:
         if ci is None or ci.curve is None:
             return False
         ci.draw_mode = draw_mode
+        # 用户显式选择：来源钉住为 'user'，本会话内不被枚举自动判定覆盖
+        ci.draw_mode_source = DRAW_MODE_SOURCE_USER
         try:
             ci.curve.setData(ci.x_data, ci.y_data, stepMode=step_mode_for(draw_mode))
         except Exception:
@@ -813,11 +816,16 @@ class MultiCurveManager:
                             True if revive_ref is None else revive_ref.visible_preference
                         )
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
+                        initial_mode = self._data_manager.decide_initial_draw_mode(
+                            pw, var_name, y_format
+                        )
                         # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
                         # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
                         # 避免 NaN 坐标进入 Qt 光栅化产生横线伪影。
                         curve = pw.plot_item.plot(
                             x_values, y_contiguous, pen=pen, name=var_name,
+                            stepMode=step_mode_for(initial_mode),
                         )
 
                         pw.curves[var_name] = CurveInfo(
@@ -828,7 +836,8 @@ class MultiCurveManager:
                             original_index=original_index,
                             color=color,
                             y_format=y_format or '',
-                            visible=initial_visible
+                            visible=initial_visible,
+                            draw_mode=initial_mode,
                         )
                         if not initial_visible and curve is not None:
                             try:
@@ -922,6 +931,10 @@ class MultiCurveManager:
 
             initial_visible = True if revive_ref is None else revive_ref.visible_preference
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
+            initial_mode = self._data_manager.decide_initial_draw_mode(
+                pw, var_name, y_format or ''
+            )
             # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck 快速路径；
             # 含 NaN（ragged CSV 尾部补 NaN）自动断线，避免 NaN 坐标进入 Qt
             # 光栅化产生横线伪影。
@@ -929,6 +942,7 @@ class MultiCurveManager:
                 x_values, y_values,
                 pen=pen,
                 name=var_name,
+                stepMode=step_mode_for(initial_mode),
             )
 
             pw.curves[var_name] = CurveInfo(
@@ -939,7 +953,8 @@ class MultiCurveManager:
                 original_index=original_index,
                 color=color,
                 y_format=y_format or '',
-                visible=initial_visible
+                visible=initial_visible,
+                draw_mode=initial_mode,
             )
             if not initial_visible and curve is not None:
                 try:

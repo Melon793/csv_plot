@@ -29,7 +29,12 @@ from src.core.config import (
     safe_qt_op,
     is_grouped_loader,
 )
-from src.core.data_types import CurveInfo, InvalidCurveRef, step_mode_for
+from src.core.data_types import (
+    CurveInfo,
+    InvalidCurveRef,
+    decide_draw_mode,
+    step_mode_for,
+)
 from src.core.logger import get_logger
 
 logger = get_logger("widget.plot_data")
@@ -57,6 +62,28 @@ class PlotDataManager:
         if axis_manager is None:
             raise ValueError("PlotDataManager requires a valid AxisManager instance")
         self._axis_manager = axis_manager
+
+    def decide_initial_draw_mode(self, pw, var_name: str, y_format: str = "") -> str:
+        """按通道元数据判定曲线初始绘制方式（供三处 CurveInfo 构造点共用）。
+
+        O(1) 元数据查表（decide_draw_mode），不扫描数据：loader 无
+        get_metadata（CSV/Excel）恒 'auto'；查询异常按 'auto' 兜底，
+        不让绘制方式判定影响加曲线主流程。判定规则与保守边界见
+        src/core/data_types.py::decide_draw_mode。
+        """
+        try:
+            loader = (
+                getattr(pw.plot_context, "loader", None)
+                if getattr(pw, "plot_context", None) is not None
+                else None
+            )
+            get_meta = getattr(loader, "get_metadata", None)
+            if get_meta is None:
+                return "auto"
+            meta = get_meta(var_name)
+        except Exception:
+            return "auto"
+        return decide_draw_mode(meta, y_format)
 
     @property
     def pw(self) -> Any:
@@ -165,12 +192,17 @@ class PlotDataManager:
                 color = DEFAULT_CURVE_COLOR
             initial_visible = True if revive_ref is None else revive_ref.visible_preference
             _pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            # 枚举通道自动阶梯（decide_initial_draw_mode：O(1) 元数据查表，
+            # CSV/Excel 恒 'auto'）。构造时直接传 stepMode，避免事后 setData
+            # 重建路径的二次刷新
+            initial_mode = self.decide_initial_draw_mode(pw, var_name, y_format)
             # 不显式传 connect/skipFiniteCheck，使用 pyqtgraph 默认 connect='auto'：
             # 数据全有限时自动降级为 'all'+skipFiniteCheck=True（快速路径，性能与
             # 原行为一致）；含 NaN（ragged CSV 短通道尾部补 NaN）时自动切 'finite'
             # 断线，避免 NaN 坐标进入 Qt 光栅化产生平台相关的横线伪影。
             curve = pw.plot_item.plot(
                 x_values, y_contiguous, pen=_pen, name=var_name,
+                stepMode=step_mode_for(initial_mode),
             )
     
             # 写入 curves 字典（统一数据源）
@@ -183,6 +215,7 @@ class PlotDataManager:
                 color=color,
                 y_format=y_format or '',
                 visible=initial_visible,
+                draw_mode=initial_mode,
             )
             if not initial_visible and curve is not None:
                 try:
