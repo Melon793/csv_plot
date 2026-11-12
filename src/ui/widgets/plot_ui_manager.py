@@ -15,14 +15,17 @@ PlotUIManager - UI初始化与刷新协调管理器
 from __future__ import annotations
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer, QPoint
+from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF
 from PySide6.QtGui import (
     QAction,
     QFontMetrics,
+    QIcon,
+    QPalette,
     QPainter,
     QPen,
     QColor,
     QDrag,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -37,6 +40,10 @@ from PySide6.QtWidgets import (
     QToolTip,
     QTextBrowser,
     QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
     QWidget,
     QWidgetAction,
 )
@@ -232,6 +239,152 @@ class _ColorSwatch(QWidget):
             ring = self.rect().adjusted(1, 1, -1, -1)
             painter.drawRoundedRect(ring, _SWATCH_RADIUS + 2, _SWATCH_RADIUS + 2)
         painter.end()
+
+
+# ---------------------------------------------------------------------------
+# 曲线快捷面板：分段控件（形态三）与自绘图例
+# ---------------------------------------------------------------------------
+
+# 分段段标签：按钮上用短词（省横向空间），tooltip 给全称（与右键菜单
+# 旧文案一致，DRAW_MODE_LABELS / SYMBOL_POLICY_LABELS）
+_SEG_DRAW_ITEMS = (
+    (DRAW_MODE_AUTO, "直线", "直线"),
+    (DRAW_MODE_STEP_POST, "阶梯后", "阶梯(后)"),
+    (DRAW_MODE_STEP_PRE, "阶梯前", "阶梯(前)"),
+)
+_SEG_SYMBOL_ITEMS = (
+    (SYMBOL_POLICY_AUTO, "自动", "自动"),
+    (SYMBOL_POLICY_ON, "显示", "始终显示"),
+    (SYMBOL_POLICY_OFF, "隐藏", "始终隐藏"),
+)
+
+# 面板标题行变量名最大宽度（超出 elide 截断，全文进 tooltip）
+_PANEL_VAR_NAME_MAX_WIDTH = 200
+
+# 分段控件按钮 QSS：中性描边 + 选中品牌蓝（与色板选中环同色系）
+_SEG_QSS = """
+    QPushButton {
+        background: transparent;
+        border: 1px solid palette(mid);
+        border-radius: 4px;
+        padding: 2px 8px;
+    }
+    QPushButton:hover {
+        background: palette(midlight);
+    }
+    QPushButton:checked {
+        background: rgba(26, 115, 232, 0.14);
+        border-color: #1a73e8;
+    }
+"""
+
+
+def _icon_painter(pixmap: QPixmap) -> tuple[QPainter, QColor]:
+    """在透明 pixmap 上初始化画笔（主题文字色、圆角端点），返回画笔与颜色。"""
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QPalette().color(QPalette.ColorRole.WindowText)
+    pen = QPen(color, 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    return painter, color
+
+
+def _draw_mode_icon(mode: str) -> QPixmap:
+    """绘制方式 18×18 线型示意图标：直线 / 阶梯后 / 阶梯前。
+
+    阶梯图标以实心点标注采样点位置（后 = 跳变发生在采样点，点在拐角；
+    前 = 跳变提前一个采样间隔，点在平台上），与 data_types 的
+    step_mode_for 语义对应。
+    """
+    dpr = 1.0
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        dpr = screen.devicePixelRatio()
+    pixmap = QPixmap(round(18 * dpr), round(18 * dpr))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter, color = _icon_painter(pixmap)
+    if mode == DRAW_MODE_STEP_POST:
+        painter.drawPolyline(
+            [QPointF(2.5, 14.0), QPointF(9.0, 14.0),
+             QPointF(9.0, 4.0), QPointF(15.5, 4.0)]
+        )
+        dot = QPointF(9.0, 14.0)
+    elif mode == DRAW_MODE_STEP_PRE:
+        painter.drawPolyline(
+            [QPointF(2.5, 14.0), QPointF(5.0, 14.0),
+             QPointF(5.0, 4.0), QPointF(15.5, 4.0)]
+        )
+        dot = QPointF(9.0, 4.0)
+    else:  # DRAW_MODE_AUTO：直线
+        painter.drawPolyline([QPointF(2.5, 14.0), QPointF(15.5, 4.0)])
+        dot = QPointF(2.5, 14.0)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(color)
+    painter.drawEllipse(dot, 1.8, 1.8)
+    painter.end()
+    return pixmap
+
+
+def _symbol_policy_icon(policy: str) -> QPixmap:
+    """数据点 18×18 图标：自动（半填充）/ 始终显示（实心）/ 始终隐藏（虚线空心）。"""
+    dpr = 1.0
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        dpr = screen.devicePixelRatio()
+    pixmap = QPixmap(round(18 * dpr), round(18 * dpr))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter, color = _icon_painter(pixmap)
+    rect = QRectF(3.0, 3.0, 12.0, 12.0)
+    if policy == SYMBOL_POLICY_ON:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(rect)
+    elif policy == SYMBOL_POLICY_OFF:
+        pen = QPen(color, 1.4, Qt.PenStyle.DashLine)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(rect)
+    else:  # SYMBOL_POLICY_AUTO：半填充（左实右空）
+        painter.drawEllipse(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPie(rect, 90 * 16, 180 * 16)
+    painter.end()
+    return pixmap
+
+
+class _SegmentedControl(QWidget):
+    """快捷面板内的横排分段单选控件（图标 + 短标签）。
+
+    每组独立实例成容器：QPushButton 的 autoExclusive 互斥范围限定在
+    同一 parent 的按钮间，两组（绘制方式 / 数据点）共存不串扰。段
+    点击只回调 ``on_pick(value)``（由调用方决定记录 picked 与关闭
+    菜单），不在此处改曲线状态——所有应用集中在菜单关闭后统一执行
+    （嵌套事件循环内不改 scene 红线）。
+    """
+
+    def __init__(self, items, current, on_pick, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        for value, label, full_label, icon in items:
+            btn = QPushButton(self)
+            btn.setIcon(QIcon(icon))
+            btn.setText(label)
+            btn.setToolTip(full_label)
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True)
+            btn.setChecked(value == current)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _checked=False, v=value: on_pick(v))
+            layout.addWidget(btn)
+        self.setStyleSheet(_SEG_QSS)
 
 
 class LegendTextBrowser(QTextBrowser):
@@ -498,38 +651,24 @@ class LegendTextBrowser(QTextBrowser):
         act_show_all = menu.addAction("显示全部变量")
         act_show_all.setEnabled(pw.can_show_all())
         menu.addSeparator()
-        # 绘制方式 / 数据点（方案 A：单曲线粒度样式入口，与变量编辑器同源，
-        # 均汇聚到 MultiCurveManager.apply_curve_draw_mode / apply_curve_symbol_policy）
+        # 曲线样式：原「绘制方式」「数据点」两个子菜单合并为单一样式面板
+        # （形态三），与左键色块快捷面板共享 _build_style_panel_widget；
+        # 应用统一走 _apply_curve_panel_picks（MultiCurveManager 共享入口）
         ci = pw.curves[var_name]
-        # 枚举通道自动阶梯时在子菜单标题标注来源（可解释性；手动选择无标注）
+        # 枚举通道自动阶梯时在面板分组标签标注来源（可解释性；手动选择无标注）
         auto_step = (
             getattr(ci, "draw_mode", DRAW_MODE_AUTO) == DRAW_MODE_STEP_POST
             and getattr(ci, "draw_mode_source", "") == DRAW_MODE_SOURCE_AUTO
         )
-        draw_entries: list[tuple[QAction, str]] = []
-        sub_draw = menu.addMenu(
-            "绘制方式（枚举通道自动）" if auto_step else "绘制方式"
+        picked: dict[str, str] = {}
+        holder = [menu]
+        sub_style = menu.addMenu("样式")
+        style_panel = self._build_style_panel_widget(
+            var_name, picked, holder, draw_group_suffix="（枚举通道自动）" if auto_step else ""
         )
-        for text, mode in (
-            ("直线", DRAW_MODE_AUTO),
-            ("阶梯(后)", DRAW_MODE_STEP_POST),
-            ("阶梯(前)", DRAW_MODE_STEP_PRE),
-        ):
-            act = sub_draw.addAction(text)
-            act.setCheckable(True)
-            act.setChecked(getattr(ci, "draw_mode", DRAW_MODE_AUTO) == mode)
-            draw_entries.append((act, mode))
-        symbol_entries: list[tuple[QAction, str]] = []
-        sub_symbol = menu.addMenu("数据点")
-        for text, policy in (
-            ("自动", SYMBOL_POLICY_AUTO),
-            ("始终显示", SYMBOL_POLICY_ON),
-            ("始终隐藏", SYMBOL_POLICY_OFF),
-        ):
-            act = sub_symbol.addAction(text)
-            act.setCheckable(True)
-            act.setChecked(getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO) == policy)
-            symbol_entries.append((act, policy))
+        style_act = QWidgetAction(sub_style)
+        style_act.setDefaultWidget(style_panel)
+        sub_style.addAction(style_act)
         menu.addSeparator()
         act_remove = menu.addAction("删除变量")
         act_copy = menu.addAction("复制变量名")
@@ -539,24 +678,16 @@ class LegendTextBrowser(QTextBrowser):
 
         chosen = menu.exec(global_pos)
         menu.deleteLater()
-        if chosen is None:
+        if chosen is None and not picked:
             return
         if var_name not in pw.curves:  # 菜单打开期间可能已陈旧
             return
+        # 样式面板选择（点段即记录并关闭整个菜单链，exec 返回 None）：
+        # 关闭后统一执行，与色板同口径
+        if picked:
+            self._apply_curve_panel_picks(var_name, picked)
+            return
         main_window = pw.window()
-        show = getattr(main_window, "_show_status_message", None)
-        for act, mode in draw_entries:
-            if chosen is act:
-                if pw._multi_curve_manager.apply_curve_draw_mode(var_name, mode):
-                    if callable(show):
-                        show(f"已切换 {var_name} 绘制方式：{DRAW_MODE_LABELS[mode]}")
-                return
-        for act, policy in symbol_entries:
-            if chosen is act:
-                if pw._multi_curve_manager.apply_curve_symbol_policy(var_name, policy):
-                    if callable(show):
-                        show(f"已切换 {var_name} 数据点显示：{SYMBOL_POLICY_LABELS[policy]}")
-                return
         if chosen is act_copy:
             QApplication.clipboard().setText(var_name)
         elif chosen is act_remove:
@@ -634,97 +765,222 @@ class LegendTextBrowser(QTextBrowser):
             if callable(show):
                 show(f"已移除 {var_name}")
 
-    def _build_color_palette_menu(
-        self, current: str, on_pick
-    ) -> tuple[QMenu, QAction]:
-        """构建 5×2 网格色板菜单。
+    def _build_style_panel_widget(
+        self,
+        var_name: str,
+        picked: dict[str, str],
+        holder: list,
+        draw_group_suffix: str = "",
+    ) -> QWidget:
+        """构建曲线快捷面板主体（左键色块菜单 / 右键「样式」子菜单共用）。
 
-        预设色顺序沿用 ``pw.curve_colors``（行优先），当前色以双环标注；
-        末尾保留「更多颜色…」普通项。网格用 QWidgetAction 内嵌，窗口
-        尺寸由布局自适应，菜单关闭后随 deleteLater 级联释放。
+        结构（形态三）：变量名标题行（当前色条 + elide 截断）→ 预设
+        色板网格 → 分隔线 → 绘制方式 / 数据点两组图标分段控件。所有
+        选择只写入 ``picked`` 并同步请求关闭 ``holder[0]``（顶层菜单），
+        不在嵌套事件循环内改 scene——应用集中在菜单关闭后统一执行
+        （``_apply_curve_panel_picks``）。面板随宿主菜单 deleteLater
+        级联释放。
+
+        Args:
+            var_name: 目标曲线（须已在 pw.curves 中）
+            picked: 选择收集 dict（键 color / draw_mode / symbol_policy，
+                单选语义：任一选择即关菜单，最多一个键）
+            holder: 长度 1 的 list，元素为需要关闭的顶层菜单
+            draw_group_suffix: 绘制方式分组标签后缀（枚举通道自动阶梯
+                时传「（枚举通道自动）」以保留可解释性标注）
+        """
+        pw = self._pw
+        ci = pw.curves[var_name]
+        current = ci.color
+        draw_mode = getattr(ci, "draw_mode", DRAW_MODE_AUTO)
+        symbol_policy = getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO)
+
+        def _pick(key: str, value: str) -> None:
+            picked[key] = value
+            if holder:
+                # 选中即关菜单（release/click 内同步 close，exec 随后
+                # 返回 None）；不用 singleShot，避免定时器仍持有即将
+                # deleteLater 的菜单
+                holder[0].close()
+
+        host = QWidget()
+        vbox = QVBoxLayout(host)
+        vbox.setContentsMargins(8, 8, 8, 6)
+        vbox.setSpacing(6)
+
+        # 标题行：当前色小条 + 变量名（超长 elide，全文进 tooltip）
+        name_row = QWidget(host)
+        name_lay = QHBoxLayout(name_row)
+        name_lay.setContentsMargins(0, 0, 0, 0)
+        name_lay.setSpacing(6)
+        color_bar = QLabel(name_row)
+        color_bar.setFixedSize(8, 8)
+        color_bar.setStyleSheet(
+            f"background-color: {current}; border-radius: 4px;"
+            " border: 1px solid rgba(0, 0, 0, 0.25);"
+        )
+        fm = name_row.fontMetrics()
+        name_label = QLabel(
+            fm.elidedText(
+                var_name, Qt.TextElideMode.ElideRight, _PANEL_VAR_NAME_MAX_WIDTH
+            ),
+            name_row,
+        )
+        name_label.setToolTip(var_name)
+        name_lay.addWidget(color_bar)
+        name_lay.addWidget(name_label)
+        name_lay.addStretch(1)
+        vbox.addWidget(name_row)
+
+        # 预设色板（顺序沿用 pw.curve_colors，行优先；当前色双环标注）
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
+        for index, color_name in enumerate(pw.curve_colors):
+            swatch = _ColorSwatch(
+                color_name,
+                _COLOR_LABELS.get(color_name, color_name),
+                color_name == current,
+                lambda c: _pick("color", c),
+            )
+            grid.addWidget(swatch, index // PALETTE_COLUMNS, index % PALETTE_COLUMNS)
+        vbox.addLayout(grid)
+
+        sep = QFrame(host)
+        sep.setFrameShape(QFrame.Shape.HLine)
+        vbox.addWidget(sep)
+
+        # 两组分段控件（图标 + 短标签；每段 tooltip 给全称）
+        draw_items = [
+            (value, label, full, _draw_mode_icon(value))
+            for value, label, full in _SEG_DRAW_ITEMS
+        ]
+        symbol_items = [
+            (value, label, full, _symbol_policy_icon(value))
+            for value, label, full in _SEG_SYMBOL_ITEMS
+        ]
+        for title, items, cur, key in (
+            (f"绘制方式{draw_group_suffix}", draw_items, draw_mode, "draw_mode"),
+            ("数据点", symbol_items, symbol_policy, "symbol_policy"),
+        ):
+            cap = QLabel(title, host)
+            cap.setStyleSheet("color: palette(mid);")
+            vbox.addWidget(cap)
+            seg = _SegmentedControl(
+                items, cur, lambda v, k=key: _pick(k, v), parent=host
+            )
+            vbox.addWidget(seg)
+        return host
+
+    def _build_curve_panel_menu(
+        self, var_name: str, picked: dict[str, str], holder: list
+    ) -> tuple[QMenu, QAction]:
+        """构建曲线快捷面板菜单（面板主体 +「更多颜色…」）。
 
         Returns:
             (menu, act_more)：``act_more`` 供 ``exec`` 返回值分发。
         """
         menu = QMenu(self._pw)
-        grid_host = QWidget(menu)
-        grid = QGridLayout(grid_host)
-        grid.setContentsMargins(8, 8, 8, 4)
-        grid.setSpacing(6)
-        for index, color_name in enumerate(self._pw.curve_colors):
-            swatch = _ColorSwatch(
-                color_name,
-                _COLOR_LABELS.get(color_name, color_name),
-                color_name == current,
-                on_pick,
-            )
-            grid.addWidget(swatch, index // PALETTE_COLUMNS, index % PALETTE_COLUMNS)
-
+        panel = self._build_style_panel_widget(var_name, picked, holder)
         widget_act = QWidgetAction(menu)
-        widget_act.setDefaultWidget(grid_host)
+        widget_act.setDefaultWidget(panel)
         menu.addAction(widget_act)
         menu.addSeparator()
         act_more = menu.addAction("更多颜色…")
-        # 压掉 QMenu 默认项内边距，避免网格四周多出一圈空白；
+        # 压掉 QMenu 默认项内边距，避免面板四周多出一圈空白；
         # 不设 border，保留 macOS 原生菜单边框/圆角/阴影
         menu.setStyleSheet("QMenu { padding: 2px; }")
         return menu, act_more
 
-    def _exec_color_menu(self, var_name: str, global_pos: QPoint) -> None:
-        """色块左键：弹出 5×2 网格调色板（当前色双环）+「更多颜色…」。
+    def _apply_curve_panel_picks(self, var_name: str, picked: dict[str, str]) -> None:
+        """快捷面板关闭后统一执行选择（色 / 绘制方式 / 数据点）。
 
-        图例快速改色入口（快速改色方案 §2.4）：与编辑器 QColorDialog
-        同源，改色动作统一走 MultiCurveManager.apply_curve_color。
-        调用方（anchorClicked 分发）经 singleShot(0) 进入，先问存活；
-        菜单 exec 返回后立即复查一次（已删则不再弹对话框），对话框
-        返回后再复查一次（打开期间曲线可能被 reload/编辑器删除，
-        §6 R3 口径），同色选择为 no-op。菜单用 deleteLater 释放，
-        避免 QMenu/内嵌网格挂在 pw 下累积。
+        单选语义（任一选择即关菜单）：dict 最多一个键，用 if/elif 表达。
+        复查归属（打开期间曲线可能被 reload/编辑器删除）+ 同值 no-op；
+        应用走 MultiCurveManager 三个共享入口，成功后状态栏播报。
+        """
+        pw = self._pw
+        if var_name not in pw.curves:
+            return
+        ci = pw.curves[var_name]
+        main_window = pw.window()
+        show = getattr(main_window, "_show_status_message", None)
+        mcm = pw._multi_curve_manager
+
+        if "color" in picked:
+            value = picked["color"]
+            if ci.color != value and mcm.apply_curve_color(var_name, value):
+                if callable(show):
+                    show(f"已修改 {var_name} 颜色")
+        elif "draw_mode" in picked:
+            value = picked["draw_mode"]
+            if (
+                getattr(ci, "draw_mode", DRAW_MODE_AUTO) != value
+                and mcm.apply_curve_draw_mode(var_name, value)
+            ):
+                if callable(show):
+                    show(f"已切换 {var_name} 绘制方式：{DRAW_MODE_LABELS[value]}")
+        elif "symbol_policy" in picked:
+            value = picked["symbol_policy"]
+            if (
+                getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO) != value
+                and mcm.apply_curve_symbol_policy(var_name, value)
+            ):
+                if callable(show):
+                    show(f"已切换 {var_name} 数据点显示：{SYMBOL_POLICY_LABELS[value]}")
+
+    def _exec_curve_panel(self, var_name: str, global_pos: QPoint) -> None:
+        """色块左键：弹出曲线快捷面板（色板 + 绘制方式 + 数据点）+「更多颜色…」。
+
+        图例快捷样式入口（形态三）：色 / 绘制方式 / 数据点同面板直达，
+        应用统一走 MultiCurveManager.apply_curve_color /
+        apply_curve_draw_mode / apply_curve_symbol_policy。选择即关
+        菜单并记录 picked，exec 返回后统一执行（嵌套事件循环内不改
+        scene 红线）。调用方（anchorClicked 分发）经 singleShot(0)
+        进入，先问存活；菜单 exec 返回后立即复查一次（已删则不再弹
+        对话框），对话框返回后再复查一次（打开期间曲线可能被
+        reload/编辑器删除，§6 R3 口径），同值选择为 no-op。菜单用
+        deleteLater 释放，避免 QMenu/内嵌面板挂在 pw 下累积。
         """
         if not widget_alive(self) or not widget_alive(self._pw):
-            logger.debug("legend 调色板菜单跳过：控件已销毁")
+            logger.debug("legend 快捷面板跳过：控件已销毁")
             return
         pw = self._pw
         if var_name not in pw.curves:
             return
-        current = pw.curves[var_name].color
 
         picked: dict[str, str] = {}
         holder: list[QMenu] = []
-
-        def _on_pick(color_name: str) -> None:
-            picked["color"] = color_name
-            if holder:
-                # 选色即关菜单（release 内同步 close，exec 随后返回 None）；
-                # 不用 singleShot，避免定时器仍持有即将 deleteLater 的菜单
-                holder[0].close()
-
-        menu, act_more = self._build_color_palette_menu(current, _on_pick)
+        menu, act_more = self._build_curve_panel_menu(var_name, picked, holder)
         holder.append(menu)
         chosen = menu.exec(global_pos)
         menu.deleteLater()
 
-        is_more = chosen is act_more
-        chosen_name = picked.get("color")
-        if not is_more and chosen_name is None:
+        if chosen is not act_more:
+            if picked:
+                self._apply_curve_panel_picks(var_name, picked)
             return  # Esc / 点菜单外：取消
 
-        # 菜单关闭后立即复查：打开期间曲线可能已被 reload/编辑器删除，
-        # 已删则不再弹对话框（避免为一个不存在的变量开颜色面板）
+        # 「更多颜色…」：菜单关闭后弹 Qt 自绘对话框（不在嵌套事件循环
+        # 内再嵌套）；打开前复查归属，已删则不再弹
         if var_name not in pw.curves:
             return
         current = pw.curves[var_name].color
+        # macOS 原生面板不支持 Qt 自定义色，统一用 Qt 自绘对话框，
+        # 并把默认色板预填到“自定义颜色”，方便直接点选。
+        for index, hex_color in enumerate(DEFAULT_CURVE_COLORS):
+            QColorDialog.setCustomColor(index, QColor(hex_color))
+        color = QColorDialog.getColor(
+            QColor(current),
+            pw,
+            "选择颜色",
+            QColorDialog.ColorDialogOption.DontUseNativeDialog,
+        )
+        if not color.isValid():
+            return
+        color_name = color.name()
 
-        if is_more:
-            # 对话框在菜单 exec 返回后打开（不在嵌套事件循环内再嵌套）
-            color = QColorDialog.getColor(QColor(current), pw, "选择颜色")
-            if not color.isValid():
-                return
-            color_name = color.name()
-        else:
-            color_name = chosen_name
-
-        # 对话框/菜单关闭后二次复查 + 同色 no-op
+        # 对话框关闭后二次复查 + 同色 no-op
         if var_name not in pw.curves or pw.curves[var_name].color == color_name:
             return
         if pw._multi_curve_manager.apply_curve_color(var_name, color_name):

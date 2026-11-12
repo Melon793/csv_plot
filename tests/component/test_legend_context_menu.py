@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -53,14 +53,19 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def setChecked(self, checked):
             self.checked = bool(checked)
 
-    class _FakeMenu:
+    class _FakeMenu(QObject):
+        """QObject 子类：「样式」子菜单作为 QWidgetAction 的 parent
+        （真实 QMenu 语义），替身须可作 QObject 父节点。"""
+
         def __init__(self, parent=None):
+            super().__init__()
             self._acts = []
             self._subs = []
             menus.append(self)
 
-        def addAction(self, text):
-            act = _FakeAction(text)
+        def addAction(self, *args):
+            # 末参恒为文案（或 QWidgetAction 实例，其 text() 为空串）
+            act = _FakeAction(args[-1])
             self._acts.append(act)
             return act
 
@@ -93,6 +98,9 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
                 if act.text == choose_text and act.enabled:
                     return act
             return None
+
+        def close(self):
+            pass
 
         def deleteLater(self):
             pass
@@ -321,15 +329,21 @@ def test_t7b_menu_layout_and_separators(plot_factory, monkeypatch):
     pw.legend_label._exec_var_menu("a", QPoint(0, 0))
 
     acts = menus[0].actions()
+
+    def _as_text(t):
+        # 样式子菜单的 QWidgetAction 项在替身里以原对象存入（其 text()
+        # 为空串），与分隔线占位一并归一为 ""
+        return t if isinstance(t, str) else ""
+
     # "" 为分隔线占位：显隐组与样式组之间一条，样式组与操作组之间一条，
     # 操作组与编辑器之间一条；复制变量名/变量信息之间无分隔线。
-    # 「绘制方式」「数据点」为子菜单占位项（方案 A 样式入口）。
-    assert [a.text for a in acts] == [
+    # 「样式」为子菜单占位项（原「绘制方式」「数据点」两入口合并），
+    # 其后紧跟一个 QWidgetAction 项（内嵌样式面板，归一为 ""）。
+    assert [_as_text(a.text) for a in acts] == [
         "仅显示此变量",
         "显示全部变量",
         "",
-        "绘制方式",
-        "数据点",
+        "样式",
         "",
         "删除变量",
         "复制变量名",

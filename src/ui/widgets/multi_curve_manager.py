@@ -740,7 +740,8 @@ class MultiCurveManager:
     def _on_legend_anchor_clicked(self, url):
         """锚点点击按 scheme 分发（图例快速改色方案 §2.3）
 
-        - color:///（色块）：弹调色板菜单——anchorClicked 在 release 处理
+        - color:///（色块）：弹曲线快捷面板（色板 + 绘制方式 + 数据
+          点）——anchorClicked 在 release 处理
           器链内发出，QMenu.exec 不得嵌套其中，singleShot(0) 延迟（与
           右键菜单 singleShot 同构）；
         - curve:///（名称）：切换显隐；失效占位仅状态栏提示、不切换
@@ -759,7 +760,7 @@ class MultiCurveManager:
             if var_name in pw.curves:
                 label = pw.legend_label
                 QTimer.singleShot(
-                    0, lambda: label._exec_color_menu(var_name, QCursor.pos())
+                    0, lambda: label._exec_curve_panel(var_name, QCursor.pos())
                 )
             return
         if var_name in pw.curves:
