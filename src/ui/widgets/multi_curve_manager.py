@@ -385,12 +385,33 @@ class MultiCurveManager:
         try:
             if var_name in pw.curves:
                 ci = pw.curves[var_name]
-                pw.add_variable_to_plot(
+                # 保留用户钉住的绘制方式（source=='user' 时记录；
+                # 'auto' 来源让重建按元数据重新判定，与 reload 同构）
+                pinned_mode = (
+                    ci.draw_mode
+                    if ci.draw_mode_source == DRAW_MODE_SOURCE_USER
+                    else None
+                )
+                success = pw.add_variable_to_plot(
                     var_name,
                     skip_existence_check=True,
                     preferred_color=ci.color,
                     announce_step=False,
                 )
+                if success and pinned_mode and var_name in pw.curves:
+                    new_ci = pw.curves[var_name]
+                    new_ci.draw_mode = pinned_mode
+                    new_ci.draw_mode_source = DRAW_MODE_SOURCE_USER
+                    if new_ci.curve is not None:
+                        try:
+                            new_ci.curve.setData(
+                                new_ci.x_data, new_ci.y_data,
+                                stepMode=step_mode_for(pinned_mode),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "重建恢复绘制方式失败: %s", var_name, exc_info=True
+                            )
         except Exception:
             logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)
 
@@ -845,7 +866,7 @@ class MultiCurveManager:
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
                         # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
                         initial_mode = self._data_manager.decide_initial_draw_mode(
-                            pw, var_name, y_format
+                            pw, var_name, y_format or ''
                         )
                         # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
                         # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
@@ -883,8 +904,9 @@ class MultiCurveManager:
                 # 显隐切换静默跳过 header/vline/密度等全部刷新
                 pw._batch_adding = False
 
-            # 批量拖入：枚举自动阶梯汇总播报（单条，不逐条刷屏）
-            self._announce_auto_step(names, batch=True)
+            # 批量拖入：枚举自动阶梯汇总播报（单条，不逐条刷屏；
+            # 只统计本次新建曲线，已在图上的重复项不计入）
+            self._announce_auto_step(success_vars, batch=True)
 
             if invalid_vars or duplicate_vars:
                 msg_parts = []

@@ -1095,16 +1095,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
                              show_duplicate_warning: bool = True, preferred_color: str | None = None,
-                             quiet: bool = False) -> bool:
+                             quiet: bool = False, announce_step: bool = True) -> bool:
         """添加变量到多曲线绘图 → 委托到 MultiCurveManager
 
         ``quiet=True`` 供 reload/模板套用等程序化批量路径使用：失败不弹
         模态框（调用方负责降级为占位并汇总播报），只落日志。
+        ``announce_step=False`` 供程序化重建（_recreate_curve）抑制
+        枚举自动阶梯的状态栏播报。
         """
         success = self._multi_curve_manager.add_variable_to_plot(
             var_name, x_values, y_values, y_format,
             skip_existence_check, show_duplicate_warning, preferred_color,
-            quiet=quiet,
+            quiet=quiet, announce_step=announce_step,
         )
         if success:
             self.curves_changed.emit()  # 仅成功添加才 emit

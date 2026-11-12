@@ -31,6 +31,7 @@ from src.core.config import (
 )
 from src.core.data_types import (
     CurveInfo,
+    DRAW_MODE_AUTO,
     InvalidCurveRef,
     decide_draw_mode,
     step_mode_for,
@@ -79,11 +80,11 @@ class PlotDataManager:
             )
             get_meta = getattr(loader, "get_metadata", None)
             if get_meta is None:
-                return "auto"
+                return DRAW_MODE_AUTO
             meta = get_meta(var_name)
         except Exception:
-            return "auto"
-        return decide_draw_mode(meta, y_format)
+            return DRAW_MODE_AUTO
+        return decide_draw_mode(meta, y_format or "")
 
     @property
     def pw(self) -> Any:
@@ -275,6 +276,10 @@ class PlotDataManager:
                     main_window.cursor_sync_manager._sync_min_xrange()
     
             logger.debug("[PLOT_VAR] plot_variable 完成: var_name=%s, 数据点=%d", var_name, len(y_contiguous))
+            # 空图首绘路径的枚举自动阶梯播报（有曲线时经 add_variable_to_plot
+            # 尾部播报；quiet 程序化路径静默）
+            if not quiet:
+                pw._multi_curve_manager._announce_auto_step([var_name])
             return True
     
         except Exception as e:

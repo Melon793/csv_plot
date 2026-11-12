@@ -437,3 +437,65 @@ def test_no_announce_on_reload(reload_env):
     host.status_messages.clear()
     reload_with({"v": list(_enum_df(30)["v"]), "c": list(np.linspace(0.0, 1.0, 30))})
     assert host.status_messages == []
+
+
+# ---------------------------------------------------------------------------
+# 修复回归：_recreate_curve 转发层 / 首绘播报 / 批量重复误播报
+# ---------------------------------------------------------------------------
+
+def test_recreate_curve_via_pw_forwarder(reload_env):
+    """_recreate_curve 经 pw 转发层调用（announce_step 透传）不再 TypeError，
+    曲线对象失效重建成功，且用户钉住的绘制方式跨重建保留。"""
+    host, pw, reload_with = reload_env
+    # 用户钉住 c 为 step-post
+    assert pw._multi_curve_manager.apply_curve_draw_mode("c", DRAW_MODE_STEP_POST)
+    old_curve = pw.curves["c"].curve
+
+    # 模拟曲线对象失效（脱离 scene）后走 _recreate_curve（经 pw 转发层）
+    try:
+        pw.plot_item.removeItem(old_curve)
+    except Exception:
+        pass
+    pw._multi_curve_manager._recreate_curve("c")
+
+    # 重建成功（未被 except Exception 静默吞掉）
+    assert pw.curves["c"].curve is not None
+    assert pw.curves["c"].curve is not old_curve
+    # 钉住保留
+    ci = pw.curves["c"]
+    assert ci.draw_mode == DRAW_MODE_STEP_POST
+    assert ci.draw_mode_source == DRAW_MODE_SOURCE_USER
+    assert ci.curve.opts["stepMode"] == "right"
+
+
+def test_first_plot_announces_enum(plot_factory, qapp):
+    """空图首绘（plot_variable 直接构造路径）枚举通道 → 播报。"""
+    pw = plot_factory(_enum_df())
+    pw.plot_context.loader = _mock_loader({"v": _enum_meta("v")})
+    host = _attach_host(pw)
+    pw.plot_variable("v")  # 空图首绘不走 add_variable_to_plot
+    settle()
+    assert any("枚举" in m for m in host.messages)
+
+
+def test_batch_duplicate_enum_not_recounted(plot_factory, qapp, monkeypatch):
+    """批量拖入含已在图上的枚举曲线 → 重复项不计入汇总播报。"""
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(lambda *a, **k: None)
+    )
+    df = _enum_df()
+    df["c"] = np.linspace(0.0, 1.0, 20)
+    pw = plot_factory(df)
+    pw.plot_context.loader = _mock_loader({
+        "v": _enum_meta("v"), "c": VarMetadata(name="c", unit="V"),
+    })
+    host = _attach_host(pw)
+    # v 已在图上（auto step-post）
+    assert pw.add_variable_to_plot("v")
+    host.messages.clear()
+    # 批量再拖 v + c：只有 c 是新建（直线，不播报）
+    pw._multi_curve_manager.add_variables_to_plot(["v", "c"])
+    settle()
+    assert host.messages == []
