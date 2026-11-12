@@ -225,6 +225,8 @@ class LegendTextBrowser(QTextBrowser):
     _TOOLTIP_COLOR = "单击：改色"
     _TOOLTIP_TOGGLE = "单击：显示/隐藏 · 中键：删除"
     _TOOLTIP_INVALID = "失效占位 · 中键：删除"
+    # 悬停延迟：需在锚点上停留该时长才显示（避免扫视图例时反复弹层）
+    _TOOLTIP_DELAY_MS = 800
 
     def __init__(self, plot_widget):
         super().__init__()
@@ -239,9 +241,17 @@ class LegendTextBrowser(QTextBrowser):
         # 中键手势状态（快速删除方案 §2.6）：press 记录、release 校验
         self._mid_press_pos: QPoint | None = None
         self._mid_var_name: str | None = None
+        # 悬停提示状态：文案 + 最新坐标 + 是否已显示 + 延迟计时器
+        self._tooltip_text: str | None = None
+        self._tooltip_pos: QPoint | None = None
+        self._tooltip_shown = False
+        self._tooltip_timer = QTimer(self)
+        self._tooltip_timer.setSingleShot(True)
+        self._tooltip_timer.setInterval(self._TOOLTIP_DELAY_MS)
+        self._tooltip_timer.timeout.connect(self._show_pending_tooltip)
 
     def mousePressEvent(self, event):
-        QToolTip.hideText()  # 任何按下即隐藏手势引导（§2.8）
+        self._hide_tooltip()  # 任何按下即隐藏手势引导（§2.8）
         if event.button() == Qt.MouseButton.LeftButton:
             href = self.anchorAt(event.position().toPoint())
             # 按压瞬间解析变量名（拖拽期间 setHtml 重建文档也不影响）。
@@ -287,29 +297,71 @@ class LegendTextBrowser(QTextBrowser):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
-        QToolTip.hideText()
+        self._hide_tooltip()
         super().leaveEvent(event)
 
-    def _update_anchor_tooltip(self, pos: QPoint) -> None:
-        """hover 锚点时显示手势引导 tooltip（快速改色方案 §2.8）。
+    def _anchor_tooltip_text(self, pos: QPoint) -> str | None:
+        """解析光标下锚点对应的手势引导文案；无提示则返回 None。
 
-        按锚点类型区分文案（色块/名称/失效占位）；空白处、陈旧锚点
-        （变量刚被删、legend 尚未重建）隐藏。QToolTip 为全局浮层，
-        需换算 viewport → global 坐标。
+        空白处、陈旧锚点（变量刚被删、legend 尚未重建）返回 None。
         """
         parsed = parse_legend_anchor(self.anchorAt(pos))
         if parsed is None:
-            QToolTip.hideText()
-            return
+            return None
         action, var_name = parsed
         if var_name in self._pw.curves:
-            text = self._TOOLTIP_COLOR if action == "color" else self._TOOLTIP_TOGGLE
-        elif var_name in (getattr(self._pw, "invalid_curves", {}) or {}):
-            text = self._TOOLTIP_INVALID
-        else:
-            QToolTip.hideText()
+            return (
+                self._TOOLTIP_COLOR if action == "color" else self._TOOLTIP_TOGGLE
+            )
+        if var_name in (getattr(self._pw, "invalid_curves", {}) or {}):
+            return self._TOOLTIP_INVALID
+        return None
+
+    def _update_anchor_tooltip(self, pos: QPoint) -> None:
+        """hover 锚点时延迟显示手势引导 tooltip（快速改色方案 §2.8）。
+
+        停留超过 ``_TOOLTIP_DELAY_MS`` 才显示：扫视图例时不再反复弹层。
+        同一锚点内移动只更新坐标、不重置计时；换锚点或移到空白处则
+        收起旧提示并重新计时。QToolTip 为全局浮层，需换算
+        viewport → global 坐标。
+        """
+        text = self._anchor_tooltip_text(pos)
+        if text is None:
+            self._hide_tooltip()
             return
-        QToolTip.showText(self.viewport().mapToGlobal(pos), text, self)
+        if text == self._tooltip_text:
+            # 同一锚点内移动：只更新坐标；提示仍在计时或已显示则不重来
+            self._tooltip_pos = pos
+            if self._tooltip_timer.isActive() or self._tooltip_shown:
+                return
+            # 提示已被系统自动隐藏：同一锚点重新计时
+            self._tooltip_timer.start()
+            return
+        self._hide_tooltip()
+        self._tooltip_text = text
+        self._tooltip_pos = pos
+        self._tooltip_timer.start()
+
+    def _show_pending_tooltip(self) -> None:
+        """延迟计时到点：在最新悬停坐标显示待展示文案。"""
+        if self._tooltip_text is None or self._tooltip_pos is None:
+            return
+        if not widget_alive(self):
+            return
+        QToolTip.showText(
+            self.viewport().mapToGlobal(self._tooltip_pos),
+            self._tooltip_text,
+            self,
+        )
+        self._tooltip_shown = True
+
+    def _hide_tooltip(self) -> None:
+        """停止计时并隐藏提示（按下 / 离开 / 移到空白处）。"""
+        self._tooltip_timer.stop()
+        self._tooltip_text = None
+        self._tooltip_pos = None
+        self._tooltip_shown = False
+        QToolTip.hideText()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:

@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 from src.ui.widgets.plot_ui_manager import PALETTE_COLUMNS, LegendTextBrowser
-from tests.fixtures.waits import settle
+from tests.fixtures.waits import pump, settle
 
 RED_NAME = QColor("red").name()  # "#ff0000"
 
@@ -998,19 +998,45 @@ def _spy_tooltip(monkeypatch):
 
 
 def test_tooltip_by_anchor_type(plot_factory, monkeypatch):
-    """hover 色块/名称锚点：文案随锚点类型变化。"""
+    """hover 色块/名称锚点并停留：文案随锚点类型变化。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
     browser = pw.legend_label
+    browser._tooltip_timer.setInterval(10)  # 测试加速，不真等 1.2s
     shown, _ = _spy_tooltip(monkeypatch)
 
     color_pos = _find_anchor_pos(browser, COLOR_SCHEME, "a")
     name_pos = _find_anchor_pos(browser, "curve", "a")
 
     browser.mouseMoveEvent(_hover_move(color_pos))
+    pump(60)
     assert shown[-1][1] == browser._TOOLTIP_COLOR
     browser.mouseMoveEvent(_hover_move(name_pos))
+    pump(60)
     assert shown[-1][1] == browser._TOOLTIP_TOGGLE
+
+
+def test_tooltip_delayed_until_dwell(plot_factory, monkeypatch):
+    """未停留到延迟时长不显示；到点才显示；同锚点内移动不重复弹出。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    browser = pw.legend_label
+    browser._tooltip_timer.setInterval(50)
+    shown, _ = _spy_tooltip(monkeypatch)
+    name_pos = _find_anchor_pos(browser, "curve", "a")
+
+    browser.mouseMoveEvent(_hover_move(name_pos))
+    pump(20)
+    assert not shown, "未到延迟时长不应显示"
+    assert browser._tooltip_timer.isActive(), "应处于延迟计时中"
+
+    pump(120)
+    assert shown and shown[-1][1] == browser._TOOLTIP_TOGGLE
+
+    count = len(shown)
+    browser.mouseMoveEvent(_hover_move(name_pos + QPoint(1, 0)))
+    pump(80)
+    assert len(shown) == count, "同一锚点内移动不应重复弹出"
 
 
 def test_tooltip_placeholder_and_blank(plot_factory, monkeypatch):
@@ -1022,10 +1048,12 @@ def test_tooltip_placeholder_and_blank(plot_factory, monkeypatch):
     pw.invalid_curves["ghost"] = InvalidCurveRef(var_name="ghost", color="gray")
     pw._update_header_for_curves()
     browser = pw.legend_label
+    browser._tooltip_timer.setInterval(10)
     shown, hidden = _spy_tooltip(monkeypatch)
 
     ghost_pos = _find_anchor_pos(browser, "curve", "ghost")
     browser.mouseMoveEvent(_hover_move(ghost_pos))
+    pump(60)
     assert shown[-1][1] == browser._TOOLTIP_INVALID
 
     blank = None
@@ -1042,7 +1070,7 @@ def test_tooltip_placeholder_and_blank(plot_factory, monkeypatch):
 
 
 def test_tooltip_hidden_on_press_and_leave(plot_factory, monkeypatch):
-    """任何按下 / 鼠标离开：隐藏 tooltip。"""
+    """任何按下 / 鼠标离开：隐藏 tooltip 并取消未到点的计时。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
     browser = pw.legend_label
@@ -1050,10 +1078,12 @@ def test_tooltip_hidden_on_press_and_leave(plot_factory, monkeypatch):
 
     name_pos = _find_anchor_pos(browser, "curve", "a")
     browser.mouseMoveEvent(_hover_move(name_pos))
+    assert browser._tooltip_timer.isActive()
     hidden.clear()
 
     browser.mousePressEvent(_lmb(QEvent.Type.MouseButtonPress, name_pos))
     assert hidden, "按下应隐藏 tooltip"
+    assert not browser._tooltip_timer.isActive(), "按下应取消延迟计时"
 
     browser.leaveEvent(QEvent(QEvent.Type.Leave))
     assert len(hidden) == 2, "离开应再次隐藏 tooltip"
