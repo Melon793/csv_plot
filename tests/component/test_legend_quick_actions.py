@@ -33,7 +33,7 @@ RED_NAME = QColor("red").name()  # "#ff0000"
 # Step 2：apply_curve_color 下沉（刷新链与迁移前逐项一致，T14）
 # ---------------------------------------------------------------------------
 
-def test_apply_curve_color_updates_pen_and_refreshes(plot_factory):
+def test_apply_curve_color_updates_pen_and_refreshes(plot_factory, monkeypatch):
     pw = plot_factory()
     assert pw.plot_variable("a")
     ci = pw.curves["a"]
@@ -41,8 +41,9 @@ def test_apply_curve_color_updates_pen_and_refreshes(plot_factory):
     ci.curve._cached_pen_key = "thin_blue"  # 预置缓存：改色后必须被清除
 
     legend_calls = []
-    orig_update = pw.update_legend_label
-    pw.update_legend_label = lambda html: legend_calls.append(html)
+    monkeypatch.setattr(
+        pw, "update_legend_label", lambda html: legend_calls.append(html)
+    )
 
     assert pw._multi_curve_manager.apply_curve_color("a", "red") is True
 
@@ -189,6 +190,7 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
     class _FakeMenu:
         def __init__(self, parent=None):
             self._acts = []
+            self.deleted = False
             menus.append(self)
 
         def addAction(self, *args):
@@ -201,6 +203,9 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
 
         def actions(self):
             return list(self._acts)
+
+        def deleteLater(self):
+            self.deleted = True
 
         def exec(self, pos=None):
             if before_return is not None:
@@ -289,9 +294,12 @@ def test_t2_invalid_placeholder_single_anchor(plot_factory):
 
 
 def test_t3_color_block_click_does_not_toggle(plot_factory, monkeypatch, qapp):
-    """点色块：显隐不变、_exec_color_menu 被调度（行为变更回归）。"""
+    """色块单击（真实 press/release→anchorClicked 链路）：显隐不变、调度调色板。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
+    pw.setFixedSize(430, 300)
+    pw.show()
+    qapp.processEvents()
     browser = pw.legend_label
 
     called = []
@@ -299,11 +307,15 @@ def test_t3_color_block_click_does_not_toggle(plot_factory, monkeypatch, qapp):
         browser, "_exec_color_menu", lambda *a, **k: called.append(a)
     )
     visible_before = pw.curves["a"].visible
+    pos = _find_anchor_pos(browser, COLOR_SCHEME, "a")
 
-    pw._on_legend_anchor_clicked(QUrl(f"{COLOR_SCHEME}:///{quote('a', safe='')}"))
+    QTest.mouseClick(
+        browser.viewport(), Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier, pos,
+    )
     qapp.processEvents()  # singleShot(0) 落地
 
-    assert called, "色块点击应调度调色板菜单"
+    assert called, "色块点击应经由 anchorClicked 调度调色板菜单"
     assert pw.curves["a"].visible == visible_before, "点色块不得切显隐"
 
 
@@ -322,8 +334,9 @@ def test_t4_palette_preset_applies(plot_factory, monkeypatch):
     _fake_menu_env(monkeypatch, choose_text="red")
 
     legend_calls = []
-    orig_update = pw.update_legend_label
-    pw.update_legend_label = lambda html: legend_calls.append(html)
+    monkeypatch.setattr(
+        pw, "update_legend_label", lambda html: legend_calls.append(html)
+    )
 
     pw.legend_label._exec_color_menu("a", QPoint(0, 0))
 
@@ -392,19 +405,40 @@ def test_t7_stale_curve_guard_after_menu(plot_factory, monkeypatch):
 
 
 def test_t7b_stale_curve_guard_after_dialog(plot_factory, monkeypatch):
-    """对话框打开期间曲线被删：同样不应用。"""
+    """对话框打开期间曲线被删：同样不应用（二次复查口径）。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    _fake_menu_env(
+    _fake_menu_env(monkeypatch, choose_text="更多颜色…")
+
+    def _fake_get_color(*a, **k):
+        pw.curves.pop("a", None)  # 模拟对话框阻塞期间被 reload/删除
+        return QColor("#123456")
+
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(_fake_get_color))
+    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    assert "a" not in pw.curves
+
+
+def test_t7c_menu_released_and_dialog_skipped_when_curve_deleted(
+    plot_factory, monkeypatch
+):
+    """菜单打开期间变量被删：菜单仍释放，且不再弹颜色对话框（#6）。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    menus = _fake_menu_env(
         monkeypatch, choose_text="更多颜色…",
         before_return=lambda: pw.curves.pop("a"),
     )
+    dialog_calls = []
     monkeypatch.setattr(
         QColorDialog, "getColor",
-        staticmethod(lambda *a, **k: QColor("#123456")),
+        staticmethod(lambda *a, **k: dialog_calls.append(1) or QColor("#123456")),
     )
+
     pw.legend_label._exec_color_menu("a", QPoint(0, 0))
-    assert "a" not in pw.curves
+
+    assert menus[0].deleted is True, "QMenu 应经 deleteLater 释放"
+    assert not dialog_calls, "变量已删时不应再弹颜色对话框"
 
 
 def test_t12_drag_from_color_block(plot_factory, monkeypatch, qapp):

@@ -52,12 +52,15 @@ def _middle_double_click(pw, qapp):
 
     快速删除方案引入 view 层护栏后，中键双击的清空前提是「位置在
     图例区外」；未 show 时布局未激活、图例 proxy 覆盖左上角，固定
-    (10,10) 会误中护栏，故取绘图区中心（对布局状态鲁棒）。
+    (10,10) 会误中护栏，故先激活布局再按真实几何取绘图区中心。
     """
+    pw.show()
+    qapp.processEvents()  # 激活布局：坐标与护栏都依赖真实几何
     center = pw.view_box.mapToScene(pw.view_box.boundingRect().center())
     vp = pw.mapFromScene(center)
-    pw.show()
-    qapp.processEvents()  # 激活布局：护栏依赖图例 proxy 的真实几何
+    # 前置条件而非功能断言：注入点必须确实在护栏之外，否则测到的是
+    # 护栏分支而不是清空分支（静默空转）
+    assert not pw._is_pos_over_legend(vp), "注入点落在图例区内，清空分支未覆盖"
     ev = QMouseEvent(
         QEvent.Type.MouseButtonDblClick,
         QPointF(vp),
