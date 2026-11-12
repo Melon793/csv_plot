@@ -64,7 +64,7 @@ def test_draw_mode_combo_switches_curve(editor_env):
     var_name = dlg.var_table.item(0, 1).data(Qt.ItemDataRole.UserRole)
     ci = pw.curves[var_name]
     assert ci.draw_mode == DRAW_MODE_STEP_POST
-    assert ci.curve.opts["stepMode"] == "left"
+    assert ci.curve.opts["stepMode"] == "right"
 
 
 def test_symbol_policy_combo_pins_symbols(editor_env):
@@ -96,7 +96,7 @@ def test_refresh_rows_in_place_updates_combos(editor_env):
     assert draw_combo.currentData() == DRAW_MODE_STEP_POST
     symbol_combo = dlg.var_table.cellWidget(0, 4)
     assert symbol_combo.currentData() == SYMBOL_POLICY_ON
-    assert pw.curves[var_name].curve.opts["stepMode"] == "left"
+    assert pw.curves[var_name].curve.opts["stepMode"] == "right"
 
 
 def test_status_message_reports_chinese_label(editor_env):

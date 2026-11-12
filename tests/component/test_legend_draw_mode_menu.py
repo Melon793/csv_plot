@@ -121,7 +121,7 @@ def test_choose_step_post_switches_draw_mode(legend_env, monkeypatch):
 
     ci = pw.curves["a"]
     assert ci.draw_mode == DRAW_MODE_STEP_POST
-    assert ci.curve.opts["stepMode"] == "left"
+    assert ci.curve.opts["stepMode"] == "right"
     assert msgs and "绘制方式" in msgs[-1]
 
 

@@ -42,10 +42,14 @@ class FormatInfo:
 
 # ---- 曲线绘制方式（draw_mode）与 symbol 策略（symbol_policy）取值 ----
 # draw_mode：'auto' = 直线连接（默认，与既有行为一致）；'step-post' = 阶梯
-# 且跳变穿过采样时刻（采样时刻记录当前值，matplotlib steps-post 语义，
-# 对应 pyqtgraph stepMode='left'）；'step-pre' = 阶梯且跳变提前一个采样
-# 间隔（采样时刻记录上一区间的值，matplotlib steps-pre 语义，对应
-# pyqtgraph stepMode='right'）。
+# 且跳变发生在采样时刻（采样时刻记录当前值，matplotlib steps-post 语义）；
+# 'step-pre' = 阶梯且跳变提前一个采样间隔（采样时刻记录上一区间已生效的
+# 值，matplotlib steps-pre 语义）。
+# ⚠ 映射陷阱：pyqtgraph 的 stepMode='left'/'right' 指数据点在平台的哪一侧
+# （'left' = 平台画在点左侧，点是右边缘 = steps-pre；'right' = 平台画在
+# 点右侧，点是左边缘 = steps-post），与其 PlotDataItem docstring 的表述
+# 恰好相反——以 PlotCurveItem._generateStepModeData 的实际几何为准
+# （见 test_step_mode_semantics_geometry 回归测试）。
 DRAW_MODE_AUTO = "auto"
 DRAW_MODE_STEP_POST = "step-post"
 DRAW_MODE_STEP_PRE = "step-pre"
@@ -62,13 +66,18 @@ SYMBOL_POLICIES = (SYMBOL_POLICY_AUTO, SYMBOL_POLICY_ON, SYMBOL_POLICY_OFF)
 def step_mode_for(draw_mode: str) -> str | None:
     """draw_mode → pyqtgraph PlotDataItem 的 stepMode 参数。
 
-    'auto' → None（直线，pyqtgraph 默认）；'step-post' → 'left'；
-    'step-pre' → 'right'。未知值按 'auto' 处理（防御）。
+    'auto' → None（直线，pyqtgraph 默认）；'step-post' → 'right'（点是
+    平台左边缘，跳变发生在采样点）；'step-pre' → 'left'（点是平台右边缘，
+    跳变提前一个采样间隔）。未知值按 'auto' 处理（防御）。
+
+    注意：pyqtgraph docstring 对 'left'/'right' 的描述与实现相反，
+    此映射经 _generateStepModeData 顶点序列实测校准（见
+    test_step_mode_semantics_geometry）。
     """
     if draw_mode == DRAW_MODE_STEP_POST:
-        return "left"
-    if draw_mode == DRAW_MODE_STEP_PRE:
         return "right"
+    if draw_mode == DRAW_MODE_STEP_PRE:
+        return "left"
     return None
 
 

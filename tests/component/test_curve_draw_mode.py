@@ -52,8 +52,8 @@ def step_plot(plot_factory, qapp):
     "draw_mode, expected",
     [
         (DRAW_MODE_AUTO, None),
-        (DRAW_MODE_STEP_POST, "left"),
-        (DRAW_MODE_STEP_PRE, "right"),
+        (DRAW_MODE_STEP_POST, "right"),
+        (DRAW_MODE_STEP_PRE, "left"),
         ("unknown-garbage", None),  # 防御：未知值按直线处理
     ],
 )
@@ -61,21 +61,57 @@ def test_step_mode_for_mapping(draw_mode, expected):
     assert step_mode_for(draw_mode) == expected
 
 
+def test_step_mode_semantics_geometry():
+    """几何级钉死 stepMode 语义（防 pyqtgraph docstring 误导性回归）。
+
+    pyqtgraph PlotDataItem docstring 声称 'left'=点描述台阶左边缘，但
+    ``_generateStepModeData`` 的实际几何相反：'left' = 平台画在点左侧
+    （点是右边缘）= steps-pre；'right' = 平台画在点右侧（点是左边缘）
+    = steps-post。本测试直接断言顶点序列，杜绝只对常量值断言而漏掉
+    几何反转（v0.5.7 开发中真实发生过：菜单前/后语义与渲染互换）。
+    """
+    from pyqtgraph.graphicsItems.PlotCurveItem import PlotCurveItem
+
+    x = np.array([10.0, 12.0, 14.0])   # 采样点
+    y = np.array([1.0, 3.0, 2.0])
+
+    # 阶梯(后) step-post：跳变发生在采样点本身
+    # 值 1（采样于 10）保持 [10,12]，跳变在 12 到 3，3 保持 [12,14]
+    xs, ys = PlotCurveItem._generateStepModeData(
+        step_mode_for(DRAW_MODE_STEP_POST), x, y, baseline=None
+    )
+    pairs = list(zip(xs.tolist(), ys.tolist()))
+    assert (12.0, 3.0) in pairs      # 采样点 (12,3) 是其平台左端
+    assert (10.0, 1.0) in pairs and (12.0, 1.0) in pairs   # 旧值保持到 12
+    assert (14.0, 3.0) in pairs      # 3 的平台覆盖 [12,14]
+    assert not any(px == 10.0 and py == 3.0 for px, py in pairs)  # 不提前
+
+    # 阶梯(前) step-pre：跳变提前一个采样间隔
+    # 值 3 的平台画在 [10,12]（采样点 12 是右端），值 2 平台 [12,14]
+    xs, ys = PlotCurveItem._generateStepModeData(
+        step_mode_for(DRAW_MODE_STEP_PRE), x, y, baseline=None
+    )
+    pairs = list(zip(xs.tolist(), ys.tolist()))
+    assert (10.0, 3.0) in pairs and (12.0, 3.0) in pairs   # 3 的平台 [10,12]
+    assert (12.0, 2.0) in pairs and (14.0, 2.0) in pairs  # 2 的平台 [12,14]
+    assert not any(px == 12.0 and py == 1.0 for px, py in pairs)  # 1 不保持到 12
+
+
 # ---------------------------------------------------------------------------
 # apply_curve_draw_mode：opts 翻转与往返
 # ---------------------------------------------------------------------------
 
 def test_draw_mode_switch_flips_step_mode(step_plot):
-    """切换 step-post/step-pre → stepMode 'left'/'right'；回 auto → None。"""
+    """切换 step-post/step-pre → stepMode 'right'/'left'；回 auto → None。"""
     pw = step_plot
     mcm = pw._multi_curve_manager
     curve = pw.curves["v"].curve
 
     assert mcm.apply_curve_draw_mode("v", DRAW_MODE_STEP_POST)
-    assert curve.opts["stepMode"] == "left"
+    assert curve.opts["stepMode"] == "right"
 
     assert mcm.apply_curve_draw_mode("v", DRAW_MODE_STEP_PRE)
-    assert curve.opts["stepMode"] == "right"
+    assert curve.opts["stepMode"] == "left"
 
     assert mcm.apply_curve_draw_mode("v", DRAW_MODE_AUTO)
     assert curve.opts["stepMode"] is None
@@ -119,10 +155,10 @@ def test_time_correction_preserves_step_mode(step_plot):
     pw = step_plot
     assert pw._multi_curve_manager.apply_curve_draw_mode("v", DRAW_MODE_STEP_POST)
     curve = pw.curves["v"].curve
-    assert curve.opts["stepMode"] == "left"
+    assert curve.opts["stepMode"] == "right"
 
     pw.update_time_correction(2.0, 1.0)
-    assert curve.opts["stepMode"] == "left"
+    assert curve.opts["stepMode"] == "right"
     # x 确实被重算了（factor 2 → 跨度翻倍）
     assert pw.curves["v"].x_data[1] == pytest.approx(3.0)  # 1 + 2*1
     # y 不受影响
@@ -151,7 +187,7 @@ def test_step_mode_with_nan_renders(plot_factory, qapp):
 
     assert pw._multi_curve_manager.apply_curve_draw_mode("v", DRAW_MODE_STEP_POST)
     ci = pw.curves["v"]
-    assert ci.curve.opts["stepMode"] == "left"
+    assert ci.curve.opts["stepMode"] == "right"
 
     # 真实渲染一帧：NaN 坐标若进入光栅化会在这里崩溃/产出垃圾
     pm = pw.grab()
