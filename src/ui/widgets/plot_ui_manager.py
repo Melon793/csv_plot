@@ -396,8 +396,10 @@ class LegendTextBrowser(QTextBrowser):
         图例快速改色入口（快速改色方案 §2.4）：与编辑器 QColorDialog
         同源，改色动作统一走 MultiCurveManager.apply_curve_color。
         调用方（anchorClicked 分发）经 singleShot(0) 进入，先问存活；
-        菜单与对话框各自 exec 返回后复查 var in pw.curves（打开期间
-        曲线可能被 reload/编辑器删除，§6 R3 口径），同色选择为 no-op。
+        菜单 exec 返回后立即复查一次（已删则不再弹对话框），对话框
+        返回后再复查一次（打开期间曲线可能被 reload/编辑器删除，
+        §6 R3 口径），同色选择为 no-op。菜单用 deleteLater 释放，
+        避免 QMenu/QIcon 挂在 pw 下累积。
         """
         if not widget_alive(self) or not widget_alive(self._pw):
             logger.debug("legend 调色板菜单跳过：控件已销毁")
@@ -420,17 +422,28 @@ class LegendTextBrowser(QTextBrowser):
 
         chosen = menu.exec(global_pos)
         if chosen is None:
+            menu.deleteLater()
             return
-        if chosen is act_more:
+        is_more = chosen is act_more
+        chosen_name = None if is_more else chosen.text()
+        menu.deleteLater()
+
+        # 菜单关闭后立即复查：打开期间曲线可能已被 reload/编辑器删除，
+        # 已删则不再弹对话框（避免为一个不存在的变量开颜色面板）
+        if var_name not in pw.curves:
+            return
+        current = pw.curves[var_name].color
+
+        if is_more:
             # 对话框在菜单 exec 返回后打开（不在嵌套事件循环内再嵌套）
             color = QColorDialog.getColor(QColor(current), pw, "选择颜色")
             if not color.isValid():
                 return
             color_name = color.name()
         else:
-            color_name = chosen.text()
+            color_name = chosen_name
 
-        # 关闭后二次复查 + 同色 no-op
+        # 对话框/菜单关闭后二次复查 + 同色 no-op
         if var_name not in pw.curves or pw.curves[var_name].color == color_name:
             return
         if pw._multi_curve_manager.apply_curve_color(var_name, color_name):
