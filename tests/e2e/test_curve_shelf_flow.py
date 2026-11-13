@@ -61,12 +61,15 @@ def test_open_shelf_button_shows_tool_window(loaded_window, qapp, qtbot):
     mw = loaded_window
     assert mw.curve_shelf_btn.isEnabled() is True
 
-    qtbot.mouseClick(mw.curve_shelf_btn, Qt.MouseButton.LeftButton)
+    capsule = mw.plot_tabs.shelf_capsule
+    assert capsule.isVisible() is True
+    qtbot.mouseClick(capsule, Qt.MouseButton.LeftButton)
     qapp.processEvents()
 
     dialog = mw.curve_shelf_if_open()
     assert dialog is not None and dialog.isVisible()
     assert mw.curve_shelf_btn.isChecked() is True
+    assert capsule.isChecked() is True
     # D11：首次开窗给一次状态栏提示
     assert "暂存区已打开" in mw._message_text
     assert mw._curve_shelf_hint_shown is True
@@ -256,3 +259,84 @@ def test_reload_empty_data_marks_all_stale(
 
     assert dialog.shelf.entry_for_name("speed").stale is True
     assert dialog.shelf.entry_for_name("rpm").stale is True
+
+
+# ---------------------------------------------------------------------------
+# 入口迁移：页签栏右端胶囊（方案 A / T2）
+# ---------------------------------------------------------------------------
+
+
+def test_top_bar_shelf_button_is_replaced_by_capsule(loaded_window):
+    mw = loaded_window
+    assert mw.curve_shelf_btn is not None  # 撤入口不撤实现（回滚/兼容）
+    assert mw.curve_shelf_btn.isVisible() is False
+    capsule = mw.plot_tabs.shelf_capsule
+    assert capsule is not None and capsule.isVisible() is True
+    assert capsule.isEnabled() is True
+
+
+def test_capsule_click_toggles_window_and_state(loaded_window, qapp, qtbot):
+    mw = loaded_window
+    capsule = mw.plot_tabs.shelf_capsule
+
+    qtbot.mouseClick(capsule, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is not None and dialog.isVisible()
+    assert capsule.isChecked() is True
+
+    qtbot.mouseClick(capsule, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert dialog.isVisible() is False
+    assert capsule.isChecked() is False
+
+
+def test_capsule_badge_keeps_count_when_window_closed(loaded_window, qapp):
+    mw = loaded_window
+    capsule = mw.plot_tabs.shelf_capsule
+    mw._show_curve_shelf()
+    qapp.processEvents()
+    shelf = mw.curve_shelf_if_open().shelf
+    _drop(shelf, build_var_mimedata(["speed", "rpm"]))
+    qapp.processEvents()
+    assert capsule.count() == 2
+
+    mw.hide_curve_shelf()
+    qapp.processEvents()
+    # 关窗不丢计数：正是本次改造要解决的「关窗即丢」
+    assert capsule.count() == 2
+    assert capsule.isChecked() is False
+
+
+def test_capsule_drop_forwards_without_opening(loaded_window, qapp):
+    mw = loaded_window
+    capsule = mw.plot_tabs.shelf_capsule
+    assert mw.curve_shelf_if_open() is None
+
+    _drop(capsule, build_var_mimedata(["speed"]))
+    qapp.processEvents()
+
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is not None
+    assert dialog.isVisible() is False  # D-A3：落点不自动弹窗
+    assert dialog.shelf.count() == 1
+    assert capsule.count() == 1
+
+
+def test_rebuilt_shelf_resets_capsule_count(loaded_window, qapp):
+    from tests.fixtures.waits import force_delete
+
+    mw = loaded_window
+    capsule = mw.plot_tabs.shelf_capsule
+    mw._show_curve_shelf()
+    qapp.processEvents()
+    dialog = mw.curve_shelf_if_open()
+    _drop(dialog.shelf, build_var_mimedata(["speed"]))
+    qapp.processEvents()
+    assert capsule.count() == 1
+
+    mw.hide_curve_shelf()
+    force_delete(dialog)  # C++ 已析构，Python 包装器尚存：走 RuntimeError 重建分支
+    mw._sync_shelf_capsule()
+    assert capsule.count() == 0
+    assert capsule.isChecked() is False

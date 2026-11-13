@@ -21,7 +21,11 @@ from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 from src.ui.widgets.plot_page import PlotPage  # noqa: E402
-from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget  # noqa: E402
+from src.ui.widgets.plot_tabs import (  # noqa: E402
+    MAX_PAGES,
+    PlotTabsWidget,
+    _SHELF_CAPSULE_ENTRY,
+)
 from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
@@ -656,7 +660,10 @@ class MainWindow(QMainWindow):
             dialog.visibility_changed.connect(
                 self._on_curve_shelf_visibility_changed
             )
+            dialog.shelf.entries_changed.connect(self._sync_shelf_capsule)
             self._curve_shelf_dialog = dialog
+            # 重建分支会产出空托盘，末尾主动推一次，避免沿用旧 N / 旧勾选
+            self._sync_shelf_capsule()
         return dialog
 
     def curve_shelf_if_open(self):
@@ -672,26 +679,69 @@ class MainWindow(QMainWindow):
         return dialog
 
     def toggle_curve_shelf(self, checked: bool | None = None) -> None:
-        """top_bar「暂存区」按钮：开/关浮窗（首次打开给一次状态栏提示）。"""
+        """暂存区入口（胶囊点击 / 旧按钮 toggled / 快捷键）：开或关浮窗。"""
+        if checked is None:
+            btn = getattr(self, "curve_shelf_btn", None)
+            want_visible = btn.isChecked() if btn is not None else True
+        else:
+            want_visible = bool(checked)
+        if want_visible:
+            self._show_curve_shelf()
+        else:
+            self.hide_curve_shelf()
+
+    def _show_curve_shelf(self) -> None:
+        """显示浮窗（懒建由 get_curve_shelf 负责，含 entries_changed 接线）。"""
         dialog = self.get_curve_shelf()
-        want_visible = (
-            self.curve_shelf_btn.isChecked()
-            if checked is None
-            else bool(checked)
-        )
-        if not want_visible:
-            dialog.hide()
-            return
         dialog.show()
         dialog.raise_()
+        self._sync_shelf_capsule(visible=True)
         if not getattr(self, "_curve_shelf_hint_shown", False):
             self._curve_shelf_hint_shown = True
             self._broadcast(
                 "暂存区已打开：把图例曲线或变量列表拖进来，再拖到目标绘图区"
             )
 
+    def hide_curve_shelf(self) -> None:
+        dialog = self.curve_shelf_if_open()
+        if dialog is not None:
+            dialog.hide()
+
+    def _on_shelf_capsule_drop(self, event) -> None:
+        """胶囊落点：原始 QDropEvent 原样转给托盘，不弹窗、只同步徽章。"""
+        shelf = self.get_curve_shelf().shelf
+        shelf.dropEvent(event)
+        self._sync_shelf_capsule()
+
+    def _sync_shelf_capsule(self, visible: bool | None = None) -> None:
+        """把条数 / 开合态 / 加载闸门一次性同步到页签角位胶囊。
+
+        注意 ``curve_shelf_if_open()`` 名不副实：它只做存活校验、不判
+        ``isVisible()``。徽章恰恰依赖"关窗后仍返回对象"的语义保持 N；
+        后人若把它"修正"成判可见，徽章会立刻归零。反之判开合态必须
+        显式看 ``isVisible()``，不能拿它当可见性判据。
+        """
+        if not widget_alive(self):
+            return
+        tabs = getattr(self, "plot_tabs", None)
+        if tabs is None or not widget_alive(tabs):
+            return
+        if tabs.shelf_capsule is None:
+            return
+        dialog = self.curve_shelf_if_open()
+        shelf = dialog.shelf if dialog is not None else None
+        tabs.set_shelf_count(shelf.count() if shelf is not None else 0)
+        if visible is None:
+            visible = bool(dialog is not None and dialog.isVisible())
+        tabs.set_shelf_active(bool(visible))
+        tabs.set_shelf_enabled(not self.is_data_loading())
+
     def _on_curve_shelf_visibility_changed(self, visible: bool) -> None:
-        """浮窗隐藏/显示（含标题栏关闭）时同步按钮勾选态。"""
+        """浮窗隐藏/显示（含标题栏关闭）时同步旧按钮与胶囊勾选态。"""
+        if not widget_alive(self):
+            return
+        # 胶囊同步必须在 btn 判空之前：替身宿主没有 curve_shelf_btn
+        self._sync_shelf_capsule(visible=bool(visible))
         btn = getattr(self, "curve_shelf_btn", None)
         if btn is None:
             return
@@ -700,6 +750,16 @@ class MainWindow(QMainWindow):
             btn.setChecked(bool(visible))
         finally:
             btn.blockSignals(False)
+
+    def curve_shelf_anchor_global(self):
+        """胶囊右下角全局坐标；不可见或页签已销毁时返回 None（T3 落点用）。"""
+        tabs = getattr(self, "plot_tabs", None)
+        if tabs is None or not widget_alive(tabs):
+            return None
+        capsule = tabs.shelf_capsule
+        if capsule is None or not widget_alive(capsule) or not capsule.isVisible():
+            return None
+        return capsule.mapToGlobal(capsule.rect().bottomRight())
 
     def _init_basic_config(self):
         # 构造期兜底（C4）：页创建前对这些字段的读写都落在 _bootstrap_state
@@ -1004,7 +1064,8 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
         self.grid_layout_btn.setToolTip("修改图表布局 (Ctrl+L)")
 
-        # 曲线暂存区：跨绘图页搬运曲线的非模态浮窗（v1 只给按钮入口）
+        # 曲线暂存区：入口已迁到页签栏右端 36×20 胶囊（方案 A）；
+        # 旧按钮始终创建以兼容既有测试/回滚，仅在开关关闭时才放进工具栏。
         self.curve_shelf_btn = QPushButton("暂存区", self.plot_widget)
         self.curve_shelf_btn.setCheckable(True)
         self.curve_shelf_btn.setToolTip(
@@ -1012,7 +1073,12 @@ class MainWindow(QMainWindow):
         )
 
         top_bar.addWidget(self.grid_layout_btn)
-        top_bar.addWidget(self.curve_shelf_btn)
+        if _SHELF_CAPSULE_ENTRY:
+            # 撤入口不撤实现：按钮仍是 toggle 槽的兼容入口（既有测试/回滚用），
+            # 但必须 hide——不 hide 会以未布局子控件身份在 (0,0) 冒出来
+            self.curve_shelf_btn.hide()
+        else:
+            top_bar.addWidget(self.curve_shelf_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
         top_bar.addWidget(self.auto_y_btn)
@@ -1025,6 +1091,8 @@ class MainWindow(QMainWindow):
         self.plot_tabs.new_page_requested.connect(self.new_page)
         self.plot_tabs.close_page_requested.connect(self._on_tab_close_requested)
         self.plot_tabs.rename_page_requested.connect(self._on_tab_rename_requested)
+        self.plot_tabs.shelf_toggle_requested.connect(self.toggle_curve_shelf)
+        self.plot_tabs.shelf_drop_requested.connect(self._on_shelf_capsule_drop)
         self.plot_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
         self.plot_tabs.currentChanged.connect(self._on_current_changed)
         root_layout.addWidget(self.plot_tabs, 1)
