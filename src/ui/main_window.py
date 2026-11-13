@@ -685,6 +685,19 @@ class MainWindow(QMainWindow):
             want_visible = btn.isChecked() if btn is not None else True
         else:
             want_visible = bool(checked)
+        if want_visible and self.reject_when_loading("打开暂存区"):
+            # 勾选态已被点按下发，拒绝时回滚到真实可见态，避免"勾着但打不开"
+            dialog = self.curve_shelf_if_open()
+            actual = bool(dialog is not None and dialog.isVisible())
+            self._sync_shelf_capsule(visible=actual)
+            btn = getattr(self, "curve_shelf_btn", None)
+            if btn is not None and btn.isChecked() != actual:
+                btn.blockSignals(True)
+                try:
+                    btn.setChecked(actual)
+                finally:
+                    btn.blockSignals(False)
+            return
         if want_visible:
             self._show_curve_shelf()
         else:

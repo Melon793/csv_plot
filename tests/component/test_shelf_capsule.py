@@ -328,11 +328,33 @@ def test_capsule_toggle_emits_and_syncs_back(capsule_shelf, qtbot):
     assert received == [True]
 
 
-def test_capsule_enabled_follows_load_gate(capsule_shelf):
-    tabs, _shelf, _host = capsule_shelf
-    capsule = tabs.shelf_capsule
+def test_capsule_enabled_follows_load_gate(qtbot):
+    """真实 FileLoaderManager.set_button_status 驱动（不直调胶囊 API）。"""
+    from PySide6.QtWidgets import QPushButton
 
-    tabs.set_shelf_enabled(False)
-    assert capsule.isEnabled() is False
-    tabs.set_shelf_enabled(True)
-    assert capsule.isEnabled() is True
+    from src.ui.file_loader_manager import FileLoaderManager
+
+    class GateHost(QWidget):
+        def __init__(self, tabs):
+            super().__init__()
+            self.plot_tabs = tabs
+            self.curve_shelf_btn = QPushButton("暂存区", self)
+            for name in (
+                "clear_all_plots_btn",
+                "auto_range_btn",
+                "auto_y_btn",
+                "cursor_btn",
+                "mark_region_btn",
+                "grid_layout_btn",
+            ):
+                setattr(self, name, QPushButton(name, self))
+
+    tabs = _make_tabs(qtbot)
+    host = GateHost(tabs)
+    qtbot.addWidget(host)
+    manager = FileLoaderManager(host)
+
+    manager.set_button_status(False)
+    assert tabs.shelf_capsule.isEnabled() is False
+    manager.set_button_status(True)
+    assert tabs.shelf_capsule.isEnabled() is True

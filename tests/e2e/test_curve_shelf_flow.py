@@ -53,8 +53,11 @@ def _drop(widget, mime, *, ctrl=False):
 
 
 def test_shelf_button_gate_before_load(main_window):
-    """未加载数据：暂存区按钮禁用（与其它分析按钮同闸门）。"""
+    """未加载数据：暂存区按钮与胶囊同步禁用（D-A7 同一闸门）。"""
     assert main_window.curve_shelf_btn.isEnabled() is False
+    capsule = main_window.plot_tabs.shelf_capsule
+    assert capsule is not None
+    assert capsule.isEnabled() is False
 
 
 def test_open_shelf_button_shows_tool_window(loaded_window, qapp, qtbot):
@@ -364,3 +367,17 @@ def test_drag_leave_reaches_capsule_only(loaded_window, qapp):
     # 非胶囊控件仍返回 True（既有行为不变，避免顺带改动其它拖拽路径）
     other = mw.plot_widgets[0]
     assert mw.eventFilter(other, QDragLeaveEvent()) is True
+
+
+def test_shelf_open_is_rejected_while_loading(loaded_window, qapp, monkeypatch):
+    mw = loaded_window
+    monkeypatch.setattr(mw, "is_data_loading", lambda: True)
+    capsule = mw.plot_tabs.shelf_capsule
+    mw.plot_tabs.set_shelf_active(True)  # 模拟点按已把勾选态翻成 True
+
+    mw.toggle_curve_shelf(True)
+    qapp.processEvents()
+
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is None or dialog.isVisible() is False
+    assert capsule.isChecked() is False  # 拒绝后勾选态回滚
