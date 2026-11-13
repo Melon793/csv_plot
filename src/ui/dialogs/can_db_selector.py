@@ -52,6 +52,7 @@ from src.core.config import (
 from src.core.settings import AppSettings
 from src.data.can_database import SUPPORTED_DB_EXTS, CanDatabaseSet, import_type_for
 from src.data.blf_loader import prescan_blf_frames
+from src.core.gc_guard import no_autogc
 from src.core.logger import get_logger
 from src.utils.paths import normalize_input_path
 
@@ -188,15 +189,20 @@ class CanDatabaseSelectorDialog(QDialog):
         self._rebuild_table()
 
     def _prescan_worker(self) -> None:
-        try:
-            counts = prescan_blf_frames(
-                self._data_file, should_cancel=lambda: self._prescan_cancel
-            )
-        except Exception as e:  # 文件坏 / 无报文 / python-can 缺失：命中列退化为「—」
-            logger.info("BLF 预扫未完成，命中列不可用: %s", e)
-            self._prescan_box.append(None)
-        else:
-            self._prescan_box.append(counts)
+        # 整段预扫包在 no_autogc() 窗口内：本线程每 4k 帧构造 Message/list/Counter
+        # 临时对象，分配量足够触发自动分代回收；收集若落在这里，会把主线程创建的
+        # QObject 包装器拿到本线程析构（详见 src/core/gc_guard.py）。线程是 daemon
+        # 且关窗只置取消位，窗口若漏，分配会跨用例继续。
+        with no_autogc():
+            try:
+                counts = prescan_blf_frames(
+                    self._data_file, should_cancel=lambda: self._prescan_cancel
+                )
+            except Exception as e:  # 文件坏 / 无报文 / python-can 缺失：命中列退化为「—」
+                logger.info("BLF 预扫未完成，命中列不可用: %s", e)
+                self._prescan_box.append(None)
+            else:
+                self._prescan_box.append(counts)
 
     def _poll_prescan(self) -> None:
         """轮询线程交接槽；结果迟到时对话框多半已关（cancel 位已置）→ 丢弃。"""

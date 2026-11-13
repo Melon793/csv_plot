@@ -231,3 +231,60 @@ def test_window_exit_disarms_primed_gen0_collection():
         "窗口退出时 gen0 仍处于待发状态：下一次分配就会在 worker 线程上触发收集"
     )
     assert gc.isenabled()
+
+
+# ---------------------------------------------------------------------------
+# BLF 预扫线程
+# ---------------------------------------------------------------------------
+
+
+def test_blf_prescan_thread_runs_no_collection_on_worker_thread(
+    qapp, tmp_path, monkeypatch, collection_threads
+):
+    """BLF 预扫线程同样不得让自动收集落在自己身上。
+
+    这条路径此前是裸窗口：``prescan_blf_frames`` 每 4k 帧 ``list(islice(...))`` +
+    ``Counter`` 累加，分配量足够触发 gen0（实测每轮全量 8 次落在 ``blf-prescan``
+    上）。线程是 daemon 且关窗只置取消位、不 join，漏掉的分配会跨用例继续。
+    """
+    from src.ui.dialogs import can_db_selector as cds_mod
+
+    seen: dict = {}
+
+    def _fake_prescan(_path, should_cancel=None):
+        seen["ident"] = threading.get_ident()
+        seen["gc_enabled"] = gc.isenabled()
+        seen["counts_at_entry"] = gc.get_count()
+        _churn()
+        seen["counts_at_exit"] = gc.get_count()
+        return {}
+
+    monkeypatch.setattr(cds_mod, "prescan_blf_frames", _fake_prescan)
+
+    blf = tmp_path / "log.blf"
+    blf.write_bytes(b"\x00" * 2048)  # 只要求「存在且低于预扫上限」，内容不解析
+
+    enabled_before = gc.isenabled()
+    dlg = cds_mod.CanDatabaseSelectorDialog(data_file=str(blf))
+    try:
+        thread = dlg._prescan_thread
+        assert thread is not None, "前提：BLF 必须真的启动预扫线程"
+        thread.join(10.0)
+        assert not thread.is_alive(), "预扫线程未在等待时间内结束"
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+    assert seen, "预扫线程没有执行到预扫函数，用例是空过"
+    assert seen["gc_enabled"] is False, "预扫窗口内自动 GC 未被关闭"
+    assert seen["counts_at_exit"][0] >= gc.get_threshold()[0], (
+        "前提不成立：预扫攒的环垃圾不足以触发一次 gen0 收集，用例是空过"
+    )
+    assert seen["counts_at_exit"][1:] == seen["counts_at_entry"][1:]
+
+    assert seen["ident"] != threading.get_ident(), "前提：worker 不应是主线程"
+    assert seen["ident"] not in collection_threads, (
+        f"预扫线程上发生了 {collection_threads.count(seen['ident'])} 次收集："
+        "它会把主线程 QObject 包装器拿到 worker 析构 → activateTimers 段错误"
+    )
+    assert gc.isenabled() == enabled_before, "窗口退出后必须把自动 GC 恢复原状"
