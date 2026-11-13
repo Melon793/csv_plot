@@ -346,3 +346,21 @@ def test_rebuilt_shelf_resets_capsule_count(loaded_window, qapp):
     _drop(rebuilt.shelf, build_var_mimedata(["rpm"]))
     qapp.processEvents()
     assert capsule.count() == 1
+
+
+def test_drag_leave_reaches_capsule_only(loaded_window, qapp):
+    """D-A9：应用级过滤器只对胶囊放行 DragLeave，其余控件维持吞掉。"""
+    from PySide6.QtGui import QDragLeaveEvent
+
+    mw = loaded_window
+    capsule = mw.plot_tabs.shelf_capsule
+    capsule._set_drag_hot(True)
+    assert capsule._drag_hot is True
+
+    qapp.sendEvent(capsule, QDragLeaveEvent())
+    qapp.processEvents()
+    assert capsule._drag_hot is False
+
+    # 非胶囊控件仍返回 True（既有行为不变，避免顺带改动其它拖拽路径）
+    other = mw.plot_widgets[0]
+    assert mw.eventFilter(other, QDragLeaveEvent()) is True
