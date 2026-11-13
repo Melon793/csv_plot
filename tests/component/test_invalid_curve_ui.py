@@ -198,7 +198,10 @@ def test_start_var_drag_proceeds_for_real_curve(plot_factory, monkeypatch):
             return None
 
     monkeypatch.setattr("src.ui.widgets.plot_ui_manager.QDrag", _FakeDrag)
-    monkeypatch.setattr("src.ui.widgets.plot_ui_manager.set_active_legend_drag", lambda *a: None)
+    monkeypatch.setattr(
+        "src.ui.widgets.plot_ui_manager.set_active_legend_drag",
+        lambda *a, **k: None,
+    )
     monkeypatch.setattr("src.ui.widgets.plot_ui_manager.clear_active_legend_drag", lambda: None)
     browser._drag_var_name = "a"
     browser._drag_press_pos = QPoint(0, 0)

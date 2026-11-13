@@ -26,6 +26,8 @@ from PySide6.QtGui import (
     QColor,
     QDrag,
     QPixmap,
+    QTextCharFormat,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -39,6 +41,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QToolTip,
     QTextBrowser,
+    QTextEdit,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -85,6 +88,11 @@ from src.ui.drag_drop import (
     create_drag_pixmap,
     parse_legend_anchor,
     set_active_legend_drag,
+)
+from src.ui.transfer_broadcast import (
+    broadcast_text,
+    broadcast_transfer,
+    loading_reject_message,
 )
 
 logger = get_logger("widget.plot_ui")
@@ -412,6 +420,8 @@ class LegendTextBrowser(QTextBrowser):
         self._pw = plot_widget
         self._drag_press_pos: QPoint | None = None
         self._drag_var_name: str | None = None
+        # 左键 press 时的修饰键（P1 多选手势：Ctrl 加选 / Shift 范围）
+        self._drag_modifiers = Qt.KeyboardModifier.NoModifier
         self._ctx_press_pos: QPoint | None = None
         self._ctx_var_name: str | None = None
         # 中键手势状态（快速删除方案 §2.6）：press 记录、release 校验
@@ -436,6 +446,7 @@ class LegendTextBrowser(QTextBrowser):
             parsed = parse_legend_anchor(href)
             self._drag_var_name = parsed[1] if parsed else None
             self._drag_press_pos = event.position().toPoint()
+            self._drag_modifiers = event.modifiers()
         elif event.button() == Qt.MouseButton.RightButton:
             # 右键：记录锚点与按压位置，release 时校验位移后弹菜单
             # （设计 v1.2 §3.2；与左键拖拽状态机同构）。同上宽松解析：
@@ -585,15 +596,44 @@ class LegendTextBrowser(QTextBrowser):
                 global_pos = self.viewport().mapToGlobal(
                     event.position().toPoint()
                 )
+                # D5：右键未选条目只操作该条、不动选择集；右键已选且
+                # 选择集 >1 时弹批量菜单。
+                selection = getattr(self._pw, "_legend_selection", set())
+                batch_menu = in_curves and var_name in selection and len(selection) > 1
                 # singleShot(0)：不在 release 处理器内直接进 menu.exec 嵌套
                 # 事件循环，让 Qt 先完成 release 收尾（与 _start_var_drag 同构）
-                QTimer.singleShot(
-                    0, lambda: self._exec_var_menu(var_name, global_pos)
-                )
+                if batch_menu:
+                    QTimer.singleShot(
+                        0, lambda: self._exec_batch_var_menu(global_pos)
+                    )
+                else:
+                    QTimer.singleShot(
+                        0, lambda: self._exec_var_menu(var_name, global_pos)
+                    )
             return
-        # 无条件清空 press 状态，防止悬空状态残留（拖拽取消兜底）
+        # 左键 release：先判定 P1 选择手势（Ctrl 加选 / Shift 范围 / 空白清选）。
+        # 命中即 return，不进 super —— 跳过 anchorClicked，显隐不切换（D4）。
+        press_pos = self._drag_press_pos
+        var_name = self._drag_var_name
+        modifiers = self._drag_modifiers
         self._drag_press_pos = None
         self._drag_var_name = None
+        self._drag_modifiers = Qt.KeyboardModifier.NoModifier
+        if (
+            press_pos is not None
+            and (event.position().toPoint() - press_pos).manhattanLength()
+            < QApplication.startDragDistance()
+        ):
+            if var_name is not None and var_name in self._pw.curves:
+                if modifiers & Qt.KeyboardModifier.ControlModifier:
+                    self._toggle_legend_selection(var_name)
+                    return
+                if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                    self._range_select_legend(var_name)
+                    return
+            elif var_name is None and not modifiers:
+                # 空白单击清空选择集；裸单击条目不清（D4：显隐正交）
+                self.clear_legend_selection()
         super().mouseReleaseEvent(event)  # 未拖拽时正常触发 anchorClicked
 
     def mouseDoubleClickEvent(self, event):
@@ -771,6 +811,7 @@ class LegendTextBrowser(QTextBrowser):
         picked: dict[str, str],
         holder: list,
         draw_group_suffix: str = "",
+        title_text: str | None = None,
     ) -> QWidget:
         """构建曲线快捷面板主体（左键色块菜单 / 右键「样式」子菜单共用）。
 
@@ -820,13 +861,16 @@ class LegendTextBrowser(QTextBrowser):
             " border: 1px solid rgba(0, 0, 0, 0.25);"
         )
         fm = name_row.fontMetrics()
+        display_name = title_text if title_text is not None else var_name
         name_label = QLabel(
             fm.elidedText(
-                var_name, Qt.TextElideMode.ElideRight, _PANEL_VAR_NAME_MAX_WIDTH
+                display_name,
+                Qt.TextElideMode.ElideRight,
+                _PANEL_VAR_NAME_MAX_WIDTH,
             ),
             name_row,
         )
-        name_label.setToolTip(var_name)
+        name_label.setToolTip(display_name)
         name_lay.addWidget(color_bar)
         name_lay.addWidget(name_label)
         name_lay.addStretch(1)
@@ -993,16 +1037,27 @@ class LegendTextBrowser(QTextBrowser):
         var_name = self._drag_var_name
         self._drag_var_name = None
         self._drag_press_pos = None
+        self._drag_modifiers = Qt.KeyboardModifier.NoModifier
         # 占位锚点不发起 legend 拖拽（§6.1）：拖到目标页后 plot_variable 会失败弹错
         if var_name in (getattr(self._pw, "invalid_curves", {}) or {}):
             return
+        # P1：拖已选条目 → 整批（批量协议 skip+quiet）；拖未选条目 → 单变量，
+        # 且选择集不动（D5 口径）。
+        pw = self._pw
+        selection = set(getattr(pw, "_legend_selection", set()) or set())
+        if var_name in selection and len(selection) > 1:
+            names = [name for name in pw.curves if name in selection]
+            batch = True
+        else:
+            names = [var_name]
+            batch = False
         drag = QDrag(self)
-        drag.setMimeData(build_legend_var_mimedata([var_name], self._pw))
-        pixmap = create_drag_pixmap([var_name], self.font())
+        drag.setMimeData(build_legend_var_mimedata(names, pw))
+        pixmap = create_drag_pixmap(names, self.font())
         if pixmap:
             drag.setPixmap(pixmap)
             drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
-        set_active_legend_drag(self._pw, [var_name])
+        set_active_legend_drag(pw, names, batch=batch)
         try:
             # CopyAction|MoveAction 并存，drop 端按 Ctrl 决定语义（默认移动、Ctrl=复制）。
             # exec 进入嵌套事件循环，release 被拖拽会话消费，
@@ -1010,6 +1065,314 @@ class LegendTextBrowser(QTextBrowser):
             drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
         finally:
             clear_active_legend_drag()
+
+    # ------------------------------------------------------------------
+    # P1 legend 多选：选择集 + 高亮 + 批量入口
+    # ------------------------------------------------------------------
+    def _toggle_legend_selection(self, var_name: str) -> None:
+        """Ctrl+单击：切换单个条目的选中态（不切显隐）。"""
+        pw = self._pw
+        selection = getattr(pw, "_legend_selection", None)
+        if selection is None:
+            return
+        if var_name in selection:
+            selection.discard(var_name)
+        else:
+            selection.add(var_name)
+        pw._legend_sel_anchor = var_name
+        self.refresh_selection_highlight()
+
+    def _range_select_legend(self, var_name: str) -> None:
+        """Shift+单击：自锚点按 curves 插入序范围选（文件管理器语义）。
+
+        范围选择替换旧选择集；锚点在范围选择后保持不变，便于连续 Shift
+        调整范围。首次 Shift（无有效锚点）退化为加选当前条目并立锚。
+        """
+        pw = self._pw
+        selection = getattr(pw, "_legend_selection", None)
+        if selection is None:
+            return
+        order = list(pw.curves)
+        anchor = getattr(pw, "_legend_sel_anchor", None)
+        if anchor in order and var_name in order:
+            start, end = order.index(anchor), order.index(var_name)
+            if start > end:
+                start, end = end, start
+            selection.clear()
+            selection.update(order[start:end + 1])
+        else:
+            selection.add(var_name)
+            pw._legend_sel_anchor = var_name
+        self.refresh_selection_highlight()
+
+    def clear_legend_selection(self) -> None:
+        """清空选择集（空白单击 / 菜单「清除选择」/ 占位态回归共用）。"""
+        pw = self._pw
+        selection = getattr(pw, "_legend_selection", None)
+        if selection is not None:
+            selection.clear()
+        pw._legend_sel_anchor = None
+        self.setExtraSelections([])
+
+    def refresh_selection_highlight(self, *, prune: bool = True) -> None:
+        """按当前选择集重放 ExtraSelections 高亮。
+
+        - 按 fragment 的 anchorHref 匹配（**按 href 不按显示文本**，截断安全）；
+        - ``prune=True`` 时把已不在 curves 中的条目从选择集修剪掉
+          （reload/删除后的陈旧选择）；
+        - 图例重建（setHtml）后由 PlotWidget.update_legend_label 调用重放。
+        """
+        pw = self._pw
+        selection = getattr(pw, "_legend_selection", None)
+        if selection is None:
+            return
+        if prune:
+            valid = set(pw.curves)
+            stale = selection - valid
+            if stale:
+                selection -= stale
+            if getattr(pw, "_legend_sel_anchor", None) not in valid:
+                pw._legend_sel_anchor = None
+        if not selection:
+            self.setExtraSelections([])
+            return
+
+        extras = []
+        doc = self.document()
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                if fragment.isValid():
+                    parsed = parse_legend_anchor(
+                        fragment.charFormat().anchorHref()
+                    )
+                    if parsed and parsed[1] in selection:
+                        cursor = QTextCursor(doc)
+                        cursor.setPosition(fragment.position())
+                        cursor.setPosition(
+                            fragment.position() + fragment.length(),
+                            QTextCursor.MoveMode.KeepAnchor,
+                        )
+                        extra = QTextEdit.ExtraSelection()
+                        extra.cursor = cursor
+                        fmt = QTextCharFormat()
+                        # 15.7% alpha（计划口径 15–20% 蓝色 tint）
+                        fmt.setBackground(QColor(0, 120, 212, 40))
+                        extra.format = fmt
+                        extras.append(extra)
+                it += 1
+            block = block.next()
+        self.setExtraSelections(extras)
+
+    def _exec_batch_var_menu(self, global_pos: QPoint) -> None:
+        """右键已选多条目：批量操作菜单（标题「已选 N 个变量」）。"""
+        if not widget_alive(self) or not widget_alive(self._pw):
+            return
+        pw = self._pw
+        selection = [name for name in pw.curves if name in pw._legend_selection]
+        if len(selection) < 2:
+            return
+        menu = QMenu(pw)
+        title = menu.addAction(f"已选 {len(selection)} 个变量")
+        title.setEnabled(False)
+        act_shelf_copy = menu.addAction("加入暂存区（复制）")
+        act_shelf_cut = menu.addAction("剪切到暂存区")
+        menu.addSeparator()
+        act_solo = menu.addAction("仅显示所选")
+        act_show_all = menu.addAction("显示全部变量")
+        picked: dict[str, str] = {}
+        holder = [menu]
+        sub_style = menu.addMenu("样式")
+        style_panel = self._build_style_panel_widget(
+            selection[0],
+            picked,
+            holder,
+            title_text=f"已选 {len(selection)} 个变量",
+        )
+        style_act = QWidgetAction(sub_style)
+        style_act.setDefaultWidget(style_panel)
+        sub_style.addAction(style_act)
+        menu.addSeparator()
+        act_remove = menu.addAction(f"删除变量（{len(selection)}）")
+        act_copy = menu.addAction("复制变量名")
+        act_clear = menu.addAction("清除选择")
+
+        chosen = menu.exec(global_pos)
+        menu.deleteLater()
+        if chosen is None and not picked:
+            return
+        # 菜单打开期间可能已 reload/删除：分发前重新核对现存曲线
+        selection = [name for name in selection if name in pw.curves]
+        if picked:
+            self._apply_batch_style_picks(selection, picked)
+            return
+        if not selection:
+            return
+        main_window = pw.window()
+        if chosen is act_shelf_copy:
+            self._send_selection_to_shelf(selection, cut=False)
+        elif chosen is act_shelf_cut:
+            self._send_selection_to_shelf(selection, cut=True)
+        elif chosen is act_solo:
+            pw._multi_curve_manager._apply_visibility(
+                {name: name in selection for name in pw.curves}
+            )
+        elif chosen is act_show_all:
+            pw.show_all_curves()
+        elif chosen is act_remove:
+            self._delete_selection_with_confirm(selection)
+        elif chosen is act_copy:
+            QApplication.clipboard().setText("、".join(selection))
+        elif chosen is act_clear:
+            self.clear_legend_selection()
+
+    def _apply_batch_style_picks(
+        self, names: list[str], picked: dict[str, str]
+    ) -> None:
+        """批量样式应用：整批抑制逐条 emit，收尾一次刷新 + 一次播报。"""
+        pw = self._pw
+        mcm = pw._multi_curve_manager
+        key, value = next(iter(picked.items()))
+        changed = 0
+        previous_batch = getattr(pw, "_batch_adding", False)
+        pw._batch_adding = True
+        try:
+            for name in names:
+                ci = pw.curves.get(name)
+                if ci is None:
+                    continue
+                if key == "color":
+                    if ci.color != value and mcm.apply_curve_color(name, value):
+                        changed += 1
+                elif key == "draw_mode":
+                    if (
+                        getattr(ci, "draw_mode", DRAW_MODE_AUTO) != value
+                        and mcm.apply_curve_draw_mode(name, value)
+                    ):
+                        changed += 1
+                elif key == "symbol_policy":
+                    if (
+                        getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO) != value
+                        and mcm.apply_curve_symbol_policy(name, value)
+                    ):
+                        changed += 1
+        finally:
+            pw._batch_adding = previous_batch
+        if changed:
+            pw.curves_changed.emit()
+            main_window = pw.window()
+            show = getattr(main_window, "_show_status_message", None)
+            if key == "color":
+                label = "颜色"
+            elif key == "draw_mode":
+                label = f"绘制方式：{DRAW_MODE_LABELS[value]}"
+            else:
+                label = f"数据点显示：{SYMBOL_POLICY_LABELS[value]}"
+            if callable(show):
+                show(f"已修改 {changed} 个变量的{label}")
+
+    def _delete_selection_with_confirm(self, names: list[str]) -> None:
+        """批量删除：N>1 一次汇总确认；删除后清空选择集。"""
+        pw = self._pw
+        try:
+            from PySide6.QtWidgets import QMessageBox
+        except Exception:  # pragma: no cover - 极端导入失败保持可用
+            QMessageBox = None
+        if len(names) > 1 and QMessageBox is not None:
+            reply = QMessageBox.question(
+                self,
+                "删除变量",
+                f"确定要删除所选的 {len(names)} 个变量吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        removed = 0
+        for name in list(names):
+            if name in pw.curves:
+                pw.remove_variable_from_plot(name)
+                removed += 1
+        self.clear_legend_selection()
+        main_window = pw.window()
+        if main_window is not None and hasattr(main_window, "layout_manager"):
+            main_window.layout_manager.request_mark_stats_refresh()
+        show = getattr(main_window, "_show_status_message", None)
+        if removed and callable(show):
+            show(f"已删除 {removed} 个变量")
+
+    def _send_selection_to_shelf(self, names: list[str], *, cut: bool) -> None:
+        """批量入区（菜单入口）：快照后复制入托盘；剪切则延迟删源。"""
+        pw = self._pw
+        main_window = pw.window()
+        # 加载期全入口拒绝（菜单入区与拖入区同口径）
+        is_loading = getattr(main_window, "is_data_loading", None)
+        if callable(is_loading) and is_loading():
+            broadcast_text(main_window, loading_reject_message())
+            return
+        get_shelf = getattr(main_window, "get_curve_shelf", None)
+        if not callable(get_shelf):
+            return
+        from src.ui.widgets.curve_shelf import ShelfEntry
+
+        dialog = get_shelf()
+        origin = self._badge_label_for(pw)
+        added: list[str] = []
+        for name in names:
+            ci = pw.curves.get(name)
+            if ci is None:
+                continue
+            dialog.shelf.add_entry(
+                ShelfEntry.from_curve_info(name, ci, origin_label=origin)
+            )
+            added.append(name)
+        if not added:
+            return
+        dialog.show()
+        dialog.raise_()
+        if cut:
+            def _make_remove(target: Any, var: str):
+                def _remove():
+                    try:
+                        target.remove_variable_from_plot(var)
+                    except RuntimeError:
+                        logger.debug("批量剪切入区：plot 已销毁，跳过删除")
+
+                return _remove
+
+            for name in added:
+                QTimer.singleShot(0, _make_remove(pw, name))
+            self.clear_legend_selection()
+        broadcast_transfer(
+            main_window,
+            "cut" if cut else "shelf_copy",
+            added,
+            src_label=origin,
+        )
+
+    def _badge_label_for(self, plot_widget: Any) -> str:
+        """反算「页N·图M」徽章（播报/来源标签用；不可用返回空串）。"""
+        page = getattr(plot_widget, "page", None)
+        host = getattr(self._pw, "window", lambda: None)()
+        if page is None or host is None:
+            return ""
+        try:
+            page_index = host.page_index(page)
+            plot_index = next(
+                (
+                    index
+                    for index, container in enumerate(page.plot_widgets)
+                    if getattr(container, "plot_widget", None) is plot_widget
+                ),
+                -1,
+            )
+        except Exception:
+            return ""
+        if page_index < 0 or plot_index < 0:
+            return ""
+        return f"页{page_index + 1}·图{plot_index + 1}"
 
 
 class PlotUIManager(BasePlotManager):
@@ -1066,6 +1429,10 @@ class PlotUIManager(BasePlotManager):
 
         # 曲线统一管理
         pw.curves = {}
+        # P1 legend 多选：纯 Python 真相源（按 plot 存）；高亮是投影，
+        # 图例重建时由 update_legend_label 钩子重放 / 修剪。
+        pw._legend_selection: set[str] = set()
+        pw._legend_sel_anchor: str | None = None
         # 失效曲线占位（方案 B2）：与 curves 物理隔离，仅存轻量 InvalidCurveRef。
         # 不变量：同一变量名绝不同时出现在 curves 与 invalid_curves。
         pw.invalid_curves = {}

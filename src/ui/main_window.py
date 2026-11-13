@@ -637,6 +637,70 @@ class MainWindow(QMainWindow):
                 if widget_alive(container):
                     yield container
 
+    # ------------------------------------------------------------------
+    # 曲线暂存区（跨页搬运，v1 非模态浮窗单例）
+    # ------------------------------------------------------------------
+    def get_curve_shelf(self):
+        """返回暂存区浮窗单例（懒创建）；已销毁则重建。"""
+        dialog = getattr(self, "_curve_shelf_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.isVisible()
+            except RuntimeError:
+                self._curve_shelf_dialog = None
+                dialog = None
+        if dialog is None:
+            from src.ui.widgets.curve_shelf import CurveShelfDialog
+
+            dialog = CurveShelfDialog(main_window=self, parent=self)
+            dialog.visibility_changed.connect(
+                self._on_curve_shelf_visibility_changed
+            )
+            self._curve_shelf_dialog = dialog
+        return dialog
+
+    def curve_shelf_if_open(self):
+        """不创建：已存在且存活才返回（reload 生命周期钩子用）。"""
+        dialog = getattr(self, "_curve_shelf_dialog", None)
+        if dialog is None:
+            return None
+        try:
+            dialog.isVisible()
+        except RuntimeError:
+            self._curve_shelf_dialog = None
+            return None
+        return dialog
+
+    def toggle_curve_shelf(self, checked: bool | None = None) -> None:
+        """top_bar「暂存区」按钮：开/关浮窗（首次打开给一次状态栏提示）。"""
+        dialog = self.get_curve_shelf()
+        want_visible = (
+            self.curve_shelf_btn.isChecked()
+            if checked is None
+            else bool(checked)
+        )
+        if not want_visible:
+            dialog.hide()
+            return
+        dialog.show()
+        dialog.raise_()
+        if not getattr(self, "_curve_shelf_hint_shown", False):
+            self._curve_shelf_hint_shown = True
+            self._broadcast(
+                "暂存区已打开：把图例曲线或变量列表拖进来，再拖到目标绘图区"
+            )
+
+    def _on_curve_shelf_visibility_changed(self, visible: bool) -> None:
+        """浮窗隐藏/显示（含标题栏关闭）时同步按钮勾选态。"""
+        btn = getattr(self, "curve_shelf_btn", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        try:
+            btn.setChecked(bool(visible))
+        finally:
+            btn.blockSignals(False)
+
     def _init_basic_config(self):
         # 构造期兜底（C4）：页创建前对这些字段的读写都落在 _bootstrap_state
         self._bootstrap_state: dict = {}
@@ -674,6 +738,9 @@ class MainWindow(QMainWindow):
         self.factor = self._factor_default
         self.offset = self._offset_default
         self._active_drag_container: PlotContainerWidget | None = None
+        # 曲线暂存区单例（懒创建）：关闭 = 隐藏，条目保留
+        self._curve_shelf_dialog = None
+        self._curve_shelf_hint_shown = False
 
         self._baseline_density: float = 0.0
         self._global_max_density: float = 0.0
@@ -937,7 +1004,15 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
         self.grid_layout_btn.setToolTip("修改图表布局 (Ctrl+L)")
 
+        # 曲线暂存区：跨绘图页搬运曲线的非模态浮窗（v1 只给按钮入口）
+        self.curve_shelf_btn = QPushButton("暂存区", self.plot_widget)
+        self.curve_shelf_btn.setCheckable(True)
+        self.curve_shelf_btn.setToolTip(
+            "曲线暂存区：把图例/变量列表中的曲线拖进来，再拖到目标绘图区"
+        )
+
         top_bar.addWidget(self.grid_layout_btn)
+        top_bar.addWidget(self.curve_shelf_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
         top_bar.addWidget(self.auto_y_btn)
@@ -1502,6 +1577,7 @@ class MainWindow(QMainWindow):
         # 唤回绘图区，走的就是这一路 toggled
         self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
         self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
+        self.curve_shelf_btn.toggled.connect(self.toggle_curve_shelf)
         self._grid_layout_shortcut = QShortcut(QKeySequence("Ctrl+L"), self.plot_widget)
         self._grid_layout_shortcut.activated.connect(self._on_grid_layout_shortcut)
         self.load_btn.clicked.connect(self.file_loader_manager.load_btn_click)
@@ -1542,6 +1618,10 @@ class MainWindow(QMainWindow):
         # 再收抽屉：状态栏抽屉是独立的 Popup 顶层窗口，主窗口销毁时若还开着，
         # 它就会留在屏幕上，鼠标/键盘 grab 也悬在半路
         self._close_status_drawers()
+        # 暂存区浮窗是独立顶层窗口，主窗口销毁前先收起
+        shelf = self.curve_shelf_if_open()
+        if shelf is not None:
+            shelf.hide()
         if self.loader is not None:
             self.plot_config_manager.save_auto_save(self)
         self._shutdown_var_info_worker()

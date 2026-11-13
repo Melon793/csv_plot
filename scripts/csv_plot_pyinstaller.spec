@@ -116,6 +116,8 @@ a = Analysis(
         "src.ui.splash_screen",
         "src.ui.cursor_sync_manager",
         "src.ui.drag_drop",
+        "src.ui.transfer_broadcast",
+        "src.ui.widgets.curve_shelf",
         "src.ui.variable_list",
         "src.ui.mark_stats",
         "src.ui.table_dialog",

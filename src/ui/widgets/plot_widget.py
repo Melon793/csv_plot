@@ -1,7 +1,8 @@
 from __future__ import annotations
 import sys
 import os
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from src.utils.platform_setup import setup_platform
 setup_platform()
@@ -13,9 +14,16 @@ from src.ui.drag_drop import (
     VAR_SEPARATOR,
     parse_var_names_from_mimedata,
     LEGEND_MIME_FORMAT,
+    SHELF_MIME_FORMAT,
+    CurveStyleSnapshot,
     get_active_legend_drag_source,
+    get_active_shelf_drag_source,
+    is_active_legend_batch_drag,
     is_legend_drag_active,
+    parse_shelf_mime_payload,
 )
+from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
+from src.ui.transfer_broadcast import broadcast_text, broadcast_transfer
 from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
@@ -32,6 +40,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 import pyqtgraph as pg
+
+
+@dataclass
+class TransferResult:
+    """一次曲线搬运（legend / 暂存区 / P1 批量）的结果汇总。
+
+    判重与失败必须区分开：``skipped`` 是目标已存在（按 on_duplicate 策略
+    跳过），``failed`` 是数据校验失败——后者绝不能触发源端删除。
+    """
+
+    requested: list[str] = field(default_factory=list)
+    added: list[str] = field(default_factory=list)
+    #: 目标已存在且用户确认「从源移除」（仅 on_duplicate="ask" 的移动语义）
+    merged: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.merged)
 
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
@@ -272,6 +300,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             saved_pos = sb.value()
             label.setHtml(text)
             sb.setValue(saved_pos)
+            # P1：图例重建后重放选择高亮，并修剪已不存在的条目（R3）
+            refresh = getattr(label, "refresh_selection_highlight", None)
+            if callable(refresh):
+                refresh()
         else:
             # 回归占位态：clear() 置空文档显示 placeholder，
             # 避免 setPlainText 继承光标处残留字符格式
@@ -279,6 +311,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 注意：纯文本 text 仅作触发占位态的信号，其内容被忽略，
             # 实际占位文案以 plot_ui_manager 中 setPlaceholderText 为准
             label.clear()
+            # 图例回归占位 = 无曲线：选择集失效，必须清空（评审 Non-blocking）
+            clear_selection = getattr(label, "clear_legend_selection", None)
+            if callable(clear_selection):
+                clear_selection()
         # 文本光标复位到文档开头：防止光标停留在彩色锚点内，
         # 导致后续内容替换继承残留颜色
         cursor = label.textCursor()
@@ -821,6 +857,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return f"变量已存在，释放以{action}" if action in ("替换", "移动") else "变量已存在"
         return f"释放以{action}"
 
+    def _build_skip_indicator_text(self, var_names: list[str], action: str) -> str:
+        """判重策略为 skip 的拖入指示文案（暂存区 / P1 批量 legend）。"""
+        existing = [name for name in var_names if name in self.curves]
+        if existing and len(existing) == len(var_names):
+            return "变量已存在，释放将跳过"
+        if existing:
+            return "部分变量已存在，释放将跳过"
+        return f"释放以{action}"
+
     def _handle_drag_hover(self, event):
         """dragEnter/dragMove 共用：按来源出指示文案并 accept"""
         mime = event.mimeData()
@@ -832,11 +877,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 检测目标是否已含所有拖入变量（用于"已存在"文案）
         already = bool(var_names) and all(name in self.curves for name in var_names)
 
-        if mime.hasFormat(LEGEND_MIME_FORMAT):
-            # legend 来源：Ctrl=复制，无修饰键=移动，Shift 忽略
+        if mime.hasFormat(SHELF_MIME_FORMAT):
+            # 暂存区来源：Ctrl=复制出，无修饰键=移出；判重策略是跳过，
+            # 已存在时文案不能再承诺「释放以移动」（Blocking 4：分支须在 else 前）
             copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
             action = "复制" if copy_pressed else "移动"
-            text_override = self._build_indicator_text(var_names, action, already)
+            text_override = self._build_skip_indicator_text(var_names, action)
+        elif mime.hasFormat(LEGEND_MIME_FORMAT):
+            # legend 来源：Ctrl=复制，无修饰键=移动，Shift 忽略。
+            # P1 批量拖拽判重是 skip：已存在时文案不能承诺「释放以移动」。
+            copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+            action = "复制" if copy_pressed else "移动"
+            if is_active_legend_batch_drag():
+                text_override = self._build_skip_indicator_text(var_names, action)
+            else:
+                text_override = self._build_indicator_text(var_names, action, already)
         else:
             # 变量列表来源：Shift=替换，否则=添加
             shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -867,7 +922,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         mime = event.mimeData()
         var_names = parse_var_names_from_mimedata(mime)
 
-        if mime.hasFormat(LEGEND_MIME_FORMAT):
+        if mime.hasFormat(SHELF_MIME_FORMAT):
+            # 暂存区来源（带 text/plain 兼容层）必须先于 else 判定（Blocking 4），
+            # 否则会被当成变量列表添加：无样式、无移出
+            self._handle_shelf_drop(event, var_names)
+        elif mime.hasFormat(LEGEND_MIME_FORMAT):
             self._handle_legend_drop(event, var_names)
         else:
             shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -888,84 +947,368 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             main_window.layout_manager.request_mark_stats_refresh()
 
     def _handle_legend_drop(self, event, var_names: list[str]):
-        """legend 来源 drop：默认移动，Ctrl=复制（Shift 忽略，设计 §2.1/§3.3）"""
+        """legend 来源 drop：默认移动，Ctrl=复制（Shift 忽略，设计 §2.1/§3.3）。
+
+        单变量走批量助手的 list-of-1 路径，但判重策略必须显式区分
+        （Blocking 1：不能靠 len 判断单变量还是批量）：
+        移动 = ``on_duplicate="ask"``（保留既有 question 确认窗）、
+        复制 = ``"notify"``（保留既有 information 提示）、quiet=False。
+        """
         # legend 拖拽恒为单变量（press 瞬间锁定单个锚点），无批量协议
         name = var_names[0] if var_names else None
         if name is None:
             event.ignore()
             return
-        # 拖回原 plot：视为取消操作，不弹窗/不添加/不删除（复制/移动统一）
+        # 拖回原 plot：视为取消操作，不弹窗/不添加/不删除（复制/移动统一）。
+        # 该早退只属于 legend 分支——暂存区拖回来源图是合法撤销，不得套用。
         source = get_active_legend_drag_source(event.mimeData())
         if source is not None and source is self:
             return
-        # 反转：无修饰键=移动，Ctrl=复制（Shift 忽略）
-        copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
-        # 样式继承（方案 A）：drop 时从源 plot 读取颜色/显隐状态，颜色走既有
-        # preferred_color 通道，显隐经 _schedule_visibility_restore 幂等恢复。
-        # source 已由 get_active_legend_drag_source 做过存活校验，
-        # source.curves 是纯 Python dict，无需再包 try/except。
+        # 样式继承：drop 时从源 plot 快照全量样式（颜色走 preferred_color
+        # 通道，显隐经 _schedule_visibility_restore 幂等恢复）。source 已由
+        # get_active_legend_drag_source 做过存活校验，source.curves 是纯
+        # Python dict，无需再包 try/except。
         # 目标空图存在同名占位时占位色优先（既有复活规则），源色不生效。
-        preferred_color: str | None = None
-        preferred_visible: bool | None = None
+        style = None
         if source is not None:
             src_ci = source.curves.get(name)
             if src_ci is not None:
-                preferred_color = src_ci.color
-                preferred_visible = src_ci.visible
-        # 前置判重而非依赖 plot_variable 返回值：后者无法区分
-        # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
-        already = name in self.curves
+                style = CurveStyleSnapshot.from_curve_info(src_ci)
+        # 反转：无修饰键=移动，Ctrl=复制（Shift 忽略）
+        copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
 
-        if copy_pressed:
-            # 复制语义：目标已存在则弹提示（与变量列表行为一致）
-            if already:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
-            else:
-                added = self.plot_variable(
-                    name, show_duplicate_warning=False, preferred_color=preferred_color
-                )
-                if added and preferred_visible is False:
-                    self._schedule_visibility_restore(name, preferred_visible)
-        else:
-            # 移动语义（默认）：目标已含该变量则弹确认窗（与复制反馈对齐），取消则两边都留
-            from PySide6.QtWidgets import QMessageBox
-            remove_source = False
-            if already:
-                if source is None:
-                    # 源已销毁，无源可删，仅提示已在目标
-                    QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
-                else:
-                    reply = QMessageBox.question(
-                        self, "移动确认",
-                        f"变量 {name} 已在目标绘图中。\n是否从源 plot 移除该变量？",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No,
-                    )
-                    remove_source = reply == QMessageBox.StandardButton.Yes
-            else:
-                # 目标未含：正常添加，添加成功则删源
-                added = self.plot_variable(
-                    name,
-                    show_duplicate_warning=False,
-                    preferred_color=preferred_color,
-                )
-                remove_source = bool(added) and source is not None
-                if added and preferred_visible is False:
-                    self._schedule_visibility_restore(name, preferred_visible)
+        # P1 多选批量拖拽：走 skip + quiet 批量协议（判重静默跳过并汇总）
+        if is_active_legend_batch_drag():
+            self._handle_legend_batch_drop(
+                event, var_names, source, copy_pressed
+            )
+            return
 
-            if remove_source:
+        remove_source_cb: Callable[[list[str]], None] | None = None
+        if not copy_pressed and source is not None:
+            def _remove_source(names_to_remove: list[str]) -> None:
                 # 延迟一拍执行源端删除：dropEvent 调用栈内直接对源 scene
                 # removeItem + setHtml 重建，存在 BSP 中间态与 paint 并发
                 # 风险（项目历史踩坑）。singleShot(0) 晚于 drop 栈返回、
                 # 仍早于源端 exec 返回（对象存活）
-                def _deferred_remove(src=source, var=name):
+                def _deferred_remove(src=source, var=names_to_remove[0]):
                     try:
                         src.remove_variable_from_plot(var)
                     except RuntimeError:
                         logger.debug("legend 移动拖拽：源 plot 已销毁，跳过删除")
 
                 QTimer.singleShot(0, _deferred_remove)
+
+            remove_source_cb = _remove_source
+
+        # 源已销毁 + 移动语义：无源可删，按复制处理并播报降级（§5.3）
+        degraded = source is None and not copy_pressed
+        result = self._transfer_curves(
+            [name],
+            style_map={name: style},
+            on_duplicate="notify" if (copy_pressed or source is None) else "ask",
+            remove_source_cb=remove_source_cb,
+            quiet=False,
+            batch=False,
+        )
+        if degraded and name in result.added:
+            broadcast_text(self.window(), "源绘图已关闭，已按复制处理")
+
+    def _handle_legend_batch_drop(
+        self, event, var_names: list[str], source: Any, copy_pressed: bool
+    ) -> None:
+        """P1 legend 多选批量拖拽：与暂存区出区共用 skip + quiet 批量协议。"""
+        names = list(dict.fromkeys(var_names))
+        style_map: dict[str, Any] = {}
+        if source is not None:
+            for name in names:
+                ci = source.curves.get(name)
+                if ci is not None:
+                    style_map[name] = CurveStyleSnapshot.from_curve_info(ci)
+
+        remove_source_cb: Callable[[list[str]], None] | None = None
+        if not copy_pressed and source is not None:
+            def _remove_source(names_to_remove: list[str]) -> None:
+                def _make_remove(src: Any, var: str):
+                    def _deferred_remove():
+                        try:
+                            src.remove_variable_from_plot(var)
+                        except RuntimeError:
+                            logger.debug(
+                                "legend 批量移动：源 plot 已销毁，跳过删除"
+                            )
+
+                    return _deferred_remove
+
+                for name in names_to_remove:
+                    QTimer.singleShot(0, _make_remove(source, name))
+
+            remove_source_cb = _remove_source
+
+        degraded = source is None and not copy_pressed
+        result = self._transfer_curves(
+            names,
+            style_map=style_map,
+            on_duplicate="skip",
+            quiet=True,
+            batch=len(names) > 1,
+            remove_source_cb=remove_source_cb,
+        )
+        broadcast_transfer(
+            self.window(),
+            "copy" if copy_pressed else "move",
+            result.added,
+            src_label=self._plot_badge_label_for(source),
+            dst_label=self._plot_badge_label(),
+            skipped=result.skipped,
+            failed=result.failed,
+            degraded=degraded and bool(result.added),
+        )
+
+    def _handle_shelf_drop(self, event, var_names: list[str]):
+        """暂存区来源 drop：无修饰=移出（条目消失）/ Ctrl=复制出（条目保留）。
+
+        判重固定 skip + quiet（全程无模态）；失败条目不删源、不删托盘条目。
+        拖回来源图是合法撤销：本函数不做「source is self」早退。
+        """
+        mime = event.mimeData()
+        shelf = get_active_shelf_drag_source(mime)
+        payload = parse_shelf_mime_payload(mime)
+        if shelf is None or payload is None:
+            # 托盘已关闭 / 拖拽上下文已失效：条目快照不可读，静默忽略
+            event.ignore()
+            return
+        entries = [
+            entry
+            for entry in shelf.entries_for_keys(payload["keys"])
+            if not entry.stale
+        ]
+        if not entries:
+            event.ignore()
+            return
+        names = [entry.var_name for entry in entries]
+        style_map = {entry.var_name: entry for entry in entries}
+        copy_mode = bool(
+            event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier
+        )
+
+        def _remove_entries(added_names: list[str]) -> None:
+            # 只删成功入图的条目，按 key 精确删除（防同名重入误删）
+            added_set = set(added_names)
+            shelf.remove_entries(
+                [entry.key for entry in entries if entry.var_name in added_set]
+            )
+
+        result = self._transfer_curves(
+            names,
+            style_map=style_map,
+            on_duplicate="skip",
+            quiet=True,
+            batch=len(names) > 1,
+            remove_entries_cb=None if copy_mode else _remove_entries,
+            action_label="复制" if copy_mode else "移动",
+        )
+        self._announce_transfer_result(result, copy_mode=copy_mode)
+        event.acceptProposedAction()
+
+    def _transfer_curves(
+        self,
+        names: list[str],
+        *,
+        style_map: dict[str, Any] | None = None,
+        on_duplicate: str = "skip",
+        remove_source_cb: Callable[[list[str]], None] | None = None,
+        remove_entries_cb: Callable[[list[str]], None] | None = None,
+        quiet: bool = True,
+        batch: bool | None = None,
+        action_label: str = "移动",
+    ) -> TransferResult:
+        """曲线搬运共享助手（legend list-of-1 / 暂存区 / P1 批量共用）。
+
+        Args:
+            names: 待搬运变量名（保序）
+            style_map: 变量名 → 样式快照（含 color/visible/draw_mode/
+                symbol_policy/draw_mode_source；缺省按默认样式落地）
+            on_duplicate: 判重策略，**显式传入、不得靠 len 推断**：
+                "ask"（单变量 legend 移动，确认后合并）/ "notify"
+                （单变量 legend 复制，提示后跳过）/ "skip"（批量/暂存区，
+                静默跳过并汇总播报）
+            remove_source_cb: 成功搬运（含确认合并）后调用，参数为变量名列表
+            remove_entries_cb: 成功搬运后调用（暂存区移出用）
+            quiet: 批量/暂存区传 True——失败不弹模态框
+            batch: 是否包 ``_batch_adding`` 批量收尾；None 时按 len(names)>1
+            action_label: 仅日志语义，保留调用语境
+
+        Returns:
+            TransferResult（added / merged / skipped / failed）
+        """
+        if on_duplicate not in ("ask", "notify", "skip"):
+            raise ValueError(f"非法判重策略: {on_duplicate!r}")
+        style_map = style_map or {}
+        result = TransferResult(requested=list(names))
+        if batch is None:
+            batch = len(names) > 1
+        try:
+            if batch:
+                self._batch_adding = True
+            for name in names:
+                # 前置判重而非依赖 plot_variable 返回值：后者无法区分
+                # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
+                if name in self.curves:
+                    decision = self._resolve_duplicate_transfer(
+                        name, on_duplicate
+                    )
+                    if decision == "merge":
+                        result.merged.append(name)
+                    else:
+                        result.skipped.append(name)
+                    continue
+
+                style = style_map.get(name)
+                preferred_color = getattr(style, "color", None) or None
+                added = self.plot_variable(
+                    name,
+                    show_duplicate_warning=False,
+                    preferred_color=preferred_color,
+                    quiet=quiet,
+                )
+                if not added:
+                    result.failed.append(name)
+                    continue
+                result.added.append(name)
+                self._apply_transfer_style(name, style)
+
+            if batch and result.added:
+                # 唯一权威收尾：补偿批量模式跳过的 header/轴/vline/密度，
+                # 合并 emit（不逐条触发 legend/编辑器重建）
+                self._multi_curve_manager._finalize_batch_add()
+        finally:
+            if batch:
+                self._batch_adding = False
+
+        if batch and result.added:
+            self.curves_changed.emit()
+            if not quiet:
+                self._multi_curve_manager._announce_auto_step(
+                    result.added, batch=True
+                )
+
+        if remove_source_cb is not None:
+            victims = list(result.added) + list(result.merged)
+            if victims:
+                remove_source_cb(victims)
+        if remove_entries_cb is not None and result.added:
+            remove_entries_cb(list(result.added))
+        logger.debug(
+            "[TRANSFER] %s: requested=%s added=%s merged=%s skipped=%s failed=%s",
+            action_label, result.requested, result.added, result.merged,
+            result.skipped, result.failed,
+        )
+        return result
+
+    def _resolve_duplicate_transfer(self, name: str, on_duplicate: str) -> str:
+        """目标已含变量时的判重决策 → "skip" / "merge"。
+
+        - skip：静默跳过（暂存区/批量）
+        - notify：弹 information 提示后跳过（单变量 legend 复制）
+        - ask：弹 question 确认，Yes 表示「从源 plot 移除」→ merge
+        """
+        if on_duplicate == "skip":
+            return "skip"
+        if on_duplicate == "notify":
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
+            return "skip"
+        from PySide6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self, "移动确认",
+            f"变量 {name} 已在目标绘图中。\n是否从源 plot 移除该变量？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return "merge" if reply == QMessageBox.StandardButton.Yes else "skip"
+
+    def _apply_transfer_style(self, name: str, style: Any) -> None:
+        """把快照样式落到目标曲线（颜色已由 preferred_color 通道传入）。
+
+        Blocking 2：``apply_curve_draw_mode`` 会把 ``draw_mode_source`` 强制
+        钉成 'user'，落完必须回写快照值，否则 'auto' 被误钉、改变 reload
+        后行为；整批的 emit 合并由 ``_batch_adding`` 抑制 + 收尾统一 emit。
+        """
+        if style is None:
+            return
+        ci = self.curves.get(name)
+        if ci is None:
+            return
+        mcm = self._multi_curve_manager
+
+        want_mode = getattr(style, "draw_mode", None)
+        want_source = getattr(style, "draw_mode_source", None)
+        if want_mode and (
+            getattr(ci, "draw_mode", DRAW_MODE_AUTO) != want_mode
+            or (
+                want_source is not None
+                and getattr(ci, "draw_mode_source", None) != want_source
+            )
+        ):
+            if mcm.apply_curve_draw_mode(name, want_mode):
+                ci = self.curves.get(name)
+                if ci is not None and want_source is not None:
+                    ci.draw_mode_source = want_source
+
+        want_policy = getattr(style, "symbol_policy", None)
+        if (
+            want_policy
+            and getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO) != want_policy
+        ):
+            mcm.apply_curve_symbol_policy(name, want_policy)
+
+        if getattr(style, "visible", True) is False:
+            self._schedule_visibility_restore(name, False)
+
+    def _plot_badge_label(self) -> str:
+        """反算本图徽章「页N·图M」（播报用；不可用返回空串）。"""
+        return self._plot_badge_label_for(self)
+
+    def _plot_badge_label_for(self, plot_widget: Any) -> str:
+        """反算指定 plot 的「页N·图M」徽章（来源/目标播报共用）。"""
+        page = getattr(plot_widget, "page", None)
+        host = self.window()
+        if page is None or host is None:
+            return ""
+        try:
+            page_index = host.page_index(page)
+            plot_index = next(
+                (
+                    index
+                    for index, container in enumerate(page.plot_widgets)
+                    if getattr(container, "plot_widget", None) is plot_widget
+                ),
+                -1,
+            )
+        except Exception:
+            return ""
+        if page_index < 0 or plot_index < 0:
+            return ""
+        return f"页{page_index + 1}·图{plot_index + 1}"
+
+    def _announce_transfer_result(
+        self, result: TransferResult, *, copy_mode: bool
+    ) -> None:
+        """出区搬运结果统一播报（成功/判重跳过/失败汇总成一条）。"""
+        if not (result.added or result.skipped or result.failed):
+            return
+        broadcast_transfer(
+            self.window(),
+            "copy" if copy_mode else "move",
+            result.added,
+            src_label="暂存区",
+            dst_label=self._plot_badge_label(),
+            skipped=result.skipped,
+            failed=result.failed,
+        )
 
     def _schedule_visibility_restore(self, var_name: str, want: bool) -> None:
         """legend 拖拽后的显隐继承（方案 A Step 2）：延迟一拍幂等恢复。
@@ -1027,8 +1370,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         success = self._plot_data_manager.plot_variable(
             var_name, show_duplicate_warning, preferred_color, quiet=quiet
         )
-        # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）
-        if success and len(self.curves) == 1:
+        # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）；
+        # 批量搬运窗口内抑制逐条 emit，由 _transfer_curves 收尾统一发一次
+        if (
+            success
+            and len(self.curves) == 1
+            and not getattr(self, "_batch_adding", False)
+        ):
             self.curves_changed.emit()
         return success
 
@@ -1108,8 +1456,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             skip_existence_check, show_duplicate_warning, preferred_color,
             quiet=quiet, announce_step=announce_step,
         )
-        if success:
-            self.curves_changed.emit()  # 仅成功添加才 emit
+        # 仅成功添加才 emit；批量窗口内抑制逐条 emit，由批量收尾统一
+        # 发一次（Blocking 2：避免 N 条曲线 ≈3N 次 legend/编辑器重建）
+        if success and not getattr(self, "_batch_adding", False):
+            self.curves_changed.emit()
         return success
     
     def update_multi_curve_mode(self):

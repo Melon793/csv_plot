@@ -29,6 +29,8 @@ class ConfigKey(StrEnum):
     # 绘图变量编辑器窗口几何（QByteArray）：位置 + 大小，失效屏幕
     # （多显示器拔插后位置落已不存在的屏幕）由窗口侧校验拦截并回退
     PLOT_VARIABLE_EDITOR_GEOMETRY = "plot_variable_editor/geometry"
+    # 曲线暂存区浮窗几何（QByteArray）：跨重启记忆；失效屏幕由窗口侧守卫
+    CURVE_SHELF_GEOMETRY = "curve_shelf/geometry"
     TEMPLATE_LAST_ID = "template/last_id"
     TEMPLATE_LAST_NAME = "template/last_name"
     # BLF 只存原始报文，必须搭配 DBC / ARXML 才能解出信号。记住上次选中的
@@ -218,6 +220,20 @@ class AppSettings:
 
     def set_plot_variable_editor_geometry(self, geometry: Any) -> None:
         self._settings.setValue(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, geometry)
+
+    def get_curve_shelf_geometry(self) -> Any:
+        """读取暂存区浮窗几何；无存档/空值/类型不符返回 None（同编辑器口径）。"""
+        from PySide6.QtCore import QByteArray
+
+        geometry = self._settings.value(ConfigKey.CURVE_SHELF_GEOMETRY)
+        if not geometry:
+            return None
+        if not isinstance(geometry, (QByteArray, bytes, bytearray)):
+            return None
+        return geometry
+
+    def set_curve_shelf_geometry(self, geometry: Any) -> None:
+        self._settings.setValue(ConfigKey.CURVE_SHELF_GEOMETRY, geometry)
 
     def get_last_template_id(self) -> str | None:
         return self._settings.value(ConfigKey.TEMPLATE_LAST_ID, None, type=str)

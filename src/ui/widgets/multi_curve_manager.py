@@ -702,8 +702,11 @@ class MultiCurveManager:
             logger.error("切换绘制方式失败: var=%s, mode=%s", var_name, draw_mode, exc_info=True)
             return False
         # 曲线集合不变，但已打开的变量编辑器下拉需要就地回填新值
-        # （curves_changed 增量刷新场景 1），与改色路径同口径
-        pw.curves_changed.emit()
+        # （curves_changed 增量刷新场景 1），与改色路径同口径。
+        # 批量搬运窗口内抑制：整批由 _transfer_curves 收尾统一 emit，
+        # 避免 N 条曲线 ≈3N 次 legend/编辑器重建（Blocking 2）。
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
         return True
 
     def apply_curve_symbol_policy(self, var_name: str, policy: str) -> bool:
@@ -733,8 +736,9 @@ class MultiCurveManager:
         except Exception:
             logger.error("应用 symbol 策略失败: var=%s", var_name, exc_info=True)
             return False
-        # 同 apply_curve_draw_mode：让已打开的编辑器下拉就地回填
-        pw.curves_changed.emit()
+        # 同 apply_curve_draw_mode：批量窗口内抑制逐条 emit
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
         return True
 
     def _on_legend_anchor_clicked(self, url):

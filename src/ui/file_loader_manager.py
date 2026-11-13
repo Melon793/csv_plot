@@ -1015,6 +1015,10 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.cursor_btn.setEnabled(status)
             self.mw.mark_region_btn.setEnabled(status)
             self.mw.grid_layout_btn.setEnabled(status)
+            # 暂存区浮窗按钮同走加载闸门（FakeMainWindow 等替身无此按钮）
+            shelf_btn = getattr(self.mw, "curve_shelf_btn", None)
+            if shelf_btn is not None:
+                shelf_btn.setEnabled(status)
 
     def reload_data(self):
         # v5.12: 互斥锁 —— 防止快速连续 reload 导致并发冲突
@@ -2338,6 +2342,26 @@ class FileLoaderManager(MainWindowBaseManager):
 
         # v5.11: reload 场景下跳过 pin 状态重置，保留 _restore_cursor_state_after_reload 恢复的 cursor 状态
         self.mw.cursor_sync_manager.replots_after_loading(skip_pin_reset=is_reload)
+
+        # 曲线暂存区 revalidate 必须挂调用方：replots_after_loading 自身
+        # 在 datalength==0 时早退（cursor_sync_manager），挂在方法内会漏掉
+        # 「空数据 → 全部置灰」。BLF 取消恢复路径（_restore_curves_after_abort）
+        # 数据未变，刻意不挂。
+        shelf_if_open = getattr(self.mw, "curve_shelf_if_open", None)
+        if callable(shelf_if_open):
+            shelf = shelf_if_open()
+            if shelf is not None:
+                try:
+                    newly_stale = shelf.revalidate_against_loader(self.mw.loader)
+                except Exception:
+                    logger.debug("刷新曲线暂存区失效状态失败", exc_info=True)
+                else:
+                    if newly_stale:
+                        show = getattr(self.mw, "_show_status_message", None)
+                        if callable(show):
+                            from src.ui.transfer_broadcast import stale_message
+
+                            show(stale_message(newly_stale))
 
         self._refresh_table_dialog(self.mw.loader)
 

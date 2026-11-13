@@ -217,6 +217,10 @@ def build_nuitka_cmd(include_packages, include_modules, hidden_excludes):
         "--include-package=src",
         "--include-module=src.ui.main_window",
         "--include-module=src.ui.widgets.plot_widget",
+        # 曲线暂存区：curve_shelf 为惰性导入（按钮首次点击才建窗），
+        # 静态分析可能漏包，显式点名
+        "--include-module=src.ui.widgets.curve_shelf",
+        "--include-module=src.ui.transfer_broadcast",
         "--include-module=src.core.curve_strategy",
         # BLF / CAN 数据库（方案 §4）：python-can 不是 asammdf 的传递依赖，
         # 下面的依赖扫描追不到它，必须点名；canmatrix 虽然能被扫到，但它只在
