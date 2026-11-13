@@ -21,7 +21,15 @@ import pyqtgraph as pg
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
-from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
+from src.core.config import (
+    DEFAULT_LINE_WIDTH,
+    HIGHLIGHT_CURVE_Z,
+    HIGHLIGHT_LINE_WIDTH,
+    HIGHLIGHT_THIN_LINE_WIDTH,
+    THICK_LINE_WIDTH,
+    THIN_LINE_WIDTH,
+    widget_alive,
+)
 from src.core.data_types import (
     DRAW_MODES,
     DRAW_MODE_SOURCE_AUTO,
@@ -781,6 +789,11 @@ class MultiCurveManager:
         每条曲线只按自身的 symbol 开关刷 pen/点标记；pen 与 symbol 均有
         缓存短路（``_cached_pen_key`` / ``_has_symbols``），热路径缩放/滚动
         中无变化的曲线零开销。曲线不存在（刚被删除/替换）时静默跳过。
+
+        选中联动：``var_name`` 在 ``pw._legend_selection`` 内且曲线可见时
+        走加粗态（pen key 追加 ``_hl`` 维度 + 临时提 Z）。判定内置于本函数，
+        故三个调用点（update_plot_style 热路径 / symbol 策略 / 委托入口）
+        自动保持高亮，缩放重刷不会丢。隐藏曲线只 tint 不加粗（显隐正交）。
         """
         pw = self.pw
         ci = pw.curves.get(var_name)
@@ -789,11 +802,16 @@ class MultiCurveManager:
         try:
             curve = ci.curve
             color = ci.color
+            highlighted = ci.visible and var_name in (
+                getattr(pw, "_legend_selection", ()) or ()
+            )
+            hl_suffix = "_hl" if highlighted else ""
 
             if show_symbols:
-                cache_key = f'thin_{color}'
+                cache_key = f'thin_{color}{hl_suffix}'
                 if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                    pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                    width = HIGHLIGHT_THIN_LINE_WIDTH if highlighted else THIN_LINE_WIDTH
+                    pen = pg.mkPen(color=color, width=width)
                     curve.setPen(pen)
                     curve._cached_pen_key = cache_key
 
@@ -804,17 +822,51 @@ class MultiCurveManager:
                     curve.setSymbolBrush(color)
                     curve._has_symbols = True
             else:
-                cache_key = f'thick_{color}'
+                cache_key = f'thick_{color}{hl_suffix}'
                 if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                    pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                    width = HIGHLIGHT_LINE_WIDTH if highlighted else THICK_LINE_WIDTH
+                    pen = pg.mkPen(color=color, width=width)
                     curve.setPen(pen)
                     curve._cached_pen_key = cache_key
 
                 if not hasattr(curve, '_has_symbols') or curve._has_symbols:
                     curve.setSymbol(None)
                     curve._has_symbols = False
+
+            # z 同步：同样进缓存判定，未变化不调 setZValue（避免无谓重绘）。
+            # 曲线默认 z=0（本模块与 plot_data_manager 均无其他 setZValue）。
+            target_z = HIGHLIGHT_CURVE_Z if highlighted else 0
+            if getattr(curve, "_cached_hl_z", 0) != target_z:
+                curve.setZValue(target_z)
+                curve._cached_hl_z = target_z
         except Exception as e:
             logger.error("应用曲线样式时出错: var=%s, %s", var_name, e)
+
+    def refresh_selection_emphasis(self) -> None:
+        """选择集 → 曲线加粗投影（第二投影，与 legend tint 并列）。
+
+        全量迭代 + pen 缓存短路：选择变化是离散动作，未变化的曲线零开销，
+        不新增逐帧成本。symbol 判定与 update_plot_style 热路径同口径
+        （resolve_symbol_show + 当前可见 x 跨度）。
+
+        守卫对齐热路径：数据更新/销毁中间态跳过（reload 的陈旧选择由
+        refresh_selection_highlight 的 prune + 图例重放兜底）。
+        """
+        pw = self.pw
+        if getattr(pw, "_is_updating_data", False) or getattr(pw, "_is_being_destroyed", False):
+            return
+        if not widget_alive(pw):
+            return
+        view_box = getattr(pw, "view_box", None)
+        if view_box is None:
+            return
+        try:
+            x_min, x_max = view_box.viewRange()[0]
+            x_width = x_max - x_min
+            for var_name, ci in pw.curves.items():
+                pw._apply_curve_style(var_name, resolve_symbol_show(ci, x_width))
+        except Exception as e:
+            logger.error("刷新选中曲线加粗时出错: %s", e)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区（统一版）"""

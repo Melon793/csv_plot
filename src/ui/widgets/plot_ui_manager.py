@@ -1080,7 +1080,7 @@ class LegendTextBrowser(QTextBrowser):
         else:
             selection.add(var_name)
         pw._legend_sel_anchor = var_name
-        self.refresh_selection_highlight()
+        pw._refresh_selection_projections()
 
     def _range_select_legend(self, var_name: str) -> None:
         """Shift+单击：自锚点按 curves 插入序范围选（文件管理器语义）。
@@ -1103,7 +1103,7 @@ class LegendTextBrowser(QTextBrowser):
         else:
             selection.add(var_name)
             pw._legend_sel_anchor = var_name
-        self.refresh_selection_highlight()
+        pw._refresh_selection_projections()
 
     def clear_legend_selection(self) -> None:
         """清空选择集（空白单击 / 菜单「清除选择」/ 占位态回归共用）。"""
@@ -1113,6 +1113,9 @@ class LegendTextBrowser(QTextBrowser):
             selection.clear()
         pw._legend_sel_anchor = None
         self.setExtraSelections([])
+        # 两投影收口：tint 已就地清空（保留原语义，含无选择集属性的替身），
+        # 这里补曲线加粗投影恢复。播报不在本函数内——用户/系统共用入口。
+        pw._refresh_selection_projections()
 
     def refresh_selection_highlight(self, *, prune: bool = True) -> None:
         """按当前选择集重放 ExtraSelections 高亮。

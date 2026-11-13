@@ -301,9 +301,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             label.setHtml(text)
             sb.setValue(saved_pos)
             # P1：图例重建后重放选择高亮，并修剪已不存在的条目（R3）
-            refresh = getattr(label, "refresh_selection_highlight", None)
-            if callable(refresh):
-                refresh()
+            # 曲线选中联动：改调两投影收口（tint/prune + 曲线加粗），
+            # prune 在 tint 投影内发生，加粗投影按修剪后的集合刷新。
+            self._refresh_selection_projections()
         else:
             # 回归占位态：clear() 置空文档显示 placeholder，
             # 避免 setPlainText 继承光标处残留字符格式
@@ -322,6 +322,24 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             cursor.setPosition(0)
             label.setTextCursor(cursor)
         self._plot_ui_manager.update_legend_height()
+
+    def _refresh_selection_projections(self) -> None:
+        """选择集两投影统一收口：legend tint（含 prune）+ 曲线加粗。
+
+        ``pw._legend_selection`` 是唯一真相源，本函数是它的全部状态投影
+        出口——所有选择集变化点（toggle / range / clear / 图例重建重放 /
+        plot 点击分派）都经此刷新，保证两投影不脱节。
+
+        顺序有含义：先 tint（其内部 prune 修剪已不存在的条目），再按修剪
+        后的集合刷加粗。**播报不在此处**——它是手势时刻的瞬时事件，系统
+        路径（setHtml 重放 / 占位清选 / reload prune）必须静默。
+        本函数不 emit curves_changed（选择是视图态，不该刷新编辑器/搜索栏）。
+        """
+        label = self.legend_label
+        refresh = getattr(label, "refresh_selection_highlight", None)
+        if callable(refresh):
+            refresh()
+        self._multi_curve_manager.refresh_selection_emphasis()
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """确保 X 轴范围非零 → 委托到 AxisManager"""
