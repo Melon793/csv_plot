@@ -21,7 +21,12 @@ import pyqtgraph as pg
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
-from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
+from src.core.config import (
+    DEFAULT_LINE_WIDTH,
+    THICK_LINE_WIDTH,
+    THIN_LINE_WIDTH,
+    is_grouped_loader,
+)
 from src.core.data_types import (
     DRAW_MODES,
     DRAW_MODE_SOURCE_AUTO,
@@ -846,8 +851,14 @@ class MultiCurveManager:
             pw._batch_adding = True
             try:
                 if variables_data:
+                    # 分组数据源的时间轴保 float64（float32 会抹平毫秒级采样，
+                    # 见 plot_data_manager.plot_variable 同处说明）
+                    loader = getattr(
+                        getattr(pw, "plot_context", None), "loader", None
+                    )
+                    x_dtype = np.float64 if is_grouped_loader(loader) else np.float32
                     for var_name, x_array, y_array, y_format in variables_data:
-                        original_index = np.ascontiguousarray(x_array, dtype=np.float32)
+                        original_index = np.ascontiguousarray(x_array, dtype=x_dtype)
                         x_values = pw.offset + pw.factor * original_index
                         y_contiguous = np.ascontiguousarray(y_array)
 
@@ -944,6 +955,8 @@ class MultiCurveManager:
             if revive_ref is not None and preferred_color is None:
                 preferred_color = revive_ref.color
 
+            loader = getattr(getattr(pw, "plot_context", None), "loader", None)
+            x_dtype = np.float64 if is_grouped_loader(loader) else np.float32
             original_index = None
             if x_values is None or y_values is None:
                 success, error_msg, x_array, y_array, y_format = pw._prepare_plot_data(var_name)
@@ -958,14 +971,14 @@ class MultiCurveManager:
                     else:
                         QMessageBox.warning(pw, "错误", error_msg)
                     return False
-                original_index = np.ascontiguousarray(x_array, dtype=np.float32)
+                original_index = np.ascontiguousarray(x_array, dtype=x_dtype)
                 x_values = pw.offset + pw.factor * original_index
                 y_values = np.ascontiguousarray(y_array)
             else:
                 # 外部传入的 x_values 已含 factor/offset，尝试反算 original_index
                 if pw.factor != 0:
                     original_index = np.ascontiguousarray(
-                        (np.asarray(x_values) - pw.offset) / pw.factor, dtype=np.float32
+                        (np.asarray(x_values) - pw.offset) / pw.factor, dtype=x_dtype
                     )
 
             # 统一重复检测：始终检查 curves 字典

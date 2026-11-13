@@ -24,8 +24,9 @@ from PySide6.QtGui import QFontMetrics
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt
 from PySide6.QtWidgets import QApplication
 
-from src.core.config import safe_qt_op
+from src.core.config import is_grouped_loader, safe_qt_op
 from src.core.logger import get_logger
+from src.core.value_format import decimals_for_step, format_fixed_trim
 
 logger = get_logger("widget.cursor")
 
@@ -703,9 +704,7 @@ class CursorManager:
                 if mode not in ("1 anchored cursor", "2 anchored cursor"):
                     if x < x_min or x > x_max:
                         continue
-                x_str = self._significant_decimal_format_str(
-                    value=float(x), ref=self.factor
-                )
+                x_str = format_fixed_trim(float(x), self._x_decimals())
                 x_info_item = self._get_x_label_from_pool(idx)
                 # 先加入 scene，再设置属性（Qt 规范顺序）
                 x_scene = x_info_item.scene()
@@ -1267,9 +1266,7 @@ class CursorManager:
                 if show_x_mode not in ("1 anchored cursor", "2 anchored cursor"):
                     if x < x_min or x > x_max:
                         continue
-                x_str = self._significant_decimal_format_str(
-                    value=float(x), ref=self.factor
-                )
+                x_str = format_fixed_trim(float(x), self._x_decimals())
                 x_info_item = self._get_x_label_from_pool(idx)
                 # 先加入 scene，再设置属性（Qt 规范顺序）
                 x_scene = x_info_item.scene()
@@ -1566,19 +1563,35 @@ class CursorManager:
         except Exception:
             return str(value)
 
-    def _significant_decimal_format_str(self, value: float, ref: float, max_dp: int | None = None) -> str:
-        """根据 ref 的显示精度自动决定 value 的字符串格式"""
-        if ref == 0.0 or not np.isfinite(ref):
-            dp = 2  # 零值/非有限值默认 2 位小数
-        else:
-            s = format(ref, 'f').rstrip('0').rstrip('.')
-            dp = 0 if '.' not in s else len(s.split('.')[1])
+    def _x_decimals(self) -> int:
+        """游标 X 标签的小数位数（两处显示路径共用同一口径）。
 
-        if max_dp is not None and max_dp >= 0:
-            dp = min(max_dp, dp)
+        - 分组数据源（MDF/BLF）的时间轴：``factor`` 只是 1.0 的无效倍数，
+          精度取可见曲线相邻 x 差中位数中最细的一档；
+        - 序号轴（CSV/Excel）：沿用 ``factor`` 语义（1 -> 0 位、0.1 -> 1 位），
+          并由 ``decimals_for_step`` 修掉 ``factor < 1e-6`` 退化成 0 位的缺陷。
+        - 无可用步长时回退 factor，再回退 2 位。
+        """
+        pw = self.pw
+        loader = getattr(getattr(pw, "plot_context", None), "loader", None)
+        if is_grouped_loader(loader):
+            curves = list((getattr(pw, "curves", None) or {}).values())
+            steps = [
+                ci.x_step
+                for ci in curves
+                if getattr(ci, "visible", True) and getattr(ci, "x_step", 0.0) > 0
+            ]
+            if not steps:
+                # 全部隐藏时仍按数据步长显示：显隐切换不应改变读数精度
+                steps = [
+                    ci.x_step
+                    for ci in curves
+                    if getattr(ci, "x_step", 0.0) > 0
+                ]
+            if steps:
+                return decimals_for_step(min(steps))
+        factor = abs(self.factor)
+        if factor > 0:
+            return decimals_for_step(factor)
+        return 2
 
-        if dp == 0:
-            return str(int(round(value)))
-
-        fmt = f'{{:.{dp}f}}'
-        return fmt.format(value).rstrip('0').rstrip('.')

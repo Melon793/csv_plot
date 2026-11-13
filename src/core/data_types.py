@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from src.core.config import XRANGE_THRESHOLD_FOR_SYMBOLS
+from src.core.value_format import decimals_for_step
 
 if TYPE_CHECKING:
     import numpy as np
@@ -141,6 +142,35 @@ def resolve_symbol_show(ci: "CurveInfo", x_width: float) -> bool:
     return x_width * ci.point_density < XRANGE_THRESHOLD_FOR_SYMBOLS
 
 
+# ---- 相邻 x 步长估计的超大数组采样约束 ----
+# 逐点 diff + median 在大数组上是一次性成本，超过阈值时只取中间切片，
+# 避免加曲线路径出现明显毛刺（时间轴中段仍能代表典型采样周期）。
+MEDIAN_DIFF_MAX_POINTS = 400_000
+MEDIAN_DIFF_SLICE_POINTS = 200_000
+
+
+def _median_positive_diff(x) -> float:
+    """x 数组相邻正差的中位数（0 表示无法估计）。
+
+    非均匀时间轴上个别报文挤在一起会产生异常小的间隔，用**中位数**代表
+    典型采样周期，避免单个异常值把全局精度拉到极限。重复/非单调时间戳
+    （diff<=0）与非有限值先过滤；全部被过滤时返回 0，由调用方回退。
+    """
+    import numpy as np
+
+    if x is None or len(x) < 2:
+        return 0.0
+    arr = x
+    if len(x) > MEDIAN_DIFF_MAX_POINTS:
+        start = (len(x) - MEDIAN_DIFF_SLICE_POINTS) // 2
+        arr = x[start:start + MEDIAN_DIFF_SLICE_POINTS]
+    diff = np.diff(np.asarray(arr, dtype=np.float64))
+    diff = diff[np.isfinite(diff) & (diff > 0)]
+    if diff.size == 0:
+        return 0.0
+    return float(np.median(diff))
+
+
 @dataclass
 class CurveInfo:
     """单条曲线的元数据。
@@ -160,6 +190,10 @@ class CurveInfo:
     x_min: float = 0.0
     x_max: float = 0.0
     point_density: float = 0.0
+    # 相邻 x 差的中位数（0 = 未知/无法估计）与由其推导的小数位数，
+    # 供游标 X 标签与标记统计窗口共用（时间轴精度的权威来源）
+    x_step: float = 0.0
+    x_decimals: int = 0
     # 绘制方式与 symbol 策略（与线色同口径：会话内存活，不持久化）
     draw_mode: str = DRAW_MODE_AUTO       # 'auto' | 'step-post' | 'step-pre'
     symbol_policy: str = SYMBOL_POLICY_AUTO  # 'auto' | 'on' | 'off'
@@ -173,13 +207,17 @@ class CurveInfo:
         self._refresh_x_cache()
 
     def _refresh_x_cache(self):
-        """刷新 x_min/x_max/point_density 缓存"""
+        """刷新 x_min/x_max/point_density 与 x_step/x_decimals 缓存"""
         import numpy as np
+        self.x_step = 0.0
+        self.x_decimals = 0
         if self.x_data is not None and len(self.x_data) > 1:
             self.x_min = float(np.min(self.x_data))
             self.x_max = float(np.max(self.x_data))
             span = self.x_max - self.x_min
             self.point_density = len(self.x_data) / span if span > 0 else 0.0
+            self.x_step = _median_positive_diff(self.x_data)
+            self.x_decimals = decimals_for_step(self.x_step)
         elif self.x_data is not None and len(self.x_data) == 1:
             self.x_min = float(self.x_data[0])
             self.x_max = float(self.x_data[0])
@@ -234,3 +272,4 @@ class MarkStatEntry:
     x_at_y_min: float = float("nan")   # y 最小时的 x 值
     y_pp: float = float("nan")         # 峰峰值 y_max - y_min
     count: int = 0                     # 区间内有效样本数
+    x_decimals: int = -1               # x 相关列的显示小数位（-1 = 沿用自适应精度）

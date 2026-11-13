@@ -629,10 +629,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """将时间戳转换为日期字符串 → 委托到 CursorManager"""
         return self._cursor_manager.dateInt_to_fmtStr(value)
     
-    def _significant_decimal_format_str(self, value: float, ref: float, max_dp: int | None = None) -> str:
-        """根据 ref 的显示精度自动决定 value 的字符串格式 → 委托到 CursorManager"""
-        return self._cursor_manager._significant_decimal_format_str(value, ref, max_dp)
-    
 
 
     def set_xrange_with_link_handling(self, xmin, xmax, padding: float = 0):

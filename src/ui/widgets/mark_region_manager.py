@@ -15,8 +15,9 @@ from typing import Any, TYPE_CHECKING
 import numpy as np
 import pyqtgraph as pg
 
-from src.core.config import _evaluate_float32_safety
+from src.core.config import _evaluate_float32_safety, is_grouped_loader
 from src.core.data_types import MarkStatEntry
+from src.core.value_format import decimals_for_step
 
 if TYPE_CHECKING:
     from src.ui.widgets.cursor_manager import CursorManager
@@ -138,6 +139,11 @@ class MarkRegionManager:
     def _get_mark_stats_multi_curve(self, min_x: float, max_x: float) -> list | None:
         """多曲线模式的统计计算"""
         stats_list = []
+        # x 列精度与游标同一口径：时间轴取数据步长，序号轴取 factor
+        loader = getattr(getattr(self.pw, "plot_context", None), "loader", None)
+        factor_decimals = (
+            decimals_for_step(abs(self.pw.factor)) if self.pw.factor else -1
+        )
 
         for var_name, ci in self.pw.curves.items():
             if not ci.visible:
@@ -230,6 +236,9 @@ class MarkRegionManager:
                     x_at_y_min=x_at_y_min,
                     y_pp=y_pp,
                     count=count,
+                    x_decimals=(
+                        ci.x_decimals if is_grouped_loader(loader) else factor_decimals
+                    ),
                 )
             )
 
