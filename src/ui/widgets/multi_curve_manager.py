@@ -56,17 +56,50 @@ if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
 
 
-def _point_segment_distance_px(
-    px: float, py: float, ax: float, ay: float, bx: float, by: float
+# 命中距离比较的数值护栏（像素）。仿射映射相对逐点 mapViewToScene 的偏差
+# 实测 ≤1.9e-9px（评审 G7，含 ±1e6 极端 x 域），取其 ~500 倍作阈值：既吸收
+# 噪声让"恰好容差 / 精确并列"的判定确定，又远小于任何可感知的像素差。
+_HIT_DISTANCE_EPS_PX = 1e-6
+
+
+def _min_segment_distance_px(
+    px: float,
+    py: float,
+    ax: np.ndarray,
+    ay: np.ndarray,
+    bx: np.ndarray,
+    by: np.ndarray,
 ) -> float:
-    """点 (px,py) 到线段 (a,b) 的最短距离（同一坐标系，此处为 scene 像素）。"""
-    dx, dy = bx - ax, by - ay
+    """点 (px,py) 到**一批**线段的最短距离（scene 像素，向量化）。
+
+    端点须已过滤非有限值（NaN/inf 段不参与，对齐游标取值的 NaN 纪律）；
+    空数组返回 inf。退化段（a==b，重复 x 的竖直 riser 会出现）按点到点算：
+    把分母 0 换成 1 再强制 t=0，避免 0/0 产生 NaN 污染 argmin。
+    """
+    if ax.size == 0:
+        return math.inf
+    dx = bx - ax
+    dy = by - ay
     len_sq = dx * dx + dy * dy
-    if len_sq <= 0.0:
-        return math.hypot(px - ax, py - ay)
-    t = ((px - ax) * dx + (py - ay) * dy) / len_sq
-    t = max(0.0, min(1.0, t))
-    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+    degenerate = len_sq <= 0.0
+    safe = np.where(degenerate, 1.0, len_sq)
+    t = ((px - ax) * dx + (py - ay) * dy) / safe
+    t = np.clip(np.where(degenerate, 0.0, t), 0.0, 1.0)
+    return float(np.hypot(px - (ax + t * dx), py - (ay + t * dy)).min())
+
+
+def _view_scene_affine(view_box: Any) -> tuple[float, float, float, float]:
+    """解出 ``mapViewToScene`` 的仿射系数 ``(ox, oy, sx, sy)``。
+
+    pyqtgraph ViewBox 的 view→scene 是 QTransform 仿射（无旋转/剪切），
+    两个基点即可定标：``scene = origin + scale * view``。据此把候选段一次性
+    向量化映射，省掉每段 2~3 次 ``mapViewToScene`` 的 Python↔C++ 往返——
+    高密度下 8px 容差带可达上万段，逐段映射会让单击明显卡顿。
+    等价性由 test_view_scene_affine_matches_per_point_mapping 钉死。
+    """
+    p0 = view_box.mapViewToScene(QPointF(0.0, 0.0))
+    p1 = view_box.mapViewToScene(QPointF(1.0, 1.0))
+    return p0.x(), p0.y(), p1.x() - p0.x(), p1.y() - p0.y()
 
 
 def hit_test_curve(pw: Any, scene_pos: QPointF) -> str | None:
@@ -76,26 +109,50 @@ def hit_test_curve(pw: Any, scene_pos: QPointF) -> str | None:
 
     - 只遍历 ``pw.curves``：失效占位无曲线对象，不参与（R9）；隐藏曲线
       不参与（点不到的东西不该被选中）；
-    - 端点缓存 ``ci.x_min/x_max`` 先做区间排除，再 ``searchsorted`` 定位
-      邻域，只测点击点附近的 3 条线段 → O(曲线数 × log n)，点击离散触发；
-    - 距离在 **scene（像素）坐标** 算：数据点经 ``mapViewToScene`` 后求
-      点到线段距离，容差 ``CURVE_HIT_TOLERANCE_PX`` 为逻辑像素（Qt 已归一
-      DPI，两平台同口径）；
+    - **候选窗口由像素容差反推**（rev3 设计变更，见下）：先把
+      ``CURVE_HIT_TOLERANCE_PX`` 换算成 x 域宽度 ``dx_tol``，再用两次
+      ``searchsorted`` 取出 x 区间与 ``[vx-dx_tol, vx+dx_tol]`` 相交的段。
+      这是"距离可能 < 容差"的**必要条件**（最近点必落在段的 x 区间内），
+      因此不漏命中；复杂度 O(曲线数 × (log n + k))，k = 容差带内采样数；
+    - 端点缓存 ``ci.x_min/x_max`` 只做 **halo 粗筛**（各向外扩 dx_tol），
+      不再是严格闭区间；
+    - 距离在 **scene（像素）坐标** 算，容差为逻辑像素（Qt 已归一 DPI，
+      两平台同口径）；映射走 ``_view_scene_affine`` + numpy 向量化；
     - 阶梯曲线额外测 L 形拐角两段，否则竖直 riser 点不中（风险 #6）。
       几何以 ``curve.opts['stepMode']`` 为渲染真相：'right'（step-post）
       = 旧值保持到 x1 再跳变，即 (x0,y0)→(x1,y0)→(x1,y1)；'left'
       （step-pre）= 跳变提前到 x0，即 (x0,y0)→(x0,y1)→(x1,y1)
       （语义经 test_step_mode_semantics_geometry 顶点序列钉死）；
-    - NaN/inf 端点跳过（对齐游标取值的 NaN 纪律）；
-    - 并列取 curves 插入序在前者（严格小于比较）。
+    - 比较口径 ``d < best_d - _HIT_DISTANCE_EPS_PX``：容差边界严格小于，
+      **浮点精度内并列取 curves 插入序在前者**。仿射映射与逐点
+      ``mapViewToScene`` 有 ~1e-9px 级偏差，无护栏时"恰好 8.000px"与
+      "精确等距"这两个测度为零的边界会随视图量级翻转（评审 NB-12）；
+      护栏比噪声大 3 个量级、比可感知像素差小 6 个量级，判定因此确定。
+
+    前提：``ci.x_data`` 非降序（真实路径恒成立——CSV 为 1..n 行号，时间轴
+    经 ``offset + factor * index`` 单调映射；重复 x 允许，float32 量化与
+    同 tick 多帧都会产生，容差带窗口天然覆盖）。
+
+    rev3 设计变更（用户授权，取代计划 §3.3 原"严格 x 域粗筛 + (idx-1,idx)
+    两线段邻域 + O(log n)"）——原口径有两处必然漏命中，探针实证：
+
+    1. 固定 ±2 采样邻域与像素容差不同量纲：24.7 行/px 时 8px ≈ 198 行，
+       尖峰侧面 1px 处最近段在 28 采样外 → 漏（r1_out_hit_edges B2 漏 66/126）；
+    2. 严格 ``[x_min, x_max]`` 闭区间既吃掉首/尾点外侧 8px 的墨水（halo），
+       又因 float32 往返误差拒绝**精确端点点击**（vx=60.00000000000001 >
+       x_max=60.0）→ 56 次端点点击漏 13 次（r1_out_hit_quantify C2/C3）。
     """
     view_box = getattr(pw, "view_box", None)
     if view_box is None:
         return None
     curves = getattr(pw, "curves", None) or {}
-    view_pos = view_box.mapSceneToView(scene_pos)
-    vx = view_pos.x()
+    if not curves:
+        return None
+    vx = view_box.mapSceneToView(scene_pos).x()
     px, py = scene_pos.x(), scene_pos.y()
+    ox, oy, sx, sy = _view_scene_affine(view_box)
+    # sx==0（退化视图）时 dx_tol=inf → 窗口退化为全扫描，语义仍正确
+    dx_tol = CURVE_HIT_TOLERANCE_PX / abs(sx) if sx else math.inf
     best_name: str | None = None
     best_d = float(CURVE_HIT_TOLERANCE_PX)
 
@@ -105,36 +162,43 @@ def hit_test_curve(pw: Any, scene_pos: QPointF) -> str | None:
         x_data, y_data = ci.x_data, ci.y_data
         if x_data is None or y_data is None or len(x_data) < 2:
             continue
-        if not (ci.x_min <= vx <= ci.x_max):
+        if not (ci.x_min - dx_tol <= vx <= ci.x_max + dx_tol):
             continue
-        idx = int(np.searchsorted(x_data, vx))
-        lo = max(0, idx - 2)
-        hi = min(len(x_data) - 1, idx + 1)
+        n = len(x_data)
+        lo = max(0, int(np.searchsorted(x_data, vx - dx_tol, side="left")) - 1)
+        hi = min(n - 1, int(np.searchsorted(x_data, vx + dx_tol, side="right")))
+        if hi <= lo:
+            continue
+        xs = np.asarray(x_data[lo:hi + 1], dtype=np.float64)
+        ys = np.asarray(y_data[lo:hi + 1], dtype=np.float64)
+        x0, y0, x1, y1 = xs[:-1], ys[:-1], xs[1:], ys[1:]
+        finite = (
+            np.isfinite(x0) & np.isfinite(y0) & np.isfinite(x1) & np.isfinite(y1)
+        )
+        if not finite.any():
+            continue
+        x0, y0, x1, y1 = x0[finite], y0[finite], x1[finite], y1[finite]
+        ax, ay = ox + sx * x0, oy + sy * y0
+        bx, by = ox + sx * x1, oy + sy * y1
         step_mode = ci.curve.opts.get("stepMode")
-        for i in range(lo, hi):
-            x0, y0 = float(x_data[i]), float(y_data[i])
-            x1, y1 = float(x_data[i + 1]), float(y_data[i + 1])
-            if not (
-                math.isfinite(x0) and math.isfinite(y0)
-                and math.isfinite(x1) and math.isfinite(y1)
-            ):
-                continue
-            p0 = view_box.mapViewToScene(QPointF(x0, y0))
-            p1 = view_box.mapViewToScene(QPointF(x1, y1))
-            if step_mode == "right":
-                corner = view_box.mapViewToScene(QPointF(x1, y0))
-            elif step_mode == "left":
-                corner = view_box.mapViewToScene(QPointF(x0, y1))
-            else:
-                corner = None
-            segments = (
-                ((p0, corner), (corner, p1)) if corner is not None else ((p0, p1),)
+        if step_mode == "right":
+            cx, cy = bx, ay          # 拐角 (x1, y0)
+        elif step_mode == "left":
+            cx, cy = ax, by          # 拐角 (x0, y1)
+        else:
+            cx = cy = None
+        if cx is None:
+            d = _min_segment_distance_px(px, py, ax, ay, bx, by)
+        else:
+            # 阶梯只测 L 形两段，**不含对角线 (a,b)**：对角线穿过 L 的凹口，
+            # 会把凹口里的空中点误判为命中（评审复跑实测误命中 255/4800）。
+            d = min(
+                _min_segment_distance_px(px, py, ax, ay, cx, cy),
+                _min_segment_distance_px(px, py, cx, cy, bx, by),
             )
-            for a, b in segments:
-                d = _point_segment_distance_px(px, py, a.x(), a.y(), b.x(), b.y())
-                if d < best_d:
-                    best_d = d
-                    best_name = var_name
+        if d < best_d - _HIT_DISTANCE_EPS_PX:
+            best_d = d
+            best_name = var_name
     return best_name
 
 
@@ -933,11 +997,17 @@ class MultiCurveManager:
         不新增逐帧成本。symbol 判定与 update_plot_style 热路径同口径
         （resolve_symbol_show + 当前可见 x 跨度）。
 
-        守卫对齐热路径：数据更新/销毁中间态跳过（reload 的陈旧选择由
-        refresh_selection_highlight 的 prune + 图例重放兜底）。
+        守卫对齐热路径：数据更新/加载/销毁中间态跳过（reload 的陈旧选择由
+        refresh_selection_highlight 的 prune + 图例重放兜底）。不查
+        ``_is_interacting``——选择是离散动作，交互中也应即时反馈，与热路径
+        "逐帧省开销"的动机不同（评审 NB-2）。
         """
         pw = self.pw
-        if getattr(pw, "_is_updating_data", False) or getattr(pw, "_is_being_destroyed", False):
+        if (
+            getattr(pw, "_is_updating_data", False)
+            or getattr(pw, "_is_loading_new_data", False)
+            or getattr(pw, "_is_being_destroyed", False)
+        ):
             return
         if not widget_alive(pw):
             return

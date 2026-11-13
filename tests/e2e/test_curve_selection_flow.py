@@ -25,11 +25,12 @@ from src.core.config import (
     HIGHLIGHT_CURVE_Z,
     HIGHLIGHT_LINE_WIDTH,
     THICK_LINE_WIDTH,
+    UI_DEBOUNCE_DELAY_MS,
 )
 from src.core.data_types import SYMBOL_POLICY_OFF
 from src.ui.drag_drop import ANCHOR_SCHEME
 from src.ui.widgets.multi_curve_manager import hit_test_curve
-from tests.fixtures.waits import settle
+from tests.fixtures.waits import pump, settle
 
 
 @pytest.fixture(autouse=True)
@@ -270,21 +271,36 @@ def test_plot_then_legend_mixed_multiselect(plotted_window, qapp):
 # ---------------------------------------------------------------------------
 
 
-def test_highlight_survives_zoom(plotted_window, qapp, qtbot):
-    """缩放触发 update_plot_style 重刷后高亮存活（pen 缓存 _hl 维度）。"""
+def test_highlight_survives_zoom(plotted_window, monkeypatch):
+    """真实 debounce → update_plot_style 重刷后高亮存活（pen 缓存 _hl 维度）。
+
+    评审 NB-5：原写法只 processEvents+settle，**不推进 50ms debounce
+    定时器**，热路径调用数实测为 0，waitUntil 首次求值即真 → 断言空转
+    （F3 反向注入实验证明对回归零检出力）。这里改为真实钟表推进 + spy
+    计数断言，确保"重刷确实发生过"再断言高亮存活。
+    """
     pw = _pw(plotted_window)
     _click_plot(pw, _curve_pos(pw, "speed"))
     assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
 
+    manager = pw._plot_ui_manager
+    original = manager.update_plot_style
+    calls = []
+
+    def _spy(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "update_plot_style", _spy)
+
     x0, x1 = pw.view_box.viewRange()[0]
     pw.view_box.setXRange(x0 + (x1 - x0) * 0.25, x0 + (x1 - x0) * 0.5, padding=0)
-    qapp.processEvents()
+    pump(4 * UI_DEBOUNCE_DELAY_MS)
     settle()
-    qtbot.waitUntil(
-        lambda: _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH, timeout=3000
-    )
 
+    assert calls, "热路径未跑，本例对回归无检出力（NB-5）"
     assert pw._legend_selection == {"speed"}
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
     assert pw.curves["speed"].curve.zValue() == HIGHLIGHT_CURVE_Z
     assert _is_tinted(pw, "speed")
 

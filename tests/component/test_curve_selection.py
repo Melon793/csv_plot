@@ -12,6 +12,8 @@
 不得断言 _message_label/toolTip/timer；夹具一律 data_factory / plot_factory。
 """
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -36,7 +38,11 @@ from src.core.data_types import (
     SYMBOL_POLICY_OFF,
     SYMBOL_POLICY_ON,
 )
-from src.ui.widgets.multi_curve_manager import hit_test_curve
+from src.ui.widgets.multi_curve_manager import (
+    _min_segment_distance_px,
+    _view_scene_affine,
+    hit_test_curve,
+)
 from tests.fixtures.data_factory import make_timeseries
 from tests.fixtures.waits import settle
 
@@ -209,6 +215,31 @@ def test_clear_selection_restores_all(three_curves):
     assert all(_z(pw, n) == 0 for n in ("a", "b", "c"))
 
 
+def test_clear_legend_selection_tolerates_stub_pw(three_curves):
+    """替身 pw 缺 _refresh_selection_projections 时 clear 不炸（评审 NB-4/D13）。
+
+    同函数内 selection / highlight 都走 getattr 守卫，收口调用也须同风格，
+    否则后续轻量替身（工具/测试）调 clear 会 AttributeError。
+    """
+    label = three_curves.legend_label
+
+    class _StubPW:
+        def __init__(self):
+            self._legend_selection = {"a"}
+            self._legend_sel_anchor = "a"
+
+    stub = _StubPW()
+    original = label._pw
+    label._pw = stub
+    try:
+        label.clear_legend_selection()
+    finally:
+        label._pw = original
+    assert stub._legend_selection == set()
+    assert stub._legend_sel_anchor is None
+    assert label.extraSelections() == []
+
+
 def test_sethtml_replay_syncs_emphasis_and_prunes(three_curves):
     """图例重建重放：加粗同步，且已删除曲线被 prune 后不再残留高亮。"""
     pw = three_curves
@@ -268,6 +299,25 @@ def test_emphasis_skips_during_data_update(three_curves):
         assert pw.curves["a"].curve._cached_pen_key == "stale"
     finally:
         pw._is_updating_data = False
+
+    pw._multi_curve_manager.refresh_selection_emphasis()
+    assert _width(pw, "a") == HIGHLIGHT_LINE_WIDTH
+
+
+def test_emphasis_skips_during_loading_new_data(three_curves):
+    """reload 加载中间态同样跳过（评审 NB-2：守卫与热路径四查对齐）。"""
+    pw = three_curves
+    _pin_symbol_state(pw, SYMBOL_POLICY_OFF)
+    pw.legend_label._toggle_legend_selection("a")
+    pw.curves["a"].curve.setPen(width=THICK_LINE_WIDTH)
+    pw.curves["a"].curve._cached_pen_key = "stale"
+
+    pw._is_loading_new_data = True
+    try:
+        pw._multi_curve_manager.refresh_selection_emphasis()
+        assert pw.curves["a"].curve._cached_pen_key == "stale"
+    finally:
+        pw._is_loading_new_data = False
 
     pw._multi_curve_manager.refresh_selection_emphasis()
     assert _width(pw, "a") == HIGHLIGHT_LINE_WIDTH
@@ -427,6 +477,69 @@ def test_hit_tie_takes_insertion_order(plot_factory, qapp):
     assert hit_test_curve(pw, _scene_at(pw, "first")) == "first"
 
 
+def test_hit_exact_tolerance_is_not_hit(plot_factory, qapp):
+    """恰好 8.000px 不中：仿射噪声由 _HIT_DISTANCE_EPS_PX 吸收（评审 NB-12/B7）。
+
+    无护栏时仿射距离落到 8.0-2.3e-13 → 严格小于误判为命中；7.99/8.01
+    两侧对照确保护栏没有把容差整体挪走。
+    """
+    n = 60
+    df = pd.DataFrame({
+        "flat": np.full(n, 50.0),
+        "wide": np.full(n, 500.0),
+    })
+    pw = _shown_plot(plot_factory, df)
+    for name in ("flat", "wide"):
+        assert pw.plot_variable(name)
+    _pin_symbol_state(pw, SYMBOL_POLICY_OFF)
+    settle()
+    ci = pw.curves["flat"]
+    base = pw.view_box.mapViewToScene(QPointF(float(ci.x_data[30]), 50.0))
+    for off, expect in ((7.99, "flat"), (8.0, None), (8.01, None)):
+        p = QPointF(base.x(), base.y() + off)
+        assert hit_test_curve(pw, p) == expect, f"偏移 {off}px"
+
+
+def test_hit_exact_tie_stable_across_zoom(plot_factory, qapp):
+    """精确等距 → 恒取插入序在前者，不随视图量级翻转（评审 NB-12）。"""
+    _, y = make_timeseries(n=20)
+    flat = np.full_like(y, 30.0)
+    df = pd.DataFrame({"first": flat, "second": flat.copy()})
+    pw = _shown_plot(plot_factory, df)
+    for name in ("first", "second"):
+        assert pw.plot_variable(name)
+    _pin_symbol_state(pw, SYMBOL_POLICY_OFF)
+    settle()
+    for x_range in (None, (5.0, 12.0), (2.0, 19.0)):
+        if x_range is not None:
+            pw.view_box.setXRange(*x_range, padding=0)
+            settle()
+        p = _scene_at(pw, "first")
+        d_first = _scalar_seg_dist(
+            p.x(), p.y(), *_segment_at(pw, "first", p)
+        )
+        d_second = _scalar_seg_dist(
+            p.x(), p.y(), *_segment_at(pw, "second", p)
+        )
+        assert d_first == pytest.approx(d_second, abs=1e-6), "并列前提不成立"
+        assert hit_test_curve(pw, p) == "first", f"x_range={x_range}"
+
+
+def _segment_at(pw, name, scene_pt):
+    """取点击点所在段的两个端点（scene 像素），供并列前提量测。"""
+    ci = pw.curves[name]
+    vx = pw.view_box.mapSceneToView(scene_pt).x()
+    idx = int(np.searchsorted(ci.x_data, vx))
+    i = max(0, min(len(ci.x_data) - 2, idx - 1))
+    a = pw.view_box.mapViewToScene(
+        QPointF(float(ci.x_data[i]), float(ci.y_data[i]))
+    )
+    b = pw.view_box.mapViewToScene(
+        QPointF(float(ci.x_data[i + 1]), float(ci.y_data[i + 1]))
+    )
+    return a.x(), a.y(), b.x(), b.y()
+
+
 def test_hit_step_post_riser_and_platform(step_plot):
     """step-post：竖直 riser 中点/两端 + 平台段都命中；直线模式对照不中。"""
     pw = step_plot
@@ -503,7 +616,11 @@ def test_hit_skips_single_point_curve(plot_factory, qapp):
 
 
 def test_hit_outside_data_x_range(hit_plot):
-    """端点缓存区间排除：x 超出 [x_min, x_max] 直接不中。"""
+    """halo 粗筛：x 远超 [x_min-dx_tol, x_max+dx_tol] 直接不中。
+
+    rev3 起粗筛是**容差 halo**而非严格闭区间（见下方 rev3 护栏段），
+    本例取 +1e3 数据单位，远在 halo 之外，断言口径不变。
+    """
     pw = hit_plot
     ci = pw.curves["c"]
     p = pw.view_box.mapViewToScene(
@@ -518,6 +635,230 @@ def test_hit_tolerates_missing_view_box():
         curves = {}
 
     assert hit_test_curve(Stub(), QPointF(0.0, 0.0)) is None
+
+
+# ---------------------------------------------------------------------------
+# P1 · rev3 命中几何护栏（容差带窗口 / halo / 仿射向量化）
+#
+# 评审第 1 轮实证原设计（计划 §3.3 严格 x 域粗筛 + (idx-1,idx) 两线段邻域）
+# 有两处必然漏命中，用户授权设计变更后落地：
+#   RC1 固定 ±2 采样邻域与像素容差不同量纲（24.7 行/px 时 8px ≈ 198 行）；
+#   RC2 严格闭区间吃掉 halo，且 float32 往返误差拒绝精确端点点击。
+# 证据：tmp/2026-11-13/r1_out_hit_quantify.txt（C2 漏 13/56、C3 halo 全漏）、
+#       r1_out_hit_edges.txt（B2 网格漏 66/126）、r1_out_dup_x.txt（E2 漏 2/4）。
+# 本段每条都先钉住"旧口径必漏"的前提，避免断言空转。
+# ---------------------------------------------------------------------------
+
+
+def _px_per_unit(pw):
+    """x 方向每数据单位对应的 scene 像素（仿射系数 sx）。"""
+    return _view_scene_affine(pw.view_box)[2]
+
+
+def _scalar_seg_dist(px, py, ax, ay, bx, by):
+    """标量点到线段距离（参照实现，供凹口/边界断言钉前提用）。"""
+    dx, dy = bx - ax, by - ay
+    len_sq = dx * dx + dy * dy
+    if len_sq <= 0.0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / len_sq))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def test_view_scene_affine_matches_per_point_mapping(hit_plot):
+    """向量化映射的前提：仿射系数与逐点 mapViewToScene 一致（3 档缩放）。"""
+    pw = hit_plot
+    vb = pw.view_box
+    worst = 0.0
+    for xr in (None, (25.0, 31.0), (-300.0, 360.0)):
+        if xr is not None:
+            vb.setXRange(*xr, padding=0)
+            settle()
+        ox, oy, sx, sy = _view_scene_affine(vb)
+        for vx in np.linspace(-40.0, 110.0, 25):
+            for vy in np.linspace(-30.0, 90.0, 15):
+                truth = vb.mapViewToScene(QPointF(float(vx), float(vy)))
+                worst = max(
+                    worst,
+                    abs(truth.x() - (ox + sx * vx)),
+                    abs(truth.y() - (oy + sy * vy)),
+                )
+    assert worst < 1e-6, f"仿射假设不成立，向量化映射不可信：偏差 {worst:.3e}px"
+
+
+def test_min_segment_distance_matches_scalar_reference():
+    """向量化距离与标量参照逐段一致，退化段（a==b）不产生 NaN。"""
+    def scalar(px, py, ax, ay, bx, by):
+        dx, dy = bx - ax, by - ay
+        len_sq = dx * dx + dy * dy
+        if len_sq <= 0.0:
+            return math.hypot(px - ax, py - ay)
+        t = ((px - ax) * dx + (py - ay) * dy) / len_sq
+        t = max(0.0, min(1.0, t))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+    rng = np.random.default_rng(11)
+    n = 500
+    ax = rng.uniform(-100, 100, n)
+    ay = rng.uniform(-100, 100, n)
+    bx = ax + rng.uniform(-20, 20, n)
+    by = ay + rng.uniform(-20, 20, n)
+    bx[:50] = ax[:50]          # 退化段：重复 x 的竖直 riser 会出现
+    by[:50] = ay[:50]
+    px, py = 3.0, -7.0
+    ref = np.array([scalar(px, py, ax[i], ay[i], bx[i], by[i]) for i in range(n)])
+    assert np.all(np.isfinite(ref)), "退化段产生 NaN"
+    got = _min_segment_distance_px(px, py, ax, ay, bx, by)
+    assert got == pytest.approx(float(ref.min()), abs=1e-9)
+    empty = np.array([], dtype=float)
+    assert _min_segment_distance_px(px, py, empty, empty, empty, empty) == math.inf
+
+
+def test_hit_exact_endpoints_both_ends(hit_plot):
+    """RC2：精确点击首/尾数据点必须命中（float32 往返误差不得拒绝）。"""
+    pw = hit_plot
+    ci = pw.curves["c"]
+    vb = pw.view_box
+    round_trip_err = 0.0
+    for i in (0, len(ci.x_data) - 1):
+        vx, vy = float(ci.x_data[i]), float(ci.y_data[i])
+        p = vb.mapViewToScene(QPointF(vx, vy))
+        back = vb.mapSceneToView(p).x()
+        round_trip_err = max(round_trip_err, abs(back - vx))
+        assert hit_test_curve(pw, p) == "c", f"端点 i={i} 反解 vx={back!r}"
+    # 钉住前提：scene→view 往返确有误差，严格闭区间会因此拒绝端点点击
+    assert round_trip_err > 0.0, "往返无误差，本例检不出 RC2 的浮点边界分支"
+
+
+def test_hit_halo_beyond_last_point(hit_plot):
+    """RC2：尾点外侧 1/4/7px 的墨水仍在容差内 → 命中；20px 外不中。"""
+    pw = hit_plot
+    ci = pw.curves["c"]
+    vb = pw.view_box
+    sx = _px_per_unit(pw)
+    y_last = float(ci.y_data[-1])
+    for dx_px, expect in ((1.0, "c"), (4.0, "c"), (7.0, "c"), (20.0, None)):
+        vx = float(ci.x_max) + dx_px / sx
+        p = vb.mapViewToScene(QPointF(vx, y_last))
+        assert vb.mapSceneToView(p).x() > ci.x_max, "halo 前提不成立：须落在域外"
+        assert hit_test_curve(pw, p) == expect, f"域外 {dx_px}px"
+
+
+@pytest.fixture()
+def dense_step_plot(plot_factory, qapp):
+    """RC1 场景：n=20000 高密度 + 一个阶跃（后半段抬升 40）。
+
+    密度 ≈ 24.7 行/px → 8px 容差带 ≈ 198 行，远超旧 ±2 采样邻域。
+    """
+    _, y = make_timeseries(n=20000)
+    y = y.copy()
+    y[12000:] += 40.0
+    df = pd.DataFrame({"sig": y})
+    pw = _shown_plot(plot_factory, df)
+    assert pw.plot_variable("sig")
+    assert pw._multi_curve_manager.apply_curve_draw_mode("sig", DRAW_MODE_STEP_POST)
+    _pin_symbol_state(pw, SYMBOL_POLICY_OFF)
+    settle()
+    return pw
+
+
+def test_hit_dense_data_side_of_riser(dense_step_plot):
+    """RC1：高密度阶跃侧面 1/3/6px（半高）必须命中，20px 外不中。
+
+    先钉住"最近段在旧 ±2 邻域之外"，证明本例确实检出 RC1 而非空转。
+    """
+    pw = dense_step_plot
+    ci = pw.curves["sig"]
+    vb = pw.view_box
+    rect = vb.sceneBoundingRect()
+    density = len(ci.x_data) / rect.width()
+    assert density > 10.0, f"密度不足，检不出 RC1：{density:.1f} 行/px"
+
+    i = 12000                       # 阶跃索引：riser 落在 x_data[12000]
+    x_riser = float(ci.x_data[i])
+    y_half = (float(ci.y_data[i - 1]) + float(ci.y_data[i])) / 2
+    sx = _px_per_unit(pw)
+    for dx_px, expect in ((1.0, "sig"), (3.0, "sig"), (6.0, "sig"), (20.0, None)):
+        vx = x_riser - dx_px / sx
+        p = vb.mapViewToScene(QPointF(vx, y_half))
+        idx = int(np.searchsorted(ci.x_data, vb.mapSceneToView(p).x()))
+        if expect is not None:
+            # 旧口径邻域 [idx-2, idx+1] 不含最近段 i-1 → 必漏
+            assert not (idx - 2 <= i - 1 <= idx + 1), (
+                f"前提不成立：最近段 {i - 1} 落在旧邻域内（idx={idx}）"
+            )
+        assert hit_test_curve(pw, p) == expect, f"阶跃左侧 {dx_px}px（idx={idx}）"
+
+
+def test_hit_duplicate_x_vertical_riser(plot_factory, qapp):
+    """重复 x 的竖直段中点必须命中（float32 量化 / 同 tick 多帧真实存在）。
+
+    证据 r1_out_dup_x.txt E1：t0=3600s、dt=1e-4s 经 float32 后 59% 相邻重复；
+    E2 旧口径漏 2/4。此处直接置 x_data 并同步 curve.setData，使渲染与命中
+    同源；断言前先钉住渲染路径确实含该竖直段。
+    """
+    df = pd.DataFrame({"dup": [1.0, 2.0, 6.0, 10.0, 3.0, 4.0]})
+    pw = _shown_plot(plot_factory, df)
+    assert pw.plot_variable("dup")
+    _pin_symbol_state(pw, SYMBOL_POLICY_OFF)
+    ci = pw.curves["dup"]
+    xs = np.array([1.0, 2.0, 2.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    ci.x_data = xs
+    ci.update_x_range()
+    ci.curve.setData(xs, ci.y_data)
+    settle()
+    vb = pw.view_box
+    # 渲染路径须含 x=2 的竖直段（2→6→10 三个同 x 采样）
+    rx, _ = ci.curve.getData()
+    assert list(rx).count(2.0) == 3, "重复 x 前提不成立"
+    for y in (4.0, 8.0):
+        assert hit_test_curve(pw, vb.mapViewToScene(QPointF(2.0, y))) == "dup", y
+
+
+def test_hit_step_notch_is_not_hit(step_plot):
+    """阶梯 L 形凹口里的空中点不得命中（只测两段，不含对角线）。
+
+    回归检出器：向量化时若把对角线 (x0,y0)→(x1,y1) 也算进距离，凹口点
+    会被误判命中——评审复跑实测误命中 255/4800。本例先钉住"该点确实在
+    对角线的容差内"，证明断言有检出力而非空转。
+    """
+    pw = step_plot
+    ci = pw.curves["s"]
+    vb = pw.view_box
+    x0, x1 = float(ci.x_data[1]), float(ci.x_data[2])
+    y0, y1 = float(ci.y_data[1]), float(ci.y_data[2])
+    notch = QPointF((x0 + x1) / 2, (y0 + y1) / 2)   # 恰在对角线中点
+    p = vb.mapViewToScene(notch)
+    a = vb.mapViewToScene(QPointF(x0, y0))
+    b = vb.mapViewToScene(QPointF(x1, y1))
+    diag_d = _scalar_seg_dist(p.x(), p.y(), a.x(), a.y(), b.x(), b.y())
+    assert diag_d < CURVE_HIT_TOLERANCE_PX, (
+        f"前提不成立：凹口点须在对角线容差内，实测 {diag_d:.2f}px"
+    )
+    for mode in (DRAW_MODE_STEP_POST, DRAW_MODE_STEP_PRE):
+        assert pw._multi_curve_manager.apply_curve_draw_mode("s", mode)
+        settle()
+        assert hit_test_curve(pw, p) is None, f"{mode} 凹口误命中"
+    # 对照：同一 x 移到 riser 上就命中（证明不是整条曲线都点不中）
+    assert pw._multi_curve_manager.apply_curve_draw_mode("s", DRAW_MODE_STEP_POST)
+    settle()
+    assert hit_test_curve(pw, vb.mapViewToScene(QPointF(x1, (y0 + y1) / 2))) == "s"
+
+
+def test_hit_two_point_curve_endpoints(plot_factory, qapp):
+    """n=2 曲线：首/尾点都要命中（旧口径 hi<=lo 时整条被跳过）。"""
+    df = pd.DataFrame({"two": [10.0, 20.0]})
+    pw = _shown_plot(plot_factory, df)
+    assert pw.plot_variable("two")
+    _pin_symbol_state(pw, SYMBOL_POLICY_OFF)
+    settle()
+    ci = pw.curves["two"]
+    assert len(ci.x_data) == 2
+    for i in (0, 1):
+        p = pw.view_box.mapViewToScene(
+            QPointF(float(ci.x_data[i]), float(ci.y_data[i]))
+        )
+        assert hit_test_curve(pw, p) == "two", f"n=2 端点 i={i}"
 
 
 # ---------------------------------------------------------------------------

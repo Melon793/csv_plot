@@ -1115,7 +1115,11 @@ class LegendTextBrowser(QTextBrowser):
         self.setExtraSelections([])
         # 两投影收口：tint 已就地清空（保留原语义，含无选择集属性的替身），
         # 这里补曲线加粗投影恢复。播报不在本函数内——用户/系统共用入口。
-        pw._refresh_selection_projections()
+        # getattr 守卫与同函数内 selection/highlight 的防御风格一致：轻量
+        # 替身 pw 可能没有该方法（评审 NB-4 / D13）。
+        refresh = getattr(pw, "_refresh_selection_projections", None)
+        if callable(refresh):
+            refresh()
 
     def refresh_selection_highlight(self, *, prune: bool = True) -> None:
         """按当前选择集重放 ExtraSelections 高亮。
