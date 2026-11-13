@@ -1715,7 +1715,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             clear = getattr(label, "clear_legend_selection", None)
             if callable(clear):
                 clear()
-            if had_selection:
+            # 播报与投影同口径防御：替身 label 缺 clear 方法时集合并未清，
+            # 不得播「已清除选择」（评审 r2 NB-B1）。
+            if had_selection and callable(clear):
                 action = "clear"
         else:
             return  # Ctrl+空白：选择保持（与 legend 口径一致）

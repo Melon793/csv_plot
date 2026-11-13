@@ -638,7 +638,10 @@ class LegendTextBrowser(QTextBrowser):
                     return
                 if modifiers & Qt.KeyboardModifier.ShiftModifier:
                     self._range_select_legend(var_name)
-                    announce_selection(self._pw, "select", var_name)
+                    # 与 Ctrl 分支同口径：_range_select_legend 在选择集缺失时
+                    # 早退（no-op），此时不得播报（评审 r2 NB-A3）。
+                    if getattr(self._pw, "_legend_selection", None) is not None:
+                        announce_selection(self._pw, "select", var_name)
                     return
             elif var_name is None and not modifiers:
                 # 空白单击清空选择集；裸单击条目不清（D4：显隐正交）
@@ -1246,9 +1249,13 @@ class LegendTextBrowser(QTextBrowser):
         elif chosen is act_copy:
             QApplication.clipboard().setText("、".join(selection))
         elif chosen is act_clear:
+            # BL-1：clear 前取实时集合快照，与 plot/legend 两个 clear 点同口径。
+            # 不复用「selection 列表非空」：列表只核对 pw.curves，菜单模态循环
+            # 期间若集合被清而 curves 保留，clear 是 no-op 却会误播（r2 NB-C1）。
+            had_selection = bool(getattr(pw, "_legend_selection", ()))
             self.clear_legend_selection()
-            # selection 非空已由上方早退保证 → 等价于 clear 前快照（BL-1）
-            announce_selection(pw, "clear")
+            if had_selection:
+                announce_selection(pw, "clear")
 
     def _apply_batch_style_picks(
         self, names: list[str], picked: dict[str, str]

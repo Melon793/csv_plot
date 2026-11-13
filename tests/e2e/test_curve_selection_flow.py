@@ -538,5 +538,5 @@ def test_status_bar_broadcast_keeps_cursor_readout(plotted_window, qapp, qtbot):
     _click_plot(pw, _curve_pos(pw, "speed"))
 
     assert mw._message_label.text() == "已选中：speed"
-    assert len(_readouts()) == len(before), "播报不得挤掉/清空绘图区读数"
+    assert _readouts() == before, "播报不得挤掉/清空/改写绘图区读数"
     assert pw.vline.isVisible()

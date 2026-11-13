@@ -17,6 +17,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication
 
 from src.core.config import (
+    HIGHLIGHT_CURVE_Z,
     HIGHLIGHT_LINE_WIDTH,
     HIGHLIGHT_THIN_LINE_WIDTH,
     THICK_LINE_WIDTH,
@@ -245,6 +246,57 @@ def test_reload_prunes_selection_and_both_projections(
     assert _is_tinted(pw, "speed")
     assert not _is_tinted(pw, "rpm")
     # 系统路径静默：reload 全程不得出现选择类播报
+    assert not any(m.startswith(_SELECTION_PREFIXES) for m in messages), messages
+
+
+def test_reload_emphasis_survives_skipped_style_refresh(
+    plotted_window, qapp, qtbot, tmp_path, monkeypatch
+):
+    """BL-2（评审 r2 自查）：reload 收尾的样式刷新被跳过时，加粗仍须在。
+
+    真实缺陷时序：刚点过曲线就 reload，``_is_interacting`` 尚未落定 →
+    收尾唯一那次 ``update_plot_style`` 被门控整个跳过 → 重建出的曲线停在
+    基础 pen（``_cached_pen_key is None``），此后视图范围不变就永不重刷，
+    选中曲线永久不加粗。负载下实测 6 次 reload 命中 2 次、pump 1.2 s 不收敛
+    （tmp/2026-11-14/probe_reload_gates.py 门控轨迹）。
+
+    确定性复现：把 ``update_plot_style`` 换成空实现并计数，等价于"那次刷新
+    被跳过"，不靠 CPU 负载碰运气。断言加粗只能来自独立收口
+    ``_refresh_selection_after_rebuild``；同时钉住系统路径静默。
+    """
+    mw = plotted_window
+    pw = _pw(mw)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    assert pw._legend_selection == {"speed"}
+    messages = _spy_status(mw, monkeypatch)
+
+    style_calls: list[int] = []
+    monkeypatch.setattr(
+        pw._plot_ui_manager,
+        "update_plot_style",
+        lambda *a, **k: style_calls.append(1),
+    )
+
+    _reload_with(
+        mw,
+        qtbot,
+        tmp_path,
+        header=["time", "speed"],
+        units=["s", "km/h"],
+        rows=_two_col_rows(),
+    )
+
+    pw = _pw(mw)
+    assert style_calls, "前提：reload 收尾确实尝试过样式刷新（否则本例空转）"
+    assert pw._legend_selection == {"speed"}
+    curve = pw.curves["speed"].curve
+    assert getattr(curve, "_cached_pen_key", None) is not None, (
+        "曲线重建后没有任何一次 _apply_curve_style 落地"
+    )
+    assert curve._cached_pen_key.endswith("_hl"), curve._cached_pen_key
+    assert _width(pw, "speed") == _expected_width(pw, "speed", selected=True)
+    assert curve.zValue() == HIGHLIGHT_CURVE_Z
+    assert _is_tinted(pw, "speed")
     assert not any(m.startswith(_SELECTION_PREFIXES) for m in messages), messages
 
 

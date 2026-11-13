@@ -1417,3 +1417,73 @@ def test_selection_primitives_and_projections_are_silent(three_curves):
 
     assert pw._legend_selection == {"b", "c"}
     assert messages == []
+
+
+# ---------------------------------------------------------------------------
+# P2 · 评审第 2 轮守卫转正（r2 NB-A3 / NB-B1 / NB-C1）
+#
+# 三例原为 tmp/2026-11-14/probe_r2_component_edges.py 的 A3/B1/C1，
+# 修复前 failed、修复后 passed；转正为常驻护栏，防止守卫被后续改动抹掉。
+# 共同口径：**动作没真正发生就不得播报**（no-op 静默），与投影侧防御一致。
+# ---------------------------------------------------------------------------
+
+
+def test_legend_shift_without_selection_attr_is_silent(three_curves):
+    """NB-A3：Shift 分支与 Ctrl 分支同口径——选择集缺失时范围选早退
+    （no-op），此时不得播「已选中」。生产恒为 set，本例守替身/未来路径。"""
+    pw = three_curves
+    browser = pw.legend_label
+    messages = _status_recorder(pw)
+    saved = pw._legend_selection
+    del pw._legend_selection
+    try:
+        _legend_click(
+            browser,
+            _legend_anchor_pos(browser, "b"),
+            Qt.KeyboardModifier.ShiftModifier,
+        )
+    finally:
+        pw._legend_selection = saved
+
+    assert messages == [], f"no-op 仍播报：{messages}"
+
+
+def test_plot_blank_clear_with_unavailable_clear_is_silent(hit_plot, monkeypatch):
+    """NB-B1：空白清选的播报须受「clear 真的可执行」约束，不能只看
+    had_selection 快照——替身 label 缺 clear 方法时集合并未清，不得误播。"""
+    pw = hit_plot
+    messages = _status_recorder(pw)
+    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    assert pw._legend_selection == {"b"}
+    messages.clear()
+
+    monkeypatch.setattr(
+        pw.legend_label, "clear_legend_selection", None, raising=False
+    )
+    _click(pw, _vp(pw, _blank_scene(pw)))
+
+    assert pw._legend_selection == {"b"}, "前提：clear 不可用，集合应保持不变"
+    assert messages == [], f"未清选却播报：{messages}"
+
+
+def test_batch_menu_clear_after_collection_emptied_is_silent(
+    three_curves, monkeypatch
+):
+    """NB-C1：批量菜单清选须取**实时集合**快照，不复用「selection 列表非空」。
+    列表只核对 pw.curves；菜单模态循环期间集合被清而 curves 保留时，
+    clear 是 no-op，不得播「已清除选择」（与 plot/legend 两 clear 点同口径）。"""
+    pw = three_curves
+    browser = pw.legend_label
+    browser._toggle_legend_selection("a")
+    browser._toggle_legend_selection("b")
+    messages = _status_recorder(pw)
+
+    _fake_menu_env(
+        monkeypatch,
+        choose_text="清除选择",
+        before_return=lambda: browser.clear_legend_selection(),
+    )
+    browser._exec_batch_var_menu(QPoint(0, 0))
+
+    assert pw._legend_selection == set()
+    assert messages == [], f"集合已空仍播报：{messages}"
