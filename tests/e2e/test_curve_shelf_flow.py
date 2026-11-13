@@ -337,6 +337,12 @@ def test_rebuilt_shelf_resets_capsule_count(loaded_window, qapp):
 
     mw.hide_curve_shelf()
     force_delete(dialog)  # C++ 已析构，Python 包装器尚存：走 RuntimeError 重建分支
-    mw._sync_shelf_capsule()
+
+    rebuilt = mw.get_curve_shelf()
+    assert rebuilt is not dialog
     assert capsule.count() == 0
     assert capsule.isChecked() is False
+    # 重建后 entries_changed 必须重接，否则徽章永远停在 0
+    _drop(rebuilt.shelf, build_var_mimedata(["rpm"]))
+    qapp.processEvents()
+    assert capsule.count() == 1

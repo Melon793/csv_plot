@@ -327,13 +327,19 @@ class _ShelfCapsuleButton(_FlatIconButton):
         if self._count <= 0:
             return
         text = f"{self._BADGE_MAX}+" if self._count > self._BADGE_MAX else str(self._count)
-        radius = 6.5 if len(text) > 1 else 5.5
+        # 字号/半径随位数收缩：8px 下 "99+" 实测 18px，13px 圆必裁
+        if len(text) > 2:
+            radius, font_px = 7.5, 6
+        elif len(text) > 1:
+            radius, font_px = 6.5, 7
+        else:
+            radius, font_px = 5.5, 8
         center = QPointF(self.width() - 1 - radius, 1 + radius)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(_ACCENT_COLOR))
         painter.drawEllipse(center, radius, radius)
         font = painter.font()
-        font.setPixelSize(8)
+        font.setPixelSize(font_px)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor("#ffffff"))

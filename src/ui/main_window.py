@@ -714,12 +714,15 @@ class MainWindow(QMainWindow):
         self._sync_shelf_capsule()
 
     def _sync_shelf_capsule(self, visible: bool | None = None) -> None:
-        """把条数 / 开合态 / 加载闸门一次性同步到页签角位胶囊。
+        """把条数与开合态同步到页签角位胶囊。
 
         注意 ``curve_shelf_if_open()`` 名不副实：它只做存活校验、不判
         ``isVisible()``。徽章恰恰依赖"关窗后仍返回对象"的语义保持 N；
         后人若把它"修正"成判可见，徽章会立刻归零。反之判开合态必须
         显式看 ``isVisible()``，不能拿它当可见性判据。
+
+        加载闸门**不在这里采样**：加载结束不会再有 sync 事件，临时采样会
+        把胶囊灰度永久写死。唯一闸门来源是 ``set_button_status``（T2c）。
         """
         if not widget_alive(self):
             return
@@ -734,7 +737,6 @@ class MainWindow(QMainWindow):
         if visible is None:
             visible = bool(dialog is not None and dialog.isVisible())
         tabs.set_shelf_active(bool(visible))
-        tabs.set_shelf_enabled(not self.is_data_loading())
 
     def _on_curve_shelf_visibility_changed(self, visible: bool) -> None:
         """浮窗隐藏/显示（含标题栏关闭）时同步旧按钮与胶囊勾选态。"""
