@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 from PySide6.QtCore import Qt
 
+from src.core.config import compute_global_x_limits
 from src.ui.mark_stats import MarkStatsWindow
 
 
@@ -383,3 +384,64 @@ def test_closing_mark_region_removes_items_on_every_page(
     first_region.setRegion([saved_before[0] - 5.0, saved_before[1] + 5.0])
     assert mw.saved_mark_range == saved_before
     assert mw.mark_region_btn.isChecked() is False
+
+
+def test_new_page_after_time_correction_keeps_x_range_in_same_units(
+    dense_loaded_window, qtbot
+):
+    """回归：系数 0.1 后新建页必须继承全局基准，切页范围不得被 limits 夹回。
+
+    旧实现里新建页的 PlotWidget 从构造默认 factor=1.0 起步，而其它页已是
+    0.1：第 5 页曲线 X 是 1..200（应为 0.1..20），切页跟随范围跨量纲搬运，
+    被目标页 limits 夹回后又把夹回值带回去，用户看到来回乱跳。
+    """
+    mw = dense_loaded_window
+
+    def wait_activation(page) -> None:
+        qtbot.waitUntil(
+            lambda p=page: mw.current_page is p and mw._pending_activation is None,
+            timeout=3000,
+        )
+        qtbot.waitUntil(lambda p=page: len(p.plot_widgets) > 0, timeout=3000)
+
+    # 建到 4 页，再把全局基准改成 0.1
+    pages = [mw.current_page]
+    for _ in range(3):
+        page = mw.new_page()
+        assert page is not None
+        wait_activation(page)
+        pages.append(page)
+    assert mw.layout_manager.apply_time_correction(0.1, 0.0) is True
+
+    # 第 5 页：旧实现 factor 停在 1.0
+    page5 = mw.new_page()
+    assert page5 is not None
+    wait_activation(page5)
+    master5 = page5.master_container().plot_widget
+    assert master5.plot_variable("speed")
+    qtbot.waitUntil(lambda: "speed" in master5.curves, timeout=3000)
+
+    expected_limits = compute_global_x_limits(mw.loader, 0.1, 0.0)
+    assert expected_limits is not None
+    expected_x_last = float(mw.loader.datalength) * 0.1
+    for container in page5.visible_containers():
+        plot_widget = container.plot_widget
+        assert plot_widget.factor == pytest.approx(0.1)
+        assert plot_widget.offset == pytest.approx(0.0)
+        curve_info = plot_widget.curves.get("speed")
+        if curve_info is not None:
+            assert curve_info.x_data[-1] == pytest.approx(
+                expected_x_last, rel=1e-6
+            )
+        assert list(plot_widget.view_box.state["limits"]["xLimits"]) == pytest.approx(
+            [expected_limits[2], expected_limits[3]]
+        )
+
+    # 切页跟随：目标页与源页同量纲，范围必须原样落地
+    master5.view_box.setXRange(10.0, 15.0, padding=0)
+    qtbot.wait(30)
+    for target in (pages[0], pages[1], page5):
+        mw.activate_page(target)
+        wait_activation(target)
+        current_pw = mw.current_page.master_container().plot_widget
+        assert _view_x(current_pw) == pytest.approx((10.0, 15.0), abs=1e-6)
