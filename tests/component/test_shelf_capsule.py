@@ -173,6 +173,23 @@ def test_capsule_never_overlaps_plus(qtbot, pages, width):
     assert cap_rect.right() < tabs.width()
 
 
+@pytest.mark.parametrize("pages,width", [(8, 360), (8, 420), (8, 540)])
+def test_plus_never_overlaps_scroll_arrows(qtbot, pages, width):
+    tabs = _make_tabs(qtbot, pages=pages, width=width)
+    bar = tabs.tabBar()
+    plus_rect = _rect_in(tabs.new_page_button, tabs)
+    arrows = [
+        child
+        for child in bar.children()
+        if child.isWidgetType()
+        and "scroll" in (child.objectName() or "").lower()
+        and child.isVisible()
+    ]
+    assert arrows, "该参数下滚动箭头应可见，否则用例失去意义"
+    for arrow in arrows:
+        assert plus_rect.intersects(_rect_in(arrow, tabs)) is False
+
+
 # ---------------------------------------------------------------------------
 # 落点：变量列表 / legend 剪切 / 复制 / 回拖拒绝 / 加载拒绝
 # ---------------------------------------------------------------------------

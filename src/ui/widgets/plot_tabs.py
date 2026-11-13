@@ -463,7 +463,12 @@ class PlotTabsWidget(QTabWidget):
         return self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
 
     def _place_new_page_button(self) -> None:
-        """把「＋」放到最后一个标签右侧；空间不足时贴右缘。"""
+        """把「＋」放到最后一个标签右侧；空间不足时贴右缘。
+
+        右翻页箭头可见时上界收紧到箭头左侧：箭头是 QTabBar 的原生子控件，
+        会盖在同级自绘按钮上（既有缺陷；角位胶囊把冲突窗宽从 ≤500 拉到
+        ≤540，这里一并按最小改动修掉）。
+        """
         # setTabBar 挂钩子后 Qt 会在构造期同步触发布局回调，此时「＋」
         # 尚未创建——直接跳过（__init__ 尾部会显式放置一次）。
         button = getattr(self, "_new_page_btn", None)
@@ -475,10 +480,33 @@ class PlotTabsWidget(QTabWidget):
             x = last_rect.right() + 5 if last_rect.isValid() else 5
         else:
             x = 5
-        x = min(x, max(2, bar.width() - button.width() - 2))
+        limit = max(2, bar.width() - button.width() - 2)
+        scrolls = self._visible_scroll_buttons()
+        if scrolls:
+            # 用最左侧的可见箭头兜底：左右箭头几何会互相重叠（实测左箭头
+            # 起点更靠左），只让右箭头会让「＋」压住左箭头。
+            limit = min(
+                limit, max(2, min(a.x() for a in scrolls) - button.width() - 2)
+            )
+        x = min(x, limit)
         y = max(0, (bar.height() - button.height()) // 2)
         button.move(x, y)
         button.raise_()
+
+    def _visible_scroll_buttons(self) -> list[QToolButton]:
+        """可见的翻页滚动箭头（Qt 未暴露公开 API，按 objectName 反查）。
+
+        不同版本/平台命名可能是 ``ScrollLeftButton`` /
+        ``qt_tabbar_scrollbutton_left``，故按 "scroll" 关键字匹配。
+        """
+        out = []
+        for child in self.tabBar().children():
+            if not child.isWidgetType():
+                continue
+            name = (child.objectName() or "").lower()
+            if "scroll" in name and child.isVisible():
+                out.append(child)
+        return out
 
     # ------------------------------------------------------------------
     # 自绘关闭按钮：逐页挂载，替换 Qt 原生关闭图标
