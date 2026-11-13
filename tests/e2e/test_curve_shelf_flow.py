@@ -100,6 +100,27 @@ def test_open_shelf_button_shows_tool_window(loaded_window, qapp, qtbot):
     assert dialog.shelf.entry_for_name("kept") is not None
 
 
+def test_minimized_shelf_restores_from_capsule(loaded_window, qapp, qtbot):
+    """最小化后点胶囊必须恢复，不能停在"勾着但看不见"的死循环。"""
+    mw = loaded_window
+    mw.toggle_curve_shelf(True)
+    qapp.processEvents()
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is not None and dialog.isVisible() is True
+
+    dialog.showMinimized()
+    qapp.processEvents()
+    assert dialog.isMinimized() is True
+    # 最小化即视为关：胶囊取消勾选，下一次点击语义是"打开"
+    assert mw.plot_tabs.shelf_capsule.isChecked() is False
+
+    qtbot.mouseClick(mw.plot_tabs.shelf_capsule, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert dialog.isMinimized() is False
+    assert dialog.isVisible() is True
+    assert mw.plot_tabs.shelf_capsule.isChecked() is True
+
+
 def test_cross_page_transfer_end_to_end(loaded_window, qapp):
     mw = loaded_window
     page1 = mw.pages[0]

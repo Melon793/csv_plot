@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDrag, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -611,6 +611,18 @@ class CurveShelfDialog(QDialog):
         super().hideEvent(event)
         self.visibility_changed.emit(False)
 
+    def changeEvent(self, event):
+        """最小化/恢复时同步开合态。
+
+        部分平台最小化不伴随 hideEvent，单靠 hideEvent 会让胶囊停在勾选态，
+        下一次点击被当成"关闭"，窗口永远唤不回。这里把"最小化"也视为关。
+        """
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.visibility_changed.emit(
+                self.isVisible() and not self.isMinimized()
+            )
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         """关闭 = 隐藏单例（条目保留），几何落盘。"""
         self._save_geometry()
@@ -677,6 +689,10 @@ class CurveShelfDialog(QDialog):
             )
 
     def _save_geometry(self) -> None:
+        # 最小化/最大化时 saveGeometry 会把窗口状态一并存盘，下次启动会
+        # 直接以最小化出现（等于丢窗）；与 mark_stats.save_geom 同口径跳过。
+        if self.isMinimized() or self.isMaximized():
+            return
         from src.core.settings import AppSettings
 
         AppSettings().set_curve_shelf_geometry(self.saveGeometry())

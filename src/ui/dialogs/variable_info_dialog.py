@@ -1150,6 +1150,10 @@ class VariableInfoDialog(QDialog):
     def save_geom(self) -> None:
         mw = self._get_main_window()
         if mw is not None and hasattr(mw, "var_info_geometry"):
+            # 最小化时 saveGeometry 会把 WindowMinimized 一并存盘，下次打开
+            # 直接以最小化出现（等于丢窗）；与 DataTableDialog.save_geom 同口径。
+            if self.isMinimized():
+                return
             mw.var_info_geometry = self.saveGeometry()
 
     def load_geom(self) -> None:

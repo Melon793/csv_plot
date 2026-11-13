@@ -709,7 +709,12 @@ class MainWindow(QMainWindow):
     def _show_curve_shelf(self) -> None:
         """显示浮窗（懒建由 get_curve_shelf 负责，含 entries_changed 接线）。"""
         dialog = self.get_curve_shelf()
-        dialog.show()
+        # 最小化窗口 show() 不会恢复（Qt 语义），必须 showNormal。否则胶囊
+        # 勾选为"开"但窗口仍最小化；Qt.Tool 不占任务栏，用户无处找回。
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
         dialog.raise_()
         self._sync_shelf_capsule(visible=True)
         if not getattr(self, "_curve_shelf_hint_shown", False):
@@ -744,7 +749,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_shelf_peek_pending", False):
             return
         self._shelf_peek_pending = True
-        self.get_curve_shelf().show()
+        dialog = self.get_curve_shelf()
+        # 最小化窗口 show() 不恢复；探出仍不 raise/activate，避免抢拖拽会话
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
         self._sync_shelf_capsule(visible=True)
 
     def _toggle_curve_shelf_shortcut(self) -> None:
@@ -757,7 +767,9 @@ class MainWindow(QMainWindow):
         if btn is None or not btn.isEnabled():
             return
         dialog = self.curve_shelf_if_open()
-        visible = bool(dialog is not None and dialog.isVisible())
+        visible = bool(
+            dialog is not None and dialog.isVisible() and not dialog.isMinimized()
+        )
         self.toggle_curve_shelf(not visible)
 
     def _sync_shelf_capsule(self, visible: bool | None = None) -> None:
@@ -782,7 +794,13 @@ class MainWindow(QMainWindow):
         shelf = dialog.shelf if dialog is not None else None
         tabs.set_shelf_count(shelf.count() if shelf is not None else 0)
         if visible is None:
-            visible = bool(dialog is not None and dialog.isVisible())
+            # 最小化窗口仍占 isVisible()==True（部分平台），开态必须排除它，
+            # 否则胶囊会停在"勾着但看不见窗口"的状态。
+            visible = bool(
+                dialog is not None
+                and dialog.isVisible()
+                and not dialog.isMinimized()
+            )
         tabs.set_shelf_active(bool(visible))
 
     def _on_curve_shelf_visibility_changed(self, visible: bool) -> None:

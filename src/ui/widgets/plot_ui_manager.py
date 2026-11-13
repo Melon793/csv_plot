@@ -1359,8 +1359,13 @@ class LegendTextBrowser(QTextBrowser):
             added.append(name)
         if not added:
             return
-        dialog.show()
-        dialog.raise_()
+        # 统一走主窗口入口：最小化时用 showNormal 恢复，并同步胶囊开态
+        show_shelf = getattr(main_window, "_show_curve_shelf", None)
+        if callable(show_shelf):
+            show_shelf()
+        else:
+            dialog.show()
+            dialog.raise_()
         if cut:
             def _make_remove(target: Any, var: str):
                 def _remove():

@@ -465,6 +465,33 @@ class PlotTabsWidget(QTabWidget):
         if self._shelf_capsule is not None:
             self._shelf_capsule.setEnabled(bool(enabled))
 
+    def _place_shelf_capsule(self) -> None:
+        """把角位胶囊在页签栏高度内垂直居中。
+
+        QTabWidget 摆放角位控件时按平台样式对齐（cocoa 贴顶、Fusion 贴底），
+        写死 20px 高的胶囊因此会随平台出现上下留白不均。这里只改 y 不改尺寸，
+        不影响 36px 占位契约与「＋」避让计算。
+        """
+        capsule = getattr(self, "_shelf_capsule", None)
+        if capsule is None:
+            return
+        y = max(0, (self.tabBar().height() - capsule.height()) // 2)
+        if capsule.y() != y:
+            capsule.move(capsule.x(), y)
+
+    def event(self, event) -> bool:  # noqa: N802 - Qt 命名
+        handled = super().event(event)
+        # 角位控件由 QTabWidget 的布局在每次布局/换肤/显隐后重新摆放，
+        # 必须在 super() 之后覆盖；只 move 不改尺寸，不会再次触发布局。
+        if event.type() in (
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.StyleChange,
+        ):
+            self._place_shelf_capsule()
+        return handled
+
     def close_button(self, index: int) -> QToolButton | None:
         """指定页的自绘关闭按钮（测试共用）。"""
         return self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)

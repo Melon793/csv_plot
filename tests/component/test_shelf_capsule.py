@@ -163,6 +163,14 @@ def test_capsule_returns_width_when_hidden(capsule_shelf):
     assert bar.width() == with_capsule
 
 
+def test_capsule_vertically_centered_in_tabbar(capsule_shelf):
+    """平台样式摆放角位控件时贴顶/贴底不一，胶囊必须按页签栏高度居中。"""
+    tabs, _shelf, _host = capsule_shelf
+    capsule = tabs.shelf_capsule
+    bar = tabs.tabBar()
+    assert abs(capsule.geometry().center().y() - bar.rect().center().y()) <= 1
+
+
 @pytest.mark.parametrize("pages,width", [(3, 360), (8, 420), (8, 900)])
 def test_capsule_never_overlaps_plus(qtbot, pages, width):
     tabs = _make_tabs(qtbot, pages=pages, width=width)

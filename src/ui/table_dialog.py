@@ -355,9 +355,6 @@ class DataTableDialog(QMainWindow):
                     if var_name in state.df.columns and dlg._tab_widget:
                         dlg._tab_widget.setCurrentIndex(state.widget_index)
                         break
-            dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
         else:
             dlg._saved_scroll_pos = (
                 dlg.main_view.verticalScrollBar().value()
@@ -366,9 +363,15 @@ class DataTableDialog(QMainWindow):
             )
             dlg.load_geom()
             dlg._add_variable_to_table(var_name, data)  # 使用内部函数
+
+        # 最小化窗口 show() 不会恢复（Qt 语义），必须 showNormal。否则入口
+        # 再点只会把已最小化的窗口再 show 一次，用户找不到窗口。
+        if dlg.isMinimized():
+            dlg.showNormal()
+        else:
             dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
+        dlg.raise_()
+        dlg.activateWindow()
 
         # 闪烁
         dlg._later(100, lambda: dlg._blink_column(var_name, pulse=BLINK_PULSE))
@@ -2130,6 +2133,10 @@ class DataTableDialog(QMainWindow):
         用于下次打开时恢复窗口状态
         """
         if self.parent() and hasattr(self.parent(), "data_table_geometry"):
+            # 最小化时 saveGeometry 会把 WindowMinimized 一并存盘，下次打开
+            # 直接以最小化出现（等于丢窗）；最大化属于用户偏好，不排除。
+            if self.isMinimized():
+                return
             self.parent().data_table_geometry = self.saveGeometry()
 
     def load_geom(self):
