@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import subprocess
@@ -54,6 +55,169 @@ def _sync_guard(*plot_widgets):
         for pw, was in saved:
             pw._is_syncing_range = was
 
+
+# pyqtgraph 的默认 xLimits 是 ±1e307 哨兵（ViewBox.py 初始化），不是 None；
+# 超过该量级的值视为“无权威 limits”，不能拿来对齐。
+_XLIMIT_ABSOLUTE_MAX = 1e306
+
+
+def _valid_x_limits(limits) -> tuple[float, float] | None:
+    """取出可用于对齐的 xLimits；None / 哨兵 / 非法值一律视为无效。"""
+    if not limits or len(limits) < 2:
+        return None
+    try:
+        x_min, x_max = float(limits[0]), float(limits[1])
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(x_min) and math.isfinite(x_max)):
+        return None
+    if abs(x_min) >= _XLIMIT_ABSOLUTE_MAX or abs(x_max) >= _XLIMIT_ABSOLUTE_MAX:
+        return None
+    if x_max <= x_min:
+        return None
+    return x_min, x_max
+
+
+def _x_limits_equal(current, target, *, rel_tol: float = 1e-9) -> bool:
+    if current is None or target is None:
+        return False
+    tol = rel_tol * max(1.0, abs(target[1] - target[0]))
+    return abs(current[0] - target[0]) <= tol and abs(current[1] - target[1]) <= tol
+
+
+def _x_limits_with_min_range(axis_manager, target):
+    """按 ``_set_x_limits_with_min_range`` 的规则展开 target。
+
+    写入时会保证 limits 宽度 >= minXRange；比较也必须用同一规则，否则
+    minXRange > 数据宽度（如极短文件）时每次同步都会判定不等、重复写 limits。
+    """
+    if axis_manager is None or target is None:
+        return target
+    try:
+        min_x_range = float(axis_manager._get_min_x_range_value())
+    except Exception:
+        return target
+    if not math.isfinite(min_x_range) or min_x_range <= 0:
+        return target
+    if target[1] - target[0] < min_x_range:
+        center = (target[0] + target[1]) / 2.0
+        return (center - min_x_range / 2.0, center + min_x_range / 2.0)
+    return target
+
+
+def apply_page_x_limits(grid, *, master_resolver=None) -> int:
+    """把本页各子图的 xLimits 统一到全局 oracle（必要时回退 master 的有效 limits）。
+
+    子图 xLimits 与全局数据域不一致时，``linkedViewChanged`` 里的
+    ``setXRange`` 会被其自身 limits 钳制，表现为“XLink 失效”。这里只写
+    limits、不写 viewRange，范围对齐仍由 ``sync_linked_x_ranges`` 负责。
+
+    只要发生改写，就对**本页所有存活子图**统一 ``_sync_guard``：``setLimits``
+    会同步触发 ``updateViewRange`` 并 emit ``sigRangeChanged``，改 master 时还会
+    正推给全部子图，不守卫会让它们误入用户交互态；无改写时完全不进守卫，
+    保持现有测试语义。
+
+    Returns:
+        实际改写了 limits 的子图数量。
+    """
+    containers = list(getattr(grid, "plot_widgets", None) or [])
+    if not containers:
+        return 0
+    if master_resolver is not None:
+        master_container = master_resolver(containers)
+    else:
+        master_container = containers[0]
+
+    master_limits = None
+    if master_container is not None and _widget_alive(master_container):
+        master_pw = getattr(master_container, "plot_widget", None)
+        master_vb = getattr(master_pw, "view_box", None)
+        if master_vb is not None:
+            master_limits = _valid_x_limits(
+                master_vb.state.get("limits", {}).get("xLimits")
+            )
+
+    # 先收集存活子图及其 oracle：某页里只要有一个子图能算出全局数据域，
+    # 没有 oracle 的子图（含无 loader 的 master）也应向它对齐。
+    entries: list[tuple[object, object, tuple[float, float, float, float] | None]] = []
+    page_oracle_limits = None
+    for container in containers:
+        if not _widget_alive(container):
+            continue
+        pw = getattr(container, "plot_widget", None)
+        if pw is None or getattr(pw, "_is_being_destroyed", False):
+            continue
+        vb = getattr(pw, "view_box", None)
+        if vb is None:
+            continue
+        axis_manager = getattr(pw, "_axis_manager", None)
+        oracle = None
+        if axis_manager is not None and hasattr(axis_manager, "_global_x_limits"):
+            oracle = axis_manager._global_x_limits()
+        if oracle is not None and page_oracle_limits is None:
+            page_oracle_limits = (float(oracle[2]), float(oracle[3]))
+        entries.append((pw, vb, oracle))
+
+    changed: list[tuple[object, object, object, tuple[float, float], object]] = []
+    live_pws: list[object] = []
+    for pw, vb, oracle in entries:
+        live_pws.append(pw)
+        if oracle is not None:
+            raw_target = (float(oracle[2]), float(oracle[3]))
+        else:
+            raw_target = page_oracle_limits or master_limits
+        if raw_target is None:
+            continue
+
+        axis_manager = getattr(pw, "_axis_manager", None)
+        target = _x_limits_with_min_range(axis_manager, raw_target)
+        current = _valid_x_limits(vb.state.get("limits", {}).get("xLimits"))
+        if _x_limits_equal(current, target):
+            continue
+        changed.append((pw, vb, axis_manager, target, current))
+
+    if not changed:
+        return 0
+
+    # 改写 master 的 limits 会经 sigXRangeChanged 正推给全部子图；只守被改写
+    # 的那个不够——收到推流的子图同样会把程序化变更误判为用户交互。
+    with _sync_guard(*live_pws):
+        for pw, vb, axis_manager, target, current in changed:
+            # 临时断开 link：setLimits 会经 updateViewRange 把新范围推给关联视图，
+            # 不隔离会把已对齐的 master 拽到子图的钳制范围上。
+            linked = vb.linkedView(0)
+            try:
+                if linked is not None:
+                    vb.setXLink(None)
+                if axis_manager is not None and hasattr(
+                    axis_manager, "_set_x_limits_with_min_range"
+                ):
+                    axis_manager._set_x_limits_with_min_range(target[0], target[1])
+                else:
+                    pw.plot_item.setLimits(xMin=target[0], xMax=target[1])
+            except Exception:
+                # 单个子图写入失败不能中断整页 range 同步
+                logger.warning(
+                    "[XLIMITS] apply_page_x_limits failed: plot=%s",
+                    getattr(pw, "y_name", "?"), exc_info=True,
+                )
+            else:
+                logger.debug(
+                    "[XLIMITS] apply_page_x_limits: plot=%s limits %s -> %s",
+                    getattr(pw, "y_name", "?"), current, target,
+                )
+            finally:
+                if linked is not None:
+                    try:
+                        vb.setXLink(linked)
+                    except Exception:
+                        logger.warning(
+                            "[XLIMITS] restore link failed: plot=%s",
+                            getattr(pw, "y_name", "?"), exc_info=True,
+                        )
+    return len(changed)
+
+
 def sync_linked_x_ranges(grid, *, master_resolver=None) -> None:
     """对“能提供 plot_widgets 的网格对象”做 XLink 健康检查与范围对齐。
 
@@ -83,6 +247,10 @@ def sync_linked_x_ranges(grid, *, master_resolver=None) -> None:
     if master_pw is None or not hasattr(master_pw, "view_box"):
         return
     master_vb = master_pw.view_box
+
+    # 先统一 xLimits：子图 limits 偏窄/偏移时，下面的 setXRange 会被自身
+    # limits 钳制，看起来就像 XLink 失效（同一宽度、整体平移）。
+    apply_page_x_limits(grid, master_resolver=master_resolver)
 
     # === X-link 健康检查：丢失 link 的 plot 自动重建 ===
     for index, container in enumerate(containers):
@@ -189,13 +357,23 @@ def sync_linked_x_ranges(grid, *, master_resolver=None) -> None:
         if not ok:
             plot_id = getattr(pw, 'y_name', '') or str(list(getattr(pw, 'curves', {}).keys())[:2])
             vb_xlimits = vb.state.get('limits', {}).get('xLimits', [None, None])
-            # 不同宽度的 linked plot 会由 linkedViewChanged 按像素几何计算 range，
-            # 与 master 的 range 不同是正常行为，降级为 DEBUG
-            logger.debug(
-                "[XLINK_SYNC] range mismatch (expected by geometry): expected=(%.4f, %.4f) got=(%s, %s) "
-                "target_xLimits=%s plot=%s",
+            master_xlimits = master_vb.state.get('limits', {}).get('xLimits', [None, None])
+            # ViewBox 像素宽度/横向位置不同时，linkedViewChanged 会按几何比例
+            # 换算 range，与 master 不同属正常；两者都相同还不同 = 被自身
+            # xLimits 钳制，必须告警。
+            try:
+                same_rect = (
+                    abs(master_vb.rect().width() - vb.rect().width()) < 0.5
+                    and abs(master_vb.rect().x() - vb.rect().x()) < 0.5
+                )
+            except Exception:
+                same_rect = False
+            log_fn = logger.warning if same_rect else logger.debug
+            log_fn(
+                "[XLINK_SYNC] range mismatch: expected=(%.4f, %.4f) got=(%s, %s) "
+                "child_xLimits=%s master_xLimits=%s same_rect=%s plot=%s",
                 xmin, xmax, new_range[0], new_range[1],
-                vb_xlimits, plot_id,
+                vb_xlimits, master_xlimits, same_rect, plot_id,
             )
 
 

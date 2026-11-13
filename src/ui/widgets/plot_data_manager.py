@@ -979,19 +979,34 @@ class PlotDataManager:
         pw.plot_item.setLimits(xMin=None, xMax=None)
         pw.plot_item.setLimits(yMin=None, yMax=None)
 
-        xMin = pw.offset + pw.factor * index_xMin
-        xMax = pw.offset + pw.factor * index_xMax
+        # 优先用全局 oracle（compute_global_x_limits）落 limits/range：入参 index
+        # 在 MDF 下已是时间，再乘 factor 会双重换算，且 per-plot limits 偏窄
+        # 会让后续 XLink 同步被钳制。oracle 不可用时保留原 index 逻辑。
+        global_limits = None
+        if hasattr(self._axis_manager, "_global_x_limits"):
+            global_limits = self._axis_manager._global_x_limits()
 
-        if not (np.isnan(xMax) or np.isinf(xMax)):
-            xMin, xMax = self._axis_manager._get_safe_x_range(xMin, xMax)
-
-            # 先设 limits
-            padding_xVal = DEFAULT_PADDING_VAL_X
-            limits_xMin = xMin - padding_xVal * (xMax - xMin)
-            limits_xMax = xMax + padding_xVal * (xMax - xMin)
+        if global_limits is not None:
+            xMin = float(global_limits[0])
+            xMax = float(global_limits[1])
+            limits_xMin = float(global_limits[2])
+            limits_xMax = float(global_limits[3])
             self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
-            # 再设 range
             pw.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
+        else:
+            xMin = float(pw.offset + pw.factor * index_xMin)
+            xMax = float(pw.offset + pw.factor * index_xMax)
+
+            if not (np.isnan(xMax) or np.isinf(xMax)):
+                xMin, xMax = self._axis_manager._get_safe_x_range(xMin, xMax)
+
+                # 先设 limits
+                padding_xVal = DEFAULT_PADDING_VAL_X
+                limits_xMin = xMin - padding_xVal * (xMax - xMin)
+                limits_xMax = xMax + padding_xVal * (xMax - xMin)
+                self._axis_manager._set_x_limits_with_min_range(limits_xMin, limits_xMax)
+                # 再设 range
+                pw.view_box.setXRange(xMin, xMax, padding=DEFAULT_PADDING_VAL_X)
 
         pw.view_box.setYRange(0, 1, padding=DEFAULT_PADDING_VAL_Y)
         # 游标域回到全局数据域（按当前 factor/offset 现算）。这里曾经是

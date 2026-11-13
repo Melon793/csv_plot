@@ -614,6 +614,15 @@ class CursorSyncManager(MainWindowBaseManager):
                 external_xmin=global_min_x,
                 external_xmax=global_max_x,
             )
+        # auto_range 内部按各子图自身数据/limits 落范围，结束后用全局 oracle
+        # 统一一次 xLimits，避免个别子图 limits 偏窄导致后续 XLink 被钳制。
+        from src.ui.layout_manager import apply_page_x_limits
+        if target is not None and hasattr(target, "master_container"):
+            apply_page_x_limits(
+                target, master_resolver=lambda _containers: target.master_container()
+            )
+        else:
+            apply_page_x_limits(self.mw)
         if announce:
             self.mw._show_status_message("已按全部可见曲线自动缩放 XY 轴")
 
