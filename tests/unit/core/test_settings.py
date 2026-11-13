@@ -149,6 +149,22 @@ class TestMarkStatsPersistence:
         assert app_settings.get_mark_stats_header_state() is None
 
 
+class TestPlotVariableEditorGeometry:
+    def test_geometry_roundtrip(self, app_settings):
+        """QByteArray 几何经 ini（base64）往返不变。"""
+        from PySide6.QtCore import QByteArray
+
+        geometry = QByteArray(b"\x00\x01editor-geometry-bytes")
+        app_settings.set_plot_variable_editor_geometry(geometry)
+        restored = app_settings.get_plot_variable_editor_geometry()
+        assert bytes(restored) == b"\x00\x01editor-geometry-bytes"
+
+    def test_geometry_unset_returns_none(self, app_settings):
+        # 同上：上一用例写入的几何会残留在 ini，先显式清键
+        app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, "")
+        assert app_settings.get_plot_variable_editor_geometry() is None
+
+
 class TestPersistence:
     def test_values_survive_singleton_reset(self, qapp):
         """sync 后重置单例，新实例仍能从 ini 读回数据"""

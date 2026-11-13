@@ -98,17 +98,22 @@ class PlotVariableEditorDialog(QDialog):
         self.setWindowTitle("绘图变量编辑器")
         self.setWindowFlag(Qt.WindowType.Tool, True)
         self.setModal(False)
-        self.resize(600, 600)  # 高度从 400 调到 600，留出候选列表空间
         self.setAcceptDrops(True)
 
         # 最近一次排序前的行序快照（单层，供"撤销上次排序"回退）
         self._last_sort_order: list[str] | None = None
+
+        # 固定列（显示/颜色/绘制方式/数据点）是否已完成首次内容自适应：
+        # 仅首帧数据填充后执行一次，后续 reload 不重算（尊重用户手动拖拽）
+        self._columns_sized = False
 
         # 高DPI支持 - PySide6中不需要WA_UseHighDpiPixmaps
         # PySide6默认支持高DPI，通过样式表控制字体大小
 
         self.setup_ui()
         self.load_current_curves()
+        # 几何恢复放在数据填充后：初始宽按实际列宽计算
+        self._restore_geometry()
 
     def setup_ui(self):
         """设置UI界面"""
@@ -199,6 +204,8 @@ class PlotVariableEditorDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  # 颜色列固定宽度
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)  # 绘制方式列固定宽度
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)  # 数据点列固定宽度
+        # 固定列先给保底宽度（首帧数据填充后由 _adjust_fixed_column_widths
+        # 按表头 + 单元格控件内容自适应重算，跨平台字体差异下不手工拍值）
         self.var_table.setColumnWidth(0, 60)  # 显示列
         self.var_table.setColumnWidth(2, 80)  # 颜色列
         self.var_table.setColumnWidth(3, 78)  # 绘制方式列
@@ -393,7 +400,82 @@ class PlotVariableEditorDialog(QDialog):
         for var_name, ref in invalid.items():
             self._add_invalid_to_table(var_name, ref)
 
+        if not self._columns_sized and self.var_table.rowCount() > 0:
+            self._adjust_fixed_column_widths()
+            self._columns_sized = True
         self.update_button_states()
+
+    def _adjust_fixed_column_widths(self):
+        """固定列（显示/颜色/绘制方式/数据点）按内容自适应列宽。
+
+        首帧数据填充后执行一次（此时单元格控件已就位，宽度由表头 +
+        复选框/色块/下拉框实际内容决定，跨平台字体差异下不手工拍值）；
+        设下限防极端窄值，后续 reload 不重算以尊重用户手动拖拽。
+        """
+        minimums = {0: 44, 2: 64, 3: 72, 4: 76}
+        for col in minimums:
+            self.var_table.resizeColumnToContents(col)
+            self.var_table.setColumnWidth(
+                col, max(self.var_table.columnWidth(col), minimums[col])
+            )
+
+    def _geometry_on_screen(self) -> bool:
+        """当前窗口几何是否与任一现存屏幕的可用区域相交。
+
+        多显示器拔插守卫：restoreGeometry 可能把窗口放到已拔掉的屏幕
+        上（窗口"消失"），此校验失败则丢弃记忆、回退初始几何。
+        用 normalGeometry（restoreGeometry 同步写入，对未显示窗口也
+        有效）；frameGeometry 对未显示窗口是空矩形，会误判放行。
+        """
+        from PySide6.QtGui import QGuiApplication
+
+        geo = self.normalGeometry()
+        if geo.isNull():
+            return True  # 无可判定几何（未布局完成），放行交给用户
+        return any(
+            geo.intersects(screen.availableGeometry())
+            for screen in QGuiApplication.screens()
+        )
+
+    def _restore_geometry(self):
+        """恢复上次窗口几何；无记忆/记忆损坏/记忆落失效屏幕时回退初始值。
+
+        初始宽按实际固定列宽和 + 变量名列最小宽 + 滚动条/边距余量计算，
+        并 clamp 到主窗口宽 × 0.9（Tool 窗宽于主窗观感差）；高度静态 600
+        （macOS Tool 窗标题栏高度不同，只自适应宽度更稳）。首次打开
+        居中于主窗口。
+        """
+        from src.core.settings import AppSettings
+
+        self.setMinimumSize(560, 400)
+        settings = AppSettings()
+        geometry = settings.get_plot_variable_editor_geometry()
+        if (
+            geometry is not None
+            and self.restoreGeometry(geometry)
+            and self._geometry_on_screen()
+        ):
+            return
+
+        # 自适应初始宽：固定列实际宽 + 变量名列最小宽 + 表格边框与
+        # 滚动条余量 + 窗口边框余量
+        fixed = sum(self.var_table.columnWidth(c) for c in (0, 2, 3, 4))
+        width = fixed + 260 + 24 + 40
+        main_window = self.plot_widget.window()
+        if main_window is not None:
+            width = min(width, int(main_window.width() * 0.9))
+        self.resize(width, 600)
+        if main_window is not None:
+            geo = self.geometry()
+            self.move(
+                main_window.x() + (main_window.width() - geo.width()) // 2,
+                main_window.y() + (main_window.height() - geo.height()) // 2,
+            )
+
+    def _save_geometry(self):
+        from src.core.settings import AppSettings
+
+        AppSettings().set_plot_variable_editor_geometry(self.saveGeometry())
 
     def _on_curves_changed_incremental(self):
         """curves_changed 增量表格更新（性能优化方案 A）
@@ -884,6 +966,7 @@ class PlotVariableEditorDialog(QDialog):
 
     def closeEvent(self, event):
         """关闭时断开 curves_changed 信号，避免重复打开编辑器导致信号连接累积"""
+        self._save_geometry()
         try:
             self.plot_widget.curves_changed.disconnect(self._on_curves_changed_incremental)
         except (TypeError, RuntimeError):
