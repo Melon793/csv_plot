@@ -219,7 +219,8 @@ class _ShelfCapsuleButton(_FlatIconButton):
 
     def _sync_tooltip(self) -> None:
         self.setToolTip(
-            f"暂存区（{self._count} 条）：把图例/变量列表拖到这里"
+            f"暂存区（{self._count} 条）：把图例/变量列表拖到这里，"
+            "Ctrl+Shift+S 开关"
         )
 
     def _on_clicked(self, checked: bool) -> None:

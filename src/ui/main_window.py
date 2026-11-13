@@ -61,6 +61,9 @@ CAN_SEGMENT_RESERVE = 80
 #: 垫片 C1：无页时的共享空列表。可读、不抛异常、不分配。
 EMPTY_PLOT_WIDGETS: list[PlotContainerWidget] = []
 
+#: 拖拽悬停自动探出暂存区（D-A4）：默认关，真机验过才允许打开
+_SHELF_AUTO_PEEK = False
+
 
 class _ElideStatusBar(QStatusBar):
     """状态栏不参与窗口最小宽度。
@@ -713,6 +716,7 @@ class MainWindow(QMainWindow):
             self._curve_shelf_hint_shown = True
             self._broadcast(
                 "暂存区已打开：把图例曲线或变量列表拖进来，再拖到目标绘图区"
+                "（Ctrl+Shift+S 开关）"
             )
 
     def hide_curve_shelf(self) -> None:
@@ -725,6 +729,29 @@ class MainWindow(QMainWindow):
         shelf = self.get_curve_shelf().shelf
         shelf.dropEvent(event)
         self._sync_shelf_capsule()
+
+    def _on_shelf_capsule_hover(self, hovered: bool) -> None:
+        """拖拽悬停探出（D-A4，默认关，真机验过才允许打开）。
+
+        探出只用 ``show()``：不 raise_、不 activateWindow，避免抢走拖拽
+        会话；``hovered=False`` 必须复位去重布尔，否则一次探出后永久失效。
+        """
+        if not _SHELF_AUTO_PEEK:
+            return
+        if not hovered:
+            self._shelf_peek_pending = False
+            return
+        if getattr(self, "_shelf_peek_pending", False):
+            return
+        self._shelf_peek_pending = True
+        self.get_curve_shelf().show()
+        self._sync_shelf_capsule(visible=True)
+
+    def _toggle_curve_shelf_shortcut(self) -> None:
+        """Ctrl+Shift+S：开也能关（if_open 只判存活，不能直接取反）。"""
+        dialog = self.curve_shelf_if_open()
+        visible = bool(dialog is not None and dialog.isVisible())
+        self.toggle_curve_shelf(not visible)
 
     def _sync_shelf_capsule(self, visible: bool | None = None) -> None:
         """把条数与开合态同步到页签角位胶囊。
@@ -1108,6 +1135,7 @@ class MainWindow(QMainWindow):
         self.plot_tabs.rename_page_requested.connect(self._on_tab_rename_requested)
         self.plot_tabs.shelf_toggle_requested.connect(self.toggle_curve_shelf)
         self.plot_tabs.shelf_drop_requested.connect(self._on_shelf_capsule_drop)
+        self.plot_tabs.shelf_drag_hovered.connect(self._on_shelf_capsule_hover)
         self.plot_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
         self.plot_tabs.currentChanged.connect(self._on_current_changed)
         root_layout.addWidget(self.plot_tabs, 1)
@@ -1177,6 +1205,9 @@ class MainWindow(QMainWindow):
 
         self._open_file_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         self._open_file_shortcut.activated.connect(self._on_open_file_shortcut)
+
+        self._shelf_shortcut = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
+        self._shelf_shortcut.activated.connect(self._toggle_curve_shelf_shortcut)
 
     # ------------------------------------------------------------------
     # 状态栏：常驻四块 —— 文件段 / x 轴段（可点开抽屉）/ 消息区 / 日志入口

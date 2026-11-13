@@ -447,3 +447,57 @@ def test_shelf_saved_geometry_is_restored(loaded_window, qapp):
         assert abs(rebuilt.geometry().y() - 140) <= 5
     finally:
         settings.set_curve_shelf_geometry(old)
+
+
+def test_shelf_hover_peek_is_off_by_default(loaded_window, qapp):
+    mw = loaded_window
+    mw.plot_tabs.shelf_drag_hovered.emit(True)
+    qapp.processEvents()
+    assert mw.curve_shelf_if_open() is None
+    assert getattr(mw, "_shelf_peek_pending", False) is False
+
+
+def test_shelf_hover_peek_when_enabled(loaded_window, qapp, monkeypatch):
+    from src.ui import main_window as mw_module
+
+    monkeypatch.setattr(mw_module, "_SHELF_AUTO_PEEK", True)
+    mw = loaded_window
+    mw.plot_tabs.shelf_drag_hovered.emit(True)
+    qapp.processEvents()
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is not None and dialog.isVisible()
+    assert mw._shelf_peek_pending is True
+
+    # M6：信号可能连发，去重后仍只探出一次且不抛
+    mw.plot_tabs.shelf_drag_hovered.emit(True)
+    assert mw._shelf_peek_pending is True
+
+    # leave 必须复位，否则一次探出后永久失效
+    mw.plot_tabs.shelf_drag_hovered.emit(False)
+    assert mw._shelf_peek_pending is False
+    mw.plot_tabs.shelf_drag_hovered.emit(True)
+    assert mw._shelf_peek_pending is True
+    assert dialog.isVisible() is True
+
+
+def test_shelf_shortcut_toggles_both_ways(loaded_window, qapp):
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtTest import QTest
+
+    mw = loaded_window
+    assert mw._shelf_shortcut.key() == QKeySequence("Ctrl+Shift+S")
+    mw.activateWindow()
+    qapp.processEvents()
+
+    mods = (
+        Qt.KeyboardModifier.ControlModifier
+        | Qt.KeyboardModifier.ShiftModifier
+    )
+    QTest.keyClick(mw, Qt.Key.Key_S, mods)
+    qapp.processEvents()
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is not None and dialog.isVisible()
+
+    QTest.keyClick(mw, Qt.Key.Key_S, mods)
+    qapp.processEvents()
+    assert dialog.isVisible() is False
