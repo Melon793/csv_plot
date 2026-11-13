@@ -221,6 +221,8 @@ def test_reload_marks_missing_shelf_entry_stale(
     assert dialog.shelf.entry_for_name("rpm").stale is True
     assert dialog.shelf.entry_for_name("speed").stale is False
     assert any("rpm 在当前数据中不存在，已置灰" in m for m in broadcasts)
+    # 置灰不删条目：徽章条数必须在 reload 后保持
+    assert mw.plot_tabs.shelf_capsule.count() == 2
 
 
 def test_reload_empty_data_marks_all_stale(
@@ -270,12 +272,19 @@ def test_reload_empty_data_marks_all_stale(
 
 
 def test_top_bar_shelf_button_is_replaced_by_capsule(loaded_window):
+    from PySide6.QtWidgets import QPushButton
+
     mw = loaded_window
     assert mw.curve_shelf_btn is not None  # 撤入口不撤实现（回滚/兼容）
     assert mw.curve_shelf_btn.isVisible() is False
     capsule = mw.plot_tabs.shelf_capsule
     assert capsule is not None and capsule.isVisible() is True
     assert capsule.isEnabled() is True
+    # top_bar 可见按钮 8 → 7（撤下的正是「暂存区」）
+    visible_buttons = [
+        b for b in mw.plot_widget.findChildren(QPushButton) if b.isVisible()
+    ]
+    assert len(visible_buttons) == 7
 
 
 def test_capsule_click_toggles_window_and_state(loaded_window, qapp, qtbot):
@@ -501,3 +510,63 @@ def test_shelf_shortcut_toggles_both_ways(loaded_window, qapp):
     QTest.keyClick(mw, Qt.Key.Key_S, mods)
     qapp.processEvents()
     assert dialog.isVisible() is False
+
+
+def test_capsule_entry_full_loop_without_top_bar_button(loaded_window, qapp, qtbot):
+    """§7.3 闭环：legend 多选直投胶囊 → 点胶囊开窗 → 跨页移出。
+
+    全程从未点击 top_bar「暂存区」按钮（D-A5/D-A3 的用户路径验收）。
+    """
+    mw = loaded_window
+    page1 = mw.pages[0]
+    pw1 = page1.plot_widgets[0].plot_widget
+    assert pw1.plot_variable("speed")
+    assert pw1.plot_variable("rpm")
+    assert pw1._multi_curve_manager.apply_curve_color("speed", "#1188cc")
+    assert pw1._multi_curve_manager.apply_curve_draw_mode("speed", "step-pre")
+    color_snapshot = pw1.curves["speed"].color
+    capsule = mw.plot_tabs.shelf_capsule
+
+    # 1) 从未开过窗：legend 多选 → 胶囊，一步入区
+    mime = build_legend_var_mimedata(["speed", "rpm"], pw1)
+    set_active_legend_drag(pw1, ["speed", "rpm"])
+    try:
+        _drop(capsule, mime)
+    finally:
+        clear_active_legend_drag()
+    qapp.processEvents()
+
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is not None
+    assert dialog.isVisible() is False  # D-A3：落点不弹窗
+    assert dialog.shelf.count() == 2
+    assert capsule.count() == 2
+    assert "speed" not in pw1.curves and "rpm" not in pw1.curves  # 剪切
+
+    # 2) 点胶囊开窗 → 跨页拖出
+    qtbot.mouseClick(capsule, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert dialog.isVisible() is True
+    page2 = mw.new_page()
+    assert page2 is not None
+    qapp.processEvents()
+    pw2 = page2.plot_widgets[0].plot_widget
+    shelf = dialog.shelf
+    keys = [e.key for e in shelf.entries]
+    shelf_mime = build_shelf_mimedata(keys, ["speed", "rpm"], shelf)
+    set_active_shelf_drag(shelf, keys)
+    try:
+        _drop(pw2, shelf_mime)
+    finally:
+        clear_active_shelf_drag()
+    qapp.processEvents()
+
+    assert "speed" in pw2.curves and "rpm" in pw2.curves
+    assert pw2.curves["speed"].color == color_snapshot
+    assert pw2.curves["speed"].draw_mode == "step-pre"
+    assert shelf.count() == 0
+    assert capsule.count() == 0
+
+    # D-A5 护栏：旧按钮对象仍在但不可见
+    assert mw.curve_shelf_btn is not None
+    assert mw.curve_shelf_btn.isVisible() is False

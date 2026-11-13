@@ -202,3 +202,64 @@ def test_plus_follows_last_tab_instead_of_far_right(tabs, qapp):
     # 紧挨最后一个标签右侧，而不是标签栏最右端
     assert 0 <= button.x() - last.right() <= 12
     assert button.x() + button.width() < bar.width() - 100
+
+
+# ---------------------------------------------------------------------------
+# 角位暂存区胶囊（方案 A）：存在性 / 初始隐藏 / 闸门同步 / 状态转发
+# ---------------------------------------------------------------------------
+
+
+def _make_tabs_with_gate(qtbot):
+    from PySide6.QtWidgets import QWidget
+
+    tabs = PlotTabsWidget()
+    qtbot.addWidget(tabs)
+    tabs.resize(640, 300)
+    tabs.addTab(QWidget(), "页面页1")
+    return tabs
+
+
+def test_corner_shelf_capsule_exists_and_initially_hidden(qapp, qtbot):
+    tabs = _make_tabs_with_gate(qtbot)
+    tabs.show()
+    qapp.processEvents()
+    capsule = tabs.shelf_capsule
+    assert capsule is not None
+    assert capsule.isVisible() is False
+
+    tabs.set_new_page_enabled(True)
+    qapp.processEvents()
+    assert capsule.isVisible() is True
+
+
+def test_new_page_gate_syncs_shelf_capsule_visibility(qapp, qtbot):
+    tabs = _make_tabs_with_gate(qtbot)
+    tabs.set_new_page_enabled(True)
+    tabs.show()
+    qapp.processEvents()
+    tabs.set_new_page_enabled(False)
+    qapp.processEvents()
+    assert tabs.tabBar().isVisible() is False
+    assert tabs.shelf_capsule.isVisible() is False
+
+
+def test_shelf_capsule_state_api_forwards(qapp, qtbot):
+    tabs = _make_tabs_with_gate(qtbot)
+    tabs.set_new_page_enabled(True)
+    tabs.show()
+    qapp.processEvents()
+    capsule = tabs.shelf_capsule
+
+    tabs.set_shelf_count(3)
+    assert capsule.count() == 3
+    assert "3 条" in capsule.toolTip()
+
+    tabs.set_shelf_active(True)
+    assert capsule.isChecked() is True
+    tabs.set_shelf_active(False)
+    assert capsule.isChecked() is False
+
+    tabs.set_shelf_enabled(False)
+    assert capsule.isEnabled() is False
+    tabs.set_shelf_enabled(True)
+    assert capsule.isEnabled() is True
