@@ -922,6 +922,11 @@ class LayoutManager(MainWindowBaseManager):
             return False
         elif etype == QEvent.Type.DragLeave:
             self.hide_drop_overlay()
+            # 胶囊自己要在 leave 时收掉高亮；其余控件维持既有（吞掉）行为，
+            # PlotWidget 指示器残留是另一条既有缺陷，不在本轮 scope（D-A9）
+            tabs = getattr(mw, "plot_tabs", None)
+            if tabs is not None and obj is getattr(tabs, "shelf_capsule", None):
+                return False
             return True
         elif etype == QEvent.Type.DragMove:
             if event.mimeData().hasUrls():

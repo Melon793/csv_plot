@@ -1044,6 +1044,13 @@ class FileLoaderManager(MainWindowBaseManager):
             shelf_btn = getattr(self.mw, "curve_shelf_btn", None)
             if shelf_btn is not None:
                 shelf_btn.setEnabled(status)
+            # 页签角位胶囊同闸门（D-A7）：这里是**唯一**闸门来源，替身宿主
+            # 可能没有 plot_tabs / 胶囊关闭时 set_shelf_enabled 不存在
+            set_shelf_enabled = getattr(
+                getattr(self.mw, "plot_tabs", None), "set_shelf_enabled", None
+            )
+            if callable(set_shelf_enabled):
+                set_shelf_enabled(status)
 
     def reload_data(self):
         # v5.12: 互斥锁 —— 防止快速连续 reload 导致并发冲突
