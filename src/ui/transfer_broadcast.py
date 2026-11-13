@@ -123,6 +123,35 @@ def broadcast_text(host: Any, message: str) -> str:
     return message
 
 
+def build_selection_message(action: str, name: str = "") -> str:
+    """选择手势播报文案（D9 唯一来源，供各入口与测试复用）。
+
+    未知 action 返回空串 = 不播报（调用点据此静默）。
+    """
+    if action == "select":
+        return f"已选中：{name}"
+    if action == "deselect":
+        return f"已取消选中：{name}"
+    if action == "clear":
+        return "已清除选择"
+    return ""
+
+
+def announce_selection(pw: Any, action: str, name: str = "") -> str:
+    """手势层薄封装：取 host + 文案 + 播报，返回实际文案（空串=未播报）。
+
+    只在**用户手势**调用点使用；系统路径（setHtml 重放 / 占位清选 /
+    reload prune）一律静默。host 无 ``_show_status_message`` 时
+    ``broadcast_text`` 静默跳过但仍返回原文案，独立 component 测试安全。
+    """
+    msg = build_selection_message(action, name)
+    if not msg:
+        return ""
+    window = getattr(pw, "window", None)
+    host = window() if callable(window) else None
+    return broadcast_text(host, msg)
+
+
 def source_closed_message(names: Iterable[str]) -> str:
     return f"源绘图已关闭，无法暂存 {_names_text(names)}"
 

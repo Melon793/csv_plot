@@ -5,8 +5,8 @@
 → Ctrl 加选第二条 → 空白单击清选；反向：legend Ctrl 点选 → 曲线加粗。
 缩放热路径与游标开启态下高亮存活。
 
-P1 只断言"选择 + 两投影"；状态栏播报文案/真实通道（_message_label、
-toolTip、info 回收）在 P2 追加到本文件。
+P1 断言"选择 + 两投影"；P2 在本文件末尾追加状态栏播报的**真实通道**断言
+（_message_label / toolTip / info 定时回收 / 长名截断 / 游标读数隔离）。
 
 关键隔离点由 e2e conftest 提供（sys.argv 重置 / app_settings 每例归零 /
 QMessageBox 替身），本文件只补真实链路与几何前提。
@@ -330,3 +330,213 @@ def test_selection_adds_no_scene_items(plotted_window, qapp):
     _click_plot(pw, _curve_pos(pw, "speed"))
     _click_plot(pw, _curve_pos(pw, "rpm"), Qt.KeyboardModifier.ControlModifier)
     assert len(pw.scene().items()) == n0
+
+
+# ---------------------------------------------------------------------------
+# P2 · 状态栏播报真实通道（计划 §3.4 / §4.2）
+#
+# 只有本层断言 _message_label / toolTip / info 定时回收；component 层
+# 只断言文案与调用次数（FakeHost 无状态栏通道）。
+# ---------------------------------------------------------------------------
+
+
+def test_status_bar_shows_selected_name(plotted_window):
+    """裸单击曲线 → 状态栏右区显示「已选中：speed」（真实通道）。"""
+    mw = plotted_window
+    pw = _pw(mw)
+
+    _click_plot(pw, _curve_pos(pw, "speed"))
+
+    assert mw._message_label.text() == "已选中：speed"
+    assert mw._message_label.toolTip() == "已选中：speed"
+    assert mw._message_text == "已选中：speed"
+
+
+def test_status_bar_ctrl_select_and_deselect_wording(plotted_window):
+    """Ctrl 加选/减选：三态文案逐条落到真实标签。"""
+    mw = plotted_window
+    pw = _pw(mw)
+    ctrl = Qt.KeyboardModifier.ControlModifier
+
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    assert mw._message_label.text() == "已选中：speed"
+    _click_plot(pw, _curve_pos(pw, "rpm"), ctrl)
+    assert mw._message_label.text() == "已选中：rpm"
+    _click_plot(pw, _curve_pos(pw, "rpm"), ctrl)
+    assert mw._message_label.text() == "已取消选中：rpm"
+    assert pw._legend_selection == {"speed"}
+
+
+def test_status_bar_blank_clear_snapshot(plotted_window):
+    """BL-1 真实通道版：空选择清选不播报，非空才播「已清除选择」。"""
+    mw = plotted_window
+    pw = _pw(mw)
+    mw.clear_status_message()
+    assert mw._message_label.text() == "", "前置：右区应为空"
+
+    _click_plot(pw, _blank_pos(pw))  # 本就为空 → 静默
+    assert mw._message_label.text() == ""
+
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    _click_plot(pw, _blank_pos(pw))
+    assert mw._message_label.text() == "已清除选择"
+    assert pw._legend_selection == set()
+
+
+def test_status_bar_ctrl_blank_is_silent(plotted_window):
+    """Ctrl+空白：选择保持，状态栏文案不被改写。"""
+    mw = plotted_window
+    pw = _pw(mw)
+
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    _click_plot(pw, _blank_pos(pw), Qt.KeyboardModifier.ControlModifier)
+
+    assert mw._message_label.text() == "已选中：speed"
+    assert pw._legend_selection == {"speed"}
+
+
+def test_status_bar_info_message_expires(plotted_window, monkeypatch, qtbot):
+    """D8 瞬时语义：info 级到时自动回收（加速替身只改超时值）。
+
+    先例 test_status_bar.py:249-264：先锁住真实配置字面值，再
+    monkeypatch.setitem 把 5s 压到 50ms。
+    """
+    from src.ui.main_window import STATUS_MESSAGE_TIMEOUT_MS
+
+    assert STATUS_MESSAGE_TIMEOUT_MS == {"info": 5000, "warn": 8000}
+    monkeypatch.setitem(STATUS_MESSAGE_TIMEOUT_MS, "info", 50)
+
+    mw = plotted_window
+    pw = _pw(mw)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    assert mw._message_label.text() == "已选中：speed"
+
+    qtbot.waitUntil(lambda: mw._message_label.text() == "", timeout=2000)
+    # 回收只清文案，不动选择集与两投影（持久识别由加粗+tint 承担）
+    assert pw._legend_selection == {"speed"}
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+    assert _is_tinted(pw, "speed")
+
+
+def test_status_bar_later_broadcast_overwrites(plotted_window):
+    """D8：后续播报覆盖前一条（不建常驻段、不排队）。"""
+    mw = plotted_window
+    pw = _pw(mw)
+
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    assert mw._message_label.text() == "已选中：speed"
+    _click_plot(pw, _curve_pos(pw, "rpm"), Qt.KeyboardModifier.ControlModifier)
+    assert mw._message_label.text() == "已选中：rpm"
+
+    mw._broadcast("其他动作播报")
+    assert mw._message_label.text() == "其他动作播报"
+    assert pw._legend_selection == {"speed", "rpm"}
+
+
+def test_legend_and_plot_broadcast_identical_text(plotted_window):
+    """D6 两入口同规格：真实通道上文案逐字相同。"""
+    mw = plotted_window
+    pw = _pw(mw)
+
+    _click_plot(pw, _curve_pos(pw, "rpm"))
+    plot_text = mw._message_label.text()
+    _click_plot(pw, _blank_pos(pw))
+    _legend_ctrl_click(pw, "rpm")
+    settle()
+
+    assert plot_text == mw._message_label.text() == "已选中：rpm"
+
+
+@pytest.fixture()
+def long_name_window(main_window, qapp, qtbot, dialog_stubs, tmp_path):
+    """超长变量名的真实窗口（合成名，非现场标识符）。
+
+    验证既有 ``_status_elided`` + ``setToolTip`` 全文出口对选择播报同样
+    生效（计划 §3.4：零新增截断代码）。
+    """
+    from tests.fixtures.data_factory import make_simple_rows, write_csv
+
+    long_name = "diag_" + "extended_channel_" * 9 + "tail"
+    csv = write_csv(
+        tmp_path / "e2e_long_name.csv",
+        header=["time", long_name],
+        units=["s", "degC"],
+        rows=[[row[0], row[1]] for row in make_simple_rows(50)],
+    )
+    dialog_stubs["open_file"] = (str(csv), "CSV/TXT Files (*.csv)")
+    qtbot.mouseClick(main_window.load_btn, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: main_window.loader is not None, timeout=5000)
+    qtbot.waitUntil(lambda: len(main_window.plot_widgets) > 0, timeout=5000)
+    qapp.processEvents()
+    assert not dialog_stubs["critical"], f"加载出现错误弹窗: {dialog_stubs['critical']}"
+
+    mw = main_window
+    mw.resize(1200, 800)
+    qapp.processEvents()
+    pw = _pw(mw)
+    assert pw.plot_variable(long_name)
+    pw.curves[long_name].symbol_policy = SYMBOL_POLICY_OFF
+    pw._refresh_selection_projections()
+    qapp.processEvents()
+    qtbot.waitUntil(
+        lambda: pw.view_box.sceneBoundingRect().height() > 100, timeout=5000
+    )
+    settle()
+    return mw, long_name
+
+
+def test_status_bar_long_name_elided_with_full_tooltip(long_name_window):
+    """长变量名：标签按 … 截断，toolTip 给全文（既有通道，零新增代码）。"""
+    mw, long_name = long_name_window
+    pw = _pw(mw)
+    full = f"已选中：{long_name}"
+
+    _click_plot(pw, _curve_pos(pw, long_name))
+
+    assert mw._message_text == full
+    assert mw._message_label.toolTip() == full
+    shown = mw._message_label.text()
+    assert shown != full and shown.endswith("…"), f"未触发截断：{shown!r}"
+    assert full.startswith(shown[:-1])
+    assert pw._legend_selection == {long_name}
+
+
+def test_status_bar_broadcast_keeps_cursor_readout(plotted_window, qapp, qtbot):
+    """通道隔离：游标开启态下播报进状态栏，绘图区读数标签不受影响。
+
+    读数标签的生成沿用 test_cursor_label_edge.py:53-63 的驱动口径
+    （show_values_only=False + 越过时间节流直调更新链）：本例被测的是
+    "播报通道与绘图区读数物理隔离"，不是游标更新链本身。
+    """
+    mw = plotted_window
+    pw = _pw(mw)
+    if not mw.cursor_btn.isChecked():
+        qtbot.mouseClick(mw.cursor_btn, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        settle()
+    assert mw.cursor_btn.isChecked()
+
+    ci = pw.curves["speed"]
+    pw.show_values_only = False
+    pw.vline.setVisible(True)
+    pw.vline.setPos(float(ci.x_data[len(ci.x_data) // 2]))
+    pw._is_interacting = False
+    pw._last_cursor_update_time = 0.0
+    pw._cursor_manager._update_multi_curve_cursor_label()
+    qapp.processEvents()
+
+    def _readouts():
+        return [
+            item.toPlainText()
+            for item in pw._cursor_item_pool["labels"]
+            if item.isVisible() and item.toPlainText()
+        ]
+
+    before = _readouts()
+    assert before, "前置：游标读数应已生成"
+
+    _click_plot(pw, _curve_pos(pw, "speed"))
+
+    assert mw._message_label.text() == "已选中：speed"
+    assert len(_readouts()) == len(before), "播报不得挤掉/清空绘图区读数"
+    assert pw.vline.isVisible()

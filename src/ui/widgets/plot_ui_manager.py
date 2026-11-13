@@ -90,6 +90,7 @@ from src.ui.drag_drop import (
     set_active_legend_drag,
 )
 from src.ui.transfer_broadcast import (
+    announce_selection,
     broadcast_text,
     broadcast_transfer,
     loading_reject_message,
@@ -627,13 +628,25 @@ class LegendTextBrowser(QTextBrowser):
             if var_name is not None and var_name in self._pw.curves:
                 if modifiers & Qt.KeyboardModifier.ControlModifier:
                     self._toggle_legend_selection(var_name)
+                    selection = getattr(self._pw, "_legend_selection", None)
+                    if selection is not None:
+                        announce_selection(
+                            self._pw,
+                            "select" if var_name in selection else "deselect",
+                            var_name,
+                        )
                     return
                 if modifiers & Qt.KeyboardModifier.ShiftModifier:
                     self._range_select_legend(var_name)
+                    announce_selection(self._pw, "select", var_name)
                     return
             elif var_name is None and not modifiers:
                 # 空白单击清空选择集；裸单击条目不清（D4：显隐正交）
+                # clear 前快照（BL-1）：clear 后集合即空，事后读恒空
+                had_selection = bool(getattr(self._pw, "_legend_selection", ()))
                 self.clear_legend_selection()
+                if had_selection:
+                    announce_selection(self._pw, "clear")
         super().mouseReleaseEvent(event)  # 未拖拽时正常触发 anchorClicked
 
     def mouseDoubleClickEvent(self, event):
@@ -1234,6 +1247,8 @@ class LegendTextBrowser(QTextBrowser):
             QApplication.clipboard().setText("、".join(selection))
         elif chosen is act_clear:
             self.clear_legend_selection()
+            # selection 非空已由上方早退保证 → 等价于 clear 前快照（BL-1）
+            announce_selection(pw, "clear")
 
     def _apply_batch_style_picks(
         self, names: list[str], picked: dict[str, str]

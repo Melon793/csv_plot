@@ -20,7 +20,7 @@ import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtTest import QTest
 
 from src.core.config import (
@@ -38,10 +38,18 @@ from src.core.data_types import (
     SYMBOL_POLICY_OFF,
     SYMBOL_POLICY_ON,
 )
+from src.ui.transfer_broadcast import announce_selection, build_selection_message
 from src.ui.widgets.multi_curve_manager import (
     _min_segment_distance_px,
     _view_scene_affine,
     hit_test_curve,
+)
+from tests.component.test_legend_context_menu import _fake_menu_env
+from tests.component.test_legend_selection import (
+    _anchor_pos as _legend_anchor_pos,
+    _attach_shelf_host,
+    _blank_pos as _legend_blank_pos,
+    _click as _legend_click,
 )
 from tests.fixtures.data_factory import make_timeseries
 from tests.fixtures.waits import settle
@@ -1091,3 +1099,321 @@ def test_bare_click_tolerates_missing_selection_attr(hit_plot):
         _click(pw, _vp(pw, _scene_at(pw, "b")))
     finally:
         pw._legend_selection = saved
+
+
+# ---------------------------------------------------------------------------
+# P2 · 状态栏播报（计划 §3.4 / D2 D9）
+#
+# 纪律（rev2 复核 BL-2）：component 层宿主 FakeHost 无状态栏通道
+# （conftest.py:59-69）→ 只断言**文案字符串与调用次数**；_message_label /
+# toolTip / info 定时回收属 e2e（tests/e2e/test_curve_selection_flow.py）。
+# ---------------------------------------------------------------------------
+
+
+def _status_recorder(pw):
+    """给宿主挂 ``_show_status_message`` recorder（先例 test_legend_selection
+    的 _attach_shelf_host）。返回按调用顺序累积的文案列表。"""
+    messages = []
+    pw.window()._show_status_message = messages.append
+    return messages
+
+
+def test_selection_message_wording():
+    """D9 文案唯一来源：三动作 + 未知动作空串（= 不播报）。"""
+    assert build_selection_message("select", "speed") == "已选中：speed"
+    assert build_selection_message("deselect", "speed") == "已取消选中：speed"
+    assert build_selection_message("clear") == "已清除选择"
+    assert build_selection_message("unknown", "speed") == ""
+    assert build_selection_message("") == ""
+
+
+def test_announce_selection_calls_host_and_returns_text(three_curves):
+    """薄封装：文案 → host 通道 → 返回实际文案（供调用点/测试复用）。"""
+    pw = three_curves
+    messages = _status_recorder(pw)
+
+    assert announce_selection(pw, "select", "a") == "已选中：a"
+    assert announce_selection(pw, "deselect", "a") == "已取消选中：a"
+    assert announce_selection(pw, "clear") == "已清除选择"
+    assert messages == ["已选中：a", "已取消选中：a", "已清除选择"]
+
+    assert announce_selection(pw, "bogus", "a") == ""
+    assert len(messages) == 3, "未知动作不得触发播报"
+
+
+def test_announce_selection_without_channel_still_returns_text(three_curves):
+    """NB-1 口径：host 无通道时静默跳过但**仍返回原文案**；无 window 不抛。"""
+    pw = three_curves  # FakeHost 默认无 _show_status_message
+    assert announce_selection(pw, "select", "a") == "已选中：a"
+    assert announce_selection(object(), "clear") == "已清除选择"
+
+
+def test_plot_bare_click_broadcasts_select(hit_plot):
+    pw = hit_plot
+    messages = _status_recorder(pw)
+
+    _click(pw, _vp(pw, _scene_at(pw, "b")))
+
+    assert messages == ["已选中：b"]
+    assert pw._legend_selection == {"b"}
+
+
+def test_plot_ctrl_click_broadcasts_select_then_deselect(hit_plot):
+    """Ctrl 加选/减选：toggle 无返回值 → 按事后成员判定文案（NB-3）。"""
+    pw = hit_plot
+    messages = _status_recorder(pw)
+    ctrl = Qt.KeyboardModifier.ControlModifier
+
+    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _scene_at(pw, "a")), ctrl)
+    _click(pw, _vp(pw, _scene_at(pw, "a")), ctrl)
+
+    assert messages == ["已选中：b", "已选中：a", "已取消选中：a"]
+    assert pw._legend_selection == {"b"}
+
+
+def test_plot_bare_click_replacement_broadcasts_new_name_only(hit_plot):
+    """裸单击替换选择集：只播新名字的 select，不补播旧名字 deselect。"""
+    pw = hit_plot
+    messages = _status_recorder(pw)
+
+    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _scene_at(pw, "a")))
+
+    assert messages == ["已选中：b", "已选中：a"]
+    assert pw._legend_selection == {"a"}
+
+
+def test_plot_blank_click_clear_snapshot(hit_plot):
+    """BL-1：clear 前取 had_selection 快照——空选择清选静默，非空才播。
+
+    反向注入意义：若把判定放在 clear 之后读集合，第 3 步恒空 →
+    「已清除选择」永不出现，本例立即失败。
+    """
+    pw = hit_plot
+    messages = _status_recorder(pw)
+    blank = _vp(pw, _blank_scene(pw))
+
+    _click(pw, blank)  # 本就为空 → 静默
+    assert messages == []
+    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, blank)  # 非空 → clear 播报
+    _click(pw, blank)  # 又为空 → 静默
+
+    assert messages == ["已选中：b", "已清除选择"]
+    assert pw._legend_selection == set()
+
+
+def test_plot_ctrl_blank_is_silent(hit_plot):
+    """Ctrl+空白：选择保持，且不播报（与 legend 口径一致）。"""
+    pw = hit_plot
+    messages = _status_recorder(pw)
+
+    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _blank_scene(pw)), Qt.KeyboardModifier.ControlModifier)
+
+    assert messages == ["已选中：b"]
+    assert pw._legend_selection == {"b"}
+
+
+def test_plot_non_click_gestures_are_silent(hit_plot):
+    """拖拽位移 / 非左键 release 不是选择手势 → 零播报。"""
+    pw = hit_plot
+    messages = _status_recorder(pw)
+    pos = _vp(pw, _scene_at(pw, "b"))
+    far = QPoint(pos.x() + 40, pos.y() + 30)
+
+    _press(pw, pos)
+    _release(pw, far)
+    _press(pw, pos)
+    _release(pw, pos, button=Qt.MouseButton.RightButton)
+
+    assert messages == []
+    assert pw._legend_selection == set()
+
+
+def test_plot_ctrl_click_without_selection_attr_is_silent(hit_plot):
+    """NB-3：无 _legend_selection 时 toggle 早退（@1088-1090）→ 跳过播报。"""
+    pw = hit_plot
+    messages = _status_recorder(pw)
+    saved = pw._legend_selection
+    del pw._legend_selection
+    try:
+        _click(pw, _vp(pw, _scene_at(pw, "b")), Qt.KeyboardModifier.ControlModifier)
+    finally:
+        pw._legend_selection = saved
+
+    assert messages == []
+
+
+def test_legend_ctrl_click_broadcasts_same_wording(three_curves):
+    pw = three_curves
+    browser = pw.legend_label
+    messages = _status_recorder(pw)
+    ctrl = Qt.KeyboardModifier.ControlModifier
+
+    _legend_click(browser, _legend_anchor_pos(browser, "a"), ctrl)
+    _legend_click(browser, _legend_anchor_pos(browser, "a"), ctrl)
+
+    assert messages == ["已选中：a", "已取消选中：a"]
+
+
+def test_legend_shift_range_broadcasts_endpoint(three_curves):
+    """Shift 范围选：播当前点击名（范围端点），选择集为整段。"""
+    pw = three_curves
+    browser = pw.legend_label
+    messages = _status_recorder(pw)
+
+    _legend_click(
+        browser, _legend_anchor_pos(browser, "a"), Qt.KeyboardModifier.ControlModifier
+    )
+    _legend_click(
+        browser, _legend_anchor_pos(browser, "c"), Qt.KeyboardModifier.ShiftModifier
+    )
+
+    assert pw._legend_selection == {"a", "b", "c"}
+    assert messages == ["已选中：a", "已选中：c"]
+
+
+def test_legend_blank_click_clear_snapshot(three_curves):
+    """legend 空白裸单击：与 plot 同一快照口径（BL-1）。"""
+    pw = three_curves
+    browser = pw.legend_label
+    messages = _status_recorder(pw)
+    blank = _legend_blank_pos(browser)
+
+    _legend_click(browser, blank)
+    assert messages == []
+    _legend_click(
+        browser, _legend_anchor_pos(browser, "b"), Qt.KeyboardModifier.ControlModifier
+    )
+    _legend_click(browser, blank)
+    _legend_click(browser, blank)
+
+    assert messages == ["已选中：b", "已清除选择"]
+
+
+def test_legend_bare_click_on_entry_is_silent(three_curves):
+    """裸单击条目 = 显隐切换（D4 正交）：不进选择集、不播报。
+
+    该路径还会经 anchorClicked → 图例重建（setHtml 重放），顺带钉死
+    系统路径静默。
+    """
+    pw = three_curves
+    browser = pw.legend_label
+    messages = _status_recorder(pw)
+
+    _legend_click(browser, _legend_anchor_pos(browser, "a"))
+
+    assert messages == []
+    assert pw._legend_selection == set()
+
+
+def test_plot_and_legend_broadcast_identical_text(hit_plot):
+    """D6 两入口同规格：同一曲线同一动作，文案逐字相同。"""
+    pw = hit_plot
+    browser = pw.legend_label
+    messages = _status_recorder(pw)
+
+    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    plot_message = messages[-1]
+    browser.clear_legend_selection()
+    _legend_click(
+        browser, _legend_anchor_pos(browser, "b"), Qt.KeyboardModifier.ControlModifier
+    )
+
+    assert plot_message == messages[-1] == "已选中：b"
+
+
+def test_batch_menu_clear_broadcasts_clear(three_curves, monkeypatch):
+    pw = three_curves
+    browser = pw.legend_label
+    browser._toggle_legend_selection("a")
+    browser._toggle_legend_selection("b")
+    messages = _status_recorder(pw)
+
+    _fake_menu_env(monkeypatch, choose_text="清除选择")
+    browser._exec_batch_var_menu(QPoint(0, 0))
+
+    assert messages == ["已清除选择"]
+    assert pw._legend_selection == set()
+
+
+def test_batch_menu_delete_keeps_only_action_broadcast(three_curves, monkeypatch):
+    """NB-2：批量删除虽经 clear，只播「已删除 N 个变量」，不叠加 clear。"""
+    pw = three_curves
+    browser = pw.legend_label
+    browser._toggle_legend_selection("a")
+    browser._toggle_legend_selection("b")
+    messages = _status_recorder(pw)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+
+    _fake_menu_env(monkeypatch, choose_text="删除变量（2）")
+    browser._exec_batch_var_menu(QPoint(0, 0))
+
+    assert messages == ["已删除 2 个变量"]
+    assert pw._legend_selection == set()
+
+
+def test_batch_menu_cut_keeps_only_transfer_broadcast(three_curves, monkeypatch, qapp):
+    """NB-2：剪切入区只播搬运结果，不叠加「已清除选择」。"""
+    pw = three_curves
+    browser = pw.legend_label
+    browser._toggle_legend_selection("a")
+    browser._toggle_legend_selection("b")
+    _host, _dialog, messages = _attach_shelf_host(pw)
+
+    _fake_menu_env(monkeypatch, choose_text="剪切到暂存区")
+    browser._exec_batch_var_menu(QPoint(0, 0))
+    qapp.processEvents()  # 源端删除 singleShot(0)
+
+    assert pw._legend_selection == set()
+    assert any("已剪切 a、b" in message for message in messages)
+    assert not any("已清除选择" in message for message in messages)
+
+
+def test_sethtml_replay_and_prune_are_silent(three_curves):
+    """风险 #17：图例重建重放 + prune 属系统路径，零播报。"""
+    pw = three_curves
+    label = pw.legend_label
+    label._toggle_legend_selection("a")
+    label._toggle_legend_selection("b")
+    messages = _status_recorder(pw)
+
+    del pw.curves["a"]
+    pw.update_legend_label('<a href="curve:///b">b</a>')
+
+    assert pw._legend_selection == {"b"}
+    assert messages == []
+
+
+def test_placeholder_clear_is_silent(three_curves):
+    """占位态回归清选（系统路径）：选择集清空但不播报。"""
+    pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
+    messages = _status_recorder(pw)
+
+    pw.update_legend_label("绘图区为空")
+
+    assert pw._legend_selection == set()
+    assert messages == []
+
+
+def test_selection_primitives_and_projections_are_silent(three_curves):
+    """播报不得内置于 toggle / range / clear / 收口函数（手势层专属）。"""
+    pw = three_curves
+    label = pw.legend_label
+    label._toggle_legend_selection("a")
+    messages = _status_recorder(pw)
+
+    label.clear_legend_selection()
+    label._toggle_legend_selection("b")
+    label._range_select_legend("c")
+    pw._refresh_selection_projections()
+
+    assert pw._legend_selection == {"b", "c"}
+    assert messages == []

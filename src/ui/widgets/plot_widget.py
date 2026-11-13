@@ -23,7 +23,7 @@ from src.ui.drag_drop import (
     parse_shelf_mime_payload,
 )
 from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
-from src.ui.transfer_broadcast import broadcast_text, broadcast_transfer
+from src.ui.transfer_broadcast import announce_selection, broadcast_text, broadcast_transfer
 from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
@@ -1690,26 +1690,41 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         name = hit_test_curve(self, scene_pos)
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         label = self.legend_label
+        # 前置快照（计划 §3.3 步骤 7 / rev2 BL-1）：clear 后集合即空，
+        # 事后读恒空 → "已清除选择" 永不触发，必须在分派前取。
+        had_selection = bool(getattr(self, "_legend_selection", ()))
+        action = ""
+        action_name = ""
         if name is not None:
             if ctrl:
                 toggle = getattr(label, "_toggle_legend_selection", None)
-                if callable(toggle):
+                selection = getattr(self, "_legend_selection", None)
+                if callable(toggle) and selection is not None:
                     toggle(name)
+                    # toggle 无返回值 → 按事后成员判定 select/deselect
+                    action = "select" if name in selection else "deselect"
+                    action_name = name
             else:
                 selection = getattr(self, "_legend_selection", None)
                 if selection is not None:
                     selection.clear()
                     selection.add(name)
                     self._legend_sel_anchor = name
+                    action, action_name = "select", name
         elif not ctrl:
             clear = getattr(label, "clear_legend_selection", None)
             if callable(clear):
                 clear()
+            if had_selection:
+                action = "clear"
         else:
             return  # Ctrl+空白：选择保持（与 legend 口径一致）
         # toggle/clear 内部已收口一次，这里再收口保证两投影一致（幂等：
         # pen 缓存短路，第二遍无重绘）；替身 label 缺方法时也仍有投影。
         self._refresh_selection_projections()
+        # 播报在手势层、投影之后（P2/D2）：瞬时状态栏文案，无 scene item。
+        if action:
+            announce_selection(self, action, action_name)
 
     def mousePressEvent(self, event):
         # 曲线选中联动：先按口径记录/清空点击起点，再走既有分支（不改控制流）
