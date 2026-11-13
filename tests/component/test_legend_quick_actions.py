@@ -17,16 +17,19 @@ from urllib.parse import quote
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
     QGridLayout,
+    QLabel,
+    QPushButton,
     QToolTip,
 )
 
+from src.core.data_types import DRAW_MODE_STEP_POST, SYMBOL_POLICY_OFF
 from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 from src.ui.widgets.plot_ui_manager import PALETTE_COLUMNS, LegendTextBrowser
@@ -189,9 +192,14 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def isChecked(self):
             return self._checked
 
-    class _FakeMenu:
+    class _FakeMenu(QObject):
+        """QObject 子类：右键菜单「样式」子菜单会作为 QWidgetAction 的
+        parent（真实 QMenu 语义），替身须可作 QObject 父节点。"""
+
         def __init__(self, parent=None):
+            super().__init__()
             self._acts = []
+            self._subs = []
             self.deleted = False
             menus.append(self)
 
@@ -203,6 +211,14 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def addSeparator(self):
             self._acts.append(_FakeAction(""))
 
+        def addMenu(self, title):
+            # 子菜单在父菜单 actions() 里占一个同名项；exec 可选中
+            # 子菜单内动作（与真实 QMenu.exec 返回任意层级 action 一致）
+            self._acts.append(_FakeAction(title))
+            sub = _FakeMenu()
+            self._subs.append(sub)
+            return sub
+
         def actions(self):
             return list(self._acts)
 
@@ -212,12 +228,18 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
         def close(self):
             pass
 
+        def _iter_all_acts(self):
+            for act in self._acts:
+                yield act
+            for sub in self._subs:
+                yield from sub._iter_all_acts()
+
         def exec(self, pos=None):
             if before_return is not None:
                 before_return()
             if choose_text is None:
                 return None
-            for act in self._acts:
+            for act in self._iter_all_acts():
                 if act.text() == choose_text and act.enabled:
                     return act
             return None
@@ -255,7 +277,8 @@ def _fake_palette_env(
         def __init__(self, parent=None):
             self.deleted = False
             self.closed = False
-            self.on_pick = None
+            self.picked = None
+            self.holder = None
             self._more = None
             self._acts = []
             menus.append(self)
@@ -270,21 +293,24 @@ def _fake_palette_env(
             if before_return is not None:
                 before_return()
             if pick_color is not None:
-                self.on_pick(pick_color)
+                self.picked["color"] = pick_color
+                if self.holder:
+                    self.holder[0].close()  # 模拟真实 _pick：记录即关闭顶层菜单
                 return None
             if choose_more:
                 return self._more
             return None
 
-    def _fake_build(self, current, on_pick):
+    def _fake_build(self, var_name, picked, holder):
         menu = _FakeMenu()
-        menu.on_pick = on_pick
+        menu.picked = picked
+        menu.holder = holder
         menu._more = _FakeAction("更多颜色…")
         menu._acts.append(menu._more)
         return menu, menu._more
 
     monkeypatch.setattr(
-        LegendTextBrowser, "_build_color_palette_menu", _fake_build
+        LegendTextBrowser, "_build_curve_panel_menu", _fake_build
     )
     return menus
 
@@ -371,7 +397,7 @@ def test_t3_color_block_click_does_not_toggle(plot_factory, monkeypatch, qapp):
 
     called = []
     monkeypatch.setattr(
-        browser, "_exec_color_menu", lambda *a, **k: called.append(a)
+        browser, "_exec_curve_panel", lambda *a, **k: called.append(a)
     )
     visible_before = pw.curves["a"].visible
     pos = _find_anchor_pos(browser, COLOR_SCHEME, "a")
@@ -405,7 +431,7 @@ def test_t4_palette_preset_applies(plot_factory, monkeypatch):
         pw, "update_legend_label", lambda html: legend_calls.append(html)
     )
 
-    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    pw.legend_label._exec_curve_panel("a", QPoint(0, 0))
 
     assert pw.curves["a"].color == "red"
     assert legend_calls
@@ -413,20 +439,40 @@ def test_t4_palette_preset_applies(plot_factory, monkeypatch):
     assert menus[0].deleted is True, "QMenu 应经 deleteLater 释放"
 
 
+def _panel_grid(panel):
+    """在快捷面板（QVBoxLayout）中定位色板 QGridLayout。"""
+    lay = panel.layout()
+    for i in range(lay.count()):
+        item = lay.itemAt(i)
+        if isinstance(item, QGridLayout):
+            return item
+    pytest.fail("快捷面板中未找到色板网格")
+
+
+def _panel_segs(panel):
+    """在快捷面板中按出现顺序收集 _SegmentedControl（绘制方式 / 数据点）。"""
+    from src.ui.widgets.plot_ui_manager import _SegmentedControl
+
+    return panel.findChildren(_SegmentedControl)
+
+
 def test_t5a_palette_grid_structure(plot_factory):
-    """真实 builder：10 个色块按行优先 5×2 排布，当前色唯一双环标记。"""
+    """真实 builder：面板含标题行 + 色板网格（行优先）+ 两组分段控件。"""
     pw = plot_factory()
     assert pw.plot_variable("a")  # 首条固定为色板首色
     first_color = pw.curve_colors[0]
-    menu, act_more = pw.legend_label._build_color_palette_menu(
-        first_color, lambda name: None
-    )
+    picked: dict[str, str] = {}
+    menu, act_more = pw.legend_label._build_curve_panel_menu("a", picked, [])
     try:
-        grid_host = menu.actions()[0].defaultWidget()
-        assert grid_host is not None, "网格应以 QWidgetAction 内嵌"
-        grid = grid_host.layout()
-        assert isinstance(grid, QGridLayout)
+        panel = menu.actions()[0].defaultWidget()
+        assert panel is not None, "面板应以 QWidgetAction 内嵌"
 
+        # 标题行：变量名 QLabel，tooltip 存全文
+        labels = panel.findChildren(QLabel)
+        name_label = next(lb for lb in labels if lb.toolTip() == "a")
+        assert name_label.text() == "a"
+
+        grid = _panel_grid(panel)
         swatches = [grid.itemAt(i).widget() for i in range(grid.count())]
         assert [s.color_name for s in swatches] == pw.curve_colors
         # 行优先：逐项校验 (row, col)，比只断行列数更能表达 6×2
@@ -445,6 +491,18 @@ def test_t5a_palette_grid_structure(plot_factory):
             assert swatch.toolTip(), "每个色块应有中文 tooltip"
             assert re.search(r"[\u4e00-\u9fff]", swatch.toolTip())
         assert selected[0].toolTip().endswith("（当前）")
+
+        # 两组分段控件：绘制方式 + 数据点，各 3 段且当前值选中
+        segs = _panel_segs(panel)
+        assert len(segs) == 2, "面板应含绘制方式 / 数据点两组分段"
+        draw_btns = segs[0].findChildren(QPushButton)
+        assert [b.text() for b in draw_btns] == ["直线", "阶梯后", "阶梯前"]
+        assert [b.isChecked() for b in draw_btns] == [True, False, False]
+        symbol_btns = segs[1].findChildren(QPushButton)
+        assert [b.text() for b in symbol_btns] == ["自动", "显示", "隐藏"]
+        assert [b.isChecked() for b in symbol_btns] == [True, False, False]
+        for btn in draw_btns + symbol_btns:
+            assert btn.toolTip(), "分段按钮应有全称 tooltip"
     finally:
         menu.deleteLater()
 
@@ -453,13 +511,13 @@ def test_t5b_swatch_click_and_keyboard(plot_factory, qapp):
     """真实 builder：鼠标点击与 Enter 键都能选中色块（菜单已 popup）。"""
     pw = plot_factory()
     assert pw.plot_variable("a")
-    picked = []
+    picked: dict[str, str] = {}
     second_color = pw.curve_colors[1]
-    menu, _ = pw.legend_label._build_color_palette_menu(
-        pw.curve_colors[0], picked.append
-    )
-    grid_host = menu.actions()[0].defaultWidget()
-    grid = grid_host.layout()
+    holder = []
+    menu, _ = pw.legend_label._build_curve_panel_menu("a", picked, holder)
+    holder.append(menu)
+    panel = menu.actions()[0].defaultWidget()
+    grid = _panel_grid(panel)
     second_swatch = next(
         grid.itemAt(i).widget()
         for i in range(grid.count())
@@ -471,14 +529,32 @@ def test_t5b_swatch_click_and_keyboard(plot_factory, qapp):
     try:
         QTest.mouseClick(second_swatch, Qt.MouseButton.LeftButton)
         qapp.processEvents()
-        assert picked == [second_color]
-
-        QTest.keyClick(second_swatch, Qt.Key.Key_Return)
-        qapp.processEvents()
-        assert picked == [second_color, second_color]
+        assert picked == {"color": second_color}
+        assert menu.isVisible() is False, "选色即关菜单"
     finally:
         menu.close()
         menu.deleteLater()
+
+    # 键盘路径：选择即关菜单，须用新菜单单独验证
+    picked2: dict[str, str] = {}
+    holder2: list = []
+    menu2, _ = pw.legend_label._build_curve_panel_menu("a", picked2, holder2)
+    holder2.append(menu2)
+    grid2 = _panel_grid(menu2.actions()[0].defaultWidget())
+    swatch2 = next(
+        grid2.itemAt(i).widget()
+        for i in range(grid2.count())
+        if grid2.itemAt(i).widget().color_name == second_color
+    )
+    try:
+        menu2.popup(QPoint(50, 50))
+        qapp.processEvents()
+        QTest.keyClick(swatch2, Qt.Key.Key_Return)
+        qapp.processEvents()
+        assert picked2 == {"color": second_color}
+    finally:
+        menu2.close()
+        menu2.deleteLater()
 
 
 def test_t5c_cancel_is_noop(plot_factory, monkeypatch):
@@ -494,7 +570,7 @@ def test_t5c_cancel_is_noop(plot_factory, monkeypatch):
         staticmethod(lambda *a, **k: dialog_calls.append(1) or QColor("#123456")),
     )
 
-    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    pw.legend_label._exec_curve_panel("a", QPoint(0, 0))
 
     assert pw.curves["a"].color == pw.curve_colors[0]
     assert not dialog_calls
@@ -505,16 +581,16 @@ def test_t5d_real_exec_click_applies(plot_factory, monkeypatch):
     pw = plot_factory()
     assert pw.plot_variable("a")
     built = []
-    orig_build = LegendTextBrowser._build_color_palette_menu
+    orig_build = LegendTextBrowser._build_curve_panel_menu
 
-    def _build_and_click(self, current, on_pick):
-        menu, act_more = orig_build(self, current, on_pick)
+    def _build_and_click(self, var_name, picked, holder):
+        menu, act_more = orig_build(self, var_name, picked, holder)
         built.append(menu)
 
         def _click_second():
             if not menu.isVisible():
                 return  # exec 提前返回、菜单已释放时不得再摸控件
-            grid = menu.actions()[0].defaultWidget().layout()
+            grid = _panel_grid(menu.actions()[0].defaultWidget())
             for i in range(grid.count()):
                 swatch = grid.itemAt(i).widget()
                 if swatch.color_name == pw.curve_colors[1]:
@@ -525,13 +601,100 @@ def test_t5d_real_exec_click_applies(plot_factory, monkeypatch):
         return menu, act_more
 
     monkeypatch.setattr(
-        LegendTextBrowser, "_build_color_palette_menu", _build_and_click
+        LegendTextBrowser, "_build_curve_panel_menu", _build_and_click
     )
 
-    pw.legend_label._exec_color_menu("a", QPoint(20, 20))
+    pw.legend_label._exec_curve_panel("a", QPoint(20, 20))
 
     assert pw.curves["a"].color == pw.curve_colors[1]
     assert built, "真实菜单应被构建"
+
+
+def test_t5e_segment_click_picks_and_applies(plot_factory, qapp):
+    """真实面板：点击「阶梯(后)」分段 → picked 记录 draw_mode + 应用 + 菜单关闭。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    picked: dict[str, str] = {}
+    holder: list = []
+    menu, _ = pw.legend_label._build_curve_panel_menu("a", picked, holder)
+    holder.append(menu)
+    panel = menu.actions()[0].defaultWidget()
+    segs = _panel_segs(panel)
+    step_post_btn = next(
+        b for b in segs[0].findChildren(QPushButton) if b.text() == "阶梯后"
+    )
+
+    menu.popup(QPoint(50, 50))
+    qapp.processEvents()
+    try:
+        QTest.mouseClick(step_post_btn, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert picked == {"draw_mode": DRAW_MODE_STEP_POST}
+        assert menu.isVisible() is False, "选择即关菜单"
+    finally:
+        menu.close()
+        menu.deleteLater()
+
+    # 关闭后统一执行（_apply_curve_panel_picks）：draw_mode 生效
+    pw.legend_label._apply_curve_panel_picks("a", picked)
+    assert pw.curves["a"].draw_mode == DRAW_MODE_STEP_POST
+
+
+def test_t5f_segment_symbol_policy_pick(plot_factory, qapp):
+    """真实面板：点击「始终隐藏」分段 → picked 记录 symbol_policy + 应用。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    picked: dict[str, str] = {}
+    menu, _ = pw.legend_label._build_curve_panel_menu("a", picked, [])
+    panel = menu.actions()[0].defaultWidget()
+    segs = _panel_segs(panel)
+    hide_btn = next(
+        b for b in segs[1].findChildren(QPushButton) if b.text() == "隐藏"
+    )
+
+    menu.popup(QPoint(50, 50))
+    qapp.processEvents()
+    try:
+        QTest.mouseClick(hide_btn, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert picked == {"symbol_policy": SYMBOL_POLICY_OFF}
+    finally:
+        menu.close()
+        menu.deleteLater()
+
+    pw.legend_label._apply_curve_panel_picks("a", picked)
+    assert pw.curves["a"].symbol_policy == SYMBOL_POLICY_OFF
+
+
+def test_t5g_picks_same_value_noop(plot_factory):
+    """同值选择 no-op：draw_mode 已是阶梯(后) 时再 pick 同值不重复应用。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    assert pw._multi_curve_manager.apply_curve_draw_mode("a", DRAW_MODE_STEP_POST)
+
+    calls = []
+    orig = pw._multi_curve_manager.apply_curve_draw_mode
+    pw._multi_curve_manager.apply_curve_draw_mode = (
+        lambda v, m: calls.append((v, m)) or True
+    )
+    try:
+        pw.legend_label._apply_curve_panel_picks(
+            "a", {"draw_mode": DRAW_MODE_STEP_POST}
+        )
+        assert not calls, "同值选择应为 no-op"
+    finally:
+        pw._multi_curve_manager.apply_curve_draw_mode = orig
+
+
+def test_t5h_picks_stale_curve_guard(plot_factory):
+    """面板关闭后曲线已被删：picked 分发复查拦截，不崩溃不应用。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    pw.curves.pop("a")  # 模拟打开期间被 reload/编辑器删除
+    pw.legend_label._apply_curve_panel_picks(
+        "a", {"draw_mode": DRAW_MODE_STEP_POST}
+    )
+    assert "a" not in pw.curves  # 无崩溃即通过
 
 
 def test_t6_more_colors_dialog_applies(plot_factory, monkeypatch):
@@ -541,17 +704,33 @@ def test_t6_more_colors_dialog_applies(plot_factory, monkeypatch):
     _fake_palette_env(monkeypatch, choose_more=True)
 
     captured = {}
+    custom = {}
 
-    def _fake_get_color(initial=None, parent=None, title="", *a, **k):
-        captured.update(initial=initial.name(), title=title, parent=parent)
+    def _fake_get_color(initial=None, parent=None, title="", options=None, *a, **k):
+        captured.update(
+            initial=initial.name(),
+            title=title,
+            parent=parent,
+            options=options,
+        )
         return QColor("#123456")
 
+    def _fake_set_custom(index, color):
+        custom[index] = color.name()
+
     monkeypatch.setattr(QColorDialog, "getColor", staticmethod(_fake_get_color))
-    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    monkeypatch.setattr(
+        QColorDialog, "setCustomColor", staticmethod(_fake_set_custom)
+    )
+    pw.legend_label._exec_curve_panel("a", QPoint(0, 0))
 
     assert pw.curves["a"].color == "#123456"
     assert captured["title"] == "选择颜色"
     assert captured["parent"] is pw
+    assert [custom[i] for i in range(len(pw.curve_colors))] == [
+        c.lower() for c in pw.curve_colors
+    ]
+    assert captured["options"] & QColorDialog.ColorDialogOption.DontUseNativeDialog
 
 
 def test_t6b_more_colors_invalid_noop(plot_factory, monkeypatch):
@@ -562,7 +741,7 @@ def test_t6b_more_colors_invalid_noop(plot_factory, monkeypatch):
     monkeypatch.setattr(
         QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor())
     )
-    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    pw.legend_label._exec_curve_panel("a", QPoint(0, 0))
     assert pw.curves["a"].color == pw.curve_colors[0]
 
 
@@ -573,7 +752,7 @@ def test_t7_stale_curve_guard_after_menu(plot_factory, monkeypatch):
     menus = _fake_palette_env(
         monkeypatch, pick_color="red", before_return=lambda: pw.curves.pop("a")
     )
-    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    pw.legend_label._exec_curve_panel("a", QPoint(0, 0))
 
     assert menus, "菜单应弹出"
     assert "a" not in pw.curves  # 二次复查拦截，无崩溃即通过
@@ -590,7 +769,7 @@ def test_t7b_stale_curve_guard_after_dialog(plot_factory, monkeypatch):
         return QColor("#123456")
 
     monkeypatch.setattr(QColorDialog, "getColor", staticmethod(_fake_get_color))
-    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    pw.legend_label._exec_curve_panel("a", QPoint(0, 0))
     assert "a" not in pw.curves
 
 
@@ -610,7 +789,7 @@ def test_t7c_menu_released_and_dialog_skipped_when_curve_deleted(
         staticmethod(lambda *a, **k: dialog_calls.append(1) or QColor("#123456")),
     )
 
-    pw.legend_label._exec_color_menu("a", QPoint(0, 0))
+    pw.legend_label._exec_curve_panel("a", QPoint(0, 0))
 
     assert menus[0].deleted is True, "QMenu 应经 deleteLater 释放"
     assert not dialog_calls, "变量已删时不应再弹颜色对话框"

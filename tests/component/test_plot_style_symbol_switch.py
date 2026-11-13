@@ -116,11 +116,11 @@ def test_real_chain_range_changed_triggers_refresh(blf_plot):
     assert curve.opts["symbol"] is None
 
 
-def test_hidden_high_density_curve_not_counted(plot_factory):
-    """per-plot + visible 过滤：隐藏 200 Hz 曲线后，1 Hz 曲线不再被连坐。
+def test_dense_and_sparse_curves_decided_per_curve(plot_factory):
+    """逐曲线判定（方案 A）：同图 1Hz 稀疏曲线不被 200Hz 密集曲线连坐。
 
-    窗口 3 s：两曲线都可见时按最大密度 200 判（600 点 → 粗线）；
-    隐藏高密度曲线后按 1 Hz 判（3 点 → 细线+symbol）。
+    窗口 3 s：fast（200Hz，600 点）→ 粗线无 symbol；slow（1Hz，3 点）
+    → 细线+symbol，二者同时成立。隐藏 fast 后 slow 判定不变。
     """
     pw = plot_factory(pd.DataFrame({"a": np.zeros(600)}))
     pw.resize(800, 600)
@@ -135,12 +135,14 @@ def test_hidden_high_density_curve_not_counted(plot_factory):
     settle()
 
     pw.view_box.setXRange(0.0, 3.0, padding=0)
-    assert not _apply_style(pw, "fast")  # max(200, 1) × 3s = 600 点 → 粗线
+    assert not _apply_style(pw, "fast")  # fast：600 点 → 粗线
+    assert _apply_style(pw, "slow")      # slow：3 点 < 100 → 细线+symbol（不再连坐）
 
+    # 隐藏密集曲线：稀疏曲线判定保持不变（逐曲线口径天然成立）
     pw.toggle_curve_visibility_by_name("fast")
     settle()
     assert not pw.curves["fast"].visible
-    assert _apply_style(pw, "slow")  # 仅剩 1 Hz：3 点 < 100 → 细线+symbol
+    assert _apply_style(pw, "slow")
 
 
 def test_guards_skip_style_refresh(blf_plot):

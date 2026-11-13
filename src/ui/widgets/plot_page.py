@@ -510,7 +510,7 @@ class PlotPage:
         屏蔽 ``sigRangeChanged``，样式判据（X 宽度 × 采样密度）不会随范围
         自动更新；不在范围落定处补一次，切页后就会停在旧范围的样式。
 
-        逐子图走统一调度器的 style 任务，``_apply_plot_style`` 自带
+        逐子图走统一调度器的 style 任务，``_apply_curve_style`` 自带
         pen/symbol 缓存，序列未变时不会重建画笔。
         """
         for container in self.plot_widgets:

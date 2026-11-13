@@ -26,6 +26,9 @@ class ConfigKey(StrEnum):
     FONT_MONO_NAME = "font/mono_name"
     AUTO_SAVE_ENABLED = "auto_save/enabled"
     LOG_WINDOW_GEOMETRY = "log_window/geometry"
+    # 绘图变量编辑器窗口几何（QByteArray）：位置 + 大小，失效屏幕
+    # （多显示器拔插后位置落已不存在的屏幕）由窗口侧校验拦截并回退
+    PLOT_VARIABLE_EDITOR_GEOMETRY = "plot_variable_editor/geometry"
     TEMPLATE_LAST_ID = "template/last_id"
     TEMPLATE_LAST_NAME = "template/last_name"
     # BLF 只存原始报文，必须搭配 DBC / ARXML 才能解出信号。记住上次选中的
@@ -195,6 +198,26 @@ class AppSettings:
 
     def set_log_window_geometry(self, geometry: Any) -> None:
         self._settings.setValue(ConfigKey.LOG_WINDOW_GEOMETRY, geometry)
+
+    def get_plot_variable_editor_geometry(self) -> Any:
+        """读取编辑器窗口几何；无存档/空值/类型不符返回 None。
+
+        类型防御：ini 里被写成纯字符串（非 @ByteArray 格式）时
+        QSettings 返回 str，直接交给 restoreGeometry 会抛 TypeError，
+        视为无存档由窗口侧走初始几何。
+        """
+        from PySide6.QtCore import QByteArray
+
+        geometry = self._settings.value(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY)
+        # 键不存在 → None；被清成空串 / 空 QByteArray 同样视为无存档
+        if not geometry:
+            return None
+        if not isinstance(geometry, (QByteArray, bytes, bytearray)):
+            return None
+        return geometry
+
+    def set_plot_variable_editor_geometry(self, geometry: Any) -> None:
+        self._settings.setValue(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, geometry)
 
     def get_last_template_id(self) -> str | None:
         return self._settings.value(ConfigKey.TEMPLATE_LAST_ID, None, type=str)

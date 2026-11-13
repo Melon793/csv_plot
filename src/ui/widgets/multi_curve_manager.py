@@ -22,7 +22,16 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH
-from src.core.data_types import CurveInfo
+from src.core.data_types import (
+    DRAW_MODES,
+    DRAW_MODE_SOURCE_AUTO,
+    DRAW_MODE_SOURCE_USER,
+    DRAW_MODE_STEP_POST,
+    SYMBOL_POLICIES,
+    CurveInfo,
+    resolve_symbol_show,
+    step_mode_for,
+)
 from src.core.logger import get_logger
 from src.ui.drag_drop import (
     ANCHOR_SCHEME,
@@ -346,17 +355,63 @@ class MultiCurveManager:
             if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
                 main_window.cursor_sync_manager._sync_min_xrange()
 
+    def _announce_auto_step(self, var_names: list, *, batch: bool = False) -> None:
+        """播报本批新增曲线中自动判为阶梯的枚举通道（仅 'auto' 来源）。
+
+        交互入口（拖入/编辑器添加）调用；quiet 程序化路径
+        （reload/模板恢复/_recreate_curve 重建）不调用，避免刷屏。
+        batch=True 时即使只有 1 条也用汇总文案（批量拖入语境）。
+        """
+        stepped = [
+            n for n in var_names
+            if (ci := self.pw.curves.get(n)) is not None
+            and ci.draw_mode_source == DRAW_MODE_SOURCE_AUTO
+            and ci.draw_mode == DRAW_MODE_STEP_POST
+        ]
+        if not stepped:
+            return
+        main_window = self.pw.window()
+        show = getattr(main_window, "_show_status_message", None)
+        if not callable(show):
+            return
+        if not batch and len(stepped) == 1:
+            show(f"通道 {stepped[0]} 为枚举量，已用阶梯显示（枚举无中间态）")
+        else:
+            show(f"{len(stepped)} 个枚举通道已用阶梯显示（枚举无中间态）")
+
     def _recreate_curve(self, var_name: str):
         """重新创建失效的曲线"""
         pw = self.pw
         try:
             if var_name in pw.curves:
                 ci = pw.curves[var_name]
-                pw.add_variable_to_plot(
+                # 保留用户钉住的绘制方式（source=='user' 时记录；
+                # 'auto' 来源让重建按元数据重新判定，与 reload 同构）
+                pinned_mode = (
+                    ci.draw_mode
+                    if ci.draw_mode_source == DRAW_MODE_SOURCE_USER
+                    else None
+                )
+                success = pw.add_variable_to_plot(
                     var_name,
                     skip_existence_check=True,
                     preferred_color=ci.color,
+                    announce_step=False,
                 )
+                if success and pinned_mode and var_name in pw.curves:
+                    new_ci = pw.curves[var_name]
+                    new_ci.draw_mode = pinned_mode
+                    new_ci.draw_mode_source = DRAW_MODE_SOURCE_USER
+                    if new_ci.curve is not None:
+                        try:
+                            new_ci.curve.setData(
+                                new_ci.x_data, new_ci.y_data,
+                                stepMode=step_mode_for(pinned_mode),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "重建恢复绘制方式失败: %s", var_name, exc_info=True
+                            )
         except Exception:
             logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)
 
@@ -619,10 +674,74 @@ class MultiCurveManager:
             pw.update_cursor_label()
         return True
 
+    def apply_curve_draw_mode(self, var_name: str, draw_mode: str) -> bool:
+        """切换单曲线绘制方式：直线 / 阶梯后（step-post）/ 阶梯前（step-pre）。
+
+        通过 ``ci.curve.setData(x, y, stepMode=...)`` 重建路径；pen/symbol/
+        connect 等既有 opts 不受影响（symbol 仍画在原始数据点上）。
+        'auto' → stepMode=None（回到直线）。
+
+        与线色同口径：仅会话内存活，reload/重开后回到默认 'auto'。
+
+        Returns:
+            是否实际应用。变量不存在或 draw_mode 非法时返回 False。
+        """
+        pw = self.pw
+        if draw_mode not in DRAW_MODES:
+            logger.warning("[DRAW_MODE] 非法取值: %s", draw_mode)
+            return False
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return False
+        ci.draw_mode = draw_mode
+        # 用户显式选择：来源钉住为 'user'，本会话内不被枚举自动判定覆盖
+        ci.draw_mode_source = DRAW_MODE_SOURCE_USER
+        try:
+            ci.curve.setData(ci.x_data, ci.y_data, stepMode=step_mode_for(draw_mode))
+        except Exception:
+            logger.error("切换绘制方式失败: var=%s, mode=%s", var_name, draw_mode, exc_info=True)
+            return False
+        # 曲线集合不变，但已打开的变量编辑器下拉需要就地回填新值
+        # （curves_changed 增量刷新场景 1），与改色路径同口径
+        pw.curves_changed.emit()
+        return True
+
+    def apply_curve_symbol_policy(self, var_name: str, policy: str) -> bool:
+        """切换单曲线 symbol 策略：自动 / 始终显示 / 始终隐藏。
+
+        只写 ``ci.symbol_policy`` 并按当前可见区间立即应用一次
+        （resolve_symbol_show 共用逐曲线判定；显式用户动作不走
+        update_plot_style 的交互/重载守卫——编辑器/菜单操作时防抖
+        残留的 ``_is_interacting`` 不应吞掉即时反馈）。后续缩放/滚动
+        仍由 update_plot_style 热路径按同口径自动重判。
+
+        Returns:
+            是否实际应用。变量不存在或 policy 非法时返回 False。
+        """
+        pw = self.pw
+        if policy not in SYMBOL_POLICIES:
+            logger.warning("[SYMBOL_POLICY] 非法取值: %s", policy)
+            return False
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return False
+        ci.symbol_policy = policy
+        try:
+            x_min, x_max = pw.view_box.viewRange()[0]
+            show = resolve_symbol_show(ci, x_max - x_min)
+            pw._apply_curve_style(var_name, show)
+        except Exception:
+            logger.error("应用 symbol 策略失败: var=%s", var_name, exc_info=True)
+            return False
+        # 同 apply_curve_draw_mode：让已打开的编辑器下拉就地回填
+        pw.curves_changed.emit()
+        return True
+
     def _on_legend_anchor_clicked(self, url):
         """锚点点击按 scheme 分发（图例快速改色方案 §2.3）
 
-        - color:///（色块）：弹调色板菜单——anchorClicked 在 release 处理
+        - color:///（色块）：弹曲线快捷面板（色板 + 绘制方式 + 数据
+          点）——anchorClicked 在 release 处理
           器链内发出，QMenu.exec 不得嵌套其中，singleShot(0) 延迟（与
           右键菜单 singleShot 同构）；
         - curve:///（名称）：切换显隐；失效占位仅状态栏提示、不切换
@@ -641,7 +760,7 @@ class MultiCurveManager:
             if var_name in pw.curves:
                 label = pw.legend_label
                 QTimer.singleShot(
-                    0, lambda: label._exec_color_menu(var_name, QCursor.pos())
+                    0, lambda: label._exec_curve_panel(var_name, QCursor.pos())
                 )
             return
         if var_name in pw.curves:
@@ -652,42 +771,46 @@ class MultiCurveManager:
             if callable(show):
                 show(f"变量 {var_name} 不在当前数据中（失效占位）")
 
-    def _apply_plot_style(self, show_symbols: bool = False):
-        """应用绘图样式 - 细线+symbol 或 粗线无symbol（含内存优化pen缓存，统一版）"""
+    def _apply_curve_style(self, var_name: str, show_symbols: bool):
+        """单曲线粒度应用样式：细线+symbol 或 粗线无 symbol（含 pen 缓存）。
+
+        每条曲线只按自身的 symbol 开关刷 pen/点标记；pen 与 symbol 均有
+        缓存短路（``_cached_pen_key`` / ``_has_symbols``），热路径缩放/滚动
+        中无变化的曲线零开销。曲线不存在（刚被删除/替换）时静默跳过。
+        """
         pw = self.pw
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return
         try:
-            for var_name, ci in pw.curves.items():
-                if ci.curve is None:
-                    continue
+            curve = ci.curve
+            color = ci.color
 
-                curve = ci.curve
-                color = ci.color
+            if show_symbols:
+                cache_key = f'thin_{color}'
+                if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                    pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                    curve.setPen(pen)
+                    curve._cached_pen_key = cache_key
 
-                if show_symbols:
-                    cache_key = f'thin_{color}'
-                    if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                        pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
-                        curve.setPen(pen)
-                        curve._cached_pen_key = cache_key
+                if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
+                    curve.setSymbol('s')
+                    curve.setSymbolSize(3)
+                    curve.setSymbolPen(color)
+                    curve.setSymbolBrush(color)
+                    curve._has_symbols = True
+            else:
+                cache_key = f'thick_{color}'
+                if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
+                    pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                    curve.setPen(pen)
+                    curve._cached_pen_key = cache_key
 
-                    if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
-                        curve.setSymbol('s')
-                        curve.setSymbolSize(3)
-                        curve.setSymbolPen(color)
-                        curve.setSymbolBrush(color)
-                        curve._has_symbols = True
-                else:
-                    cache_key = f'thick_{color}'
-                    if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                        pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
-                        curve.setPen(pen)
-                        curve._cached_pen_key = cache_key
-
-                    if not hasattr(curve, '_has_symbols') or curve._has_symbols:
-                        curve.setSymbol(None)
-                        curve._has_symbols = False
+                if not hasattr(curve, '_has_symbols') or curve._has_symbols:
+                    curve.setSymbol(None)
+                    curve._has_symbols = False
         except Exception as e:
-            logger.error("应用绘图样式时出错: %s", e)
+            logger.error("应用曲线样式时出错: var=%s, %s", var_name, e)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区（统一版）"""
@@ -742,11 +865,16 @@ class MultiCurveManager:
                             True if revive_ref is None else revive_ref.visible_preference
                         )
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                        # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
+                        initial_mode = self._data_manager.decide_initial_draw_mode(
+                            pw, var_name, y_format or ''
+                        )
                         # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
                         # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
                         # 避免 NaN 坐标进入 Qt 光栅化产生横线伪影。
                         curve = pw.plot_item.plot(
                             x_values, y_contiguous, pen=pen, name=var_name,
+                            stepMode=step_mode_for(initial_mode),
                         )
 
                         pw.curves[var_name] = CurveInfo(
@@ -757,7 +885,8 @@ class MultiCurveManager:
                             original_index=original_index,
                             color=color,
                             y_format=y_format or '',
-                            visible=initial_visible
+                            visible=initial_visible,
+                            draw_mode=initial_mode,
                         )
                         if not initial_visible and curve is not None:
                             try:
@@ -776,6 +905,10 @@ class MultiCurveManager:
                 # 显隐切换静默跳过 header/vline/密度等全部刷新
                 pw._batch_adding = False
 
+            # 批量拖入：枚举自动阶梯汇总播报（单条，不逐条刷屏；
+            # 只统计本次新建曲线，已在图上的重复项不计入）
+            self._announce_auto_step(success_vars, batch=True)
+
             if invalid_vars or duplicate_vars:
                 msg_parts = []
                 if invalid_vars:
@@ -789,11 +922,13 @@ class MultiCurveManager:
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,
                              show_duplicate_warning: bool = True, preferred_color: str | None = None,
-                             quiet: bool = False) -> bool:
+                             quiet: bool = False, announce_step: bool = True) -> bool:
         """添加变量到曲线绘图（统一版：无模式切换，始终写入 curves 字典）
 
         ``quiet=True`` 供 reload/模板套用等程序化批量路径使用：失败不弹
         模态框（调用方负责降级为占位并汇总播报），只落日志。
+        ``announce_step=False`` 供程序化重建（_recreate_curve）抑制
+        枚举自动阶梯的状态栏播报。
         """
         pw = self.pw
         logger.debug(
@@ -851,6 +986,10 @@ class MultiCurveManager:
 
             initial_visible = True if revive_ref is None else revive_ref.visible_preference
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+            # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
+            initial_mode = self._data_manager.decide_initial_draw_mode(
+                pw, var_name, y_format or ''
+            )
             # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck 快速路径；
             # 含 NaN（ragged CSV 尾部补 NaN）自动断线，避免 NaN 坐标进入 Qt
             # 光栅化产生横线伪影。
@@ -858,6 +997,7 @@ class MultiCurveManager:
                 x_values, y_values,
                 pen=pen,
                 name=var_name,
+                stepMode=step_mode_for(initial_mode),
             )
 
             pw.curves[var_name] = CurveInfo(
@@ -868,7 +1008,8 @@ class MultiCurveManager:
                 original_index=original_index,
                 color=color,
                 y_format=y_format or '',
-                visible=initial_visible
+                visible=initial_visible,
+                draw_mode=initial_mode,
             )
             if not initial_visible and curve is not None:
                 try:
@@ -965,6 +1106,10 @@ class MultiCurveManager:
                 main_window = pw.window()
                 if main_window is not None and hasattr(main_window, 'cursor_sync_manager'):
                     main_window.cursor_sync_manager._sync_min_xrange()
+
+                # 枚举通道自动阶梯播报（交互入口；quiet/批量/重建路径静默）
+                if announce_step and not quiet:
+                    self._announce_auto_step([var_name])
 
             return True
 
