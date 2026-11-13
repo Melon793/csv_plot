@@ -748,7 +748,14 @@ class MainWindow(QMainWindow):
         self._sync_shelf_capsule(visible=True)
 
     def _toggle_curve_shelf_shortcut(self) -> None:
-        """Ctrl+Shift+S：开也能关（if_open 只判存活，不能直接取反）。"""
+        """Ctrl+Shift+S：开也能关（if_open 只判存活，不能直接取反）。
+
+        闸门与 GUI 入口同口径：未加载数据时按钮 disabled，快捷键同步忽略，
+        避免绕过 set_button_status 打开空窗（与 Ctrl+L 的守卫一致）。
+        """
+        btn = getattr(self, "curve_shelf_btn", None)
+        if btn is None or not btn.isEnabled():
+            return
         dialog = self.curve_shelf_if_open()
         visible = bool(dialog is not None and dialog.isVisible())
         self.toggle_curve_shelf(not visible)

@@ -570,3 +570,22 @@ def test_capsule_entry_full_loop_without_top_bar_button(loaded_window, qapp, qtb
     # D-A5 护栏：旧按钮对象仍在但不可见
     assert mw.curve_shelf_btn is not None
     assert mw.curve_shelf_btn.isVisible() is False
+
+
+def test_shelf_shortcut_ignored_before_data_loaded(main_window, qapp):
+    """Ctrl+Shift+S 与 GUI 入口同闸门：无数据时按钮 disabled，快捷键忽略。"""
+    from PySide6.QtTest import QTest
+
+    mw = main_window
+    assert mw.curve_shelf_btn.isEnabled() is False
+    mw.activateWindow()
+    qapp.processEvents()
+
+    mods = (
+        Qt.KeyboardModifier.ControlModifier
+        | Qt.KeyboardModifier.ShiftModifier
+    )
+    QTest.keyClick(mw, Qt.Key.Key_S, mods)
+    qapp.processEvents()
+
+    assert mw.curve_shelf_if_open() is None
