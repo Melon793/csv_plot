@@ -997,15 +997,21 @@ class MultiCurveManager:
         不新增逐帧成本。symbol 判定与 update_plot_style 热路径同口径
         （resolve_symbol_show + 当前可见 x 跨度）。
 
-        守卫对齐热路径：数据更新/加载/销毁中间态跳过（reload 的陈旧选择由
-        refresh_selection_highlight 的 prune + 图例重放兜底）。不查
-        ``_is_interacting``——选择是离散动作，交互中也应即时反馈，与热路径
-        "逐帧省开销"的动机不同（评审 NB-2）。
+        守卫口径：只查 ``_is_updating_data`` / ``_is_being_destroyed`` /
+        控件存活——这三者覆盖"曲线对象正在被销毁重建"的危险窗口。
+
+        **刻意不查 ``_is_loading_new_data``**（评审 r3 A5）：该锁只存在于
+        MainWindow（pw 上没有这个属性），且它门控的是"逐帧样式刷新"。
+        选择是离散动作，与不查 ``_is_interacting`` 同理（评审 NB-2）；更要紧
+        的是**两投影必须同进同退**：legend tint 不受该锁门控，若加粗受门控，
+        加载期点击就会出现"图例已染色、曲线不加粗"的脱节，大文件下可持续
+        数秒。reload 期间的陈旧选择由 refresh_selection_highlight 的 prune
+        + 图例重放兜底，重建后的加粗由 ``_refresh_selection_after_rebuild``
+        在锁清之后补刷（BL-2）。
         """
         pw = self.pw
         if (
             getattr(pw, "_is_updating_data", False)
-            or getattr(pw, "_is_loading_new_data", False)
             or getattr(pw, "_is_being_destroyed", False)
         ):
             return

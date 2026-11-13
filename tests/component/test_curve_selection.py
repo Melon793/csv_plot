@@ -312,23 +312,28 @@ def test_emphasis_skips_during_data_update(three_curves):
     assert _width(pw, "a") == HIGHLIGHT_LINE_WIDTH
 
 
-def test_emphasis_skips_during_loading_new_data(three_curves):
-    """reload 加载中间态同样跳过（评审 NB-2：守卫与热路径四查对齐）。"""
+def test_emphasis_not_gated_by_host_loading_lock(three_curves):
+    """加载锁刻意不门控加粗（评审 r3 A5：两投影必须同进同退）。
+
+    锁的真实归属是宿主窗口（``pw.window()``，生产里是 MainWindow），
+    pw 上没有这个属性——原用例往 pw 上写标志，与当时读 pw 的死守卫
+    互相圆场，是假绿。本例写到真实归属处，钉住"加载期点击仍两投影同步"：
+    legend tint 不受该锁门控，加粗若受门控就会出现图例染色而曲线不加粗
+    的脱节。危险的重建窗口由 ``_is_updating_data`` 单独兜住（下一例）。
+    """
     pw = three_curves
     _pin_symbol_state(pw, SYMBOL_POLICY_OFF)
     pw.legend_label._toggle_legend_selection("a")
-    pw.curves["a"].curve.setPen(width=THICK_LINE_WIDTH)
-    pw.curves["a"].curve._cached_pen_key = "stale"
 
-    pw._is_loading_new_data = True
+    host = pw.window()
+    assert host is not None and host is not pw, "加载锁在宿主窗口上，不在 pw 上"
+    host._is_loading_new_data = True
     try:
         pw._multi_curve_manager.refresh_selection_emphasis()
-        assert pw.curves["a"].curve._cached_pen_key == "stale"
+        assert _width(pw, "a") == HIGHLIGHT_LINE_WIDTH
+        assert pw.legend_label.extraSelections(), "tint 与加粗须同时在位"
     finally:
-        pw._is_loading_new_data = False
-
-    pw._multi_curve_manager.refresh_selection_emphasis()
-    assert _width(pw, "a") == HIGHLIGHT_LINE_WIDTH
+        host._is_loading_new_data = False
 
 
 def test_emphasis_tolerates_missing_selection_attr(three_curves):
