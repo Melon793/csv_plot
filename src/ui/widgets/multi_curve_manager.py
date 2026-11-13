@@ -13,15 +13,17 @@ MultiCurveManager - 曲线绘图管理（统一版）
 from __future__ import annotations
 import contextlib
 import html
+import math
 from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QPointF, QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import (
+    CURVE_HIT_TOLERANCE_PX,
     DEFAULT_LINE_WIDTH,
     HIGHLIGHT_CURVE_Z,
     HIGHLIGHT_LINE_WIDTH,
@@ -52,6 +54,88 @@ logger = get_logger("widget.multi_curve")
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
+
+
+def _point_segment_distance_px(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> float:
+    """点 (px,py) 到线段 (a,b) 的最短距离（同一坐标系，此处为 scene 像素）。"""
+    dx, dy = bx - ax, by - ay
+    len_sq = dx * dx + dy * dy
+    if len_sq <= 0.0:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / len_sq
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def hit_test_curve(pw: Any, scene_pos: QPointF) -> str | None:
+    """plot 点击命中检测：容差内最近的可见曲线胜出（R1 / D5）。
+
+    纯函数（只读 pw），便于独立单测。口径：
+
+    - 只遍历 ``pw.curves``：失效占位无曲线对象，不参与（R9）；隐藏曲线
+      不参与（点不到的东西不该被选中）；
+    - 端点缓存 ``ci.x_min/x_max`` 先做区间排除，再 ``searchsorted`` 定位
+      邻域，只测点击点附近的 3 条线段 → O(曲线数 × log n)，点击离散触发；
+    - 距离在 **scene（像素）坐标** 算：数据点经 ``mapViewToScene`` 后求
+      点到线段距离，容差 ``CURVE_HIT_TOLERANCE_PX`` 为逻辑像素（Qt 已归一
+      DPI，两平台同口径）；
+    - 阶梯曲线额外测 L 形拐角两段，否则竖直 riser 点不中（风险 #6）。
+      几何以 ``curve.opts['stepMode']`` 为渲染真相：'right'（step-post）
+      = 旧值保持到 x1 再跳变，即 (x0,y0)→(x1,y0)→(x1,y1)；'left'
+      （step-pre）= 跳变提前到 x0，即 (x0,y0)→(x0,y1)→(x1,y1)
+      （语义经 test_step_mode_semantics_geometry 顶点序列钉死）；
+    - NaN/inf 端点跳过（对齐游标取值的 NaN 纪律）；
+    - 并列取 curves 插入序在前者（严格小于比较）。
+    """
+    view_box = getattr(pw, "view_box", None)
+    if view_box is None:
+        return None
+    curves = getattr(pw, "curves", None) or {}
+    view_pos = view_box.mapSceneToView(scene_pos)
+    vx = view_pos.x()
+    px, py = scene_pos.x(), scene_pos.y()
+    best_name: str | None = None
+    best_d = float(CURVE_HIT_TOLERANCE_PX)
+
+    for var_name, ci in curves.items():
+        if not ci.visible or ci.curve is None:
+            continue
+        x_data, y_data = ci.x_data, ci.y_data
+        if x_data is None or y_data is None or len(x_data) < 2:
+            continue
+        if not (ci.x_min <= vx <= ci.x_max):
+            continue
+        idx = int(np.searchsorted(x_data, vx))
+        lo = max(0, idx - 2)
+        hi = min(len(x_data) - 1, idx + 1)
+        step_mode = ci.curve.opts.get("stepMode")
+        for i in range(lo, hi):
+            x0, y0 = float(x_data[i]), float(y_data[i])
+            x1, y1 = float(x_data[i + 1]), float(y_data[i + 1])
+            if not (
+                math.isfinite(x0) and math.isfinite(y0)
+                and math.isfinite(x1) and math.isfinite(y1)
+            ):
+                continue
+            p0 = view_box.mapViewToScene(QPointF(x0, y0))
+            p1 = view_box.mapViewToScene(QPointF(x1, y1))
+            if step_mode == "right":
+                corner = view_box.mapViewToScene(QPointF(x1, y0))
+            elif step_mode == "left":
+                corner = view_box.mapViewToScene(QPointF(x0, y1))
+            else:
+                corner = None
+            segments = (
+                ((p0, corner), (corner, p1)) if corner is not None else ((p0, p1),)
+            )
+            for a, b in segments:
+                d = _point_segment_distance_px(px, py, a.x(), a.y(), b.x(), b.y())
+                if d < best_d:
+                    best_d = d
+                    best_name = var_name
+    return best_name
 
 
 class MultiCurveManager:

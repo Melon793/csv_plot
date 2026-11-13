@@ -94,6 +94,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         )
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self._mid_press_over_legend = False  # 本次中键按下的起点是否在图例内
+        # 曲线选中联动：本次左键 press 的起点（仅落在绘图区内才记录），
+        # release 侧据此判"无位移单击"。非左键/Shift/区外一律置 None。
+        self._curve_click_press_pos = None
         self._cursor_label_busy = False
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
         self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
@@ -1637,7 +1640,80 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
         return super().mouseDoubleClickEvent(event)
 
+    def _curve_click_press_candidate(self, event):
+        """press 侧点击起点判定：左键 + 无 Shift + 在绘图区内 + 不在图例内。
+
+        不满足任一条即返回 None（清空记录）。区域校验与 release 侧对齐，
+        构成跨区误触的双保险：图例上的 press 也会先到 widget 层，且图例区
+        与 vb 区相邻、startDragDistance=10，"press 落图例/轴区、release
+        移 ≤10px 进绘图区"几何可达（评审 B3）。
+        Shift 留给框选缩放专属（R4），中键/右键不留陈旧记录（评审 N2）。
+        """
+        if event.button() != Qt.MouseButton.LeftButton:
+            return None
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            return None
+        pos = event.position().toPoint()
+        if self._is_pos_over_legend(pos):
+            return None
+        if not self.view_box.sceneBoundingRect().contains(self.mapToScene(pos)):
+            return None
+        return pos
+
+    def _handle_curve_click_release(self, event) -> None:
+        """左键无位移 release → 曲线命中选择（D5：release 侧判定）。
+
+        调用前 super().mouseReleaseEvent 已先行完成 ViewBox 平移收尾，
+        本方法不 accept、不拦截，故左键拖拽平移零影响。判定顺序：
+        左键 → 有 press 记录 → 位移 < startDragDistance → release 仍在
+        绘图区内 → 命中检测 → 手势分派 → 两投影收口。
+
+        手势语义（R1/R2/R3）：裸单击命中=替换单选；Ctrl+命中=toggle
+        （复用 legend 的 _toggle_legend_selection）；裸单击空白=清选；
+        Ctrl+空白=保持。选择变化不 emit curves_changed。
+        """
+        from src.ui.widgets.multi_curve_manager import hit_test_curve
+
+        press_pos = self._curve_click_press_pos
+        self._curve_click_press_pos = None
+        if event.button() != Qt.MouseButton.LeftButton or press_pos is None:
+            return
+        release_pos = event.position().toPoint()
+        if (release_pos - press_pos).manhattanLength() >= QApplication.startDragDistance():
+            return  # 是拖拽（平移/搬运）不是点击
+        scene_pos = self.mapToScene(release_pos)
+        if not self.view_box.sceneBoundingRect().contains(scene_pos):
+            return
+        if self._is_pos_over_legend(release_pos):
+            return
+
+        name = hit_test_curve(self, scene_pos)
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        label = self.legend_label
+        if name is not None:
+            if ctrl:
+                toggle = getattr(label, "_toggle_legend_selection", None)
+                if callable(toggle):
+                    toggle(name)
+            else:
+                selection = getattr(self, "_legend_selection", None)
+                if selection is not None:
+                    selection.clear()
+                    selection.add(name)
+                    self._legend_sel_anchor = name
+        elif not ctrl:
+            clear = getattr(label, "clear_legend_selection", None)
+            if callable(clear):
+                clear()
+        else:
+            return  # Ctrl+空白：选择保持（与 legend 口径一致）
+        # toggle/clear 内部已收口一次，这里再收口保证两投影一致（幂等：
+        # pen 缓存短路，第二遍无重绘）；替身 label 缺方法时也仍有投影。
+        self._refresh_selection_projections()
+
     def mousePressEvent(self, event):
+        # 曲线选中联动：先按口径记录/清空点击起点，再走既有分支（不改控制流）
+        self._curve_click_press_pos = self._curve_click_press_candidate(event)
         if event.button() == Qt.MouseButton.MiddleButton:
             # 记录本次中键手势的起点是否在图例内，供 mouseDoubleClickEvent
             # 判定（双击序列的第二次 press 被 dblclick 取代，必须在此留存）
@@ -1691,6 +1767,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+            # super 先行完成 ViewBox 收尾后再判选择手势（不 accept 不拦截）
+            self._handle_curve_click_release(event)
     
     def add_mark_region(self, min_x, max_x):
         """添加标记区域 → 委托到 MarkRegionManager"""

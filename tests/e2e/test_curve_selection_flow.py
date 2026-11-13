@@ -1,0 +1,316 @@
+"""曲线选中联动端到端闭环（真实 MainWindow，offscreen）。
+
+用户场景验收锚点：
+加载 CSV → 绘图 → 在 plot 里单击曲线 → 选择集 + legend tint + 曲线加粗
+→ Ctrl 加选第二条 → 空白单击清选；反向：legend Ctrl 点选 → 曲线加粗。
+缩放热路径与游标开启态下高亮存活。
+
+P1 只断言"选择 + 两投影"；状态栏播报文案/真实通道（_message_label、
+toolTip、info 回收）在 P2 追加到本文件。
+
+关键隔离点由 e2e conftest 提供（sys.argv 重置 / app_settings 每例归零 /
+QMessageBox 替身），本文件只补真实链路与几何前提。
+"""
+
+from urllib.parse import quote
+
+import pytest
+
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
+
+from src.core.config import (
+    HIGHLIGHT_CURVE_Z,
+    HIGHLIGHT_LINE_WIDTH,
+    THICK_LINE_WIDTH,
+)
+from src.core.data_types import SYMBOL_POLICY_OFF
+from src.ui.drag_drop import ANCHOR_SCHEME
+from src.ui.widgets.multi_curve_manager import hit_test_curve
+from tests.fixtures.waits import settle
+
+
+@pytest.fixture(autouse=True)
+def _guard_app_exit(monkeypatch):
+    """防毒化：任何路径若调用 QApplication.exit，同进程后续用例会被 quitNow 拖死。"""
+    monkeypatch.setattr(QApplication, "exit", staticmethod(lambda *a, **k: None))
+
+
+@pytest.fixture()
+def plotted_window(loaded_window, qapp, qtbot):
+    """已绘 speed/rpm 两条曲线的真实 MainWindow，宿主布局完成后再量测。
+
+    几何前提必须显式等待：未布局完成时 vb 只有 ~21px 高，8px 命中容差
+    与像素断言全部失真（计划 §4.2 / 评审探针实测）。
+    symbol 策略钉住为 off，让线宽断言不受可见点数阈值影响。
+    """
+    mw = loaded_window
+    mw.resize(1200, 800)
+    qapp.processEvents()
+    pw = mw.plot_widgets[0].plot_widget
+    for name in ("speed", "rpm"):
+        assert pw.plot_variable(name), name
+    for ci in pw.curves.values():
+        ci.symbol_policy = SYMBOL_POLICY_OFF
+    pw._refresh_selection_projections()
+    qapp.processEvents()
+    qtbot.waitUntil(
+        lambda: pw.view_box.sceneBoundingRect().height() > 100, timeout=5000
+    )
+    settle()
+    return mw
+
+
+def _pw(mw):
+    return mw.plot_widgets[0].plot_widget
+
+
+def _curve_pos(pw, name, frac=0.5):
+    """曲线上某数据点的 viewport 坐标（QTest 点击落点）。"""
+    ci = pw.curves[name]
+    i = min(len(ci.x_data) - 1, int(len(ci.x_data) * frac))
+    scene = pw.view_box.mapViewToScene(
+        QPointF(float(ci.x_data[i]), float(ci.y_data[i]))
+    )
+    return pw.mapFromScene(scene)
+
+
+def _blank_pos(pw):
+    """两条曲线之间的空带中央（speed 10~35 / rpm 800~1290，间隔极大）。"""
+    pa = _curve_pos(pw, "speed")
+    pb = _curve_pos(pw, "rpm")
+    pos = QPoint(pa.x(), (pa.y() + pb.y()) // 2)
+    assert hit_test_curve(pw, pw.mapToScene(pos)) is None, "空白点前提不成立"
+    return pos
+
+
+def _width(pw, name):
+    return pw.curves[name].curve.opts["pen"].widthF()
+
+
+def _tinted_texts(pw):
+    return [es.cursor.selectedText() for es in pw.legend_label.extraSelections()]
+
+
+def _is_tinted(pw, name):
+    """tint 按 fragment 计（色块 + 名字各一段），真实 legend 名字带单位
+    （如 `speed (km/h)`），故按前缀匹配而非全等。"""
+    return any(t.startswith(name) for t in _tinted_texts(pw))
+
+
+def _anchor_pos(browser, var_name):
+    """legend 中变量名锚点的坐标（按 href 定位，截断安全）。"""
+    href = f"{ANCHOR_SCHEME}:///{quote(var_name, safe='')}"
+    for y in range(1, 60):
+        for x in range(1, 600, 2):
+            if browser.anchorAt(QPoint(x, y)) == href:
+                return QPoint(x, y)
+    pytest.fail(f"legend 中未找到 {href} 的锚点坐标")
+
+
+def _click_plot(pw, pos, mods=Qt.KeyboardModifier.NoModifier):
+    QTest.mouseClick(pw.viewport(), Qt.MouseButton.LeftButton, mods, pos)
+    QApplication.processEvents()
+
+
+def _legend_ctrl_click(pw, var_name):
+    """legend Ctrl 点选：沿用既有 QMouseEvent 直调模式（计划 §4.2）。
+
+    QTest 打 QTextBrowser 会经窗口投递到 viewport，绕过
+    LegendTextBrowser.mousePressEvent 的 _drag_press_pos 记录 → 手势不成立。
+    """
+    browser = pw.legend_label
+    pos = QPointF(_anchor_pos(browser, var_name))
+    mods = Qt.KeyboardModifier.ControlModifier
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress, pos, pos, QPointF(0.0, 0.0),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, mods,
+    )
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease, pos, pos, QPointF(0.0, 0.0),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, mods,
+    )
+    browser.mousePressEvent(press)
+    browser.mouseReleaseEvent(release)
+    QApplication.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# 正向：plot 点击 → 选择集 + 两投影
+# ---------------------------------------------------------------------------
+
+
+def test_click_curve_selects_thickens_and_tints(plotted_window, qapp):
+    """单击曲线：选择集 / 加粗 2→4 / 提 Z / legend tint 四断言（真实通道）。"""
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+
+    assert pw._legend_selection == {"speed"}
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+    assert pw.curves["speed"].curve.zValue() == HIGHLIGHT_CURVE_Z
+    assert _is_tinted(pw, "speed")
+    assert not _is_tinted(pw, "rpm")
+    assert _width(pw, "rpm") == THICK_LINE_WIDTH
+
+
+def test_ctrl_click_adds_second_curve(plotted_window, qapp):
+    """Ctrl 加选第二条 → 两条都加粗；Ctrl 再击 → 减选并恢复。"""
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    _click_plot(pw, _curve_pos(pw, "rpm"), Qt.KeyboardModifier.ControlModifier)
+
+    assert pw._legend_selection == {"speed", "rpm"}
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+    assert _width(pw, "rpm") == HIGHLIGHT_LINE_WIDTH
+
+    _click_plot(pw, _curve_pos(pw, "rpm"), Qt.KeyboardModifier.ControlModifier)
+    assert pw._legend_selection == {"speed"}
+    assert _width(pw, "rpm") == THICK_LINE_WIDTH
+
+
+def test_blank_click_clears_and_restores(plotted_window, qapp):
+    """裸单击空白 → 清选 + 线宽/z/tint 全恢复。"""
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    _click_plot(pw, _curve_pos(pw, "rpm"), Qt.KeyboardModifier.ControlModifier)
+    assert pw._legend_selection == {"speed", "rpm"}
+
+    _click_plot(pw, _blank_pos(pw))
+
+    assert pw._legend_selection == set()
+    assert _width(pw, "speed") == THICK_LINE_WIDTH
+    assert _width(pw, "rpm") == THICK_LINE_WIDTH
+    assert pw.curves["speed"].curve.zValue() == 0
+    assert pw.legend_label.extraSelections() == []
+
+
+def test_ctrl_blank_keeps_selection(plotted_window, qapp):
+    """Ctrl+空白 → 选择保持（与 legend 口径一致）。"""
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    _click_plot(pw, _blank_pos(pw), Qt.KeyboardModifier.ControlModifier)
+    assert pw._legend_selection == {"speed"}
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+
+
+def test_pan_drag_does_not_change_selection(plotted_window, qapp):
+    """N1：位移 ≥ startDragDistance 的左键拖拽是平移，不改选择集。
+
+    断言口径为"press/release 序列不改变选择集"，不依赖 release 缺席
+    （offscreen 下 QDrag.exec 立即返回，release 仍送达）。
+    """
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    before = set(pw._legend_selection)
+
+    start = _curve_pos(pw, "rpm")
+    end = QPoint(start.x() + 40, start.y() + 30)
+    assert (end - start).manhattanLength() >= QApplication.startDragDistance()
+    QTest.mousePress(pw.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, start)
+    QTest.mouseRelease(pw.viewport(), Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, end)
+    qapp.processEvents()
+    settle()
+
+    assert pw._legend_selection == before
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+
+
+def test_shift_drag_zoom_does_not_select(plotted_window, qapp):
+    """R4：Shift 框选缩放专属，不被选择手势捕获。"""
+    pw = _pw(plotted_window)
+    start = _curve_pos(pw, "speed")
+    end = QPoint(start.x() + 120, start.y() + 80)
+    QTest.mousePress(pw.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.ShiftModifier, start)
+    assert pw.rubberBand.isVisible()
+    QTest.mouseRelease(pw.viewport(), Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.ShiftModifier, end)
+    qapp.processEvents()
+    settle()
+
+    assert pw._legend_selection == set()
+    assert not pw.rubberBand.isVisible()
+
+
+# ---------------------------------------------------------------------------
+# 反向：legend Ctrl 点选 → 曲线加粗
+# ---------------------------------------------------------------------------
+
+
+def test_legend_ctrl_click_thickens_curve(plotted_window, qapp):
+    """legend 入口与 plot 入口共用同一真相源与同一投影。"""
+    pw = _pw(plotted_window)
+    _legend_ctrl_click(pw, "rpm")
+    settle()
+
+    assert pw._legend_selection == {"rpm"}
+    assert _width(pw, "rpm") == HIGHLIGHT_LINE_WIDTH
+    assert pw.curves["rpm"].curve.zValue() == HIGHLIGHT_CURVE_Z
+    assert _is_tinted(pw, "rpm")
+
+
+def test_plot_then_legend_mixed_multiselect(plotted_window, qapp):
+    """两入口混合加选：plot 点 speed + legend Ctrl 点 rpm → 2 选。"""
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    _legend_ctrl_click(pw, "rpm")
+    settle()
+
+    assert pw._legend_selection == {"speed", "rpm"}
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+    assert _width(pw, "rpm") == HIGHLIGHT_LINE_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# 共存：缩放热路径 / 游标开启态（风险 #2、验收 §6.4）
+# ---------------------------------------------------------------------------
+
+
+def test_highlight_survives_zoom(plotted_window, qapp, qtbot):
+    """缩放触发 update_plot_style 重刷后高亮存活（pen 缓存 _hl 维度）。"""
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+
+    x0, x1 = pw.view_box.viewRange()[0]
+    pw.view_box.setXRange(x0 + (x1 - x0) * 0.25, x0 + (x1 - x0) * 0.5, padding=0)
+    qapp.processEvents()
+    settle()
+    qtbot.waitUntil(
+        lambda: _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH, timeout=3000
+    )
+
+    assert pw._legend_selection == {"speed"}
+    assert pw.curves["speed"].curve.zValue() == HIGHLIGHT_CURVE_Z
+    assert _is_tinted(pw, "speed")
+
+
+def test_selection_coexists_with_cursor(plotted_window, qapp, qtbot):
+    """游标开启态：点击照常选中，游标 vline 仍可见且 z 序高于选中曲线。"""
+    mw = plotted_window
+    pw = _pw(mw)
+    if not mw.cursor_btn.isChecked():
+        qtbot.mouseClick(mw.cursor_btn, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        settle()
+    assert mw.cursor_btn.isChecked()
+
+    _click_plot(pw, _curve_pos(pw, "speed"))
+
+    assert pw._legend_selection == {"speed"}
+    assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
+    assert pw.vline.isVisible()
+    assert pw.vline.zValue() > pw.curves["speed"].curve.zValue()
+
+
+def test_selection_adds_no_scene_items(plotted_window, qapp):
+    """D2 rev2：无徽章/无覆盖物 —— 选择只改 pen 与 ExtraSelections。"""
+    pw = _pw(plotted_window)
+    n0 = len(pw.scene().items())
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    _click_plot(pw, _curve_pos(pw, "rpm"), Qt.KeyboardModifier.ControlModifier)
+    assert len(pw.scene().items()) == n0
