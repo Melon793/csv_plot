@@ -639,6 +639,8 @@ class CurveShelfDialog(QDialog):
         )
 
     def _restore_geometry(self) -> None:
+        from PySide6.QtGui import QGuiApplication
+
         from src.core.settings import AppSettings
 
         settings = AppSettings()
@@ -650,6 +652,22 @@ class CurveShelfDialog(QDialog):
         ):
             return
         self.resize(300, 260)
+        # 默认落点：页签栏右端胶囊下方 6px、右对齐。getattr 兜底是硬要求：
+        # 组件测试的 ShelfHost 没有这个方法，不能 AttributeError。
+        anchor_getter = getattr(self.main_window, "curve_shelf_anchor_global", None)
+        anchor = anchor_getter() if callable(anchor_getter) else None
+        if anchor is not None:
+            size = self.size()
+            x = anchor.x() - size.width() + 1
+            y = anchor.y() + 6
+            # G7：screenAt 会返回 None（虚拟屏 / 跨屏边缘），必须退回主屏
+            screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                x = min(max(x, available.left()), available.right() - size.width() + 1)
+                y = min(max(y, available.top()), available.bottom() - size.height() + 1)
+            self.move(x, y)
+            return
         parent = self.parentWidget()
         if parent is not None:
             geo = self.geometry()

@@ -351,7 +351,7 @@ def test_rebuilt_shelf_resets_capsule_count(loaded_window, qapp):
     assert capsule.count() == 1
 
 
-def test_drag_leave_reaches_capsule_only(loaded_window, qapp):
+def test_drag_leave_reaches_capsule_only(loaded_window, qapp, monkeypatch):
     """D-A9：应用级过滤器只对胶囊放行 DragLeave，其余控件维持吞掉。"""
     from PySide6.QtGui import QDragLeaveEvent
 
@@ -363,6 +363,17 @@ def test_drag_leave_reaches_capsule_only(loaded_window, qapp):
     qapp.sendEvent(capsule, QDragLeaveEvent())
     qapp.processEvents()
     assert capsule._drag_hot is False
+
+    # 负向对照：过滤器换成恒 True（等价修复前行为）时高亮必须卡住，
+    # 证明上面的 False 真来自定向放行而不是事件根本没到
+    capsule._set_drag_hot(True)
+    monkeypatch.setattr(
+        mw.layout_manager, "_handle_event_filter", lambda obj, ev: True
+    )
+    qapp.sendEvent(capsule, QDragLeaveEvent())
+    qapp.processEvents()
+    assert capsule._drag_hot is True
+    monkeypatch.undo()
 
     # 非胶囊控件仍返回 True（既有行为不变，避免顺带改动其它拖拽路径）
     other = mw.plot_widgets[0]
@@ -381,3 +392,58 @@ def test_shelf_open_is_rejected_while_loading(loaded_window, qapp, monkeypatch):
     dialog = mw.curve_shelf_if_open()
     assert dialog is None or dialog.isVisible() is False
     assert capsule.isChecked() is False  # 拒绝后勾选态回滚
+
+
+def test_shelf_default_position_anchors_below_capsule(loaded_window, qapp):
+    from PySide6.QtGui import QGuiApplication
+
+    from src.core.settings import AppSettings
+
+    mw = loaded_window
+    # offscreen 虚拟屏 800×800：先把主窗收窄，保证胶囊锚点在屏内，
+    # 否则 G7 的 clamp 会把"对齐"与"完整在屏"变成互斥断言
+    mw.resize(620, 600)
+    mw.move(0, 0)
+    qapp.processEvents()
+
+    settings = AppSettings()
+    old = settings.get_curve_shelf_geometry()
+    settings.set_curve_shelf_geometry(None)
+    try:
+        mw._show_curve_shelf()
+        qapp.processEvents()
+        dialog = mw.curve_shelf_if_open()
+        anchor = mw.curve_shelf_anchor_global()
+        assert anchor is not None
+        geo = dialog.geometry()
+        assert abs(geo.right() - anchor.x()) <= 2
+        assert abs(geo.top() - (anchor.y() + 6)) <= 2
+        screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+        assert screen is not None
+        assert screen.availableGeometry().contains(geo)
+    finally:
+        settings.set_curve_shelf_geometry(old)
+
+
+def test_shelf_saved_geometry_is_restored(loaded_window, qapp):
+    from tests.fixtures.waits import force_delete
+
+    from src.core.settings import AppSettings
+
+    mw = loaded_window
+    settings = AppSettings()
+    old = settings.get_curve_shelf_geometry()
+    try:
+        dialog = mw.get_curve_shelf()
+        dialog.move(120, 140)
+        dialog.show()
+        qapp.processEvents()
+        mw.hide_curve_shelf()  # hideEvent → 记忆几何
+        force_delete(dialog)
+
+        rebuilt = mw.get_curve_shelf()  # 走 restoreGeometry 成功分支
+        qapp.processEvents()
+        assert abs(rebuilt.geometry().x() - 120) <= 5
+        assert abs(rebuilt.geometry().y() - 140) <= 5
+    finally:
+        settings.set_curve_shelf_geometry(old)

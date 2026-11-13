@@ -157,6 +157,7 @@ def test_capsule_returns_width_when_hidden(capsule_shelf):
     without_capsule = bar.width()
     # G2：36px 记在尺寸契约里，隐藏后必须全额归还（实测正好 36）
     assert without_capsule - with_capsule == 36
+    assert capsule.sizeHint().width() == 36
     capsule.show()
     QApplication.processEvents()
     assert bar.width() == with_capsule
