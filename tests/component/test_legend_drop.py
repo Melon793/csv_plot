@@ -4,7 +4,7 @@
 语义且会触发 QMessageBox 阻塞，无法在 offscreen 运行）。
 
 现行语义（src/ui/widgets/plot_widget.py::_handle_legend_drop）：
-- legend 来源：无修饰键=移动，Ctrl=复制，Shift 忽略
+- legend 来源：无修饰键=移动，Alt(⌥)=复制，Shift 忽略；Ctrl/⌘ 是选择/抓取专用，不参与复制
 - 拖回原 plot：静默无操作
 - 移动遇目标已含该变量：弹 question 确认窗，Yes=删源、No=两边都留
 - 复制遇目标已含该变量：弹 information 提示，不改动
@@ -53,11 +53,13 @@ def silent_dialogs(monkeypatch):
     return calls, answer
 
 
-def _drop_legend(dst, src, name, *, ctrl=False, shift=False):
+def _drop_legend(dst, src, name, *, copy=False, shift=False, extra_mods=None):
     """模拟一次 legend 来源 drop（登记注册表 + 构造 QDropEvent）"""
     mods = Qt.KeyboardModifier.NoModifier
-    if ctrl:
-        mods |= Qt.KeyboardModifier.ControlModifier
+    if copy:
+        mods |= Qt.KeyboardModifier.AltModifier
+    if extra_mods is not None:
+        mods |= extra_mods
     if shift:
         mods |= Qt.KeyboardModifier.ShiftModifier
     mime = build_legend_var_mimedata([name], src)
@@ -97,16 +99,29 @@ def test_default_move_removes_source(two_plots, silent_dialogs):
     assert "b" in src.curves  # 其余曲线不受影响
 
 
-def test_ctrl_copy_keeps_source(two_plots, silent_dialogs):
-    """Ctrl=复制：目标新增、源保留"""
+def test_alt_copy_keeps_source(two_plots, silent_dialogs):
+    """Alt(⌥)=复制：目标新增、源保留"""
     src, dst, _ = two_plots
     assert src.plot_variable("a")
     assert dst.plot_variable("b")
 
-    _drop_legend(dst, src, "a", ctrl=True)
+    _drop_legend(dst, src, "a", copy=True)
 
     assert "a" in dst.curves and "b" in dst.curves
     assert "a" in src.curves
+
+
+def test_ctrl_is_not_copy_modifier(two_plots, silent_dialogs):
+    """Ctrl/⌘ 不再参与复制判定：与无修饰一致，走移动语义。"""
+    src, dst, qapp = two_plots
+    assert src.plot_variable("a")
+
+    mods = Qt.KeyboardModifier.ControlModifier
+    _drop_legend(dst, src, "a", extra_mods=mods)
+
+    assert "a" in dst.curves
+    qapp.processEvents()
+    assert "a" not in src.curves
 
 
 def test_drop_on_same_plot_noop(two_plots, silent_dialogs):
@@ -116,7 +131,7 @@ def test_drop_on_same_plot_noop(two_plots, silent_dialogs):
     before = dict(src.curves)
 
     _drop_legend(src, src, "a")
-    _drop_legend(src, src, "a", ctrl=True)
+    _drop_legend(src, src, "a", copy=True)
     qapp.processEvents()
 
     assert list(src.curves) == list(before)
@@ -155,14 +170,14 @@ def test_move_to_existing_confirm_no_keeps_both(two_plots, silent_dialogs):
     assert "a" in src.curves  # 取消则源保留
 
 
-def test_ctrl_copy_to_existing_shows_info(two_plots, silent_dialogs):
-    """Ctrl 复制遇目标已含：仅弹 information 提示，曲线无改动"""
+def test_alt_copy_to_existing_shows_info(two_plots, silent_dialogs):
+    """Alt 复制遇目标已含：仅弹 information 提示，曲线无改动"""
     calls, _ = silent_dialogs
     src, dst, _ = two_plots
     assert src.plot_variable("a")
     assert dst.plot_variable("a")
 
-    _drop_legend(dst, src, "a", ctrl=True)
+    _drop_legend(dst, src, "a", copy=True)
 
     assert len(calls["information"]) == 1
     assert list(dst.curves) == ["a"]
@@ -263,13 +278,13 @@ def test_move_preserves_color_to_nonempty_target(two_plots, silent_dialogs):
     assert dst.curves["c"].color == want_c
 
 
-def test_ctrl_copy_preserves_custom_hex_color(two_plots, silent_dialogs):
-    """Ctrl 复制：自定义 hex 色同样继承，且源曲线保留"""
+def test_alt_copy_preserves_custom_hex_color(two_plots, silent_dialogs):
+    """Alt 复制：自定义 hex 色同样继承，且源曲线保留"""
     src, dst, _ = two_plots
     assert src.plot_variable("a")
     assert src._multi_curve_manager.apply_curve_color("a", "#123456")
 
-    _drop_legend(dst, src, "a", ctrl=True)
+    _drop_legend(dst, src, "a", copy=True)
 
     assert dst.curves["a"].color == "#123456"
     assert _pen_color_hex(dst.curves["a"]) == "#123456"
@@ -277,15 +292,15 @@ def test_ctrl_copy_preserves_custom_hex_color(two_plots, silent_dialogs):
     assert src.curves["a"].color == "#123456"
 
 
-def test_ctrl_copy_preserves_color_to_nonempty_target(two_plots, silent_dialogs):
-    """Ctrl 复制到非空目标：继承源色，目标既有曲线不受影响"""
+def test_alt_copy_preserves_color_to_nonempty_target(two_plots, silent_dialogs):
+    """Alt 复制到非空目标：继承源色，目标既有曲线不受影响"""
     src, dst, _ = two_plots
     assert src.plot_variable("a")
     want_a = src.curves["a"].color
     assert dst.plot_variable("c")
     want_c = dst.curves["c"].color
 
-    _drop_legend(dst, src, "a", ctrl=True)
+    _drop_legend(dst, src, "a", copy=True)
 
     assert dst.curves["a"].color == want_a
     assert dst.curves["c"].color == want_c

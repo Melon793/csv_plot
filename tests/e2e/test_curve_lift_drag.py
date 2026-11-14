@@ -112,6 +112,27 @@ def test_real_long_press_requires_selection(
 
 
 @pytest.mark.full_matrix
+def test_ctrl_long_press_lifts_unselected_curve(two_plots, qtbot, qapp):
+    """⌘+长按 = 抓取许可：未选中的曲线也能直接出副框，且不改选择集。"""
+    _mw, _page, left, _right = two_plots
+    pos = _curve_pos(left, "speed")
+    assert left._legend_selection == set()
+
+    QTest.mousePress(left.viewport(), Qt.MouseButton.LeftButton, CTRL, pos)
+    qtbot.waitUntil(lambda: left._lift_active, timeout=CURVE_LIFT_LONG_PRESS_MS + 2000)
+    settle()
+
+    assert left._lift_names == ["speed"]
+    assert left._legend_selection == set(), "预览阶段不得预选"
+
+    QTest.mouseRelease(left.viewport(), Qt.MouseButton.LeftButton, CTRL, pos)
+    qapp.processEvents()
+
+    assert left._lift_active is False
+    assert left._legend_selection == {"speed"}, "未拖动则回落为 ⌘ 单击选择"
+
+
+@pytest.mark.full_matrix
 def test_curve_origin_move_is_quiet_and_clears_target_selection(
     two_plots, silent_dialogs, qapp
 ):

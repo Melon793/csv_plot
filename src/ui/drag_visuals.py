@@ -81,7 +81,7 @@ class DragItem:
 
 def copy_modifier_hint() -> str:
     """复制修饰键的展示文案，与 ``drag_drop.is_copy_modifier`` 语义一致。"""
-    return "⌥/⌘" if sys.platform == "darwin" else "Ctrl"
+    return "⌥" if sys.platform == "darwin" else "Alt"
 
 
 def _sized_font(font: QFont, delta: int) -> QFont:
