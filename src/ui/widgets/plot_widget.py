@@ -1826,19 +1826,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._curve_click_ctrl = bool(
             event.modifiers() & Qt.KeyboardModifier.ControlModifier
         )
-        # 长按抬框：Ctrl/Shift 不参与；Alt 允许（macOS ⌥ 先按再拖是习惯路径）。
+        # 长按抬框：Shift 不参与（框选缩放专属）；Alt/Ctrl/⌘ 允许——macOS
+        # ⌥/⌘ 是「先按修饰键再拖动」的习惯路径，排除 Ctrl 会让选择手感断裂。
         # 只记起点并起表，不拦截、不 accept、不跑命中检测（平移热路径）
         candidate = self._curve_click_press_pos
         if (
             candidate is not None
             and event.button() == Qt.MouseButton.LeftButton
-            and not (
-                event.modifiers()
-                & (
-                    Qt.KeyboardModifier.ControlModifier
-                    | Qt.KeyboardModifier.ShiftModifier
-                )
-            )
+            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         ):
             self._lift_press_pos = candidate
             self._lift_timer.start()
@@ -1851,6 +1846,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             super().mousePressEvent(event)
             return
         if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            if self._is_pos_over_legend(event.position().toPoint()):
+                # 图例区的 Shift 属于范围选择手势：本层不得起框选缩放。
+                # view 层先于 scene 分发，若在此 accept，legend 收不到 press
+                # → 范围选择失效；松手时 0×0 框不缩放，但若带位移就会把
+                # 图例上的 Shift 拖动变成 plot 放大（用户可见的 zoom in）。
+                super().mousePressEvent(event)
+                return
             self.origin = event.pos()
             self.rubberBand.setGeometry(QRect(self.origin, QSize()))
             self.rubberBand.show()
@@ -1888,7 +1890,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        was_lifted = self._lift_active
         self._cancel_lift(restore_cursor=True)
         if self.rubberBand.isVisible() and event.button() == Qt.MouseButton.LeftButton:
             self.rubberBand.hide()
@@ -1919,12 +1920,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
-            if was_lifted or self._suppress_curve_click:
-                # 长按抬起后直接松手 = 无操作；QDrag 消费 release 的兜底
+            if self._suppress_curve_click:
+                # QDrag 消费 release 的兜底：本次不是点击
                 self._suppress_curve_click = False
                 self._curve_click_press_pos = None
                 return
-            # super 先行完成 ViewBox 收尾后再判选择手势（不 accept 不拦截）
+            # super 先行完成 ViewBox 收尾后再判选择手势（不 accept 不拦截）。
+            # 抬框后未越过拖拽阈值就松手也走这里：副框只是拖拽预备态，
+            # 没拖走就按点击收口（Ctrl 慢点击仍能 toggle）
             self._handle_curve_click_release(event)
 
     # ---------------- 长按抬框搬运 ----------------
@@ -2014,7 +2017,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         card.setGeometry(x, y, width, height)
 
     def _on_lift_timeout(self) -> None:
-        """长按到期：命中曲线才抬框（此时才做一次命中检测）。"""
+        """长按到期：按下点命中**已选中的曲线**才抬框（此时才做命中检测）。
+
+        只对选择集内的曲线起手势：未选中曲线的长按与「慢速拖动平移」
+        物理上无法区分（两者都是按下后不动），会互抢；选择集非空说明
+        用户已明确表达意图，此时长按才没有歧义。
+        """
         if self._is_being_destroyed or not self.isVisible():
             self._cancel_lift()
             return
@@ -2022,18 +2030,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if press_pos is None:
             self._cancel_lift()
             return
+        selection = set(getattr(self, "_legend_selection", ()) or ())
+        if not selection:
+            # 无选择集时直接放弃：连命中检测都不做（平移热路径的常见情形）
+            self._cancel_lift()
+            return
         from src.ui.widgets.multi_curve_manager import hit_test_curve
 
         # 用当前坐标重算 scene 位置（XLink 联动/区间变化会让 press 时的坐标过期）
         hit = hit_test_curve(self, self.mapToScene(press_pos))
-        if hit is None:
+        if hit is None or hit not in selection:
             self._cancel_lift()
             return
-        selection = set(getattr(self, "_legend_selection", ()) or ())
-        if len(selection) > 1 and hit in selection:
-            names = [name for name in self.curves if name in selection]
-        else:
-            names = [hit]
+        names = [name for name in self.curves if name in selection]
         names = [
             name
             for name in names

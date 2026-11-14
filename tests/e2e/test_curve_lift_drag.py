@@ -71,12 +71,28 @@ def _drop_curve(dst, src, names, *, mods=Qt.KeyboardModifier.NoModifier):
 
 
 @pytest.mark.full_matrix
-def test_real_long_press_lifts_card_then_release_is_noop(
+def test_real_long_press_requires_selection(
     two_plots, qtbot, qapp
 ):
     _mw, _page, left, _right = two_plots
     pos = _curve_pos(left, "speed")
 
+    # 未选中：长按不抬框（与慢速拖动平移的按下-静止阶段无法区分）
+    QTest.mousePress(left.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, pos)
+    assert left._lift_timer.isActive()
+    qtbot.wait(CURVE_LIFT_LONG_PRESS_MS + 300)
+    qapp.processEvents()
+    assert left._lift_active is False
+    assert left._lift_card is None or not left._lift_card.isVisible()
+
+    QTest.mouseRelease(left.viewport(), Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, pos)
+    qapp.processEvents()
+    assert left._legend_selection == set(), "裸单击不得选中"
+
+    # 已选中：真实 300ms 抬起副框，原地松手不搬运、不改选择
+    left.legend_label._toggle_legend_selection("speed")
     QTest.mousePress(left.viewport(), Qt.MouseButton.LeftButton,
                      Qt.KeyboardModifier.NoModifier, pos)
     qtbot.waitUntil(lambda: left._lift_active, timeout=CURVE_LIFT_LONG_PRESS_MS + 2000)
@@ -84,14 +100,14 @@ def test_real_long_press_lifts_card_then_release_is_noop(
 
     assert left._lift_names == ["speed"]
     assert left._lift_card is not None and left._lift_card.isVisible()
-    assert left._legend_selection == set()
+    assert left._legend_selection == {"speed"}
 
     QTest.mouseRelease(left.viewport(), Qt.MouseButton.LeftButton,
                        Qt.KeyboardModifier.NoModifier, pos)
     qapp.processEvents()
 
     assert left._lift_active is False
-    assert left._legend_selection == set(), "抬起后松手不得选中"
+    assert left._legend_selection == {"speed"}, "原地松手不得改选择"
     assert left.curves["speed"].curve is not None, "松手不得搬运"
 
 

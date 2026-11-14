@@ -541,3 +541,55 @@ def test_status_bar_broadcast_keeps_cursor_readout(plotted_window, qapp, qtbot):
     assert mw._message_label.text() == "已选中：speed"
     assert _readouts() == before, "播报不得挤掉/清空/改写绘图区读数"
     assert pw.vline.isVisible()
+
+# ---------------------------------------------------------------------------
+# 反向：图例上的 Shift 必须走 scene→proxy 链（view 层不得截胡成框选缩放）
+# ---------------------------------------------------------------------------
+
+
+def _anchor_view_pos(pw, var_name):
+    """legend 锚点坐标换算到 view 的 viewport 坐标系（真实事件落点）。"""
+    return pw.legend_label.mapTo(
+        pw.viewport(), _anchor_pos(pw.legend_label, var_name)
+    )
+
+
+def test_shift_click_legend_through_view_range_selects(plotted_window, qapp):
+    """真实事件链路（QTest 打 viewport）：Shift 单击 legend 触发范围选择。
+
+    回归：view 层 mousePressEvent 的 Shift 分支先于 scene 分发，过去会把
+    图例上的 Shift 按下当成「开始框选缩放」并 accept，legend 收不到
+    press → 范围选择失效。
+    """
+    pw = _pw(plotted_window)
+    _click_plot(pw, _curve_pos(pw, "speed"))
+    assert pw._legend_selection == {"speed"}
+
+    QTest.mouseClick(
+        pw.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        _anchor_view_pos(pw, "rpm"),
+    )
+    qapp.processEvents()
+
+    assert pw._legend_selection == {"speed", "rpm"}
+    assert not pw.rubberBand.isVisible()
+
+
+def test_shift_drag_from_legend_does_not_zoom(plotted_window, qapp):
+    """图例上 Shift 拖出的位移不得变成 plot 框选放大。"""
+    pw = _pw(plotted_window)
+    anchor = _anchor_view_pos(pw, "speed")
+    target = QPoint(anchor.x() + 160, anchor.y() + 120)
+    xrange_before = pw.view_box.viewRange()
+
+    QTest.mousePress(pw.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.ShiftModifier, anchor)
+    assert not pw.rubberBand.isVisible(), "图例上的 Shift press 不得起框"
+    QTest.mouseMove(pw.viewport(), target)
+    QTest.mouseRelease(pw.viewport(), Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.ShiftModifier, target)
+    qapp.processEvents()
+
+    assert pw.view_box.viewRange() == xrange_before, "不得缩放"

@@ -144,15 +144,26 @@ def test_press_starts_timer_without_hit_test(three_curves):
     pw._cancel_lift()
 
 
-def test_ctrl_press_does_not_start_lift(three_curves):
+def test_ctrl_press_starts_lift_timer(three_curves):
+    """macOS ⌘/Ctrl 先按再拖是习惯路径，长按不得被 Ctrl 排除。"""
     pw = three_curves
     _press(pw, _curve_pos(pw, "a"), Qt.KeyboardModifier.ControlModifier)
+    assert pw._lift_timer.isActive()
+    pw._cancel_lift()
+
+
+def test_shift_press_does_not_start_lift(three_curves):
+    """Shift 是框选缩放专属，不参与长按搬运。"""
+    pw = three_curves
+    _press(pw, _curve_pos(pw, "a"), Qt.KeyboardModifier.ShiftModifier)
     assert not pw._lift_timer.isActive()
     assert pw._lift_press_pos is None
+    pw.rubberBand.hide()
 
 
 def test_timeout_hit_shows_card_without_scene_item(three_curves):
     pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
     items_before = len(pw.scene().items())
 
     _lift(pw, _curve_pos(pw, "a"))
@@ -162,7 +173,7 @@ def test_timeout_hit_shows_card_without_scene_item(three_curves):
     assert pw._lift_card is not None
     assert pw._lift_card.isVisibleTo(pw.viewport())
     assert len(pw.scene().items()) == items_before, "副框不得进入 scene"
-    assert pw._legend_selection == set(), "抬起不改变选择"
+    assert pw._legend_selection == {"a"}, "抬起不改变选择"
     pw._cancel_lift(restore_cursor=True)
 
 
@@ -180,14 +191,17 @@ def test_timeout_miss_cancels_silently(three_curves):
     assert pw._lift_card is None or not pw._lift_card.isVisible()
 
 
-def test_unselected_curve_lifts_single(three_curves):
+def test_unselected_curve_does_not_lift(three_curves):
+    """未选中曲线不参与长按：与慢速拖动平移的按下-静止阶段无法区分。"""
     pw = three_curves
     pw.legend_label._toggle_legend_selection("b")
 
-    _lift(pw, _curve_pos(pw, "a"))
+    _press(pw, _curve_pos(pw, "a"))
+    pw._on_lift_timeout()
 
-    assert pw._lift_names == ["a"], "未选中曲线也可单条搬运"
-    pw._cancel_lift(restore_cursor=True)
+    assert pw._lift_active is False
+    assert pw._lift_names == []
+    assert pw._lift_card is None or not pw._lift_card.isVisible()
 
 
 def test_selected_member_lifts_whole_batch(three_curves):
@@ -214,19 +228,37 @@ def test_move_before_timeout_cancels_lift(three_curves):
 
 
 def test_release_after_lift_does_nothing(three_curves, fake_drag):
+    """抬框后原地松手：不搬运，裸单击语义（不选中/不清选）。"""
     pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
     pos = _curve_pos(pw, "a")
     _lift(pw, pos)
 
     _release(pw, pos)
 
     assert fake_drag.instances == []
-    assert pw._legend_selection == set()
+    assert pw._legend_selection == {"a"}
     assert pw._lift_active is False
+
+
+def test_ctrl_slow_click_after_lift_still_toggles(three_curves, fake_drag):
+    """⌘+长按后未拖动就松手：按点击收口，慢点击仍能 toggle（不丢手势）。"""
+    pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
+    pos = _curve_pos(pw, "a")
+    _press(pw, pos, Qt.KeyboardModifier.ControlModifier)
+    pw._on_lift_timeout()
+    assert pw._lift_active is True
+
+    _release(pw, pos, Qt.KeyboardModifier.ControlModifier)
+
+    assert fake_drag.instances == []
+    assert pw._legend_selection == set(), "慢点击应取消选中而不是静默丢弃"
 
 
 def test_move_after_lift_starts_drag_with_curve_origin(three_curves, fake_drag):
     pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
     pos = _curve_pos(pw, "a")
     _lift(pw, pos)
 
@@ -241,7 +273,7 @@ def test_move_after_lift_starts_drag_with_curve_origin(three_curves, fake_drag):
     assert drag.snapshot["batch"] is False, "单条曲线也走 quiet 批量协议"
     assert drag.snapshot["source"] is pw
     assert drag.snapshot["vars"] == ["a"]
-    assert pw._legend_selection == set(), "发起搬运不得自动选中"
+    assert pw._legend_selection == {"a"}, "发起搬运不得改变选择"
 
 
 def test_batch_drag_marks_batch(three_curves, fake_drag):
@@ -261,6 +293,7 @@ def test_batch_drag_marks_batch(three_curves, fake_drag):
 def test_drag_finish_clears_registry_and_scene_state(three_curves, fake_drag):
     pw = three_curves
     scene = pw.scene()
+    pw.legend_label._toggle_legend_selection("a")
 
     pos = _curve_pos(pw, "a")
     _lift(pw, pos)
@@ -280,22 +313,24 @@ def test_drag_finish_clears_registry_and_scene_state(three_curves, fake_drag):
 
 def test_suppress_click_after_drag_does_not_select(three_curves, fake_drag):
     pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
     pos = _curve_pos(pw, "a")
     _lift(pw, pos)
     _move(pw, pos + QPoint(QApplication.startDragDistance() + 8, 0))
 
     # QDrag 消费 release 的兜底：释放同位置不得当成 Ctrl 单击
     _release(pw, pos, Qt.KeyboardModifier.ControlModifier)
-    assert pw._legend_selection == set()
+    assert pw._legend_selection == {"a"}, "释放补刀不得改动选择"
 
     # 下一次正常 Ctrl 单击必须恢复
     _press(pw, pos, Qt.KeyboardModifier.ControlModifier)
     _release(pw, pos, Qt.KeyboardModifier.ControlModifier)
-    assert pw._legend_selection == {"a"}
+    assert pw._legend_selection == set()
 
 
 def test_lost_release_cancels_lift(three_curves):
     pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
     pos = _curve_pos(pw, "a")
     _lift(pw, pos)
 
