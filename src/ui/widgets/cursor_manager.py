@@ -1257,14 +1257,14 @@ class CursorManager:
                 fmt.setLeftMargin(7)
                 doc.rootFrame().setFrameFormat(fmt)
 
-            # 身份色：左侧 4px 全色条 + 60α 同色底 + 曲线色描边（tint60 变体）。
-            # 底色用曲线色 60α(=23.5% 色) 而非白：空背景呈淡彩、压曲线更显色；
-            # 代价是压自身深色曲线时背景偏深、黑字对比下降（见设计稿 §4.5）。
+            # 身份色：左侧 4px 全色条 + 15α 同色底 + 曲线色描边（tin15 变体）。
+            # 底色用曲线色 15α(=5.9% 色)：几乎近白、只留一丝色相，遮挡最轻；
+            # 身份仍由不透明色条承担，压深色曲线时黑字对比也比高 α 同色底更稳。
             if (not hasattr(text_item, '_cached_chip_color')
                     or text_item._cached_chip_color != layout.color):
                 c = pg.mkColor(layout.color)
                 tint = pg.mkColor(layout.color)
-                tint.setAlpha(60)
+                tint.setAlpha(15)
                 grad = QLinearGradient(0.0, 0.0, 5.0, 0.0)
                 grad.setColorAt(0.0, c)
                 grad.setColorAt(0.79, c)

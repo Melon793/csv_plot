@@ -23,7 +23,7 @@ _TOL = 6
 def _show_label(pw):
     """把交点放到视图中部并刷新出数值标签
 
-    关网格：底色 60α 半透明，像素采样点需落在纯白背景上才能算期望色。
+    关网格：底色 15α 半透明，像素采样点需落在纯白背景上才能算期望色。
     """
     pw.plot_item.showGrid(x=False, y=False)
     vb = pw.view_box
@@ -65,7 +65,7 @@ def _blend_hex(color_hex: str, alpha: int, bg: str = "#FFFFFF") -> str:
 
 
 def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
-    """同色 60α 底 + 左侧 4px 曲线色条（渐变刷，不新增图元）"""
+    """同色 15α 底 + 左侧 4px 曲线色条（渐变刷，不新增图元）"""
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     lbl = _show_label(pw)
     curve_color = pw.curves["y"].color.lower()
@@ -73,12 +73,12 @@ def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
     assert lbl.fill.style() == Qt.BrushStyle.LinearGradientPattern
     stops = lbl.fill.gradient().stops()
     assert len(stops) >= 3
-    # 0~4px 是不透明全色条；4px 之后是 60α 同色底（透出曲线）
+    # 0~4px 是不透明全色条；4px 之后是 15α 同色底（透出曲线）
     assert stops[0][1].name().lower() == curve_color
     assert stops[0][1].alpha() == 255
     assert stops[1][1].name().lower() == curve_color
     assert stops[-1][1].name().lower() == curve_color
-    assert stops[-1][1].alpha() == 60
+    assert stops[-1][1].alpha() == 15
 
     # 文字始终黑色；边框为曲线色 1.5px（main 原色，浅灰对白底几乎不可见）
     assert lbl.textItem.defaultTextColor().name().lower() == "#000000"
@@ -90,7 +90,7 @@ def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
 
 
 def test_label_bar_rendered_in_curve_color(plot_factory, qapp):
-    """像素验证：左缘 2px 是不透明色条；右侧是 60α 同色叠白的淡彩"""
+    """像素验证：左缘 2px 是不透明色条；右侧是 15α 同色叠白的淡彩"""
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     lbl = _show_label(pw)
     curve_color = pw.curves["y"].color
@@ -101,7 +101,7 @@ def test_label_bar_rendered_in_curve_color(plot_factory, qapp):
     assert _near(img.pixelColor(x + 2, row), curve_color), (
         f"色条像素 {img.pixelColor(x + 2, row).name()} 应为 {curve_color}"
     )
-    expected = _blend_hex(curve_color, 60)  # 60α 同色叠白底
+    expected = _blend_hex(curve_color, 15)  # 15α 同色叠白底
     assert _near(img.pixelColor(x + 20, row), expected), (
         f"底色像素 {img.pixelColor(x + 20, row).name()} 应为 {expected}"
     )
