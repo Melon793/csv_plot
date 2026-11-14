@@ -21,7 +21,11 @@ _TOL = 6
 
 
 def _show_label(pw):
-    """把交点放到视图中部并刷新出数值标签"""
+    """把交点放到视图中部并刷新出数值标签
+
+    关网格：底色 60α 半透明，像素采样点需落在纯白背景上才能算期望色。
+    """
+    pw.plot_item.showGrid(x=False, y=False)
     vb = pw.view_box
     vb.setXRange(0, 99, padding=0.05)
     vb.setYRange(0, 200, padding=0)
@@ -61,16 +65,19 @@ def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
     assert lbl.fill.style() == Qt.BrushStyle.LinearGradientPattern
     stops = lbl.fill.gradient().stops()
     assert len(stops) >= 3
-    # 0~4px 是曲线色，4px 之后是白色；两端都必须完全不透明
+    # 0~4px 是不透明全色条；4px 之后是 60α 白底（透出曲线）
     assert stops[0][1].name().lower() == curve_color
     assert stops[0][1].alpha() == 255
     assert stops[1][1].name().lower() == curve_color
     assert stops[-1][1].name().lower() == "#ffffff"
-    assert stops[-1][1].alpha() == 255
+    assert stops[-1][1].alpha() == 60
 
     # 文字始终黑色、边框浅灰（不随曲线色变化）
     assert lbl.textItem.defaultTextColor().name().lower() == "#000000"
     assert lbl.border.color().name().lower() == "#d0d4da"
+
+    # 色条与文字之间留 3px 间隙（默认左边距 4 + 3 = 7）
+    assert lbl.textItem.document().rootFrame().frameFormat().leftMargin() == 7
 
 
 def test_label_bar_rendered_in_curve_color(plot_factory, qapp):
@@ -95,3 +102,32 @@ def test_label_height_cache_not_underestimated(plot_factory, qapp):
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     lbl = _show_label(pw)
     assert pw._cursor_manager._cached_label_height_pixels >= lbl.boundingRect().height()
+
+
+def test_leader_line_connects_point_to_label(plot_factory, qapp):
+    """A2 引导线：标签被推离交点时存在，两端分别落在交点与标签左缘"""
+    pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
+    lbl = _show_label(pw)
+    leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
+    assert leaders, "标签离交点 >8px 时应有引导线"
+    xs, ys = leaders[0].getData()
+    assert len(xs) == 2, "引导线应为两点线段"
+
+    vb = pw.view_box
+    lab = vb.mapSceneToView(lbl.scenePos())  # 标签左缘中点（数据坐标）
+    peak_x = _x_where(pw, "y", 100.0)
+    ends = list(zip(xs, ys))
+    assert any(abs(x - lab.x()) < 1e-6 and abs(y - lab.y()) < 1e-6 for x, y in ends), (
+        "引导线一端应落在标签左缘"
+    )
+    assert any(abs(x - peak_x) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in ends), (
+        "引导线另一端应落在交点"
+    )
+
+
+def test_leader_pool_cleared_on_full_cleanup(plot_factory, qapp):
+    """彻底清理（hide_only=False）后 leaders 池清空，不泄漏图元"""
+    pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
+    _show_label(pw)
+    pw._cursor_manager._clear_cursor_items(hide_only=False)
+    assert pw._cursor_item_pool["leaders"] == [], "彻底清理后 leaders 池应清空"
