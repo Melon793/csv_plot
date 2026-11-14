@@ -1134,10 +1134,19 @@ class LayoutManager(MainWindowBaseManager):
         return False
 
     def show_drop_overlay(self):
+        """拖拽悬停遮罩：只做视觉反馈。
+
+        遮罩是 centralWidget 的子控件，``activateWindow()`` 会作用到**顶层窗口**
+        （Qt 语义：等同点一下标题栏），在别人的拖拽会话里把主窗口抢到前台 ——
+        现场表现为"拖动文件经过 csv_plot 时窗口跳到前面、打断移动"。
+        沿用 ``_on_shelf_capsule_hover`` 的意图：只 ``show()``，不显式
+        raise/activate；遮罩本身不接收键盘输入，不需要焦点。
+        （注：该处最小化分支的 ``showNormal()`` 自身会激活窗口，不是完整范本。）
+        drop 之后的置前由 ``load_csv_file`` 的 finally 负责，不在这里做。
+        """
         self.mw.drop_overlay.setGeometry(self.mw.centralWidget().rect())
         self.mw.drop_overlay.raise_()
         self.mw.drop_overlay.show()
-        self.mw.drop_overlay.activateWindow()
 
     def hide_drop_overlay(self):
         self.mw.drop_overlay.hide()
