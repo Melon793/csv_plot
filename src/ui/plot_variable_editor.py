@@ -33,6 +33,7 @@ from src.core.data_types import (
     SYMBOL_POLICY_ON,
 )
 from src.core.logger import get_logger
+from src.ui import theme
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.ui.widgets.variable_search_bar import VariableSearchBar
 
@@ -178,23 +179,23 @@ class PlotVariableEditorDialog(QDialog):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.var_table.setAlternatingRowColors(True)
-        self.var_table.setStyleSheet("""
-            QTableWidget {
+        self.var_table.setStyleSheet(f"""
+            QTableWidget {{
                 gridline-color: #d0d0d0;
                 background-color: white;
                 font-size: 12px;
-            }
-            QTableWidget::item {
+            }}
+            QTableWidget::item {{
                 padding: 6px;
                 border: none;
-            }
-            QTableWidget::item:selected {
-                background-color: #e3f2fd;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {theme.TINT_SOFT};
                 color: #000000;
-            }
-            QCheckBox {
+            }}
+            QCheckBox {{
                 font-size: 12px;
-            }
+            }}
         """)
 
         # 设置列宽

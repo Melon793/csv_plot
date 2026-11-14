@@ -70,6 +70,7 @@ from src.core.data_types import (
     SYMBOL_POLICY_ON,
     resolve_symbol_show,
 )
+from src.ui import theme
 
 # 图例菜单/状态栏用的中文短标签（键为 data_types 常量）
 DRAW_MODE_LABELS = {
@@ -139,7 +140,7 @@ PALETTE_COLUMNS = 6
 _SWATCH_SIZE = 26      # 色块边长（逻辑像素，Qt 按 DPR 缩放）
 _SWATCH_RADIUS = 5     # 圆角半径
 _SWATCH_HOVER_RING = QColor("#bdbdbd")
-_SWATCH_SELECT_RING = QColor("#1a73e8")
+_SWATCH_SELECT_RING = QColor(theme.ACCENT)
 _COLOR_LABELS = {
     "#0072B2": "蓝色",
     "#D62728": "红色",
@@ -276,20 +277,20 @@ _SEG_SYMBOL_ITEMS = (
 _PANEL_VAR_NAME_MAX_WIDTH = 200
 
 # 分段控件按钮 QSS：中性描边 + 选中品牌蓝（与色板选中环同色系）
-_SEG_QSS = """
-    QPushButton {
+_SEG_QSS = f"""
+    QPushButton {{
         background: transparent;
         border: 1px solid palette(mid);
         border-radius: 4px;
         padding: 2px 8px;
-    }
-    QPushButton:hover {
+    }}
+    QPushButton:hover {{
         background: palette(midlight);
-    }
-    QPushButton:checked {
-        background: rgba(26, 115, 232, 0.14);
-        border-color: #1a73e8;
-    }
+    }}
+    QPushButton:checked {{
+        background: {theme.TINT_SOFT};
+        border-color: {theme.ACCENT};
+    }}
 """
 
 
@@ -1203,8 +1204,8 @@ class LegendTextBrowser(QTextBrowser):
                         extra = QTextEdit.ExtraSelection()
                         extra.cursor = cursor
                         fmt = QTextCharFormat()
-                        # 15.7% alpha（计划口径 15–20% 蓝色 tint）
-                        fmt.setBackground(QColor(0, 120, 212, 40))
+                        # 25% 档：与全 app 选中 tint 同一 token
+                        fmt.setBackground(theme.tint_qcolor())
                         extra.format = fmt
                         extras.append(extra)
                 it += 1

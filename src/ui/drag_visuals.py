@@ -30,10 +30,10 @@ from PySide6.QtWidgets import QWidget
 from src.ui import theme
 
 # === 色板（全部复用 theme 既有值） ===
-DRAG_ACCENT = theme.CHIP_SEL_BD          # #2F6FB4：落点边框与提示文字
-DRAG_ACCENT_SOFT = theme.CHIP_CUR_BG     # #E8F1FD：有效落点底色
+DRAG_ACCENT = theme.CHIP_SEL_BD          # 强调色：落点边框与提示文字
+DRAG_ACCENT_SOFT = theme.CHIP_CUR_BG     # 10% 浅底：有效落点底色
 DRAG_SURFACE = QColor(255, 255, 255, 247)
-DRAG_BD = "#CBD9E8"
+DRAG_BD = theme.SEP_ON_BAR            # 中性卡片描边（原 #CBD9E8 淡蓝灰并入灰阶）
 DRAG_TEXT = theme.TEXT_PRIMARY
 DRAG_MUTED = theme.TEXT_MUTED
 DRAG_SEP = theme.SEP                     # #EAECEF：头部分隔线

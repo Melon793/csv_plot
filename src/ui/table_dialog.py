@@ -45,6 +45,7 @@ from src.core.config import (
     widget_alive,
     is_grouped_loader,
 )
+from src.ui import theme
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.core.logger import get_logger
 
@@ -248,9 +249,10 @@ class CustomDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, highlight_color)
         # 被选中的单元格所在的行或列：使用浅蓝色，提高透明度
         elif is_in_selected_row_or_col:
+            # 十字引导：10% 档（比选中格弱一档，不抢读数）
             painter.fillRect(
-                option.rect, QColor(200, 200, 255, 32)
-            )  # 浅蓝高亮，更透明（从64降低到32）
+                option.rect, theme.tint_qcolor(theme.TINT_SOFT_ALPHA)
+            )
 
         # 新增：高亮来自另一个视图的行
         if index.row() in self.highlighted_rows:
@@ -260,9 +262,8 @@ class CustomDelegate(QStyledItemDelegate):
 
         # 新增：高亮指定的列（用于闪烁）
         if index.column() in self.highlighted_cols:
-            painter.fillRect(
-                option.rect, QColor(200, 200, 255, 128)
-            )  # 淡蓝色高亮，半透明
+            # 列闪烁：25% 档
+            painter.fillRect(option.rect, theme.tint_qcolor())
 
         super().paint(painter, option, index)
         painter.restore()

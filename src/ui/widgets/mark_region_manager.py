@@ -18,6 +18,7 @@ import pyqtgraph as pg
 from src.core.config import _evaluate_float32_safety, is_grouped_loader
 from src.core.data_types import MarkStatEntry
 from src.core.value_format import decimals_for_step
+from src.ui import theme
 
 if TYPE_CHECKING:
     from src.ui.widgets.cursor_manager import CursorManager
@@ -61,7 +62,10 @@ class MarkRegionManager:
         """添加标记区域（已存在时先拆干净，避免留下拖不动也关不掉的幽灵区域）"""
         self._teardown_mark_region()
 
-        self.pw.mark_region = pg.LinearRegionItem([min_x, max_x], movable=True)
+        # 区域填充显式走主题 tint：库默认是 (0,0,255,50) 纯蓝且源码里搜不到
+        self.pw.mark_region = pg.LinearRegionItem(
+            [min_x, max_x], movable=True, brush=theme.tint_qcolor()
+        )
         for line in self.pw.mark_region.lines:
             line.setHoverPen(pg.mkPen(color="r", width=10))
 

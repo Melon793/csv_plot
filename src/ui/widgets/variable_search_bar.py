@@ -21,6 +21,7 @@ from PySide6.QtGui import QColor, QPen
 
 from src.core.config import safe_qt_op
 from src.core.keyword_match import KeywordMatcher
+from src.ui import theme
 
 from src.core.logger import get_logger
 from PySide6.QtWidgets import (
@@ -110,7 +111,7 @@ class _CandidateItemDelegate(QStyledItemDelegate):
             font.setItalic(True)
             painter.setFont(font)
         elif option.state & QStyle.StateFlag.State_Selected:
-            painter.setPen(QColor(255, 255, 255))
+            painter.setPen(option.palette.highlightedText().color())
         else:
             painter.setPen(option.palette.text().color())
 
@@ -211,18 +212,18 @@ class VariableSearchBar(QWidget):
             placeholder = "搜索变量...（Ctrl+F 或 Insert 聚焦）"
         self.search_edit.setPlaceholderText(placeholder)
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setStyleSheet("""
-            QLineEdit {
+        self.search_edit.setStyleSheet(f"""
+            QLineEdit {{
                 font-size: 14px;
                 padding: 8px 12px;
                 border: 1px solid #ccc;
                 border-radius: 6px;
                 background: #f8f8f8;
-            }
-            QLineEdit:focus {
-                border: 1px solid #4a90d9;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {theme.ACCENT};
                 background: #ffffff;
-            }
+            }}
         """)
         search_row.addWidget(self.search_edit, 1)
         layout.addLayout(search_row)
@@ -234,25 +235,25 @@ class VariableSearchBar(QWidget):
         # ↑↓ 导航通过 eventFilter 拦截搜索框按键实现，不依赖列表焦点
         self.candidate_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.candidate_list.setItemDelegate(_CandidateItemDelegate(self.candidate_list))
-        self.candidate_list.setStyleSheet("""
-            QListWidget {
+        self.candidate_list.setStyleSheet(f"""
+            QListWidget {{
                 border: 1px solid #ddd;
                 border-top: none;
                 background: #ffffff;
                 font-size: 12px;
                 outline: none;
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 padding: 3px 6px;
                 border-bottom: 1px solid #eee;
-            }
-            QListWidget::item:selected {
-                background: #e3f2fd;
-            }
-            QListWidget::item:disabled {
+            }}
+            QListWidget::item:selected {{
+                background: {theme.TINT_SOFT};
+            }}
+            QListWidget::item:disabled {{
                 color: #999;
                 background: #fafafa;
-            }
+            }}
         """)
         self.candidate_list.setMouseTracking(True)
         self.candidate_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
