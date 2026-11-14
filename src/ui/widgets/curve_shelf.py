@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QDrag, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,11 +44,16 @@ from src.ui.drag_drop import (
     SHELF_MIME_FORMAT,
     build_shelf_mimedata,
     clear_active_shelf_drag,
-    create_drag_pixmap,
     get_active_legend_drag_source,
     is_copy_modifier,
     parse_var_names_from_mimedata,
     set_active_shelf_drag,
+)
+from src.ui.drag_visuals import (
+    DragItem,
+    build_drag_pixmap,
+    drag_hotspot,
+    transfer_hint,
 )
 from src.ui.transfer_broadcast import (
     broadcast_text,
@@ -298,12 +303,14 @@ class CurveShelfWidget(QListWidget):
         keys = [entry.key for entry in entries]
         drag = QDrag(self)
         drag.setMimeData(build_shelf_mimedata(keys, names, self))
-        pixmap = create_drag_pixmap(names, self.font())
+        pixmap = build_drag_pixmap(
+            [DragItem(entry.var_name, entry.color or None) for entry in entries],
+            self.font(),
+            hint=transfer_hint(),
+        )
         if pixmap:
             drag.setPixmap(pixmap)
-            drag.setHotSpot(
-                QPoint(pixmap.width() // 2, pixmap.height() // 2)
-            )
+            drag.setHotSpot(drag_hotspot())
         set_active_shelf_drag(self, keys)
         try:
             # 无修饰=移出、Ctrl=复制出，由 drop 端按修饰键决定语义

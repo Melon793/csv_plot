@@ -85,9 +85,14 @@ SYMBOL_POLICY_LABELS = {
 from src.ui.drag_drop import (
     build_legend_var_mimedata,
     clear_active_legend_drag,
-    create_drag_pixmap,
     parse_legend_anchor,
     set_active_legend_drag,
+)
+from src.ui.drag_visuals import (
+    DragItem,
+    build_drag_pixmap,
+    drag_hotspot,
+    transfer_hint,
 )
 from src.ui.transfer_broadcast import (
     announce_selection,
@@ -1068,10 +1073,17 @@ class LegendTextBrowser(QTextBrowser):
             batch = False
         drag = QDrag(self)
         drag.setMimeData(build_legend_var_mimedata(names, pw))
-        pixmap = create_drag_pixmap(names, self.font())
+        pixmap = build_drag_pixmap(
+            [
+                DragItem(name, getattr(pw.curves.get(name), "color", None))
+                for name in names
+            ],
+            self.font(),
+            hint=transfer_hint(),
+        )
         if pixmap:
             drag.setPixmap(pixmap)
-            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+            drag.setHotSpot(drag_hotspot())
         set_active_legend_drag(pw, names, batch=batch)
         try:
             # CopyAction|MoveAction 并存，drop 端按 Ctrl 决定语义（默认移动、Ctrl=复制）。

@@ -27,6 +27,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QTabBar, QTabWidget, QToolButton
 
 from src.ui.drag_drop import SHELF_MIME_FORMAT
+from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
 
 #: 绘图页数量上限（设计文档 §4.4）
 MAX_PAGES = 8
@@ -37,8 +38,8 @@ _SHELF_CAPSULE_ENTRY = True
 #: 角位胶囊尺寸：宽度写死 36（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）
 _SHELF_CAPSULE_SIZE = QSize(36, 20)
 
-#: 激活页顶部强调线（VSCode 默认浅色主题蓝）
-_ACCENT_COLOR = "#0078d4"
+#: 激活页顶部强调线（与拖拽视觉同一份品牌蓝）
+_ACCENT_COLOR = DRAG_ACCENT
 
 #: 标签栏样式：VSCode 扁平风——选中页白底 + 顶部强调线，未选中透明，
 #: 标签相互贴合，pane 顶边 1px 分隔线衔接绘图区。
@@ -278,7 +279,7 @@ class _ShelfCapsuleButton(_FlatIconButton):
         rect = self.rect().adjusted(1, 1, -1, -1)
         if self.isChecked():
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#dceeff"))
+            painter.setBrush(QColor(DRAG_ACCENT_SOFT))
             painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
         elif self.isEnabled() and self.underMouse():
             painter.setPen(Qt.PenStyle.NoPen)

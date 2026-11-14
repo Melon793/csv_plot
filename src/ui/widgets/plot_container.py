@@ -7,8 +7,10 @@ PlotContainerWidget —— 包装单个 Plot，负责显示拖拽提示
 
 from __future__ import annotations
 from typing import Any
-from PySide6.QtWidgets import QWidget, QSizePolicy, QVBoxLayout, QLabel
-from PySide6.QtCore import Qt, QMargins
+from PySide6.QtWidgets import QWidget, QSizePolicy, QVBoxLayout
+from PySide6.QtCore import QMargins
+
+from src.ui.drag_visuals import DragIndicatorOverlay
 
 
 class PlotContainerWidget(QWidget):
@@ -26,28 +28,8 @@ class PlotContainerWidget(QWidget):
         self._init_indicator()
 
     def _init_indicator(self):
-        self._indicator = QWidget(self)
-        self._indicator.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-        )
+        self._indicator = DragIndicatorOverlay(self)
         self._indicator.hide()
-        self._indicator.setStyleSheet(
-            "background-color: rgba(0, 120, 215, 40);"
-            "border: 2px dashed #0078d7;"
-            "border-radius: 12px;"
-        )
-        layout = QVBoxLayout(self._indicator)
-        layout.setContentsMargins(16, 16, 16, 16)
-        self._indicator_label = QLabel("", self._indicator)
-        self._indicator_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._indicator_label.setWordWrap(True)
-        self._indicator_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
-        )
-        self._indicator_label.setStyleSheet(
-            "color: #0b365a; font-size: 16px; font-weight: bold; background: transparent; border: none;"
-        )
-        layout.addWidget(self._indicator_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def _build_indicator_text(self, _var_names: list[str]) -> str:
         """构建拖拽指示文本。非 Shift 路径统一返回固定文本。"""
@@ -57,7 +39,7 @@ class PlotContainerWidget(QWidget):
         self, var_names: list[str] | None = None, text_override: str | None = None
     ):
         text = text_override or self._build_indicator_text(var_names or [])
-        self._indicator_label.setText(text)
+        self._indicator.set_content(text)
         self._indicator.setGeometry(self.rect())
         self._indicator.raise_()
         self._indicator.show()

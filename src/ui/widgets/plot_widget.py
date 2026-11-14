@@ -1,7 +1,6 @@
 from __future__ import annotations
 import sys
 import os
-import html
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -20,7 +19,6 @@ from src.ui.drag_drop import (
     active_legend_drag_origin,
     build_legend_var_mimedata,
     clear_active_legend_drag,
-    create_drag_pixmap,
     get_active_legend_drag_source,
     get_active_shelf_drag_source,
     is_active_legend_batch_drag,
@@ -28,6 +26,13 @@ from src.ui.drag_drop import (
     is_legend_drag_active,
     parse_shelf_mime_payload,
     set_active_legend_drag,
+)
+from src.ui.drag_visuals import (
+    PIXMAP_PAD,
+    DragItem,
+    build_drag_pixmap,
+    drag_hotspot,
+    transfer_hint,
 )
 from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
 from src.ui.transfer_broadcast import announce_selection, broadcast_text, broadcast_transfer
@@ -38,7 +43,7 @@ from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, Signal, QEvent
-from PySide6.QtGui import QCursor, QDrag, QFontMetrics
+from PySide6.QtGui import QCursor, QDrag, QPixmap
 
 logger = get_logger("widget.plot")
 from PySide6.QtWidgets import (
@@ -145,6 +150,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """
         self._is_being_destroyed = True
         self._cancel_lift(restore_cursor=True)
+        # 浮卡挂在主窗口上，不会随 plot 一起析构，这里显式回收。
+        card = getattr(self, "_lift_card", None)
+        if card is not None:
+            try:
+                card.deleteLater()
+            except RuntimeError:
+                pass
+            self._lift_card = None
 
     def setup_ui(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
@@ -1959,61 +1972,64 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._lift_cursor_owner = False
 
     def _ensure_lift_card(self) -> QLabel:
-        """惰性创建副框（viewport 子控件，不入 scene）。"""
+        """惰性创建副框（挂主窗口，不入 scene）。
+
+        不能挂在 viewport 下：子图只有一两百逻辑像素高，浮卡靠近下边缘时会
+        被钳制回子图内，光标就不再落在卡片角上。挂到主窗口后与 QDrag 拖影
+        一致 —— 永远浮在最上层，也不会被子图边界裁掉。
+        """
         card = getattr(self, "_lift_card", None)
+        host = self.window()
         if card is not None:
             try:
-                card.parent()
+                if card.parentWidget() is host:
+                    return card
+                card.setParent(host)
                 return card
             except RuntimeError:
                 self._lift_card = None
-        card = QLabel(self.viewport())
-        card.setTextFormat(Qt.TextFormat.RichText)
-        card.setWordWrap(False)
+        card = QLabel(host)
         card.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         card.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        card.setStyleSheet(
-            "QLabel { background: rgba(255,255,255,236);"
-            " border: 1px solid #b0b8c4; border-radius: 6px;"
-            " padding: 6px 8px; color: #1f1f1f; }"
-        )
-        card.setMaximumWidth(max(120, int(self.viewport().width() * 0.6)))
         card.hide()
         self._lift_card = card
         return card
 
-    def _build_lift_card_html(self, names: list[str]) -> str:
-        """副框内容：标题 + 颜色点 + 变量名（超 8 条折叠），名字必须转义。"""
-        title = f"搬运 {len(names)} 条曲线" if len(names) > 1 else "搬运曲线"
-        metrics = QFontMetrics(self.font())
-        max_text_width = max(80, int(self.viewport().width() * 0.45))
-        rows = []
-        for name in names[:8]:
-            color = getattr(self.curves.get(name), "color", "#333333") or "#333333"
-            shown = metrics.elidedText(
-                name, Qt.TextElideMode.ElideRight, max_text_width
-            )
-            rows.append(
-                "<tr>"
-                f'<td style="padding-right:6px;color:{html.escape(color)};">&#9679;</td>'
-                f"<td>{html.escape(shown)}</td>"
-                "</tr>"
-            )
-        if len(names) > 8:
-            rows.append(f'<tr><td></td><td>… 共 {len(names)} 条</td></tr>')
-        return f"<b>{title}</b><br><table>{''.join(rows)}</table>"
+    def _render_lift_card(self, names: list[str]) -> QPixmap | None:
+        """浮卡与拖拽缩略图同源：都走 ``build_drag_pixmap``。
+
+        QLabel 富文本画不出圆角卡片（QTextDocument 不支持 border-radius），
+        改成贴 pixmap 后，条数、色点、提示、圆角与阴影与拖影逐像素一致。
+        """
+        return build_drag_pixmap(
+            [
+                DragItem(name, getattr(self.curves.get(name), "color", None))
+                for name in names
+            ],
+            self.font(),
+            hint=transfer_hint(),
+        )
 
     def _move_lift_card(self, pos: QPoint) -> None:
-        """把副框定位到光标右下并钳制在 viewport 内（viewport 坐标）。"""
+        """让浮卡的**可见表面**左上角落在光标点上，并钳制在主窗口内。
+
+        ``pos`` 是 viewport 坐标；浮卡挂在主窗口上，所以要换算成窗口坐标。
+        """
         card = getattr(self, "_lift_card", None)
         if card is None:
             return
-        hint = card.sizeHint()
-        vp = self.viewport().rect()
-        width = min(max(120, hint.width()), max(120, int(vp.width() * 0.6)))
-        height = hint.height()
-        x = min(max(0, pos.x() + 14), max(0, vp.width() - width))
-        y = min(max(0, pos.y() + 16), max(0, vp.height() - height))
+        pixmap = card.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        dpr = float(pixmap.devicePixelRatio() or 1.0)
+        width = int(round(pixmap.width() / dpr))
+        height = int(round(pixmap.height() / dpr))
+        host = card.parentWidget()
+        origin = host.mapFromGlobal(self.viewport().mapToGlobal(pos))
+        bounds = host.rect()
+        # pixmap 四周有 PIXMAP_PAD 的阴影留白，扣掉后可见表面才与光标对齐。
+        x = min(max(0, origin.x() - PIXMAP_PAD), max(0, bounds.width() - width))
+        y = min(max(0, origin.y() - PIXMAP_PAD), max(0, bounds.height() - height))
         card.setGeometry(x, y, width, height)
 
     def _on_lift_timeout(self) -> None:
@@ -2054,8 +2070,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._lift_names = names
         self._lift_active = True
         card = self._ensure_lift_card()
-        card.setText(self._build_lift_card_html(names))
-        card.adjustSize()
+        pixmap = self._render_lift_card(names)
+        if pixmap is not None:
+            card.setPixmap(pixmap)
+            card.adjustSize()
         self._move_lift_card(press_pos)
         card.show()
         card.raise_()
@@ -2080,10 +2098,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._suppress_curve_click = True
         drag = QDrag(self)
         drag.setMimeData(build_legend_var_mimedata(valid, self))
-        pixmap = create_drag_pixmap(valid, self.font())
+        pixmap = build_drag_pixmap(
+            [
+                DragItem(name, getattr(self.curves.get(name), "color", None))
+                for name in valid
+            ],
+            self.font(),
+            hint=transfer_hint(),
+        )
         if pixmap is not None:
             drag.setPixmap(pixmap)
-            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+            drag.setHotSpot(drag_hotspot())
         # 曲线来源一律 origin="curve"：即使只有 1 条也走 skip + quiet
         set_active_legend_drag(
             self, valid, batch=len(valid) > 1, origin="curve"

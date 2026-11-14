@@ -17,15 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote
 
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import (
-    QFontMetrics,
-    QPainter,
-    QPen,
-    QColor,
-    QPixmap,
-    QFont,
-)
+from PySide6.QtCore import Qt
 from PySide6.QtCore import QMimeData
 
 from src.core.data_types import (
@@ -314,58 +306,3 @@ def get_active_shelf_drag_source(mime_data) -> Any | None:
     except RuntimeError:
         return None
     return source
-
-
-def create_drag_pixmap(
-    var_names: list[str],
-    font: QFont | None = None,
-) -> QPixmap | None:
-    """创建拖拽时显示的变量名缩略图。
-
-    Args:
-        var_names: 变量名列表
-        font: 绘制字体，为 None 时使用默认系统字体
-
-    Returns:
-        QPixmap 缩略图，var_names 为空时返回 None
-    """
-    if not var_names:
-        return None
-
-    if font is None:
-        font = QFont()
-
-    metrics = QFontMetrics(font)
-    bullet_names = [f"• {name}" for name in var_names]
-    max_visible = 8
-    display_lines = bullet_names[:max_visible]
-    if len(bullet_names) > max_visible:
-        display_lines.append(f"... 共{len(var_names)}项")
-
-    text_width = max(
-        (metrics.horizontalAdvance(line) for line in display_lines),
-        default=80,
-    )
-    margin = 12
-    line_height = metrics.lineSpacing()
-    width = max(140, text_width + margin * 2)
-    height = line_height * len(display_lines) + margin * 2
-
-    pixmap = QPixmap(width, height)
-    pixmap.fill(Qt.GlobalColor.transparent)
-
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setFont(font)
-    painter.setPen(QPen(QColor("#2b6def"), 2))
-    painter.setBrush(QColor(255, 255, 255, 240))
-    painter.drawRoundedRect(1, 1, width - 2, height - 2, 10, 10)
-    painter.setPen(QColor("#1f1f1f"))
-
-    y = margin + metrics.ascent()
-    for line in display_lines:
-        painter.drawText(QPoint(margin, y), line)
-        y += line_height
-
-    painter.end()
-    return pixmap

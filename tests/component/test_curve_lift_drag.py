@@ -171,7 +171,9 @@ def test_timeout_hit_shows_card_without_scene_item(three_curves):
     assert pw._lift_active is True
     assert pw._lift_names == ["a"]
     assert pw._lift_card is not None
-    assert pw._lift_card.isVisibleTo(pw.viewport())
+    # 副框挂在主窗口上（不挂 viewport），否则靠近子图边缘会被钳制回子图内
+    assert pw._lift_card.parentWidget() is pw.window()
+    assert pw._lift_card.isVisible()
     assert len(pw.scene().items()) == items_before, "副框不得进入 scene"
     assert pw._legend_selection == {"a"}, "抬起不改变选择"
     pw._cancel_lift(restore_cursor=True)
