@@ -149,11 +149,13 @@ def active_legend_drag_origin() -> str:
 
 
 def is_copy_modifier(modifiers) -> bool:
-    """拖动中的复制修饰键：Alt 或 Ctrl（macOS 上 ControlModifier 即 ⌘）。"""
-    return bool(
-        modifiers
-        & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
-    )
+    """拖动中的复制修饰键：只认 Alt（macOS 为 ⌥）。
+
+    Ctrl/⌘ 不参与复制判定——它专门用于选择与抓取（legend 加选、曲线
+    toggle、⌘ 拖动抓曲线），若同时当复制键，「⌘ 抓 + 按着 ⌘ 放」会
+    变成复制而不是移动。
+    """
+    return bool(modifiers & Qt.KeyboardModifier.AltModifier)
 
 
 def clear_active_legend_drag() -> None:

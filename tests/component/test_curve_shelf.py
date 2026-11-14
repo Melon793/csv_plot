@@ -91,8 +91,8 @@ def shelf(qapp):
     host.deleteLater()
 
 
-def _drop_into_shelf(widget, mime, *, ctrl=False):
-    mods = Qt.KeyboardModifier.ControlModifier if ctrl else Qt.KeyboardModifier.NoModifier
+def _drop_into_shelf(widget, mime, *, copy=False):
+    mods = Qt.KeyboardModifier.AltModifier if copy else Qt.KeyboardModifier.NoModifier
     _keep_alive.append(mime)
     event = QDropEvent(
         QPointF(10.0, 10.0),
@@ -104,11 +104,11 @@ def _drop_into_shelf(widget, mime, *, ctrl=False):
     widget.dropEvent(event)
 
 
-def _legend_drop(widget, source, name, *, ctrl=False):
+def _legend_drop(widget, source, name, *, copy=False):
     mime = build_legend_var_mimedata([name], source)
     set_active_legend_drag(source, [name])
     try:
-        _drop_into_shelf(widget, mime, ctrl=ctrl)
+        _drop_into_shelf(widget, mime, copy=copy)
     finally:
         clear_active_legend_drag()
 
@@ -183,12 +183,12 @@ def test_legend_cut_snapshots_and_removes_source(shelf, plot_factory, qapp):
     assert "a" not in src.curves
 
 
-def test_legend_ctrl_copy_keeps_source(shelf, plot_factory, qapp):
+def test_legend_alt_copy_keeps_source(shelf, plot_factory, qapp):
     widget, host = shelf
     src = plot_factory()
     assert src.plot_variable("a")
 
-    _legend_drop(widget, src, "a", ctrl=True)
+    _legend_drop(widget, src, "a", copy=True)
 
     assert widget.entry_for_name("a") is not None
     qapp.processEvents()

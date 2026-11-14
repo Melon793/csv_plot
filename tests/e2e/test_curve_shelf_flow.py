@@ -35,11 +35,11 @@ def _guard_app_exit(monkeypatch):
     monkeypatch.setattr(QApplication, "exit", staticmethod(lambda *a, **k: None))
 
 
-def _drop(widget, mime, *, ctrl=False):
+def _drop(widget, mime, *, copy=False):
     _keep_alive.append(mime)
     mods = (
-        Qt.KeyboardModifier.ControlModifier
-        if ctrl
+        Qt.KeyboardModifier.AltModifier
+        if copy
         else Qt.KeyboardModifier.NoModifier
     )
     event = QDropEvent(

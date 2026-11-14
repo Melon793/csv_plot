@@ -575,7 +575,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         already = bool(var_names) and all(name in self.curves for name in var_names)
 
         if is_legend_drag_active():
-            # legend/曲线来源：轮询 Alt/⌘（复制切换），无修饰键=移动，Shift 忽略（设计 §2.2）
+            # legend/曲线来源：轮询 Alt（复制切换），无修饰键=移动，Shift 忽略（设计 §2.2）
             copy_pressed = is_copy_modifier(mods)
             action = "复制" if copy_pressed else "移动"
             if is_active_legend_batch_drag() or active_legend_drag_origin() == "curve":
@@ -994,12 +994,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         copy_pressed = is_copy_modifier(modifiers)
 
         if mime.hasFormat(SHELF_MIME_FORMAT):
-            # 暂存区来源：Alt/⌘=复制出，无修饰键=移出；判重策略是跳过，
+            # 暂存区来源：Alt=复制出，无修饰键=移出；判重策略是跳过，
             # 已存在时文案不能再承诺「释放以移动」（Blocking 4：分支须在 else 前）
             action = "复制" if copy_pressed else "移动"
             text_override = self._build_skip_indicator_text(var_names, action)
         elif mime.hasFormat(LEGEND_MIME_FORMAT):
-            # legend/曲线来源：Alt/⌘=复制，无修饰键=移动，Shift 忽略。
+            # legend/曲线来源：Alt=复制，无修饰键=移动，Shift 忽略。Ctrl/⌘ 不参与（选择/抓取专用）
             # 批量与曲线来源判重是 skip：已存在时文案不能承诺「释放以移动」。
             action = "复制" if copy_pressed else "移动"
             if is_active_legend_batch_drag() or active_legend_drag_origin() == "curve":
@@ -1014,7 +1014,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
         if mime.hasFormat(SHELF_MIME_FORMAT) or mime.hasFormat(LEGEND_MIME_FORMAT):
-            # 光标与文案一致：Alt/⌘ 复制时不能继续显示「移动」光标
+            # 光标与文案一致：Alt 复制时不能继续显示「移动」光标
             event.setDropAction(
                 Qt.DropAction.CopyAction if copy_pressed else Qt.DropAction.MoveAction
             )
@@ -1068,7 +1068,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             main_window.layout_manager.request_mark_stats_refresh()
 
     def _handle_legend_drop(self, event, var_names: list[str]):
-        """legend 来源 drop：默认移动，Alt/⌘=复制（Shift 忽略，设计 §2.1/§3.3）。
+        """legend 来源 drop：默认移动，Alt=复制（Shift 忽略，设计 §2.1/§3.3）。
 
         单变量走批量助手的 list-of-1 路径，但判重策略必须显式区分
         （Blocking 1：不能靠 len 判断单变量还是批量）：
@@ -1096,7 +1096,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             src_ci = source.curves.get(name)
             if src_ci is not None:
                 style = CurveStyleSnapshot.from_curve_info(src_ci)
-        # 反转：无修饰键=移动，Alt/⌘=复制（Shift 忽略）
+        # 反转：无修饰键=移动，Alt=复制（Shift 忽略；Ctrl/⌘ 是选择/抓取专用）
         copy_pressed = is_copy_modifier(event.keyboardModifiers())
 
         # P1 多选批量 / 曲线来源：走 skip + quiet 批量协议（判重静默跳过并汇总）
@@ -1195,7 +1195,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._clear_own_selection()
 
     def _handle_shelf_drop(self, event, var_names: list[str]):
-        """暂存区来源 drop：无修饰=移出（条目消失）/ Alt/⌘=复制出（条目保留）。
+        """暂存区来源 drop：无修饰=移出（条目消失）/ Alt=复制出（条目保留）。
 
         判重固定 skip + quiet（全程无模态）；失败条目不删源、不删托盘条目。
         拖回来源图是合法撤销：本函数不做「source is self」早退。
@@ -1895,6 +1895,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if (
                 event.position().toPoint() - self._lift_press_pos
             ).manhattanLength() >= QApplication.startDragDistance():
+                # ⌘/Ctrl 是「抓取许可」：越过阈值立刻抓（不等 300ms），
+                # 手感与平移同级；未命中曲线则照常平移
+                if self._curve_click_ctrl:
+                    names = self._curve_grab_names(self._lift_press_pos)
+                    if names:
+                        self._start_curve_drag(names)
+                        return
                 self._cancel_lift()
         super().mouseMoveEvent(event)
 
@@ -2028,12 +2035,42 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         y = min(max(0, origin.y() - PIXMAP_PAD), max(0, bounds.height() - height))
         card.setGeometry(x, y, width, height)
 
-    def _on_lift_timeout(self) -> None:
-        """长按到期：按下点命中**已选中的曲线**才抬框（此时才做命中检测）。
+    def _curve_grab_names(self, press_pos: QPoint) -> list[str]:
+        """按下点决定本次抓取集合；不可抓时返回空列表。
 
-        只对选择集内的曲线起手势：未选中曲线的长按与「慢速拖动平移」
-        物理上无法区分（两者都是按下后不动），会互抢；选择集非空说明
-        用户已明确表达意图，此时长按才没有歧义。
+        - 命中**当前选择集成员** → 整个选择集（不带修饰键也允许，长按 300ms）；
+        - 未选中但按下时按着 ⌘/Ctrl（抓取许可）→ **选择集 ∪ 按着的这一条**，
+          与 ⌘ 单击的「加选」语义一致；选择集为空时即单条；
+        - 其余情况（空白、未选中且无修饰键）→ 空。
+        """
+        if press_pos is None:
+            return []
+        from src.ui.widgets.multi_curve_manager import hit_test_curve
+
+        # 用当前坐标重算 scene 位置（XLink 联动/区间变化会让 press 时的坐标过期）
+        hit = hit_test_curve(self, self.mapToScene(press_pos))
+        if hit is None:
+            return []
+        selection = set(getattr(self, "_legend_selection", ()) or ())
+        if hit in selection:
+            names = [name for name in self.curves if name in selection]
+        elif getattr(self, "_curve_click_ctrl", False):
+            # 已选曲线跟着一起走：⌘ 按在未选中曲线上 = 临时并入批次
+            names = [name for name in self.curves if name in selection or name == hit]
+        else:
+            return []
+        return [
+            name
+            for name in names
+            if getattr(self.curves.get(name), "curve", None) is not None
+        ]
+
+    def _on_lift_timeout(self) -> None:
+        """长按到期：出抬框预览（此时才做命中检测）。
+
+        可抬起的两种情况：命中当前选择集成员（整批）、或按下时按着 ⌘/Ctrl
+        的「抓取许可」（未选中也能单条抓）。不带修饰键且未选中时取消——
+        那种「按下-静止」与慢速拖动平移无法区分，不能抢。
         """
         if self._is_being_destroyed or not self.isVisible():
             self._cancel_lift()
@@ -2042,24 +2079,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if press_pos is None:
             self._cancel_lift()
             return
-        selection = set(getattr(self, "_legend_selection", ()) or ())
-        if not selection:
-            # 无选择集时直接放弃：连命中检测都不做（平移热路径的常见情形）
-            self._cancel_lift()
-            return
-        from src.ui.widgets.multi_curve_manager import hit_test_curve
-
-        # 用当前坐标重算 scene 位置（XLink 联动/区间变化会让 press 时的坐标过期）
-        hit = hit_test_curve(self, self.mapToScene(press_pos))
-        if hit is None or hit not in selection:
-            self._cancel_lift()
-            return
-        names = [name for name in self.curves if name in selection]
-        names = [
-            name
-            for name in names
-            if getattr(self.curves.get(name), "curve", None) is not None
-        ]
+        names = self._curve_grab_names(press_pos)
         if not names:
             self._cancel_lift()
             return

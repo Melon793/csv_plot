@@ -69,11 +69,11 @@ def _rect_in(widget: QWidget, base: QWidget) -> QRect:
     return QRect(widget.mapTo(base, widget.rect().topLeft()), widget.size())
 
 
-def _drop(widget: QWidget, mime, *, ctrl: bool = False) -> QDropEvent:
+def _drop(widget: QWidget, mime, *, copy: bool = False) -> QDropEvent:
     _keep_alive.append(mime)
     mods = (
-        Qt.KeyboardModifier.ControlModifier
-        if ctrl
+        Qt.KeyboardModifier.AltModifier
+        if copy
         else Qt.KeyboardModifier.NoModifier
     )
     event = QDropEvent(
@@ -223,18 +223,18 @@ def test_drop_from_legend_cut_removes_source(capsule_shelf, plot_factory, qapp):
     assert src.plot_variable("a")
     assert src.plot_variable("b")
 
-    for name, ctrl in (("a", False), ("b", True)):
+    for name, copy in (("a", False), ("b", True)):
         mime = build_legend_var_mimedata([name], src)
         set_active_legend_drag(src, [name])
         try:
-            _drop(tabs.shelf_capsule, mime, ctrl=ctrl)
+            _drop(tabs.shelf_capsule, mime, copy=copy)
         finally:
             clear_active_legend_drag()
 
     assert shelf.count() == 2
     qapp.processEvents()  # 源端删除是 singleShot(0)
     assert "a" not in src.curves  # 剪切：源删除
-    assert "b" in src.curves  # Ctrl：复制语义保留源
+    assert "b" in src.curves  # Alt：复制语义保留源
 
 
 def test_drop_preserves_style_snapshot(capsule_shelf, plot_factory):

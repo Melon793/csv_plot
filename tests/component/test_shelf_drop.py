@@ -76,13 +76,13 @@ def _style_entry(name: str, key: str = "k1") -> ShelfEntry:
     )
 
 
-def _drop(dst, shelf, entries, *, ctrl=False):
+def _drop(dst, shelf, entries, *, copy=False):
     keys = [entry.key for entry in entries]
     mime = build_shelf_mimedata(keys, [entry.var_name for entry in entries], shelf)
     _keep_alive.append(mime)
     mods = (
-        Qt.KeyboardModifier.ControlModifier
-        if ctrl
+        Qt.KeyboardModifier.AltModifier
+        if copy
         else Qt.KeyboardModifier.NoModifier
     )
     set_active_shelf_drag(shelf, keys)
@@ -119,11 +119,11 @@ def test_shelf_move_applies_full_style_and_removes_entry(dst, shelf, qapp):
     assert any("已移动 a：暂存区 → 页2·图1" in m for m in dst.window().messages)
 
 
-def test_shelf_ctrl_copy_keeps_entry(dst, shelf):
+def test_shelf_alt_copy_keeps_entry(dst, shelf):
     entry = _style_entry("a")
     shelf.add_entry(entry)
 
-    _drop(dst, shelf, [entry], ctrl=True)
+    _drop(dst, shelf, [entry], copy=True)
 
     assert "a" in dst.curves
     assert shelf.count() == 1  # 复制出：条目保留
@@ -239,7 +239,7 @@ def test_shelf_drop_without_registry_ignored(dst, shelf):
 # ---------------------------------------------------------------------------
 
 
-def _hover_text(dst, shelf, entries, *, ctrl=False):
+def _hover_text(dst, shelf, entries, *, copy=False):
     keys = [entry.key for entry in entries]
     mime = build_shelf_mimedata(keys, [entry.var_name for entry in entries], shelf)
     _keep_alive.append(mime)
@@ -253,8 +253,8 @@ def _hover_text(dst, shelf, entries, *, ctrl=False):
     original = dst._notify_drag_indicator
     dst._notify_drag_indicator = fake_notify
     mods = (
-        Qt.KeyboardModifier.ControlModifier
-        if ctrl
+        Qt.KeyboardModifier.AltModifier
+        if copy
         else Qt.KeyboardModifier.NoModifier
     )
     set_active_shelf_drag(shelf, keys)
@@ -282,7 +282,7 @@ def test_shelf_hover_move_text(dst, shelf):
 
 def test_shelf_hover_copy_text(dst, shelf):
     entry = ShelfEntry(key="k1", var_name="a")
-    captured = _hover_text(dst, shelf, [entry], ctrl=True)
+    captured = _hover_text(dst, shelf, [entry], copy=True)
     assert captured["text"] == "释放以复制"
 
 

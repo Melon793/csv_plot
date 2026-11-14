@@ -2,9 +2,9 @@
 
 设计口径（tmp/2026-11-13/curve-transfer-preview-plan.md）：
 - 托盘条目自持全量样式快照（入区即拷完，出区零源依赖）；
-- legend → 托盘：无修饰=剪切（源端延迟删除）/ Ctrl=复制；
+- legend → 托盘：无修饰=剪切（源端延迟删除）/ Alt(⌥)=复制；
 - 变量列表 → 托盘：名字入区，默认样式，复制语义；
-- 托盘 → plot：无修饰=移出（条目消失）/ Ctrl=复制出（条目保留）；
+- 托盘 → plot：无修饰=移出（条目消失）/ Alt(⌥)=复制出（条目保留）；
 - stale（reload 后变量不在新数据中）置灰不可拖，删除入口保留。
 
 本模块只放数据模型 + 托盘 QListWidget + 浮窗壳；plot 侧批量协议见
@@ -313,7 +313,7 @@ class CurveShelfWidget(QListWidget):
             drag.setHotSpot(drag_hotspot())
         set_active_shelf_drag(self, keys)
         try:
-            # 无修饰=移出、Ctrl=复制出，由 drop 端按修饰键决定语义
+            # 无修饰=移出、Alt=复制出，由 drop 端按修饰键决定语义
             drag.exec(
                 Qt.DropAction.CopyAction | Qt.DropAction.MoveAction
             )
@@ -367,7 +367,7 @@ class CurveShelfWidget(QListWidget):
     def dragMoveEvent(self, event):
         if self._can_accept_mime(event.mimeData()):
             if event.mimeData().hasFormat(LEGEND_MIME_FORMAT):
-                # 光标与 drop 语义一致（Alt/⌘=复制，无修饰=剪切）
+                # 光标与 drop 语义一致（Alt=复制，无修饰=剪切）
                 event.setDropAction(
                     Qt.DropAction.CopyAction
                     if is_copy_modifier(event.keyboardModifiers())
@@ -398,7 +398,7 @@ class CurveShelfWidget(QListWidget):
             self._drop_from_variable_list(event, names)
 
     def _drop_from_legend(self, event, names: list[str]) -> None:
-        """legend 来源：无修饰=剪切入区（源端延迟删除）/ Ctrl=复制入区。"""
+        """legend 来源：无修饰=剪切入区（源端延迟删除）/ Alt=复制入区。"""
         source = get_active_legend_drag_source(event.mimeData())
         if source is None:
             # 源已销毁：快照不可读，拒绝入区（区别于 plot drop 端的按复制降级）

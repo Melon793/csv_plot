@@ -123,9 +123,9 @@ def fake_drag(monkeypatch):
     return _FakeDrag
 
 
-def _lift(pw, pos):
+def _lift(pw, pos, mods=Qt.KeyboardModifier.NoModifier):
     """press + 直接触发计时器回调（等价 300ms 到期）。"""
-    _press(pw, pos)
+    _press(pw, pos, mods)
     assert pw._lift_timer.isActive()
     pw._on_lift_timeout()
 
@@ -204,6 +204,114 @@ def test_unselected_curve_does_not_lift(three_curves):
     assert pw._lift_active is False
     assert pw._lift_names == []
     assert pw._lift_card is None or not pw._lift_card.isVisible()
+
+
+def test_ctrl_grab_starts_drag_before_timeout(three_curves, fake_drag):
+    """⌘/Ctrl 是抓取许可：越过阈值立刻抓未选中曲线，不等 300ms。"""
+    pw = three_curves
+    pos = _curve_pos(pw, "a")
+    _press(pw, pos, Qt.KeyboardModifier.ControlModifier)
+
+    _move(
+        pw,
+        pos + QPoint(QApplication.startDragDistance() + 8, 0),
+        mods=Qt.KeyboardModifier.ControlModifier,
+    )
+
+    assert len(fake_drag.instances) == 1
+    drag = fake_drag.instances[0]
+    assert drag.snapshot["origin"] == "curve"
+    assert drag.snapshot["vars"] == ["a"], "未选中时只抓按着的这一条"
+    assert drag.snapshot["batch"] is False
+    assert pw._legend_selection == set(), "抓取不改选择集"
+    assert pw._lift_active is False
+    assert not pw._lift_timer.isActive()
+
+
+def test_ctrl_grab_on_selected_member_grabs_batch(three_curves, fake_drag):
+    """⌘ 按在已选成员上 → 立刻抓整批。"""
+    pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
+    pw.legend_label._toggle_legend_selection("b")
+    pos = _curve_pos(pw, "a")
+    _press(pw, pos, Qt.KeyboardModifier.ControlModifier)
+
+    _move(
+        pw,
+        pos + QPoint(QApplication.startDragDistance() + 8, 0),
+        mods=Qt.KeyboardModifier.ControlModifier,
+    )
+
+    drag = fake_drag.instances[0]
+    assert set(drag.snapshot["vars"]) == {"a", "b"}
+    assert drag.snapshot["batch"] is True
+
+
+def test_ctrl_grab_unselected_brings_existing_selection(three_curves, fake_drag):
+    """已选 a 时 ⌘ 按在未选中的 b 上：a+b 一起走（⌘ 单击是加选，抓取同口径）。"""
+    pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
+    pos = _curve_pos(pw, "b")
+    _press(pw, pos, Qt.KeyboardModifier.ControlModifier)
+
+    _move(
+        pw,
+        pos + QPoint(QApplication.startDragDistance() + 8, 0),
+        mods=Qt.KeyboardModifier.ControlModifier,
+    )
+
+    drag = fake_drag.instances[0]
+    assert set(drag.snapshot["vars"]) == {"a", "b"}
+    assert drag.snapshot["batch"] is True
+    assert pw._legend_selection == {"a"}, "抓取不改选择集（cancel 后仍是原选择）"
+
+
+def test_ctrl_slow_press_brings_existing_selection(three_curves, fake_drag):
+    """同上但走 300ms 副框路径：预览里同样带着已选曲线。"""
+    pw = three_curves
+    pw.legend_label._toggle_legend_selection("a")
+
+    _lift(pw, _curve_pos(pw, "b"), Qt.KeyboardModifier.ControlModifier)
+
+    assert pw._lift_active is True
+    assert set(pw._lift_names) == {"a", "b"}
+    assert pw._legend_selection == {"a"}
+
+
+def test_ctrl_drag_from_blank_keeps_pan(three_curves, fake_drag):
+    """⌘ 起手在空白处：不抓，仍是平移（不影响平移热路径）。"""
+    pw = three_curves
+    pa = _curve_pos(pw, "a")
+    pb = _curve_pos(pw, "b")
+    blank = QPoint(pa.x(), (pa.y() + pb.y()) // 2)
+    _press(pw, blank, Qt.KeyboardModifier.ControlModifier)
+
+    _move(
+        pw,
+        blank + QPoint(QApplication.startDragDistance() + 8, 0),
+        mods=Qt.KeyboardModifier.ControlModifier,
+    )
+
+    assert fake_drag.instances == []
+    assert pw._lift_active is False
+    assert pw._lift_press_pos is None, "越阈即收手，不再等计时器"
+
+
+def test_ctrl_slow_press_lifts_unselected_single(three_curves, fake_drag):
+    """⌘ 按住不动满 300ms → 出副框预览；松手仍按 ⌘ 单击 toggle。"""
+    pw = three_curves
+    pos = _curve_pos(pw, "a")
+
+    _lift(pw, pos, Qt.KeyboardModifier.ControlModifier)
+
+    assert pw._lift_active is True
+    assert pw._lift_names == ["a"]
+    assert pw._legend_selection == set(), "预览阶段不改选择集"
+
+    _release(pw, pos, Qt.KeyboardModifier.ControlModifier)
+
+    assert fake_drag.instances == []
+    assert pw._legend_selection == {"a"}, "未拖动 → 回落为 ⌘ 单击选择"
 
 
 def test_selected_member_lifts_whole_batch(three_curves):
