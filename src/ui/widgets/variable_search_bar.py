@@ -3,7 +3,7 @@
 常驻于 PlotVariableEditorDialog 顶部，提供 Spotlight 风格的变量搜索添加能力。
 - 搜索框 + 候选列表（限高、可折叠） + 状态栏
 - QTimer 100ms 防抖
-- 子串匹配 + 关键词分割 + 分级排序
+- 子串匹配（支持 * / ? 通配）+ 关键词分割 + 分级排序
 - 有效性色块（与左侧变量列表 NoHoverDelegate 一致）
 - 已添加变量置灰可选可移除（点击/Enter 已添加项触发移除）
 - 已添加变量保持原位（仅样式区分，不挪末尾），add/remove 行为对称
@@ -20,6 +20,7 @@ from PySide6.QtCore import QEvent, Qt, QTimer, QRect, Signal
 from PySide6.QtGui import QColor, QPen
 
 from src.core.config import safe_qt_op
+from src.core.keyword_match import KeywordMatcher
 
 from src.core.logger import get_logger
 from PySide6.QtWidgets import (
@@ -418,6 +419,8 @@ class VariableSearchBar(QWidget):
         """根据关键词过滤并分级排序（OR 关系）
 
         过滤：空格分隔多个关键字，任一关键字命中即保留（OR 逻辑）。
+        关键字支持通配符 `*`（任意长度）与 `?`（恰好一个字符），其余字符
+        按字面量处理；不含通配符时仍走原子串匹配，行为零变化。
 
         排序优先级（统一多态，不区分单/多关键词）：
         1. last_hit_rank：命中的最后一个关键词索引越大越优先
@@ -440,21 +443,22 @@ class VariableSearchBar(QWidget):
             return list(self._all_var_names)
 
         keywords = q.split()
-        keywords_lower = [kw.lower() for kw in keywords]
+        # 每个关键词只编译一次，逐变量复用
+        matchers = [KeywordMatcher(kw) for kw in keywords]
 
         results: list[tuple[int, int, int, int, str]] = []
         # 元组：(last_hit_rank, hit_count_rank, validity_rank, original_idx, name)
         for idx, (var_name, name_lower) in enumerate(zip(self._all_var_names, self._lower_names)):
             # OR 逻辑：任一关键字命中即保留
-            # 同时计算"命中的最后一个关键词的索引"
+            # 同时统计命中数与「命中的最后一个关键词的索引」（单次遍历）
             last_hit_idx = -1
-            for i, kw in enumerate(keywords_lower):
-                if kw in name_lower:
+            hit_count = 0
+            for i, matcher in enumerate(matchers):
+                if matcher.matches_lower(name_lower):
                     last_hit_idx = i
+                    hit_count += 1
             if last_hit_idx == -1:
                 continue  # 无任何命中
-
-            hit_count = sum(1 for kw in keywords_lower if kw in name_lower)
 
             # validity_rank: 0=有效, 1=常数, 2=无效；未知(-2)按有效对待
             valid = self._validity.get(var_name, -2)
