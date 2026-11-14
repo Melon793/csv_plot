@@ -72,9 +72,10 @@ def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
     assert stops[-1][1].name().lower() == "#ffffff"
     assert stops[-1][1].alpha() == 60
 
-    # 文字始终黑色、边框浅灰（不随曲线色变化）
+    # 文字始终黑色；边框为曲线色 1.5px（main 原色，浅灰对白底几乎不可见）
     assert lbl.textItem.defaultTextColor().name().lower() == "#000000"
-    assert lbl.border.color().name().lower() == "#d0d4da"
+    assert lbl.border.color().name().lower() == curve_color
+    assert lbl.border.widthF() == 1.5
 
     # 色条与文字之间留 3px 间隙（默认左边距 4 + 3 = 7）
     assert lbl.textItem.document().rootFrame().frameFormat().leftMargin() == 7
