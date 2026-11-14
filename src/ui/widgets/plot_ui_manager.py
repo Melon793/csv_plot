@@ -1813,6 +1813,7 @@ class PlotUIManager(BasePlotManager):
             "circles": [],
             "labels": [],
             "x_labels": [],
+            "leaders": [],
         }
 
         pw.proxy = _pg.SignalProxy(

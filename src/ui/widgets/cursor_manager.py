@@ -20,7 +20,7 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QBrush, QFontMetrics, QLinearGradient
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt
 from PySide6.QtWidgets import QApplication
 
@@ -399,8 +399,12 @@ class CursorManager:
 
         while len(pool) <= index:
             label = pg.TextItem(
-                color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0, 0.5)
+                color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 255), anchor=(0, 0.5)
             )
+            # 白底默认不透明（渲染时降为 60α 以透出曲线）；
+            # 身份色由 _render_label_layout 设置的左侧全色条承担。
+            # 边框在渲染时按曲线色设 1.5px：浅灰对白底对比仅 1.49 几乎不可见，
+            # 曲线色 5.0+ 才能把文本框从白底里勾出来（main 原色）。
             font = QApplication.font()
             font.setPixelSize(11)
             label.setFont(font)
@@ -426,6 +430,18 @@ class CursorManager:
             pool.append(x_label)
         return pool[index]
 
+    def _get_leader_from_pool(self, index: int):
+        """获取交点→标签引导线（PlotCurveItem，数据坐标，随视图缩放）"""
+        pool = self.pw._cursor_item_pool["leaders"]
+        if index < len(pool):
+            return pool[index]
+
+        while len(pool) <= index:
+            leader = pg.PlotCurveItem(pen=pg.mkPen(120, 120, 120, 150, width=1))
+            leader.setZValue(200.5)  # 圆点 200 < 引导线 < 标签 201
+            pool.append(leader)
+        return pool[index]
+
     def _clear_cursor_items(self, hide_only: bool = True):
         """清除或隐藏所有 cursor 可视化元素"""
         if not hasattr(self.pw, "multi_cursor_items") or not hasattr(
@@ -440,6 +456,7 @@ class CursorManager:
         # 预构建 O(1) 查找集合，避免 list 的 O(n) 线性搜索
         x_labels_set = set(self.pw._cursor_item_pool.get("x_labels", []))
         labels_set = set(self.pw._cursor_item_pool.get("labels", []))
+        leaders_set = set(self.pw._cursor_item_pool.get("leaders", []))
 
         for item in self.pw.multi_cursor_items:
             try:
@@ -450,6 +467,8 @@ class CursorManager:
                     safe_qt_op(item.setText, "")
                 elif item in labels_set:
                     safe_qt_op(item.setText, "")
+                elif item in leaders_set:
+                    pass  # 池化复用：顶部已 setVisible(False)，下一帧重设数据
                 else:
                     self._queue_item_for_deletion(item)
             except Exception:
@@ -467,8 +486,11 @@ class CursorManager:
             old_circles = list(self.pw._cursor_item_pool.get("circles", []))
             old_labels = list(self.pw._cursor_item_pool.get("labels", []))
             old_x_labels = list(self.pw._cursor_item_pool.get("x_labels", []))
+            old_leaders = list(self.pw._cursor_item_pool.get("leaders", []))
 
-            self.pw._cursor_item_pool = {"circles": [], "labels": [], "x_labels": []}
+            self.pw._cursor_item_pool = {
+                "circles": [], "labels": [], "x_labels": [], "leaders": [],
+            }
 
             scene = None
             plot_item = None
@@ -476,7 +498,7 @@ class CursorManager:
                 plot_item = self.pw.plot_item
                 scene = plot_item.scene()
 
-            for item in (old_circles + old_labels + old_x_labels):
+            for item in (old_circles + old_labels + old_x_labels + old_leaders):
                 if item is None:
                     continue
                 safe_qt_op(item.setVisible, False)
@@ -769,7 +791,14 @@ class CursorManager:
             sample_text_item = self._get_label_from_pool(0)
             text_font = sample_text_item.textItem.font()
             self._cached_font_metrics = QFontMetrics(text_font)
-            self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
+            # 标签实际高度由 QTextDocument 默认 4px 边距决定，比 fm.height()
+            # 多 8px；再留 2px 给描边外沿。旧公式 +6 少算 2px，使
+            # LABEL_VERTICAL_GAP=4 实际只剩 2px，相邻标签近乎粘连。
+            if not sample_text_item.toPlainText():
+                sample_text_item.setText("0")
+            self._cached_label_height_pixels = (
+                sample_text_item.boundingRect().height() + 2
+            )
 
         label_height_pixels = self._cached_label_height_pixels
         font_metrics = self._cached_font_metrics
@@ -1220,12 +1249,30 @@ class CursorManager:
 
             text_item.setText(display_text)
 
-            # 边框颜色
-            if (not hasattr(text_item, '_cached_border_color')
-                    or text_item._cached_border_color != layout.color):
-                border_pen = pg.mkPen(layout.color, width=1.5)
-                text_item.border = border_pen
-                text_item._cached_border_color = layout.color
+            # 色条(4px)与文字留 3px 间隙。setPlainText 会重置 root frame 边距，
+            # 故每次 setText 后重设（默认 4 + 3 = 7）；只加左 margin，不改高度。
+            doc = text_item.textItem.document()
+            fmt = doc.rootFrame().frameFormat()
+            if fmt.leftMargin() != 7:
+                fmt.setLeftMargin(7)
+                doc.rootFrame().setFrameFormat(fmt)
+
+            # 身份色：左侧 4px 全色条 + 10α 同色底 + 曲线色描边（tint10 定稿）。
+            # 底色用曲线色 10α(≈3.9% 色)：几乎近白、只留一丝色相，遮挡最轻；
+            # 身份仍由不透明色条承担，压深色曲线时黑字对比也比高 α 同色底更稳。
+            if (not hasattr(text_item, '_cached_chip_color')
+                    or text_item._cached_chip_color != layout.color):
+                c = pg.mkColor(layout.color)
+                tint = pg.mkColor(layout.color)
+                tint.setAlpha(10)
+                grad = QLinearGradient(0.0, 0.0, 5.0, 0.0)
+                grad.setColorAt(0.0, c)
+                grad.setColorAt(0.79, c)
+                grad.setColorAt(0.80, tint)
+                text_item.fill = QBrush(grad)
+                text_item.setColor(pg.mkColor("#000000"))
+                text_item.border = pg.mkPen(c, width=1.5)
+                text_item._cached_chip_color = layout.color
 
             text_item.setVisible(True)
 
@@ -1236,6 +1283,27 @@ class CursorManager:
             text_item.setPos(data_pos.x(), data_pos.y())
             text_item.setZValue(201)
             pw.multi_cursor_items.append(text_item)
+
+            # 引导线：交点 → 标签左缘（A2）。数据坐标，随视图缩放与标签同动。
+            leader = self._get_leader_from_pool(layout.index)
+            leader_scene = leader.scene()
+            if leader_scene != plot_scene:
+                if leader_scene is not None:
+                    leader_scene.removeItem(leader)
+                pw.plot_item.addItem(leader, ignoreBounds=True)
+            p0 = view_box.mapViewToScene(QPointF(layout.x_pos, layout.y_pos))
+            p1 = QPointF(layout.layout_x, layout.layout_y)
+            if (p1 - p0).manhattanLength() > 8:
+                d0 = view_box.mapSceneToView(p0)
+                d1 = view_box.mapSceneToView(p1)
+                leader.setData([d0.x(), d1.x()], [d0.y(), d1.y()])
+                lc = pg.mkColor(layout.color)
+                lc.setAlpha(150)
+                leader.setPen(pg.mkPen(lc, width=1))
+                leader.setVisible(True)
+                pw.multi_cursor_items.append(leader)
+            else:
+                leader.setVisible(False)  # 贴住交点时不画，避免噪音
 
     # ========================================================================
 
