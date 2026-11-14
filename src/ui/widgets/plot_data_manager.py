@@ -172,8 +172,13 @@ class PlotDataManager:
             pw.curves.clear()
             pw.current_color_index = 0
     
-            # 性能优化：保持 ascontiguousarray + float32 动态选择
-            original_index = np.ascontiguousarray(x_array, dtype=np.float32)
+            # 性能优化：保持 ascontiguousarray + float32 动态选择；
+            # 分组数据源（MDF/BLF）的时间轴必须先保 float64 —— float32 在
+            # t≈1370 s 时 ULP≈0.12 ms，长录制会抹平毫秒级采样，小数位加长后
+            # 显示的全是量化噪声
+            loader = getattr(getattr(pw, "plot_context", None), "loader", None)
+            x_dtype = np.float64 if is_grouped_loader(loader) else np.float32
+            original_index = np.ascontiguousarray(x_array, dtype=x_dtype)
             safe_for_float32, abs_max_plot = _evaluate_float32_safety(y_array)
             keep_float64 = (
                 y_format in ["s", "date"]

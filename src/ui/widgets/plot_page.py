@@ -200,6 +200,13 @@ class PlotPage:
         plot_widget = DraggableGraphicsLayoutWidget(
             services.units, services.data, services.time_channels_infos
         )
+        # 新建页/新补格子必须从当前全局时间基准起步：PlotWidget 构造期默认
+        # factor=1/offset=0，若不补种，新建页的曲线 X、X limits、游标域会与
+        # 其它页差一个系数，切页跟随范围时被目标页 limits 夹回并互相污染。
+        # 必须放在游标初始化之前：apply_cursor_mode 会用 factor/offset 反算
+        # pinned_index_value，后置会把固定游标的索引值算错。
+        plot_widget.factor = float(getattr(services, "factor", 1.0))
+        plot_widget.offset = float(getattr(services, "offset", 0.0))
         #: 反查所属页（mark region / 统计 / 日志头）
         plot_widget.page = self
         # 关键：注入“本页”而不是“当前页”，页切走后 ctx 仍指向自己的兄弟集合

@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid
 
 from src.core.settings import AppSettings
+from src.core.value_format import format_fixed_trim
 
 if TYPE_CHECKING:
     from src.core.data_types import MarkStatEntry
@@ -116,8 +117,12 @@ CONTEXT_COLUMNS: list[_ContextColumn] = [
 ]
 
 
-def _format_stat_value(value) -> str:
-    """自适应精度 4 位有效数字；NaN→"-"，±inf→"inf"/"-inf"，整数原样。"""
+def _format_stat_value(value, decimals: int | None = None) -> str:
+    """自定义精度或自适应 4 位有效数字；NaN→"-"，±inf→"inf"/"-inf"，整数原样。
+
+    ``decimals >= 0`` 时按该小数位定点格式化（与游标 X 标签同口径），
+    用于 x1/x2/dx 等 x 相关列；否则沿用 4 位有效数字。
+    """
     if isinstance(value, (int, np.integer)):
         return str(int(value))
     v = float(value)
@@ -127,11 +132,17 @@ def _format_stat_value(value) -> str:
         return "inf" if v > 0 else "-inf"
     if v == 0:
         return "0"
+    if decimals is not None and decimals >= 0:
+        return format_fixed_trim(v, decimals)
     exp = math.floor(math.log10(abs(v)))
-    decimals = 4 - 1 - exp
-    if decimals <= 0:
+    auto_decimals = 4 - 1 - exp
+    if auto_decimals <= 0:
         return f"{v:.0f}"
-    return f"{v:.{decimals}f}".rstrip("0").rstrip(".") or "0"
+    return f"{v:.{auto_decimals}f}".rstrip("0").rstrip(".") or "0"
+
+
+# x 相关列：与游标 X 标签共用「按数据步长推导」的小数位
+_X_DECIMAL_KEYS = frozenset({"x1", "x2", "dx", "x_at_y_max", "x_at_y_min"})
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +275,13 @@ class MarkStatsTableModel(QAbstractTableModel):
                 return None
             value = STAT_COLUMNS[self._column_keys[i]].getter(row.entry)
             if role == Qt.ItemDataRole.DisplayRole:
-                return _format_stat_value(value)
+                key = self._column_keys[i]
+                decimals = (
+                    getattr(row.entry, "x_decimals", -1)
+                    if key in _X_DECIMAL_KEYS
+                    else None
+                )
+                return _format_stat_value(value, decimals)
             if role == SORT_ROLE:
                 if isinstance(value, (int, np.integer)):
                     return int(value)
@@ -803,6 +820,15 @@ class MarkStatsWindow(QDialog):
         except (TypeError, ValueError, IndexError):
             return None
 
+    def _max_x_decimals(self) -> int | None:
+        """表格中 x 相关列的最大小数位；无可用值（旧数据/空表）返回 None。"""
+        values = [
+            r.entry.x_decimals
+            for r in self.model.rows()
+            if getattr(r.entry, "x_decimals", -1) >= 0
+        ]
+        return max(values) if values else None
+
     def _update_status_bar(self):
         parts = [
             f"{len(self._pages)} 页 · {self._plot_count} 子图 · "
@@ -810,9 +836,12 @@ class MarkStatsWindow(QDialog):
         ]
         rng = self._mark_range()
         if rng is not None:
-            # 不硬编码单位后缀（x 未必是秒），按 x 轴原样显示数字
+            # 不硬编码单位后缀（x 未必是秒），按 x 轴原样显示数字；
+            # 小数位与表格 x 列同口径（取各行中最细的精度）
+            decimals = self._max_x_decimals()
             parts.append(
-                f"标记区间 [{_format_stat_value(rng[0])}, {_format_stat_value(rng[1])}]"
+                f"标记区间 [{_format_stat_value(rng[0], decimals)}, "
+                f"{_format_stat_value(rng[1], decimals)}]"
             )
         if self._empty_plots:
             parts.append(f"{self._empty_plots} 个空子图未统计")

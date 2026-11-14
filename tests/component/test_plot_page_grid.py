@@ -180,3 +180,37 @@ def test_apply_visibility_grows_partial_page(page):
     assert page.rows_current == 2 and page.cols_current == 2
     assert all(page.cell_visible(i) for i in range(4))
     assert page.container_at(1, 1) is page.plot_widgets[3]
+
+
+def test_new_plot_widgets_inherit_global_time_base(page):
+    """建子图必须继承当前全局 factor/offset（新建页与后续补格两条路径）。"""
+    fake = page.services
+    fake.factor = 0.1
+    fake.offset = 2.0
+
+    page.build_matrix(1, 1)
+    first_pw = page.plot_widgets[0].plot_widget
+    assert first_pw.factor == pytest.approx(0.1)
+    assert first_pw.offset == pytest.approx(2.0)
+
+    page.apply_visibility(1, 2)
+    assert len(page.plot_widgets) == 2
+    for container in page.plot_widgets:
+        assert container.plot_widget.factor == pytest.approx(0.1)
+        assert container.plot_widget.offset == pytest.approx(2.0)
+
+
+def test_new_plot_seeds_time_base_before_cursor_init(page):
+    """补种必须先于游标初始化：pinned_index_value 由 factor 反算。"""
+    fake = page.services
+    fake.factor = 0.1
+    fake.cursor_btn._checked = True
+    fake.cursor_mode = "1 anchored cursor"
+    fake.pinned_x_values = [5.0]
+
+    page.build_matrix(1, 1)
+    plot_widget = page.plot_widgets[0].plot_widget
+    assert plot_widget.factor == pytest.approx(0.1)
+    assert plot_widget.is_cursor_pinned is True
+    assert plot_widget.pinned_index_value == pytest.approx(50.0)
+    assert plot_widget.vline.value() == pytest.approx(5.0)

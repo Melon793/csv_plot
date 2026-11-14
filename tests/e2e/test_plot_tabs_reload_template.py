@@ -15,7 +15,7 @@ import pytest
 
 from PySide6.QtWidgets import QInputDialog
 
-from src.core.plot_config import PlotSessionConfig
+from src.core.plot_config import PlotConfig, PlotPageConfig, PlotSessionConfig
 
 
 def _add_page_with_curve(mw, qtbot, var_name: str):
@@ -260,3 +260,50 @@ def test_export_apply_keeps_curve_in_its_cell_when_first_cell_empty(
     )
     assert set(page.plot_widgets[1].plot_widget.curves) == {"speed"}
     assert not page.plot_widgets[0].plot_widget.curves, "曲线被错位到第 1 格"
+
+
+def test_template_reset_to_default_factor_recomputes_existing_pages(
+    loaded_window, qtbot
+):
+    """模板/auto-save 从 0.1 恢复默认基准时，所有页（含新建页）都要重算。
+
+    旧实现只在模板 factor/offset 非默认时进入重算分支；模板值恰好为 1/0 时
+    整段跳过，既有页停在 0.1、复用的新页按建图时的旧基准继承，曲线 X 与
+    mw.factor 永久不一致。
+    """
+    mw = loaded_window
+    qtbot.waitUntil(lambda: not mw._is_loading_new_data, timeout=5000)
+    assert mw.layout_manager.apply_time_correction(0.1, 0.0) is True
+
+    config = PlotSessionConfig(
+        time_factor=1.0,
+        time_offset=0.0,
+        active_page=1,
+    )
+    for title in ("page 1", "page 2"):
+        config.pages.append(
+            PlotPageConfig(
+                title=title,
+                layout_rows=1,
+                layout_cols=1,
+                plots=[PlotConfig(curves=["speed"], cell_index=0)],
+            )
+        )
+
+    assert mw.plot_config_manager.apply_config(mw, config) is True
+    qtbot.waitUntil(lambda: len(mw.pages) == 2, timeout=3000)
+    qtbot.waitUntil(lambda: mw.current_page is mw.pages[1], timeout=3000)
+    qtbot.waitUntil(lambda: mw._pending_activation is None, timeout=3000)
+
+    assert mw.factor == pytest.approx(1.0)
+    assert mw.offset == pytest.approx(0.0)
+    for page in mw.pages:
+        for container in page.visible_containers():
+            plot_widget = container.plot_widget
+            assert plot_widget.factor == pytest.approx(1.0)
+            assert plot_widget.offset == pytest.approx(0.0)
+            curve_info = plot_widget.curves.get("speed")
+            if curve_info is not None:
+                assert curve_info.x_data[-1] == pytest.approx(
+                    float(mw.loader.datalength), rel=1e-6
+                )

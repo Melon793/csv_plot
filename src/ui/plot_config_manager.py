@@ -264,7 +264,35 @@ class PlotConfigManager(QObject):
             # 全局时间基准：所有页都要重算数据层，隐藏页由 scene=False 分级
             main_window.factor = config.time_factor
             main_window.offset = config.time_offset
-            if config.time_factor != 1.0 or config.time_offset != 0.0:
+
+            needs_time_recompute = (
+                config.time_factor != 1.0 or config.time_offset != 0.0
+            )
+            if not needs_time_recompute:
+                # 模板/auto-save 恢复默认基准时也要校正：新建页可能在建图时
+                # 继承了旧 factor，而原先只按“模板值是否非默认”决定是否重算，
+                # 会把整场恢复停在旧基准（曲线 X 与 mw.factor 不一致）。
+                for page in pages:
+                    for container in page.plot_widgets:
+                        widget = getattr(container, "plot_widget", None)
+                        if widget is None:
+                            continue
+                        if (
+                            abs(
+                                float(getattr(widget, "factor", config.time_factor))
+                                - config.time_factor
+                            ) > 1e-12
+                            or abs(
+                                float(getattr(widget, "offset", config.time_offset))
+                                - config.time_offset
+                            ) > 1e-12
+                        ):
+                            needs_time_recompute = True
+                            break
+                    if needs_time_recompute:
+                        break
+
+            if needs_time_recompute:
                 for page in pages:
                     is_current = page is current
                     for container in page.plot_widgets:
