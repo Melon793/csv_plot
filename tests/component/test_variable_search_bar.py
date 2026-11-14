@@ -223,3 +223,55 @@ def test_consecutive_keyboard_adds(bar):
     search_bar._last_input_was_mouse = False
     search_bar.mark_added(var)
     assert search_bar.candidate_list.currentRow() == -1
+
+
+def test_wildcard_star_filter(bar):
+    """`*` 通配：跨段命中，仍保持候选排序/选中逻辑"""
+    search_bar, _ = bar
+    search_bar.search_edit.setText("engine_*_5")
+    search_bar._refresh_list()
+    assert _item_names(search_bar) == ["engine_rpm_5"]
+    assert search_bar.candidate_list.currentRow() == 0
+
+
+def test_wildcard_question_filter(bar):
+    """`?` 只匹配一个字符：engine_rpm_?0 → 10/20/30/40"""
+    search_bar, _ = bar
+    search_bar.search_edit.setText("engine_rpm_?0")
+    search_bar._refresh_list()
+    assert _item_names(search_bar) == [
+        "engine_rpm_10",
+        "engine_rpm_20",
+        "engine_rpm_30",
+        "engine_rpm_40",
+    ]
+
+
+def test_multi_keyword_wildcard_keeps_ranking(bar):
+    """多关键词 + 通配：后输入关键词命中的候选仍优先（last_hit_rank）"""
+    search_bar, _ = bar
+    search_bar.search_edit.setText("engine_* temp")
+    search_bar._refresh_list()
+    names = _item_names(search_bar)
+    assert names[:2] == ["temp_coolant", "temp_oil"]  # 关键词 2 命中 → 排最前
+    assert len(names) == 52
+    assert all(name.startswith("engine_rpm_") for name in names[2:])
+
+
+def test_multi_keyword_hit_count_ranks_first(qapp):
+    """同时命中多个关键词的变量优先（hit_count_rank 单遍合并后仍生效）"""
+    pw = FakePlotWidget()
+    # 原始顺序刻意与排序结果相反：若 hit_count_rank 失效，顺序会退回
+    # last_hit_rank + original_idx，本用例即转红（防假阳性）
+    names = ["temp_only", "engine_rpm_1", "engine_temp_2", "other"]
+    search_bar = VariableSearchBar(names, {}, {n: 1 for n in names}, pw)
+    try:
+        search_bar.search_edit.setText("engine_* temp")
+        search_bar._refresh_list()
+        assert _item_names(search_bar) == [
+            "engine_temp_2",  # 两个关键词都命中
+            "temp_only",      # 只命中后一个关键词
+            "engine_rpm_1",   # 只命中前一个关键词
+        ]
+    finally:
+        search_bar.deleteLater()

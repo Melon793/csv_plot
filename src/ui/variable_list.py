@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QTableWidgetSelectionRange,
     QHeaderView,
 )
+from src.core.keyword_match import KeywordMatcher
 from src.core.logger import get_logger
 from src.core.config import VAR_INFO_MAX_TABS, is_grouped_loader
 from src.ui.drag_drop import build_var_mimedata
@@ -654,7 +655,13 @@ class MyTableWidget(QTableWidget):
         self._is_full_table = True
 
     def hide_non_matching(self, name_keywords, unit_keywords, units):
-        """通过 setRowHidden 过滤行，不重建任何 QTableWidgetItem"""
+        """通过 setRowHidden 过滤行，不重建任何 QTableWidgetItem
+
+        关键词支持通配符：`*` 任意长度、`?` 恰好一个字符；其余字符按字面量
+        处理（不需要转义）。多个关键词仍是「任一命中即保留」（OR，调用方
+        按空格拆分后传入），语义不变；不含通配符的关键词走原子串匹配，
+        行为零变化。
+        """
         if not self._is_full_table:
             return False
 
@@ -662,16 +669,21 @@ class MyTableWidget(QTableWidget):
         self._current_unit_keywords = unit_keywords
         self._current_units = units
 
+        # 每个关键词只编译一次，逐行复用
+        name_matchers = [KeywordMatcher(kw) for kw in name_keywords]
+        unit_matchers = [KeywordMatcher(kw) for kw in unit_keywords]
+
         self.setUpdatesEnabled(False)
         try:
             for row, name in enumerate(self._row_var_names):
-                if name_keywords:
-                    if not any(kw in str(name).lower() for kw in name_keywords):
+                if name_matchers:
+                    name_lower = str(name).lower()
+                    if not any(m.matches_lower(name_lower) for m in name_matchers):
                         self.setRowHidden(row, True)
                         continue
-                if unit_keywords:
-                    unit = str(units.get(name, "")).lower()
-                    if not any(kw in unit for kw in unit_keywords):
+                if unit_matchers:
+                    unit_lower = str(units.get(name, "")).lower()
+                    if not any(m.matches_lower(unit_lower) for m in unit_matchers):
                         self.setRowHidden(row, True)
                         continue
                 self.setRowHidden(row, False)
