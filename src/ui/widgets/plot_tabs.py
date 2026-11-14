@@ -27,6 +27,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QTabBar, QTabWidget, QToolButton
 
 from src.ui.drag_drop import SHELF_MIME_FORMAT
+from src.ui import theme
 from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
 
 #: 绘图页数量上限（设计文档 §4.4）
@@ -344,7 +345,7 @@ class _ShelfCapsuleButton(_FlatIconButton):
         font.setPixelSize(font_px)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QColor("#ffffff"))
+        painter.setPen(QColor(theme.ON_ACCENT))
         painter.drawText(
             QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2),
             Qt.AlignmentFlag.AlignCenter,

@@ -2,7 +2,8 @@
 
 值全部取自 ``src/ui/dialogs/layout_grid_selector.py`` 的既有实现 —— 那是本仓
 唯一一处成体系的视觉语言，作者认可它并要求其他界面与之对齐。抽到这里的目的是
-让抽屉不再自带一份颜色：将来做深浅主题 token 化时只改这一个文件。
+让抽屉不再自带一份颜色：全 app 的蓝色统一由 :data:`ACCENT` 派生（Windows 跟
+系统强调色，其它平台品牌蓝），散落字面量逐步收敛到这里的 token。
 
 已知代价（选它而不是 ``palette()`` 自动跟随的理由）：这是一份**浅色主题**的
 写死色板，网格选择器今天也是这样。同一屏上出现两套灰阶比深色主题下不一致更
@@ -19,6 +20,119 @@
 
 from __future__ import annotations
 
+import colorsys
+import sys
+
+from PySide6.QtGui import QColor
+
+# === 强调色（accent） ===
+# 全 app 只有一个蓝色源头：Windows 跟随系统强调色（DWM AccentColor），
+# 其余平台固定品牌蓝。启动时解析一次——改系统强调色后重启生效（不做
+# 运行中重刷，避免为 WM_SETTINGCHANGE 引入一整套重绘链路）。
+BRAND_BLUE = "#2F6FB4"        # mac / Linux：本仓既有视觉锚点（原 CHIP_SEL_BD）
+WINDOWS_FALLBACK = "#0078D4"  # Windows 读不到 AccentColor 时的系统默认蓝
+_MAX_ACCENT_LUM = 0.45        # 亮度上限：浅黄/浅粉等强调色压暗到线框可读
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    value = value.lstrip("#")
+    return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+
+
+def _rgb_to_hex(rgb) -> str:
+    return "#" + "".join(f"{max(0, min(255, round(c))):02X}" for c in rgb)
+
+
+def mix_hex(base: str, other: str, t: float) -> str:
+    """线性混合两色：t=0 全 base，t=1 全 other。"""
+    a, b = _hex_to_rgb(base), _hex_to_rgb(other)
+    return _rgb_to_hex(x + (y - x) * t for x, y in zip(a, b))
+
+
+def lighten_hex(value: str, factor: float) -> str:
+    """按 HSV 明度缩放（保留色相/饱和度）：factor>1 提亮，<1 压暗。"""
+    rgb = [c / 255 for c in _hex_to_rgb(value)]
+    h, s, v = colorsys.rgb_to_hsv(*rgb)
+    return _rgb_to_hex(
+        c * 255 for c in colorsys.hsv_to_rgb(h, s, min(1.0, max(0.0, v * factor)))
+    )
+
+
+def relative_luminance(value: str) -> float:
+    """WCAG 相对亮度（0=黑，1=白）。"""
+
+    def channel(c: int) -> float:
+        c = c / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = _hex_to_rgb(value)
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def clamp_luminance(value: str, max_lum: float = _MAX_ACCENT_LUM) -> str:
+    """把过亮的颜色逐档压暗到亮度上限内（Windows 强调色可以是浅黄）。"""
+    rgb = tuple(float(c) for c in _hex_to_rgb(value))
+    while relative_luminance(_rgb_to_hex(rgb)) > max_lum and max(rgb) > 0:
+        rgb = tuple(c * 0.9 for c in rgb)
+    return _rgb_to_hex(rgb)
+
+
+def _abgr_to_hex(dword: int) -> str:
+    """DWM AccentColor 是 0xAABBGGRR：低位是 R，alpha 字节忽略。"""
+    return _rgb_to_hex((dword & 0xFF, (dword >> 8) & 0xFF, (dword >> 16) & 0xFF))
+
+
+def _read_windows_accent() -> str | None:
+    """读 HKCU 下的 DWM AccentColor（Software/Microsoft/Windows/DWM），失败返回 None。"""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM"
+        ) as key:
+            dword, _ = winreg.QueryValueEx(key, "AccentColor")
+    except OSError:
+        return None
+    if not isinstance(dword, int):
+        return None
+    return _abgr_to_hex(dword)
+
+
+def resolve_accent() -> str:
+    """当前平台强调色：Windows 读系统强调色，其余平台品牌蓝。"""
+    if sys.platform == "win32":
+        return clamp_luminance(_read_windows_accent() or WINDOWS_FALLBACK)
+    return BRAND_BLUE
+
+
+def on_accent_for(value: str) -> str:
+    """实色上的文字：在白字/深字中取对比度更高的一档（延迟取 TEXT_PRIMARY）。"""
+    lum = relative_luminance(value)
+    white_ratio = 1.05 / (lum + 0.05)
+    dark_ratio = (lum + 0.05) / (relative_luminance(TEXT_PRIMARY) + 0.05)
+    return "#FFFFFF" if white_ratio >= dark_ratio else TEXT_PRIMARY
+
+
+ACCENT = resolve_accent()
+BORDER_SOFT = mix_hex(ACCENT, "#FFFFFF", 0.5)   # 弱边框：hover/focus/分类格
+TINT_SOFT = mix_hex(ACCENT, "#FFFFFF", 0.9)     # 白底上的 10% 浅底（不透明版）
+TINT_ALPHA = 64        # 25%：半透明覆盖（标记区域/闪烁/按压/选中 tint）
+TINT_SOFT_ALPHA = 26   # 10%：更弱的半透明覆盖（数值列表十字引导）
+
+
+def accent_qcolor(alpha: int = 255) -> QColor:
+    color = QColor(ACCENT)
+    color.setAlpha(alpha)
+    return color
+
+
+def tint_qcolor(alpha: int = TINT_ALPHA) -> QColor:
+    """accent 的半透明版本：盖在内容上必须透出底层。"""
+    return accent_qcolor(alpha)
+
+
 # === 色板 ===
 BG = "#FFFFFF"
 TEXT_PRIMARY = "#1F2329"
@@ -33,11 +147,14 @@ SEP_ON_BAR = "#C9CDD4"
 # 网格方片三态（只有「修改布局」那 15 格用）：未选浅灰、当前淡蓝、新值实心蓝
 CHIP_OFF_BG = "#F2F4F7"
 CHIP_OFF_BD = "#DFE3E8"
-CHIP_CUR_BG = "#E8F1FD"
-CHIP_CUR_BD = "#8FBBEA"
-CHIP_SEL_BG_TOP = "#5AA2E6"
-CHIP_SEL_BG_BOT = "#3B82D0"
-CHIP_SEL_BD = "#2F6FB4"
+CHIP_CUR_BG = TINT_SOFT
+CHIP_CUR_BD = BORDER_SOFT
+CHIP_SEL_BG_TOP = lighten_hex(ACCENT, 1.35)
+CHIP_SEL_BG_BOT = lighten_hex(ACCENT, 0.87)
+CHIP_SEL_BD = ACCENT
+
+# 实色（accent）上的文字：白字对比度不足 4.5:1 时改用深字
+ON_ACCENT = on_accent_for(ACCENT)
 
 # === 度量 ===
 R_FIELD = 4  # 值列字段框的圆角：框比按钮大一号，用更小一档才不显肿

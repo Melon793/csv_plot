@@ -275,3 +275,12 @@ def test_multi_keyword_hit_count_ranks_first(qapp):
         ]
     finally:
         search_bar.deleteLater()
+
+
+def test_blue_tokens_come_from_theme(bar):
+    """focus 边框与候选选中底走 theme token（防止再引入硬编码蓝）"""
+    from src.ui import theme
+
+    search_bar, _ = bar
+    assert theme.ACCENT in search_bar.search_edit.styleSheet()
+    assert theme.TINT_SOFT in search_bar.candidate_list.styleSheet()

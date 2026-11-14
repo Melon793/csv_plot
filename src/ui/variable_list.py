@@ -162,9 +162,9 @@ class NoHoverDelegate(QStyledItemDelegate):
         if not isinstance(text, str):
             text = str(text)
 
-        # 选中时使用白色文字（高对比度），否则使用默认颜色
+        # 选中文字用系统配套的 highlightedText（mac 高亮色偏浅，白字对比不足）
         if option.state & QStyle.StateFlag.State_Selected:
-            painter.setPen(QColor(255, 255, 255))
+            painter.setPen(option.palette.highlightedText().color())
         else:
             painter.setPen(option.palette.text().color())
 

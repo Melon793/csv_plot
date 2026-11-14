@@ -33,6 +33,7 @@ from src.core.plot_config import (
     TemplateNameConflictError,
 )
 from src.core.logger import get_logger
+from src.ui import theme
 
 
 logger = get_logger(__name__)
@@ -497,7 +498,8 @@ class TemplateEditorDialog(QDialog):
                     label.setWordWrap(True)
                     if len(curves) > 1:
                         frame.setStyleSheet(
-                            "background-color: #e8f4fc; border: 1px solid #99c2ff;"
+                            f"background-color: {theme.TINT_SOFT};"
+                            f" border: 1px solid {theme.BORDER_SOFT};"
                         )
                     else:
                         frame.setStyleSheet(

@@ -75,6 +75,7 @@ from src.core.config import (
 )
 from src.core.logger import get_logger
 from src.core.gc_guard import no_autogc
+from src.ui import theme
 from src.data import var_info
 from src.data.metadata import VALID, CONST, INVALID
 from src.utils.paths import STYLE_POSIX, STYLE_WINDOWS, format_for_copy
@@ -259,7 +260,8 @@ class CopyFieldDelegate(QStyledItemDelegate):
             QRect(rect.left() + 5, rect.top(), w, h), 1.5, 1.5
         )
         if pressed:
-            painter.setBrush(QColor(33, 150, 243, 70))
+            # 25% 档：与全 app「瞬时按压 tint」同一 token
+            painter.setBrush(theme.tint_qcolor())
         painter.drawRoundedRect(
             QRect(rect.left() + 1, rect.top() + 4, w, h), 1.5, 1.5
         )
