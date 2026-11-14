@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QAbstractTableModel,
     QEvent,
     QModelIndex,
+    QPoint,
     QSortFilterProxyModel,
     Qt,
     QSignalBlocker,
@@ -117,6 +118,15 @@ CONTEXT_COLUMNS: list[_ContextColumn] = [
 ]
 
 
+@dataclass(frozen=True)
+class _InsertTarget:
+    """表头右键位置解析结果：模型插入位 + 视觉落点 + 菜单提示。"""
+
+    insert_at: int
+    visual_at: int | None  # None = 不移动（追加末尾）
+    hint: str | None
+
+
 def _format_stat_value(value, decimals: int | None = None) -> str:
     """自定义精度或自适应 4 位有效数字；NaN→"-"，±inf→"inf"/"-inf"，整数原样。
 
@@ -181,6 +191,26 @@ class MarkStatsTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._column_keys = list(keys)
         self.endResetModel()
+
+    def insert_column_key(self, index: int, key: str) -> None:
+        """插入单个指标列（增量信号，保留表头拖动列序）。"""
+        if key not in STAT_COLUMNS or key in self._column_keys:
+            return
+        index = max(0, min(int(index), len(self._column_keys)))
+        column = len(CONTEXT_COLUMNS) + index
+        self.beginInsertColumns(QModelIndex(), column, column)
+        self._column_keys.insert(index, key)
+        self.endInsertColumns()
+
+    def remove_column_key(self, key: str) -> None:
+        """删除单个指标列（增量信号，保留表头拖动列序）。"""
+        if key not in self._column_keys:
+            return
+        index = self._column_keys.index(key)
+        column = len(CONTEXT_COLUMNS) + index
+        self.beginRemoveColumns(QModelIndex(), column, column)
+        self._column_keys.pop(index)
+        self.endRemoveColumns()
 
     # ----- 行数据 -----
 
@@ -741,9 +771,55 @@ class MarkStatsWindow(QDialog):
     # 列配置（§5.6 两级入口）
     # ------------------------------------------------------------------
 
-    def _show_header_menu(self, pos):
-        menu = QMenu(self)
+    def _resolve_insert_target(self, pos: QPoint) -> _InsertTarget:
+        """把表头右键坐标解析成插入目标（模型位 + 视觉位 + 菜单提示）。
+
+        注意坐标系：visualIndexAt 收像素位置、返回 visual index；
+        sectionViewportPosition/sectionSize 收 logicalIndex（不是 visual）。
+        """
         current = self.model.column_keys()
+        append = _InsertTarget(len(current), None, "勾选新指标时：插入到末尾")
+        if pos.x() < 0 or pos.y() < 0:  # 键盘触发等的无效坐标
+            return append
+
+        header = self.table.horizontalHeader()
+        visual = header.visualIndexAt(pos.x())
+        if visual < 0:  # 最后一列右侧空白区
+            return append
+
+        logical = header.logicalIndex(visual)
+        section_left = header.sectionViewportPosition(logical)
+        after = pos.x() >= section_left + header.sectionSize(logical) / 2
+
+        if logical < len(CONTEXT_COLUMNS):
+            # 固定前导块：模型顺序插到指标区最前，视觉上紧跟「单位」
+            unit_logical = len(CONTEXT_COLUMNS) - 1
+            return _InsertTarget(
+                0,
+                header.visualIndex(unit_logical) + 1,
+                "勾选新指标时：插入到「单位」右侧",
+            )
+
+        idx = logical - len(CONTEXT_COLUMNS)
+        if not 0 <= idx < len(current):
+            return append
+        anchor_key = current[idx]
+        side = "右侧" if after else "左侧"
+        return _InsertTarget(
+            current.index(anchor_key) + int(after),
+            visual + int(after),
+            f"勾选新指标时：插入到「{STAT_COLUMNS[anchor_key].title}」{side}",
+        )
+
+    def _show_header_menu(self, pos):
+        # 快照列集：菜单模态期间定时刷新只改行、不改列
+        current = self.model.column_keys()
+        target = self._resolve_insert_target(pos)
+        has_unchecked = any(k not in current for k in STAT_COLUMNS)
+
+        menu = QMenu(self)
+        if target.hint and has_unchecked:
+            menu.addSection(target.hint)
         for key, col in STAT_COLUMNS.items():
             act = menu.addAction(col.title)
             act.setCheckable(True)
@@ -767,10 +843,12 @@ class MarkStatsWindow(QDialog):
             return
         key = data
         if key in current:
-            new_keys = [k for k in current if k != key]
+            self._apply_column_keys([k for k in current if k != key])
         else:
-            new_keys = current + [key]  # 勾选新指标追加到末尾
-        self._apply_column_keys(new_keys)
+            new_keys = current[:target.insert_at] + [key] + current[target.insert_at:]
+            self._apply_column_keys(
+                new_keys, place_new_at_visual=target.visual_at
+            )
 
     def _open_column_dialog(self):
         dlg = _ColumnConfigDialog(self, selected=self.model.column_keys())
@@ -780,12 +858,33 @@ class MarkStatsWindow(QDialog):
         finally:
             dlg.deleteLater()
 
-    def _apply_column_keys(self, keys: list[str]) -> None:
-        """应用新列集：持久化 + 列 reset + sortColumn 按 key 重映射。"""
-        keys = [k for k in keys if k in STAT_COLUMNS]
-        if not keys or keys == self.model.column_keys():
+    def _apply_column_keys(
+        self, keys: list[str], *, place_new_at_visual: int | None = None
+    ) -> None:
+        """应用新列集：单增/单删走增量信号，重排走 reset；持久化并重映射排序。"""
+        deduped: list[str] = []
+        for key in keys:
+            if key in STAT_COLUMNS and key not in deduped:
+                deduped.append(key)
+        keys = deduped
+        current = self.model.column_keys()
+        if not keys or keys == current:
             return
-        # 排序先按 key 记忆（列 reset 前取值）
+
+        added = [k for k in keys if k not in current]
+        removed = [k for k in current if k not in keys]
+        single_insert = (
+            len(added) == 1
+            and not removed
+            and [k for k in keys if k != added[0]] == current
+        )
+        single_remove = (
+            len(removed) == 1
+            and not added
+            and [k for k in current if k != removed[0]] == keys
+        )
+
+        # 排序先按 key 记忆（列变更前取值）
         sort_key: str | None = None
         sort_order = Qt.SortOrder.AscendingOrder
         sort_col = self.proxy.sortColumn()
@@ -793,16 +892,34 @@ class MarkStatsWindow(QDialog):
             sort_key = self._column_key_at(sort_col)
             sort_order = self.proxy.sortOrder()
 
-        self._column_keys = list(keys)
-        self.model.set_column_keys(self._column_keys)
-        AppSettings().set_mark_stats_columns(self._column_keys)  # 即写即 sync
+        if single_insert:
+            self.model.insert_column_key(keys.index(added[0]), added[0])
+        elif single_remove:
+            self.model.remove_column_key(removed[0])
+        else:
+            self.model.set_column_keys(keys)  # 重排/多增删仍走 reset
+        self._column_keys = self.model.column_keys()
+
+        header = self.table.horizontalHeader()
+        if single_insert and place_new_at_visual is not None:
+            new_col = len(CONTEXT_COLUMNS) + keys.index(added[0])
+            target = max(0, min(place_new_at_visual, header.count() - 1))
+            cur_visual = header.visualIndex(new_col)
+            if cur_visual != target:
+                header.moveSection(cur_visual, target)
 
         if sort_key is not None:
             new_col = self._column_index_for_key(sort_key)
             if new_col is not None:
                 self.proxy.sort(new_col, sort_order)
+                header.setSortIndicator(new_col, sort_order)
             else:
                 self.proxy.sort(-1, Qt.SortOrder.AscendingOrder)
+                # 增量路径不会自动回源序；invalidate 只发 layoutChanged
+                self.proxy.invalidate()
+                header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+
+        AppSettings().set_mark_stats_columns(self._column_keys)  # 即写即 sync
         self._save_header_state()
 
     # ------------------------------------------------------------------

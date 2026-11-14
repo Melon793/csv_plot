@@ -17,6 +17,7 @@ import pytest
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QAction
+from PySide6.QtTest import QSignalSpy
 
 from src.core.data_types import MarkStatEntry
 from src.ui.mark_stats import (
@@ -31,8 +32,21 @@ from src.ui.mark_stats import (
     _format_stat_value,
 )
 
-# _show_header_menu 的 pos 参数仅用于 mapToGlobal，未显示窗口下取原点即可
+# 表头菜单位置参与插入点判定；未显示时默认列宽已生效，可直接用 QPoint 命中
 _QT_POINT_ZERO = QPoint(0, 0)
+
+
+def _point_in_section(header, logical: int, ratio: float = 0.5) -> QPoint:
+    """按 logical 列号构造表头点击点（section API 收 logicalIndex）。"""
+    x = header.sectionViewportPosition(logical) + int(
+        header.sectionSize(logical) * ratio
+    )
+    return QPoint(x, max(1, header.height() // 2))
+
+
+def _blank_point(header) -> QPoint:
+    """最后一列右侧的空白区。"""
+    return QPoint(header.length() + 10, max(1, header.height() // 2))
 
 
 def _entry(**over) -> MarkStatEntry:
@@ -307,12 +321,20 @@ class _HeaderMenuStub:
 
     def __init__(self, parent=None):
         self._actions: list = []
+        self._sections: list[str] = []
         self._parent = parent
         _HeaderMenuStub.last = self
 
     def addAction(self, text):
         act = QAction(text)
         self._actions.append(act)
+        return act
+
+    def addSection(self, text):
+        act = QAction(text)
+        act.setSeparator(True)
+        self._actions.append(act)
+        self._sections.append(text)
         return act
 
     def addSeparator(self):
@@ -331,6 +353,27 @@ class _HeaderMenuStub:
         return None
 
 
+@pytest.fixture()
+def header_menu(monkeypatch):
+    """注入菜单 stub 并在用例结束后恢复。"""
+    import src.ui.mark_stats as mark_stats_module
+
+    monkeypatch.setattr(mark_stats_module, "QMenu", _HeaderMenuStub)
+    _HeaderMenuStub.click_title = None
+    _HeaderMenuStub.last = None
+    yield _HeaderMenuStub
+    _HeaderMenuStub.click_title = None
+    _HeaderMenuStub.last = None
+
+
+def _open_header_menu(window, click: str | None = None, pos: QPoint | None = None):
+    _HeaderMenuStub.click_title = click
+    window._show_header_menu(pos if pos is not None else _QT_POINT_ZERO)
+    menu = _HeaderMenuStub.last
+    assert menu is not None
+    return menu
+
+
 class TestHeaderMenu:
     """§5.6 表头右键菜单：勾选载荷与端到端生效。
 
@@ -338,30 +381,11 @@ class TestHeaderMenu:
     None，任何勾选都静默失效（key 变成 "None" 字面量被注册表过滤）。
     """
 
-    @pytest.fixture()
-    def header_menu(self, stats_window, monkeypatch):
-        """注入菜单 stub 并在用例结束后恢复。"""
-        import src.ui.mark_stats as mark_stats_module
-
-        monkeypatch.setattr(mark_stats_module, "QMenu", _HeaderMenuStub)
-        _HeaderMenuStub.click_title = None
-        _HeaderMenuStub.last = None
-        yield _HeaderMenuStub
-        _HeaderMenuStub.click_title = None
-        _HeaderMenuStub.last = None
-
-    def _open_menu(self, stats_window, click: str | None = None):
-        _HeaderMenuStub.click_title = click
-        stats_window._show_header_menu(_QT_POINT_ZERO)
-        menu = _HeaderMenuStub.last
-        assert menu is not None
-        return menu
-
     def test_every_checkable_action_carries_valid_key(
         self, stats_window, header_menu
     ):
         """勾选项必须携带注册表合法 key（漏 setData 的直接回归测试）。"""
-        menu = self._open_menu(stats_window)
+        menu = _open_header_menu(stats_window)
         checkable = [a for a in menu.actions() if a.isCheckable()]
         assert len(checkable) == len(STAT_COLUMNS)
         for act in checkable:
@@ -369,9 +393,12 @@ class TestHeaderMenu:
             assert isinstance(data, str), f"'{act.text()}' 未携带 key 载荷"
             assert data in STAT_COLUMNS
 
-    def test_checking_metric_appends_column(self, stats_window, header_menu):
-        """勾选「样本数 n」→ count 列追加到末尾。"""
-        self._open_menu(stats_window, click="样本数 n")
+    def test_checking_metric_on_blank_area_appends_column(
+        self, stats_window, header_menu
+    ):
+        """空白区勾选「样本数 n」→ count 列追加到末尾（保持旧行为）。"""
+        header = stats_window.table.horizontalHeader()
+        _open_header_menu(stats_window, click="样本数 n", pos=_blank_point(header))
 
         keys = stats_window.model.column_keys()
         assert keys[-1] == "count"
@@ -389,7 +416,7 @@ class TestHeaderMenu:
         self, stats_window, header_menu, app_settings
     ):
         """取消勾选「均值 y_avg」→ y_avg 列移除并持久化。"""
-        self._open_menu(stats_window, click="均值 y_avg")
+        _open_header_menu(stats_window, click="均值 y_avg")
 
         keys = stats_window.model.column_keys()
         assert "y_avg" not in keys
@@ -402,10 +429,315 @@ class TestHeaderMenu:
     ):
         """仅剩 1 列指标时该项禁用取消。"""
         stats_window._apply_column_keys(["dy"])
-        menu = self._open_menu(stats_window)
+        menu = _open_header_menu(stats_window)
         dy_act = next(a for a in menu.actions() if a.text() == "变化量 dy")
         assert dy_act.isChecked() is True
         assert dy_act.isEnabled() is False
+
+
+class TestSmartColumnInsert:
+    """按表头点击位置插入新指标列：半区/上下文/空白/拖动/排序。"""
+
+    def test_left_half_inserts_before_clicked_metric(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+        inserted = QSignalSpy(stats_window.model.columnsInserted)
+        reset = QSignalSpy(stats_window.model.modelReset)
+
+        _open_header_menu(
+            stats_window,
+            click="样本数 n",
+            pos=_point_in_section(header, 4, 0.25),  # 首个指标列 dy 左半区
+        )
+
+        assert stats_window.model.column_keys() == [
+            "count",
+            "dy",
+            "slope",
+            "y_avg",
+            "y_max",
+            "y_min",
+        ]
+        assert inserted.count() == 1
+        assert reset.count() == 0
+        assert header.visualIndex(4) == 4
+        assert (
+            stats_window.model.headerData(4, Qt.Orientation.Horizontal)
+            == "样本数 n"
+        )
+
+    def test_right_half_inserts_after_clicked_metric(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+        _open_header_menu(
+            stats_window,
+            click="样本数 n",
+            pos=_point_in_section(header, 4, 0.75),
+        )
+
+        assert stats_window.model.column_keys() == [
+            "dy",
+            "count",
+            "slope",
+            "y_avg",
+            "y_max",
+            "y_min",
+        ]
+        assert header.visualIndex(5) == 5
+
+    @pytest.mark.parametrize("logical", [0, 3])  # 页 / 单位
+    def test_context_column_inserts_at_metric_front(
+        self, stats_window, header_menu, logical
+    ):
+        header = stats_window.table.horizontalHeader()
+        _open_header_menu(
+            stats_window,
+            click="样本数 n",
+            pos=_point_in_section(header, logical, 0.5),
+        )
+
+        assert stats_window.model.column_keys()[0] == "count"
+        assert header.visualIndex(4) == 4  # 「单位」视觉位 + 1
+
+    def test_dragged_column_right_half_inserts_to_its_right(
+        self, stats_window, header_menu
+    ):
+        """拖动后仍按点击列的真实左右半区判定（P0 回归）。"""
+        header = stats_window.table.horizontalHeader()
+        header.moveSection(header.visualIndex(5), 1)  # slope 拖到视觉第 2 位
+        assert [header.logicalIndex(v) for v in range(header.count())] == [
+            0,
+            5,
+            1,
+            2,
+            3,
+            4,
+            6,
+            7,
+            8,
+        ]
+        reset = QSignalSpy(stats_window.model.modelReset)
+
+        _open_header_menu(
+            stats_window,
+            click="样本数 n",
+            pos=_point_in_section(header, 5, 0.75),
+        )
+
+        assert stats_window.model.column_keys() == [
+            "dy",
+            "slope",
+            "count",
+            "y_avg",
+            "y_max",
+            "y_min",
+        ]
+        assert [header.logicalIndex(v) for v in range(header.count())] == [
+            0,
+            5,
+            6,
+            1,
+            2,
+            3,
+            4,
+            7,
+            8,
+            9,
+        ]
+        assert reset.count() == 0
+
+    def test_dragged_header_uncheck_keeps_visual_order(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+        header.moveSection(header.visualIndex(5), 1)
+        removed = QSignalSpy(stats_window.model.columnsRemoved)
+        reset = QSignalSpy(stats_window.model.modelReset)
+
+        _open_header_menu(stats_window, click="均值 y_avg")
+
+        assert [header.logicalIndex(v) for v in range(header.count())] == [
+            0,
+            5,
+            1,
+            2,
+            3,
+            4,
+            6,
+            7,
+        ]
+        assert removed.count() == 1
+        assert reset.count() == 0
+
+    def test_blank_area_after_drag_appends_to_visual_end(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+        header.moveSection(header.visualIndex(5), 1)
+
+        _open_header_menu(
+            stats_window, click="样本数 n", pos=_blank_point(header)
+        )
+
+        assert stats_window.model.column_keys()[-1] == "count"
+        assert header.visualIndex(9) == 9
+
+    def test_context_click_when_unit_dragged_targets_unit_right(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+        header.moveSection(header.visualIndex(3), 6)  # 「单位」拖到视觉 6
+
+        _open_header_menu(
+            stats_window,
+            click="样本数 n",
+            pos=_point_in_section(header, 0, 0.5),  # 仍点「页」
+        )
+
+        assert stats_window.model.column_keys()[0] == "count"
+        assert header.visualIndex(4) == 7  # 单位视觉位 6 + 1
+
+    def test_insert_before_sorted_column_keeps_sort_key_and_indicator(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+        stats_window.table.sortByColumn(5, Qt.SortOrder.AscendingOrder)
+        assert stats_window.proxy.sortColumn() == 5
+
+        _open_header_menu(
+            stats_window,
+            click="样本数 n",
+            pos=_point_in_section(header, 5, 0.25),
+        )
+
+        assert stats_window.model.column_keys() == [
+            "dy",
+            "count",
+            "slope",
+            "y_avg",
+            "y_max",
+            "y_min",
+        ]
+        assert stats_window.proxy.sortColumn() == 6
+        assert header.sortIndicatorSection() == 6
+
+    def test_deleting_sorted_column_restores_source_order(
+        self, stats_window, header_menu
+    ):
+        stats_window.update_stats(
+            [
+                [_entry(var_name="a", label="a", slope=3.0)],
+                [_entry(var_name="b", label="b", slope=1.0)],
+                [_entry(var_name="c", label="c", slope=2.0)],
+            ]
+        )
+        stats_window.table.sortByColumn(5, Qt.SortOrder.AscendingOrder)
+        assert [
+            stats_window.proxy.index(r, 2).data()
+            for r in range(stats_window.proxy.rowCount())
+        ] == ["b", "c", "a"]
+        stats_window.table.selectRow(1)  # 排序后第 2 行 = c
+        removed = QSignalSpy(stats_window.model.columnsRemoved)
+        reset = QSignalSpy(stats_window.model.modelReset)
+
+        _open_header_menu(stats_window, click="斜率 slope")
+
+        assert removed.count() == 1
+        assert reset.count() == 0
+        assert stats_window.proxy.sortColumn() == -1
+        assert stats_window.table.horizontalHeader().sortIndicatorSection() == -1
+        assert [
+            stats_window.proxy.index(r, 2).data()
+            for r in range(stats_window.proxy.rowCount())
+        ] == ["a", "b", "c"]
+        selected = stats_window.table.selectionModel().selectedRows(0)
+        assert [
+            stats_window.proxy.index(i.row(), 2).data() for i in selected
+        ] == ["c"]
+
+    def test_menu_hint_reflects_clicked_section(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+
+        menu = _open_header_menu(
+            stats_window, pos=_point_in_section(header, 4, 0.25)
+        )
+        assert any("变化量 dy" in s and "左侧" in s for s in menu._sections)
+
+        menu = _open_header_menu(
+            stats_window, pos=_point_in_section(header, 4, 0.75)
+        )
+        assert any("变化量 dy" in s and "右侧" in s for s in menu._sections)
+
+        menu = _open_header_menu(
+            stats_window, pos=_point_in_section(header, 3, 0.5)
+        )
+        assert any("单位" in s for s in menu._sections)
+
+        menu = _open_header_menu(stats_window, pos=_blank_point(header))
+        assert any("末尾" in s for s in menu._sections)
+
+    def test_dialog_style_single_add_and_remove_use_incremental_signals(
+        self, stats_window
+    ):
+        model = stats_window.model
+        inserted = QSignalSpy(model.columnsInserted)
+        reset = QSignalSpy(model.modelReset)
+
+        stats_window._apply_column_keys(DEFAULT_COLUMN_KEYS + ["count"])
+
+        assert model.column_keys()[-1] == "count"
+        assert inserted.count() == 1
+        assert reset.count() == 0
+
+        removed = QSignalSpy(model.columnsRemoved)
+        reset = QSignalSpy(model.modelReset)
+        stats_window._apply_column_keys(
+            [k for k in model.column_keys() if k != "y_avg"]
+        )
+
+        assert "y_avg" not in model.column_keys()
+        assert removed.count() == 1
+        assert reset.count() == 0
+
+    def test_model_column_api_guards(self, stats_window):
+        model = stats_window.model
+        model.insert_column_key(999, "count")  # 越界 clamp 到末尾
+        assert model.column_keys()[-1] == "count"
+        model.insert_column_key(0, "count")  # 重复 key 静默忽略
+        assert model.column_keys().count("count") == 1
+        model.insert_column_key(0, "not_a_key")  # 非法 key 静默忽略
+        assert "not_a_key" not in model.column_keys()
+        model.remove_column_key("not_a_key")  # 不存在 key 静默忽略
+        assert "count" in model.column_keys()
+
+    def test_dragged_insert_persists_header_state(
+        self, stats_window, header_menu
+    ):
+        header = stats_window.table.horizontalHeader()
+        header.moveSection(header.visualIndex(5), 1)
+        _open_header_menu(
+            stats_window,
+            click="样本数 n",
+            pos=_point_in_section(header, 5, 0.75),
+        )
+        expected_keys = stats_window.model.column_keys()
+        expected_visual = [header.logicalIndex(v) for v in range(header.count())]
+        stats_window.hide()
+
+        rebuilt = MarkStatsWindow()
+        try:
+            rebuilt_header = rebuilt.table.horizontalHeader()
+            assert rebuilt.model.column_keys() == expected_keys
+            assert [
+                rebuilt_header.logicalIndex(v)
+                for v in range(rebuilt_header.count())
+            ] == expected_visual
+        finally:
+            rebuilt.deleteLater()
 
 
 class TestFilters:
