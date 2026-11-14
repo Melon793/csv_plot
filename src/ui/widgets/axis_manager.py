@@ -203,7 +203,9 @@ class AxisManager:
             )
 
         # 再设 range（此时 limits 已是新值）
-        pw.view_box.setXRange(min_x, max_x, padding=DEFAULT_PADDING_VAL_X)
+        pw.view_box.setXRange(
+            _as_float(min_x), _as_float(max_x), padding=DEFAULT_PADDING_VAL_X
+        )
         self._set_safe_y_range(min_y, max_y)
 
         self._set_vline_bounds([min_x, max_x])
@@ -370,22 +372,32 @@ class AxisManager:
         minXRange_val = self._get_min_x_range_value()
         limits_xMin = _as_float(limits_xMin)
         limits_xMax = _as_float(limits_xMax)
+        # 非有限/非正 minXRange 无法参与约束求解，直接不传
+        min_x_range_arg = _as_float(minXRange_val)
+        if min_x_range_arg is not None and (
+            not np.isfinite(min_x_range_arg) or min_x_range_arg <= 0
+        ):
+            min_x_range_arg = None
         # 确保 limits 宽度 >= minXRange，防止约束冲突导致 viewRange 振荡
-        if limits_xMin is not None and limits_xMax is not None:
+        if (
+            limits_xMin is not None
+            and limits_xMax is not None
+            and min_x_range_arg is not None
+        ):
             limits_width = limits_xMax - limits_xMin
-            if limits_width < minXRange_val:
+            if limits_width < min_x_range_arg:
                 center = (limits_xMin + limits_xMax) / 2.0
-                limits_xMin = center - minXRange_val / 2.0
-                limits_xMax = center + minXRange_val / 2.0
+                limits_xMin = center - min_x_range_arg / 2.0
+                limits_xMax = center + min_x_range_arg / 2.0
                 logger.debug(
                     "[XLIMITS] limits width %.4f < minXRange %.4f, "
                     "expanded limits to [%.4f, %.4f]",
-                    limits_width, minXRange_val, limits_xMin, limits_xMax,
+                    limits_width, min_x_range_arg, limits_xMin, limits_xMax,
                 )
         pw.plot_item.setLimits(
             xMin=limits_xMin,
             xMax=limits_xMax,
-            minXRange=_as_float(minXRange_val),
+            minXRange=min_x_range_arg,
         )
 
     def _set_min_x_range(self, minXRange: float) -> None:

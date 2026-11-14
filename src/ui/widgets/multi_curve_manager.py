@@ -13,19 +13,25 @@ MultiCurveManager - 曲线绘图管理（统一版）
 from __future__ import annotations
 import contextlib
 import html
+import math
 from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QPointF, QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import (
+    CURVE_HIT_TOLERANCE_PX,
     DEFAULT_LINE_WIDTH,
+    HIGHLIGHT_CURVE_Z,
+    HIGHLIGHT_LINE_WIDTH,
+    HIGHLIGHT_THIN_LINE_WIDTH,
     THICK_LINE_WIDTH,
     THIN_LINE_WIDTH,
     is_grouped_loader,
+    widget_alive,
 )
 from src.core.data_types import (
     DRAW_MODES,
@@ -49,6 +55,152 @@ logger = get_logger("widget.multi_curve")
 
 if TYPE_CHECKING:
     from src.ui.widgets.plot_data_manager import PlotDataManager
+
+
+# 命中距离比较的数值护栏（像素）。仿射映射相对逐点 mapViewToScene 的偏差
+# 实测 ≤1.9e-9px（评审 G7，含 ±1e6 极端 x 域），取其 ~500 倍作阈值：既吸收
+# 噪声让"恰好容差 / 精确并列"的判定确定，又远小于任何可感知的像素差。
+_HIT_DISTANCE_EPS_PX = 1e-6
+
+
+def _min_segment_distance_px(
+    px: float,
+    py: float,
+    ax: np.ndarray,
+    ay: np.ndarray,
+    bx: np.ndarray,
+    by: np.ndarray,
+) -> float:
+    """点 (px,py) 到**一批**线段的最短距离（scene 像素，向量化）。
+
+    端点须已过滤非有限值（NaN/inf 段不参与，对齐游标取值的 NaN 纪律）；
+    空数组返回 inf。退化段（a==b，重复 x 的竖直 riser 会出现）按点到点算：
+    把分母 0 换成 1 再强制 t=0，避免 0/0 产生 NaN 污染 argmin。
+    """
+    if ax.size == 0:
+        return math.inf
+    dx = bx - ax
+    dy = by - ay
+    len_sq = dx * dx + dy * dy
+    degenerate = len_sq <= 0.0
+    safe = np.where(degenerate, 1.0, len_sq)
+    t = ((px - ax) * dx + (py - ay) * dy) / safe
+    t = np.clip(np.where(degenerate, 0.0, t), 0.0, 1.0)
+    return float(np.hypot(px - (ax + t * dx), py - (ay + t * dy)).min())
+
+
+def _view_scene_affine(view_box: Any) -> tuple[float, float, float, float]:
+    """解出 ``mapViewToScene`` 的仿射系数 ``(ox, oy, sx, sy)``。
+
+    pyqtgraph ViewBox 的 view→scene 是 QTransform 仿射（无旋转/剪切），
+    两个基点即可定标：``scene = origin + scale * view``。据此把候选段一次性
+    向量化映射，省掉每段 2~3 次 ``mapViewToScene`` 的 Python↔C++ 往返——
+    高密度下 8px 容差带可达上万段，逐段映射会让单击明显卡顿。
+    等价性由 test_view_scene_affine_matches_per_point_mapping 钉死。
+    """
+    p0 = view_box.mapViewToScene(QPointF(0.0, 0.0))
+    p1 = view_box.mapViewToScene(QPointF(1.0, 1.0))
+    return p0.x(), p0.y(), p1.x() - p0.x(), p1.y() - p0.y()
+
+
+def hit_test_curve(pw: Any, scene_pos: QPointF) -> str | None:
+    """plot 点击命中检测：容差内最近的可见曲线胜出（R1 / D5）。
+
+    纯函数（只读 pw），便于独立单测。口径：
+
+    - 只遍历 ``pw.curves``：失效占位无曲线对象，不参与（R9）；隐藏曲线
+      不参与（点不到的东西不该被选中）；
+    - **候选窗口由像素容差反推**（rev3 设计变更，见下）：先把
+      ``CURVE_HIT_TOLERANCE_PX`` 换算成 x 域宽度 ``dx_tol``，再用两次
+      ``searchsorted`` 取出 x 区间与 ``[vx-dx_tol, vx+dx_tol]`` 相交的段。
+      这是"距离可能 < 容差"的**必要条件**（最近点必落在段的 x 区间内），
+      因此不漏命中；复杂度 O(曲线数 × (log n + k))，k = 容差带内采样数；
+    - 端点缓存 ``ci.x_min/x_max`` 只做 **halo 粗筛**（各向外扩 dx_tol），
+      不再是严格闭区间；
+    - 距离在 **scene（像素）坐标** 算，容差为逻辑像素（Qt 已归一 DPI，
+      两平台同口径）；映射走 ``_view_scene_affine`` + numpy 向量化；
+    - 阶梯曲线额外测 L 形拐角两段，否则竖直 riser 点不中（风险 #6）。
+      几何以 ``curve.opts['stepMode']`` 为渲染真相：'right'（step-post）
+      = 旧值保持到 x1 再跳变，即 (x0,y0)→(x1,y0)→(x1,y1)；'left'
+      （step-pre）= 跳变提前到 x0，即 (x0,y0)→(x0,y1)→(x1,y1)
+      （语义经 test_step_mode_semantics_geometry 顶点序列钉死）；
+    - 比较口径 ``d < best_d - _HIT_DISTANCE_EPS_PX``：容差边界严格小于，
+      **浮点精度内并列取 curves 插入序在前者**。仿射映射与逐点
+      ``mapViewToScene`` 有 ~1e-9px 级偏差，无护栏时"恰好 8.000px"与
+      "精确等距"这两个测度为零的边界会随视图量级翻转（评审 NB-12）；
+      护栏比噪声大 3 个量级、比可感知像素差小 6 个量级，判定因此确定。
+
+    前提：``ci.x_data`` 非降序（真实路径恒成立——CSV 为 1..n 行号，时间轴
+    经 ``offset + factor * index`` 单调映射；重复 x 允许，float32 量化与
+    同 tick 多帧都会产生，容差带窗口天然覆盖）。
+
+    rev3 设计变更（用户授权，取代计划 §3.3 原"严格 x 域粗筛 + (idx-1,idx)
+    两线段邻域 + O(log n)"）——原口径有两处必然漏命中，探针实证：
+
+    1. 固定 ±2 采样邻域与像素容差不同量纲：24.7 行/px 时 8px ≈ 198 行，
+       尖峰侧面 1px 处最近段在 28 采样外 → 漏（r1_out_hit_edges B2 漏 66/126）；
+    2. 严格 ``[x_min, x_max]`` 闭区间既吃掉首/尾点外侧 8px 的墨水（halo），
+       又因 float32 往返误差拒绝**精确端点点击**（vx=60.00000000000001 >
+       x_max=60.0）→ 56 次端点点击漏 13 次（r1_out_hit_quantify C2/C3）。
+    """
+    view_box = getattr(pw, "view_box", None)
+    if view_box is None:
+        return None
+    curves = getattr(pw, "curves", None) or {}
+    if not curves:
+        return None
+    vx = view_box.mapSceneToView(scene_pos).x()
+    px, py = scene_pos.x(), scene_pos.y()
+    ox, oy, sx, sy = _view_scene_affine(view_box)
+    # sx==0（退化视图）时 dx_tol=inf → 窗口退化为全扫描，语义仍正确
+    dx_tol = CURVE_HIT_TOLERANCE_PX / abs(sx) if sx else math.inf
+    best_name: str | None = None
+    best_d = float(CURVE_HIT_TOLERANCE_PX)
+
+    for var_name, ci in curves.items():
+        if not ci.visible or ci.curve is None:
+            continue
+        x_data, y_data = ci.x_data, ci.y_data
+        if x_data is None or y_data is None or len(x_data) < 2:
+            continue
+        if not (ci.x_min - dx_tol <= vx <= ci.x_max + dx_tol):
+            continue
+        n = len(x_data)
+        lo = max(0, int(np.searchsorted(x_data, vx - dx_tol, side="left")) - 1)
+        hi = min(n - 1, int(np.searchsorted(x_data, vx + dx_tol, side="right")))
+        if hi <= lo:
+            continue
+        xs = np.asarray(x_data[lo:hi + 1], dtype=np.float64)
+        ys = np.asarray(y_data[lo:hi + 1], dtype=np.float64)
+        x0, y0, x1, y1 = xs[:-1], ys[:-1], xs[1:], ys[1:]
+        finite = (
+            np.isfinite(x0) & np.isfinite(y0) & np.isfinite(x1) & np.isfinite(y1)
+        )
+        if not finite.any():
+            continue
+        x0, y0, x1, y1 = x0[finite], y0[finite], x1[finite], y1[finite]
+        ax, ay = ox + sx * x0, oy + sy * y0
+        bx, by = ox + sx * x1, oy + sy * y1
+        step_mode = ci.curve.opts.get("stepMode")
+        if step_mode == "right":
+            cx, cy = bx, ay          # 拐角 (x1, y0)
+        elif step_mode == "left":
+            cx, cy = ax, by          # 拐角 (x0, y1)
+        else:
+            cx = cy = None
+        if cx is None:
+            d = _min_segment_distance_px(px, py, ax, ay, bx, by)
+        else:
+            # 阶梯只测 L 形两段，**不含对角线 (a,b)**：对角线穿过 L 的凹口，
+            # 会把凹口里的空中点误判为命中（评审复跑实测误命中 255/4800）。
+            d = min(
+                _min_segment_distance_px(px, py, ax, ay, cx, cy),
+                _min_segment_distance_px(px, py, cx, cy, bx, by),
+            )
+        if d < best_d - _HIT_DISTANCE_EPS_PX:
+            best_d = d
+            best_name = var_name
+    return best_name
 
 
 class MultiCurveManager:
@@ -707,8 +859,11 @@ class MultiCurveManager:
             logger.error("切换绘制方式失败: var=%s, mode=%s", var_name, draw_mode, exc_info=True)
             return False
         # 曲线集合不变，但已打开的变量编辑器下拉需要就地回填新值
-        # （curves_changed 增量刷新场景 1），与改色路径同口径
-        pw.curves_changed.emit()
+        # （curves_changed 增量刷新场景 1），与改色路径同口径。
+        # 批量搬运窗口内抑制：整批由 _transfer_curves 收尾统一 emit，
+        # 避免 N 条曲线 ≈3N 次 legend/编辑器重建（Blocking 2）。
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
         return True
 
     def apply_curve_symbol_policy(self, var_name: str, policy: str) -> bool:
@@ -738,8 +893,9 @@ class MultiCurveManager:
         except Exception:
             logger.error("应用 symbol 策略失败: var=%s", var_name, exc_info=True)
             return False
-        # 同 apply_curve_draw_mode：让已打开的编辑器下拉就地回填
-        pw.curves_changed.emit()
+        # 同 apply_curve_draw_mode：批量窗口内抑制逐条 emit
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
         return True
 
     def _on_legend_anchor_clicked(self, url):
@@ -782,6 +938,11 @@ class MultiCurveManager:
         每条曲线只按自身的 symbol 开关刷 pen/点标记；pen 与 symbol 均有
         缓存短路（``_cached_pen_key`` / ``_has_symbols``），热路径缩放/滚动
         中无变化的曲线零开销。曲线不存在（刚被删除/替换）时静默跳过。
+
+        选中联动：``var_name`` 在 ``pw._legend_selection`` 内且曲线可见时
+        走加粗态（pen key 追加 ``_hl`` 维度 + 临时提 Z）。判定内置于本函数，
+        故三个调用点（update_plot_style 热路径 / symbol 策略 / 委托入口）
+        自动保持高亮，缩放重刷不会丢。隐藏曲线只 tint 不加粗（显隐正交）。
         """
         pw = self.pw
         ci = pw.curves.get(var_name)
@@ -790,11 +951,16 @@ class MultiCurveManager:
         try:
             curve = ci.curve
             color = ci.color
+            highlighted = ci.visible and var_name in (
+                getattr(pw, "_legend_selection", ()) or ()
+            )
+            hl_suffix = "_hl" if highlighted else ""
 
             if show_symbols:
-                cache_key = f'thin_{color}'
+                cache_key = f'thin_{color}{hl_suffix}'
                 if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                    pen = pg.mkPen(color=color, width=THIN_LINE_WIDTH)
+                    width = HIGHLIGHT_THIN_LINE_WIDTH if highlighted else THIN_LINE_WIDTH
+                    pen = pg.mkPen(color=color, width=width)
                     curve.setPen(pen)
                     curve._cached_pen_key = cache_key
 
@@ -805,17 +971,63 @@ class MultiCurveManager:
                     curve.setSymbolBrush(color)
                     curve._has_symbols = True
             else:
-                cache_key = f'thick_{color}'
+                cache_key = f'thick_{color}{hl_suffix}'
                 if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                    pen = pg.mkPen(color=color, width=THICK_LINE_WIDTH)
+                    width = HIGHLIGHT_LINE_WIDTH if highlighted else THICK_LINE_WIDTH
+                    pen = pg.mkPen(color=color, width=width)
                     curve.setPen(pen)
                     curve._cached_pen_key = cache_key
 
                 if not hasattr(curve, '_has_symbols') or curve._has_symbols:
                     curve.setSymbol(None)
                     curve._has_symbols = False
+
+            # z 同步：同样进缓存判定，未变化不调 setZValue（避免无谓重绘）。
+            # 曲线默认 z=0（本模块与 plot_data_manager 均无其他 setZValue）。
+            target_z = HIGHLIGHT_CURVE_Z if highlighted else 0
+            if getattr(curve, "_cached_hl_z", 0) != target_z:
+                curve.setZValue(target_z)
+                curve._cached_hl_z = target_z
         except Exception as e:
             logger.error("应用曲线样式时出错: var=%s, %s", var_name, e)
+
+    def refresh_selection_emphasis(self) -> None:
+        """选择集 → 曲线加粗投影（第二投影，与 legend tint 并列）。
+
+        全量迭代 + pen 缓存短路：选择变化是离散动作，未变化的曲线零开销，
+        不新增逐帧成本。symbol 判定与 update_plot_style 热路径同口径
+        （resolve_symbol_show + 当前可见 x 跨度）。
+
+        守卫口径：只查 ``_is_updating_data`` / ``_is_being_destroyed`` /
+        控件存活——这三者覆盖"曲线对象正在被销毁重建"的危险窗口。
+
+        **刻意不查 ``_is_loading_new_data``**（评审 r3 A5）：该锁只存在于
+        MainWindow（pw 上没有这个属性），且它门控的是"逐帧样式刷新"。
+        选择是离散动作，与不查 ``_is_interacting`` 同理（评审 NB-2）；更要紧
+        的是**两投影必须同进同退**：legend tint 不受该锁门控，若加粗受门控，
+        加载期点击就会出现"图例已染色、曲线不加粗"的脱节，大文件下可持续
+        数秒。reload 期间的陈旧选择由 refresh_selection_highlight 的 prune
+        + 图例重放兜底，重建后的加粗由 ``_refresh_selection_after_rebuild``
+        在锁清之后补刷（BL-2）。
+        """
+        pw = self.pw
+        if (
+            getattr(pw, "_is_updating_data", False)
+            or getattr(pw, "_is_being_destroyed", False)
+        ):
+            return
+        if not widget_alive(pw):
+            return
+        view_box = getattr(pw, "view_box", None)
+        if view_box is None:
+            return
+        try:
+            x_min, x_max = view_box.viewRange()[0]
+            x_width = x_max - x_min
+            for var_name, ci in pw.curves.items():
+                pw._apply_curve_style(var_name, resolve_symbol_show(ci, x_width))
+        except Exception as e:
+            logger.error("刷新选中曲线加粗时出错: %s", e)
 
     def add_variables_to_plot(self, var_names: list[str]):
         """批量添加变量到当前绘图区（统一版）"""

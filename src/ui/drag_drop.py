@@ -12,19 +12,19 @@ DragDropHandler —— 变量拖放统一工具类
 - 拖拽上下文注册表：drop 端反查活的源 plot 对象
 """
 
+import json
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote
 
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import (
-    QFontMetrics,
-    QPainter,
-    QPen,
-    QColor,
-    QPixmap,
-    QFont,
-)
+from PySide6.QtCore import Qt
 from PySide6.QtCore import QMimeData
+
+from src.core.data_types import (
+    DRAW_MODE_AUTO,
+    DRAW_MODE_SOURCE_AUTO,
+    SYMBOL_POLICY_AUTO,
+)
 
 VAR_SEPARATOR = ";;"
 
@@ -119,11 +119,41 @@ def parse_legend_anchor(href: str) -> tuple[str, str] | None:
     return None
 
 
-def set_active_legend_drag(source_plot: Any, var_names: list[str]) -> None:
-    """登记当前 legend 拖拽上下文（drag.exec 前调用）"""
+def set_active_legend_drag(
+    source_plot: Any,
+    var_names: list[str],
+    *,
+    batch: bool = False,
+    origin: str = "legend",
+) -> None:
+    """登记当前 legend 拖拽上下文（drag.exec 前调用）。
+
+    ``batch=True`` 表示 P1 多选批量拖拽：drop 端按 skip + quiet 处理，
+    与单变量 legend 拖拽（ask/notify 确认窗）区分。不能用变量个数推断
+    —— 批量选择集可能只有 1 条。
+
+    ``origin`` 标记拖拽起点：``"legend"``（默认）或 ``"curve"``（从绘图区
+    曲线本体长按抬起）。曲线来源即使只拖 1 条也必须走 skip + quiet，
+    因此 drop 路由看 origin 而不是 batch。
+    """
     _active_legend_drag.clear()
     _active_legend_drag["source"] = source_plot
     _active_legend_drag["vars"] = list(var_names)
+    _active_legend_drag["batch"] = bool(batch)
+    _active_legend_drag["origin"] = str(origin)
+
+
+def active_legend_drag_origin() -> str:
+    """当前拖拽起点来源（"legend" / "curve"）；无拖拽返回空串。"""
+    return str(_active_legend_drag.get("origin") or "")
+
+
+def is_copy_modifier(modifiers) -> bool:
+    """拖动中的复制修饰键：Alt 或 Ctrl（macOS 上 ControlModifier 即 ⌘）。"""
+    return bool(
+        modifiers
+        & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+    )
 
 
 def clear_active_legend_drag() -> None:
@@ -134,6 +164,11 @@ def clear_active_legend_drag() -> None:
 def is_legend_drag_active() -> bool:
     """当前是否存在进行中的 legend 拖拽（供指示器轮询区分 Alt/Shift）"""
     return bool(_active_legend_drag)
+
+
+def is_active_legend_batch_drag() -> bool:
+    """当前 legend 拖拽是否为 P1 多选批量（决定 drop 端判重策略）。"""
+    return bool(_active_legend_drag.get("batch"))
 
 
 def get_active_legend_drag_source(mime_data) -> Any | None:
@@ -161,56 +196,113 @@ def get_active_legend_drag_source(mime_data) -> Any | None:
     return source
 
 
-def create_drag_pixmap(
-    var_names: list[str],
-    font: QFont | None = None,
-) -> QPixmap | None:
-    """创建拖拽时显示的变量名缩略图。
+# ---------------------------------------------------------------------------
+# 曲线暂存区（CurveShelf）拖拽协议
+#
+# 托盘拖出走独立 MIME：text/plain 兼容层仍写变量名（变量数值表/编辑器等
+# 既有纯文本 drop 目标不受影响），自定义格式携带托盘 id + 条目 key 列表。
+# 条目快照自持于托盘，drop 端经 id 比对 + 存活校验反查活托盘。
+# ---------------------------------------------------------------------------
+SHELF_MIME_FORMAT = "application/x-csvplot-shelf"
 
-    Args:
-        var_names: 变量名列表
-        font: 绘制字体，为 None 时使用默认系统字体
+_active_shelf_drag: dict[str, Any] = {}
 
-    Returns:
-        QPixmap 缩略图，var_names 为空时返回 None
+
+@dataclass(frozen=True)
+class CurveStyleSnapshot:
+    """曲线样式快照：搬运入区/出区全程自持，出区零源依赖。
+
+    ``draw_mode_source`` 必须原样保留：出区落地后要回写（apply 入口会把
+    来源强制钉成 'user'，直接落 'auto' 快照会改变 reload 后的行为）。
     """
-    if not var_names:
-        return None
 
-    if font is None:
-        font = QFont()
+    color: str = ""
+    visible: bool = True
+    draw_mode: str = DRAW_MODE_AUTO
+    symbol_policy: str = SYMBOL_POLICY_AUTO
+    draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
 
-    metrics = QFontMetrics(font)
-    bullet_names = [f"• {name}" for name in var_names]
-    max_visible = 8
-    display_lines = bullet_names[:max_visible]
-    if len(bullet_names) > max_visible:
-        display_lines.append(f"... 共{len(var_names)}项")
+    @classmethod
+    def from_curve_info(cls, ci: Any) -> "CurveStyleSnapshot":
+        """从 CurveInfo 拷贝全部样式值（须在源存活期调用）。"""
+        return cls(
+            color=getattr(ci, "color", "") or "",
+            visible=bool(getattr(ci, "visible", True)),
+            draw_mode=getattr(ci, "draw_mode", DRAW_MODE_AUTO),
+            symbol_policy=getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO),
+            draw_mode_source=getattr(
+                ci, "draw_mode_source", DRAW_MODE_SOURCE_AUTO
+            ),
+        )
 
-    text_width = max(
-        (metrics.horizontalAdvance(line) for line in display_lines),
-        default=80,
+
+def build_shelf_mimedata(
+    entry_keys: list[str], var_names: list[str], shelf: Any
+) -> QMimeData:
+    """托盘来源 MIME：text/plain 兼容层 + 自定义格式（托盘 id + 条目 key）。"""
+    mime = build_var_mimedata(list(var_names))
+    payload = json.dumps(
+        {"id": id(shelf), "keys": [str(k) for k in entry_keys]},
+        ensure_ascii=False,
     )
-    margin = 12
-    line_height = metrics.lineSpacing()
-    width = max(140, text_width + margin * 2)
-    height = line_height * len(display_lines) + margin * 2
+    mime.setData(SHELF_MIME_FORMAT, payload.encode("utf-8"))
+    return mime
 
-    pixmap = QPixmap(width, height)
-    pixmap.fill(Qt.GlobalColor.transparent)
 
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setFont(font)
-    painter.setPen(QPen(QColor("#2b6def"), 2))
-    painter.setBrush(QColor(255, 255, 255, 240))
-    painter.drawRoundedRect(1, 1, width - 2, height - 2, 10, 10)
-    painter.setPen(QColor("#1f1f1f"))
+def parse_shelf_mime_payload(mime_data) -> dict | None:
+    """解析托盘 MIME 自定义格式 → {"id": int|None, "keys": [str, ...]}。
 
-    y = margin + metrics.ascent()
-    for line in display_lines:
-        painter.drawText(QPoint(margin, y), line)
-        y += line_height
+    无效 JSON / 结构不符 / 空 key 列表返回 None（调用方静默降级）。
+    """
+    if mime_data is None or not mime_data.hasFormat(SHELF_MIME_FORMAT):
+        return None
+    try:
+        data = json.loads(bytes(mime_data.data(SHELF_MIME_FORMAT)).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    keys = data.get("keys")
+    if not isinstance(keys, list):
+        return None
+    cleaned = [str(k) for k in keys if isinstance(k, str) and k]
+    if not cleaned:
+        return None
+    return {"id": data.get("id"), "keys": cleaned}
 
-    painter.end()
-    return pixmap
+
+def set_active_shelf_drag(shelf: Any, entry_keys: list[str]) -> None:
+    """登记当前托盘拖拽上下文（drag.exec 前调用）。"""
+    _active_shelf_drag.clear()
+    _active_shelf_drag["source"] = shelf
+    _active_shelf_drag["keys"] = [str(k) for k in entry_keys]
+
+
+def clear_active_shelf_drag() -> None:
+    """清理托盘拖拽上下文（drag.exec 返回后调用）。"""
+    _active_shelf_drag.clear()
+
+
+def is_shelf_drag_active() -> bool:
+    """当前是否存在进行中的托盘拖拽（供 hover 指示器文案分支）。"""
+    return bool(_active_shelf_drag)
+
+
+def get_active_shelf_drag_source(mime_data) -> Any | None:
+    """drop 端反查活的托盘对象。
+
+    要求：自定义格式存在 + MIME 内 id 与注册表一致（防伪造冗余校验）+
+    对象存活（拖拽期间托盘被关闭时静默返回 None，调用方降级忽略）。
+    """
+    payload = parse_shelf_mime_payload(mime_data)
+    if payload is None or not _active_shelf_drag:
+        return None
+    source = _active_shelf_drag.get("source")
+    if source is None or id(source) != payload.get("id"):
+        return None
+    try:
+        # 访问已销毁的 C++ 对象会抛 RuntimeError
+        source.window()
+    except RuntimeError:
+        return None
+    return source

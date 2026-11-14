@@ -21,7 +21,11 @@ from src.core.logger import LogManager, get_logger  # noqa: E402
 from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 from src.ui.widgets.plot_page import PlotPage  # noqa: E402
-from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget  # noqa: E402
+from src.ui.widgets.plot_tabs import (  # noqa: E402
+    MAX_PAGES,
+    PlotTabsWidget,
+    _SHELF_CAPSULE_ENTRY,
+)
 from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
@@ -56,6 +60,9 @@ CAN_SEGMENT_RESERVE = 80
 
 #: 垫片 C1：无页时的共享空列表。可读、不抛异常、不分配。
 EMPTY_PLOT_WIDGETS: list[PlotContainerWidget] = []
+
+#: 拖拽悬停自动探出暂存区（D-A4）：默认关，真机验过才允许打开
+_SHELF_AUTO_PEEK = False
 
 
 class _ElideStatusBar(QStatusBar):
@@ -637,6 +644,190 @@ class MainWindow(QMainWindow):
                 if widget_alive(container):
                     yield container
 
+    # ------------------------------------------------------------------
+    # 曲线暂存区（跨页搬运，v1 非模态浮窗单例）
+    # ------------------------------------------------------------------
+    def get_curve_shelf(self):
+        """返回暂存区浮窗单例（懒创建）；已销毁则重建。"""
+        dialog = getattr(self, "_curve_shelf_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.isVisible()
+            except RuntimeError:
+                self._curve_shelf_dialog = None
+                dialog = None
+        if dialog is None:
+            from src.ui.widgets.curve_shelf import CurveShelfDialog
+
+            dialog = CurveShelfDialog(main_window=self, parent=self)
+            dialog.visibility_changed.connect(
+                self._on_curve_shelf_visibility_changed
+            )
+            dialog.shelf.entries_changed.connect(self._sync_shelf_capsule)
+            self._curve_shelf_dialog = dialog
+            # 重建分支会产出空托盘，末尾主动推一次，避免沿用旧 N / 旧勾选
+            self._sync_shelf_capsule()
+        return dialog
+
+    def curve_shelf_if_open(self):
+        """不创建：已存在且存活才返回（reload 生命周期钩子用）。"""
+        dialog = getattr(self, "_curve_shelf_dialog", None)
+        if dialog is None:
+            return None
+        try:
+            dialog.isVisible()
+        except RuntimeError:
+            self._curve_shelf_dialog = None
+            return None
+        return dialog
+
+    def toggle_curve_shelf(self, checked: bool | None = None) -> None:
+        """暂存区入口（胶囊点击 / 旧按钮 toggled / 快捷键）：开或关浮窗。"""
+        if checked is None:
+            btn = getattr(self, "curve_shelf_btn", None)
+            want_visible = btn.isChecked() if btn is not None else True
+        else:
+            want_visible = bool(checked)
+        if want_visible and self.reject_when_loading("打开暂存区"):
+            # 勾选态已被点按下发，拒绝时回滚到真实可见态，避免"勾着但打不开"
+            dialog = self.curve_shelf_if_open()
+            actual = bool(dialog is not None and dialog.isVisible())
+            self._sync_shelf_capsule(visible=actual)
+            btn = getattr(self, "curve_shelf_btn", None)
+            if btn is not None and btn.isChecked() != actual:
+                btn.blockSignals(True)
+                try:
+                    btn.setChecked(actual)
+                finally:
+                    btn.blockSignals(False)
+            return
+        if want_visible:
+            self._show_curve_shelf()
+        else:
+            self.hide_curve_shelf()
+
+    def _show_curve_shelf(self) -> None:
+        """显示浮窗（懒建由 get_curve_shelf 负责，含 entries_changed 接线）。"""
+        dialog = self.get_curve_shelf()
+        # 最小化窗口 show() 不会恢复（Qt 语义），必须 showNormal。否则胶囊
+        # 勾选为"开"但窗口仍最小化；Qt.Tool 不占任务栏，用户无处找回。
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
+        dialog.raise_()
+        self._sync_shelf_capsule(visible=True)
+        if not getattr(self, "_curve_shelf_hint_shown", False):
+            self._curve_shelf_hint_shown = True
+            self._broadcast(
+                "暂存区已打开：把图例曲线或变量列表拖进来，再拖到目标绘图区"
+                "（Ctrl+Shift+S 开关）"
+            )
+
+    def hide_curve_shelf(self) -> None:
+        dialog = self.curve_shelf_if_open()
+        if dialog is not None:
+            dialog.hide()
+
+    def _on_shelf_capsule_drop(self, event) -> None:
+        """胶囊落点：原始 QDropEvent 原样转给托盘，不弹窗、只同步徽章。"""
+        shelf = self.get_curve_shelf().shelf
+        shelf.dropEvent(event)
+        self._sync_shelf_capsule()
+
+    def _on_shelf_capsule_hover(self, hovered: bool) -> None:
+        """拖拽悬停探出（D-A4，默认关，真机验过才允许打开）。
+
+        探出只用 ``show()``：不 raise_、不 activateWindow，避免抢走拖拽
+        会话；``hovered=False`` 必须复位去重布尔，否则一次探出后永久失效。
+        """
+        if not _SHELF_AUTO_PEEK:
+            return
+        if not hovered:
+            self._shelf_peek_pending = False
+            return
+        if getattr(self, "_shelf_peek_pending", False):
+            return
+        self._shelf_peek_pending = True
+        dialog = self.get_curve_shelf()
+        # 最小化窗口 show() 不恢复；探出仍不 raise/activate，避免抢拖拽会话
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
+        self._sync_shelf_capsule(visible=True)
+
+    def _toggle_curve_shelf_shortcut(self) -> None:
+        """Ctrl+Shift+S：开也能关（if_open 只判存活，不能直接取反）。
+
+        闸门与 GUI 入口同口径：未加载数据时按钮 disabled，快捷键同步忽略，
+        避免绕过 set_button_status 打开空窗（与 Ctrl+L 的守卫一致）。
+        """
+        btn = getattr(self, "curve_shelf_btn", None)
+        if btn is None or not btn.isEnabled():
+            return
+        dialog = self.curve_shelf_if_open()
+        visible = bool(
+            dialog is not None and dialog.isVisible() and not dialog.isMinimized()
+        )
+        self.toggle_curve_shelf(not visible)
+
+    def _sync_shelf_capsule(self, visible: bool | None = None) -> None:
+        """把条数与开合态同步到页签角位胶囊。
+
+        注意 ``curve_shelf_if_open()`` 名不副实：它只做存活校验、不判
+        ``isVisible()``。徽章恰恰依赖"关窗后仍返回对象"的语义保持 N；
+        后人若把它"修正"成判可见，徽章会立刻归零。反之判开合态必须
+        显式看 ``isVisible()``，不能拿它当可见性判据。
+
+        加载闸门**不在这里采样**：加载结束不会再有 sync 事件，临时采样会
+        把胶囊灰度永久写死。唯一闸门来源是 ``set_button_status``（T2c）。
+        """
+        if not widget_alive(self):
+            return
+        tabs = getattr(self, "plot_tabs", None)
+        if tabs is None or not widget_alive(tabs):
+            return
+        if tabs.shelf_capsule is None:
+            return
+        dialog = self.curve_shelf_if_open()
+        shelf = dialog.shelf if dialog is not None else None
+        tabs.set_shelf_count(shelf.count() if shelf is not None else 0)
+        if visible is None:
+            # 最小化窗口仍占 isVisible()==True（部分平台），开态必须排除它，
+            # 否则胶囊会停在"勾着但看不见窗口"的状态。
+            visible = bool(
+                dialog is not None
+                and dialog.isVisible()
+                and not dialog.isMinimized()
+            )
+        tabs.set_shelf_active(bool(visible))
+
+    def _on_curve_shelf_visibility_changed(self, visible: bool) -> None:
+        """浮窗隐藏/显示（含标题栏关闭）时同步旧按钮与胶囊勾选态。"""
+        if not widget_alive(self):
+            return
+        # 胶囊同步必须在 btn 判空之前：替身宿主没有 curve_shelf_btn
+        self._sync_shelf_capsule(visible=bool(visible))
+        btn = getattr(self, "curve_shelf_btn", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        try:
+            btn.setChecked(bool(visible))
+        finally:
+            btn.blockSignals(False)
+
+    def curve_shelf_anchor_global(self):
+        """胶囊右下角全局坐标；不可见或页签已销毁时返回 None（T3 落点用）。"""
+        tabs = getattr(self, "plot_tabs", None)
+        if tabs is None or not widget_alive(tabs):
+            return None
+        capsule = tabs.shelf_capsule
+        if capsule is None or not widget_alive(capsule) or not capsule.isVisible():
+            return None
+        return capsule.mapToGlobal(capsule.rect().bottomRight())
+
     def _init_basic_config(self):
         # 构造期兜底（C4）：页创建前对这些字段的读写都落在 _bootstrap_state
         self._bootstrap_state: dict = {}
@@ -674,6 +865,9 @@ class MainWindow(QMainWindow):
         self.factor = self._factor_default
         self.offset = self._offset_default
         self._active_drag_container: PlotContainerWidget | None = None
+        # 曲线暂存区单例（懒创建）：关闭 = 隐藏，条目保留
+        self._curve_shelf_dialog = None
+        self._curve_shelf_hint_shown = False
 
         self._baseline_density: float = 0.0
         self._global_max_density: float = 0.0
@@ -937,7 +1131,21 @@ class MainWindow(QMainWindow):
         self.grid_layout_btn = QPushButton("修改布局", self.plot_widget)
         self.grid_layout_btn.setToolTip("修改图表布局 (Ctrl+L)")
 
+        # 曲线暂存区：入口已迁到页签栏右端 36×20 胶囊（方案 A）；
+        # 旧按钮始终创建以兼容既有测试/回滚，仅在开关关闭时才放进工具栏。
+        self.curve_shelf_btn = QPushButton("暂存区", self.plot_widget)
+        self.curve_shelf_btn.setCheckable(True)
+        self.curve_shelf_btn.setToolTip(
+            "曲线暂存区：把图例/变量列表中的曲线拖进来，再拖到目标绘图区"
+        )
+
         top_bar.addWidget(self.grid_layout_btn)
+        if _SHELF_CAPSULE_ENTRY:
+            # 撤入口不撤实现：按钮仍是 toggle 槽的兼容入口（既有测试/回滚用），
+            # 但必须 hide——不 hide 会以未布局子控件身份在 (0,0) 冒出来
+            self.curve_shelf_btn.hide()
+        else:
+            top_bar.addWidget(self.curve_shelf_btn)
         top_bar.addWidget(self.cursor_btn)
         top_bar.addWidget(self.mark_region_btn)
         top_bar.addWidget(self.auto_y_btn)
@@ -950,6 +1158,9 @@ class MainWindow(QMainWindow):
         self.plot_tabs.new_page_requested.connect(self.new_page)
         self.plot_tabs.close_page_requested.connect(self._on_tab_close_requested)
         self.plot_tabs.rename_page_requested.connect(self._on_tab_rename_requested)
+        self.plot_tabs.shelf_toggle_requested.connect(self.toggle_curve_shelf)
+        self.plot_tabs.shelf_drop_requested.connect(self._on_shelf_capsule_drop)
+        self.plot_tabs.shelf_drag_hovered.connect(self._on_shelf_capsule_hover)
         self.plot_tabs.tabBar().tabMoved.connect(self._on_tab_moved)
         self.plot_tabs.currentChanged.connect(self._on_current_changed)
         root_layout.addWidget(self.plot_tabs, 1)
@@ -1019,6 +1230,9 @@ class MainWindow(QMainWindow):
 
         self._open_file_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
         self._open_file_shortcut.activated.connect(self._on_open_file_shortcut)
+
+        self._shelf_shortcut = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
+        self._shelf_shortcut.activated.connect(self._toggle_curve_shelf_shortcut)
 
     # ------------------------------------------------------------------
     # 状态栏：常驻四块 —— 文件段 / x 轴段（可点开抽屉）/ 消息区 / 日志入口
@@ -1502,6 +1716,7 @@ class MainWindow(QMainWindow):
         # 唤回绘图区，走的就是这一路 toggled
         self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
         self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
+        self.curve_shelf_btn.toggled.connect(self.toggle_curve_shelf)
         self._grid_layout_shortcut = QShortcut(QKeySequence("Ctrl+L"), self.plot_widget)
         self._grid_layout_shortcut.activated.connect(self._on_grid_layout_shortcut)
         self.load_btn.clicked.connect(self.file_loader_manager.load_btn_click)
@@ -1542,6 +1757,10 @@ class MainWindow(QMainWindow):
         # 再收抽屉：状态栏抽屉是独立的 Popup 顶层窗口，主窗口销毁时若还开着，
         # 它就会留在屏幕上，鼠标/键盘 grab 也悬在半路
         self._close_status_drawers()
+        # 暂存区浮窗是独立顶层窗口，主窗口销毁前先收起
+        shelf = self.curve_shelf_if_open()
+        if shelf is not None:
+            shelf.hide()
         if self.loader is not None:
             self.plot_config_manager.save_auto_save(self)
         self._shutdown_var_info_worker()

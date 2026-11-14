@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from itertools import groupby
-from PySide6.QtCore import Qt, QTimer, QPoint, QRect
+from PySide6.QtCore import Qt, QTimer, QRect
 from PySide6.QtGui import QDrag, QPen, QColor, QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (
 )
 from src.core.logger import get_logger
 from src.core.config import VAR_INFO_MAX_TABS, is_grouped_loader
-from src.ui.drag_drop import build_var_mimedata, create_drag_pixmap
+from src.ui.drag_drop import build_var_mimedata
+from src.ui.drag_visuals import DragItem, build_drag_pixmap, drag_hotspot
 from src.ui.variable_actions import (
     add_variables_to_blank_plot,
     add_variables_to_data_table,
@@ -541,11 +542,14 @@ class MyTableWidget(QTableWidget):
         drag = QDrag(self)
         drag.setMimeData(build_var_mimedata(var_names))
 
-        preview_pixmap = create_drag_pixmap(var_names, self.font())
+        preview_pixmap = build_drag_pixmap(
+            [DragItem(name) for name in var_names],
+            self.font(),
+            hint="Shift = 替换",
+        )
         if preview_pixmap:
             drag.setPixmap(preview_pixmap)
-            hot_spot = QPoint(preview_pixmap.width() // 2, preview_pixmap.height() // 2)
-            drag.setHotSpot(hot_spot)
+            drag.setHotSpot(drag_hotspot())
 
         drag.exec(Qt.DropAction.MoveAction)
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 import sys
 import os
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from src.utils.platform_setup import setup_platform
 setup_platform()
@@ -13,25 +14,65 @@ from src.ui.drag_drop import (
     VAR_SEPARATOR,
     parse_var_names_from_mimedata,
     LEGEND_MIME_FORMAT,
+    SHELF_MIME_FORMAT,
+    CurveStyleSnapshot,
+    active_legend_drag_origin,
+    build_legend_var_mimedata,
+    clear_active_legend_drag,
     get_active_legend_drag_source,
+    get_active_shelf_drag_source,
+    is_active_legend_batch_drag,
+    is_copy_modifier,
     is_legend_drag_active,
+    parse_shelf_mime_payload,
+    set_active_legend_drag,
 )
-from src.core.config import (safe_callback, safe_qt_op, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.ui.drag_visuals import (
+    PIXMAP_PAD,
+    DragItem,
+    build_drag_pixmap,
+    drag_hotspot,
+    transfer_hint,
+)
+from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
+from src.ui.transfer_broadcast import announce_selection, broadcast_text, broadcast_transfer
+from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, Signal, QEvent
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QCursor, QDrag, QPixmap
 
 logger = get_logger("widget.plot")
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView,
+    QLabel,
     QMessageBox,
     QWidget,
 )
 import pyqtgraph as pg
+
+
+@dataclass
+class TransferResult:
+    """一次曲线搬运（legend / 暂存区 / P1 批量）的结果汇总。
+
+    判重与失败必须区分开：``skipped`` 是目标已存在（按 on_duplicate 策略
+    跳过），``failed`` 是数据校验失败——后者绝不能触发源端删除。
+    """
+
+    requested: list[str] = field(default_factory=list)
+    added: list[str] = field(default_factory=list)
+    #: 目标已存在且用户确认「从源移除」（仅 on_duplicate="ask" 的移动语义）
+    merged: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.merged)
 
 
 class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
@@ -66,6 +107,24 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         )
         self._suppress_pin_update = False  # 标志：临时禁止pin状态自动更新
         self._mid_press_over_legend = False  # 本次中键按下的起点是否在图例内
+        # 曲线选中联动：本次左键 press 的起点（仅落在绘图区内才记录），
+        # release 侧据此判"无位移单击"。非左键/Shift/区外一律置 None。
+        self._curve_click_press_pos = None
+        # press 时刻的 Ctrl/⌘ 快照（release 侧消费，避免按下带 ⌘、松开前
+        # 放开修饰键时手势摇摆）
+        self._curve_click_ctrl = False
+        # QDrag 消费 release 时用于抑制下一次误判的兜底位（press 顶部清零）
+        self._suppress_curve_click = False
+        # 长按抬框搬运状态：计时器、起点、抬起变量集、副框与光标所有权
+        self._lift_timer = QTimer(self)
+        self._lift_timer.setSingleShot(True)
+        self._lift_timer.setInterval(CURVE_LIFT_LONG_PRESS_MS)
+        self._lift_timer.timeout.connect(self._on_lift_timeout)
+        self._lift_press_pos = None
+        self._lift_names: list[str] = []
+        self._lift_active = False
+        self._lift_card: QLabel | None = None
+        self._lift_cursor_owner = False
         self._cursor_label_busy = False
         self._cached_data_version = 0  # 【稳定性优化】缓存的数据版本号
         self._pending_delete_items = []  # 【稳定性优化】待删除对象队列
@@ -90,6 +149,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         一轮事件循环，期间排着的定时器/防抖回调仍会打到这个 plot。
         """
         self._is_being_destroyed = True
+        self._cancel_lift(restore_cursor=True)
+        # 浮卡挂在主窗口上，不会随 plot 一起析构，这里显式回收。
+        card = getattr(self, "_lift_card", None)
+        if card is not None:
+            try:
+                card.deleteLater()
+            except RuntimeError:
+                pass
+            self._lift_card = None
 
     def setup_ui(self, units_dict, dataframe, time_channels_info=None, synchronizer=None):
         if time_channels_info is None:
@@ -272,6 +340,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             saved_pos = sb.value()
             label.setHtml(text)
             sb.setValue(saved_pos)
+            # P1：图例重建后重放选择高亮，并修剪已不存在的条目（R3）
+            # 曲线选中联动：改调两投影收口（tint/prune + 曲线加粗），
+            # prune 在 tint 投影内发生，加粗投影按修剪后的集合刷新。
+            self._refresh_selection_projections()
         else:
             # 回归占位态：clear() 置空文档显示 placeholder，
             # 避免 setPlainText 继承光标处残留字符格式
@@ -279,6 +351,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 注意：纯文本 text 仅作触发占位态的信号，其内容被忽略，
             # 实际占位文案以 plot_ui_manager 中 setPlaceholderText 为准
             label.clear()
+            # 图例回归占位 = 无曲线：选择集失效，必须清空（评审 Non-blocking）
+            clear_selection = getattr(label, "clear_legend_selection", None)
+            if callable(clear_selection):
+                clear_selection()
         # 文本光标复位到文档开头：防止光标停留在彩色锚点内，
         # 导致后续内容替换继承残留颜色
         cursor = label.textCursor()
@@ -286,6 +362,67 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             cursor.setPosition(0)
             label.setTextCursor(cursor)
         self._plot_ui_manager.update_legend_height()
+
+    def _refresh_selection_projections(self) -> None:
+        """选择集两投影统一收口：legend tint（含 prune）+ 曲线加粗。
+
+        ``pw._legend_selection`` 是唯一真相源，本函数是它的全部状态投影
+        出口——所有选择集变化点（toggle / range / clear / 图例重建重放 /
+        plot 点击分派）都经此刷新，保证两投影不脱节。
+
+        顺序有含义：先 tint（其内部 prune 修剪已不存在的条目），再按修剪
+        后的集合刷加粗。**播报不在此处**——它是手势时刻的瞬时事件，系统
+        路径（setHtml 重放 / 占位清选 / reload prune）必须静默。
+        本函数不 emit curves_changed（选择是视图态，不该刷新编辑器/搜索栏）。
+        """
+        label = self.legend_label
+        refresh = getattr(label, "refresh_selection_highlight", None)
+        if callable(refresh):
+            refresh()
+        self._multi_curve_manager.refresh_selection_emphasis()
+
+    # ---------------- 页级选择作用域（薄门面） ----------------
+    # 选择集存储仍是每 plot 一份；同页只允许一个 plot 持有非空选择。
+    # 无 page（component 测试里的裸 widget / FakeHost）时退化为只作用于自身。
+    def page_has_any_selection(self) -> bool:
+        page = getattr(self, "page", None)
+        has_any = getattr(page, "has_any_selection", None)
+        if callable(has_any):
+            try:
+                return bool(has_any())
+            except RuntimeError:
+                pass
+        return bool(getattr(self, "_legend_selection", ()))
+
+    def clear_page_selection(self) -> bool:
+        """清空本页当前持有的选择；返回是否真的清到了东西。"""
+        page = getattr(self, "page", None)
+        clear_page = getattr(page, "clear_page_selection", None)
+        if callable(clear_page):
+            try:
+                return bool(clear_page())
+            except RuntimeError:
+                pass
+        return self._clear_own_selection()
+
+    def clear_page_selection_except_self(self) -> None:
+        page = getattr(self, "page", None)
+        clear_others = getattr(page, "clear_selection_except", None)
+        if callable(clear_others):
+            try:
+                clear_others(self)
+            except RuntimeError:
+                pass
+
+    def _clear_own_selection(self) -> bool:
+        """无 page 时的退化清空：只清本 plot（clear 不可用时不清也不播报）。"""
+        label = getattr(self, "legend_label", None)
+        clear = getattr(label, "clear_legend_selection", None)
+        if not callable(clear):
+            return False
+        had = bool(getattr(self, "_legend_selection", ()))
+        clear()
+        return had
 
     def _get_safe_x_range(self, min_x: float, max_x: float) -> tuple[float, float]:
         """确保 X 轴范围非零 → 委托到 AxisManager"""
@@ -438,10 +575,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         already = bool(var_names) and all(name in self.curves for name in var_names)
 
         if is_legend_drag_active():
-            # legend 来源：轮询 Ctrl（复制切换），无修饰键=移动，Shift 忽略（设计 §2.2）
-            copy_pressed = bool(mods & Qt.KeyboardModifier.ControlModifier)
+            # legend/曲线来源：轮询 Alt/⌘（复制切换），无修饰键=移动，Shift 忽略（设计 §2.2）
+            copy_pressed = is_copy_modifier(mods)
             action = "复制" if copy_pressed else "移动"
-            desired_text = self._build_indicator_text(var_names, action, already)
+            if is_active_legend_batch_drag() or active_legend_drag_origin() == "curve":
+                # 批量/曲线来源判重是 skip：120ms 轮询不得把 skip 文案
+                # 覆盖回「释放以移动」
+                desired_text = self._build_skip_indicator_text(var_names, action)
+            else:
+                desired_text = self._build_indicator_text(var_names, action, already)
         else:
             # 变量列表来源：轮询 Shift（添加/替换切换）
             shift_pressed = bool(mods & Qt.KeyboardModifier.ShiftModifier)
@@ -817,6 +959,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return f"变量已存在，释放以{action}" if action in ("替换", "移动") else "变量已存在"
         return f"释放以{action}"
 
+    def _build_skip_indicator_text(self, var_names: list[str], action: str) -> str:
+        """判重策略为 skip 的拖入指示文案（暂存区 / P1 批量 legend）。"""
+        existing = [name for name in var_names if name in self.curves]
+        if existing and len(existing) == len(var_names):
+            return "变量已存在，释放将跳过"
+        if existing:
+            return "部分变量已存在，释放将跳过"
+        return f"释放以{action}"
+
     def _handle_drag_hover(self, event):
         """dragEnter/dragMove 共用：按来源出指示文案并 accept"""
         mime = event.mimeData()
@@ -828,19 +979,48 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 检测目标是否已含所有拖入变量（用于"已存在"文案）
         already = bool(var_names) and all(name in self.curves for name in var_names)
 
-        if mime.hasFormat(LEGEND_MIME_FORMAT):
-            # legend 来源：Ctrl=复制，无修饰键=移动，Shift 忽略
-            copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        # 曲线来源拖回源 plot：直接拒绝（legend 来源保持既有语义，
+        # 不在 hover 拦截，避免无关回归）
+        if (
+            mime.hasFormat(LEGEND_MIME_FORMAT)
+            and active_legend_drag_origin() == "curve"
+            and get_active_legend_drag_source(mime) is self
+        ):
+            self._notify_drag_indicator(hide=True)
+            event.ignore()
+            return
+
+        modifiers = event.keyboardModifiers()
+        copy_pressed = is_copy_modifier(modifiers)
+
+        if mime.hasFormat(SHELF_MIME_FORMAT):
+            # 暂存区来源：Alt/⌘=复制出，无修饰键=移出；判重策略是跳过，
+            # 已存在时文案不能再承诺「释放以移动」（Blocking 4：分支须在 else 前）
             action = "复制" if copy_pressed else "移动"
-            text_override = self._build_indicator_text(var_names, action, already)
+            text_override = self._build_skip_indicator_text(var_names, action)
+        elif mime.hasFormat(LEGEND_MIME_FORMAT):
+            # legend/曲线来源：Alt/⌘=复制，无修饰键=移动，Shift 忽略。
+            # 批量与曲线来源判重是 skip：已存在时文案不能承诺「释放以移动」。
+            action = "复制" if copy_pressed else "移动"
+            if is_active_legend_batch_drag() or active_legend_drag_origin() == "curve":
+                text_override = self._build_skip_indicator_text(var_names, action)
+            else:
+                text_override = self._build_indicator_text(var_names, action, already)
         else:
             # 变量列表来源：Shift=替换，否则=添加
-            shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
             action = "替换" if shift_pressed else "添加"
             text_override = self._build_indicator_text(var_names, action, already)
 
         self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
-        event.acceptProposedAction()
+        if mime.hasFormat(SHELF_MIME_FORMAT) or mime.hasFormat(LEGEND_MIME_FORMAT):
+            # 光标与文案一致：Alt/⌘ 复制时不能继续显示「移动」光标
+            event.setDropAction(
+                Qt.DropAction.CopyAction if copy_pressed else Qt.DropAction.MoveAction
+            )
+            event.accept()
+        else:
+            event.acceptProposedAction()
 
     def dragEnterEvent(self, event):
         self._handle_drag_hover(event)
@@ -863,7 +1043,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         mime = event.mimeData()
         var_names = parse_var_names_from_mimedata(mime)
 
-        if mime.hasFormat(LEGEND_MIME_FORMAT):
+        if mime.hasFormat(SHELF_MIME_FORMAT):
+            # 暂存区来源（带 text/plain 兼容层）必须先于 else 判定（Blocking 4），
+            # 否则会被当成变量列表添加：无样式、无移出
+            self._handle_shelf_drop(event, var_names)
+        elif mime.hasFormat(LEGEND_MIME_FORMAT):
             self._handle_legend_drop(event, var_names)
         else:
             shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -884,84 +1068,374 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             main_window.layout_manager.request_mark_stats_refresh()
 
     def _handle_legend_drop(self, event, var_names: list[str]):
-        """legend 来源 drop：默认移动，Ctrl=复制（Shift 忽略，设计 §2.1/§3.3）"""
-        # legend 拖拽恒为单变量（press 瞬间锁定单个锚点），无批量协议
+        """legend 来源 drop：默认移动，Alt/⌘=复制（Shift 忽略，设计 §2.1/§3.3）。
+
+        单变量走批量助手的 list-of-1 路径，但判重策略必须显式区分
+        （Blocking 1：不能靠 len 判断单变量还是批量）：
+        移动 = ``on_duplicate="ask"``（保留既有 question 确认窗）、
+        复制 = ``"notify"``（保留既有 information 提示）、quiet=False。
+        """
+        # legend 拖拽恒为单变量（press 瞬间锁定单个锚点）；曲线来源可多变量，
+        # 但其路由在下方批量分支先行拦截
         name = var_names[0] if var_names else None
         if name is None:
             event.ignore()
             return
-        # 拖回原 plot：视为取消操作，不弹窗/不添加/不删除（复制/移动统一）
+        # 拖回原 plot：视为取消操作，不弹窗/不添加/不删除（复制/移动统一）。
+        # 该早退只属于 legend 分支——暂存区拖回来源图是合法撤销，不得套用。
         source = get_active_legend_drag_source(event.mimeData())
         if source is not None and source is self:
             return
-        # 反转：无修饰键=移动，Ctrl=复制（Shift 忽略）
-        copy_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
-        # 样式继承（方案 A）：drop 时从源 plot 读取颜色/显隐状态，颜色走既有
-        # preferred_color 通道，显隐经 _schedule_visibility_restore 幂等恢复。
-        # source 已由 get_active_legend_drag_source 做过存活校验，
-        # source.curves 是纯 Python dict，无需再包 try/except。
+        # 样式继承：drop 时从源 plot 快照全量样式（颜色走 preferred_color
+        # 通道，显隐经 _schedule_visibility_restore 幂等恢复）。source 已由
+        # get_active_legend_drag_source 做过存活校验，source.curves 是纯
+        # Python dict，无需再包 try/except。
         # 目标空图存在同名占位时占位色优先（既有复活规则），源色不生效。
-        preferred_color: str | None = None
-        preferred_visible: bool | None = None
+        style = None
         if source is not None:
             src_ci = source.curves.get(name)
             if src_ci is not None:
-                preferred_color = src_ci.color
-                preferred_visible = src_ci.visible
-        # 前置判重而非依赖 plot_variable 返回值：后者无法区分
-        # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
-        already = name in self.curves
+                style = CurveStyleSnapshot.from_curve_info(src_ci)
+        # 反转：无修饰键=移动，Alt/⌘=复制（Shift 忽略）
+        copy_pressed = is_copy_modifier(event.keyboardModifiers())
 
-        if copy_pressed:
-            # 复制语义：目标已存在则弹提示（与变量列表行为一致）
-            if already:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
-            else:
-                added = self.plot_variable(
-                    name, show_duplicate_warning=False, preferred_color=preferred_color
-                )
-                if added and preferred_visible is False:
-                    self._schedule_visibility_restore(name, preferred_visible)
-        else:
-            # 移动语义（默认）：目标已含该变量则弹确认窗（与复制反馈对齐），取消则两边都留
-            from PySide6.QtWidgets import QMessageBox
-            remove_source = False
-            if already:
-                if source is None:
-                    # 源已销毁，无源可删，仅提示已在目标
-                    QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
-                else:
-                    reply = QMessageBox.question(
-                        self, "移动确认",
-                        f"变量 {name} 已在目标绘图中。\n是否从源 plot 移除该变量？",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No,
-                    )
-                    remove_source = reply == QMessageBox.StandardButton.Yes
-            else:
-                # 目标未含：正常添加，添加成功则删源
-                added = self.plot_variable(
-                    name,
-                    show_duplicate_warning=False,
-                    preferred_color=preferred_color,
-                )
-                remove_source = bool(added) and source is not None
-                if added and preferred_visible is False:
-                    self._schedule_visibility_restore(name, preferred_visible)
+        # P1 多选批量 / 曲线来源：走 skip + quiet 批量协议（判重静默跳过并汇总）
+        if is_active_legend_batch_drag() or active_legend_drag_origin() == "curve":
+            self._handle_legend_batch_drop(
+                event, var_names, source, copy_pressed
+            )
+            return
 
-            if remove_source:
+        remove_source_cb: Callable[[list[str]], None] | None = None
+        if not copy_pressed and source is not None:
+            def _remove_source(names_to_remove: list[str]) -> None:
                 # 延迟一拍执行源端删除：dropEvent 调用栈内直接对源 scene
                 # removeItem + setHtml 重建，存在 BSP 中间态与 paint 并发
                 # 风险（项目历史踩坑）。singleShot(0) 晚于 drop 栈返回、
                 # 仍早于源端 exec 返回（对象存活）
-                def _deferred_remove(src=source, var=name):
+                def _deferred_remove(src=source, var=names_to_remove[0]):
                     try:
                         src.remove_variable_from_plot(var)
                     except RuntimeError:
                         logger.debug("legend 移动拖拽：源 plot 已销毁，跳过删除")
 
                 QTimer.singleShot(0, _deferred_remove)
+
+            remove_source_cb = _remove_source
+
+        # 源已销毁 + 移动语义：无源可删，按复制处理并播报降级（§5.3）
+        degraded = source is None and not copy_pressed
+        result = self._transfer_curves(
+            [name],
+            style_map={name: style},
+            on_duplicate="notify" if (copy_pressed or source is None) else "ask",
+            remove_source_cb=remove_source_cb,
+            quiet=False,
+            batch=False,
+        )
+        if degraded and name in result.added:
+            broadcast_text(self.window(), "源绘图已关闭，已按复制处理")
+        # 落点成功：只清目标自己的旧选择（全 skip 时保持）
+        if result.added:
+            self._clear_own_selection()
+
+    def _handle_legend_batch_drop(
+        self, event, var_names: list[str], source: Any, copy_pressed: bool
+    ) -> None:
+        """P1 legend 多选批量拖拽：与暂存区出区共用 skip + quiet 批量协议。"""
+        names = list(dict.fromkeys(var_names))
+        style_map: dict[str, Any] = {}
+        if source is not None:
+            for name in names:
+                ci = source.curves.get(name)
+                if ci is not None:
+                    style_map[name] = CurveStyleSnapshot.from_curve_info(ci)
+
+        remove_source_cb: Callable[[list[str]], None] | None = None
+        if not copy_pressed and source is not None:
+            def _remove_source(names_to_remove: list[str]) -> None:
+                def _make_remove(src: Any, var: str):
+                    def _deferred_remove():
+                        try:
+                            src.remove_variable_from_plot(var)
+                        except RuntimeError:
+                            logger.debug(
+                                "legend 批量移动：源 plot 已销毁，跳过删除"
+                            )
+
+                    return _deferred_remove
+
+                for name in names_to_remove:
+                    QTimer.singleShot(0, _make_remove(source, name))
+
+            remove_source_cb = _remove_source
+
+        degraded = source is None and not copy_pressed
+        result = self._transfer_curves(
+            names,
+            style_map=style_map,
+            on_duplicate="skip",
+            quiet=True,
+            batch=len(names) > 1,
+            remove_source_cb=remove_source_cb,
+        )
+        broadcast_transfer(
+            self.window(),
+            "copy" if copy_pressed else "move",
+            result.added,
+            src_label=self._plot_badge_label_for(source),
+            dst_label=self._plot_badge_label(),
+            skipped=result.skipped,
+            failed=result.failed,
+            degraded=degraded and bool(result.added),
+        )
+        # 搬运成功落到本 plot：只清本 plot 自己的旧选择（不动源），
+        # 全被 skip 时保持原选择，避免「什么都没发生却清选」
+        if result.added:
+            self._clear_own_selection()
+
+    def _handle_shelf_drop(self, event, var_names: list[str]):
+        """暂存区来源 drop：无修饰=移出（条目消失）/ Alt/⌘=复制出（条目保留）。
+
+        判重固定 skip + quiet（全程无模态）；失败条目不删源、不删托盘条目。
+        拖回来源图是合法撤销：本函数不做「source is self」早退。
+        """
+        mime = event.mimeData()
+        shelf = get_active_shelf_drag_source(mime)
+        payload = parse_shelf_mime_payload(mime)
+        if shelf is None or payload is None:
+            # 托盘已关闭 / 拖拽上下文已失效：条目快照不可读，静默忽略
+            event.ignore()
+            return
+        entries = [
+            entry
+            for entry in shelf.entries_for_keys(payload["keys"])
+            if not entry.stale
+        ]
+        if not entries:
+            event.ignore()
+            return
+        names = [entry.var_name for entry in entries]
+        style_map = {entry.var_name: entry for entry in entries}
+        copy_mode = is_copy_modifier(event.keyboardModifiers())
+
+        def _remove_entries(added_names: list[str]) -> None:
+            # 只删成功入图的条目，按 key 精确删除（防同名重入误删）
+            added_set = set(added_names)
+            shelf.remove_entries(
+                [entry.key for entry in entries if entry.var_name in added_set]
+            )
+
+        result = self._transfer_curves(
+            names,
+            style_map=style_map,
+            on_duplicate="skip",
+            quiet=True,
+            batch=len(names) > 1,
+            remove_entries_cb=None if copy_mode else _remove_entries,
+            action_label="复制" if copy_mode else "移动",
+        )
+        self._announce_transfer_result(result, copy_mode=copy_mode)
+        event.acceptProposedAction()
+
+    def _transfer_curves(
+        self,
+        names: list[str],
+        *,
+        style_map: dict[str, Any] | None = None,
+        on_duplicate: str = "skip",
+        remove_source_cb: Callable[[list[str]], None] | None = None,
+        remove_entries_cb: Callable[[list[str]], None] | None = None,
+        quiet: bool = True,
+        batch: bool | None = None,
+        action_label: str = "移动",
+    ) -> TransferResult:
+        """曲线搬运共享助手（legend list-of-1 / 暂存区 / P1 批量共用）。
+
+        Args:
+            names: 待搬运变量名（保序）
+            style_map: 变量名 → 样式快照（含 color/visible/draw_mode/
+                symbol_policy/draw_mode_source；缺省按默认样式落地）
+            on_duplicate: 判重策略，**显式传入、不得靠 len 推断**：
+                "ask"（单变量 legend 移动，确认后合并）/ "notify"
+                （单变量 legend 复制，提示后跳过）/ "skip"（批量/暂存区，
+                静默跳过并汇总播报）
+            remove_source_cb: 成功搬运（含确认合并）后调用，参数为变量名列表
+            remove_entries_cb: 成功搬运后调用（暂存区移出用）
+            quiet: 批量/暂存区传 True——失败不弹模态框
+            batch: 是否包 ``_batch_adding`` 批量收尾；None 时按 len(names)>1
+            action_label: 仅日志语义，保留调用语境
+
+        Returns:
+            TransferResult（added / merged / skipped / failed）
+        """
+        if on_duplicate not in ("ask", "notify", "skip"):
+            raise ValueError(f"非法判重策略: {on_duplicate!r}")
+        style_map = style_map or {}
+        result = TransferResult(requested=list(names))
+        if batch is None:
+            batch = len(names) > 1
+        try:
+            if batch:
+                self._batch_adding = True
+            for name in names:
+                # 前置判重而非依赖 plot_variable 返回值：后者无法区分
+                # "重复拒绝"与"数据校验失败"，校验失败时绝不能触发源端删除
+                if name in self.curves:
+                    decision = self._resolve_duplicate_transfer(
+                        name, on_duplicate
+                    )
+                    if decision == "merge":
+                        result.merged.append(name)
+                    else:
+                        result.skipped.append(name)
+                    continue
+
+                style = style_map.get(name)
+                preferred_color = getattr(style, "color", None) or None
+                added = self.plot_variable(
+                    name,
+                    show_duplicate_warning=False,
+                    preferred_color=preferred_color,
+                    quiet=quiet,
+                )
+                if not added:
+                    result.failed.append(name)
+                    continue
+                result.added.append(name)
+                self._apply_transfer_style(name, style)
+
+            if batch and result.added:
+                # 唯一权威收尾：补偿批量模式跳过的 header/轴/vline/密度，
+                # 合并 emit（不逐条触发 legend/编辑器重建）
+                self._multi_curve_manager._finalize_batch_add()
+        finally:
+            if batch:
+                self._batch_adding = False
+
+        if batch and result.added:
+            self.curves_changed.emit()
+            if not quiet:
+                self._multi_curve_manager._announce_auto_step(
+                    result.added, batch=True
+                )
+
+        if remove_source_cb is not None:
+            victims = list(result.added) + list(result.merged)
+            if victims:
+                remove_source_cb(victims)
+        if remove_entries_cb is not None and result.added:
+            remove_entries_cb(list(result.added))
+        logger.debug(
+            "[TRANSFER] %s: requested=%s added=%s merged=%s skipped=%s failed=%s",
+            action_label, result.requested, result.added, result.merged,
+            result.skipped, result.failed,
+        )
+        return result
+
+    def _resolve_duplicate_transfer(self, name: str, on_duplicate: str) -> str:
+        """目标已含变量时的判重决策 → "skip" / "merge"。
+
+        - skip：静默跳过（暂存区/批量）
+        - notify：弹 information 提示后跳过（单变量 legend 复制）
+        - ask：弹 question 确认，Yes 表示「从源 plot 移除」→ merge
+        """
+        if on_duplicate == "skip":
+            return "skip"
+        if on_duplicate == "notify":
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.information(self, "提示", f"变量 {name} 已在绘图中")
+            return "skip"
+        from PySide6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self, "移动确认",
+            f"变量 {name} 已在目标绘图中。\n是否从源 plot 移除该变量？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return "merge" if reply == QMessageBox.StandardButton.Yes else "skip"
+
+    def _apply_transfer_style(self, name: str, style: Any) -> None:
+        """把快照样式落到目标曲线（颜色已由 preferred_color 通道传入）。
+
+        Blocking 2：``apply_curve_draw_mode`` 会把 ``draw_mode_source`` 强制
+        钉成 'user'，落完必须回写快照值，否则 'auto' 被误钉、改变 reload
+        后行为；整批的 emit 合并由 ``_batch_adding`` 抑制 + 收尾统一 emit。
+        """
+        if style is None:
+            return
+        ci = self.curves.get(name)
+        if ci is None:
+            return
+        mcm = self._multi_curve_manager
+
+        want_mode = getattr(style, "draw_mode", None)
+        want_source = getattr(style, "draw_mode_source", None)
+        if want_mode and (
+            getattr(ci, "draw_mode", DRAW_MODE_AUTO) != want_mode
+            or (
+                want_source is not None
+                and getattr(ci, "draw_mode_source", None) != want_source
+            )
+        ):
+            if mcm.apply_curve_draw_mode(name, want_mode):
+                ci = self.curves.get(name)
+                if ci is not None and want_source is not None:
+                    ci.draw_mode_source = want_source
+
+        want_policy = getattr(style, "symbol_policy", None)
+        if (
+            want_policy
+            and getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO) != want_policy
+        ):
+            mcm.apply_curve_symbol_policy(name, want_policy)
+
+        if getattr(style, "visible", True) is False:
+            self._schedule_visibility_restore(name, False)
+
+    def _plot_badge_label(self) -> str:
+        """反算本图徽章「页N·图M」（播报用；不可用返回空串）。"""
+        return self._plot_badge_label_for(self)
+
+    def _plot_badge_label_for(self, plot_widget: Any) -> str:
+        """反算指定 plot 的「页N·图M」徽章（来源/目标播报共用）。"""
+        page = getattr(plot_widget, "page", None)
+        host = self.window()
+        if page is None or host is None:
+            return ""
+        try:
+            page_index = host.page_index(page)
+            plot_index = next(
+                (
+                    index
+                    for index, container in enumerate(page.plot_widgets)
+                    if getattr(container, "plot_widget", None) is plot_widget
+                ),
+                -1,
+            )
+        except Exception:
+            return ""
+        if page_index < 0 or plot_index < 0:
+            return ""
+        return f"页{page_index + 1}·图{plot_index + 1}"
+
+    def _announce_transfer_result(
+        self, result: TransferResult, *, copy_mode: bool
+    ) -> None:
+        """出区搬运结果统一播报（成功/判重跳过/失败汇总成一条）。"""
+        if not (result.added or result.skipped or result.failed):
+            return
+        broadcast_transfer(
+            self.window(),
+            "copy" if copy_mode else "move",
+            result.added,
+            src_label="暂存区",
+            dst_label=self._plot_badge_label(),
+            skipped=result.skipped,
+            failed=result.failed,
+        )
 
     def _schedule_visibility_restore(self, var_name: str, want: bool) -> None:
         """legend 拖拽后的显隐继承（方案 A Step 2）：延迟一拍幂等恢复。
@@ -1023,8 +1497,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         success = self._plot_data_manager.plot_variable(
             var_name, show_duplicate_warning, preferred_color, quiet=quiet
         )
-        # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）
-        if success and len(self.curves) == 1:
+        # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）；
+        # 批量搬运窗口内抑制逐条 emit，由 _transfer_curves 收尾统一发一次
+        if (
+            success
+            and len(self.curves) == 1
+            and not getattr(self, "_batch_adding", False)
+        ):
             self.curves_changed.emit()
         return success
 
@@ -1104,8 +1583,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             skip_existence_check, show_duplicate_warning, preferred_color,
             quiet=quiet, announce_step=announce_step,
         )
-        if success:
-            self.curves_changed.emit()  # 仅成功添加才 emit
+        # 仅成功添加才 emit；批量窗口内抑制逐条 emit，由批量收尾统一
+        # 发一次（Blocking 2：避免 N 条曲线 ≈3N 次 legend/编辑器重建）
+        if success and not getattr(self, "_batch_adding", False):
+            self.curves_changed.emit()
         return success
     
     def update_multi_curve_mode(self):
@@ -1190,6 +1671,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         return proxy.boundingRect().contains(proxy.mapFromScene(scene_pos))
 
     def mouseDoubleClickEvent(self, event):
+        # 双击会打开编辑器/轴对话框：先取消可能悬着的长按抬框
+        self._cancel_lift(restore_cursor=True)
         if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             super().mouseDoubleClickEvent(event)
             return
@@ -1265,7 +1748,104 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
         return super().mouseDoubleClickEvent(event)
 
+    def _curve_click_press_candidate(self, event):
+        """press 侧点击起点判定：左键 + 无 Shift + 在绘图区内 + 不在图例内。
+
+        不满足任一条即返回 None（清空记录）。区域校验与 release 侧对齐，
+        构成跨区误触的双保险：图例上的 press 也会先到 widget 层，且图例区
+        与 vb 区相邻、startDragDistance=10，"press 落图例/轴区、release
+        移 ≤10px 进绘图区"几何可达（评审 B3）。
+        Shift 留给框选缩放专属（R4），中键/右键不留陈旧记录（评审 N2）。
+        """
+        if event.button() != Qt.MouseButton.LeftButton:
+            return None
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            return None
+        pos = event.position().toPoint()
+        if self._is_pos_over_legend(pos):
+            return None
+        if not self.view_box.sceneBoundingRect().contains(self.mapToScene(pos)):
+            return None
+        return pos
+
+    def _handle_curve_click_release(self, event) -> None:
+        """左键无位移 release → 曲线选择手势（选择只由 ⌘/Ctrl 触发）。
+
+        调用前 super().mouseReleaseEvent 已先行完成 ViewBox 平移收尾，
+        本方法不 accept、不拦截，故左键拖拽平移零影响。判定顺序：
+        左键 → 有 press 记录 → 位移 < startDragDistance → release 仍在
+        绘图区内 → 命中检测 → 手势分派 → 两投影收口。
+
+        手势语义：裸单击命中=无操作；Ctrl/⌘+命中=toggle（复用 legend 的
+        ``_toggle_legend_selection``）；裸单击空白=清空本页选择；
+        Ctrl/⌘+空白=保持。修饰键取 press 时刻快照，选择变化不 emit
+        curves_changed。
+        """
+        from src.ui.widgets.multi_curve_manager import hit_test_curve
+
+        press_pos = self._curve_click_press_pos
+        self._curve_click_press_pos = None
+        if self._suppress_curve_click:
+            # QDrag 消费 release 后的兜底：本次不是点击
+            self._suppress_curve_click = False
+            return
+        if event.button() != Qt.MouseButton.LeftButton or press_pos is None:
+            return
+        release_pos = event.position().toPoint()
+        if (release_pos - press_pos).manhattanLength() >= QApplication.startDragDistance():
+            return  # 是拖拽（平移/搬运）不是点击
+        scene_pos = self.mapToScene(release_pos)
+        if not self.view_box.sceneBoundingRect().contains(scene_pos):
+            return
+        if self._is_pos_over_legend(release_pos):
+            return
+
+        name = hit_test_curve(self, scene_pos)
+        ctrl = bool(getattr(self, "_curve_click_ctrl", False))
+        label = self.legend_label
+        if name is not None:
+            if not ctrl:
+                return  # 裸单击曲线：无操作（选择只由 ⌘/Ctrl 触发）
+            toggle = getattr(label, "_toggle_legend_selection", None)
+            selection = getattr(self, "_legend_selection", None)
+            if not callable(toggle) or selection is None:
+                return
+            toggle(name)
+            # toggle 无返回值 → 按事后成员判定 select/deselect
+            action = "select" if name in selection else "deselect"
+            self._refresh_selection_projections()
+            announce_selection(self, action, name)
+            return
+        if ctrl:
+            return  # Ctrl/⌘+空白：选择保持（与 legend 口径一致）
+        # 裸单击空白：清空本页选择（可能持有者在同页另一个 plot 上）
+        cleared = self.clear_page_selection()
+        self._refresh_selection_projections()
+        if cleared:
+            announce_selection(self, "clear")
+
     def mousePressEvent(self, event):
+        # 每次左键 press 顶部清零兜底位：QDrag 永久消费 release 时，
+        # 只靠 release 清会吞掉下一次正常点击
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._suppress_curve_click = False
+            self._cancel_lift()
+        # 曲线选中联动：先按口径记录/清空点击起点，再走既有分支（不改控制流）
+        self._curve_click_press_pos = self._curve_click_press_candidate(event)
+        self._curve_click_ctrl = bool(
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        )
+        # 长按抬框：Shift 不参与（框选缩放专属）；Alt/Ctrl/⌘ 允许——macOS
+        # ⌥/⌘ 是「先按修饰键再拖动」的习惯路径，排除 Ctrl 会让选择手感断裂。
+        # 只记起点并起表，不拦截、不 accept、不跑命中检测（平移热路径）
+        candidate = self._curve_click_press_pos
+        if (
+            candidate is not None
+            and event.button() == Qt.MouseButton.LeftButton
+            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        ):
+            self._lift_press_pos = candidate
+            self._lift_timer.start()
         if event.button() == Qt.MouseButton.MiddleButton:
             # 记录本次中键手势的起点是否在图例内，供 mouseDoubleClickEvent
             # 判定（双击序列的第二次 press 被 dblclick 取代，必须在此留存）
@@ -1275,6 +1855,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             super().mousePressEvent(event)
             return
         if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            if self._is_pos_over_legend(event.position().toPoint()):
+                # 图例区的 Shift 属于范围选择手势：本层不得起框选缩放。
+                # view 层先于 scene 分发，若在此 accept，legend 收不到 press
+                # → 范围选择失效；松手时 0×0 框不缩放，但若带位移就会把
+                # 图例上的 Shift 拖动变成 plot 放大（用户可见的 zoom in）。
+                super().mousePressEvent(event)
+                return
             self.origin = event.pos()
             self.rubberBand.setGeometry(QRect(self.origin, QSize()))
             self.rubberBand.show()
@@ -1286,10 +1873,33 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if self.rubberBand.isVisible():
             self.rubberBand.setGeometry(QRect(self.origin, event.pos()).normalized())
             event.accept()
-        else:
-            super().mouseMoveEvent(event)
+            return
+        if self._lift_active:
+            # release 丢失兜底：任何不含左键的 move 都视为手势已结束
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._cancel_lift(restore_cursor=True)
+                return
+            pos = event.position().toPoint()
+            self._move_lift_card(pos)
+            if (
+                self._lift_press_pos is not None
+                and (pos - self._lift_press_pos).manhattanLength()
+                >= QApplication.startDragDistance()
+            ):
+                self._start_curve_drag(list(self._lift_names))
+                return
+            event.accept()
+            return
+        if self._lift_press_pos is not None and self._lift_timer.isActive():
+            # 计时器到期前已超过点击阈值：是平移，不再抬框
+            if (
+                event.position().toPoint() - self._lift_press_pos
+            ).manhattanLength() >= QApplication.startDragDistance():
+                self._cancel_lift()
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        self._cancel_lift(restore_cursor=True)
         if self.rubberBand.isVisible() and event.button() == Qt.MouseButton.LeftButton:
             self.rubberBand.hide()
             rect = self.rubberBand.geometry()
@@ -1319,6 +1929,214 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+            if self._suppress_curve_click:
+                # QDrag 消费 release 的兜底：本次不是点击
+                self._suppress_curve_click = False
+                self._curve_click_press_pos = None
+                return
+            # super 先行完成 ViewBox 收尾后再判选择手势（不 accept 不拦截）。
+            # 抬框后未越过拖拽阈值就松手也走这里：副框只是拖拽预备态，
+            # 没拖走就按点击收口（Ctrl 慢点击仍能 toggle）
+            self._handle_curve_click_release(event)
+
+    # ---------------- 长按抬框搬运 ----------------
+    def hideEvent(self, event):
+        # 切页只 hide（不是销毁）：取消未完成的抬框，但**不清选择**
+        self._cancel_lift(restore_cursor=True)
+        super().hideEvent(event)
+
+    def _cancel_lift(self, restore_cursor: bool = False) -> None:
+        """取消长按抬起：停表、清状态、隐藏副框（可选恢复光标）。"""
+        timer = getattr(self, "_lift_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._lift_active = False
+        self._lift_names = []
+        self._lift_press_pos = None
+        card = getattr(self, "_lift_card", None)
+        if card is not None:
+            try:
+                card.hide()
+            except RuntimeError:
+                pass
+        if restore_cursor and getattr(self, "_lift_cursor_owner", False):
+            try:
+                # 用 unsetCursor 而不是 ArrowCursor：不覆盖应用/主题光标
+                self.viewport().unsetCursor()
+            except RuntimeError:
+                pass
+            self._lift_cursor_owner = False
+
+    def _ensure_lift_card(self) -> QLabel:
+        """惰性创建副框（挂主窗口，不入 scene）。
+
+        不能挂在 viewport 下：子图只有一两百逻辑像素高，浮卡靠近下边缘时会
+        被钳制回子图内，光标就不再落在卡片角上。挂到主窗口后与 QDrag 拖影
+        一致 —— 永远浮在最上层，也不会被子图边界裁掉。
+        """
+        card = getattr(self, "_lift_card", None)
+        host = self.window()
+        if card is not None:
+            try:
+                if card.parentWidget() is host:
+                    return card
+                card.setParent(host)
+                return card
+            except RuntimeError:
+                self._lift_card = None
+        card = QLabel(host)
+        card.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        card.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        card.hide()
+        self._lift_card = card
+        return card
+
+    def _render_lift_card(self, names: list[str]) -> QPixmap | None:
+        """浮卡与拖拽缩略图同源：都走 ``build_drag_pixmap``。
+
+        QLabel 富文本画不出圆角卡片（QTextDocument 不支持 border-radius），
+        改成贴 pixmap 后，条数、色点、提示、圆角与阴影与拖影逐像素一致。
+        """
+        return build_drag_pixmap(
+            [
+                DragItem(name, getattr(self.curves.get(name), "color", None))
+                for name in names
+            ],
+            self.font(),
+            hint=transfer_hint(),
+        )
+
+    def _move_lift_card(self, pos: QPoint) -> None:
+        """让浮卡的**可见表面**左上角落在光标点上，并钳制在主窗口内。
+
+        ``pos`` 是 viewport 坐标；浮卡挂在主窗口上，所以要换算成窗口坐标。
+        """
+        card = getattr(self, "_lift_card", None)
+        if card is None:
+            return
+        pixmap = card.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        dpr = float(pixmap.devicePixelRatio() or 1.0)
+        width = int(round(pixmap.width() / dpr))
+        height = int(round(pixmap.height() / dpr))
+        host = card.parentWidget()
+        origin = host.mapFromGlobal(self.viewport().mapToGlobal(pos))
+        bounds = host.rect()
+        # pixmap 四周有 PIXMAP_PAD 的阴影留白，扣掉后可见表面才与光标对齐。
+        x = min(max(0, origin.x() - PIXMAP_PAD), max(0, bounds.width() - width))
+        y = min(max(0, origin.y() - PIXMAP_PAD), max(0, bounds.height() - height))
+        card.setGeometry(x, y, width, height)
+
+    def _on_lift_timeout(self) -> None:
+        """长按到期：按下点命中**已选中的曲线**才抬框（此时才做命中检测）。
+
+        只对选择集内的曲线起手势：未选中曲线的长按与「慢速拖动平移」
+        物理上无法区分（两者都是按下后不动），会互抢；选择集非空说明
+        用户已明确表达意图，此时长按才没有歧义。
+        """
+        if self._is_being_destroyed or not self.isVisible():
+            self._cancel_lift()
+            return
+        press_pos = self._lift_press_pos
+        if press_pos is None:
+            self._cancel_lift()
+            return
+        selection = set(getattr(self, "_legend_selection", ()) or ())
+        if not selection:
+            # 无选择集时直接放弃：连命中检测都不做（平移热路径的常见情形）
+            self._cancel_lift()
+            return
+        from src.ui.widgets.multi_curve_manager import hit_test_curve
+
+        # 用当前坐标重算 scene 位置（XLink 联动/区间变化会让 press 时的坐标过期）
+        hit = hit_test_curve(self, self.mapToScene(press_pos))
+        if hit is None or hit not in selection:
+            self._cancel_lift()
+            return
+        names = [name for name in self.curves if name in selection]
+        names = [
+            name
+            for name in names
+            if getattr(self.curves.get(name), "curve", None) is not None
+        ]
+        if not names:
+            self._cancel_lift()
+            return
+        self._lift_names = names
+        self._lift_active = True
+        card = self._ensure_lift_card()
+        pixmap = self._render_lift_card(names)
+        if pixmap is not None:
+            card.setPixmap(pixmap)
+            card.adjustSize()
+        self._move_lift_card(press_pos)
+        card.show()
+        card.raise_()
+        try:
+            self.viewport().setCursor(Qt.CursorShape.DragMoveCursor)
+            self._lift_cursor_owner = True
+        except RuntimeError:
+            pass
+
+    def _start_curve_drag(self, names: list[str]) -> None:
+        """抬起后首次越过拖拽阈值：发 QDrag（复用 legend 的 MIME/drop 链路）。"""
+        valid = [
+            name
+            for name in names
+            if name in self.curves
+            and getattr(self.curves[name], "curve", None) is not None
+        ]
+        self._cancel_lift(restore_cursor=True)
+        self._curve_click_press_pos = None
+        if not valid:
+            return
+        self._suppress_curve_click = True
+        drag = QDrag(self)
+        drag.setMimeData(build_legend_var_mimedata(valid, self))
+        pixmap = build_drag_pixmap(
+            [
+                DragItem(name, getattr(self.curves.get(name), "color", None))
+                for name in valid
+            ],
+            self.font(),
+            hint=transfer_hint(),
+        )
+        if pixmap is not None:
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(drag_hotspot())
+        # 曲线来源一律 origin="curve"：即使只有 1 条也走 skip + quiet
+        set_active_legend_drag(
+            self, valid, batch=len(valid) > 1, origin="curve"
+        )
+        try:
+            drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+        finally:
+            clear_active_legend_drag()
+            # QDrag 消费 release → pyqtgraph scene 会残留 dragButtons/
+            # clickEvents；不清会让下一次点击被当成「结束上一次拖拽」
+            self._reset_scene_drag_state()
+            self._cancel_lift(restore_cursor=True)
+            self._lift_names = []
+
+    def _reset_scene_drag_state(self) -> None:
+        """清 pyqtgraph GraphicsScene 的拖拽登记（依赖 0.14 内部字段）。
+
+        0.14.0 的 ``GraphicsScene.mouseReleaseEvent`` 只在 ``not ev.buttons()``
+        时清这些字段；``QDrag.exec()`` 会把 release 从源控件手里拿走，于是
+        按下时的 ``dragButtons``/``clickEvents`` 一直留着，下一次 release
+        会用陈旧的 ``lastDrag`` 算出巨大位移 → 视口跳变 / 吞一次点击。
+        """
+        scene = self.scene()
+        if scene is None:
+            return
+        try:
+            scene.dragButtons = []
+            scene.dragItem = None
+            scene.lastDrag = None
+            scene.clickEvents = []
+        except (AttributeError, RuntimeError):
+            pass
     
     def add_mark_region(self, min_x, max_x):
         """添加标记区域 → 委托到 MarkRegionManager"""

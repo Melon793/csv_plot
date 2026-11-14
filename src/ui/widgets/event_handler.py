@@ -172,6 +172,15 @@ class EventHandler:
             self._queue_ui_refresh(immediate=True)
             # 广播刷新到兄弟子图（它们在交互期间被级联抑制跳过了刷新）
             self._refresh_siblings_after_interaction()
+            # 拖拽/缩放可能因个别子图 limits 偏窄而落到不同范围；
+            # 松手后调度一次页级 XLink 自愈（50ms 防抖 + epoch 作废）。
+            page = getattr(self.pw, "page", None)
+            if (
+                page is not None
+                and not getattr(self.pw, "_is_being_destroyed", False)
+                and hasattr(page, "schedule_xlink_sync")
+            ):
+                page.schedule_xlink_sync()
             if getattr(self.pw, '_pending_cursor_geometry_update', False):
                 self.pw._pending_cursor_geometry_update = False
                 self._schedule_cursor_geometry_update()

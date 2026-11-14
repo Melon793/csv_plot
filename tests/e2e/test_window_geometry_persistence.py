@@ -85,6 +85,24 @@ def test_add_variables_keeps_user_geometry(loaded_window):
     assert _geom(dlg) == USER_GEOM, "add_variables 后几何被 load_geom 重置"
 
 
+def test_popup_restores_minimized_window(loaded_window):
+    """数值表最小化后再次 popup 必须恢复，不能停在最小化不可见状态。"""
+    mw = loaded_window
+    settle()
+    from src.ui.table_dialog import DataTableDialog
+
+    dlg = DataTableDialog.popup("speed", mw.loader.df["speed"], parent=mw)
+    settle()
+    dlg.showMinimized()
+    settle()
+    assert dlg.isMinimized() is True
+
+    DataTableDialog.popup("rpm", mw.loader.df["rpm"], parent=mw)
+    settle()
+    assert dlg.isMinimized() is False
+    assert dlg.isVisible() is True
+
+
 def test_variable_info_reopen_keeps_user_geometry(loaded_window):
     """变量信息窗口开着时再次 popup（右键另一个变量）不得重置其几何。"""
     from src.ui.dialogs.variable_info_dialog import VariableInfoDialog

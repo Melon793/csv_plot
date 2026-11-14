@@ -28,6 +28,22 @@ if TYPE_CHECKING:  # pragma: no cover - 仅类型检查
 logger = get_logger(__name__)
 
 
+def _clear_plot_selection(plot_widget) -> None:
+    """清单个 plot 的选择集（优先走 legend 入口，缺失时退化直清）。"""
+    label = getattr(plot_widget, "legend_label", None)
+    clear = getattr(label, "clear_legend_selection", None)
+    if callable(clear):
+        clear()
+        return
+    selection = getattr(plot_widget, "_legend_selection", None)
+    if selection is not None:
+        selection.clear()
+    plot_widget._legend_sel_anchor = None
+    refresh = getattr(plot_widget, "_refresh_selection_projections", None)
+    if callable(refresh):
+        refresh()
+
+
 class PlotPage:
     """一个标签页：QWidget 容器 + QGridLayout + 页级视图状态。
 
@@ -114,6 +130,56 @@ class PlotPage:
                     plot_widget.mark_being_destroyed()
                 except RuntimeError:
                     pass
+
+    # ------------------------------------------------------------------
+    # 选择作用域（同页单持有）
+    # ------------------------------------------------------------------
+    def iter_plot_widgets(self):
+        """遍历本页存活 plot（逐项防御页重建期间的已删包装）。"""
+        for container in list(self.plot_widgets):
+            plot_widget = getattr(container, "plot_widget", None)
+            if plot_widget is None:
+                continue
+            try:
+                if getattr(plot_widget, "_is_being_destroyed", False):
+                    continue
+                # 访问已析构的 C++ 对象会抛 RuntimeError
+                plot_widget.window()
+            except RuntimeError:
+                continue
+            yield plot_widget
+
+    def has_any_selection(self) -> bool:
+        """本页是否任一 plot 持有非空选择（只读，不刷新投影）。"""
+        return any(
+            bool(getattr(pw, "_legend_selection", ()))
+            for pw in self.iter_plot_widgets()
+        )
+
+    def clear_selection_except(self, owner) -> None:
+        """静默清空本页除 ``owner`` 外的选择（先判空，避免白刷样式）。"""
+        for plot_widget in self.iter_plot_widgets():
+            if plot_widget is owner:
+                continue
+            if not getattr(plot_widget, "_legend_selection", None):
+                continue
+            try:
+                _clear_plot_selection(plot_widget)
+            except RuntimeError:
+                continue
+
+    def clear_page_selection(self) -> bool:
+        """清空本页全部选择；返回是否真的清到了东西。"""
+        cleared = False
+        for plot_widget in self.iter_plot_widgets():
+            if not getattr(plot_widget, "_legend_selection", None):
+                continue
+            try:
+                _clear_plot_selection(plot_widget)
+                cleared = True
+            except RuntimeError:
+                continue
+        return cleared
 
     def clear_matrix(self) -> None:
         """摘掉全部子图容器（页容器本身保留）。"""
@@ -397,6 +463,21 @@ class PlotPage:
         for index in visible_indices:
             self.plot_widgets[index].plot_widget._is_syncing_range = True
         try:
+            # 先把各子图 xLimits 统一到全局 oracle：limits 偏窄/偏移时，
+            # 下面的 setXRange 会被自身 limits 钳制，表现为 XLink 失配。
+            from src.ui.layout_manager import apply_page_x_limits
+            apply_page_x_limits(
+                self, master_resolver=lambda _containers: self.master_container()
+            )
+            # limits 对齐可能钳制 master 的范围，重读一次，避免用旧目标写子图
+            try:
+                refreshed_min, refreshed_max = first_visible.plot_widget.view_box.viewRange()[0]
+                if refreshed_min is not None and refreshed_max is not None:
+                    global_min, global_max = refreshed_min, refreshed_max
+            except Exception:
+                logger.debug(
+                    "[LAYOUT] re-read master range after xlimits align failed", exc_info=True
+                )
             for index in visible_indices:
                 container = self.plot_widgets[index]
                 widget = container.plot_widget
@@ -435,11 +516,12 @@ class PlotPage:
                     logger.debug("获取 viewRange 失败", exc_info=True)
 
                 row, col = divmod(index, grid_cols)
+                tol = 1e-9 * max(1.0, abs(global_max - global_min))
                 match_ok = (
                     after_min is not None
                     and after_max is not None
-                    and abs(after_min - global_min) < 1e-6
-                    and abs(after_max - global_max) < 1e-6
+                    and abs(after_min - global_min) <= tol
+                    and abs(after_max - global_max) <= tol
                 )
                 logger.debug(
                     "[LAYOUT]   plot[%d,%d] idx=%d linked=%s before=(%.4f,%.4f) "
@@ -535,12 +617,37 @@ class PlotPage:
         epoch = self.epoch
         QTimer.singleShot(delay_ms, lambda: self._run_pending_sync(epoch))
 
+    def _has_active_interaction(self) -> bool:
+        """本页是否有子图正在拖拽/缩放（含未落地的交互防抖计时器）。"""
+        for container in self.plot_widgets:
+            if not widget_alive(container):
+                continue
+            pw = getattr(container, "plot_widget", None)
+            if pw is None:
+                continue
+            if getattr(pw, "_is_interacting", False):
+                return True
+            timer = getattr(pw, "_interaction_timer", None)
+            if timer is None:
+                continue
+            try:
+                if timer.isActive():
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
     def _run_pending_sync(self, epoch: int) -> None:
         if epoch != self.epoch or not widget_alive(self.widget):
             return
         # 定时器落地时页可能已随窗口销毁：sync_xlink 入口还有一道存活守卫，
         # 这里先挡一次，避免 _pending_xlink_sync 在残壳上被无意义地推进。
         self._pending_xlink_sync = False
+        # 用户若在防抖窗口内又开始拖拽，重写范围会覆盖其第一步（还可能被
+        # 误判成交互源）；推迟到交互结束再自愈。
+        if self._has_active_interaction():
+            self.schedule_xlink_sync()
+            return
         self.sync_xlink()
 
     # ------------------------------------------------------------------

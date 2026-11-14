@@ -676,6 +676,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 # 只重建失效曲线，正常曲线原样保留
                 try:
                     self._refresh_curve_paint_path(widget)
+                    self._refresh_selection_after_rebuild(widget)
                 except Exception:
                     logger.debug(
                         "_refresh_curve_paint_path 失败（紧急解锁期间）", exc_info=True
@@ -743,6 +744,7 @@ class FileLoaderManager(MainWindowBaseManager):
             for widget in widgets_to_refresh:
                 try:
                     self._refresh_curve_paint_path(widget)
+                    self._refresh_selection_after_rebuild(widget)
                 except Exception:
                     logger.debug("_refresh_curve_paint_path 失败", exc_info=True)
 
@@ -798,6 +800,29 @@ class FileLoaderManager(MainWindowBaseManager):
 
         for var_name, curve in curves_to_check:
             safe_qt_op(lambda: self._safe_check_and_rebuild_curve(widget, var_name, curve))
+
+    def _refresh_selection_after_rebuild(self, widget):
+        """曲线重建后补刷「选中加粗」投影（静默，不播报）。
+
+        为什么必须单独补一次：reload 期间 ``_is_updating_data`` /
+        ``_is_loading_new_data`` 双锁会让图例重放里的加粗投影早退；锁清了
+        之后，收尾唯一的样式刷新走 ``update_plot_style``，而它受
+        ``_is_interacting`` 门控 —— 用户刚点过曲线就 reload 时该标志尚未
+        落定，这一次刷新被整个跳过，重建出的曲线停在基础 pen
+        （``_cached_pen_key is None``）。此后若视图范围不再变化，就没有
+        任何路径会重刷样式，选中曲线**永久不加粗**（实测：负载下 6 次
+        reload 有 2 次命中，持续 pump 1.2 s 不收敛）。
+
+        ``refresh_selection_emphasis`` 不查 ``_is_interacting``（选择是
+        离散动作，见其 docstring），正好补上这个缺口；它自带存活/中间态
+        守卫，且只写 pen/symbol/Z，不 emit curves_changed、不播报。
+        两条兄弟路径（正常收尾 _post_reload_ui_refresh / 紧急解锁
+        _force_unlock_all）都在锁清之后调本函数，口径一致。
+        """
+        manager = getattr(widget, "_multi_curve_manager", None)
+        emphasis = getattr(manager, "refresh_selection_emphasis", None)
+        if callable(emphasis):
+            emphasis()
 
     def _safe_check_and_rebuild_curve(self, widget, var_name, curve):
         """检查曲线状态并在失效时尝试重建"""
@@ -1015,6 +1040,17 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.cursor_btn.setEnabled(status)
             self.mw.mark_region_btn.setEnabled(status)
             self.mw.grid_layout_btn.setEnabled(status)
+            # 暂存区浮窗按钮同走加载闸门（FakeMainWindow 等替身无此按钮）
+            shelf_btn = getattr(self.mw, "curve_shelf_btn", None)
+            if shelf_btn is not None:
+                shelf_btn.setEnabled(status)
+            # 页签角位胶囊同闸门（D-A7）：这里是**唯一**闸门来源，替身宿主
+            # 可能没有 plot_tabs / 胶囊关闭时 set_shelf_enabled 不存在
+            set_shelf_enabled = getattr(
+                getattr(self.mw, "plot_tabs", None), "set_shelf_enabled", None
+            )
+            if callable(set_shelf_enabled):
+                set_shelf_enabled(status)
 
     def reload_data(self):
         # v5.12: 互斥锁 —— 防止快速连续 reload 导致并发冲突
@@ -2338,6 +2374,26 @@ class FileLoaderManager(MainWindowBaseManager):
 
         # v5.11: reload 场景下跳过 pin 状态重置，保留 _restore_cursor_state_after_reload 恢复的 cursor 状态
         self.mw.cursor_sync_manager.replots_after_loading(skip_pin_reset=is_reload)
+
+        # 曲线暂存区 revalidate 必须挂调用方：replots_after_loading 自身
+        # 在 datalength==0 时早退（cursor_sync_manager），挂在方法内会漏掉
+        # 「空数据 → 全部置灰」。BLF 取消恢复路径（_restore_curves_after_abort）
+        # 数据未变，刻意不挂。
+        shelf_if_open = getattr(self.mw, "curve_shelf_if_open", None)
+        if callable(shelf_if_open):
+            shelf = shelf_if_open()
+            if shelf is not None:
+                try:
+                    newly_stale = shelf.revalidate_against_loader(self.mw.loader)
+                except Exception:
+                    logger.debug("刷新曲线暂存区失效状态失败", exc_info=True)
+                else:
+                    if newly_stale:
+                        show = getattr(self.mw, "_show_status_message", None)
+                        if callable(show):
+                            from src.ui.transfer_broadcast import stale_message
+
+                            show(stale_message(newly_stale))
 
         self._refresh_table_dialog(self.mw.loader)
 

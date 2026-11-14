@@ -19,6 +19,31 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
+from tests.fixtures.waits import settle
+
+
+@pytest.fixture()
+def two_plots(loaded_window, qtbot, qapp):
+    """同页 1×2：左 plot 画 speed，右 plot 画 rpm（需 ``full_matrix``）。"""
+    mw = loaded_window
+    page = mw.current_page
+    for container in page.plot_widgets:
+        container.plot_widget.clear_plot_item()
+    mw.layout_manager.set_plots_visible(1, 2)
+    qtbot.waitUntil(lambda: len(page.plot_widgets) >= 2, timeout=5000)
+    left = page.plot_widgets[0].plot_widget
+    right = page.plot_widgets[1].plot_widget
+    assert left.plot_variable("speed")
+    assert right.plot_variable("rpm")
+    for pw in (left, right):
+        qapp.processEvents()
+        qtbot.waitUntil(
+            lambda pw=pw: pw.view_box.sceneBoundingRect().height() > 100,
+            timeout=5000,
+        )
+    settle()
+    return mw, page, left, right
+
 # 已知的清理期竞态异常（非功能缺陷）：加载链路会调度
 # QTimer.singleShot 延迟回调（如 _post_reload_ui_refresh），窗口关闭/
 # 销毁后这些定时器仍可能触发，src 内部已自行容错，但 PySide6 会把
