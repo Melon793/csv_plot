@@ -9,7 +9,9 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from src.core.config import widget_alive
 from src.ui.widgets.plot_page import PlotPage
+from tests.fixtures.waits import flush_deferred_deletes
 
 
 class _FakeButton:
@@ -84,6 +86,31 @@ def page(qapp, qtbot):
     qtbot.addWidget(page.widget)
     yield page
     page.dispose()
+    # pytest 无 app.exec()，deleteLater 必须显式排空；否则销毁与下一例新建交叠，
+    # 会触发 PySide6 构造期的 SIGSEGV
+    flush_deferred_deletes()
+
+
+@pytest.fixture()
+def page_teardown_probe():
+    """把"收尾已销毁"的校验排在 ``page`` 终结之后。
+
+    同作用域 fixture 按请求顺序建立、逆序终结：本 fixture 在用例签名里排在
+    ``page`` 之前且不依赖它，因此 yield 之后的断言能看到 ``dispose()`` +
+    排空的结果。
+    """
+    box = {}
+    yield box
+    assert box["widget"] is not None
+    assert not widget_alive(box["widget"]), (
+        "page fixture 收尾必须排空 DeferredDelete（flush_deferred_deletes），"
+        "否则 deleteLater 不落地"
+    )
+
+
+def test_page_fixture_flushes_deferred_deletes(page_teardown_probe, page):
+    """护栏：删掉 page fixture 收尾的 flush_deferred_deletes 必须失败。"""
+    page_teardown_probe["widget"] = page.widget
 
 
 def test_partial_grid_uses_actual_column_stride(page):

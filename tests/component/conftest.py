@@ -107,6 +107,9 @@ def plot_factory(qapp):
         pw.deleteLater()
     for host in hosts:
         host.deleteLater()
+    # pytest 不跑 app.exec()，不排空则 deleteLater 永不落地：销毁与下一例新建
+    # 交叠会触发 PySide6 构造期的 SIGSEGV
+    flush_deferred_deletes()
 
 
 # --------------------------------------------------------------------------
