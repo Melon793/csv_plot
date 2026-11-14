@@ -160,7 +160,8 @@ def test_labels_hidden_on_tiny_plot_without_crash(plot_factory, qapp):
     assert labels, "前置：正常尺寸下标签应已建立"
 
     fm = QFontMetrics(labels[0].textItem.font())  # TextItem 内部 QGraphicsTextItem
-    label_h = fm.height() + 6  # 与 _position_labels_new 的缓存公式一致
+    # 与 _position_labels_new 的缓存公式一致：文档边距 8 + 描边外沿 2
+    label_h = fm.height() + 10
     needed_h = (
         label_h
         + pw._cursor_manager.LABEL_VERTICAL_GAP

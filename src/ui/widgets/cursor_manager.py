@@ -20,7 +20,7 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QBrush, QFontMetrics, QLinearGradient
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt
 from PySide6.QtWidgets import QApplication
 
@@ -399,8 +399,11 @@ class CursorManager:
 
         while len(pool) <= index:
             label = pg.TextItem(
-                color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 220), anchor=(0, 0.5)
+                color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 255), anchor=(0, 0.5)
             )
+            # 白底必须不透明：文字对比不随"标签底下是什么"变化。
+            # 身份色由 _render_label_layout 设置的左侧全色条承担。
+            label.border = pg.mkPen("#D0D4DA", width=1)
             font = QApplication.font()
             font.setPixelSize(11)
             label.setFont(font)
@@ -769,7 +772,14 @@ class CursorManager:
             sample_text_item = self._get_label_from_pool(0)
             text_font = sample_text_item.textItem.font()
             self._cached_font_metrics = QFontMetrics(text_font)
-            self._cached_label_height_pixels = self._cached_font_metrics.height() + 6
+            # 标签实际高度由 QTextDocument 默认 4px 边距决定，比 fm.height()
+            # 多 8px；再留 2px 给描边外沿。旧公式 +6 少算 2px，使
+            # LABEL_VERTICAL_GAP=4 实际只剩 2px，相邻标签近乎粘连。
+            if not sample_text_item.toPlainText():
+                sample_text_item.setText("0")
+            self._cached_label_height_pixels = (
+                sample_text_item.boundingRect().height() + 2
+            )
 
         label_height_pixels = self._cached_label_height_pixels
         font_metrics = self._cached_font_metrics
@@ -1220,12 +1230,19 @@ class CursorManager:
 
             text_item.setText(display_text)
 
-            # 边框颜色
-            if (not hasattr(text_item, '_cached_border_color')
-                    or text_item._cached_border_color != layout.color):
-                border_pen = pg.mkPen(layout.color, width=1.5)
-                text_item.border = border_pen
-                text_item._cached_border_color = layout.color
+            # 身份色：左侧 4px 全色条（A1'）。用渐变刷实现，不新增图元：
+            # 0~4px 为曲线色，4px 之后为不透明白底；文字从 4px 文档边距起排，
+            # 与色条刚好相接。颜色面积从 1.5px 描边的 ~24% 提升到整条色带。
+            if (not hasattr(text_item, '_cached_chip_color')
+                    or text_item._cached_chip_color != layout.color):
+                c = pg.mkColor(layout.color)
+                grad = QLinearGradient(0.0, 0.0, 5.0, 0.0)
+                grad.setColorAt(0.0, c)
+                grad.setColorAt(0.79, c)
+                grad.setColorAt(0.80, pg.mkColor("#FFFFFF"))
+                text_item.fill = QBrush(grad)
+                text_item.setColor(pg.mkColor("#000000"))
+                text_item._cached_chip_color = layout.color
 
             text_item.setVisible(True)
 
