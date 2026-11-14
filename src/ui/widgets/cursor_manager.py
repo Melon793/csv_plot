@@ -1257,18 +1257,18 @@ class CursorManager:
                 fmt.setLeftMargin(7)
                 doc.rootFrame().setFrameFormat(fmt)
 
-            # 身份色：左侧 4px 全色条 + 60α 白底 + 曲线色描边（A1' 调整版）。
-            # 色条不透明全色承担身份；白底 60α(=23.5% 白) 让曲线/网格透上来；
-            # 描边用曲线色 1.5px（main 原色），把文本框从白底里勾出来。
+            # 身份色：左侧 4px 全色条 + 60α 同色底 + 曲线色描边（tint60 变体）。
+            # 底色用曲线色 60α(=23.5% 色) 而非白：空背景呈淡彩、压曲线更显色；
+            # 代价是压自身深色曲线时背景偏深、黑字对比下降（见设计稿 §4.5）。
             if (not hasattr(text_item, '_cached_chip_color')
                     or text_item._cached_chip_color != layout.color):
                 c = pg.mkColor(layout.color)
-                white = pg.mkColor("#FFFFFF")
-                white.setAlpha(60)
+                tint = pg.mkColor(layout.color)
+                tint.setAlpha(60)
                 grad = QLinearGradient(0.0, 0.0, 5.0, 0.0)
                 grad.setColorAt(0.0, c)
                 grad.setColorAt(0.79, c)
-                grad.setColorAt(0.80, white)
+                grad.setColorAt(0.80, tint)
                 text_item.fill = QBrush(grad)
                 text_item.setColor(pg.mkColor("#000000"))
                 text_item.border = pg.mkPen(c, width=1.5)

@@ -56,8 +56,16 @@ def _near(actual, expected_hex: str, tol: int = _TOL) -> bool:
     return all(abs(a - b) <= tol for a, b in zip(got, exp))
 
 
+def _blend_hex(color_hex: str, alpha: int, bg: str = "#FFFFFF") -> str:
+    """fg 以 alpha 叠在 bg 上的合成 hex（与 Qt 合成同口径）"""
+    fg = [int(color_hex[i:i + 2], 16) for i in (1, 3, 5)]
+    base = [int(bg[i:i + 2], 16) for i in (1, 3, 5)]
+    t = alpha / 255.0
+    return "#" + "".join(f"{round(f * t + b * (1 - t)):02x}" for f, b in zip(fg, base))
+
+
 def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
-    """白底不透明 + 左侧 4px 曲线色条（渐变刷，不新增图元）"""
+    """同色 60α 底 + 左侧 4px 曲线色条（渐变刷，不新增图元）"""
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     lbl = _show_label(pw)
     curve_color = pw.curves["y"].color.lower()
@@ -65,11 +73,11 @@ def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
     assert lbl.fill.style() == Qt.BrushStyle.LinearGradientPattern
     stops = lbl.fill.gradient().stops()
     assert len(stops) >= 3
-    # 0~4px 是不透明全色条；4px 之后是 60α 白底（透出曲线）
+    # 0~4px 是不透明全色条；4px 之后是 60α 同色底（透出曲线）
     assert stops[0][1].name().lower() == curve_color
     assert stops[0][1].alpha() == 255
     assert stops[1][1].name().lower() == curve_color
-    assert stops[-1][1].name().lower() == "#ffffff"
+    assert stops[-1][1].name().lower() == curve_color
     assert stops[-1][1].alpha() == 60
 
     # 文字始终黑色；边框为曲线色 1.5px（main 原色，浅灰对白底几乎不可见）
@@ -82,19 +90,20 @@ def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
 
 
 def test_label_bar_rendered_in_curve_color(plot_factory, qapp):
-    """像素验证：标签左缘内侧 2px 是曲线色（色条），同一行右侧是纯白"""
+    """像素验证：左缘 2px 是不透明色条；右侧是 60α 同色叠白的淡彩"""
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     lbl = _show_label(pw)
     curve_color = pw.curves["y"].color
     img, x, y = _grab_and_origin(pw, qapp, lbl)
 
-    # 取文字上方 6px 的一行（仍在标签内、避开字形），色条与白底同排可比
+    # 取文字上方 6px 的一行（仍在标签内、避开字形），色条与底色同排可比
     row = y - 6
     assert _near(img.pixelColor(x + 2, row), curve_color), (
         f"色条像素 {img.pixelColor(x + 2, row).name()} 应为 {curve_color}"
     )
-    assert _near(img.pixelColor(x + 20, row), "#ffffff"), (
-        f"白底像素 {img.pixelColor(x + 20, row).name()} 应为 #ffffff"
+    expected = _blend_hex(curve_color, 60)  # 60α 同色叠白底
+    assert _near(img.pixelColor(x + 20, row), expected), (
+        f"底色像素 {img.pixelColor(x + 20, row).name()} 应为 {expected}"
     )
 
 
