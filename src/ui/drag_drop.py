@@ -128,18 +128,40 @@ def parse_legend_anchor(href: str) -> tuple[str, str] | None:
 
 
 def set_active_legend_drag(
-    source_plot: Any, var_names: list[str], *, batch: bool = False
+    source_plot: Any,
+    var_names: list[str],
+    *,
+    batch: bool = False,
+    origin: str = "legend",
 ) -> None:
     """登记当前 legend 拖拽上下文（drag.exec 前调用）。
 
     ``batch=True`` 表示 P1 多选批量拖拽：drop 端按 skip + quiet 处理，
     与单变量 legend 拖拽（ask/notify 确认窗）区分。不能用变量个数推断
     —— 批量选择集可能只有 1 条。
+
+    ``origin`` 标记拖拽起点：``"legend"``（默认）或 ``"curve"``（从绘图区
+    曲线本体长按抬起）。曲线来源即使只拖 1 条也必须走 skip + quiet，
+    因此 drop 路由看 origin 而不是 batch。
     """
     _active_legend_drag.clear()
     _active_legend_drag["source"] = source_plot
     _active_legend_drag["vars"] = list(var_names)
     _active_legend_drag["batch"] = bool(batch)
+    _active_legend_drag["origin"] = str(origin)
+
+
+def active_legend_drag_origin() -> str:
+    """当前拖拽起点来源（"legend" / "curve"）；无拖拽返回空串。"""
+    return str(_active_legend_drag.get("origin") or "")
+
+
+def is_copy_modifier(modifiers) -> bool:
+    """拖动中的复制修饰键：Alt 或 Ctrl（macOS 上 ControlModifier 即 ⌘）。"""
+    return bool(
+        modifiers
+        & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+    )
 
 
 def clear_active_legend_drag() -> None:

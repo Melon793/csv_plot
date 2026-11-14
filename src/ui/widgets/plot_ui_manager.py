@@ -644,11 +644,10 @@ class LegendTextBrowser(QTextBrowser):
                         announce_selection(self._pw, "select", var_name)
                     return
             elif var_name is None and not modifiers:
-                # 空白单击清空选择集；裸单击条目不清（D4：显隐正交）
-                # clear 前快照（BL-1）：clear 后集合即空，事后读恒空
-                had_selection = bool(getattr(self._pw, "_legend_selection", ()))
-                self.clear_legend_selection()
-                if had_selection:
+                # 空白单击清空**本页**选择；裸单击条目不清（D4：显隐正交）
+                clear_page = getattr(self._pw, "clear_page_selection", None)
+                cleared = bool(clear_page()) if callable(clear_page) else False
+                if cleared:
                     announce_selection(self._pw, "clear")
         super().mouseReleaseEvent(event)  # 未拖拽时正常触发 anchorClicked
 
@@ -1094,6 +1093,10 @@ class LegendTextBrowser(QTextBrowser):
         if var_name in selection:
             selection.discard(var_name)
         else:
+            # 同页单持有：加选前静默清空同页兄弟（减选不触发）
+            clear_others = getattr(pw, "clear_page_selection_except_self", None)
+            if callable(clear_others):
+                clear_others()
             selection.add(var_name)
         pw._legend_sel_anchor = var_name
         pw._refresh_selection_projections()
@@ -1110,13 +1113,20 @@ class LegendTextBrowser(QTextBrowser):
             return
         order = list(pw.curves)
         anchor = getattr(pw, "_legend_sel_anchor", None)
+        clear_others = getattr(pw, "clear_page_selection_except_self", None)
         if anchor in order and var_name in order:
             start, end = order.index(anchor), order.index(var_name)
             if start > end:
                 start, end = end, start
+            # 先算新集合再清兄弟：范围为空时不得误清别的 plot
+            new_selection = set(order[start:end + 1])
+            if new_selection and callable(clear_others):
+                clear_others()
             selection.clear()
-            selection.update(order[start:end + 1])
+            selection.update(new_selection)
         else:
+            if callable(clear_others):
+                clear_others()
             selection.add(var_name)
             pw._legend_sel_anchor = var_name
         pw._refresh_selection_projections()
@@ -1249,12 +1259,10 @@ class LegendTextBrowser(QTextBrowser):
         elif chosen is act_copy:
             QApplication.clipboard().setText("、".join(selection))
         elif chosen is act_clear:
-            # BL-1：clear 前取实时集合快照，与 plot/legend 两个 clear 点同口径。
-            # 不复用「selection 列表非空」：列表只核对 pw.curves，菜单模态循环
-            # 期间若集合被清而 curves 保留，clear 是 no-op 却会误播（r2 NB-C1）。
-            had_selection = bool(getattr(pw, "_legend_selection", ()))
-            self.clear_legend_selection()
-            if had_selection:
+            # 页级清空：返回是否真清到东西，避免「什么都没清却播报」
+            clear_page = getattr(pw, "clear_page_selection", None)
+            cleared = bool(clear_page()) if callable(clear_page) else False
+            if cleared:
                 announce_selection(pw, "clear")
 
     def _apply_batch_style_picks(

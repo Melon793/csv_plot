@@ -46,6 +46,7 @@ from src.ui.drag_drop import (
     clear_active_shelf_drag,
     create_drag_pixmap,
     get_active_legend_drag_source,
+    is_copy_modifier,
     parse_var_names_from_mimedata,
     set_active_shelf_drag,
 )
@@ -358,7 +359,16 @@ class CurveShelfWidget(QListWidget):
 
     def dragMoveEvent(self, event):
         if self._can_accept_mime(event.mimeData()):
-            event.acceptProposedAction()
+            if event.mimeData().hasFormat(LEGEND_MIME_FORMAT):
+                # 光标与 drop 语义一致（Alt/⌘=复制，无修饰=剪切）
+                event.setDropAction(
+                    Qt.DropAction.CopyAction
+                    if is_copy_modifier(event.keyboardModifiers())
+                    else Qt.DropAction.MoveAction
+                )
+                event.accept()
+            else:
+                event.acceptProposedAction()
         else:
             event.ignore()
 
@@ -389,9 +399,7 @@ class CurveShelfWidget(QListWidget):
             event.ignore()
             return
 
-        copy_mode = bool(
-            event.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier
-        )
+        copy_mode = is_copy_modifier(event.keyboardModifiers())
         origin = self._origin_label_for(source)
         # 快照必须在 drop 调用栈内读完（源端删除延迟一拍）
         added: list[str] = []

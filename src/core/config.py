@@ -140,6 +140,10 @@ HIGHLIGHT_LINE_WIDTH = 4        # 选中粗线态 2→4
 HIGHLIGHT_THIN_LINE_WIDTH = 3   # 选中 symbol 态 1→3
 HIGHLIGHT_CURVE_Z = 10          # 选中曲线临时 z（曲线0 < 10 < vline100）
 CURVE_HIT_TOLERANCE_PX = 8      # plot 点击命中容差（逻辑像素，Qt 已归一 DPI）
+# 曲线长按搬运：按住左键不动达到该时长后抬起副框（命中曲线才算），
+# 与 ViewBox 左键平移并行——press 不拦截、不跑命中检测，只在计时器到期
+# 且位移未过 startDragDistance 时才做一次 hit_test_curve。
+CURVE_LIFT_LONG_PRESS_MS = 300
 UI_DEBOUNCE_DELAY_MS = 50  # UI事件防抖延迟时间
 # 枚举通道自动阶梯显示总开关：True 时 MDF/BLF 的枚举通道（is_enum）在
 # 绘图时自动用 step-post 连线（枚举码值离散、无中间态，线性插值会画出

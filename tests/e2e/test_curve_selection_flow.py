@@ -111,7 +111,8 @@ def _anchor_pos(browser, var_name):
     pytest.fail(f"legend 中未找到 {href} 的锚点坐标")
 
 
-def _click_plot(pw, pos, mods=Qt.KeyboardModifier.NoModifier):
+def _click_plot(pw, pos, mods=Qt.KeyboardModifier.ControlModifier):
+    """左键单击 plot。默认带 ⌘/Ctrl：选择只由修饰键触发（裸单击=无操作）。"""
     QTest.mouseClick(pw.viewport(), Qt.MouseButton.LeftButton, mods, pos)
     QApplication.processEvents()
 
@@ -178,7 +179,7 @@ def test_blank_click_clears_and_restores(plotted_window, qapp):
     _click_plot(pw, _curve_pos(pw, "rpm"), Qt.KeyboardModifier.ControlModifier)
     assert pw._legend_selection == {"speed", "rpm"}
 
-    _click_plot(pw, _blank_pos(pw))
+    _click_plot(pw, _blank_pos(pw), Qt.KeyboardModifier.NoModifier)
 
     assert pw._legend_selection == set()
     assert _width(pw, "speed") == THICK_LINE_WIDTH
@@ -374,11 +375,11 @@ def test_status_bar_blank_clear_snapshot(plotted_window):
     mw.clear_status_message()
     assert mw._message_label.text() == "", "前置：右区应为空"
 
-    _click_plot(pw, _blank_pos(pw))  # 本就为空 → 静默
+    _click_plot(pw, _blank_pos(pw), Qt.KeyboardModifier.NoModifier)  # 本就为空 → 静默
     assert mw._message_label.text() == ""
 
     _click_plot(pw, _curve_pos(pw, "speed"))
-    _click_plot(pw, _blank_pos(pw))
+    _click_plot(pw, _blank_pos(pw), Qt.KeyboardModifier.NoModifier)
     assert mw._message_label.text() == "已清除选择"
     assert pw._legend_selection == set()
 
@@ -440,7 +441,7 @@ def test_legend_and_plot_broadcast_identical_text(plotted_window):
 
     _click_plot(pw, _curve_pos(pw, "rpm"))
     plot_text = mw._message_label.text()
-    _click_plot(pw, _blank_pos(pw))
+    _click_plot(pw, _blank_pos(pw), Qt.KeyboardModifier.NoModifier)
     _legend_ctrl_click(pw, "rpm")
     settle()
 

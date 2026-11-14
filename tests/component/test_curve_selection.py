@@ -884,7 +884,7 @@ def test_qtest_click_selects_thickens_and_tints(hit_plot, qapp):
     pw = hit_plot
     pos = _vp(pw, _scene_at(pw, "b"))
     QTest.mouseClick(pw.viewport(), Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, pos)
+                     Qt.KeyboardModifier.ControlModifier, pos)
     qapp.processEvents()
 
     assert pw._legend_selection == {"b"}
@@ -904,7 +904,7 @@ def test_ctrl_click_adds_then_toggles(hit_plot, qapp):
     pa = _vp(pw, _scene_at(pw, "a"))
     pb = _vp(pw, _scene_at(pw, "b"))
     QTest.mouseClick(pw.viewport(), Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, pb)
+                     Qt.KeyboardModifier.ControlModifier, pb)
     QTest.mouseClick(pw.viewport(), Qt.MouseButton.LeftButton,
                      Qt.KeyboardModifier.ControlModifier, pa)
     qapp.processEvents()
@@ -920,20 +920,20 @@ def test_ctrl_click_adds_then_toggles(hit_plot, qapp):
     assert _z(pw, "a") == 0
 
 
-def test_bare_click_replaces_selection_and_anchor(hit_plot):
-    """裸单击 = 替换单选（标准文件管理器语义），anchor 同步重置。"""
+def test_bare_click_does_not_change_selection_or_anchor(hit_plot):
+    """裸单击曲线 = 无操作（选择只由 ⌘/Ctrl 触发），anchor 同步不变。"""
     pw = hit_plot
     pw.legend_label._toggle_legend_selection("a")
     pw.legend_label._toggle_legend_selection("c")
     assert pw._legend_selection == {"a", "c"}
+    anchor = pw._legend_sel_anchor
 
     _click(pw, _vp(pw, _scene_at(pw, "b")))
 
-    assert pw._legend_selection == {"b"}
-    assert pw._legend_sel_anchor == "b"
-    assert _width(pw, "a") == THICK_LINE_WIDTH
-    assert _width(pw, "c") == THICK_LINE_WIDTH
-    assert _width(pw, "b") == HIGHLIGHT_LINE_WIDTH
+    assert pw._legend_selection == {"a", "c"}
+    assert pw._legend_sel_anchor == anchor
+    assert _width(pw, "a") == HIGHLIGHT_LINE_WIDTH
+    assert _width(pw, "b") == THICK_LINE_WIDTH
 
 
 def test_bare_click_blank_clears(hit_plot):
@@ -978,8 +978,8 @@ def test_small_jitter_still_counts_as_click(hit_plot):
     assert (jitter - pos).manhattanLength() < QApplication.startDragDistance()
     assert hit_test_curve(pw, pw.mapToScene(jitter)) == "b"
 
-    _press(pw, pos)
-    _release(pw, jitter)
+    _press(pw, pos, mods=Qt.KeyboardModifier.ControlModifier)
+    _release(pw, jitter, mods=Qt.KeyboardModifier.ControlModifier)
 
     assert pw._legend_selection == {"b"}
 
@@ -1153,14 +1153,15 @@ def test_announce_selection_without_channel_still_returns_text(three_curves):
     assert announce_selection(object(), "clear") == "已清除选择"
 
 
-def test_plot_bare_click_broadcasts_select(hit_plot):
+def test_plot_bare_click_is_silent(hit_plot):
+    """裸单击曲线不再选中：零播报、选择集不变。"""
     pw = hit_plot
     messages = _status_recorder(pw)
 
     _click(pw, _vp(pw, _scene_at(pw, "b")))
 
-    assert messages == ["已选中：b"]
-    assert pw._legend_selection == {"b"}
+    assert messages == []
+    assert pw._legend_selection == set()
 
 
 def test_plot_ctrl_click_broadcasts_select_then_deselect(hit_plot):
@@ -1169,7 +1170,7 @@ def test_plot_ctrl_click_broadcasts_select_then_deselect(hit_plot):
     messages = _status_recorder(pw)
     ctrl = Qt.KeyboardModifier.ControlModifier
 
-    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _scene_at(pw, "b")), ctrl)
     _click(pw, _vp(pw, _scene_at(pw, "a")), ctrl)
     _click(pw, _vp(pw, _scene_at(pw, "a")), ctrl)
 
@@ -1177,16 +1178,17 @@ def test_plot_ctrl_click_broadcasts_select_then_deselect(hit_plot):
     assert pw._legend_selection == {"b"}
 
 
-def test_plot_bare_click_replacement_broadcasts_new_name_only(hit_plot):
-    """裸单击替换选择集：只播新名字的 select，不补播旧名字 deselect。"""
+def test_plot_ctrl_click_broadcasts_each_new_name(hit_plot):
+    """Ctrl 逐个加选：每次只播当前新名字的 select。"""
     pw = hit_plot
     messages = _status_recorder(pw)
+    ctrl = Qt.KeyboardModifier.ControlModifier
 
-    _click(pw, _vp(pw, _scene_at(pw, "b")))
-    _click(pw, _vp(pw, _scene_at(pw, "a")))
+    _click(pw, _vp(pw, _scene_at(pw, "b")), ctrl)
+    _click(pw, _vp(pw, _scene_at(pw, "a")), ctrl)
 
     assert messages == ["已选中：b", "已选中：a"]
-    assert pw._legend_selection == {"a"}
+    assert pw._legend_selection == {"a", "b"}
 
 
 def test_plot_blank_click_clear_snapshot(hit_plot):
@@ -1201,7 +1203,7 @@ def test_plot_blank_click_clear_snapshot(hit_plot):
 
     _click(pw, blank)  # 本就为空 → 静默
     assert messages == []
-    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _scene_at(pw, "b")), Qt.KeyboardModifier.ControlModifier)
     _click(pw, blank)  # 非空 → clear 播报
     _click(pw, blank)  # 又为空 → 静默
 
@@ -1214,7 +1216,7 @@ def test_plot_ctrl_blank_is_silent(hit_plot):
     pw = hit_plot
     messages = _status_recorder(pw)
 
-    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _scene_at(pw, "b")), Qt.KeyboardModifier.ControlModifier)
     _click(pw, _vp(pw, _blank_scene(pw)), Qt.KeyboardModifier.ControlModifier)
 
     assert messages == ["已选中：b"]
@@ -1320,7 +1322,7 @@ def test_plot_and_legend_broadcast_identical_text(hit_plot):
     browser = pw.legend_label
     messages = _status_recorder(pw)
 
-    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _scene_at(pw, "b")), Qt.KeyboardModifier.ControlModifier)
     plot_message = messages[-1]
     browser.clear_legend_selection()
     _legend_click(
@@ -1458,7 +1460,7 @@ def test_plot_blank_clear_with_unavailable_clear_is_silent(hit_plot, monkeypatch
     had_selection 快照——替身 label 缺 clear 方法时集合并未清，不得误播。"""
     pw = hit_plot
     messages = _status_recorder(pw)
-    _click(pw, _vp(pw, _scene_at(pw, "b")))
+    _click(pw, _vp(pw, _scene_at(pw, "b")), Qt.KeyboardModifier.ControlModifier)
     assert pw._legend_selection == {"b"}
     messages.clear()
 

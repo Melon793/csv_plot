@@ -160,6 +160,7 @@ def test_cross_region_after_resize_uses_new_geometry(plotted_window, qapp):
     assert pw._legend_selection == {"rpm"}
 
     # 新几何下正常单击仍须命中：证明区域校验没有把整块绘图区误判成图例
+    pw.legend_label.clear_legend_selection()
     _click_plot(pw, _curve_pos(pw, "speed"))
     assert pw._legend_selection == {"speed"}
     assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
@@ -199,7 +200,7 @@ def test_double_click_keeps_selection_and_leaves_no_stale_record(plotted_window,
     assert _width(pw, "speed") == HIGHLIGHT_LINE_WIDTH
     assert pw._curve_click_press_pos is None, "尾随 release 后不得留陈旧记录"
 
-    _click_plot(pw, _blank_pos(pw))
+    _click_plot(pw, _blank_pos(pw), Qt.KeyboardModifier.NoModifier)
     assert pw._legend_selection == set()
     assert _width(pw, "speed") == THICK_LINE_WIDTH
     assert mw._message_label.text() == "已清除选择"
@@ -247,8 +248,7 @@ def test_click_hidden_curve_position_clears_selection(plotted_window, qapp):
     settle()
     assert hit_test_curve(pw, scene) is None, "隐藏曲线不该被命中"
 
-    _click_plot(pw, pos)
-
+    _click_plot(pw, pos, Qt.KeyboardModifier.NoModifier)
     assert pw._legend_selection == set()
     assert _width(pw, "rpm") == THICK_LINE_WIDTH
     assert mw._message_label.text() == "已清除选择"
