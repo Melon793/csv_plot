@@ -931,7 +931,7 @@ class CursorManager:
 
     @staticmethod
     def _layouts_collide(a: list, b: list, label_height_pixels: float) -> bool:
-        """两组标签矩形是否相交（跨组避让判定，含同组内两两检查的调用）。"""
+        """两组标签矩形是否相交（跨组避让判定）。"""
         for la in a:
             wa = la.w or 1.0
             for lb in b:
@@ -969,33 +969,38 @@ class CursorManager:
         label_height_pixels: float,
         font_metrics,
     ) -> None:
-        """跨组碰撞 → 向外分裂：组0 强制左、组1 强制右。
+        """跨组碰撞 → 向外分裂：光标靠左的组强制左、靠右的组强制右。
 
         先校验两侧空间预算（所需列总宽 vs 光标到视口边缘的可用宽），
         通过且重布局后零重叠、全部在视口内才接受；否则回退原布局并留
         debug 日志（重叠优于消失，指标条如实显示）。重布局跳过滞回喂入。
+        按光标实际 scene x 排序（而非 cursor_id），保证「向外」不跨过邻光标。
         """
-        g0, g1 = groups
+        left_group, right_group = sorted(
+            groups, key=lambda g: g['cursor_scene'].x()
+        )
         common = (
             view_box, x_min, x_max, y_min, y_max,
             label_height_pixels, font_metrics,
         )
-        l0, hide0, meta0 = self._layout_cursor_group(
-            g0['cid'], g0['visible'], g0['cursor_scene'], *common,
+        l_left, hide_left, meta_left = self._layout_cursor_group(
+            left_group['cid'], left_group['visible'],
+            left_group['cursor_scene'], *common,
             force_side='left', feed_hysteresis=False,
         )
-        l1, hide1, meta1 = self._layout_cursor_group(
-            g1['cid'], g1['visible'], g1['cursor_scene'], *common,
+        l_right, hide_right, meta_right = self._layout_cursor_group(
+            right_group['cid'], right_group['visible'],
+            right_group['cursor_scene'], *common,
             force_side='right', feed_hysteresis=False,
         )
-        if meta0 is None or meta1 is None:
+        if meta_left is None or meta_right is None:
             logger.debug("[CURSOR] 跨组避让回退：重布局无可用标签")
             return
 
-        left_need = meta0['left_need']
-        left_avail = meta0['left_available']
-        right_need = meta1['right_need']
-        right_avail = meta1['right_available']
+        left_need = meta_left['left_need']
+        left_avail = meta_left['left_available']
+        right_need = meta_right['right_need']
+        right_avail = meta_right['right_available']
         if left_need > left_avail + 1e-6 or right_need > right_avail + 1e-6:
             logger.debug(
                 "[CURSOR] 跨组避让回退：预算不足 left %.1f/%.1f right %.1f/%.1f",
@@ -1003,20 +1008,20 @@ class CursorManager:
             )
             return
 
-        if self._layouts_collide(l0, l1, label_height_pixels):
+        if self._layouts_collide(l_left, l_right, label_height_pixels):
             logger.debug("[CURSOR] 跨组避让回退：向外分裂后仍重叠")
             return
-        if (not self._layouts_within_view(l0, meta0, label_height_pixels)
+        if (not self._layouts_within_view(l_left, meta_left, label_height_pixels)
                 or not self._layouts_within_view(
-                    l1, meta1, label_height_pixels
+                    l_right, meta_right, label_height_pixels
                 )):
             logger.debug("[CURSOR] 跨组避让回退：向外分裂后标签越出视口")
             return
 
-        g0['layouts'] = l0
-        g0['hide'] = hide0
-        g1['layouts'] = l1
-        g1['hide'] = hide1
+        left_group['layouts'] = l_left
+        left_group['hide'] = hide_left
+        right_group['layouts'] = l_right
+        right_group['hide'] = hide_right
         logger.debug(
             "[CURSOR] 跨组避让：向外分裂 left %.1f/%.1f right %.1f/%.1f",
             left_need, left_avail, right_need, right_avail,
@@ -1102,16 +1107,13 @@ class CursorManager:
         max_label_width_px = max(label_widths_pixels)
 
         # 获取 y 轴占用宽度
-        y_axis_width = 0
-        left_axis = self.pw.plot_item.getAxis('left')
-        if left_axis:
-            y_axis_width = left_axis.width()
-
         view_width_pixels = max(1, view_box.width())
         view_height_pixels = max(1, view_box.height())
 
-        # Scene 坐标边界
-        x_min_scene = view_box.mapViewToScene(QPointF(x_min, 0)).x() + y_axis_width
+        # Scene 坐标边界。mapViewToScene(x_min) 已是 ViewBox 左界（轴区在
+        # ViewBox 之外），不能再叠加左轴宽度——重复计入会让左侧可用宽
+        # 凭空缩小，跨组避让误判「预算不足」而回退。
+        x_min_scene = view_box.mapViewToScene(QPointF(x_min, 0)).x()
         x_max_scene = view_box.mapViewToScene(QPointF(x_max, 0)).x()
         y_min_scene = view_box.mapViewToScene(QPointF(0, y_min)).y()
         y_max_scene = view_box.mapViewToScene(QPointF(0, y_max)).y()
