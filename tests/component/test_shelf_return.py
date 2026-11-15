@@ -4,10 +4,15 @@ import weakref
 
 import pytest
 
+from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtWidgets import QWidget
 
 from src.ui.transfer_broadcast import build_return_message
-from src.ui.widgets.curve_shelf import CurveShelfWidget, ShelfEntry
+from src.ui.widgets.curve_shelf import (
+    CurveShelfDialog,
+    CurveShelfWidget,
+    ShelfEntry,
+)
 from src.ui.widgets.plot_widget import TransferResult
 from tests.fixtures.waits import force_delete
 
@@ -292,3 +297,172 @@ def test_build_return_message_classification():
         "未退回；原图已有 a，条目已保留；b 数据校验失败，未退回；"
         "c 的原绘图已关闭，未退回（条目已保留）；d 无原绘图来源，仍留在暂存区"
     )
+
+
+# ---------------------------------------------------------------------------
+# UI：按钮 / 右键菜单 / tooltip
+# ---------------------------------------------------------------------------
+
+
+class _FakeAction:
+    def __init__(self, text):
+        self.text = text
+        self.enabled = True
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+
+
+def _patch_menu(monkeypatch, choose_prefix: str | None = None):
+    """把 curve_shelf.QMenu 换成纯 Python 替身，返回弹出的菜单列表。"""
+    import src.ui.widgets.curve_shelf as shelf_mod
+
+    menus = []
+
+    class FakeMenu:
+        def __init__(self, parent=None):
+            self.acts = []
+            menus.append(self)
+
+        def addAction(self, text):
+            action = _FakeAction(text)
+            self.acts.append(action)
+            return action
+
+        def addSeparator(self):
+            self.acts.append(_FakeAction(""))
+
+        def exec(self, pos):
+            for action in self.acts:
+                if choose_prefix and action.text.startswith(choose_prefix):
+                    return action
+            return None
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(shelf_mod, "QMenu", FakeMenu)
+    return menus
+
+
+def _open_menu(widget, qapp):
+    widget.resize(320, 240)
+    widget.show()
+    qapp.processEvents()
+    item = widget.item(0)
+    pos = widget.visualItemRect(item).center()
+    event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, pos, widget.mapToGlobal(pos)
+    )
+    widget.contextMenuEvent(event)
+
+
+def test_return_button_tracks_selection(shelf, host, qapp):
+    page, plot = _make_plot(host)
+    dialog = CurveShelfDialog(main_window=host, parent=host)
+    dialog.show()
+    entry = _entry("a", plot)
+    dialog.shelf.add_entry(entry)
+    qapp.processEvents()
+    assert dialog.return_btn.isEnabled() is False
+
+    dialog.shelf.item(0).setSelected(True)
+    qapp.processEvents()
+    assert dialog.return_btn.isEnabled() is True
+
+    dialog.return_btn.click()
+    assert "a" in plot.curves
+    assert dialog.shelf.count() == 0
+    dialog.deleteLater()
+
+
+def test_return_button_disabled_without_origin(shelf, host, qapp):
+    dialog = CurveShelfDialog(main_window=host, parent=host)
+    dialog.show()
+    dialog.shelf.add_entry(ShelfEntry(key="k1", var_name="a"))
+    dialog.shelf.item(0).setSelected(True)
+    qapp.processEvents()
+    assert dialog.return_btn.isEnabled() is False
+    dialog.deleteLater()
+
+
+def test_menu_actions_put_return_first(shelf, host, monkeypatch, qapp):
+    page, plot = _make_plot(host)
+    shelf.add_entry(_entry("a", plot))
+    menus = _patch_menu(monkeypatch, choose_prefix=None)
+
+    _open_menu(shelf, qapp)
+
+    texts = [action.text for action in menus[0].acts]
+    assert texts[0] == "退回原图"
+    assert texts[1] == ""  # 分隔线
+    assert texts[2:] == ["删除条目", "清空暂存区"]
+
+
+def test_menu_hides_return_for_no_origin(shelf, host, monkeypatch, qapp):
+    shelf.add_entry(ShelfEntry(key="k1", var_name="a"))
+    menus = _patch_menu(monkeypatch, choose_prefix=None)
+
+    _open_menu(shelf, qapp)
+
+    assert [action.text for action in menus[0].acts] == [
+        "删除条目",
+        "清空暂存区",
+    ]
+
+
+def test_menu_return_executes_and_removes(shelf, host, monkeypatch, qapp):
+    page, plot = _make_plot(host)
+    entry = _entry("a", plot)
+    shelf.add_entry(entry)
+    _patch_menu(monkeypatch, choose_prefix="退回原图")
+
+    _open_menu(shelf, qapp)
+
+    assert "a" in plot.curves
+    assert shelf.count() == 0
+
+
+def test_mixed_selection_only_returns_returnable(shelf, host, qapp):
+    page, plot = _make_plot(host)
+    returnable = _entry("a", plot, "k1")
+    no_origin = ShelfEntry(key="k2", var_name="b")
+    shelf.add_entry(returnable)
+    shelf.add_entry(no_origin)
+    shelf.item(0).setSelected(True)
+    shelf.item(1).setSelected(True)
+    qapp.processEvents()
+
+    assert shelf.returnable_entries() == [returnable]
+    assert shelf.return_selected() == ["a"]
+    assert shelf.count() == 1
+    assert shelf.entry_for_name("b") is no_origin
+
+
+def test_tooltip_reports_return_state(shelf, host, qapp):
+    page, plot = _make_plot(host)
+    entry = _entry("a", plot)
+    shelf.add_entry(entry)
+    item = shelf.item(0)
+    assert "可退回原图" in item.toolTip()
+
+    plot.curves["a"] = object()
+    shelf._refresh_item(entry)
+    assert "原图已有该曲线，无需退回" in item.toolTip()
+
+    copy_entry = ShelfEntry(key="k2", var_name="b")
+    shelf.add_entry(copy_entry)
+    copy_item = shelf.item(1)
+    assert "复制入区：没有可退回的剪切" in copy_item.toolTip()
+
+
+def test_tooltip_shows_live_label_after_reorder(shelf, host):
+    page, plot = _make_plot(host)
+    entry = _entry("a", plot)
+    shelf.add_entry(entry)
+
+    host.pages.insert(0, FakePage(0, []))  # 原页被挤到第 2 位
+    shelf._refresh_item(entry)
+
+    tooltip = shelf.item(0).toolTip()
+    assert "当前位置：页2·图1（行内为入区快照）" in tooltip

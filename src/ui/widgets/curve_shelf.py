@@ -305,12 +305,16 @@ class CurveShelfWidget(QListWidget):
             text += SHELF_STALE_MARK
         item.setText(text)
         item.setIcon(_color_icon(entry.color))
+        tooltip = entry.style_summary()
         if entry.stale:
             item.setForeground(QColor("#9a9a9a"))
-            item.setToolTip(entry.style_summary() + "\n当前数据中不存在（不可拖出）")
+            tooltip += "\n当前数据中不存在（不可拖出）"
         else:
             item.setForeground(QColor("#1f1f1f"))
-            item.setToolTip(entry.style_summary())
+            extra = self._return_tooltip_line(entry)
+            if extra:
+                tooltip += "\n" + extra
+        item.setToolTip(tooltip)
         flags = (
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -579,6 +583,40 @@ class CurveShelfWidget(QListWidget):
             return "present"
         return ""
 
+    def returnable_entries(
+        self, entries: list[ShelfEntry] | None = None
+    ) -> list[ShelfEntry]:
+        """筛选可退回条目；None → 当前选中集。菜单/按钮共用。"""
+        candidates = self.selected_entries() if entries is None else list(entries)
+        return [
+            entry
+            for entry in candidates
+            if self._return_block_reason(entry) == ""
+        ]
+
+    def _return_tooltip_line(self, entry: ShelfEntry) -> str:
+        """条目 tooltip 的退回状态行（懒计算，选择变化时刷新）。"""
+        try:
+            reason = self._return_block_reason(entry)
+            if reason == "no_origin":
+                return "复制入区：没有可退回的剪切（删除条目即可丢弃）"
+            if reason == "closed":
+                return "原绘图已关闭，无法退回（可拖到目标图）"
+            if reason == "present":
+                return "原图已有该曲线，无需退回"
+            if reason == "stale":
+                return ""
+            plot, label = self._resolve_origin(entry)
+            if plot is None:
+                return ""
+            lines = ["可退回原图"]
+            if label and label != entry.origin_label:
+                lines.append(f"当前位置：{label}（行内为入区快照）")
+            return "\n".join(lines)
+        except Exception:
+            logger.debug("暂存条目 tooltip 计算失败", exc_info=True)
+            return ""
+
     def _scene_for(self, plot: Any) -> bool:
         """退回落地的 scene 口径：仅当前页允许写场景。
 
@@ -702,6 +740,8 @@ class CurveShelfWidget(QListWidget):
     def contextMenuEvent(self, event):
         item = self.itemAt(event.pos())
         menu = QMenu(self)
+        return_act = None
+        return_keys: list[str] = []
         delete_act = None
         delete_keys: list[str] = []
         if item is not None:
@@ -710,6 +750,24 @@ class CurveShelfWidget(QListWidget):
                 delete_keys = [k for k in self.selected_keys() if k]
             else:
                 delete_keys = [key]
+            candidates = self.selected_entries() if item.isSelected() else [
+                entry
+                for entry in (self.entry_for_key(key),)
+                if entry is not None
+            ]
+            # 菜单打开时刷新 tooltip：原图状态可能已变化（关闭/已有同名）
+            for entry in candidates:
+                self._refresh_item(entry)
+            returnable = self.returnable_entries(candidates)
+            if returnable:
+                label = (
+                    f"退回原图（{len(returnable)}）"
+                    if len(returnable) > 1
+                    else "退回原图"
+                )
+                return_act = menu.addAction(label)
+                return_keys = [entry.key for entry in returnable]
+                menu.addSeparator()
             label = (
                 f"删除所选条目（{len(delete_keys)}）"
                 if len(delete_keys) > 1
@@ -721,7 +779,9 @@ class CurveShelfWidget(QListWidget):
 
         chosen = menu.exec(event.globalPos())
         menu.deleteLater()
-        if chosen is delete_act and delete_keys:
+        if chosen is return_act and return_keys:
+            self.return_entries(return_keys)
+        elif chosen is delete_act and delete_keys:
             if len(delete_keys) > 1:
                 reply = QMessageBox.question(
                     self,
@@ -782,16 +842,22 @@ class CurveShelfDialog(QDialog):
         layout.addWidget(self.shelf, 1)
 
         btn_row = QHBoxLayout()
+        self.return_btn = QPushButton("退回原图", self)
+        self.return_btn.setToolTip("选中暂存条目后可退回它被剪出的绘图区")
+        self.return_btn.clicked.connect(self.shelf.return_selected)
         self.clear_btn = QPushButton("清空", self)
         self.clear_btn.clicked.connect(self.shelf.request_clear)
         self.close_btn = QPushButton("收起", self)
         self.close_btn.clicked.connect(self.hide)
+        btn_row.addWidget(self.return_btn)
         btn_row.addWidget(self.clear_btn)
         btn_row.addStretch(1)
         btn_row.addWidget(self.close_btn)
         layout.addLayout(btn_row)
 
         self.shelf.entries_changed.connect(self._on_entries_changed)
+        self.shelf.itemSelectionChanged.connect(self._on_selection_changed)
+        self._update_return_btn()
         self._restore_geometry()
 
     # ------------------------------------------------------------------
@@ -802,6 +868,16 @@ class CurveShelfDialog(QDialog):
         self.title_label.setText(f"暂存区 ({count})")
         self.setWindowTitle(f"曲线暂存区 ({count})")
         self.clear_btn.setEnabled(count > 0)
+        self._update_return_btn()
+
+    def _on_selection_changed(self) -> None:
+        """选中集变化：刷新 tooltip 状态行与退回按钮可用性。"""
+        for entry in self.shelf.selected_entries():
+            self.shelf._refresh_item(entry)
+        self._update_return_btn()
+
+    def _update_return_btn(self) -> None:
+        self.return_btn.setEnabled(bool(self.shelf.returnable_entries()))
 
     def showEvent(self, event):
         super().showEvent(event)
