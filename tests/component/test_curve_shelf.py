@@ -182,6 +182,9 @@ def test_legend_cut_snapshots_and_removes_source(shelf, plot_factory, qapp):
 
     qapp.processEvents()  # 源端删除 singleShot(0) 落地
     assert "a" not in src.curves
+    # 删源后台账刷新：不能停在入区瞬间的「原图已有」状态
+    assert "可退回原图" in widget.item(0).toolTip()
+    assert widget.returnable_entries([entry]) == [entry]
 
 
 def test_legend_alt_copy_keeps_source(shelf, plot_factory, qapp):

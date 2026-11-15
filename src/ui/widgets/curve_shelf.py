@@ -324,6 +324,18 @@ class CurveShelfWidget(QListWidget):
             flags &= ~Qt.ItemFlag.ItemIsDragEnabled
         item.setFlags(flags)
 
+    def refresh_entries(self, names: list[str]) -> None:
+        """按变量名刷新条目展示/状态行（延迟删源后刷新退回判定）。"""
+        changed = False
+        for name in names:
+            entry = self.entry_for_name(name)
+            if entry is None:
+                continue
+            self._refresh_item(entry)
+            changed = True
+        if changed:
+            self.entries_changed.emit()
+
     def item_for_key(self, key: str) -> QListWidgetItem | None:
         for row in range(self.count()):
             item = self.item(row)
@@ -476,6 +488,9 @@ class CurveShelfWidget(QListWidget):
 
         if not copy_mode:
             self._schedule_source_remove(source, added)
+            # 源端删除是延迟一拍：入区瞬间的 present 判定会在删除后失效，
+            # 必须再刷一次 tooltip/按钮（否则一直显示「原图已有」）
+            self._schedule_post_cut_refresh(added)
 
         event.acceptProposedAction()
         self._announce_shelf_intake(
@@ -511,6 +526,16 @@ class CurveShelfWidget(QListWidget):
 
         for name in names:
             QTimer.singleShot(0, _make_remove(source, name))
+
+    def _schedule_post_cut_refresh(self, names: list[str]) -> None:
+        """延迟删源后刷新状态行（排在所有删除 singleShot 之后）。"""
+
+        def _refresh():
+            if not widget_alive(self):
+                return
+            self.refresh_entries(list(names))
+
+        QTimer.singleShot(0, _refresh)
 
     def _announce_shelf_intake(
         self, *, cut: bool, names: list[str], origin: str, updated: int

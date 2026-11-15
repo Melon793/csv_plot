@@ -464,6 +464,8 @@ def test_batch_menu_shelf_copy(three_curves, monkeypatch):
     assert dialog.shown == 1
     assert any("已复制 a、b" in message for message in messages)
     assert pw._legend_selection == {"a", "b"}  # 复制不清选择集
+    # 复制入区不记来源：原图仍有曲线，退回无事可做
+    assert {entry.origin_plot() for entry in dialog.shelf.entries} == {None}
 
 
 def test_batch_menu_shelf_cut_removes_curves(three_curves, monkeypatch, qapp):
@@ -480,6 +482,8 @@ def test_batch_menu_shelf_cut_removes_curves(three_curves, monkeypatch, qapp):
     assert set(pw.curves) == {"c"}
     assert any("已剪切 a、b" in message for message in messages)
     assert pw._legend_selection == set()
+    # 菜单剪切同样记来源，否则退回原图入口对这条主路径失效
+    assert {entry.origin_plot() for entry in dialog.shelf.entries} == {pw}
 
 
 def test_batch_menu_shelf_rejected_while_loading(three_curves):

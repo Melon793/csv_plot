@@ -1375,7 +1375,13 @@ class LegendTextBrowser(QTextBrowser):
             if ci is None:
                 continue
             dialog.shelf.add_entry(
-                ShelfEntry.from_curve_info(name, ci, origin_label=origin)
+                ShelfEntry.from_curve_info(
+                    name,
+                    ci,
+                    origin_label=origin,
+                    # 菜单剪切同样删源：必须记来源，否则退回入口失效
+                    origin_plot=pw if cut else None,
+                )
             )
             added.append(name)
         if not added:
@@ -1399,6 +1405,15 @@ class LegendTextBrowser(QTextBrowser):
 
             for name in added:
                 QTimer.singleShot(0, _make_remove(pw, name))
+
+            def _refresh_shelf_after_cut():
+                # 排在所有删源 singleShot 之后：入区瞬间的 present 判定失效
+                try:
+                    dialog.shelf.refresh_entries(list(added))
+                except RuntimeError:
+                    logger.debug("批量剪切入区：托盘已销毁，跳过状态刷新")
+
+            QTimer.singleShot(0, _refresh_shelf_after_cut)
             self.clear_legend_selection()
         broadcast_transfer(
             main_window,

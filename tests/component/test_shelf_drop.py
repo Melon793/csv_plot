@@ -266,7 +266,12 @@ def test_land_entries_scene_false_skips_scene_writes(plot_factory, qapp, monkeyp
     pw = plot_factory()
     page = ScenePage()
     pw.page = page
-    pw.pinned_x_values = [999.0]
+    # 构造真实 pinned 场景：vline 在 40，退回后 bounds 收窄到 [1,3]。
+    # 若静默 setBounds 没做信号阻断，钳制值会写回 pinned，本断言即失败。
+    pw.is_cursor_pinned = True
+    pw.vline.setBounds([1.0, 50.0])
+    pw.vline.setValue(40.0)
+    pw.pinned_x_values = [40.0]
 
     events: list[str] = []
     monkeypatch.setattr(
@@ -291,10 +296,27 @@ def test_land_entries_scene_false_skips_scene_writes(plot_factory, qapp, monkeyp
 
     assert result.added == ["a"]
     assert pw.curves["a"].color == "#123456"
-    assert pw.pinned_x_values == [999.0]
+    assert pw.pinned_x_values == [40.0]
     assert events == []
     assert refresh_calls == [{"cursor": False}]
     assert page._scene_dirty is True
+
+
+def test_land_entries_active_single_keeps_single_path(plot_factory, monkeypatch):
+    """活动页单条退回：不得被强制进批量收尾（保持既有单条语义）。"""
+    pw = plot_factory()
+    pw.page = ScenePage()
+    finalized: list[dict] = []
+    monkeypatch.setattr(
+        pw._multi_curve_manager,
+        "_finalize_batch_add",
+        lambda **kw: finalized.append(kw),
+    )
+    result = pw.land_shelf_entries(
+        [ShelfEntry(key="k1", var_name="a")], batch=False, scene=True
+    )
+    assert result.added == ["a"]
+    assert finalized == []
 
 
 def test_land_entries_scene_false_forces_batch(plot_factory, monkeypatch):
