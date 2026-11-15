@@ -44,6 +44,8 @@ class LabelLayout:
     y_pos: float      # 数据交点 y 坐标
     y_value: str      # 标签文本
     color: str        # 标签颜色
+    pinned: bool = False  # 交点 y 出界：标签吸附到视口边缘
+    up: bool = False      # pinned 方向：交点在上方/下方视口外
 
 
 class CursorManager:
@@ -54,6 +56,10 @@ class CursorManager:
     LABEL_COL_GAP = 15            # 多列时列与列之间的间距
     LABEL_VERTICAL_GAP = 4        # 同一列内标签之间的垂直间距
     LABEL_Y_OFFSET = 10           # 标签底部到交点的垂直距离（向上偏移）
+
+    # 形态开关：改常量后需重新构建/分发，非运行期开关
+    CURSOR_EDGE_PIN = True         # Y 出界交点的标签吸附到视口边缘（▲/▼ 虚线）
+    CURSOR_LEADER_ELBOW = True     # 引导线改 elbow 正交折线
 
     def __init__(self, multi_curve_manager: MultiCurveManager):
         """初始化光标管理器，绑定到 MultiCurveManager 以获取依赖链"""
@@ -610,6 +616,7 @@ class CursorManager:
             plot_scene = pw.plot_item.scene()
 
             cursor_values = []
+            circle_index = 0  # 圆点池独立计数器（pinned 项不建圆点，不占索引）
             (x_min, x_max), (y_min, y_max) = view_box.viewRange()
 
             curves_to_process = []
@@ -674,7 +681,10 @@ class CursorManager:
                     x_actual = x_data[idx]
                     if np.isnan(x_actual) or np.isnan(y_val):
                         continue
-                    if y_val < y_min or y_val > y_max:
+                    # Y 出界：circle 仍不画（维持现状）；开启边缘吸附时标签
+                    # 仍入列并标记 pinned，ideal 在布局阶段改写为视口边缘。
+                    y_pinned = y_val < y_min or y_val > y_max
+                    if y_pinned and not self.CURSOR_EDGE_PIN:
                         continue
 
                     if y_format == "enum":
@@ -695,10 +705,16 @@ class CursorManager:
                             "y_value": y_str,
                             "color": color,
                             "cursor_id": cursor_id,  # 标识属于哪个 cursor
+                            "pinned": y_pinned,      # 交点 y 出界（标签吸附边缘）
+                            "up": y_val > y_max,     # pinned 方向：上方出界
                         }
                     )
 
-                    circle = self._get_circle_from_pool(len(cursor_values) - 1)
+                    if y_pinned:
+                        continue  # 出界交点不建圆点，仅保留边缘标签
+
+                    circle = self._get_circle_from_pool(circle_index)
+                    circle_index += 1  # 独立计数器：pinned 项不占池索引
                     circle_scene = circle.scene()
                     if circle_scene != plot_scene:
                         if circle_scene is not None:
@@ -870,7 +886,8 @@ class CursorManager:
         y 方向不做死区过滤：交点靠上/下边缘时标签由 _layout_column 的
         边界 clamp 吸附到边缘内侧完整显示（设计原则：交点在视图内时
         标签必须可见，宁可在视口内重叠也不画出视口消失）；y 出界的
-        交点已在上游 update_cursor_label 过滤（circle 与标签都不显示）。
+        交点在开启 CURSOR_EDGE_PIN 时同样入列并标记 pinned，ideal 由
+        列布局改写为视口上/下边缘（circle 仍不画）。
         """
         visible = [
             v for v in cursor_values
@@ -909,11 +926,14 @@ class CursorManager:
         if not visible_labels:
             return [], set()
 
-        # 计算标签宽度
+        # 计算标签宽度（pinned 项按带 ▲/▼ 前缀的最终文本测量，
+        # 否则边缘列宽不足会被 elide）
         max_label_width_pixels = 200  # 最大标签宽度（像素）
         label_widths_pixels = []
         for item in visible_labels:
-            text_width = font_metrics.horizontalAdvance(item['y_value'])
+            text_width = font_metrics.horizontalAdvance(
+                self._label_display_text(item)
+            )
             w = min(text_width + 12, max_label_width_pixels)
             label_widths_pixels.append(w)
 
@@ -1114,6 +1134,31 @@ class CursorManager:
             return (col_y_min + col_y_max) / 2
         return max(lo, min(hi, target_y))
 
+    @staticmethod
+    def _label_display_text(item: dict) -> str:
+        """标签最终显示文本：pinned 项带 ▲/▼ 方向前缀。"""
+        if item.get("pinned"):
+            return ("▲ " if item.get("up") else "▼ ") + item["y_value"]
+        return item["y_value"]
+
+    def _ideal_label_scene_y(
+        self,
+        label: dict,
+        view_box: Any,
+        col_y_min: float,
+        col_y_max: float,
+        half_height: float,
+    ) -> float:
+        """标签理想中心 y：正常项贴交点上方，pinned 项吸附视口边缘内侧。"""
+        if label.get("pinned"):
+            if label.get("up"):
+                return col_y_min + half_height + 2
+            return col_y_max - half_height - 2
+        scene_pos = view_box.mapViewToScene(
+            QPointF(label["x_pos"], label["y_pos"])
+        )
+        return scene_pos.y() - self.LABEL_Y_OFFSET
+
     def _layout_column(
         self,
         labels: list,
@@ -1131,11 +1176,13 @@ class CursorManager:
         half_height = label_height_pixels / 2
         view_box = self.pw.plot_item.getViewBox()
 
-        # 单标签：放在交点上方（统一向上偏移 LABEL_Y_OFFSET）
+        # 单标签：放在交点上方（统一向上偏移 LABEL_Y_OFFSET）；
+        # pinned 项 ideal 吸附边缘内侧
         if n == 1:
             label = labels[0]
-            scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
-            target_y = scene_pos.y() - self.LABEL_Y_OFFSET  # 向上偏移
+            target_y = self._ideal_label_scene_y(
+                label, view_box, col_y_min, col_y_max, half_height
+            )
             target_y = self._clamp_label_y(
                 target_y, col_y_min, col_y_max, half_height
             )
@@ -1144,14 +1191,18 @@ class CursorManager:
                 index=label['_orig_idx'],
                 x_pos=label['x_pos'], y_pos=label['y_pos'],
                 y_value=label['y_value'], color=label['color'],
+                pinned=label.get('pinned', False), up=label.get('up', False),
             )]
 
         # 多标签：PAV 等渗回归直解（最小位移 + 最小间距）。
         # 标签已按 y_pos 降序（scene y 升序），ideal 即交点上方 LABEL_Y_OFFSET。
         items = []
         for label in labels:
-            scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
-            items.append({'ideal': scene_pos.y() - self.LABEL_Y_OFFSET})
+            items.append({
+                'ideal': self._ideal_label_scene_y(
+                    label, view_box, col_y_min, col_y_max, half_height
+                )
+            })
         stacked_y = self._pav_stack(
             items, col_y_min, col_y_max, label_height_pixels, gap_pixels
         )
@@ -1162,6 +1213,7 @@ class CursorManager:
                 index=label['_orig_idx'],
                 x_pos=label['x_pos'], y_pos=label['y_pos'],
                 y_value=label['y_value'], color=label['color'],
+                pinned=label.get('pinned', False), up=label.get('up', False),
             )
             for i, label in enumerate(labels)
         ]
@@ -1251,8 +1303,11 @@ class CursorManager:
                     text_scene.removeItem(text_item)
                 pw.plot_item.addItem(text_item, ignoreBounds=True)
 
-            # 标签文本截断（防止过长文本导致列宽计算失准）
+            # 标签文本截断（防止过长文本导致列宽计算失准）。
+            # pinned 项按带 ▲/▼ 前缀的最终文本测宽，与布局阶段同口径。
             display_text = layout.y_value
+            if layout.pinned:
+                display_text = ("▲ " if layout.up else "▼ ") + display_text
             text_width = font_metrics.horizontalAdvance(display_text) + 12
             if text_width > MAX_LABEL_WIDTH_PIXELS:
                 display_text = font_metrics.elidedText(
@@ -1273,8 +1328,11 @@ class CursorManager:
             # 身份色：左侧 4px 全色条 + 90α 白底 + 曲线色描边（A1' 调整版）。
             # 色条不透明全色承担身份；白底 90α(≈35% 白) 让曲线/网格透上来；
             # 描边用曲线色 1.5px（main 原色），把文本框从白底里勾出来。
-            if (not hasattr(text_item, '_cached_chip_color')
-                    or text_item._cached_chip_color != layout.color):
+            # pinned 项描边改虚线；缓存键必须并入 pinned，否则颜色不变时
+            # 虚线/实线切换不会生效。
+            chip_key = (layout.color, layout.pinned)
+            if (not hasattr(text_item, '_cached_chip_key')
+                    or text_item._cached_chip_key != chip_key):
                 c = pg.mkColor(layout.color)
                 white = pg.mkColor("#FFFFFF")
                 white.setAlpha(90)
@@ -1284,9 +1342,11 @@ class CursorManager:
                 grad.setColorAt(0.80, white)
                 text_item.fill = QBrush(grad)
                 text_item.setColor(pg.mkColor("#000000"))
-                text_item.border = pg.mkPen(c, width=1.5)
-                text_item._cached_chip_color = layout.color
+                border_style = Qt.DashLine if layout.pinned else Qt.SolidLine
+                text_item.border = pg.mkPen(c, width=1.5, style=border_style)
+                text_item._cached_chip_key = chip_key
 
+            text_item.setOpacity(0.8 if layout.pinned else 1.0)
             text_item.setVisible(True)
 
             # 将 scene 坐标转回数据坐标（TextItem 添加到 plot_item 时使用数据坐标）
@@ -1297,7 +1357,8 @@ class CursorManager:
             text_item.setZValue(201)
             pw.multi_cursor_items.append(text_item)
 
-            # 引导线：交点 → 标签左缘（A2）。数据坐标，随视图缩放与标签同动。
+            # 引导线：交点 → 标签（A2）。数据坐标，随视图缩放与标签同动。
+            # pinned 项贴边显示，不画引导线（避免横穿视口的噪音线）。
             leader = self._get_leader_from_pool(layout.index)
             leader_scene = leader.scene()
             if leader_scene != plot_scene:
@@ -1306,17 +1367,33 @@ class CursorManager:
                 pw.plot_item.addItem(leader, ignoreBounds=True)
             p0 = view_box.mapViewToScene(QPointF(layout.x_pos, layout.y_pos))
             p1 = QPointF(layout.layout_x, layout.layout_y)
-            if (p1 - p0).manhattanLength() > 8:
-                d0 = view_box.mapSceneToView(p0)
-                d1 = view_box.mapSceneToView(p1)
-                leader.setData([d0.x(), d1.x()], [d0.y(), d1.y()])
+            if not layout.pinned and (p1 - p0).manhattanLength() > 8:
+                if self.CURSOR_LEADER_ELBOW:
+                    # 四点正交折线：p0 → (mx, p0.y) → (mx, p1.y) → p1。
+                    # 标签在右：mx = 左缘−6；标签在左：mx = 右缘+6。
+                    if layout.layout_x >= p0.x():
+                        mx = layout.layout_x - 6
+                    else:
+                        mx = layout.layout_x + text_width + 6
+                    scene_pts = [
+                        p0,
+                        QPointF(mx, p0.y()),
+                        QPointF(mx, p1.y()),
+                        p1,
+                    ]
+                else:
+                    scene_pts = [p0, p1]
+                view_pts = [view_box.mapSceneToView(pt) for pt in scene_pts]
+                leader.setData(
+                    [pt.x() for pt in view_pts], [pt.y() for pt in view_pts]
+                )
                 lc = pg.mkColor(layout.color)
                 lc.setAlpha(150)
                 leader.setPen(pg.mkPen(lc, width=1))
                 leader.setVisible(True)
                 pw.multi_cursor_items.append(leader)
             else:
-                leader.setVisible(False)  # 贴住交点时不画，避免噪音
+                leader.setVisible(False)  # 贴住交点或 pinned 时不画，避免噪音
 
     # ========================================================================
 
