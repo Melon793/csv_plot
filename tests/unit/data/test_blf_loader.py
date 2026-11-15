@@ -26,7 +26,7 @@ import pytest
 
 import src.data.blf_loader as blf_module
 from src.core.config import is_grouped_loader
-from src.data.blf_loader import BLFLazyLoader
+from src.data.blf_loader import BLFLazyLoader, prescan_blf_frames
 from src.data.metadata import UNKNOWN
 from tests.fixtures import bus_data_access as bd
 from tests.fixtures.data_factory import (
@@ -79,7 +79,7 @@ def _var_on_channel(loader, channel: int, needle: str = "EngineSpeed") -> str:
         if needle not in name:
             continue
         gi = loader.get_var_group_index(name)
-        if loader.get_group_label(gi).startswith(f"Ch{channel} "):
+        if loader.get_group_label(gi).startswith(f"CAN{channel + 1} "):
             return name
     raise AssertionError(f"通道 {channel} 上没有 {needle}: {loader.var_names}")
 
@@ -235,7 +235,7 @@ def test_single_frame_bucket_does_not_make_a_zero_length_range(tmp_path):
 def test_groups_are_channels_times_ids_and_labels_read_well(loader_and_paths):
     loader, _blf, dbc = loader_and_paths
     labels = [loader.get_group_label(gi) for gi in range(loader.group_count)]
-    assert any(lbl.startswith("Ch0 0x1A0 EngineData (G") for lbl in labels), labels
+    assert any(lbl.startswith("CAN1 0x1A0 EngineData (G") for lbl in labels), labels
     # 未匹配的 0x7FF 桶不生成变量 ⇒ 不在 group_count 里（否则 UI 出现空 tab）
     assert loader.group_count == len(loader.groups)
     for group in loader.groups:
@@ -253,7 +253,7 @@ def test_same_id_on_two_buses_creates_two_buckets(dual_bus_loader):
     ]
     assert len(engine_groups) == 2
     channels = {loader.get_group_label(gi).split()[0] for gi in engine_groups}
-    assert channels == {"Ch0", "Ch1"}
+    assert channels == {"CAN1", "CAN2"}
 
 
 def test_three_tier_renaming(dual_bus_loader):
@@ -335,7 +335,7 @@ def test_bound_channel_missing_id_becomes_unmatched_not_fallback(tmp_path):
         engine_on_ch1 = [
             n for n in loader.var_names
             if "EngineSpeed" in n
-            and loader.get_group_label(loader.get_var_group_index(n)).startswith("Ch1 ")
+            and loader.get_group_label(loader.get_var_group_index(n)).startswith("CAN2 ")
         ]
         assert engine_on_ch1 == [], engine_on_ch1
     finally:
@@ -438,12 +438,30 @@ def test_error_and_remote_frames_produce_no_samples(tmp_path):
     loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
     try:
         assert loader.total_messages == wanted
+        # 错误帧不产生采样点，但必须计数（可识别错误帧的下界）
+        assert sum(loader.error_frames.values()) == sum(
+            1 for r in raw if r.get("error")
+        )
         all_ids = {
             loader.get_group_label(gi) for gi in range(loader.group_count)
         }
         assert not any("0x5" in lbl.split()[1] for lbl in all_ids), all_ids
     finally:
         loader.close()
+
+
+def test_prescan_reports_error_frame_counts(tmp_path):
+    blf, _dbc = write_blf_pair(
+        tmp_path, n=30, buses=(0,), with_error=True
+    )
+    raw = make_blf_messages(n=30, buses=(0,), with_error=True)
+    expected = sum(1 for r in raw if r.get("error"))
+
+    errors: dict = {}
+    prescan_blf_frames(str(blf), error_counts=errors)
+
+    assert sum(errors.values()) == expected
+    assert all(ch >= 0 for ch in errors)
 
 
 # ---------------------------------------------------------------------------

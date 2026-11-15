@@ -317,6 +317,14 @@ BLF_TEXT_FILE_UPDATED = (
 )
 BLF_TEXT_SIDECAR_FOUND = "发现日志旁配置 {name}，已作为本次预选（导入前可修改）。"
 BLF_TEXT_SIDECAR_ISSUES = "旁车配置存在问题：{issues}"
+BLF_TEXT_POOL_EMPTY = (
+    "没有可用的 CAN 数据库（库池为空），未生成任何信号。\n"
+    "请添加 DBC / ARXML 后重试。"
+)
+BLF_TEXT_BINDING_EXCLUDED = (
+    "通道绑定排除了全部报文：池里有这些 ID 的定义，但当前通道绑定的库都不包含它们。\n"
+    "这不是「库里没有信号」——可在选库框点「全部使用全局库」，或修正各通道的绑定。"
+)
 BLF_TEXT_PRESCAN_SKIPPED = (
     f"BLF 文件超过 {BLF_PRESCAN_MAX_BYTES // (1024 * 1024)} MB，"
     "已跳过匹配度预扫（「命中」列不显示）；不影响导入，数据库仍会完整解码。"

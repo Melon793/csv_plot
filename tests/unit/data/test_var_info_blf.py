@@ -150,7 +150,7 @@ def test_can_section_values_for_an_intel_signal(blf_loader):
     )
     assert rows["报文名"] == "EngineData"
     assert rows["CAN ID"] == "0x1A0"
-    assert rows["总线通道"] == "0"
+    assert rows["总线通道"] == "CAN1"
     assert rows["DLC (字节)"] == "8"
     assert rows["起始位 (DBC)"] == "0"
     assert rows["位长"] == "16 bit"

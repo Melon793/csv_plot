@@ -33,6 +33,8 @@ from src.core.config import (
     BLF_TEXT_FILE_UPDATED,
     BLF_TEXT_NO_DB_SELECTED,
     BLF_TEXT_NO_SIGNAL,
+    BLF_TEXT_BINDING_EXCLUDED,
+    BLF_TEXT_POOL_EMPTY,
     BLF_TEXT_SIDECAR_FOUND,
     BLF_TEXT_SIDECAR_ISSUES,
     BLF_TEXT_TRUNCATED,
@@ -1500,6 +1502,15 @@ class FileLoaderManager(MainWindowBaseManager):
             file_path, initial_cfg=base_cfg, notice=extra_notice
         )
 
+    @staticmethod
+    def _no_signal_text(reason: str | None) -> str:
+        """0 信号三文案（评审 F18）：别让绑定问题伪装成「库里没有信号」。"""
+        if reason == "pool_empty":
+            return BLF_TEXT_POOL_EMPTY
+        if reason == "binding_excluded_all":
+            return BLF_TEXT_BINDING_EXCLUDED
+        return BLF_TEXT_NO_SIGNAL
+
     def _initial_cfg_for_new_import(self, file_path: str, remembered: CanBindings):
         """B/C 的预选来源：旁车 YAML > 按文件记忆 > 全局记忆。
 
@@ -1556,12 +1567,12 @@ class FileLoaderManager(MainWindowBaseManager):
         )
 
     def _ask_can_databases(self, file_path: str, initial_cfg: CanBindings | None = None,
-                           missing=None, notice: str = ""):
+                           missing=None, notice: str = "",
+                           known_channels=None):
         """弹 §5.2 的选择对话框。取消/未选中任何可用库 → ``None``。
 
-        笔 2–3 的过渡语义：选项卡里还改不了绑定，因此返回的配置 =
-        **新池 ∩ 原绑定**（``restrict_to_pool``）：用户移除某个被绑定的库时
-        对应绑定随之删除，绑定变空的通道退回「用全局池」，不留死引用。
+        绑定与别名由对话框直接编辑并随 ``get_result_config()`` 返回；
+        ``known_channels`` 供「预扫被跳过 / 重选」场景列出通道（loader 已扫桶）。
         """
         from src.core.settings import AppSettings
         from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
@@ -1572,6 +1583,8 @@ class FileLoaderManager(MainWindowBaseManager):
             data_file=file_path,
             initial_paths=base.pool_list,
             missing_paths=list(missing or []),
+            initial_cfg=base,
+            known_channels=list(known_channels or []),
         )
         if notice:
             dialog.set_notice(notice)
@@ -1582,7 +1595,7 @@ class FileLoaderManager(MainWindowBaseManager):
         if not paths:
             logger.info(BLF_TEXT_NO_DB_SELECTED)
             return None
-        cfg = base.restrict_to_pool(paths)
+        cfg = dialog.get_result_config()
         # 记忆写入时机：「导入」成功后才写；取消不写（§5.2）。此处先记住列表，
         # 扫描失败（异常路径）时不会回滚 —— 下次导入仍能在对话框里看到它们。
         # 复选框现在是「记住此列表，下次自动预选」：不勾 = 这一次的选择不入
@@ -1858,7 +1871,10 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.load_btn.setEnabled(True)
             self._reload_in_progress = False
             self.mw.reload_btn.setEnabled(True)
-            QMessageBox.warning(self.mw, "未生成任何信号", BLF_TEXT_NO_SIGNAL)
+            QMessageBox.warning(
+                self.mw, "未生成任何信号",
+                self._no_signal_text(getattr(new_loader, "zero_reason", None)),
+            )
             self._blf_force_dialog = True
             self._blf_preset_cfg = preset_cfg
             self._schedule_delayed(0, lambda: self._restart_blf_import(file_path))
@@ -2028,6 +2044,11 @@ class FileLoaderManager(MainWindowBaseManager):
                 )
                 seg_text = f"CAN：{len(db_names)} 库 · {database.signal_count} 信号"
         # tooltip 给 banner 两行全文（含库名清单），段被宽度收纳时仍有出口
+        errors = sum((getattr(loader, "error_frames", None) or {}).values())
+        if errors:
+            # 错误帧不产生采样点，但必须让人知道「日志里有错误帧」——
+            # 总线质量问题的第一现场证据，别让它只落在 debug 日志里。
+            seg_text = f"{seg_text} · 错误帧 {errors:,}"
         self.mw._update_can_segment(seg_text, tip=banner.info_label.text())
 
     def reselect_can_database(self) -> None:
@@ -2042,7 +2063,11 @@ class FileLoaderManager(MainWindowBaseManager):
             by_channel=getattr(loader, "bindings", None),
             alias=getattr(loader, "channel_aliases", None),
         )
-        cfg = self._ask_can_databases(loader.path, initial_cfg=current)
+        cfg = self._ask_can_databases(
+            loader.path,
+            initial_cfg=current,
+            known_channels=getattr(loader, "channel_stats", None),
+        )
         if cfg is None:
             return
         # 解析大库时主线程确实会卡住（Qt 也来不及重绘）；至少让光标先变成
@@ -2075,11 +2100,15 @@ class FileLoaderManager(MainWindowBaseManager):
             logger.info("重选 CAN 数据库 0 命中，已回滚到原数据库")
             QMessageBox.warning(
                 self.mw, "未生成任何信号",
-                BLF_TEXT_NO_SIGNAL + "\n已保留原数据库与已绘制曲线。",
+                self._no_signal_text(stats.get("zero_reason"))
+                + "\n已保留原数据库与已绘制曲线。",
             )
             return
         if not stats.get("var_count"):
-            QMessageBox.warning(self.mw, "未生成任何信号", BLF_TEXT_NO_SIGNAL)
+            QMessageBox.warning(
+                self.mw, "未生成任何信号",
+                self._no_signal_text(stats.get("zero_reason")),
+            )
         for err in loader.load_errors:
             logger.warning("CAN 数据库: %s", err)
         # 换库后同名变量可能指向完全不同的信号，统计缓存必须整体作废。

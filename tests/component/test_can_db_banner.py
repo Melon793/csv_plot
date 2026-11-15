@@ -409,7 +409,7 @@ def test_the_detail_table_prints_the_frame_format_the_data_layer_reported(qapp):
     assert cells == {"0x123", "0x123E", "0x7FF"}
     # 排序按帧数降位（第三列不再是计数）
     assert dlg.table.item(0, 2).text() == "9"
-    assert dlg.table.item(0, 0).text() == "1"
+    assert dlg.table.item(0, 0).text() == "CAN2"   # 1 基显示（内部通道 1）
     assert dlg.table.item(0, 3).text() == "60.00%"
 
 

@@ -21,16 +21,20 @@ import os
 import threading
 from html import escape
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QMimeData, Qt, QTimer
+from PySide6.QtGui import QColor, QDrag
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
+    QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -50,6 +54,14 @@ from src.core.config import (
     BLF_TEXT_PRESCAN_SKIPPED,
 )
 from src.core.settings import AppSettings
+from src.data.can_bindings import (
+    CanBindings,
+    format_bus_channel,
+    is_dir_writable,
+    load_yaml,
+    save_yaml,
+    sidecar_config_path,
+)
 from src.data.can_database import SUPPORTED_DB_EXTS, CanDatabaseSet, import_type_for
 from src.data.blf_loader import prescan_blf_frames
 from src.core.gc_guard import no_autogc
@@ -109,6 +121,102 @@ class _Row:
         return _STATUS_ERROR[0].format(reason=reason[:48]), _STATUS_ERROR[1]
 
 
+_DB_MIME = "application/x-canview-db"
+
+
+class _PoolTable(QTableWidget):
+    """库池表：拖行调序 + 拖到通道表绑定。
+
+    外部文件拖入仍由对话框级 ``dropEvent`` 处理：本表只接受自定义 MIME，
+    其余一律 ignore，事件冒泡到对话框，原有「拖 .dbc 进来」能力不变。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_row = -1
+        #: (src_row, dst_row) -> None，由对话框注入
+        self.on_move = None
+
+    def startDrag(self, supported_actions):  # noqa: N802 - Qt 命名
+        row = self.currentRow()
+        if row < 0 or self.on_move is None:
+            return
+        item = self.item(row, 1)
+        path = item.toolTip() if item is not None else ""
+        if not path:
+            return
+        self._drag_row = row
+        mime = QMimeData()
+        mime.setData(_DB_MIME, path.encode("utf-8"))
+        mime.setText(path)
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt 命名
+        if event.mimeData().hasFormat(_DB_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802 - Qt 命名
+        if event.mimeData().hasFormat(_DB_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802 - Qt 命名
+        if (not event.mimeData().hasFormat(_DB_MIME)
+                or event.source() is not self):
+            event.ignore()
+            return
+        row = self.rowAt(int(event.position().toPoint().y()))
+        if row < 0:
+            row = self.rowCount() - 1
+        if self.on_move is not None and self._drag_row >= 0:
+            self.on_move(self._drag_row, row)
+        self._drag_row = -1
+        event.acceptProposedAction()
+
+
+class _ChannelTable(QTableWidget):
+    """通道绑定表：接受从库池拖来的库行（drop = 加入该通道绑定）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        #: (0 基通道, 库路径) -> None，由对话框注入
+        self.on_bind = None
+
+    def _accepts(self, event) -> bool:
+        return event.mimeData().hasFormat(_DB_MIME) and self.on_bind is not None
+
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt 命名
+        if self._accepts(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802 - Qt 命名
+        if self._accepts(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):  # noqa: N802 - Qt 命名
+        if not self._accepts(event):
+            event.ignore()
+            return
+        row = self.rowAt(int(event.position().toPoint().y()))
+        item = self.item(row, 0) if row >= 0 else None
+        channel = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if channel is None:
+            event.ignore()
+            return
+        path = bytes(event.mimeData().data(_DB_MIME)).decode("utf-8")
+        self.on_bind(int(channel), path)
+        event.acceptProposedAction()
+
+
 class CanDatabaseSelectorDialog(QDialog):
     """模态选择对话框。``exec()`` 返回 Accepted 后用 :meth:`get_selected_paths`。"""
 
@@ -120,6 +228,8 @@ class CanDatabaseSelectorDialog(QDialog):
         initial_paths: list[str] | None = None,
         missing_paths: list[str] | None = None,
         estimated_messages: int | None = None,
+        initial_cfg: CanBindings | None = None,
+        known_channels: list[tuple[int, int]] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("指定 CAN 数据库（DBC / ARXML）")
@@ -131,6 +241,17 @@ class CanDatabaseSelectorDialog(QDialog):
         self._missing = {normalize_input_path(p) for p in (missing_paths or [])}
         self._data_file = data_file
         self._estimated_messages = estimated_messages
+
+        # ---- 通道绑定（0 基通道 → 库路径子集 / 别名）---------------------
+        cfg = initial_cfg or CanBindings.empty()
+        self._bindings: dict[int, tuple[str, ...]] = dict(cfg.by_channel)
+        self._aliases: dict[int, str] = dict(cfg.alias)
+        #: 重选/抽屉场景由 loader 已扫桶给出（预扫被跳过时也能列通道）
+        self._known_channels: dict[int, int] = dict(known_channels or [])
+        #: 首次导入 >128MB（预扫跳过）时用户手工补的通道号
+        self._manual_channels: list[int] = []
+        #: 预扫阶段的错误帧计数（0 基通道 → 帧数），用于通道行提示
+        self._prescan_errors: dict[int, int] = {}
 
         # ---- 后台预扫（方案 §5.2 命中列）---------------------------------
         # BLF 没有索引，报文 ID 集合只有完整读一遍才知道；预扫在后台线程跑
@@ -146,11 +267,14 @@ class CanDatabaseSelectorDialog(QDialog):
         self._prescan_timer: QTimer | None = None
         # 用户动过行（增删/排序）就不许再自动排序，尊重用户的手工顺序
         self._user_edited = False
+        #: 用户手动折叠过通道绑定分组时，重建不再覆盖其选择（D1）
+        self._bind_user_toggled = False
 
         self._build_ui()
         if initial_paths:
             self.add_paths(initial_paths)
         self._refresh_buttons()
+        self._rebuild_channel_table()
         self._start_prescan()
 
     # ------------------------------------------------------------------
@@ -194,14 +318,18 @@ class CanDatabaseSelectorDialog(QDialog):
         # QObject 包装器拿到本线程析构（详见 src/core/gc_guard.py）。线程是 daemon
         # 且关窗只置取消位，窗口若漏，分配会跨用例继续。
         with no_autogc():
+            errors: dict[int, int] = {}
             try:
                 counts = prescan_blf_frames(
-                    self._data_file, should_cancel=lambda: self._prescan_cancel
+                    self._data_file,
+                    should_cancel=lambda: self._prescan_cancel,
+                    error_counts=errors,
                 )
             except Exception as e:  # 文件坏 / 无报文 / python-can 缺失：命中列退化为「—」
                 logger.info("BLF 预扫未完成，命中列不可用: %s", e)
                 self._prescan_box.append(None)
             else:
+                self._prescan_errors = errors
                 self._prescan_box.append(counts)
 
     def _poll_prescan(self) -> None:
@@ -225,6 +353,7 @@ class CanDatabaseSelectorDialog(QDialog):
             self._prescan_counts = counts
             self._prescan_total = sum(counts.values())
         self._apply_prescan_results()
+        self._rebuild_channel_table()
 
     def _hit_frames_of(self, row: _Row) -> int:
         """该库能解出的帧数：预扫计数按 (can_id, extended) 归并后查库内帧定义。
@@ -299,7 +428,8 @@ class CanDatabaseSelectorDialog(QDialog):
         self.notice.setVisible(False)
         layout.addWidget(self.notice)
 
-        self.table = QTableWidget(0, len(_COLUMNS))
+        self.table = _PoolTable(self)
+        self.table.setColumnCount(len(_COLUMNS))
         self.table.setHorizontalHeaderLabels(list(_COLUMNS))
         self.table.setAlternatingRowColors(True)
         # 只有备注列可编辑：QTableWidget 的 edit trigger 是表级的，但 item
@@ -322,6 +452,11 @@ class CanDatabaseSelectorDialog(QDialog):
         self.table.setColumnWidth(5, BLF_DB_COL_WIDTHS["note"])
         self.table.setColumnWidth(6, BLF_DB_COL_WIDTHS["status"])
         self.table.setMinimumHeight(180)
+        # 拖拽：行内调序（与 ↑/↓ 按钮共用 _move_row）+ 拖到通道行绑定
+        self.table.setDragEnabled(True)
+        self.table.setAcceptDrops(True)
+        self.table.setDragDropMode(QTableWidget.DragDropMode.DragDrop)
+        self.table.on_move = self._move_row
         self.table.currentCellChanged.connect(lambda *_: self._refresh_buttons())
         self.table.itemChanged.connect(self._on_note_changed)
         layout.addWidget(self.table, 1)
@@ -343,13 +478,90 @@ class CanDatabaseSelectorDialog(QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        hint = QLabel("ℹ 同一报文 ID 在多库中重复时，排在上面的库生效。")
+        hint = QLabel(
+            "ℹ 同一报文 ID 在多库中重复时，排在上面的库生效。"
+            "拖拽：库行上下拖 = 调优先级；拖到下方通道行 = 绑定。"
+        )
         hint.setStyleSheet("color: #666;")
+        hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        self.remember_check = QCheckBox("记住此列表，下次自动预选")
+        # ---- 通道绑定分组（D1：多通道默认展开，单通道默认折叠）----------
+        self.bind_box = QGroupBox("通道绑定")
+        self.bind_box.setCheckable(True)
+        self.bind_box.setChecked(True)
+        group_layout = QVBoxLayout(self.bind_box)
+        group_layout.setContentsMargins(8, 4, 8, 6)
+        self.bind_content = QWidget()
+        bind_layout = QVBoxLayout(self.bind_content)
+        bind_layout.setContentsMargins(0, 0, 0, 0)
+        bind_layout.setSpacing(4)
+        group_layout.addWidget(self.bind_content)
+
+        def _toggle_content(checked: bool) -> None:
+            self._bind_user_toggled = True
+            self.bind_content.setVisible(bool(checked))
+
+        self.bind_box.toggled.connect(_toggle_content)
+
+        self.bind_summary = QLabel("")
+        self.bind_summary.setTextFormat(Qt.TextFormat.RichText)
+        self.bind_summary.setWordWrap(True)
+        bind_layout.addWidget(self.bind_summary)
+
+        self.bind_table = _ChannelTable(self)
+        self.bind_table.setColumnCount(5)
+        self.bind_table.setHorizontalHeaderLabels(
+            ["通道", "别名（可选）", "绑定库", "该通道命中", ""]
+        )
+        self.bind_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.bind_table.setSelectionMode(
+            QTableWidget.SelectionMode.NoSelection
+        )
+        self.bind_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.bind_table.verticalHeader().setVisible(False)
+        self.bind_table.setMinimumHeight(96)
+        bind_header = self.bind_table.horizontalHeader()
+        bind_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        bind_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.bind_table.setColumnWidth(0, 86)
+        self.bind_table.setColumnWidth(1, 130)
+        self.bind_table.setColumnWidth(3, 170)
+        self.bind_table.setColumnWidth(4, 44)
+        self.bind_table.on_bind = self._on_drag_bind
+        bind_layout.addWidget(self.bind_table)
+
+        bind_btn_row = QHBoxLayout()
+        bind_btn_row.setSpacing(6)
+        self.add_ch_btn = QPushButton("＋ 手动添加通道…")
+        self.add_ch_btn.clicked.connect(self._on_add_channel)
+        bind_btn_row.addWidget(self.add_ch_btn)
+        self.reset_bind_btn = QPushButton("全部使用全局库")
+        self.reset_bind_btn.clicked.connect(self._reset_all_bindings)
+        bind_btn_row.addWidget(self.reset_bind_btn)
+        bind_btn_row.addStretch(1)
+        bind_layout.addLayout(bind_btn_row)
+
+        self.bind_hint = QLabel("")
+        self.bind_hint.setStyleSheet("color: #666; font-size: 11px;")
+        self.bind_hint.setWordWrap(True)
+        bind_layout.addWidget(self.bind_hint)
+        layout.addWidget(self.bind_box)
+
+        self.remember_check = QCheckBox("记住此配置，下次打开同一文件自动预选")
         self.remember_check.setChecked(True)
         layout.addWidget(self.remember_check)
+
+        cfg_row = QHBoxLayout()
+        cfg_row.setSpacing(6)
+        self.save_cfg_btn = QPushButton("保存配置…")
+        self.save_cfg_btn.clicked.connect(self._on_save_config)
+        cfg_row.addWidget(self.save_cfg_btn)
+        self.load_cfg_btn = QPushButton("载入配置…")
+        self.load_cfg_btn.clicked.connect(self._on_load_config)
+        cfg_row.addWidget(self.load_cfg_btn)
+        cfg_row.addStretch(1)
+        layout.addLayout(cfg_row)
 
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel
@@ -421,6 +633,7 @@ class CanDatabaseSelectorDialog(QDialog):
                 + "、".join(escape(n) for n in missing_names)
             )
         self._rebuild_table()
+        self._rebuild_channel_table()
         return added
 
     @staticmethod
@@ -533,10 +746,21 @@ class CanDatabaseSelectorDialog(QDialog):
         dst = r + delta
         if r < 0 or dst < 0 or dst >= len(self._rows):
             return
+        self._move_row(r, dst)
+
+    def _move_row(self, src: int, dst: int) -> None:
+        """调序唯一入口：↑/↓ 按钮与池表拖拽都走这里（播报 parity）。"""
+        if not (0 <= src < len(self._rows)) or src == dst:
+            return
+        dst = max(0, min(dst, len(self._rows) - 1))
         self._user_edited = True
-        self._rows[r], self._rows[dst] = self._rows[dst], self._rows[r]
+        row = self._rows.pop(src)
+        self._rows.insert(dst, row)
         self._rebuild_table()
+        self._rebuild_channel_table()
         self.table.selectRow(dst)
+        logger.info("CAN 数据库优先级调整: %s -> 第 %d 位",
+                    os.path.basename(row.path), dst + 1)
 
     def _on_remove(self) -> None:
         r = self.table.currentRow()
@@ -544,6 +768,7 @@ class CanDatabaseSelectorDialog(QDialog):
             self._user_edited = True
             del self._rows[r]
             self._rebuild_table()
+            self._rebuild_channel_table()
 
     def _on_add_files(self) -> None:
         self._user_edited = True
@@ -571,6 +796,351 @@ class CanDatabaseSelectorDialog(QDialog):
             return  # 对话框保持打开
         self._shutdown_prescan()  # 用户已定夺，预扫不必再跑
         self.accept()
+
+    # ------------------------------------------------------------------
+    # 通道绑定（内部 0 基，显示 1 基；绑定 ⊂ 池）
+    # ------------------------------------------------------------------
+
+    def _pool_paths(self) -> list[str]:
+        """可用于绑定的库（按优先级）。缺失/解析失败的行不参与。"""
+        return [r.path for r in self._rows if r.ok and r.frame_count > 0]
+
+    def _channel_numbers(self) -> list[int]:
+        channels: set[int] = set(self._known_channels)
+        channels.update(self._manual_channels)
+        channels.update(self._bindings)
+        channels.update(self._aliases)
+        if self._prescan_counts:
+            channels.update(ch for ch, _aid, _ext in self._prescan_counts)
+        return sorted(channels)
+
+    def _binding_allowed(self, channel: int, pool: dict[str, frozenset]) -> set[str]:
+        bound = self._bindings.get(channel)
+        return set(bound) if bound is not None else set(pool)
+
+    def _channel_hit(self, channel: int) -> tuple[str, str]:
+        if self._prescan_state != "done" or not self._prescan_counts:
+            return "—（导入后可知）", "预扫不可用；导入后按绑定解码，未匹配 ID 会列在状态栏"
+        pool = {
+            r.path: r.db_ids for r in self._rows if r.ok and r.frame_count > 0
+        }
+        allowed = self._binding_allowed(channel, pool)
+        ok = total = 0
+        missing: list[str] = []
+        pool_only: list[str] = []
+        for (ch, aid, ext), n in self._prescan_counts.items():
+            if ch != channel:
+                continue
+            total += n
+            hex_id = f"0x{aid:X}" + ("E" if ext else "")
+            defined = [p for p, ids in pool.items() if (aid, ext) in ids]
+            if any(p in allowed for p in defined):
+                ok += n
+            else:
+                missing.append(hex_id)
+                if any(p not in allowed for p in defined):
+                    pool_only.append(hex_id)
+        pct = ok / total * 100 if total else 0.0
+        tip = [f"按当前绑定可解出 {ok:,} / {total:,} 帧"]
+        if missing:
+            tip.append("未定义：" + "、".join(sorted(set(missing))[:8]))
+        if pool_only:
+            tip.append(
+                "仅全局池有定义（按「不回落」不自动使用）："
+                + "、".join(sorted(set(pool_only))[:8])
+            )
+        return f"{ok:,} / {total:,} 帧（{pct:.1f}%）", "\n".join(tip)
+
+    def _duplicate_cross_channel_ids(self) -> list[str]:
+        if not self._prescan_counts:
+            return []
+        seen: dict[tuple[int, bool], set[int]] = {}
+        for ch, aid, ext in self._prescan_counts:
+            seen.setdefault((aid, ext), set()).add(ch)
+        return [
+            f"0x{aid:X}" + ("E" if ext else "")
+            for (aid, ext), chans in seen.items()
+            if len(chans) > 1
+        ]
+
+    def _summary_text(self) -> str:
+        if not self._channel_numbers():
+            return (
+                "尚无通道信息（大文件未预扫）。可手动添加通道行，"
+                "或先导入后从「重选数据库」补绑定。"
+            )
+        if self._prescan_state == "running":
+            return "正在后台预扫…完成后显示按绑定的命中率。"
+        if self._prescan_state != "done" or not self._prescan_counts:
+            return (
+                "预扫不可用：导入后按当前绑定解码，未匹配 ID 会列在状态栏。"
+            )
+        pool = {
+            r.path: r.db_ids for r in self._rows if r.ok and r.frame_count > 0
+        }
+        ok = total = 0
+        missing: set[str] = set()
+        pool_only: set[str] = set()
+        for (ch, aid, ext), n in self._prescan_counts.items():
+            total += n
+            hex_id = f"0x{aid:X}" + ("E" if ext else "")
+            allowed = self._binding_allowed(ch, pool)
+            defined = [p for p, ids in pool.items() if (aid, ext) in ids]
+            if any(p in allowed for p in defined):
+                ok += n
+            else:
+                missing.add(hex_id)
+                if any(p not in allowed for p in defined):
+                    pool_only.add(hex_id)
+        pct = ok / total * 100 if total else 0.0
+        text = f"按当前绑定可解出 <b>{ok:,} / {total:,}</b> 帧（{pct:.1f}%）"
+        if missing:
+            text += f" · 未定义 ID {len(missing)} 个"
+        if pool_only:
+            text += (
+                '<br><span style="color:#9a6b00">ⓘ '
+                + "、".join(sorted(pool_only)[:8])
+                + " 仅全局池其他库有定义，按「不回落」不会自动使用。</span>"
+            )
+        if not self._bindings:
+            dup = self._duplicate_cross_channel_ids()
+            if dup:
+                text += (
+                    '<br><span style="color:#9a6b00">⚠ '
+                    + "、".join(dup[:6])
+                    + " 跨通道同 ID：未绑定时按池顺序取定义，可能解错其中一路。</span>"
+                )
+        return text
+
+    def _binding_button(self, channel: int) -> QPushButton:
+        pool = self._pool_paths()
+        current = self._bindings.get(channel)
+        if current is None:
+            text = "全部库（默认）"
+        else:
+            text = "、".join(os.path.basename(p) for p in current)
+        btn = QPushButton(f"{text} ▾")
+        btn.setToolTip("勾选只在该通道使用的库；全选 = 未绑定（用全局池）")
+        btn.setStyleSheet("text-align: left; padding: 2px 6px;")
+        menu = QMenu(btn)
+        for path in pool:
+            action = menu.addAction(os.path.basename(path))
+            action.setCheckable(True)
+            action.setChecked(current is None or path in current)
+            action.toggled.connect(
+                lambda checked, p=path, c=channel:
+                self._toggle_binding(c, p, checked)
+            )
+        menu.addSeparator()
+        menu.addAction("全选（用全局池）").triggered.connect(
+            lambda _checked=False, c=channel: self._reset_channel_binding(c)
+        )
+        btn.setMenu(menu)
+        return btn
+
+    def _toggle_binding(self, channel: int, path: str, checked: bool) -> None:
+        current = self._bindings.get(channel)
+        paths = list(current) if current is not None else list(self._pool_paths())
+        if checked and path not in paths:
+            paths.append(path)
+        elif not checked:
+            paths = [p for p in paths if p != path]
+        self._set_channel_binding(channel, paths)
+        # 菜单属于即将被重建的按钮：等本轮事件收尾再重建，避免销毁打开中的菜单
+        QTimer.singleShot(0, self._rebuild_channel_table)
+
+    def _set_channel_binding(self, channel: int,
+                             paths: list[str] | tuple[str, ...]) -> None:
+        """绑定变更唯一入口：勾选面板 / 拖拽 / 一键恢复都走这里。"""
+        pool = self._pool_paths()
+        allowed = [p for p in pool if p in set(paths)]
+        if not allowed or set(allowed) == set(pool):
+            self._bindings.pop(channel, None)
+        else:
+            self._bindings[channel] = tuple(allowed)
+        logger.info(
+            "通道 %s 绑定: %s",
+            format_bus_channel(channel),
+            "全局池" if channel not in self._bindings
+            else "、".join(os.path.basename(p) for p in self._bindings[channel]),
+        )
+        self._rebuild_channel_table()
+
+    def _reset_channel_binding(self, channel: int) -> None:
+        self._set_channel_binding(channel, [])
+
+    def _reset_all_bindings(self) -> None:
+        self._bindings.clear()
+        logger.info("已恢复：所有通道使用全局库")
+        self._rebuild_channel_table()
+
+    def _on_drag_bind(self, channel: int, path: str) -> None:
+        if path not in self._pool_paths():
+            return
+        current = self._bindings.get(channel)
+        if current is None:
+            paths = [path]
+        elif path in current:
+            paths = list(current)
+        else:
+            paths = list(current) + [path]
+        self._set_channel_binding(channel, paths)
+
+    def _on_alias_edited(self, channel: int, text: str) -> None:
+        text = (text or "").strip()
+        if text:
+            self._aliases[channel] = text
+        else:
+            self._aliases.pop(channel, None)
+        self._rebuild_channel_table()
+
+    def _on_add_channel(self) -> None:
+        value, ok = QInputDialog.getInt(
+            self, "手动添加通道",
+            "通道号（1 基，与 CANoe / 记录仪一致）：", 1, 1, 9999,
+        )
+        if not ok:
+            return
+        channel = int(value) - 1
+        if channel not in self._manual_channels:
+            self._manual_channels.append(channel)
+        self._rebuild_channel_table()
+
+    def _on_remove_channel(self, channel: int) -> None:
+        self._manual_channels = [c for c in self._manual_channels if c != channel]
+        self._bindings.pop(channel, None)
+        self._aliases.pop(channel, None)
+        self._rebuild_channel_table()
+
+    def _rebuild_channel_table(self) -> None:
+        channels = self._channel_numbers()
+        self.bind_table.blockSignals(True)
+        self.bind_table.setRowCount(len(channels))
+        for row, channel in enumerate(channels):
+            errors = int(self._prescan_errors.get(channel, 0) or 0)
+            text = format_bus_channel(channel, self._aliases.get(channel))
+            if errors:
+                text += f"  ⚠{errors}"
+            item = QTableWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, channel)
+            item.setToolTip(
+                f"内部通道号 {channel}（0 基）"
+                + (f" · 可识别错误帧 {errors:,}（不产生采样点）" if errors else "")
+            )
+            self.bind_table.setItem(row, 0, item)
+
+            edit = QLineEdit(self._aliases.get(channel, ""))
+            edit.setPlaceholderText("如：动力CAN")
+            edit.editingFinished.connect(
+                lambda c=channel, e=edit: self._on_alias_edited(c, e.text())
+            )
+            self.bind_table.setCellWidget(row, 1, edit)
+
+            self.bind_table.setCellWidget(row, 2, self._binding_button(channel))
+
+            hit_text, hit_tip = self._channel_hit(channel)
+            hit_item = QTableWidgetItem(hit_text)
+            hit_item.setToolTip(hit_tip)
+            self.bind_table.setItem(row, 3, hit_item)
+
+            if channel in self._manual_channels:
+                remove = QPushButton("删")
+                remove.setFixedWidth(34)
+                remove.clicked.connect(
+                    lambda _checked=False, c=channel: self._on_remove_channel(c)
+                )
+                self.bind_table.setCellWidget(row, 4, remove)
+            else:
+                self.bind_table.removeCellWidget(row, 4)
+        self.bind_table.blockSignals(False)
+
+        self.bind_table.setVisible(bool(channels))
+        self.bind_summary.setText(self._summary_text())
+        self.bind_hint.setText(
+            "通道号填 CANoe / 记录仪里看到的编号（1 基）。"
+            "已绑定通道只在其绑定库中找定义；找不到进未匹配列表，不会借用其他通道的库。"
+        )
+        if not self._bind_user_toggled:
+            self.bind_box.blockSignals(True)
+            self.bind_box.setChecked(True)
+            self.bind_box.blockSignals(False)
+            self.bind_content.setVisible(True)
+
+    # ------------------------------------------------------------------
+    # 显式配置：保存 / 载入（旁车 YAML 或用户配置目录）
+    # ------------------------------------------------------------------
+
+    def _on_save_config(self) -> None:
+        cfg = self.get_result_config()
+        if not cfg.pool:
+            QMessageBox.warning(
+                self, "没有可保存的配置", "请先添加可用的数据库文件。"
+            )
+            return
+        if self._data_file:
+            folder = os.path.dirname(os.path.abspath(self._data_file))
+            default = (
+                sidecar_config_path(self._data_file)
+                if is_dir_writable(folder)
+                else AppSettings.blf_binding_store_path(self._data_file)
+            )
+        else:
+            default = ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存 CAN 配置", default,
+            "CAN 配置 (*.canview.yaml *.yaml)",
+        )
+        if not path:
+            return
+        issues = save_yaml(cfg, path)
+        if issues:
+            self.set_notice("保存配置失败：" + "；".join(escape(i) for i in issues))
+        else:
+            self._append_notice(
+                f"配置已保存：{escape(os.path.basename(path))}"
+            )
+
+    def _on_load_config(self) -> None:
+        initial_dir = (
+            os.path.dirname(os.path.abspath(self._data_file))
+            if self._data_file else ""
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, "载入 CAN 配置", initial_dir,
+            "CAN 配置 (*.canview.yaml *.yaml)",
+        )
+        if not path:
+            return
+        cfg, issues = load_yaml(path, self._data_file)
+        if cfg.pool:
+            self.add_paths(cfg.pool)
+        pool = set(self._pool_paths())
+        self._bindings = {
+            ch: tuple(p for p in files if p in pool)
+            for ch, files in cfg.by_channel.items()
+        }
+        self._bindings = {
+            ch: files for ch, files in self._bindings.items() if files
+        }
+        self._aliases = dict(cfg.alias)
+        self._rebuild_channel_table()
+        message = f"已载入配置：{escape(os.path.basename(path))}"
+        if issues:
+            message += "<br>" + "；".join(escape(i) for i in issues)
+        self._append_notice(message)
+
+    def get_result_config(self) -> CanBindings:
+        """按当前池顺序 + 绑定 + 别名生成配置（绑定自动收敛到可用池）。"""
+        pool = self._pool_paths()
+        allowed = set(pool)
+        by_channel: dict[int, tuple[str, ...]] = {}
+        for channel, files in self._bindings.items():
+            subset = tuple(p for p in files if p in allowed)
+            # 初始配置里的「绑定 = 当前全池」原样保留（将来加库时不应悄悄放宽）；
+            # 只有 UI 操作（勾选/拖拽）才会把「全选」归一成未绑定。
+            if subset:
+                by_channel[channel] = subset
+        return CanBindings.from_paths(pool, by_channel, self._aliases)
 
     # ------------------------------------------------------------------
     # 结果

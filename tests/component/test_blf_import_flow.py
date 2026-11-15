@@ -1167,7 +1167,8 @@ def test_dialog_selection_drops_bindings_to_removed_databases(
     assert got is not None
     assert got.pool == (str(dbc),)
     assert got.by_channel == {}, "被移除的库不能留下死绑定"
-    assert got.alias == {}
+    # 别名是展示层属性，与绑定解耦：绑定被清空后别名仍保留
+    assert got.alias == {1: "车身CAN"}
 
 
 # ---------------------------------------------------------------------------
@@ -1297,3 +1298,21 @@ def test_unchecking_remember_also_forgets_the_file_config(
     manager.load_csv_file(str(blf))
 
     assert normalize_input_path(str(blf)) not in app_settings.get_blf_file_bindings()
+
+
+def test_zero_signal_texts_distinguish_the_three_causes():
+    """评审 F18：绑定问题不能伪装成「库里没有信号」。"""
+    from src.core.config import (
+        BLF_TEXT_BINDING_EXCLUDED,
+        BLF_TEXT_NO_SIGNAL,
+        BLF_TEXT_POOL_EMPTY,
+    )
+    from src.ui.file_loader_manager import FileLoaderManager
+
+    assert FileLoaderManager._no_signal_text("pool_empty") == BLF_TEXT_POOL_EMPTY
+    assert (
+        FileLoaderManager._no_signal_text("binding_excluded_all")
+        == BLF_TEXT_BINDING_EXCLUDED
+    )
+    assert FileLoaderManager._no_signal_text("no_match") == BLF_TEXT_NO_SIGNAL
+    assert FileLoaderManager._no_signal_text(None) == BLF_TEXT_NO_SIGNAL

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from src.core.config import BLF_UNMATCHED_REPORT_LIMIT
 from src.core.logger import get_logger
+from src.data.can_bindings import format_bus_channel
 
 logger = get_logger("ui.can_unmatched_dialog")
 
@@ -116,7 +117,10 @@ class CanUnmatchedDialog(QDialog):
                 if self._total_messages
                 else "-"
             )
-            cells = (str(int(channel)), hex_text, f"{int(frames):,}", ratio)
+            cells = (
+                format_bus_channel(int(channel)), hex_text,
+                f"{int(frames):,}", ratio,
+            )
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 if c >= 2:

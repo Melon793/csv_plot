@@ -607,3 +607,182 @@ def test_a_blf_below_the_prescan_cap_still_prescans(
     finally:
         dlg._shutdown_prescan()
         dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# 通道绑定（D1–D7）：数据来源三档、绑定与命中、拖拽入口、配置保存载入
+# ---------------------------------------------------------------------------
+
+def _bind_rows(dialog) -> list[tuple[int, str]]:
+    return [
+        (
+            dialog.bind_table.item(r, 0).data(Qt.ItemDataRole.UserRole),
+            dialog.bind_table.item(r, 0).text(),
+        )
+        for r in range(dialog.bind_table.rowCount())
+    ]
+
+
+def test_channel_rows_come_from_prescan_with_binding_summary(qapp, tmp_path):
+    blf, dbc = write_blf_pair(tmp_path, n=24, buses=(0, 1))
+    dlg = CanDatabaseSelectorDialog(data_file=str(blf), initial_paths=[str(dbc)])
+    try:
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+        assert dlg._prescan_state == "done"
+        assert [c for c, _t in _bind_rows(dlg)] == [0, 1]
+        assert [t for _c, t in _bind_rows(dlg)] == ["CAN1", "CAN2"]
+        summary = dlg.bind_summary.text()
+        assert "按当前绑定可解出" in summary
+        # 0x1A0 被两条总线同时收到 → 未绑定时必须提示跨通道同 ID
+        assert "跨通道同 ID" in summary
+        assert "帧" in dlg.bind_table.item(0, 3).text()
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_binding_a_subset_changes_hits_and_result_config(qapp, tmp_path):
+    import re
+
+    blf, dbc_full = write_blf_pair(tmp_path, n=24, buses=(0, 1))
+    partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])  # 只有 0x1A0
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
+    )
+    try:
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+
+        dlg._set_channel_binding(1, [str(partial)])
+
+        assert dlg._bindings[1] == (str(partial),)
+        text = dlg.bind_table.item(1, 3).text()
+        ok, total = [
+            int(x.replace(",", "")) for x in re.findall(r"([\d,]+)", text)[:2]
+        ]
+        assert ok < total, "只含一个 ID 的库不可能解出整条通道"
+        cfg = dlg.get_result_config()
+        assert cfg.by_channel == {1: (str(partial),)}
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_dragging_a_pool_row_onto_a_channel_binds_it(qapp, tmp_path):
+    """drop 回调 = 绑定唯一入口之一，与勾选面板共用 _set_channel_binding。"""
+    blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
+    )
+    try:
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+        dlg.show()
+        from PySide6.QtCore import QCoreApplication
+
+        QCoreApplication.processEvents()
+        mime = QMimeData()
+        mime.setData("application/x-canview-db", str(partial).encode("utf-8"))
+        _keep_alive.append(mime)  # offscreen 下防 GC 段错误（见文件头注释）
+        rect = dlg.bind_table.visualItemRect(dlg.bind_table.item(0, 0))
+        assert rect.height() > 0, f"通道行未布局: {rect}"
+        event = QDropEvent(
+            QPointF(rect.center()),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        dlg.bind_table.dropEvent(event)
+
+        assert dlg._bindings.get(0) == (str(partial),)
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_selecting_the_whole_pool_means_unbound(qapp, tmp_path):
+    blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0,))
+    partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
+    )
+    try:
+        dlg._set_channel_binding(0, [str(dbc_full)])
+        assert 0 in dlg._bindings
+
+        dlg._set_channel_binding(0, [str(dbc_full), str(partial)])
+        assert 0 not in dlg._bindings, "全选 = 未绑定（用全局池）"
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_known_channels_fill_rows_when_prescan_is_unavailable(qapp, tmp_path):
+    _blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
+    dlg = CanDatabaseSelectorDialog(
+        initial_paths=[str(dbc)], known_channels=[(0, 20), (1, 5)]
+    )
+    try:
+        assert dlg._prescan_state == "off"
+        assert [c for c, _t in _bind_rows(dlg)] == [0, 1]
+        assert "—（导入后可知）" in dlg.bind_table.item(0, 3).text()
+        assert "预扫不可用" in dlg.bind_summary.text()
+    finally:
+        dlg.deleteLater()
+
+
+def test_manual_channel_row_can_be_added_and_removed(qapp, tmp_path, monkeypatch):
+    import src.ui.dialogs.can_db_selector as cds
+
+    _blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc)])
+    try:
+        monkeypatch.setattr(
+            cds.QInputDialog, "getInt",
+            staticmethod(lambda *a, **k: (3, True)),
+        )
+        dlg._on_add_channel()
+        assert (2, "CAN3") in _bind_rows(dlg)
+
+        dlg._on_remove_channel(2)
+        assert all(c != 2 for c, _t in _bind_rows(dlg))
+    finally:
+        dlg.deleteLater()
+
+
+def test_save_and_load_config_roundtrip(qapp, tmp_path, monkeypatch):
+    import src.ui.dialogs.can_db_selector as cds
+
+    blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
+    target = tmp_path / "x.canview.yaml"
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
+    )
+    try:
+        dlg._set_channel_binding(1, [str(partial)])
+        dlg._aliases[1] = "车身CAN"
+        monkeypatch.setattr(
+            cds.QFileDialog, "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(target), "")),
+        )
+        dlg._on_save_config()
+        assert target.exists()
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+    dlg2 = CanDatabaseSelectorDialog(initial_paths=[])
+    try:
+        monkeypatch.setattr(
+            cds.QFileDialog, "getOpenFileName",
+            staticmethod(lambda *a, **k: (str(target), "")),
+        )
+        dlg2._on_load_config()
+        cfg = dlg2.get_result_config()
+        assert cfg.pool == (str(dbc_full), str(partial))
+        assert cfg.by_channel == {1: (str(partial),)}
+        assert cfg.alias == {1: "车身CAN"}
+    finally:
+        dlg2._shutdown_prescan()
+        dlg2.deleteLater()

@@ -38,6 +38,7 @@ from src.core.config import (
     BLF_SCAN_CHUNK_MESSAGES,
     BLF_UNMATCHED_REPORT_LIMIT,
 )
+from src.data.can_bindings import format_bus_channel
 from src.data.can_database import CanDatabaseSet, CanFrameSpec, CanSignalSpec
 from src.data.can_decode import (
     decode_physical,
@@ -70,7 +71,8 @@ def _safe_tell(handle, fallback: int) -> int:
         return int(fallback)
 
 
-def prescan_blf_frames(path: str, *, should_cancel=None):
+def prescan_blf_frames(path: str, *, should_cancel=None,
+                       error_counts: Optional[dict] = None):
     """快速预扫 BLF：只统计 ``(通道, CAN ID, 扩展位)`` 的帧数，不存任何 payload。
 
     供选库对话框在后台估算「每个数据库能解出多少帧」（命中列）：BLF 没有索引，
@@ -79,12 +81,15 @@ def prescan_blf_frames(path: str, *, should_cancel=None):
     保持同一套过滤口径（跳过错误帧 / 远程帧、通道号 -1 归 0、同一上限截断），
     否则命中率与实际解码结果会对不上。
 
+    Args:
+        should_cancel: 轮询式取消谓词，返回 True 时抛 :class:`InterruptedError`。
+        error_counts: 可选出参：累计 ``{0 基通道: 可识别错误帧数}``。
+            口径只覆盖 python-can 会 yield 的 ``CAN_ERROR_EXT``（普通 CAN_ERROR
+            直接不 yield），是「可识别错误帧」的下界。
+
     Returns:
         ``Counter[(channel, can_id, extended), 帧数]``；帧数总和即参与解码的
         总帧数。文件损坏 / 无报文 / python-can 缺失时抛异常，由调用方兜底。
-
-    Args:
-        should_cancel: 轮询式取消谓词，返回 True 时抛 :class:`InterruptedError`。
     """
     from collections import Counter
 
@@ -105,10 +110,17 @@ def prescan_blf_frames(path: str, *, should_cancel=None):
             if not chunk:
                 break
             for msg in chunk:
-                if msg.is_error_frame or msg.is_remote_frame:
-                    continue  # 与 _scan 同口径：这两类帧不产生采样点
                 channel = int(msg.channel) if msg.channel is not None else 0
-                counts[(max(0, channel), int(msg.arbitration_id),
+                if channel < 0:
+                    channel = 0
+                if msg.is_error_frame:
+                    # 与 _scan 同口径：只计数，不产生采样点
+                    if error_counts is not None:
+                        error_counts[channel] = error_counts.get(channel, 0) + 1
+                    continue
+                if msg.is_remote_frame:
+                    continue  # 远程帧只有 ID 没有 payload，不产生采样点
+                counts[(channel, int(msg.arbitration_id),
                         bool(msg.is_extended_id))] += 1
                 total_bytes += len(msg.data) if msg.data else 0
             total = sum(counts.values())
@@ -348,6 +360,11 @@ class BLFLazyLoader:
         #: ``"messages"`` / ``"payload"``；未截断时为 None
         self.truncated_reason: Optional[str] = None
         self.unmatched_ids: list[tuple[int, int, bool, int]] = []
+        #: 可识别错误帧（0 基通道 → 帧数）。只计数，不产生采样点。
+        self.error_frames: dict[int, int] = {}
+        #: 最近一次绑定的 0 信号成因（pool_empty / binding_excluded_all /
+        #: no_match / None），供 UI 区分文案（评审 F18）。
+        self.zero_reason: Optional[str] = None
         self.load_errors: list[str] = []
         self._t0 = 0.0
         self._database = CanDatabaseSet()
@@ -414,16 +431,24 @@ class BLFLazyLoader:
                 if not chunk:
                     break
                 for msg in chunk:
-                    if msg.is_error_frame or msg.is_remote_frame:
-                        # 错误帧没有可信的数据区，远程帧只有 ID 没有 payload，
-                        # 两者都不该产生采样点（画出来只会是误导性的台阶）。
-                        continue
                     aid = int(msg.arbitration_id)
                     extended = bool(msg.is_extended_id)
                     # python-can 把 BLF 的 1 基通道号减 1，老文件里的 0 会变成 -1
                     channel = int(msg.channel) if msg.channel is not None else 0
                     if channel < 0:
                         channel = 0
+                    if msg.is_error_frame:
+                        # 错误帧**带** ID 与 data，但语义不可靠（DLC/valid bytes
+                        # 经常不可信，扩展错误帧的 data 也不是总线载荷），拿来
+                        # 解码只会画出误导性的台阶。只计数、不产生采样点。
+                        # 口径：python-can 只 yield CAN_ERROR_EXT，普通
+                        # CAN_ERROR 对象直接跳过，故这是「可识别错误帧」的下界。
+                        self.error_frames[channel] = (
+                            self.error_frames.get(channel, 0) + 1
+                        )
+                        continue
+                    if msg.is_remote_frame:
+                        continue  # 远程帧只有 ID 没有 payload，不产生采样点
                     key = (channel, aid, extended)
                     bucket = buckets.get(key)
                     if bucket is None:
@@ -577,12 +602,14 @@ class BLFLazyLoader:
         self._notify_progress(99)
         self._build_metadata()
         self._clear_lru_caches()
+        reason = self._zero_reason(len(self._metadata))
+        self.zero_reason = reason
         return {
             "var_count": len(self._metadata),
             "unmatched": len(self.unmatched_ids),
             "frame_count": self._database.frame_count,
             "signal_count": self._database.signal_count,
-            "zero_reason": self._zero_reason(len(self._metadata)),
+            "zero_reason": reason,
         }
 
     def _zero_reason(self, var_count: int) -> Optional[str]:
@@ -691,8 +718,11 @@ class BLFLazyLoader:
             frame = bucket.frame
             label_id = f"0x{bucket.can_id:X}" + ("E" if bucket.extended else "")
             name_part = f" {frame.name}" if frame is not None else ""
+            # 1 基显示（CAN1 / CAN2），有别名用别名；与 CANoe、help.md 对齐。
+            # 内部桶键 / bindings / YAML 仍是 0 基，转换只在展示层做。
             self._group_labels[gi] = (
-                f"Ch{bucket.channel} {label_id}{name_part} (G{gi})"
+                f"{format_bus_channel(bucket.channel, self.channel_aliases.get(bucket.channel))}"
+                f" {label_id}{name_part} (G{gi})"
             )
 
         self.unmatched_ids = sorted(unmatched, key=lambda x: -x[3])
@@ -702,8 +732,9 @@ class BLFLazyLoader:
                 len(unmatched), min(len(unmatched), BLF_UNMATCHED_REPORT_LIMIT),
             )
         for ch, cid, ext, cnt in self.unmatched_ids:
-            logger.debug("未匹配报文: Ch%d 0x%X%s (%d 帧)",
-                         ch, cid, "（扩展帧）" if ext else "", cnt)
+            logger.debug("未匹配报文: %s 0x%X%s (%d 帧)",
+                         format_bus_channel(ch, self.channel_aliases.get(ch)),
+                         cid, "（扩展帧）" if ext else "", cnt)
 
         self._compute_global_time_range()
         self._notify_progress(100)
@@ -986,7 +1017,11 @@ class BLFLazyLoader:
                 # 的最大 payload」。CAN FD 的 valid_bytes < DLC 时两者不同，把
                 # 观察值报成 DLC 会掩盖高字节全 0 的真实原因（评审 L1）。
                 "observed_max_bytes": bucket.stride,
-                "bus_channel": bucket.channel,
+                "bus_channel": format_bus_channel(
+                    bucket.channel, self.channel_aliases.get(bucket.channel)
+                ),
+                # 排错/脚本用的原始 0 基编号（展示层一律用上面的 1 基文本）
+                "bus_channel_index": bucket.channel,
                 "start_bit": sig.dbc_start_bit,
                 # 解码器真正用的 canmatrix 内部位号（Intel 与 DBC 相同，
                 # Motorola 不同），放在副键里供排错时比对
