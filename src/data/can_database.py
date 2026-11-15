@@ -21,11 +21,20 @@ import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _path_key(path: str) -> str:
+    """通道绑定匹配的唯一路径口径：绝对化 + 大小写归一。
+
+    ``normalize_input_path`` 只做展示层归一（~ 展开 / 分隔符），**不统一大小写**，
+    不能用于绑定匹配：Windows / UNC 上同一文件的大小写写法不同会静默失配。
+    """
+    return os.path.normcase(os.path.abspath(str(path)))
 
 # canmatrix 按文件后缀决定 import_type；本项目只支持这两类数据库文件
 SUPPORTED_DB_EXTS = (".dbc", ".arxml")
@@ -480,14 +489,25 @@ def _convert_frame(frame: Any, db_path: str) -> CanFrameSpec:
 
 
 class CanDatabaseSet:
-    """多个 DBC / ARXML 文件合并后的只读查询视图（顺序即优先级）。"""
+    """多个 DBC / ARXML 文件合并后的只读查询视图（顺序即优先级）。
 
-    def __init__(self, paths: Iterable[str] = ()):
+    ``bindings`` 可选：``{0 基通道: {库路径, ...}}``，值会在构造时归一成
+    :func:`_path_key` 形式。语义见 :meth:`find_frame`：**已绑定通道只在
+    子集内找定义，未命中不回落全局池**（宁可未匹配，不给错曲线）；未绑定
+    通道与无 bindings 时完全保持历史行为（池顺序 first-match）。
+    """
+
+    def __init__(self, paths: Iterable[str] = (), *,
+                 bindings: Optional[Mapping[int, Iterable[str]]] = None):
         self._paths: list[str] = []
         self._frames: list[CanFrameSpec] = []
         # {(can_id, extended): [CanFrameSpec, ...]}，按数据库加载顺序追加
         self._index: dict[tuple[int, bool], list[CanFrameSpec]] = {}
         self._reports: list[DbFileReport] = []
+        self._bindings: dict[int, frozenset[str]] = {
+            int(ch): frozenset(_path_key(p) for p in files)
+            for ch, files in (bindings or {}).items()
+        }
         paths = list(paths or [])
         if paths:
             self.load(paths)
@@ -621,16 +641,39 @@ class CanDatabaseSet:
 
     def find_frame(self, channel: int, can_id: int,
                    extended: bool = False) -> Optional[CanFrameSpec]:
-        """按 (can_id, extended) 返回**第一个**命中的帧定义。
+        """按 (can_id, extended) 返回帧定义，**通道参与过滤**。
 
-        ``channel`` 当前不参与匹配（DBC/ARXML 里没有总线通道概念），保留形参是
-        为将来的「按总线绑定不同数据库」留口子。同一 ID 在多库中重复时，
-        列表里靠前的库生效 —— 这正是选择对话框允许调序的意义。
+        三档语义（顺序即判定）：
+
+        1. 无 bindings：池顺序 first-match（历史行为，逐字节等价）；
+        2. 该通道未绑定：池顺序 first-match（未绑定 = 用全局池）；
+        3. 该通道已绑定：只在绑定库子集内 first-match；**子集内未命中返回
+           ``None``，绝不回落全局池**。回落等于把「跨通道同 ID 误解码」换成
+           「绑定后仍串库」，正是要消灭的失败模式。
+
+        同一 ID 在多库中重复时，列表里靠前的库生效 —— 这正是选择对话框
+        允许调序的意义。
         """
-        hits = self._index.get((can_id, bool(extended)))
-        return hits[0] if hits else None
+        hits = self._index.get((int(can_id), bool(extended)))
+        if not hits:
+            return None
+        if not self._bindings:
+            return hits[0]
+        allowed = self._bindings.get(int(channel))
+        if allowed is None:
+            return hits[0]
+        for spec in hits:
+            if _path_key(spec.db_path) in allowed:
+                return spec
+        return None
 
     def has_frame(self, can_id: int, extended: bool = False) -> bool:
+        """**池级** ID 查询：刻意不区分通道。
+
+        与 :meth:`find_frame` 的通道语义分裂是设计使然——本方法只回答
+        「池里有没有这个 ID」，用于未匹配归因（例如区分「绑定排除了全部」
+        与「库里确实没有」）；不要跟着 find_frame 改成通道敏感。
+        """
         return (int(can_id), bool(extended)) in self._index
 
     @property

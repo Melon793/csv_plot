@@ -304,6 +304,7 @@ class BLFLazyLoader:
         path: str,
         *,
         db_paths: Optional[list[str]] = None,
+        bindings: Optional[dict[int, frozenset[str]]] = None,
         _progress: Optional[Callable[[int], None]] = None,
         _should_cancel: Optional[Callable[[], bool]] = None,
         _stats: Optional[dict] = None,
@@ -334,6 +335,9 @@ class BLFLazyLoader:
         self._current_group_index = 0
 
         self.db_paths: list[str] = list(db_paths or [])
+        #: 通道绑定（0 基通道 → 库路径子集），与 db_paths 同生命周期；
+        #: reload / 重选数据库必须能把它读回去，否则会静默丢绑定。
+        self.bindings: dict[int, frozenset[str]] = dict(bindings or {})
         self.total_messages = 0
         #: 扫描期 payload 实际占用的字节数（含对齐补位与行长度数组）
         self.payload_bytes = 0
@@ -347,7 +351,7 @@ class BLFLazyLoader:
 
         self._validate_file()
         self._scan()
-        self._bind_database(self.db_paths)
+        self._bind_database(self.db_paths, self.bindings)
 
         logger.info(
             "BLF 加载完成: %s (%.1f MB) · %d 帧 / %d 报文桶 · %d 信号 · %d 未匹配 ID",
@@ -501,8 +505,9 @@ class BLFLazyLoader:
     # ------------------------------------------------------------------
 
     def bind_databases(self, paths: list[str], *,
+                       bindings: Optional[dict[int, frozenset[str]]] = None,
                        rollback_if_empty: bool = False) -> dict:
-        """重新绑定 DBC / ARXML：**不重扫报文**，只重建元数据并清缓存。
+        """重新绑定 DBC / ARXML + 通道绑定：**不重扫报文**，只重建元数据并清缓存。
 
         ``CanDatabaseSet(paths)`` 会在调用线程**同步解析**全部数据库，耗时取
         决于库的数量/体积（几十 MB 的 ARXML 可达数百毫秒到数秒），并非
@@ -510,29 +515,36 @@ class BLFLazyLoader:
         —— 原始 payload 与数据库解耦，换库只改变「怎么解释这些字节」。
 
         Args:
-            rollback_if_empty: 新库与当前报文完全对不上（``var_count == 0``）
-                时恢复旧库、旧元数据，并在返回值里带 ``rolled_back=True``。
-                供 UI 的「重选数据库」使用：一次误选不能先把已画曲线清掉再
-                告诉用户「没有信号」。默认 False 保持既有调用语义。
+            bindings: 0 基通道 → 库路径子集；``None``/空 = 所有通道用全局池。
+                缺省必须保持历史行为（无绑定时逐字节等价）。
+            rollback_if_empty: 新库/新绑定与当前报文完全对不上（``var_count == 0``）
+                时恢复旧库、旧绑定、旧元数据，并在返回值里带 ``rolled_back=True``。
+                返回值的 ``zero_reason`` 描述**失败那次**的 0 信号成因，供 UI
+                区分「池为空 / 绑定排除全部 / 库里确实没有」。
         """
-        # ``db_paths`` 与元数据是同一份状态：写它必须跟重建共用一把锁，否则
-        # reload 路径（读 loader.db_paths 直接复用）会读到半新半旧的组合。
+        # ``db_paths`` / ``bindings`` 与元数据是同一份状态：写它们必须跟重建
+        # 共用一把锁，否则 reload 路径会读到半新半旧的组合。
         with self._access_lock:
             old_paths = list(self.db_paths)
+            old_bindings = dict(self.bindings)
             old_database = self._database
             old_errors = list(self.load_errors)
             self.db_paths = list(paths or [])
+            self.bindings = dict(bindings or {})
             try:
-                stats = self._bind_database(self.db_paths)
+                stats = self._bind_database(self.db_paths, self.bindings)
             except Exception:
                 # 解析/建元数据中途失败：恢复到调用前的可用状态，再把异常抛回
                 self.db_paths = old_paths
+                self.bindings = old_bindings
                 self._database = old_database
                 self.load_errors = old_errors
                 self._build_metadata()
                 raise
             if rollback_if_empty and not stats.get("var_count"):
+                failed_reason = stats.get("zero_reason")
                 self.db_paths = old_paths
+                self.bindings = old_bindings
                 self._database = old_database
                 self.load_errors = old_errors
                 self._build_metadata()
@@ -542,11 +554,13 @@ class BLFLazyLoader:
                     "frame_count": old_database.frame_count,
                     "signal_count": old_database.signal_count,
                     "rolled_back": True,
+                    "zero_reason": failed_reason,
                 }
             return stats
 
-    def _bind_database(self, paths: list[str]) -> dict:
-        self._database = CanDatabaseSet(paths)
+    def _bind_database(self, paths: list[str],
+                       bindings: Optional[dict[int, frozenset[str]]] = None) -> dict:
+        self._database = CanDatabaseSet(paths, bindings=bindings)
         self.load_errors = list(self._database.load_errors)
         # 90→99 是「正在生成信号列表…」的区间（§5.4），必须排在 _build_metadata()
         # 末尾那记 100 之前；顺序写反会让进度条从 100 退回 99。
@@ -558,7 +572,33 @@ class BLFLazyLoader:
             "unmatched": len(self.unmatched_ids),
             "frame_count": self._database.frame_count,
             "signal_count": self._database.signal_count,
+            "zero_reason": self._zero_reason(len(self._metadata)),
         }
+
+    def _zero_reason(self, var_count: int) -> Optional[str]:
+        """0 信号的成因归因（评审 F18）：三种文案分别给，别让绑定问题伪装成空库。"""
+        if self._database.frame_count == 0:
+            return "pool_empty"
+        if var_count:
+            return None
+        if self.bindings and any(
+            self._database.has_frame(cid, ext) for _, cid, ext, _ in self.unmatched_ids
+        ):
+            # 池里有这些 ID、但按绑定一个都没落下：用户会以为是「库没信号」
+            return "binding_excluded_all"
+        return "no_match"
+
+    @property
+    def channel_stats(self) -> list[tuple[int, int]]:
+        """``[(0 基通道, 帧数)]``，按通道升序。选库框「已知通道」数据源。
+
+        聚合到通道维度（同一通道多个 ID 的桶相加），不暴露 ``_buckets`` 本体。
+        """
+        with self._access_lock:
+            counts: dict[int, int] = {}
+            for bucket in self._buckets:
+                counts[bucket.channel] = counts.get(bucket.channel, 0) + bucket.count
+            return sorted(counts.items())
 
     def _build_metadata(self):
         """报文桶 ∩ 数据库 → VarMetadata（组 = 一个桶）。"""
