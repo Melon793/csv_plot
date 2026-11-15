@@ -1168,7 +1168,7 @@ class CursorManager:
         label_height_pixels: float,
         gap_pixels: float,
     ) -> list[LabelLayout]:
-        """列内垂直堆叠：自适应权重的约束垂直堆叠"""
+        """列内垂直堆叠：PAV 等渗回归求最小位移且保持最小间距"""
         n = len(labels)
         if n == 0:
             return []
