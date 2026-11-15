@@ -177,6 +177,7 @@ def test_legend_cut_snapshots_and_removes_source(shelf, plot_factory, qapp):
     assert entry.draw_mode_source == DRAW_MODE_SOURCE_AUTO
     assert entry.symbol_policy == SYMBOL_POLICY_ON
     assert entry.origin_label == "页1·图2"
+    assert entry.origin_plot() is src  # 剪切记来源：可退回
     assert any("已剪切 a（页1·图2）→ 暂存区" in m for m in host.messages)
 
     qapp.processEvents()  # 源端删除 singleShot(0) 落地
@@ -190,7 +191,9 @@ def test_legend_alt_copy_keeps_source(shelf, plot_factory, qapp):
 
     _legend_drop(widget, src, "a", copy=True)
 
-    assert widget.entry_for_name("a") is not None
+    entry = widget.entry_for_name("a")
+    assert entry is not None
+    assert entry.origin_plot() is None  # 复制不记来源：原图仍有，无需退回
     qapp.processEvents()
     assert "a" in src.curves  # 复制语义：源保留
     assert any("已复制 a" in m for m in host.messages)
@@ -255,6 +258,109 @@ def test_entry_survives_source_plot_destruction(shelf, qapp):
     assert widget.entry_for_name("a") is entry
     assert entry.color == "#101010"
     assert entry.stale is False
+
+
+def test_duplicate_cut_from_another_plot_updates_origin(shelf, plot_factory, qapp):
+    """同名二次剪入必须换来源：否则退回旧图且播报看起来完全正常。"""
+    widget, host = shelf
+    first = plot_factory()
+    second = plot_factory()
+    assert first.plot_variable("a")
+    assert second.plot_variable("a")
+    first.page = FakePage(0, [FakeContainer(first)])
+    second.page = FakePage(0, [FakeContainer(second)])
+
+    _legend_drop(widget, first, "a")
+    qapp.processEvents()
+    _legend_drop(widget, second, "a")
+
+    assert widget.count() == 1
+    entry = widget.entry_for_name("a")
+    assert entry is not None
+    assert entry.origin_plot() is second
+    assert entry.origin_label == "页1·图1"
+    assert any("已更新 1 条同名暂存" in m for m in host.messages)
+
+
+def test_copy_intake_overwrites_cut_origin_with_none(shelf, plot_factory, qapp):
+    """剪入后被复制入区覆盖 → 来源清空（最近一次入区动作决定语义）。"""
+    widget, host = shelf
+    cut_src = plot_factory()
+    copy_src = plot_factory()
+    assert cut_src.plot_variable("a")
+    assert copy_src.plot_variable("a")
+    cut_src.page = FakePage(0, [FakeContainer(cut_src)])
+    copy_src.page = FakePage(0, [FakeContainer(copy_src)])
+
+    _legend_drop(widget, cut_src, "a")
+    qapp.processEvents()
+    _legend_drop(widget, copy_src, "a", copy=True)
+
+    entry = widget.entry_for_name("a")
+    assert entry is not None
+    assert entry.origin_plot() is None
+    assert any("已更新 1 条同名暂存" in m for m in host.messages)
+
+
+def test_origin_plot_none_after_source_destroyed(shelf, qapp):
+    """来源绘图关闭后条目仍在，但退回来源解析为 None。"""
+    widget, _ = shelf
+    source = QWidget()
+    source.curves = {
+        "a": SimpleNamespace(
+            color="#101010",
+            visible=True,
+            draw_mode="auto",
+            symbol_policy="auto",
+            draw_mode_source="auto",
+        )
+    }
+    source.remove_variable_from_plot = lambda name: None
+    source.page = FakePage(0, [FakeContainer(source)])
+
+    _legend_drop(widget, source, "a")
+    qapp.processEvents()
+    entry = widget.entry_for_name("a")
+    assert entry is not None and entry.origin_plot() is source
+
+    force_delete(source)
+
+    assert entry.origin_plot() is None
+    assert widget.count() == 1
+    assert entry.origin_label == "页1·图1"
+
+
+def test_unweakrefable_origin_degrades_to_none():
+    ci = SimpleNamespace(color="", visible=True)
+    entry = ShelfEntry.from_curve_info("a", ci, origin_plot=object())
+    assert entry.origin_plot_ref is None
+    assert entry.origin_plot() is None
+
+
+def test_resolve_origin_rejects_dead_or_detached_sources(shelf, plot_factory):
+    widget, _ = shelf
+    src = plot_factory()
+    assert src.plot_variable("a")
+    entry = ShelfEntry.from_curve_info(
+        "a", src.curves["a"], origin_label="页1·图1", origin_plot=src
+    )
+
+    # 页已从宿主摘掉（ShelfHost.page_index 读 FakePage.index）
+    src.page = FakePage(-1, [FakeContainer(src)])
+    assert widget._resolve_origin(entry) == (None, "")
+
+    # 图已不在该页容器列表里
+    src.page = FakePage(0, [FakeContainer(object())])
+    assert widget._resolve_origin(entry) == (None, "")
+
+    # 销毁窗口期
+    src.page = FakePage(0, [FakeContainer(src)])
+    src._is_being_destroyed = True
+    assert widget._resolve_origin(entry) == (None, "")
+
+    # 正常路径
+    src._is_being_destroyed = False
+    assert widget._resolve_origin(entry) == (src, "页1·图1")
 
 
 def test_variable_list_intake_default_style(shelf):

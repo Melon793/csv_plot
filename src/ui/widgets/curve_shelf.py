@@ -14,6 +14,7 @@ PlotWidget._transfer_curves 与 _handle_shelf_drop。
 from __future__ import annotations
 
 import uuid
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.core.config import widget_alive
 from src.core.data_types import (
     DRAW_MODE_AUTO,
     DRAW_MODE_SOURCE_AUTO,
@@ -83,10 +85,30 @@ class ShelfEntry:
     draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
     origin_label: str = ""
     stale: bool = False
+    #: 剪切入区的来源绘图（弱引用，不延长生命周期）；复制/变量列表入区为 None
+    origin_plot_ref: weakref.ReferenceType | None = None
 
     @classmethod
-    def from_curve_info(cls, var_name: str, ci: Any, origin_label: str = "") -> "ShelfEntry":
-        """从源曲线快照全量样式（须在 drop 调用栈内、源存活时读完）。"""
+    def from_curve_info(
+        cls,
+        var_name: str,
+        ci: Any,
+        origin_label: str = "",
+        *,
+        origin_plot: Any = None,
+    ) -> "ShelfEntry":
+        """从源曲线快照全量样式（须在 drop 调用栈内、源存活时读完）。
+
+        ``origin_plot`` 只在无修饰剪切入区时传入；复制不记来源，避免
+        「原图仍有一条、退回却无事可做」的假入口。
+        """
+        ref = None
+        if origin_plot is not None:
+            try:
+                ref = weakref.ref(origin_plot)
+            except TypeError:
+                # 测试替身等不可弱引用对象：退回入口自然降级为不可用
+                logger.debug("暂存来源不可弱引用：%r", type(origin_plot))
         return cls(
             key=uuid.uuid4().hex,
             var_name=var_name,
@@ -98,12 +120,22 @@ class ShelfEntry:
                 ci, "draw_mode_source", DRAW_MODE_SOURCE_AUTO
             ),
             origin_label=origin_label,
+            origin_plot_ref=ref,
         )
 
     @classmethod
     def from_name(cls, var_name: str, origin_label: str = "变量列表") -> "ShelfEntry":
         """变量列表来源：默认样式，复制语义。"""
         return cls(key=uuid.uuid4().hex, var_name=var_name, origin_label=origin_label)
+
+    def origin_plot(self) -> Any | None:
+        """存活的来源绘图；引用为空 / 目标已销毁返回 None。
+
+        ``widget_alive`` 自身已判 None（``config.py`` 的实现是
+        ``widget is not None and ...``）；这里显式写 None 分支只是让意图清楚。
+        """
+        plot = self.origin_plot_ref() if self.origin_plot_ref is not None else None
+        return plot if widget_alive(plot) else None
 
     def style_summary(self) -> str:
         """tooltip 用的样式摘要。"""
@@ -198,6 +230,9 @@ class CurveShelfWidget(QListWidget):
                 "symbol_policy",
                 "draw_mode_source",
                 "origin_label",
+                # 来源引用必须跟随最近一次入区：剪入 A 后又从 B 剪入同名
+                # 变量时，退回目标必须是 B（漏掉会静默退错图）
+                "origin_plot_ref",
             ):
                 setattr(existing, attr, getattr(entry, attr))
             existing.stale = False
@@ -415,7 +450,13 @@ class CurveShelfWidget(QListWidget):
             ci = source.curves.get(name)
             if ci is None:
                 continue
-            entry = ShelfEntry.from_curve_info(name, ci, origin_label=origin)
+            entry = ShelfEntry.from_curve_info(
+                name,
+                ci,
+                origin_label=origin,
+                # 复制入区不记来源：原图仍有该曲线，退回无事可做
+                origin_plot=None if copy_mode else source,
+            )
             status = self.add_entry(entry)
             if status == "updated":
                 updated += 1
@@ -476,6 +517,24 @@ class CurveShelfWidget(QListWidget):
             src_label=origin,
             updated=updated,
         )
+
+    def _resolve_origin(self, entry: ShelfEntry) -> tuple[Any | None, str]:
+        """解析条目可退回的来源绘图 → ``(plot, live_label)``。
+
+        不可退回返回 ``(None, "")``。判定必须覆盖三层：弱引用目标存活、
+        所属页仍在宿主 ``pages`` 里、绘图仍在该页 ``plot_widgets`` 里。
+        后两条由 ``_origin_label_for`` 的成员身份反算一并完成；按标题/序号
+        猜测的路径一律不走（重排/改名后会退错目标）。
+        """
+        plot = entry.origin_plot()
+        host = self._host_window()
+        if plot is None or host is None:
+            return None, ""
+        if getattr(plot, "_is_being_destroyed", False):
+            # deleteLater 与包装器存活之间的窗口：此时落地会撞 RuntimeError
+            return None, ""
+        label = self._origin_label_for(plot)
+        return (plot, label) if label else (None, "")
 
     def _origin_label_for(self, source: Any) -> str:
         """反算来源徽章「页N·图M」（快照语义：之后重命名/重排不追更）。"""
