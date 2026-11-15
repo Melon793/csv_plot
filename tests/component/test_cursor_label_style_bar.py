@@ -1,7 +1,6 @@
-"""游标数值标签 A1'（白底 + 左侧全色条）样式用例（offscreen）。
+"""游标数值标签定稿样式用例（offscreen）：90α 白底 + 左侧全色条。
 
-分支对比用：本文件对应 feature/cursor-label-bar；
-另一支 feature/cursor-label-tint90 是 90α 高透明底色，两者样式互斥。
+对应 feature/cursor-label-bar 的样式已合入 main；同色底变体（tint*）已弃用。
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ _TOL = 6
 def _show_label(pw):
     """把交点放到视图中部并刷新出数值标签
 
-    关网格：底色 60α 半透明，像素采样点需落在纯白背景上才能算期望色。
+    关网格：底色 90α 半透明，像素采样点需落在纯白背景上才能算期望色。
     """
     pw.plot_item.showGrid(x=False, y=False)
     vb = pw.view_box
@@ -65,12 +64,12 @@ def test_label_bar_style_white_fill_and_color_bar(plot_factory, qapp):
     assert lbl.fill.style() == Qt.BrushStyle.LinearGradientPattern
     stops = lbl.fill.gradient().stops()
     assert len(stops) >= 3
-    # 0~4px 是不透明全色条；4px 之后是 60α 白底（透出曲线）
+    # 0~4px 是不透明全色条；4px 之后是 90α 白底（透出曲线）
     assert stops[0][1].name().lower() == curve_color
     assert stops[0][1].alpha() == 255
     assert stops[1][1].name().lower() == curve_color
     assert stops[-1][1].name().lower() == "#ffffff"
-    assert stops[-1][1].alpha() == 60
+    assert stops[-1][1].alpha() == 90
 
     # 文字始终黑色；边框为曲线色 1.5px（main 原色，浅灰对白底几乎不可见）
     assert lbl.textItem.defaultTextColor().name().lower() == "#000000"

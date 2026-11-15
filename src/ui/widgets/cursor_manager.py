@@ -401,7 +401,7 @@ class CursorManager:
             label = pg.TextItem(
                 color=(0, 0, 0), fill=pg.mkBrush(255, 255, 255, 255), anchor=(0, 0.5)
             )
-            # 白底默认不透明（渲染时降为 60α 以透出曲线）；
+            # 白底默认不透明（渲染时降为 90α 以透出曲线）；
             # 身份色由 _render_label_layout 设置的左侧全色条承担。
             # 边框在渲染时按曲线色设 1.5px：浅灰对白底对比仅 1.49 几乎不可见，
             # 曲线色 5.0+ 才能把文本框从白底里勾出来（main 原色）。
@@ -1257,14 +1257,14 @@ class CursorManager:
                 fmt.setLeftMargin(7)
                 doc.rootFrame().setFrameFormat(fmt)
 
-            # 身份色：左侧 4px 全色条 + 60α 白底 + 曲线色描边（A1' 调整版）。
-            # 色条不透明全色承担身份；白底 60α(=23.5% 白) 让曲线/网格透上来；
+            # 身份色：左侧 4px 全色条 + 90α 白底 + 曲线色描边（A1' 调整版）。
+            # 色条不透明全色承担身份；白底 90α(≈35% 白) 让曲线/网格透上来；
             # 描边用曲线色 1.5px（main 原色），把文本框从白底里勾出来。
             if (not hasattr(text_item, '_cached_chip_color')
                     or text_item._cached_chip_color != layout.color):
                 c = pg.mkColor(layout.color)
                 white = pg.mkColor("#FFFFFF")
-                white.setAlpha(60)
+                white.setAlpha(90)
                 grad = QLinearGradient(0.0, 0.0, 5.0, 0.0)
                 grad.setColorAt(0.0, c)
                 grad.setColorAt(0.79, c)
