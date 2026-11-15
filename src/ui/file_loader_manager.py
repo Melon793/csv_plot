@@ -30,8 +30,13 @@ from src.core.config import (
     BLF_MAX_PAYLOAD_BYTES,
     BLF_TEXT_CANCELLED,
     BLF_TEXT_DB_MISSING,
+    BLF_TEXT_FILE_UPDATED,
     BLF_TEXT_NO_DB_SELECTED,
     BLF_TEXT_NO_SIGNAL,
+    BLF_TEXT_BINDING_EXCLUDED,
+    BLF_TEXT_POOL_EMPTY,
+    BLF_TEXT_SIDECAR_FOUND,
+    BLF_TEXT_SIDECAR_ISSUES,
     BLF_TEXT_TRUNCATED,
     BLF_TEXT_TRUNCATED_PAYLOAD,
     FILE_SIZE_LIMIT_BACKGROUND_LOADING,
@@ -40,6 +45,13 @@ from src.core.config import (
 )
 from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
+from src.data.can_bindings import (
+    CanBindings,
+    is_dir_writable,
+    load_yaml,
+    save_yaml,
+    sidecar_config_path,
+)
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.utils.paths import normalize_input_path
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -87,7 +99,9 @@ class FileLoaderManager(MainWindowBaseManager):
     # BLF / CAN 数据库状态（§5）。在 __init__ 之外声明类级默认值，避免
     # 未走过 BLF 路径时 getattr 一路传默认值、也让单能直接断言初始态。
     _blf_progress = None
-    _blf_db_paths: list | None = None
+    # BLF 配置 = 有序库池 + 通道绑定 + 别名。绑定必须与池同生命周期地穿透
+    # reload / 重选 / F 回环，否则会静默丢绑定（评审 F8）。
+    _blf_can_cfg: CanBindings | None = None
     # 取消标记按**代次**记录而不是一个全局布尔：进度框的 canceled 是同步落地，
     # 而旧线程的 cancelled/finished 会在后来的事件循环里迟到（见 _start_blf_load
     # 的保活注释），单布尔会被旧线程把新一轮导入误杀。
@@ -97,7 +111,7 @@ class FileLoaderManager(MainWindowBaseManager):
     _blf_cancelled_version = None
     _blf_thread_refs: list | None = None
     _blf_force_dialog = False
-    _blf_preset_db_paths = None
+    _blf_preset_cfg: CanBindings | None = None
     # F 路径（库与报文完全不通）暂存**已经扫完**的 loader：报文桶与数据库是解耦
     # 的，重开对话框换库只需要重绑（毫秒级），不必把整文件再扫一遍。
     _blf_pending_loader = None
@@ -1143,11 +1157,11 @@ class FileLoaderManager(MainWindowBaseManager):
         if is_blf_file:
             # §5.1：BLF 必须先拿到 CAN 数据库才能导入。拿不到（用户取消）
             # 就回到导入前状态，**不进入空数据态**。
-            db_paths = self._resolve_can_databases(file_path, is_reload=is_reload)
-            if db_paths is None:
+            cfg = self._resolve_can_databases(file_path, is_reload=is_reload)
+            if cfg is None:
                 self._cancel_pending_reload(is_reload)
                 return
-            self._blf_db_paths = db_paths
+            self._blf_can_cfg = cfg
             delimiter_typ = ","
             desc_rows = 0
             has_unit = False
@@ -1275,7 +1289,7 @@ class FileLoaderManager(MainWindowBaseManager):
             try:
                 self._start_blf_load(
                     file_path,
-                    getattr(self, "_blf_db_paths", []) or [],
+                    getattr(self, "_blf_can_cfg", None) or CanBindings.empty(),
                     is_reload=is_reload,
                 )
                 started_async = True
@@ -1402,28 +1416,37 @@ class FileLoaderManager(MainWindowBaseManager):
         return usable, bad
 
     def _resolve_can_databases(self, file_path: str, is_reload: bool = False):
-        """§5.1 的 B / C / F 前置路径。返回 ``db_paths``；``None`` = 中止导入。
+        """§5.1 的 B / C / F 前置路径。返回 ``CanBindings``；``None`` = 中止导入。
 
         新导入**永远弹窗**（B）：不允许静默解析，上次记忆的库列表只作为弹窗里
         的预选项，命中与否由用户确认。唯一的豁免是「重载」——那是对当前数据
-        源的再扫描，库本来就是用户之前显式选过的。
+        源的再扫描，库与绑定本来就是用户之前显式选过的（评审 F8 #6）。
         """
         from html import escape
 
         from src.core.settings import AppSettings
 
-        remembered = [normalize_input_path(p)
-                      for p in AppSettings().get_blf_last_db_paths()]
+        remembered = CanBindings.from_paths(
+            normalize_input_path(p) for p in AppSettings().get_blf_last_db_paths()
+        )
 
         if is_reload and self._is_blf_source():
-            # 「重载」始终复用上次 db_paths，绝不主动弹窗；只有真读不到才走 C
-            current = [normalize_input_path(p)
-                       for p in (getattr(self.mw.loader, "db_paths", None) or [])]
-            usable, bad = self._usable_db_paths(current)
+            # 「重载」始终复用上次配置（池 + 绑定 + 别名），绝不主动弹窗；
+            # 只有真读不到才走 C。
+            current = CanBindings.from_paths(
+                (
+                    normalize_input_path(p)
+                    for p in (getattr(self.mw.loader, "db_paths", None) or [])
+                ),
+                by_channel=getattr(self.mw.loader, "bindings", None),
+                alias=getattr(self.mw.loader, "channel_aliases", None),
+            )
+            usable, bad = self._usable_db_paths(current.pool)
             if usable and not bad:
-                return usable
+                return current.restrict_to_pool(usable)
             return self._ask_can_databases(
-                file_path, initial=current, missing=bad,
+                file_path, initial_cfg=current, missing=bad,
+                known_channels=getattr(self.mw.loader, "channel_stats", None),
                 notice=BLF_TEXT_DB_MISSING.format(
                     paths=escape("\n".join(bad) or "（无）")
                 ),
@@ -1432,50 +1455,129 @@ class FileLoaderManager(MainWindowBaseManager):
         if getattr(self, "_blf_force_dialog", False):
             # F 路径：扫完 0 个信号，warning 后直接重开对话框（回到 B）
             self._blf_force_dialog = False
-            preset = getattr(self, "_blf_preset_db_paths", None) or remembered
-            self._blf_preset_db_paths = None
-            paths = self._ask_can_databases(file_path, initial=preset)
-            if paths is None:
+            preset = getattr(self, "_blf_preset_cfg", None) or remembered
+            self._blf_preset_cfg = None
+            cfg = self._ask_can_databases(file_path, initial_cfg=preset)
+            if cfg is None:
                 # 用户在重开的框里按了取消/没留下任何可用库：本轮导入到此为止，
                 # 上一轮暂存的报文桶（可能几百 MB）没有下一轮可复用，立刻释放
                 # （评审 A7）。
                 self._release_pending_blf_loader()
                 return None
-            if list(paths) == list(preset or []):
-                # 答案与上一轮逐个相同 → 报文没变、库也没变，结果必然还是 0 信号。
-                # 换库改成毫秒级重绑后，这一环不再被「整文件重扫」天然限速，同一份
-                # 错库会被快速提交成连环弹窗，所以这里直接收口：本轮按「未选库」
-                # 取消处理，回到导入前状态，要再试由用户主动点「导入」。
-                logger.info("CAN 数据库选择未变化，仍与 %s 的报文不匹配，已取消本轮导入",
+            if cfg == preset:
+                # 整份配置（池顺序 + 绑定 + 别名）与上一轮完全相同 → 报文没变、
+                # 解释方式也没变，结果必然还是 0 信号。只比库列表会把「只改了
+                # 通道绑定」误判成未变化并静默取消导入（评审 F9）。
+                logger.info("CAN 数据库配置未变化，仍与 %s 的报文不匹配，已取消本轮导入",
                             file_path)
                 return None
-            return paths
+            return cfg
 
-        if remembered:
-            # C：记忆命中但个别文件缺失/解析失败 → 弹窗 + 黄条说明
-            usable, bad = self._usable_db_paths(remembered)
+        # 先尝试按文件记忆 / 旁车配置（它们可能带着绑定与别名）；没有命中时
+        # base 就是全局记忆，C 路径的缺文件检查对两者同样适用。
+        base_cfg, extra_notice = self._initial_cfg_for_new_import(
+            file_path, remembered
+        )
+
+        # B：每次新导入都弹窗。预选优先级：旁车 YAML > 按文件记忆 > 全局记忆。
+        if base_cfg.pool:
+            usable, bad = self._usable_db_paths(base_cfg.pool)
             if bad and usable:
-                return self._ask_can_databases(
-                    file_path, initial=remembered, missing=bad,
-                    notice=BLF_TEXT_DB_MISSING.format(
-                        paths=escape("\n".join(bad))
-                    ),
+                notice = BLF_TEXT_DB_MISSING.format(
+                    paths=escape("\n".join(bad))
                 )
+                if extra_notice:
+                    notice = f"{extra_notice}\n{notice}"
+                return self._ask_can_databases(
+                    file_path, initial_cfg=base_cfg, missing=bad, notice=notice
+                )
+        return self._ask_can_databases(
+            file_path, initial_cfg=base_cfg, notice=extra_notice
+        )
 
-        # B：每次新导入都弹窗，预选上次记忆的列表（可能为空）
-        return self._ask_can_databases(file_path, initial=remembered)
+    @staticmethod
+    def _no_signal_text(reason: str | None) -> str:
+        """0 信号三文案（评审 F18）：别让绑定问题伪装成「库里没有信号」。"""
+        if reason == "pool_empty":
+            return BLF_TEXT_POOL_EMPTY
+        if reason == "binding_excluded_all":
+            return BLF_TEXT_BINDING_EXCLUDED
+        return BLF_TEXT_NO_SIGNAL
 
-    def _ask_can_databases(self, file_path: str, initial=None, missing=None,
-                           notice: str = ""):
-        """弹 §5.2 的选择对话框。取消/未选中任何可用库 → ``None``。"""
+    def _initial_cfg_for_new_import(self, file_path: str, remembered: CanBindings):
+        """B/C 的预选来源：旁车 YAML > 按文件记忆 > 全局记忆。
+
+        按文件记忆命中但 size/mtime 不符时**询问**沿用还是重选（评审 F10：
+        现场从共享盘拷到本地，mtime 必变，直接失配等于记忆永远不命中）。
+        """
+        from src.core.settings import AppSettings
+
+        base = remembered
+        notice = ""
+        entry = AppSettings().get_blf_file_bindings().get(
+            AppSettings.blf_memory_key(file_path)
+        )
+        if entry:
+            try:
+                cfg = CanBindings.from_yaml_dict(entry.get("config") or {})
+            except ValueError:
+                cfg = None
+            if cfg is not None and cfg.pool:
+                if self._memory_entry_is_stale(entry, file_path):
+                    answer = QMessageBox.question(
+                        self.mw, "文件已更新", BLF_TEXT_FILE_UPDATED,
+                        QMessageBox.StandardButton.Yes
+                        | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer == QMessageBox.StandardButton.Yes:
+                        base = cfg
+                else:
+                    base = cfg
+
+        sidecar = sidecar_config_path(file_path)
+        if os.path.isfile(sidecar):
+            cfg, issues = load_yaml(sidecar, file_path)
+            if cfg.pool:
+                base = cfg
+                notice = BLF_TEXT_SIDECAR_FOUND.format(
+                    name=os.path.basename(sidecar)
+                )
+            if issues:
+                line = BLF_TEXT_SIDECAR_ISSUES.format(issues="；".join(issues))
+                notice = f"{notice}\n{line}" if notice else line
+        return base, notice
+
+    @staticmethod
+    def _memory_entry_is_stale(entry: dict, file_path: str) -> bool:
+        try:
+            stat = os.stat(file_path)
+        except OSError:
+            return False
+        return (
+            int(entry.get("size", -1)) != int(stat.st_size)
+            or abs(float(entry.get("mtime", 0.0)) - float(stat.st_mtime)) > 1e-6
+        )
+
+    def _ask_can_databases(self, file_path: str, initial_cfg: CanBindings | None = None,
+                           missing=None, notice: str = "",
+                           known_channels=None):
+        """弹 §5.2 的选择对话框。取消/未选中任何可用库 → ``None``。
+
+        绑定与别名由对话框直接编辑并随 ``get_result_config()`` 返回；
+        ``known_channels`` 供「预扫被跳过 / 重选」场景列出通道（loader 已扫桶）。
+        """
         from src.core.settings import AppSettings
         from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
 
+        base = initial_cfg or CanBindings.empty()
         dialog = CanDatabaseSelectorDialog(
             self.mw,
             data_file=file_path,
-            initial_paths=list(initial or []),
+            initial_paths=base.pool_list,
             missing_paths=list(missing or []),
+            initial_cfg=base,
+            known_channels=list(known_channels or []),
         )
         if notice:
             dialog.set_notice(notice)
@@ -1486,13 +1588,64 @@ class FileLoaderManager(MainWindowBaseManager):
         if not paths:
             logger.info(BLF_TEXT_NO_DB_SELECTED)
             return None
+        cfg = dialog.get_result_config()
         # 记忆写入时机：「导入」成功后才写；取消不写（§5.2）。此处先记住列表，
         # 扫描失败（异常路径）时不会回滚 —— 下次导入仍能在对话框里看到它们。
         # 复选框现在是「记住此列表，下次自动预选」：不勾 = 这一次的选择不入
         # 记忆，同时清掉旧记忆，否则旧列表会在下次弹窗里违背用户意图地出现。
         settings = AppSettings()
-        settings.set_blf_last_db_paths(paths if dialog.remember_choice() else [])
-        return paths
+        remembered = dialog.remember_choice()
+        settings.set_blf_last_db_paths(cfg.pool_list if remembered else [])
+        if not remembered:
+            # 「不记住」也要清掉按文件记忆，否则过期配置会在下次弹窗里
+            # 违背用户意图地重新出现。
+            settings.forget_blf_file_binding(file_path)
+        return cfg
+
+    def save_can_config(self, file_path: str, cfg: CanBindings,
+                        *, alongside: bool = False):
+        """保存显式配置。返回 ``(实际路径, issues)``。
+
+        ``alongside``：优先写日志同目录；只读 / UNC 盘写不进时**静默回退**
+        用户配置目录（评审 F11：现场日志常在只读共享盘）。
+        """
+        target = ""
+        if alongside:
+            folder = os.path.dirname(os.path.abspath(file_path))
+            if is_dir_writable(folder):
+                target = sidecar_config_path(file_path)
+        if not target:
+            from src.core.settings import AppSettings
+
+            target = AppSettings.blf_binding_store_path(file_path)
+        return target, save_yaml(cfg, target)
+
+    def load_can_config(self, path: str, file_path: str = ""):
+        """读取显式配置（坏文件不抛断导入）。"""
+        return load_yaml(path, file_path or None)
+
+    def _remember_blf_config(self, loader) -> None:
+        """导入成功后写按文件记忆（best-effort，绝不打断导入）。"""
+        try:
+            from src.core.settings import AppSettings
+
+            settings = AppSettings()
+            if not settings.get_blf_last_db_paths():
+                return  # 用户没勾「记住」：本轮不写
+            cfg = CanBindings.from_paths(
+                getattr(loader, "db_paths", None) or [],
+                by_channel=getattr(loader, "bindings", None),
+                alias=getattr(loader, "channel_aliases", None),
+            )
+            if not cfg.pool:
+                return
+            stat = os.stat(loader.path)
+            settings.remember_blf_file_binding(
+                loader.path, size=stat.st_size, mtime=stat.st_mtime,
+                config=cfg.to_yaml_dict(),
+            )
+        except Exception:
+            logger.debug("写入 BLF 文件配置记忆失败", exc_info=True)
 
     def _close_blf_progress(self) -> None:
         dialog = getattr(self, "_blf_progress", None)
@@ -1512,8 +1665,13 @@ class FileLoaderManager(MainWindowBaseManager):
         except RuntimeError:  #已被 Qt 销毁
             pass
 
-    def _start_blf_load(self, file_path: str, db_paths, is_reload: bool = False):
-        """§5.4：后台扫描 + 可量化进度 + **必须有取消按钮**。"""
+    def _start_blf_load(self, file_path: str, cfg: CanBindings,
+                        is_reload: bool = False):
+        """§5.4：后台扫描 + 可量化进度 + **必须有取消按钮**。
+
+        ``cfg`` 是**整份配置**（池 + 绑定 + 别名）：只传池会让 F 回环与线程
+        静默丢绑定（评审 F8 #2/#3）。
+        """
         pending = self._blf_pending_loader
         if pending is not None:
             # F 路径回环（上一轮扫完但 0 信号）：文件没变就复用已扫到的报文桶，只
@@ -1521,7 +1679,11 @@ class FileLoaderManager(MainWindowBaseManager):
             self._blf_pending_loader = None
             if pending.path == file_path:
                 try:
-                    pending.bind_databases(list(db_paths or []))
+                    pending.bind_databases(
+                        list(cfg.pool),
+                        bindings=cfg.normalized_loader_bindings(),
+                        aliases=cfg.alias_map(),
+                    )
                 except Exception as e:
                     logger.warning("复用已扫 BLF 重绑数据库失败，回落重新扫描: %s",
                                    e, exc_info=True)
@@ -1537,7 +1699,12 @@ class FileLoaderManager(MainWindowBaseManager):
             self._discard_loader(pending)
 
         name = os.path.basename(file_path)
-        thread = DataLoadThread(file_path, db_paths=list(db_paths))
+        thread = DataLoadThread(
+            file_path,
+            db_paths=list(cfg.pool),
+            bindings=cfg.normalized_loader_bindings(),
+            aliases=cfg.alias_map(),
+        )
         # QThread 的 Python 包装器一丢最后一条强引用就当场析构 C++ 对象，Qt 直接
         # std::terminate（实测：丢掉运行中线程的唯一引用后继续跑事件循环 →
         # ``QThread: Destroyed while thread is still running`` + SIGABRT）。
@@ -1677,8 +1844,13 @@ class FileLoaderManager(MainWindowBaseManager):
         self._close_blf_progress()
 
         if not new_loader.var_names:
-            # F 路径：库与报文完全不通 → warning 后重开对话框，不进空数据态
-            db_paths = list(getattr(new_loader, "db_paths", None) or [])
+            # F 路径：库与报文完全不通 → warning 后重开对话框，不进空数据态。
+            # 绑定与别名随池一起暂存，重开关里继续可见（评审 F8 #7）。
+            preset_cfg = CanBindings.from_paths(
+                getattr(new_loader, "db_paths", None) or [],
+                by_channel=getattr(new_loader, "bindings", None),
+                alias=getattr(new_loader, "channel_aliases", None),
+            )
             # 扫好的报文桶**不丢**：桶只按 (通道, CAN ID) 分，与数据库无关，下一轮
             # 换库靠 bind_databases() 毫秒级重绑即可（与 §5.6「CAN 数据库…」按钮
             # 同一条承诺）。此前在这里 close() 掉了整轮扫描成果，于是每一轮重试
@@ -1692,9 +1864,12 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.load_btn.setEnabled(True)
             self._reload_in_progress = False
             self.mw.reload_btn.setEnabled(True)
-            QMessageBox.warning(self.mw, "未生成任何信号", BLF_TEXT_NO_SIGNAL)
+            QMessageBox.warning(
+                self.mw, "未生成任何信号",
+                self._no_signal_text(getattr(new_loader, "zero_reason", None)),
+            )
             self._blf_force_dialog = True
-            self._blf_preset_db_paths = db_paths
+            self._blf_preset_cfg = preset_cfg
             self._schedule_delayed(0, lambda: self._restart_blf_import(file_path))
             return
 
@@ -1731,6 +1906,7 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.reload_btn.setEnabled(True)
         if not applied:
             return
+        self._remember_blf_config(new_loader)
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
         self._schedule_delayed(
             0, lambda: self._post_load_actions(file_path, is_reload=is_reload)
@@ -1799,7 +1975,7 @@ class FileLoaderManager(MainWindowBaseManager):
     def _give_up_blf_restart(self) -> None:
         """放弃 F 路径重开时必须把两个标志复位（它们只对这一轮导入有意义）。"""
         self._blf_force_dialog = False
-        self._blf_preset_db_paths = None
+        self._blf_preset_cfg = None
         self._release_pending_blf_loader()
 
     def _release_pending_blf_loader(self) -> None:
@@ -1861,6 +2037,11 @@ class FileLoaderManager(MainWindowBaseManager):
                 )
                 seg_text = f"CAN：{len(db_names)} 库 · {database.signal_count} 信号"
         # tooltip 给 banner 两行全文（含库名清单），段被宽度收纳时仍有出口
+        errors = sum((getattr(loader, "error_frames", None) or {}).values())
+        if errors:
+            # 错误帧不产生采样点，但必须让人知道「日志里有错误帧」——
+            # 总线质量问题的第一现场证据，别让它只落在 debug 日志里。
+            seg_text = f"{seg_text} · 错误帧 {errors:,}"
         self.mw._update_can_segment(seg_text, tip=banner.info_label.text())
 
     def reselect_can_database(self) -> None:
@@ -1870,17 +2051,29 @@ class FileLoaderManager(MainWindowBaseManager):
         loader = getattr(self.mw, "loader", None)
         if not self._is_blf_source():
             return
-        paths = self._ask_can_databases(
-            loader.path, initial=list(getattr(loader, "db_paths", None) or [])
+        current = CanBindings.from_paths(
+            getattr(loader, "db_paths", None) or [],
+            by_channel=getattr(loader, "bindings", None),
+            alias=getattr(loader, "channel_aliases", None),
         )
-        if not paths:
+        cfg = self._ask_can_databases(
+            loader.path,
+            initial_cfg=current,
+            known_channels=getattr(loader, "channel_stats", None),
+        )
+        if cfg is None:
             return
         # 解析大库时主线程确实会卡住（Qt 也来不及重绘）；至少让光标先变成
         # 等待态，用户能区分「在处理」与「卡死」。finally 保证异常/提前返回
         # 都不会把整个应用留在忙碌光标上；错误框放到光标复原之后再弹。
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            stats = loader.bind_databases(paths, rollback_if_empty=True)
+            stats = loader.bind_databases(
+                list(cfg.pool),
+                bindings=cfg.normalized_loader_bindings(),
+                aliases=cfg.alias_map(),
+                rollback_if_empty=True,
+            )
             bind_error = None
         except Exception as e:  # noqa: BLE001 - 对话框要把任意解析异常都报出来
             bind_error = e
@@ -1900,11 +2093,15 @@ class FileLoaderManager(MainWindowBaseManager):
             logger.info("重选 CAN 数据库 0 命中，已回滚到原数据库")
             QMessageBox.warning(
                 self.mw, "未生成任何信号",
-                BLF_TEXT_NO_SIGNAL + "\n已保留原数据库与已绘制曲线。",
+                self._no_signal_text(stats.get("zero_reason"))
+                + "\n已保留原数据库与已绘制曲线。",
             )
             return
         if not stats.get("var_count"):
-            QMessageBox.warning(self.mw, "未生成任何信号", BLF_TEXT_NO_SIGNAL)
+            QMessageBox.warning(
+                self.mw, "未生成任何信号",
+                self._no_signal_text(stats.get("zero_reason")),
+            )
         for err in loader.load_errors:
             logger.warning("CAN 数据库: %s", err)
         # 换库后同名变量可能指向完全不同的信号，统计缓存必须整体作废。
@@ -1921,9 +2118,10 @@ class FileLoaderManager(MainWindowBaseManager):
         # 库要样本，统计任务直接返回错误文本。不调 _swap_loader 是因为它
         # 会 _release_old_data —— 正在用的 loader 不能释放。
         self._apply_loader(is_reload=True)
+        self._remember_blf_config(loader)
         logger.info(
             "CAN 数据库已重绑: %d 库 / %d 变量 / %d 未匹配 ID（未重扫报文）",
-            len(paths), stats.get("var_count", 0), stats.get("unmatched", 0),
+            len(cfg.pool), stats.get("var_count", 0), stats.get("unmatched", 0),
         )
 
     def show_can_unmatched(self) -> None:
@@ -2223,6 +2421,8 @@ class FileLoaderManager(MainWindowBaseManager):
             elif ext == ".blf":
                 # 正常导入路径下 BLF 一律走后台线程（§5.4），这里保留同步
                 # 入口只为给单测 / 脚本一个能直接拿到 loader 的等价通道。
+                # 通道绑定 / 别名刻意不接线：生产路径在 :1273 已提前返回，
+                # 走不到这里；接线只会制造第二份需要维护的传递链（评审 F8 #10）。
                 from src.data.blf_loader import BLFLazyLoader
 
                 if not db_paths:

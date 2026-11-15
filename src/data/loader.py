@@ -53,6 +53,8 @@ class DataLoadThread(QThread):
         encoding: str | None = None,
         sheet_name: str | None = None,
         db_paths: list[str] | None = None,
+        bindings: dict[int, frozenset[str]] | None = None,
+        aliases: dict[int, str] | None = None,
     ):
         super().__init__(parent)
         self.file_path = file_path
@@ -61,9 +63,13 @@ class DataLoadThread(QThread):
         self.has_unit = has_unit
         self.encoding = encoding
         self.sheet_name = sheet_name
-        # BLF 专有：DBC / ARXML 数据库路径列表。其他格式一律忽略，
+        # BLF 专有：数据库池（顺序即优先级）。其他格式一律忽略，
         # 但 reload 路径会无条件读 ``loader.db_paths``，故统一存下来。
         self.db_paths = list(db_paths) if db_paths else []
+        # BLF 专有：通道绑定（0 基通道 → 库路径子集）与别名。显式形参而不是
+        # **kwargs：component 替身若静默吞掉它们，测试会假绿（评审 F8 #11）。
+        self.bindings = dict(bindings or {})
+        self.aliases = dict(aliases or {})
         self._cancel_requested = False
         # BLF 扫描的实时计数（{"messages": int, "buckets": int}），供进度框
         # 显示「已读 N 帧」。非 BLF 格式始终为空 dict。
@@ -115,6 +121,8 @@ class DataLoadThread(QThread):
                 loader = BLFLazyLoader(
                     self.file_path,
                     db_paths=self.db_paths,
+                    bindings=self.bindings,
+                    aliases=self.aliases,
                     _progress=_progress_cb,
                     _should_cancel=lambda: self._cancel_requested,
                     _stats=self.scan_stats,

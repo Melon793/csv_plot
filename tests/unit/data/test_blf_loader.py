@@ -19,18 +19,20 @@ from __future__ import annotations
 import gc
 import threading
 import weakref
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 import src.data.blf_loader as blf_module
 from src.core.config import is_grouped_loader
-from src.data.blf_loader import BLFLazyLoader
+from src.data.blf_loader import BLFLazyLoader, prescan_blf_frames
 from src.data.metadata import UNKNOWN
 from tests.fixtures import bus_data_access as bd
 from tests.fixtures.data_factory import (
     CAN_FRAMES,
     CAN_UNMATCHED_ID,
+    encode_frame_payload,
     make_blf_messages,
     write_blf,
     write_blf_pair,
@@ -51,6 +53,59 @@ def _load(directory, *, n=20, buses=(0,), basename="syn_can", **kw):
         directory, n=n, buses=buses, basename=basename, **kw
     )
     return BLFLazyLoader(str(blf), db_paths=[str(dbc)]), blf, dbc
+
+
+def _conflicting_engine(tmp_path, name: str = "engine_b.dbc") -> Path:
+    """同 ID 0x1A0、EngineSpeed 因子 100 倍 / 单位不同的第二份库。"""
+    frame = dict(CAN_FRAMES[0])
+    frame["signals"] = tuple(
+        {**sig, "factor": 100.0, "unit": "conflicted"}
+        if sig["name"] == "EngineSpeed"
+        else dict(sig)
+        for sig in CAN_FRAMES[0]["signals"]
+    )
+    return write_dbc(tmp_path / name, [frame])
+
+
+def _unused_dbc(tmp_path, name: str = "unused.dbc") -> Path:
+    """日志里不存在的 ID（0x7DF）：用于制造 0 信号与「池里有但绑定排除了」。"""
+    frame = {**CAN_FRAMES[0], "can_id": 0x7DF, "name": "NotInLog"}
+    return write_dbc(tmp_path / name, [frame])
+
+
+def _var_on_channel(loader, channel: int, needle: str = "EngineSpeed") -> str:
+    """按组标签找属于某通道的信号名（_G 后缀编号随桶序变化，不写死）。"""
+    for name in loader.var_names:
+        if needle not in name:
+            continue
+        gi = loader.get_var_group_index(name)
+        if loader.get_group_label(gi).startswith(f"CAN{channel + 1} "):
+            return name
+    raise AssertionError(f"通道 {channel} 上没有 {needle}: {loader.var_names}")
+
+
+def _same_payload_blf(path, *, n: int = 10):
+    """两条通道写**完全相同**的 payload：跨通道比例断言的前提。
+
+    工厂的 ``make_blf_messages`` 按 (帧, 总线) 递增 seq，两条总线的物理值
+    本就不同，只能用于「各解各的」定性断言，不能做跨通道数值比较。
+    """
+    rows = []
+    for i in range(n):
+        data = encode_frame_payload(CAN_FRAMES[0], {
+            "EngineSpeed": float(i * 100),
+            "CoolantTemp": 25.0 + i,
+            "StarterMode": 1.0,
+            "TorqueLimit": 12.0,
+        })
+        for channel in (0, 1):
+            rows.append({
+                "timestamp": T0 + i * 0.01,
+                "channel": channel,
+                "can_id": CAN_FRAMES[0]["can_id"],
+                "data": data,
+            })
+    return write_blf(path, rows)
 
 
 @pytest.fixture(scope="module")
@@ -180,7 +235,7 @@ def test_single_frame_bucket_does_not_make_a_zero_length_range(tmp_path):
 def test_groups_are_channels_times_ids_and_labels_read_well(loader_and_paths):
     loader, _blf, dbc = loader_and_paths
     labels = [loader.get_group_label(gi) for gi in range(loader.group_count)]
-    assert any(lbl.startswith("Ch0 0x1A0 EngineData (G") for lbl in labels), labels
+    assert any(lbl.startswith("CAN1 0x1A0 EngineData (G") for lbl in labels), labels
     # 未匹配的 0x7FF 桶不生成变量 ⇒ 不在 group_count 里（否则 UI 出现空 tab）
     assert loader.group_count == len(loader.groups)
     for group in loader.groups:
@@ -198,7 +253,7 @@ def test_same_id_on_two_buses_creates_two_buckets(dual_bus_loader):
     ]
     assert len(engine_groups) == 2
     channels = {loader.get_group_label(gi).split()[0] for gi in engine_groups}
-    assert channels == {"Ch0", "Ch1"}
+    assert channels == {"CAN1", "CAN2"}
 
 
 def test_three_tier_renaming(dual_bus_loader):
@@ -216,6 +271,112 @@ def test_three_tier_renaming(dual_bus_loader):
     # original_name 永远是裸信号名（导出/搜索按它匹配）
     for n in prefixed:
         assert loader.get_metadata(n).original_name == "EngineSpeed"
+
+
+# ---------------------------------------------------------------------------
+# 通道绑定（评审 F2：已绑定通道不回落；F18：zero_reason 三态）
+# ---------------------------------------------------------------------------
+
+def test_channel_binding_decodes_same_id_with_its_own_database(tmp_path):
+    """0x1A0 在两条通道上用不同库：必须各解各的（本次修复的核心）。"""
+    blf = _same_payload_blf(tmp_path / "bind.blf")
+    dbc_a = write_dbc(tmp_path / "engine_a.dbc")
+    dbc_b = _conflicting_engine(tmp_path)
+    loader = BLFLazyLoader(
+        str(blf),
+        db_paths=[str(dbc_a), str(dbc_b)],
+        bindings={0: frozenset({str(dbc_a)}), 1: frozenset({str(dbc_b)})},
+    )
+    try:
+        name0 = _var_on_channel(loader, 0)
+        name1 = _var_on_channel(loader, 1)
+        v0 = loader.get_series(name0).to_numpy()
+        v1 = loader.get_series(name1).to_numpy()
+        ratio = 100.0 / 0.125      # engine_b 因子 / 默认因子
+        assert np.allclose(v1, v0 * ratio, equal_nan=True)
+        assert loader.units[name0] == "rpm"
+        assert loader.units[name1] == "conflicted"
+    finally:
+        loader.close()
+
+
+def test_unbound_channels_share_pool_first_match(tmp_path):
+    """无 bindings 时保持历史行为：同 ID 两通道用同一份（靠前的）定义。"""
+    blf = _same_payload_blf(tmp_path / "legacy.blf")
+    dbc_a = write_dbc(tmp_path / "engine_a.dbc")
+    dbc_b = _conflicting_engine(tmp_path)
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc_a), str(dbc_b)])
+    try:
+        name0 = _var_on_channel(loader, 0)
+        name1 = _var_on_channel(loader, 1)
+        assert np.allclose(
+            loader.get_series(name0).to_numpy(),
+            loader.get_series(name1).to_numpy(),
+            equal_nan=True,
+        )
+        assert loader.units[name0] == loader.units[name1] == "rpm"
+    finally:
+        loader.close()
+
+
+def test_bound_channel_missing_id_becomes_unmatched_not_fallback(tmp_path):
+    """通道绑了不含该 ID 的库：进未匹配列表，不借用池里的定义。"""
+    blf, dbc_a = write_blf_pair(tmp_path, n=20, buses=(0, 1), basename="miss")
+    chassis = write_dbc(tmp_path / "chassis.dbc", [CAN_FRAMES[2]])
+    loader = BLFLazyLoader(
+        str(blf),
+        db_paths=[str(dbc_a), str(chassis)],
+        bindings={0: frozenset({str(dbc_a)}), 1: frozenset({str(chassis)})},
+    )
+    try:
+        assert any(
+            ch == 1 and cid == 0x1A0 for ch, cid, _ext, _cnt in loader.unmatched_ids
+        ), loader.unmatched_ids
+        engine_on_ch1 = [
+            n for n in loader.var_names
+            if "EngineSpeed" in n
+            and loader.get_group_label(loader.get_var_group_index(n)).startswith("CAN2 ")
+        ]
+        assert engine_on_ch1 == [], engine_on_ch1
+    finally:
+        loader.close()
+
+
+def test_zero_reason_distinguishes_pool_binding_and_no_match(tmp_path):
+    blf, dbc = write_blf_pair(tmp_path, n=20, buses=(0, 1), basename="zero")
+    unused = _unused_dbc(tmp_path)
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        assert loader.bind_databases([])["zero_reason"] == "pool_empty"
+
+        stats = loader.bind_databases(
+            [str(dbc), str(unused)],
+            bindings={
+                0: frozenset({str(unused)}),
+                1: frozenset({str(unused)}),
+            },
+        )
+        assert stats["var_count"] == 0
+        assert stats["zero_reason"] == "binding_excluded_all"
+
+        assert loader.bind_databases([str(unused)])["zero_reason"] == "no_match"
+
+        rolled = loader.bind_databases([str(unused)], rollback_if_empty=True)
+        assert rolled["rolled_back"] is True
+        assert rolled["zero_reason"] == "no_match"
+    finally:
+        loader.close()
+
+
+def test_channel_stats_aggregates_frame_counts_per_channel(tmp_path):
+    blf, dbc = write_blf_pair(
+        tmp_path, n=20, buses=(0, 1), basename="stats", with_unmatched=False
+    )
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
+    try:
+        assert dict(loader.channel_stats) == {0: 20, 1: 20}
+    finally:
+        loader.close()
 
 
 def test_single_bus_names_only_get_the_frame_prefix(loader_and_paths):
@@ -277,12 +438,30 @@ def test_error_and_remote_frames_produce_no_samples(tmp_path):
     loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)])
     try:
         assert loader.total_messages == wanted
+        # 错误帧不产生采样点，但必须计数（可识别错误帧的下界）
+        assert sum(loader.error_frames.values()) == sum(
+            1 for r in raw if r.get("error")
+        )
         all_ids = {
             loader.get_group_label(gi) for gi in range(loader.group_count)
         }
         assert not any("0x5" in lbl.split()[1] for lbl in all_ids), all_ids
     finally:
         loader.close()
+
+
+def test_prescan_reports_error_frame_counts(tmp_path):
+    blf, _dbc = write_blf_pair(
+        tmp_path, n=30, buses=(0,), with_error=True
+    )
+    raw = make_blf_messages(n=30, buses=(0,), with_error=True)
+    expected = sum(1 for r in raw if r.get("error"))
+
+    errors: dict = {}
+    prescan_blf_frames(str(blf), error_counts=errors)
+
+    assert sum(errors.values()) == expected
+    assert all(ch >= 0 for ch in errors)
 
 
 # ---------------------------------------------------------------------------

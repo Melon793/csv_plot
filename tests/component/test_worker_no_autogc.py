@@ -251,7 +251,7 @@ def test_blf_prescan_thread_runs_no_collection_on_worker_thread(
 
     seen: dict = {}
 
-    def _fake_prescan(_path, should_cancel=None):
+    def _fake_prescan(_path, should_cancel=None, error_counts=None):
         seen["ident"] = threading.get_ident()
         seen["gc_enabled"] = gc.isenabled()
         seen["counts_at_entry"] = gc.get_count()

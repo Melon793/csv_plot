@@ -22,6 +22,7 @@ from src.data.can_database import (  # noqa: E402
     CanDatabaseSet,
     CanFrameSpec,
     CanSignalSpec,
+    _path_key,
     import_type_for,
 )
 from tests.fixtures import bus_data_access as bd  # noqa: E402
@@ -372,9 +373,60 @@ def test_merge_keeps_frames_unique_by_id_but_counts_signals_from_both(tmp_path):
     assert db.find_frame(0, CAN_UNMATCHED_ID) is None
 
 
-def test_has_frame_ignores_channel_lookup():
+def test_has_frame_is_pool_level_id_query():
     db = CanDatabaseSet()
     assert db.has_frame(0x1A0) is False
+
+
+class TestChannelBindings:
+    """按通道绑库：已绑定通道只在子集内找，未命中不回落（评审 F2）。"""
+
+    def test_bound_channel_uses_its_own_database(self, tmp_path):
+        a = _make_engine_only(tmp_path)
+        b = _make_engine_conflicting(tmp_path)
+        db = CanDatabaseSet([str(a), str(b)], bindings={0: {str(a)}, 1: {str(b)}})
+
+        sig0 = db.find_frame(0, 0x1A0).signal_by_name("EngineSpeed")
+        sig1 = db.find_frame(1, 0x1A0).signal_by_name("EngineSpeed")
+        assert sig0.factor == pytest.approx(1.0)
+        assert sig1.factor == pytest.approx(100.0)
+        assert sig1.unit == "conflicted"
+
+    def test_bound_channel_does_not_fall_back_to_pool(self, tmp_path):
+        engine = _make_engine_only(tmp_path)
+        chassis = write_dbc(tmp_path / "chassis.dbc", [CAN_FRAMES[2]])
+        db = CanDatabaseSet(
+            [str(engine), str(chassis)], bindings={0: {str(chassis)}}
+        )
+
+        # 绑定库里没有 0x1A0：宁可未匹配，也不借用池里的 EngineData 定义
+        assert db.find_frame(0, 0x1A0) is None
+        # 未绑定通道仍走全局池（兼容现状）
+        assert db.find_frame(1, 0x1A0) is not None
+
+    def test_unbound_channel_keeps_pool_first_match(self, tmp_path):
+        a = _make_engine_only(tmp_path)
+        b = _make_engine_conflicting(tmp_path)
+        db = CanDatabaseSet([str(a), str(b)], bindings={0: {str(a)}})
+
+        sig = db.find_frame(3, 0x1A0).signal_by_name("EngineSpeed")
+        assert sig.factor == pytest.approx(1.0)
+
+    def test_empty_bindings_is_legacy_behaviour(self, tmp_path):
+        a = _make_engine_only(tmp_path)
+        b = _make_engine_conflicting(tmp_path)
+        legacy = CanDatabaseSet([str(a), str(b)])
+        empty = CanDatabaseSet([str(a), str(b)], bindings={})
+
+        for channel in (0, 1):
+            assert (
+                legacy.find_frame(channel, 0x1A0).db_path
+                == empty.find_frame(channel, 0x1A0).db_path
+            )
+
+    def test_path_key_normalises_relative_and_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert _path_key("db/x.dbc") == _path_key(str(tmp_path / "db" / "x.dbc"))
 
 
 # ---------------------------------------------------------------------------

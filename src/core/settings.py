@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from enum import StrEnum
 from pathlib import Path
 from threading import Lock
@@ -41,6 +42,13 @@ class ConfigKey(StrEnum):
     # 不能用 BLF_LAST_DB_PATHS 的 pathsep 连接（值里可能含分隔符或空格），
     # JSON 单字符串在 ini 后端里最稳。
     BLF_DB_NOTES = "blf/db_notes"
+    # 按日志文件记住的完整配置（JSON dict）：键 = 规范化路径，值 =
+    # {size, mtime, ts, config}。config 是 CanBindings.to_yaml_dict() 的形状
+    # （有序池 + 1 基通道绑定 + 别名）。**键用路径而不是路径+size+mtime**：
+    # 现场常把日志从共享盘拷到本地，mtime 必变，三元组作键几乎不命中；
+    # size/mtime 只用于「同一路径的文件换了」的确认提示（评审 F10）。
+    # 只保留最近 20 份（按 ts），ini 不会无限膨胀。
+    BLF_FILE_BINDINGS = "blf/file_bindings"
     # 标记统计窗口的已选指标列（JSON 数组字符串，有序；顺序即显示顺序）。
     # 合法 key 集合由窗口侧的指标注册表定义，settings 只做存储与防御性解析，
     # 不反向依赖 ui 层。
@@ -304,6 +312,91 @@ class AppSettings:
         self._settings.setValue(
             ConfigKey.BLF_DB_NOTES, json.dumps(notes, ensure_ascii=False)
         )
+
+    # ------------------------------------------------------------------
+    # BLF 按文件记忆的完整配置（池 + 通道绑定 + 别名）
+    # ------------------------------------------------------------------
+
+    BLF_FILE_BINDINGS_LIMIT = 20
+
+    @staticmethod
+    def blf_memory_key(blf_path: str) -> str:
+        """按文件记忆的键：与通道绑定同口径（normcase + 绝对路径）。
+
+        评审 P2：此前用 ``normalize_input_path``（不做大小写归一），Windows /
+        UNC 上同一文件的不同写法会漏命中，与 ``_path_key`` 口径分裂。
+        """
+        return os.path.normcase(os.path.abspath(normalize_input_path(blf_path)))
+
+    def get_blf_file_bindings(self) -> dict[str, dict]:
+        """``{规范化路径: {size, mtime, ts, config}}``。坏数据一律空 dict。"""
+        raw = self._settings.value(ConfigKey.BLF_FILE_BINDINGS, "", type=str) or ""
+        if not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            _logger.warning("BLF 文件配置记忆解析失败，已忽略: %.120s", raw)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, dict] = {}
+        for key, entry in data.items():
+            if isinstance(entry, dict) and isinstance(entry.get("config"), dict):
+                out[str(key)] = entry
+        return out
+
+    def remember_blf_file_binding(
+        self, blf_path: str, *, size: int, mtime: float, config: dict
+    ) -> None:
+        """记住某份日志的配置；LRU（按 ts）保留最近 ``BLF_FILE_BINDINGS_LIMIT`` 份。"""
+        key = self.blf_memory_key(blf_path)
+        if not key or not isinstance(config, dict):
+            return
+        entries = self.get_blf_file_bindings()
+        entries[key] = {
+            "size": int(size),
+            "mtime": float(mtime),
+            "ts": time.time(),
+            "config": config,
+        }
+        if len(entries) > self.BLF_FILE_BINDINGS_LIMIT:
+            newest = sorted(
+                entries.items(),
+                key=lambda kv: float(kv[1].get("ts") or 0.0),
+                reverse=True,
+            )[: self.BLF_FILE_BINDINGS_LIMIT]
+            entries = dict(newest)
+        self._settings.setValue(
+            ConfigKey.BLF_FILE_BINDINGS,
+            json.dumps(entries, ensure_ascii=False),
+        )
+
+    def forget_blf_file_binding(self, blf_path: str) -> None:
+        key = self.blf_memory_key(blf_path)
+        entries = self.get_blf_file_bindings()
+        if key in entries:
+            entries.pop(key, None)
+            self._settings.setValue(
+                ConfigKey.BLF_FILE_BINDINGS,
+                json.dumps(entries, ensure_ascii=False),
+            )
+
+    @staticmethod
+    def blf_binding_store_path(blf_path: str) -> str:
+        """默认落点：用户配置目录下按日志路径哈希命名的 YAML（跨只读盘可用）。"""
+        import hashlib
+
+        from PySide6.QtCore import QStandardPaths
+
+        base = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppDataLocation
+        ) or tempfile.gettempdir()
+        folder = os.path.join(base, "can_bindings")
+        digest = hashlib.sha1(
+            os.path.normcase(os.path.abspath(blf_path)).encode("utf-8", "replace")
+        ).hexdigest()[:16]
+        return os.path.join(folder, f"{digest}.canview.yaml")
 
     # ------------------------------------------------------------------
     # 标记统计窗口（MarkStatsWindow）持久化

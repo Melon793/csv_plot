@@ -191,10 +191,15 @@ class FakeLoadThread(QObject):
     error = Signal(str)
     cancelled = Signal(str)
 
-    def __init__(self, file_path: str, parent=None, db_paths=None):
+    def __init__(self, file_path: str, parent=None, db_paths=None,
+                 bindings=None, aliases=None):
         super().__init__(parent)
         self.file_path = file_path
         self.db_paths = list(db_paths or [])
+        # 显式收下并记录：若签名不跟上真线程，`bindings=` 会被 **kwargs 静默
+        # 吞掉，component 测试就是假绿（评审 F8 #11）。
+        self.bindings = dict(bindings or {})
+        self.aliases = dict(aliases or {})
         self.scan_stats: dict = {}
         self.started = 0
         self.cancel_requests = 0
@@ -256,8 +261,10 @@ def blf_flow_host(qapp):
     host.file_loader_manager = manager
     threads: list[FakeLoadThread] = []
 
-    def _factory(file_path, parent=None, db_paths=None, **kwargs):
-        thread = FakeLoadThread(file_path, parent=parent, db_paths=db_paths)
+    def _factory(file_path, parent=None, db_paths=None, bindings=None,
+                 aliases=None, **kwargs):
+        thread = FakeLoadThread(file_path, parent=parent, db_paths=db_paths,
+                                bindings=bindings, aliases=aliases)
         threads.append(thread)
         return thread
 
