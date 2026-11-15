@@ -100,6 +100,8 @@ csv_plot/
     │   ├── curve_strategy.py    # 曲线策略（单/多曲线模式切换）
     │   ├── scheduler.py         # UnifiedUpdateScheduler 防抖调度器
     │   ├── font_cache.py        # 字体缓存（基于 AppSettings）
+    │   ├── keyword_match.py     # 变量过滤关键词匹配（子串 + * ? 通配符）
+    │   ├── value_format.py      # 数值显示精度（游标标签 / 标记统计共用）
     │   ├── logger.py            # Logger 日志管理器
     │   ├── crash_handler.py     # 未处理异常写崩溃日志（打包版无控制台时的兜底）
     │   ├── gc_guard.py          # worker 线程屏蔽自动 GC（跨线程析构死锁防护）
@@ -128,6 +130,8 @@ csv_plot/
         ├── main_window.py       # MainWindow 主窗口
         ├── theme.py             # 界面色板与文字层级（网格选择器 / 状态栏抽屉共用）
         ├── drag_drop.py         # 拖放解析
+        ├── drag_visuals.py      # 拖拽视觉统一层（缩略图 / 热点 / 落点覆盖层）
+        ├── transfer_broadcast.py # 曲线跨页搬运播报文案
         ├── table_dialog.py      # DataTableDialog + PandasTableModel + XYScatterPlotDialog
         ├── variable_list.py     # MyTableWidget 变量列表面板
         ├── variable_actions.py  # 变量操作共享实现（右键菜单 / 变量信息联动按钮）
@@ -154,6 +158,7 @@ csv_plot/
         └── widgets/
             ├── __init__.py
             ├── base_manager.py  # 管理器基类
+            ├── curve_shelf.py   # CurveShelfDialog 曲线暂存区浮窗（跨页搬运）
             ├── custom_viewbox.py # 信号化 CustomViewBox
             ├── plot_widget.py   # PlotWidget 主绘图组件
             ├── plot_container.py # PlotContainerWidget 绘图容器
