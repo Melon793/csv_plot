@@ -77,14 +77,14 @@ def test_compact_columns_wide_then_narrow_no_overlap(
 ):
     # 高 y（先分配）= 宽文本，低 y = 窄文本 → 第1列宽、第2列窄
     df = pd.DataFrame({
-        "a": np.full(100, 123456.7),
-        "b": np.full(100, 123456.8),
-        "c": np.full(100, 123456.9),
+        "a": np.full(100, 1234.5),
+        "b": np.full(100, 2345.6),
+        "c": np.full(100, 3456.7),
         "d": np.full(100, 1.0),
         "e": np.full(100, 2.0),
         "f": np.full(100, 3.0),
     })
-    pw = _setup(plot_factory, df, size=(500, 160))
+    pw = _setup(plot_factory, df, size=(700, 160))
     # 显式固定两列：列宽逻辑与字体度量/容量无关（VM 缺字体时高度容量
     # 会自然收敛到 1 列，掩盖累计偏移断言）。
     monkeypatch.setattr(
@@ -130,7 +130,7 @@ def test_second_column_wide_label_uses_first_column_width(
         "e": np.full(100, 0.2345678),
         "f": np.full(100, 0.3456789),
     })
-    pw = _setup(plot_factory, df, size=(500, 160))
+    pw = _setup(plot_factory, df, size=(700, 160))
     monkeypatch.setattr(
         pw._cursor_manager, "_apply_column_hysteresis",
         lambda new_count, cursor_id=0: 2,
