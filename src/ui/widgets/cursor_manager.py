@@ -1146,74 +1146,87 @@ class CursorManager:
                 y_value=label['y_value'], color=label['color'],
             )]
 
-        # 多标签：自适应权重堆叠
-        ideal_spacing = (col_y_max - col_y_min) / n
-        total_height = label_height_pixels + gap_pixels
-        results: list[LabelLayout] = []
-
-        # 虚拟"上一个标签底部"：从列顶部开始，保证第一个标签也有最小位置约束
-        prev_bottom = col_y_min + half_height
-
-        for i, label in enumerate(labels):
+        # 多标签：PAV 等渗回归直解（最小位移 + 最小间距）。
+        # 标签已按 y_pos 降序（scene y 升序），ideal 即交点上方 LABEL_Y_OFFSET。
+        items = []
+        for label in labels:
             scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
-            # 所有标签统一向上偏移 LABEL_Y_OFFSET，保持间距一致
-            ideal_y = scene_pos.y() - self.LABEL_Y_OFFSET
-            uniform_y = col_y_min + ideal_spacing * (i + 0.5)  # 均匀分布
+            items.append({'ideal': scene_pos.y() - self.LABEL_Y_OFFSET})
+        stacked_y = self._pav_stack(
+            items, col_y_min, col_y_max, label_height_pixels, gap_pixels
+        )
 
-            # 自适应权重：密集区域偏向均匀分布，稀疏区域偏向交点位置
-            local_density = self._count_nearby(labels, label['y_pos'],
-                                                radius=label_height_pixels * 3)
-            w_ideal = max(0.2, 1.0 - local_density * 0.15)
-            target_y = w_ideal * ideal_y + (1 - w_ideal) * uniform_y
-
-            # 动态最大偏移量
-            max_offset = label_height_pixels * (0.5 + n * 0.1)
-            max_offset = min(max_offset, label_height_pixels * 2)
-            target_y = max(ideal_y - max_offset, min(ideal_y + max_offset, target_y))
-
-            # 与上一个标签防重叠（包括第一个标签与列顶部的约束）
-            target_y = max(target_y, prev_bottom + gap_pixels + half_height)
-
-            # 边界 clamp（含倒挂防御）
-            target_y = self._clamp_label_y(
-                target_y, col_y_min, col_y_max, half_height
-            )
-
-            results.append(LabelLayout(
-                layout_x=col_scene_x, layout_y=target_y,
+        return [
+            LabelLayout(
+                layout_x=col_scene_x, layout_y=stacked_y[i],
                 index=label['_orig_idx'],
                 x_pos=label['x_pos'], y_pos=label['y_pos'],
                 y_value=label['y_value'], color=label['color'],
-            ))
+            )
+            for i, label in enumerate(labels)
+        ]
 
-            # 更新 prev_bottom 供下一个标签使用
-            prev_bottom = target_y + half_height
+    @staticmethod
+    def _pav_stack(
+        items: list,
+        top: float,
+        bottom: float,
+        h: float,
+        gap: float,
+    ) -> list[float]:
+        """PAV（pool adjacent violators）等渗回归：列内垂直堆叠直解。
 
-        # Pass 2: 正向扫描，修正边界 clamp 导致的重叠（自顶向下）
-        for i in range(1, len(results)):
-            prev_bottom = results[i - 1].layout_y + half_height
-            curr_top = results[i].layout_y - half_height
-            if curr_top < prev_bottom + gap_pixels:
-                results[i].layout_y = prev_bottom + gap_pixels + half_height
-                # 检查是否超出底部边界
-                results[i].layout_y = min(results[i].layout_y,
-                                           col_y_max - half_height)
+        最小化 Σ(y_i − ideal_i)²，约束 y_i ≥ y_{i−1} + h + gap（标签不重叠）。
+        items 为按 scene y 升序排列的 {'ideal': float}；返回各标签中心 y。
 
-        # Pass 3: 反向扫描，修正被推挤后产生的新重叠（自底向上）
-        for i in range(len(results) - 2, -1, -1):
-            next_top = results[i + 1].layout_y - half_height
-            curr_bottom = results[i].layout_y + half_height
-            if curr_bottom > next_top - gap_pixels:
-                results[i].layout_y = next_top - gap_pixels - half_height
-                # 检查是否超出顶部边界，超出则截断
-                results[i].layout_y = max(results[i].layout_y,
-                                           col_y_min + half_height)
+        变换 z_i = ideal_i − i·step 后约束变为 z 非降，PAV 合并违序块取均值
+        即得全局最优解（未触发边界 clamp 时）。簇围绕中心上下对称分裂，
+        避免单向下推的级联位移。边界 clamp 复用 ``_clamp_label_y``（含倒挂
+        防御），随后仅做有界正/反推，保证结果不越出列区域。
+        """
+        n = len(items)
+        if n == 0:
+            return []
 
-        return results
+        half_height = h / 2
+        step = h + gap
 
-    def _count_nearby(self, labels: list, y_pos: float, radius: float) -> int:
-        """计算 y_pos 附近 radius 范围内的标签数量"""
-        return sum(1 for l in labels if abs(l['y_pos'] - y_pos) <= radius)
+        if n == 1:
+            return [
+                CursorManager._clamp_label_y(
+                    items[0]['ideal'], top, bottom, half_height
+                )
+            ]
+
+        # 违序块合并：每块携带 (Σz, 块内标签数, 起始下标)
+        blocks: list[list[float]] = []
+        for i, item in enumerate(items):
+            blocks.append([item['ideal'] - i * step, 1, i])
+            while len(blocks) > 1:
+                last, prev = blocks[-1], blocks[-2]
+                if last[0] / last[1] >= prev[0] / prev[1] - 1e-9:
+                    break
+                prev[0] += last[0]
+                prev[1] += last[1]
+                blocks.pop()
+
+        y = [0.0] * n
+        for block_sum, count, start in blocks:
+            mean = block_sum / count
+            for i in range(start, start + int(count)):
+                y[i] = mean + i * step
+
+        y = [
+            CursorManager._clamp_label_y(v, top, bottom, half_height) for v in y
+        ]
+
+        # 有界前推：不把标签推出视口下边缘
+        for i in range(1, n):
+            y[i] = min(max(y[i], y[i - 1] + step), bottom - half_height)
+        # 有界后推：不把标签推出视口上边缘
+        for i in range(n - 2, -1, -1):
+            y[i] = max(min(y[i], y[i + 1] - step), top + half_height)
+        return y
 
     def _render_label_layout(self, layouts: list[LabelLayout]):
         """Phase 3: 按计算结果渲染标签"""
