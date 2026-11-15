@@ -72,7 +72,9 @@ def _dual_columns_df():
 
 # ---------- ① 紧凑列宽：宽列后接窄列不重叠 ----------
 
-def test_compact_columns_wide_then_narrow_no_overlap(plot_factory, qapp):
+def test_compact_columns_wide_then_narrow_no_overlap(
+    plot_factory, qapp, monkeypatch
+):
     # 高 y（先分配）= 宽文本，低 y = 窄文本 → 第1列宽、第2列窄
     df = pd.DataFrame({
         "a": np.full(100, 123456.7),
@@ -83,6 +85,12 @@ def test_compact_columns_wide_then_narrow_no_overlap(plot_factory, qapp):
         "f": np.full(100, 3.0),
     })
     pw = _setup(plot_factory, df, size=(500, 160))
+    # 显式固定两列：列宽逻辑与字体度量/容量无关（VM 缺字体时高度容量
+    # 会自然收敛到 1 列，掩盖累计偏移断言）。
+    monkeypatch.setattr(
+        pw._cursor_manager, "_apply_column_hysteresis",
+        lambda new_count, cursor_id=0: 2,
+    )
     _reset_view(pw, 0, 99, 0, 200000)
     qapp.processEvents()
     pw.vline.setVisible(True)
@@ -110,7 +118,9 @@ def test_compact_columns_wide_then_narrow_no_overlap(plot_factory, qapp):
 
 # ---------- ② 宽标签在第 2 列：列 x 只累计第1列实际宽 ----------
 
-def test_second_column_wide_label_uses_first_column_width(plot_factory, qapp):
+def test_second_column_wide_label_uses_first_column_width(
+    plot_factory, qapp, monkeypatch
+):
     # 高 y = 窄文本 → 第1列窄；低 y = 宽文本 → 第2列宽
     df = pd.DataFrame({
         "a": np.full(100, 300.0),
@@ -121,6 +131,10 @@ def test_second_column_wide_label_uses_first_column_width(plot_factory, qapp):
         "f": np.full(100, 0.3456789),
     })
     pw = _setup(plot_factory, df, size=(500, 160))
+    monkeypatch.setattr(
+        pw._cursor_manager, "_apply_column_hysteresis",
+        lambda new_count, cursor_id=0: 2,
+    )
     _reset_view(pw, 0, 99, 0, 200000)
     qapp.processEvents()
     pw.vline.setVisible(True)
