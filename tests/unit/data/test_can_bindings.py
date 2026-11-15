@@ -166,18 +166,16 @@ def test_bad_yaml_and_future_schema_return_issues(tmp_path):
     assert any("不受支持" in s for s in issues)
 
 
-def test_sidecar_path_and_writability_probe(tmp_path):
-    assert sidecar_config_path("/tmp/x/log.blf").endswith("/tmp/x/log.canview.yaml")
+def test_sidecar_path_and_writability_probe(tmp_path, monkeypatch):
+    log = tmp_path / "log.blf"
+    assert sidecar_config_path(str(log)) == str(tmp_path / "log.canview.yaml")
     assert is_dir_writable(str(tmp_path)) is True
 
-    import os
+    # 平台中性：Windows 的 chmod 不产生只读目录，直接让探针写入失败
+    import src.data.can_bindings as cb
 
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        pytest.skip("root 无视目录权限")
-    locked = tmp_path / "locked"
-    locked.mkdir()
-    locked.chmod(0o500)
-    try:
-        assert is_dir_writable(str(locked)) is False
-    finally:
-        locked.chmod(0o700)
+    def _denied(*_args, **_kwargs):
+        raise OSError("denied")
+
+    monkeypatch.setattr(cb.tempfile, "mkstemp", _denied)
+    assert is_dir_writable(str(tmp_path)) is False
