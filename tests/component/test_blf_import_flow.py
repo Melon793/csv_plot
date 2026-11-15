@@ -23,18 +23,19 @@ import threading
 
 import pytest
 
-from PySide6.QtWidgets import QDialog, QPushButton, QProgressDialog
+from PySide6.QtWidgets import QDialog, QMessageBox, QPushButton, QProgressDialog
 
 from src.core.config import (
     BLF_TEXT_NO_SIGNAL,
     BLF_TEXT_TRUNCATED,
     BLF_TEXT_TRUNCATED_PAYLOAD,
 )
-from src.core.settings import AppSettings
+from src.core.settings import AppSettings, ConfigKey
 from src.data.blf_loader import BLFLazyLoader
-from src.data.can_bindings import CanBindings
+from src.data.can_bindings import CanBindings, save_yaml, sidecar_config_path
 from src.data.loader import DataLoadThread
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
+from src.utils.paths import normalize_input_path
 from tests.fixtures.data_factory import CAN_FRAMES, write_blf_pair, write_dbc
 
 
@@ -1167,3 +1168,132 @@ def test_dialog_selection_drops_bindings_to_removed_databases(
     assert got.pool == (str(dbc),)
     assert got.by_channel == {}, "被移除的库不能留下死绑定"
     assert got.alias == {}
+
+
+# ---------------------------------------------------------------------------
+# 持久化（评审 F10/F11）：按文件记忆、更新确认、旁车 YAML、成功回写
+# ---------------------------------------------------------------------------
+
+def _remember_file_config(app_settings, blf, dbc, **cfg_kw):
+    app_settings.remember_blf_file_binding(
+        str(blf),
+        size=os.path.getsize(blf),
+        mtime=os.path.getmtime(blf),
+        config=CanBindings.from_paths([str(dbc)], **cfg_kw).to_yaml_dict(),
+    )
+
+
+def test_a_remembered_file_config_preselects_pool_and_bindings(
+    blf_flow, tmp_path, remembered, dialogs, app_settings
+):
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    remembered([str(dbc)])
+    _remember_file_config(
+        app_settings, blf, dbc,
+        by_channel={1: [str(dbc)]}, alias={1: "车身CAN"},
+    )
+
+    manager.load_csv_file(str(blf))
+
+    assert len(dialogs["opened"]) == 1
+    assert threads[0].bindings == {1: frozenset({str(dbc)})}
+    assert threads[0].aliases == {1: "车身CAN"}
+
+
+def test_a_stale_file_memory_asks_before_reusing(
+    blf_flow, tmp_path, remembered, dialogs, app_settings, monkeypatch
+):
+    """评审 F10：从共享盘拷到本地 mtime 必变，必须询问而不是直接失配。"""
+    import src.ui.file_loader_manager as flm
+
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    remembered([str(dbc)])
+    _remember_file_config(app_settings, blf, dbc, by_channel={1: [str(dbc)]})
+    # 篡改 size 模拟「同一路径的文件换了」
+    import json
+
+    entries = app_settings.get_blf_file_bindings()
+    key = normalize_input_path(str(blf))
+    entries[key]["size"] = int(entries[key]["size"]) + 5
+    app_settings.set_value(
+        ConfigKey.BLF_FILE_BINDINGS, json.dumps(entries, ensure_ascii=False)
+    )
+
+    asked = []
+
+    def fake_question(*args, **kwargs):
+        asked.append(args)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(flm.QMessageBox, "question", staticmethod(fake_question))
+    # 任何 critical 都直接失败（offscreen 下模态框会把用例挂死）
+    monkeypatch.setattr(
+        flm.QMessageBox, "critical",
+        staticmethod(lambda *a, **k: (_ for _ in ()).throw(AssertionError(a))),
+    )
+
+    manager.load_csv_file(str(blf))
+
+    assert asked, "文件已更新必须询问一次"
+    assert threads[0].bindings == {1: frozenset({str(dbc)})}, "选「沿用」应保留绑定"
+
+
+def test_a_successful_import_remembers_the_file_config(
+    blf_flow, tmp_path, remembered, dialogs, app_settings
+):
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    remembered([str(dbc)])
+
+    manager.load_csv_file(str(blf))
+    loader = BLFLazyLoader(
+        str(blf), db_paths=[str(dbc)],
+        bindings={1: frozenset({str(dbc)})}, aliases={1: "车身CAN"},
+    )
+    threads[0].emit_done(loader)
+
+    entry = app_settings.get_blf_file_bindings()[normalize_input_path(str(blf))]
+    cfg = CanBindings.from_yaml_dict(entry["config"])
+    assert cfg.pool == (str(dbc),)
+    assert cfg.by_channel == {1: (str(dbc),)}
+    assert cfg.alias == {1: "车身CAN"}
+
+
+def test_a_sidecar_config_is_preselected_and_announced(
+    blf_flow, tmp_path, remembered, dialogs
+):
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    sidecar = sidecar_config_path(str(blf))
+    assert save_yaml(
+        CanBindings.from_paths(
+            [str(dbc)], by_channel={0: [str(dbc)]}, alias={0: "动力CAN"}
+        ),
+        sidecar,
+    ) == []
+
+    manager.load_csv_file(str(blf))
+
+    assert threads[0].bindings == {0: frozenset({str(dbc)})}
+    assert threads[0].aliases == {0: "动力CAN"}
+    assert "canview" in dialogs["opened"][0].notice.text()
+
+
+def test_unchecking_remember_also_forgets_the_file_config(
+    blf_flow, tmp_path, remembered, dialogs, app_settings
+):
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    _remember_file_config(app_settings, blf, dbc)
+    assert normalize_input_path(str(blf)) in app_settings.get_blf_file_bindings()
+    dialogs["answers"] = [
+        (QDialog.DialogCode.Accepted,
+         lambda dlg: dlg.remember_check.setChecked(False))
+    ]
+
+    manager.load_csv_file(str(blf))
+
+    assert normalize_input_path(str(blf)) not in app_settings.get_blf_file_bindings()

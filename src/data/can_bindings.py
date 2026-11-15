@@ -16,10 +16,13 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
 SCHEMA_VERSION = "canview/1"
+SIDECAR_SUFFIX = ".canview.yaml"
 
 
 def _key(path: str) -> str:
@@ -166,3 +169,142 @@ class CanBindings:
             if entry.get("alias"):
                 alias[ch] = str(entry["alias"])
         return cls.from_paths(data.get("databases") or (), by_channel, alias)
+
+
+# ---------------------------------------------------------------------------
+# 文件 IO（显式配置）：旁车 YAML / 用户配置目录
+# ---------------------------------------------------------------------------
+
+def sidecar_config_path(blf_path: str) -> str:
+    """日志旁的约定文件名：``<日志名>.canview.yaml``。"""
+    return os.path.splitext(os.path.abspath(str(blf_path)))[0] + SIDECAR_SUFFIX
+
+
+def is_dir_writable(folder: str) -> bool:
+    """写入探针：只读盘 / UNC 上 os.access 不可靠，实际建删一个临时文件。"""
+    try:
+        os.makedirs(folder, exist_ok=True)
+        fd, probe = tempfile.mkstemp(prefix=".canview-", dir=folder)
+        os.close(fd)
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _resolve_db_path(raw: str, bases: list[str],
+                     memo: dict[str, str]) -> str:
+    """库路径解析：相对 YAML 目录 → 相对日志目录 → 绝对兜底。
+
+    存在的相对路径解析成绝对路径（后续匹配/显示都稳定）；都不存在时保留
+    首选基目录下的候选路径，交给调用方作为 issue 列红。
+    """
+    key = str(raw)
+    if key in memo:
+        return memo[key]
+    candidate = Path(key)
+    if candidate.is_absolute():
+        resolved = str(candidate)
+    else:
+        resolved = ""
+        for base in bases:
+            try:
+                probe = Path(base) / key
+            except (TypeError, ValueError):
+                continue
+            if probe.exists():
+                resolved = str(probe.resolve())
+                break
+        if not resolved:
+            resolved = str(Path(bases[0]) / key) if bases else key
+    memo[key] = resolved
+    return resolved
+
+
+def load_yaml(path: str, blf_path: Optional[str] = None) -> tuple[CanBindings, list[str]]:
+    """读取显式配置。**不抛异常**：坏文件 / 版本不符 → ``(empty, issues)``。"""
+    import yaml
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except OSError as exc:
+        return CanBindings.empty(), [f"配置文件无法读取：{exc}"]
+    except yaml.YAMLError as exc:
+        return CanBindings.empty(), [f"配置文件不是有效 YAML：{exc}"]
+    if not isinstance(data, dict):
+        return CanBindings.empty(), ["配置文件顶层必须是映射（schema / databases / channels）"]
+
+    issues: list[str] = []
+    schema = data.get("schema")
+    if schema != SCHEMA_VERSION:
+        if schema is None:
+            issues.append(f"配置缺少 schema，已按 {SCHEMA_VERSION} 读取")
+        else:
+            return CanBindings.empty(), [
+                f"配置版本 {schema!r} 不受支持（需要 {SCHEMA_VERSION}）"
+            ]
+
+    bases: list[str] = []
+    for folder in (
+        os.path.dirname(os.path.abspath(path)),
+        os.path.dirname(os.path.abspath(blf_path)) if blf_path else "",
+    ):
+        if folder and folder not in bases:
+            bases.append(folder)
+
+    memo: dict[str, str] = {}
+    resolved = dict(data)
+    resolved.pop("schema", None)
+    resolved["databases"] = [
+        _resolve_db_path(p, bases, memo) for p in (data.get("databases") or [])
+    ]
+    channels: dict = {}
+    for raw_ch, entry in (data.get("channels") or {}).items():
+        entry = entry or {}
+        item: dict = {
+            "databases": [
+                _resolve_db_path(p, bases, memo) for p in (entry.get("databases") or [])
+            ]
+        }
+        if entry.get("alias"):
+            item["alias"] = entry["alias"]
+        channels[raw_ch] = item
+    resolved["channels"] = channels
+
+    try:
+        cfg = CanBindings.from_yaml_dict(resolved)
+    except ValueError as exc:
+        return CanBindings.empty(), [str(exc)]
+
+    for db_path in cfg.pool:
+        if not os.path.exists(db_path):
+            issues.append(f"数据库不存在：{db_path}")
+    issues.extend(cfg.validate())
+    return cfg, issues
+
+
+def save_yaml(cfg: CanBindings, path: str) -> list[str]:
+    """原子写显式配置（临时文件 + os.replace）。返回问题列表（空 = 成功）。"""
+    import yaml
+
+    folder = os.path.dirname(os.path.abspath(path)) or "."
+    tmp_path = ""
+    try:
+        os.makedirs(folder, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".canview-", suffix=".yaml", dir=folder)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(
+                cfg.to_yaml_dict(), handle, allow_unicode=True, sort_keys=False
+            )
+        os.replace(tmp_path, path)
+        tmp_path = ""
+        return []
+    except OSError as exc:
+        return [f"配置写入失败：{exc}"]
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.can_bindings import CanBindings, format_bus_channel
+from src.data.can_bindings import (
+    CanBindings,
+    format_bus_channel,
+    is_dir_writable,
+    load_yaml,
+    save_yaml,
+    sidecar_config_path,
+)
 
 
 def test_empty_is_unbound():
@@ -89,3 +96,88 @@ def test_equality_covers_pool_order_bindings_and_alias():
     assert a != CanBindings.from_paths(
         ["p.dbc", "q.dbc"], by_channel={0: ["p.dbc"]}, alias={0: "车身"}
     )
+
+
+# ---------------------------------------------------------------------------
+# 显式配置文件 IO（评审 F11：相对路径 / 只读盘 / 坏文件）
+# ---------------------------------------------------------------------------
+
+def test_save_and_load_roundtrip_with_relative_paths(tmp_path):
+    db = tmp_path / "db" / "p.dbc"
+    db.parent.mkdir()
+    db.write_text("x", encoding="utf-8")
+    cfg = CanBindings.from_paths(
+        ["db/p.dbc"], by_channel={0: ["db/p.dbc"]}, alias={0: "动力"}
+    )
+    yaml_path = tmp_path / "conf" / "x.canview.yaml"
+
+    assert save_yaml(cfg, str(yaml_path)) == []
+
+    loaded, issues = load_yaml(str(yaml_path), blf_path=str(tmp_path / "log.blf"))
+    assert issues == []
+    # 相对路径解析成绝对路径（先相对 YAML 目录、再相对日志目录）
+    assert loaded.pool == (str(db.resolve()),)
+    assert loaded.by_channel == {0: (str(db.resolve()),)}
+    assert loaded.alias == {0: "动力"}
+
+
+def test_load_resolves_relative_to_the_blf_directory(tmp_path):
+    logdir = tmp_path / "logs"
+    (logdir / "db").mkdir(parents=True)
+    db = logdir / "db" / "q.dbc"
+    db.write_text("x", encoding="utf-8")
+    cfgdir = tmp_path / "conf"
+    cfgdir.mkdir()
+    save_yaml(
+        CanBindings.from_paths(["db/q.dbc"]), str(cfgdir / "c.canview.yaml")
+    )
+
+    loaded, issues = load_yaml(
+        str(cfgdir / "c.canview.yaml"), blf_path=str(logdir / "a.blf")
+    )
+
+    assert issues == []
+    assert loaded.pool == (str(db.resolve()),)
+
+
+def test_missing_database_is_reported_not_raised(tmp_path):
+    yaml_path = tmp_path / "c.canview.yaml"
+    save_yaml(CanBindings.from_paths(["nope.dbc"]), str(yaml_path))
+
+    loaded, issues = load_yaml(str(yaml_path), blf_path=str(tmp_path / "x.blf"))
+
+    assert loaded.pool  # 仍保留候选路径，交给 UI 列红
+    assert any("数据库不存在" in s for s in issues)
+
+
+def test_bad_yaml_and_future_schema_return_issues(tmp_path):
+    bad = tmp_path / "bad.canview.yaml"
+    bad.write_text("::: [", encoding="utf-8")
+    cfg, issues = load_yaml(str(bad))
+    assert cfg == CanBindings.empty()
+    assert issues
+
+    future = tmp_path / "future.canview.yaml"
+    future.write_text(
+        "schema: canview/9\ndatabases: [a.dbc]\nchannels: {}\n", encoding="utf-8"
+    )
+    cfg, issues = load_yaml(str(future))
+    assert cfg == CanBindings.empty()
+    assert any("不受支持" in s for s in issues)
+
+
+def test_sidecar_path_and_writability_probe(tmp_path):
+    assert sidecar_config_path("/tmp/x/log.blf").endswith("/tmp/x/log.canview.yaml")
+    assert is_dir_writable(str(tmp_path)) is True
+
+    import os
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root 无视目录权限")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        assert is_dir_writable(str(locked)) is False
+    finally:
+        locked.chmod(0o700)

@@ -180,3 +180,66 @@ class TestPersistence:
 
     def test_singleton_returns_same_instance(self, app_settings):
         assert AppSettings() is app_settings
+
+
+class TestBlfFileBindings:
+    """按文件记忆的完整配置：路径作键、size/mtime 作校验、LRU 20 份。"""
+
+    def test_remember_and_read_roundtrip(self, app_settings, tmp_path):
+        from src.utils.paths import normalize_input_path
+
+        blf = tmp_path / "demo.blf"
+        blf.write_bytes(b"x")
+        config = {
+            "schema": "canview/1",
+            "databases": ["p.dbc"],
+            "channels": {"2": {"alias": "车身", "databases": ["p.dbc"]}},
+        }
+        app_settings.remember_blf_file_binding(
+            str(blf), size=1, mtime=123.0, config=config
+        )
+
+        entry = app_settings.get_blf_file_bindings()[
+            normalize_input_path(str(blf))
+        ]
+        assert entry["size"] == 1
+        assert entry["mtime"] == 123.0
+        assert entry["config"] == config
+        assert entry["ts"] > 0
+
+    def test_lru_keeps_only_the_newest_twenty(self, app_settings, tmp_path):
+        for i in range(25):
+            app_settings.remember_blf_file_binding(
+                str(tmp_path / f"f{i}.blf"), size=0, mtime=0.0,
+                config={"databases": []},
+            )
+        entries = app_settings.get_blf_file_bindings()
+        assert len(entries) == AppSettings.BLF_FILE_BINDINGS_LIMIT == 20
+
+    def test_bad_json_and_non_config_entries_are_ignored(self, app_settings):
+        app_settings.set_value(ConfigKey.BLF_FILE_BINDINGS, "{not json")
+        assert app_settings.get_blf_file_bindings() == {}
+
+        app_settings.set_value(
+            ConfigKey.BLF_FILE_BINDINGS,
+            '{"a": {"size": 1}, "b": "x"}',   # 没有 config 的条目一律丢弃
+        )
+        assert app_settings.get_blf_file_bindings() == {}
+
+    def test_forget_removes_only_that_file(self, app_settings, tmp_path):
+        for name in ("a.blf", "b.blf"):
+            app_settings.remember_blf_file_binding(
+                str(tmp_path / name), size=0, mtime=0.0,
+                config={"databases": []},
+            )
+        app_settings.forget_blf_file_binding(str(tmp_path / "a.blf"))
+        from src.utils.paths import normalize_input_path
+
+        entries = app_settings.get_blf_file_bindings()
+        assert normalize_input_path(str(tmp_path / "a.blf")) not in entries
+        assert normalize_input_path(str(tmp_path / "b.blf")) in entries
+
+    def test_store_path_stays_inside_app_data_dir(self, tmp_path):
+        path = AppSettings.blf_binding_store_path(str(tmp_path / "x.blf"))
+        assert path.endswith(".canview.yaml")
+        assert "can_bindings" in path.replace("\\", "/")

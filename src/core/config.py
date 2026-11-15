@@ -311,6 +311,12 @@ BLF_TEXT_TRUNCATED_PAYLOAD = (
     "已停止扫描（其余报文不生成信号）。"
 )
 BLF_TEXT_CANCELLED = "已取消 BLF 扫描: {path}"
+BLF_TEXT_FILE_UPDATED = (
+    "此文件的大小 / 修改时间与上次保存的配置不一致（可能已被替换或追加录制）。\n\n"
+    "「是」= 沿用上次的数据库与通道绑定；「否」= 重新选择数据库。"
+)
+BLF_TEXT_SIDECAR_FOUND = "发现日志旁配置 {name}，已作为本次预选（导入前可修改）。"
+BLF_TEXT_SIDECAR_ISSUES = "旁车配置存在问题：{issues}"
 BLF_TEXT_PRESCAN_SKIPPED = (
     f"BLF 文件超过 {BLF_PRESCAN_MAX_BYTES // (1024 * 1024)} MB，"
     "已跳过匹配度预扫（「命中」列不显示）；不影响导入，数据库仍会完整解码。"

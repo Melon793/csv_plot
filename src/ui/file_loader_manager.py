@@ -30,8 +30,11 @@ from src.core.config import (
     BLF_MAX_PAYLOAD_BYTES,
     BLF_TEXT_CANCELLED,
     BLF_TEXT_DB_MISSING,
+    BLF_TEXT_FILE_UPDATED,
     BLF_TEXT_NO_DB_SELECTED,
     BLF_TEXT_NO_SIGNAL,
+    BLF_TEXT_SIDECAR_FOUND,
+    BLF_TEXT_SIDECAR_ISSUES,
     BLF_TEXT_TRUNCATED,
     BLF_TEXT_TRUNCATED_PAYLOAD,
     FILE_SIZE_LIMIT_BACKGROUND_LOADING,
@@ -40,7 +43,13 @@ from src.core.config import (
 )
 from src.core.data_types import AutoDetectError
 from src.data.loader import DataLoadThread, FastDataLoader
-from src.data.can_bindings import CanBindings
+from src.data.can_bindings import (
+    CanBindings,
+    is_dir_writable,
+    load_yaml,
+    save_yaml,
+    sidecar_config_path,
+)
 from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.utils.paths import normalize_input_path
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -1472,8 +1481,79 @@ class FileLoaderManager(MainWindowBaseManager):
                     ),
                 )
 
-        # B：每次新导入都弹窗，预选上次记忆的列表（可能为空）
-        return self._ask_can_databases(file_path, initial_cfg=remembered)
+        # B：每次新导入都弹窗。预选优先级：旁车 YAML > 按文件记忆 > 全局记忆。
+        base_cfg, extra_notice = self._initial_cfg_for_new_import(
+            file_path, remembered
+        )
+        if base_cfg.pool:
+            usable, bad = self._usable_db_paths(base_cfg.pool)
+            if bad and usable:
+                notice = BLF_TEXT_DB_MISSING.format(
+                    paths=escape("\n".join(bad))
+                )
+                if extra_notice:
+                    notice = f"{extra_notice}\n{notice}"
+                return self._ask_can_databases(
+                    file_path, initial_cfg=base_cfg, missing=bad, notice=notice
+                )
+        return self._ask_can_databases(
+            file_path, initial_cfg=base_cfg, notice=extra_notice
+        )
+
+    def _initial_cfg_for_new_import(self, file_path: str, remembered: CanBindings):
+        """B/C 的预选来源：旁车 YAML > 按文件记忆 > 全局记忆。
+
+        按文件记忆命中但 size/mtime 不符时**询问**沿用还是重选（评审 F10：
+        现场从共享盘拷到本地，mtime 必变，直接失配等于记忆永远不命中）。
+        """
+        from src.core.settings import AppSettings
+
+        base = remembered
+        notice = ""
+        entry = AppSettings().get_blf_file_bindings().get(
+            normalize_input_path(file_path)
+        )
+        if entry:
+            try:
+                cfg = CanBindings.from_yaml_dict(entry.get("config") or {})
+            except ValueError:
+                cfg = None
+            if cfg is not None and cfg.pool:
+                if self._memory_entry_is_stale(entry, file_path):
+                    answer = QMessageBox.question(
+                        self.mw, "文件已更新", BLF_TEXT_FILE_UPDATED,
+                        QMessageBox.StandardButton.Yes
+                        | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer == QMessageBox.StandardButton.Yes:
+                        base = cfg
+                else:
+                    base = cfg
+
+        sidecar = sidecar_config_path(file_path)
+        if os.path.isfile(sidecar):
+            cfg, issues = load_yaml(sidecar, file_path)
+            if cfg.pool:
+                base = cfg
+                notice = BLF_TEXT_SIDECAR_FOUND.format(
+                    name=os.path.basename(sidecar)
+                )
+            if issues:
+                line = BLF_TEXT_SIDECAR_ISSUES.format(issues="；".join(issues))
+                notice = f"{notice}\n{line}" if notice else line
+        return base, notice
+
+    @staticmethod
+    def _memory_entry_is_stale(entry: dict, file_path: str) -> bool:
+        try:
+            stat = os.stat(file_path)
+        except OSError:
+            return False
+        return (
+            int(entry.get("size", -1)) != int(stat.st_size)
+            or abs(float(entry.get("mtime", 0.0)) - float(stat.st_mtime)) > 1e-6
+        )
 
     def _ask_can_databases(self, file_path: str, initial_cfg: CanBindings | None = None,
                            missing=None, notice: str = ""):
@@ -1508,8 +1588,58 @@ class FileLoaderManager(MainWindowBaseManager):
         # 复选框现在是「记住此列表，下次自动预选」：不勾 = 这一次的选择不入
         # 记忆，同时清掉旧记忆，否则旧列表会在下次弹窗里违背用户意图地出现。
         settings = AppSettings()
-        settings.set_blf_last_db_paths(cfg.pool_list if dialog.remember_choice() else [])
+        remembered = dialog.remember_choice()
+        settings.set_blf_last_db_paths(cfg.pool_list if remembered else [])
+        if not remembered:
+            # 「不记住」也要清掉按文件记忆，否则过期配置会在下次弹窗里
+            # 违背用户意图地重新出现。
+            settings.forget_blf_file_binding(file_path)
         return cfg
+
+    def save_can_config(self, file_path: str, cfg: CanBindings,
+                        *, alongside: bool = False):
+        """保存显式配置。返回 ``(实际路径, issues)``。
+
+        ``alongside``：优先写日志同目录；只读 / UNC 盘写不进时**静默回退**
+        用户配置目录（评审 F11：现场日志常在只读共享盘）。
+        """
+        target = ""
+        if alongside:
+            folder = os.path.dirname(os.path.abspath(file_path))
+            if is_dir_writable(folder):
+                target = sidecar_config_path(file_path)
+        if not target:
+            from src.core.settings import AppSettings
+
+            target = AppSettings.blf_binding_store_path(file_path)
+        return target, save_yaml(cfg, target)
+
+    def load_can_config(self, path: str, file_path: str = ""):
+        """读取显式配置（坏文件不抛断导入）。"""
+        return load_yaml(path, file_path or None)
+
+    def _remember_blf_config(self, loader) -> None:
+        """导入成功后写按文件记忆（best-effort，绝不打断导入）。"""
+        try:
+            from src.core.settings import AppSettings
+
+            settings = AppSettings()
+            if not settings.get_blf_last_db_paths():
+                return  # 用户没勾「记住」：本轮不写
+            cfg = CanBindings.from_paths(
+                getattr(loader, "db_paths", None) or [],
+                by_channel=getattr(loader, "bindings", None),
+                alias=getattr(loader, "channel_aliases", None),
+            )
+            if not cfg.pool:
+                return
+            stat = os.stat(loader.path)
+            settings.remember_blf_file_binding(
+                loader.path, size=stat.st_size, mtime=stat.st_mtime,
+                config=cfg.to_yaml_dict(),
+            )
+        except Exception:
+            logger.debug("写入 BLF 文件配置记忆失败", exc_info=True)
 
     def _close_blf_progress(self) -> None:
         dialog = getattr(self, "_blf_progress", None)
@@ -1767,6 +1897,7 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.reload_btn.setEnabled(True)
         if not applied:
             return
+        self._remember_blf_config(new_loader)
         # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
         self._schedule_delayed(
             0, lambda: self._post_load_actions(file_path, is_reload=is_reload)
@@ -1965,6 +2096,7 @@ class FileLoaderManager(MainWindowBaseManager):
         # 库要样本，统计任务直接返回错误文本。不调 _swap_loader 是因为它
         # 会 _release_old_data —— 正在用的 loader 不能释放。
         self._apply_loader(is_reload=True)
+        self._remember_blf_config(loader)
         logger.info(
             "CAN 数据库已重绑: %d 库 / %d 变量 / %d 未匹配 ID（未重扫报文）",
             len(cfg.pool), stats.get("var_count", 0), stats.get("unmatched", 0),
