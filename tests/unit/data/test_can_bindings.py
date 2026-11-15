@@ -186,3 +186,17 @@ def test_sidecar_path_and_writability_probe(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cb.tempfile, "mkstemp", _denied)
     assert is_dir_writable(str(tmp_path)) is False
+
+def test_yaml_roundtrip_keeps_alias_only_channels():
+    """第二轮评审 P0：别名-only 的通道必须落盘，且读回不能被当成空绑定。"""
+    cfg = CanBindings.from_paths(
+        ["p.dbc"], by_channel={0: ["p.dbc"]}, alias={1: "车身CAN"}
+    )
+
+    data = cfg.to_yaml_dict()
+
+    assert data["channels"]["2"] == {"databases": [], "alias": "车身CAN"}
+    loaded = CanBindings.from_yaml_dict(data)
+    assert loaded.alias == {1: "车身CAN"}
+    assert loaded.by_channel == {0: ("p.dbc",)}
+    assert loaded == cfg

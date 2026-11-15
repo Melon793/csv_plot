@@ -113,7 +113,7 @@ class CanBindings:
         return CanBindings(
             pool=tuple(str(p) for p in (pool or ()) if str(p)),
             by_channel=kept,
-            alias={ch: a for ch, a in self.alias.items() if ch >= 0},
+            alias=dict(self.alias),
         )
 
     # ------------------------------------------------------------------
@@ -142,9 +142,12 @@ class CanBindings:
     # ------------------------------------------------------------------
 
     def to_yaml_dict(self) -> dict:
+        # 别名与绑定解耦：别名-only 的通道也必须落盘，否则「只改通道名不绑库」
+        # 在持久化边界静默丢失（第二轮评审 P0）。无绑定的通道写出空列表，
+        # 读回时 from_yaml_dict 不会把它当成「绑定到空集」。
         channels: dict[str, dict] = {}
-        for ch in sorted(self.by_channel):
-            entry: dict = {"databases": list(self.by_channel[ch])}
+        for ch in sorted(set(self.by_channel) | set(self.alias)):
+            entry: dict = {"databases": list(self.by_channel.get(ch, ()))}
             if self.alias.get(ch):
                 entry["alias"] = self.alias[ch]
             channels[str(ch + 1)] = entry
@@ -167,8 +170,10 @@ class CanBindings:
             if ch < 0:
                 raise ValueError(f"非法通道键：{raw_ch!r}（应为 ≥ 1）")
             entry = entry or {}
-            dbs = entry.get("databases")
-            by_channel[ch] = tuple(str(p) for p in (dbs or ()))
+            dbs = tuple(str(p) for p in (entry.get("databases") or ()))
+            if dbs:
+                # 空列表是「只有别名」的通道，不能当成绑定到空集（= 全部排除）
+                by_channel[ch] = dbs
             if entry.get("alias"):
                 alias[ch] = str(entry["alias"])
         return cls.from_paths(data.get("databases") or (), by_channel, alias)

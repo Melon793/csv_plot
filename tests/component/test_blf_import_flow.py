@@ -1364,3 +1364,23 @@ def test_zero_signal_warning_uses_the_binding_exclusion_text(
 
     assert loader.zero_reason == "binding_excluded_all"
     assert warnings and warnings[0][2] == BLF_TEXT_BINDING_EXCLUDED
+
+
+def test_alias_only_channels_survive_the_memory_roundtrip(
+    blf_flow, tmp_path, remembered, dialogs, app_settings
+):
+    """第二轮评审 P0：导入成功写记忆时，别名-only 通道不能被 to_yaml_dict 丢掉。"""
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    remembered([str(dbc)])
+
+    manager.load_csv_file(str(blf))
+    loader = BLFLazyLoader(
+        str(blf), db_paths=[str(dbc)], aliases={1: "车身CAN"}
+    )
+    threads[0].emit_done(loader)
+
+    entry = app_settings.get_blf_file_bindings()[AppSettings.blf_memory_key(str(blf))]
+    cfg = CanBindings.from_yaml_dict(entry["config"])
+    assert cfg.alias == {1: "车身CAN"}
+    assert cfg.by_channel == {}

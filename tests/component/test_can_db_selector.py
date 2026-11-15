@@ -868,3 +868,44 @@ def test_removing_a_bound_library_warns_and_falls_back_with_notice(qapp, tmp_pat
     finally:
         dlg._shutdown_prescan()
         dlg.deleteLater()
+
+
+def test_dropping_a_file_onto_the_channel_table_adds_it_to_the_pool(qapp, tmp_path):
+    """通道表也显式转发外部文件，不依赖 ignore 冒泡。"""
+    blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
+    extra = write_dbc(tmp_path / "extra.dbc", CAN_FRAMES[:1])
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc)]
+    )
+    try:
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(extra))])
+        _keep_alive.append(mime)
+        event = QDropEvent(
+            QPointF(5, 5), Qt.DropAction.CopyAction, mime,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        )
+        dlg.bind_table.dropEvent(event)
+        assert str(extra) in [r.path for r in dlg.rows]
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_a_manual_expand_survives_channel_table_rebuilds(qapp, tmp_path):
+    blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc)]
+    )
+    try:
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+        assert dlg.bind_box.isChecked() is False
+
+        dlg.bind_box.setChecked(True)
+        dlg._rebuild_channel_table()
+
+        assert dlg.bind_box.isChecked() is True
+        assert dlg.bind_content.isHidden() is False
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()

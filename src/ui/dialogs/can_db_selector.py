@@ -196,35 +196,49 @@ class _ChannelTable(QTableWidget):
         super().__init__(parent)
         #: (0 基通道, 库路径) -> None，由对话框注入
         self.on_bind = None
+        #: 外部文件拖入：显式转发给对话框，不依赖 ignore 冒泡
+        self.on_external_accept = None
+        self.on_external_drop = None
 
     def _accepts(self, event) -> bool:
         return event.mimeData().hasFormat(_DB_MIME) and self.on_bind is not None
 
+    def _accepts_external(self, event) -> bool:
+        return (
+            self.on_external_accept is not None
+            and self.on_external_accept(event)
+        )
+
     def dragEnterEvent(self, event):  # noqa: N802 - Qt 命名
-        if self._accepts(event):
+        if self._accepts(event) or self._accepts_external(event):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):  # noqa: N802 - Qt 命名
-        if self._accepts(event):
+        if self._accepts(event) or self._accepts_external(event):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):  # noqa: N802 - Qt 命名
-        if not self._accepts(event):
-            event.ignore()
+        if self._accepts(event):
+            row = self.rowAt(int(event.position().toPoint().y()))
+            item = self.item(row, 0) if row >= 0 else None
+            channel = (
+                item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            )
+            if channel is None:
+                event.ignore()
+                return
+            path = bytes(event.mimeData().data(_DB_MIME)).decode("utf-8")
+            self.on_bind(int(channel), path)
+            event.acceptProposedAction()
             return
-        row = self.rowAt(int(event.position().toPoint().y()))
-        item = self.item(row, 0) if row >= 0 else None
-        channel = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-        if channel is None:
-            event.ignore()
+        if self.on_external_drop is not None and self.on_external_drop(event):
+            event.acceptProposedAction()
             return
-        path = bytes(event.mimeData().data(_DB_MIME)).decode("utf-8")
-        self.on_bind(int(channel), path)
-        event.acceptProposedAction()
+        event.ignore()
 
 
 class CanDatabaseSelectorDialog(QDialog):
@@ -541,6 +555,8 @@ class CanDatabaseSelectorDialog(QDialog):
         self.bind_table.setColumnWidth(3, 170)
         self.bind_table.setColumnWidth(4, 44)
         self.bind_table.on_bind = self._on_drag_bind
+        self.bind_table.on_external_accept = self._accept_external_drag
+        self.bind_table.on_external_drop = self._handle_external_drop
         bind_layout.addWidget(self.bind_table)
 
         bind_btn_row = QHBoxLayout()
@@ -803,15 +819,25 @@ class CanDatabaseSelectorDialog(QDialog):
         self._user_edited = True
         del self._rows[r]
         if dropped:
-            # 被移除的库仍在绑定里：立即收敛并明确告知，不能静默放宽到全局池
+            # 被移除的库仍在绑定里：立即收敛并明确告知，不能静默放宽到全局池。
+            # 措辞按收敛结果分支：还有别的绑定库 ≠ 退回全局池。
             for ch in dropped:
                 self._set_channel_binding(
                     ch, [p for p in self._bindings.get(ch, ()) if p != row.path],
                     rebuild=False,
                 )
+            kept = [format_bus_channel(ch) for ch in dropped
+                    if ch in self._bindings]
+            freed = [format_bus_channel(ch) for ch in dropped
+                     if ch not in self._bindings]
+            parts = []
+            if kept:
+                parts.append(f"{'、'.join(kept)} 保留其余绑定库")
+            if freed:
+                parts.append(f"{'、'.join(freed)} 改为使用全局库")
             self._append_notice(
-                f"库 {escape(os.path.basename(row.path))} 已被移除，"
-                "相关通道绑定已改为使用全局库。"
+                f"库 {escape(os.path.basename(row.path))} 已被移除："
+                + "；".join(parts) + "。"
             )
         self._rebuild_table()
         self._rebuild_channel_table()
