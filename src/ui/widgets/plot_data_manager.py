@@ -101,6 +101,7 @@ class PlotDataManager:
         show_duplicate_warning: bool = True,
         preferred_color: str | None = None,
         quiet: bool = False,
+        scene: bool = True,
     ) -> bool:
         """绘制变量到图表（统一版）
     
@@ -117,6 +118,10 @@ class PlotDataManager:
             preferred_color: 首绘指定颜色（None 时按占位/色板首色规则）
             quiet: 程序化批量路径（reload/模板套用）传 True：失败不弹
                 模态框，只落日志（调用方负责降级为占位并汇总播报）
+            scene: ``False`` 供非活动页的数据重建（暂存区退回原图）使用：
+                空图首绘跳过游标/标签/bounds/密度/minXRange 等场景尾，
+                由 ``_finalize_batch_add(scene=False)`` 静默收尾；数据与
+                Y 范围照常写入。已有曲线分支仍由 ``_batch_adding`` 守卫。
     
         Returns:
             bool: 绘制是否成功
@@ -167,7 +172,11 @@ class PlotDataManager:
             # === 统一路径：始终写入 curves 字典 ===
             # 占位复活：curves 为空但可能存在同名失效占位，取出其颜色/可见性偏好
             revive_ref = self._consume_invalid_ref(var_name)
-            pw._clear_cursor_items(hide_only=False)
+            if scene:
+                pw._clear_cursor_items(hide_only=False)
+            else:
+                # 隐藏页只建数据层；游标 item 由切页 restore_scene 统一补建
+                pw.mark_dirty_for_activation()
             self._safe_clear_plot_items()
             pw.curves.clear()
             pw.current_color_index = 0
@@ -237,9 +246,10 @@ class PlotDataManager:
                 y_contiguous.dtype, color, revive_ref is not None,
             )
     
-            pw._queue_ui_refresh()
+            pw._queue_ui_refresh(cursor=scene)
     
-            pw._update_header_for_curves()
+            if scene:
+                pw._update_header_for_curves()
     
             special_limits = self.handle_single_point_limits(x_values, y_contiguous)
             if special_limits:
@@ -267,18 +277,25 @@ class PlotDataManager:
                     data_min_y, data_max_y, min_y, max_y,
                 )
     
-            min_x, max_x = np.min(x_values), np.max(x_values)
-            self._axis_manager._set_vline_bounds([min_x, max_x])
-            pw.plot_item.update()
-            pw._update_cursor_after_plot(min_x, max_x)
-    
-            self._axis_manager._recalc_max_point_density()
-            if not getattr(pw, "_is_updating_data", False):
-                main_window = pw.window()
-                if main_window is not None and hasattr(
-                    main_window, "cursor_sync_manager"
-                ):
-                    main_window.cursor_sync_manager._sync_min_xrange()
+            if scene:
+                min_x, max_x = np.min(x_values), np.max(x_values)
+                self._axis_manager._set_vline_bounds([min_x, max_x])
+                pw.plot_item.update()
+                pw._update_cursor_after_plot(min_x, max_x)
+
+                self._axis_manager._recalc_max_point_density()
+                if not getattr(pw, "_is_updating_data", False):
+                    main_window = pw.window()
+                    if main_window is not None and hasattr(
+                        main_window, "cursor_sync_manager"
+                    ):
+                        main_window.cursor_sync_manager._sync_min_xrange()
+            else:
+                # 非活动页：vline bounds（信号阻断）、密度、minXRange 与
+                # mark_dirty 统一由 _finalize_batch_add(scene=False) 收尾。
+                # 尤其不能调 _update_cursor_after_plot：其 scene=False 分支
+                # 仍裸调 setBounds，会把钳制值写回全局 pinned。
+                pw.mark_dirty_for_activation()
     
             logger.debug("[PLOT_VAR] plot_variable 完成: var_name=%s, 数据点=%d", var_name, len(y_contiguous))
             # 空图首绘路径的枚举自动阶梯播报（有曲线时经 add_variable_to_plot

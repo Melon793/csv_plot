@@ -217,6 +217,105 @@ def test_shelf_drop_rejected_while_loading(dst, shelf):
     assert shelf.count() == 1
 
 
+def test_shelf_drop_all_stale_does_nothing(dst, shelf):
+    """全 stale：不落地、不删条目（重构抽出 land 后不得变成空 go）。"""
+    entry = _style_entry("a")
+    shelf.add_entry(entry)
+    shelf.revalidate({"zzz"})
+    _drop(dst, shelf, [entry])
+    assert "a" not in dst.curves
+    assert shelf.count() == 1
+
+
+def test_land_entries_all_skipped_keeps_entries(dst):
+    """B2：目标已有同名 → 全 skipped 时删除回调不得被调用。"""
+    assert dst.plot_variable("a")
+    removed: list[str] = []
+    result = dst.land_shelf_entries(
+        [_style_entry("a")], remove_entries_cb=removed.extend
+    )
+    assert result.added == [] and result.skipped == ["a"]
+    assert removed == []
+
+
+def test_land_entries_removes_only_added(dst, qapp):
+    """B2：一成一败时只把成功变量交给删除回调。"""
+    removed: list[str] = []
+    result = dst.land_shelf_entries(
+        [_style_entry("a", "k1"), ShelfEntry(key="k2", var_name="missing")],
+        remove_entries_cb=removed.extend,
+    )
+    assert result.added == ["a"]
+    assert result.failed == ["missing"]
+    assert removed == ["a"]
+    qapp.processEvents()
+
+
+class ScenePage:
+    """最小页替身：只承载 mark_dirty_for_activation。"""
+
+    def __init__(self):
+        self._scene_dirty = False
+
+    def mark_dirty_for_activation(self):
+        self._scene_dirty = True
+
+
+def test_land_entries_scene_false_skips_scene_writes(plot_factory, qapp, monkeypatch):
+    """B1：隐藏页空图首绘不得清游标/写标签/同步密度，pinned 不得被钳制回写。"""
+    pw = plot_factory()
+    page = ScenePage()
+    pw.page = page
+    pw.pinned_x_values = [999.0]
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        pw, "_clear_cursor_items", lambda *a, **k: events.append("clear_cursor")
+    )
+    monkeypatch.setattr(
+        pw,
+        "_update_cursor_after_plot",
+        lambda *a, **k: events.append("cursor_after_plot"),
+    )
+    monkeypatch.setattr(
+        pw, "toggle_cursor", lambda *a, **k: events.append("toggle_cursor")
+    )
+    monkeypatch.setattr(
+        pw, "update_cursor_label", lambda *a, **k: events.append("label")
+    )
+    refresh_calls: list[dict] = []
+    monkeypatch.setattr(pw, "_queue_ui_refresh", lambda **kw: refresh_calls.append(kw))
+
+    entry = ShelfEntry(key="k1", var_name="a", color="#123456")
+    result = pw.land_shelf_entries([entry], batch=True, scene=False)
+
+    assert result.added == ["a"]
+    assert pw.curves["a"].color == "#123456"
+    assert pw.pinned_x_values == [999.0]
+    assert events == []
+    assert refresh_calls == [{"cursor": False}]
+    assert page._scene_dirty is True
+
+
+def test_land_entries_scene_false_forces_batch(plot_factory, monkeypatch):
+    """scene=False 即使单条也走 finalize(scene=False)，不允许绕回收尾。"""
+    pw = plot_factory()
+    pw.page = ScenePage()
+    calls: list[dict] = []
+    original = pw._multi_curve_manager._finalize_batch_add
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(pw._multi_curve_manager, "_finalize_batch_add", spy)
+    result = pw.land_shelf_entries(
+        [ShelfEntry(key="k1", var_name="a")], batch=False, scene=False
+    )
+    assert result.added == ["a"]
+    assert calls and calls[0]["scene"] is False
+
+
 def test_shelf_drop_without_registry_ignored(dst, shelf):
     entry = _style_entry("a")
     shelf.add_entry(entry)

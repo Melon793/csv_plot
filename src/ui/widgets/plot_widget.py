@@ -1194,6 +1194,34 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if result.added:
             self._clear_own_selection()
 
+    def land_shelf_entries(
+        self,
+        entries: list[Any],
+        *,
+        batch: bool | None = None,
+        scene: bool = True,
+        remove_entries_cb: Callable[[list[str]], None] | None = None,
+    ) -> TransferResult:
+        """把暂存条目落地到本图（不播报，不自行删托盘条目）。
+
+        drop 与「退回原图」共用。``remove_entries_cb`` 由
+        ``_transfer_curves`` 在 ``if result.added`` 守卫内调用——全 skipped /
+        failed 时不得删除条目（那是剪切后曲线的唯一副本）。
+        """
+        live = [entry for entry in entries if not getattr(entry, "stale", False)]
+        if not live:
+            return TransferResult()
+        return self._transfer_curves(
+            [entry.var_name for entry in live],
+            style_map={entry.var_name: entry for entry in live},
+            on_duplicate="skip",
+            quiet=True,
+            batch=batch,
+            scene=scene,
+            remove_entries_cb=remove_entries_cb,
+            action_label="暂存区落地",
+        )
+
     def _handle_shelf_drop(self, event, var_names: list[str]):
         """暂存区来源 drop：无修饰=移出（条目消失）/ Alt=复制出（条目保留）。
 
@@ -1215,8 +1243,6 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not entries:
             event.ignore()
             return
-        names = [entry.var_name for entry in entries]
-        style_map = {entry.var_name: entry for entry in entries}
         copy_mode = is_copy_modifier(event.keyboardModifiers())
 
         def _remove_entries(added_names: list[str]) -> None:
@@ -1226,14 +1252,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 [entry.key for entry in entries if entry.var_name in added_set]
             )
 
-        result = self._transfer_curves(
-            names,
-            style_map=style_map,
-            on_duplicate="skip",
-            quiet=True,
-            batch=len(names) > 1,
+        result = self.land_shelf_entries(
+            entries,
+            batch=len(entries) > 1,
             remove_entries_cb=None if copy_mode else _remove_entries,
-            action_label="复制" if copy_mode else "移动",
         )
         self._announce_transfer_result(result, copy_mode=copy_mode)
         event.acceptProposedAction()
@@ -1248,6 +1270,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         remove_entries_cb: Callable[[list[str]], None] | None = None,
         quiet: bool = True,
         batch: bool | None = None,
+        scene: bool = True,
         action_label: str = "移动",
     ) -> TransferResult:
         """曲线搬运共享助手（legend list-of-1 / 暂存区 / P1 批量共用）。
@@ -1264,6 +1287,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             remove_entries_cb: 成功搬运后调用（暂存区移出用）
             quiet: 批量/暂存区传 True——失败不弹模态框
             batch: 是否包 ``_batch_adding`` 批量收尾；None 时按 len(names)>1
+            scene: ``False`` 供非活动页落地（暂存区退回原图）：首绘跳过
+                场景尾，收尾由 ``_finalize_batch_add(scene=False)`` 独占。
+                此时强制 batch=True，避免单条路径绕过收尾。
             action_label: 仅日志语义，保留调用语境
 
         Returns:
@@ -1275,6 +1301,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         result = TransferResult(requested=list(names))
         if batch is None:
             batch = len(names) > 1
+        if not scene:
+            # 场景收尾必须由 _finalize_batch_add(scene=False) 独占：
+            # 单条路径不进批量尾巴，会把场景写回隐藏页
+            batch = True
         try:
             if batch:
                 self._batch_adding = True
@@ -1298,6 +1328,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     show_duplicate_warning=False,
                     preferred_color=preferred_color,
                     quiet=quiet,
+                    scene=scene,
                 )
                 if not added:
                     result.failed.append(name)
@@ -1307,8 +1338,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
             if batch and result.added:
                 # 唯一权威收尾：补偿批量模式跳过的 header/轴/vline/密度，
-                # 合并 emit（不逐条触发 legend/编辑器重建）
-                self._multi_curve_manager._finalize_batch_add()
+                # 合并 emit（不逐条触发 legend/编辑器重建）。scene=False
+                # 时改走信号阻断 + 标脏，场景留到切页 restore_scene。
+                self._multi_curve_manager._finalize_batch_add(scene=scene)
         finally:
             if batch:
                 self._batch_adding = False
@@ -1488,14 +1520,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         show_duplicate_warning: bool = True,
         preferred_color: str | None = None,
         quiet: bool = False,
+        scene: bool = True,
     ) -> bool:
         """绘制变量到图表 → 委托到 PlotDataManager
 
         ``quiet=True`` 供 reload/模板套用等程序化批量路径使用：失败不弹
         模态框（调用方负责降级为占位并汇总播报），只落日志。
+        ``scene=False`` 供非活动页数据重建（暂存区退回原图）：空图首绘
+        跳过场景尾，收尾交给 ``_finalize_batch_add(scene=False)``。
         """
         success = self._plot_data_manager.plot_variable(
-            var_name, show_duplicate_warning, preferred_color, quiet=quiet
+            var_name,
+            show_duplicate_warning,
+            preferred_color,
+            quiet=quiet,
+            scene=scene,
         )
         # 仅首绘分支 emit（委托给 add_variable_to_plot 时由后者 emit，避免双 emit）；
         # 批量搬运窗口内抑制逐条 emit，由 _transfer_curves 收尾统一发一次
