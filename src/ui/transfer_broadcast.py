@@ -93,6 +93,72 @@ def build_transfer_message(
     return "；".join(part for part in parts if part)
 
 
+def build_return_message(
+    groups: Iterable[tuple[str, Iterable[str], bool]],
+    *,
+    skipped: Iterable[str] = (),
+    failed: Iterable[str] = (),
+    origin_closed: Iterable[str] = (),
+    no_origin: Iterable[str] = (),
+) -> str:
+    """拼装「退回原图」播报。
+
+    Args:
+        groups: ``(目标徽章, 退回成功的变量名, 该图当前是否被布局隐藏)``
+        skipped: 原图已有同名、未退回的变量（条目保留）
+        failed: 数据校验失败、未退回的变量
+        origin_closed: 原绘图已关闭/已移除的变量（条目保留）
+        no_origin: 复制/变量列表入区，无原图可退回的变量
+
+    全句仍用「；」连接，与 ``build_transfer_message`` 同口径。
+    """
+    parts: list[str] = []
+    success_parts: list[str] = []
+    for label, names, hidden in groups:
+        names = list(names)
+        if not names:
+            continue
+        text = f"已退回 {_names_text(names)}：暂存区 → {label or '原绘图'}"
+        if hidden:
+            text += "（该子图当前被布局隐藏）"
+        success_parts.append(text)
+
+    skipped = list(skipped)
+    failed = list(failed)
+    origin_closed = list(origin_closed)
+    no_origin = list(no_origin)
+    if not (success_parts or skipped or failed or origin_closed or no_origin):
+        return ""
+
+    parts.extend(success_parts)
+    if not success_parts:
+        parts.append("未退回")
+    if skipped:
+        parts.append(f"原图已有 {_names_text(skipped)}，条目已保留")
+    if failed:
+        parts.append(f"{_names_text(failed)} 数据校验失败，未退回")
+    if origin_closed:
+        parts.append(f"{_names_text(origin_closed)} 的原绘图已关闭，未退回（条目已保留）")
+    if no_origin:
+        parts.append(f"{_names_text(no_origin)} 无原绘图来源，仍留在暂存区")
+    return "；".join(part for part in parts if part)
+
+
+def broadcast_return(
+    host: Any,
+    groups: Iterable[tuple[str, Iterable[str], bool]],
+    **kwargs: Any,
+) -> str:
+    """统一播报「退回原图」（无 ``_show_status_message`` 时静默）。"""
+    message = build_return_message(groups, **kwargs)
+    if not message:
+        return ""
+    show = getattr(host, "_show_status_message", None)
+    if callable(show):
+        show(message)
+    return message
+
+
 def broadcast_transfer(
     host: Any,
     action: str,

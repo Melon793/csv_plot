@@ -58,6 +58,7 @@ from src.ui.drag_visuals import (
     transfer_hint,
 )
 from src.ui.transfer_broadcast import (
+    broadcast_return,
     broadcast_text,
     broadcast_transfer,
     loading_reject_message,
@@ -557,6 +558,133 @@ class CurveShelfWidget(QListWidget):
         if page_index < 0 or plot_index < 0:
             return ""
         return f"页{page_index + 1}·图{plot_index + 1}"
+
+    # ------------------------------------------------------------------
+    # 退回原图（撤销剪切）
+    # ------------------------------------------------------------------
+    def _return_block_reason(self, entry: ShelfEntry) -> str:
+        """不可退回原因；空串 = 可退回。
+
+        返回值同时供菜单/按钮启用条件使用，保证「能看见」与「点了有效」
+        共用同一套判定。
+        """
+        if entry.stale:
+            return "stale"
+        if entry.origin_plot_ref is None:
+            return "no_origin"
+        plot, _ = self._resolve_origin(entry)
+        if plot is None:
+            return "closed"
+        if entry.var_name in getattr(plot, "curves", {}):
+            return "present"
+        return ""
+
+    def _scene_for(self, plot: Any) -> bool:
+        """退回落地的 scene 口径：仅当前页允许写场景。
+
+        与 ``cursor_sync_manager._defers_scene_write`` 同义；这里不直接调
+        私有方法：``current_page is None``（关页/启动窗口期）必须判成延迟，
+        否则隐藏页会重新写游标场景。
+        """
+        host = self._host_window()
+        page = getattr(plot, "page", None)
+        current = getattr(host, "current_page", None)
+        return page is not None and current is page
+
+    def _origin_cell_hidden(self, plot: Any) -> bool:
+        """原图所在格是否被布局隐藏（仅用于播报提示）。"""
+        page = getattr(plot, "page", None)
+        if page is None:
+            return False
+        try:
+            index = next(
+                (
+                    i
+                    for i, container in enumerate(page.plot_widgets)
+                    if getattr(container, "plot_widget", None) is plot
+                ),
+                -1,
+            )
+            cell_visible = getattr(page, "cell_visible", None)
+            return bool(
+                index >= 0 and callable(cell_visible) and not cell_visible(index)
+            )
+        except Exception:
+            return False
+
+    def return_entries(self, keys: list[str]) -> list[str]:
+        """把指定条目退回各自被剪出的原图；返回实际退回的变量名。"""
+        host = self._host_window()
+        if self._reject_when_loading("退回暂存变量"):
+            return []
+
+        groups: dict[int, tuple[Any, str, list[ShelfEntry]]] = {}
+        skipped: list[str] = []
+        failed: list[str] = []
+        origin_closed: list[str] = []
+        no_origin: list[str] = []
+        for entry in self.entries_for_keys(keys):
+            reason = self._return_block_reason(entry)
+            if reason == "stale":
+                continue
+            if reason == "no_origin":
+                no_origin.append(entry.var_name)
+                continue
+            if reason == "closed":
+                origin_closed.append(entry.var_name)
+                continue
+            if reason == "present":
+                skipped.append(entry.var_name)
+                continue
+            plot, label = self._resolve_origin(entry)
+            groups.setdefault(id(plot), (plot, label, []))[2].append(entry)
+
+        returned_groups: list[tuple[str, list[str], bool]] = []
+        returned_names: list[str] = []
+        for plot, label, group_entries in groups.values():
+            scene = self._scene_for(plot)
+            hidden = self._origin_cell_hidden(plot)
+
+            def _remove_added(added: list[str], entries=group_entries) -> None:
+                # 只删成功落地者，按 key 精确删除（防同名重入误删）
+                added_set = set(added)
+                self.remove_entries(
+                    [entry.key for entry in entries if entry.var_name in added_set]
+                )
+
+            try:
+                result = plot.land_shelf_entries(
+                    group_entries,
+                    batch=len(group_entries) > 1 or not scene,
+                    scene=scene,
+                    remove_entries_cb=_remove_added,
+                )
+            except Exception:
+                # 单组异常不中断后续组；条目保留是安全侧（可能已落地，
+                # 最坏是重复条目，绝不丢曲线）
+                logger.warning("退回原图失败：%s", label, exc_info=True)
+                failed.extend(entry.var_name for entry in group_entries)
+                continue
+
+            if result.added:
+                returned_groups.append((label, list(result.added), hidden))
+                returned_names.extend(result.added)
+            skipped.extend(result.skipped)
+            failed.extend(result.failed)
+
+        broadcast_return(
+            host,
+            returned_groups,
+            skipped=skipped,
+            failed=failed,
+            origin_closed=origin_closed,
+            no_origin=no_origin,
+        )
+        return returned_names
+
+    def return_selected(self) -> list[str]:
+        """退回选中条目（按钮/菜单共用入口）。"""
+        return self.return_entries(self.selected_keys())
 
     # ------------------------------------------------------------------
     # 条目删除（中键 / 右键 / 清空）
