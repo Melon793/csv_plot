@@ -72,7 +72,6 @@ class CursorManager:
         self._data_manager = multi_curve_manager
 
         # 标签布局算法的状态
-        self._prev_layout: list[LabelLayout] = []  # 上一帧的布局结果
         # 列数滞回状态按 cursor_id 分键：(当前列数, 切换计数)。
         # 单游标固定 key=0，初值与旧单份状态一致（1 列、0 计数）。
         self._column_state: dict[int, tuple[int, int]] = {}
