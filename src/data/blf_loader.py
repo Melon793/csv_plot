@@ -305,6 +305,7 @@ class BLFLazyLoader:
         *,
         db_paths: Optional[list[str]] = None,
         bindings: Optional[dict[int, frozenset[str]]] = None,
+        aliases: Optional[dict[int, str]] = None,
         _progress: Optional[Callable[[int], None]] = None,
         _should_cancel: Optional[Callable[[], bool]] = None,
         _stats: Optional[dict] = None,
@@ -338,6 +339,8 @@ class BLFLazyLoader:
         #: 通道绑定（0 基通道 → 库路径子集），与 db_paths 同生命周期；
         #: reload / 重选数据库必须能把它读回去，否则会静默丢绑定。
         self.bindings: dict[int, frozenset[str]] = dict(bindings or {})
+        #: 通道别名（0 基通道 → 显示名），同上；组标签用它替换裸 CAN 编号。
+        self.channel_aliases: dict[int, str] = dict(aliases or {})
         self.total_messages = 0
         #: 扫描期 payload 实际占用的字节数（含对齐补位与行长度数组）
         self.payload_bytes = 0
@@ -506,6 +509,7 @@ class BLFLazyLoader:
 
     def bind_databases(self, paths: list[str], *,
                        bindings: Optional[dict[int, frozenset[str]]] = None,
+                       aliases: Optional[dict[int, str]] = None,
                        rollback_if_empty: bool = False) -> dict:
         """重新绑定 DBC / ARXML + 通道绑定：**不重扫报文**，只重建元数据并清缓存。
 
@@ -517,6 +521,8 @@ class BLFLazyLoader:
         Args:
             bindings: 0 基通道 → 库路径子集；``None``/空 = 所有通道用全局池。
                 缺省必须保持历史行为（无绑定时逐字节等价）。
+            aliases: 0 基通道 → 显示别名；仅影响组标签等展示层（笔 4 接线），
+                不参与解码与匹配。
             rollback_if_empty: 新库/新绑定与当前报文完全对不上（``var_count == 0``）
                 时恢复旧库、旧绑定、旧元数据，并在返回值里带 ``rolled_back=True``。
                 返回值的 ``zero_reason`` 描述**失败那次**的 0 信号成因，供 UI
@@ -527,16 +533,19 @@ class BLFLazyLoader:
         with self._access_lock:
             old_paths = list(self.db_paths)
             old_bindings = dict(self.bindings)
+            old_aliases = dict(self.channel_aliases)
             old_database = self._database
             old_errors = list(self.load_errors)
             self.db_paths = list(paths or [])
             self.bindings = dict(bindings or {})
+            self.channel_aliases = dict(aliases or {})
             try:
                 stats = self._bind_database(self.db_paths, self.bindings)
             except Exception:
                 # 解析/建元数据中途失败：恢复到调用前的可用状态，再把异常抛回
                 self.db_paths = old_paths
                 self.bindings = old_bindings
+                self.channel_aliases = old_aliases
                 self._database = old_database
                 self.load_errors = old_errors
                 self._build_metadata()
@@ -545,6 +554,7 @@ class BLFLazyLoader:
                 failed_reason = stats.get("zero_reason")
                 self.db_paths = old_paths
                 self.bindings = old_bindings
+                self.channel_aliases = old_aliases
                 self._database = old_database
                 self.load_errors = old_errors
                 self._build_metadata()

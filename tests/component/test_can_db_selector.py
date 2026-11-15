@@ -41,6 +41,7 @@ from src.core.config import (
     BLF_DB_DIALOG_SIZE,
 )
 from src.core.settings import AppSettings
+from src.data.can_bindings import CanBindings
 from src.data.can_database import CanDatabaseSet
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
 from src.ui.file_loader_manager import FileLoaderManager
@@ -416,8 +417,10 @@ def test_a_confirmed_selection_is_remembered_when_the_box_is_checked(
     flow_host, monkeypatch, dbc_a, fresh_blf_settings
 ):
     _auto_answer(monkeypatch, accept=True)
-    paths = flow_host._ask_can_databases("log.blf", initial=[str(dbc_a)])
-    assert paths == [str(dbc_a)]
+    cfg = flow_host._ask_can_databases(
+        "log.blf", initial_cfg=CanBindings.from_paths([str(dbc_a)])
+    )
+    assert cfg is not None and cfg.pool_list == [str(dbc_a)]
     assert AppSettings().get_blf_last_db_paths() == [str(dbc_a)]
 
 
@@ -432,14 +435,18 @@ def test_unchecking_remember_clears_the_memory_instead_of_writing_it(
         accept=True,
         prepare=lambda dialog: dialog.remember_check.setChecked(False),
     )
-    assert flow_host._ask_can_databases("log.blf", initial=[str(dbc_a)])
+    assert flow_host._ask_can_databases(
+        "log.blf", initial_cfg=CanBindings.from_paths([str(dbc_a)])
+    )
     assert AppSettings().get_blf_last_db_paths() == []
 
 
 def test_cancelling_the_dialog_writes_nothing(flow_host, monkeypatch,
                                               dbc_a, fresh_blf_settings):
     _auto_answer(monkeypatch, accept=False)
-    assert flow_host._ask_can_databases("log.blf", initial=[str(dbc_a)]) is None
+    assert flow_host._ask_can_databases(
+        "log.blf", initial_cfg=CanBindings.from_paths([str(dbc_a)])
+    ) is None
     assert AppSettings().get_blf_last_db_paths() == []
 
 

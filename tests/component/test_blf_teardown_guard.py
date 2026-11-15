@@ -97,7 +97,7 @@ def test_restart_gives_up_quietly_once_the_window_is_gone(qapp, spy_excepthook):
 
     assert reached == [], "守卫放行就会在按钮调用上抛 RuntimeError"
     assert manager._blf_force_dialog is False
-    assert manager._blf_preset_db_paths is None
+    assert manager._blf_preset_cfg is None
     assert spy_excepthook == []
 
 
