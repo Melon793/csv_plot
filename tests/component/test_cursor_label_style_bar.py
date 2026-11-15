@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import pytest
 
+from PySide6.QtCore import QPointF, Qt
+
+from src.ui.widgets.cursor_manager import LabelLayout
 from tests.component.test_cursor_label_edge import (
     _make_peak_df,
     _refresh,
@@ -17,6 +20,39 @@ from tests.component.test_cursor_label_edge import (
 
 # 采样容差：渐变边缘 + 抗锯齿的舍入误差
 _TOL = 6
+
+
+def test_pinned_style_switches_with_same_color(plot_factory, qapp):
+    """颜色不变时 pinned 与普通标签也必须切换虚线/透明度（缓存键含 pinned）"""
+    pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
+    vb = pw.view_box
+    vb.setXRange(0, 99, padding=0.05)
+    vb.setYRange(0, 200, padding=0)
+    qapp.processEvents()
+    peak_x = _x_where(pw, "y", 100.0)
+    cross = vb.mapViewToScene(QPointF(peak_x, 100.0))
+    mgr = pw._cursor_manager
+    mgr._clear_cursor_items()
+    color = pw.curves["y"].color
+
+    mgr._render_label_layout([LabelLayout(
+        layout_x=cross.x(), layout_y=cross.y() - 60, index=0,
+        x_pos=peak_x, y_pos=250.0, y_value="250", color=color,
+        pinned=True, up=True,
+    )])
+    lbl = pw._cursor_item_pool["labels"][0]
+    assert lbl.toPlainText() == "▲ 250"
+    assert lbl.border.style() == Qt.PenStyle.DashLine
+    assert lbl.opacity() == pytest.approx(0.8)
+
+    # 同一图元、同一颜色：退出 pinned 后必须恢复实线与不透明
+    mgr._render_label_layout([LabelLayout(
+        layout_x=cross.x(), layout_y=cross.y() - 10, index=0,
+        x_pos=peak_x, y_pos=100.0, y_value="100", color=color,
+    )])
+    assert lbl.toPlainText() == "100"
+    assert lbl.border.style() == Qt.PenStyle.SolidLine
+    assert lbl.opacity() == pytest.approx(1.0)
 
 
 def _show_label(pw):
@@ -105,24 +141,33 @@ def test_label_height_cache_not_underestimated(plot_factory, qapp):
 
 
 def test_leader_line_connects_point_to_label(plot_factory, qapp):
-    """A2 引导线：标签被推离交点时存在，两端分别落在交点与标签左缘"""
+    """A2 引导线（elbow）：标签被推离交点时存在，端点仍落交点与标签左缘"""
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     lbl = _show_label(pw)
     leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
     assert leaders, "标签离交点 >8px 时应有引导线"
     xs, ys = leaders[0].getData()
-    assert len(xs) == 2, "引导线应为两点线段"
+    assert len(xs) == 4, "引导线应为 elbow 四点正交折线"
 
     vb = pw.view_box
     lab = vb.mapSceneToView(lbl.scenePos())  # 标签左缘中点（数据坐标）
     peak_x = _x_where(pw, "y", 100.0)
     ends = list(zip(xs, ys))
-    assert any(abs(x - lab.x()) < 1e-6 and abs(y - lab.y()) < 1e-6 for x, y in ends), (
-        "引导线一端应落在标签左缘"
+    assert abs(ends[0][0] - peak_x) < 1e-6 and abs(ends[0][1] - 100.0) < 1e-6, (
+        "折线起点应落在交点"
     )
-    assert any(abs(x - peak_x) < 1e-6 and abs(y - 100.0) < 1e-6 for x, y in ends), (
-        "引导线另一端应落在交点"
+    assert abs(ends[-1][0] - lab.x()) < 1e-6 and abs(ends[-1][1] - lab.y()) < 1e-6, (
+        "折线终点应落在标签左缘"
     )
+
+    # 竖段位于标签列外侧 6px；两段拐点的 x 相同
+    label_left_scene = lbl.scenePos().x()
+    elbow_scene_x = vb.mapViewToScene(QPointF(xs[1], ys[1])).x()
+    assert abs(xs[1] - xs[2]) < 1e-9, "elbow 竖段 x 应一致"
+    assert abs((elbow_scene_x - label_left_scene) + 6.0) < 1e-6, (
+        "竖段应位于标签左缘外侧 6px"
+    )
+    assert abs(ys[1] - ys[0]) < 1e-9 and abs(ys[2] - ys[3]) < 1e-9
 
 
 def test_leader_pool_cleared_on_full_cleanup(plot_factory, qapp):

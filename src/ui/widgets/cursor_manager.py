@@ -44,6 +44,9 @@ class LabelLayout:
     y_pos: float      # 数据交点 y 坐标
     y_value: str      # 标签文本
     color: str        # 标签颜色
+    pinned: bool = False  # 交点 y 出界：标签吸附到视口边缘
+    up: bool = False      # pinned 方向：交点在上方/下方视口外
+    w: float = 0.0        # 标签渲染宽度（像素，含内边距与 ▲/▼ 前缀）
 
 
 class CursorManager:
@@ -55,6 +58,11 @@ class CursorManager:
     LABEL_VERTICAL_GAP = 4        # 同一列内标签之间的垂直间距
     LABEL_Y_OFFSET = 10           # 标签底部到交点的垂直距离（向上偏移）
 
+    # 形态开关：改常量后需重新构建/分发，非运行期开关
+    CURSOR_EDGE_PIN = True         # Y 出界交点的标签吸附到视口边缘（▲/▼ 虚线）
+    CURSOR_LEADER_ELBOW = True     # 引导线改 elbow 正交折线
+    CURSOR_CROSS_AVOID = True      # 双游标跨组碰撞时向外分裂
+
     def __init__(self, multi_curve_manager: MultiCurveManager):
         """初始化光标管理器，绑定到 MultiCurveManager 以获取依赖链"""
         if multi_curve_manager is None:
@@ -65,8 +73,9 @@ class CursorManager:
 
         # 标签布局算法的状态
         self._prev_layout: list[LabelLayout] = []  # 上一帧的布局结果
-        self._column_count: int = 1          # 当前列数
-        self._column_hysteresis_counter: int = 0  # 列数切换滞回计数器
+        # 列数滞回状态按 cursor_id 分键：(当前列数, 切换计数)。
+        # 单游标固定 key=0，初值与旧单份状态一致（1 列、0 计数）。
+        self._column_state: dict[int, tuple[int, int]] = {}
         self._prev_cursor_scene_pos: QPointF | None = None  # 上一帧光标 scene 位置
 
     @property
@@ -610,6 +619,7 @@ class CursorManager:
             plot_scene = pw.plot_item.scene()
 
             cursor_values = []
+            circle_index = 0  # 圆点池独立计数器（pinned 项不建圆点，不占索引）
             (x_min, x_max), (y_min, y_max) = view_box.viewRange()
 
             curves_to_process = []
@@ -674,7 +684,10 @@ class CursorManager:
                     x_actual = x_data[idx]
                     if np.isnan(x_actual) or np.isnan(y_val):
                         continue
-                    if y_val < y_min or y_val > y_max:
+                    # Y 出界：circle 仍不画（维持现状）；开启边缘吸附时标签
+                    # 仍入列并标记 pinned，ideal 在布局阶段改写为视口边缘。
+                    y_pinned = y_val < y_min or y_val > y_max
+                    if y_pinned and not self.CURSOR_EDGE_PIN:
                         continue
 
                     if y_format == "enum":
@@ -695,10 +708,16 @@ class CursorManager:
                             "y_value": y_str,
                             "color": color,
                             "cursor_id": cursor_id,  # 标识属于哪个 cursor
+                            "pinned": y_pinned,      # 交点 y 出界（标签吸附边缘）
+                            "up": y_val > y_max,     # pinned 方向：上方出界
                         }
                     )
 
-                    circle = self._get_circle_from_pool(len(cursor_values) - 1)
+                    if y_pinned:
+                        continue  # 出界交点不建圆点，仅保留边缘标签
+
+                    circle = self._get_circle_from_pool(circle_index)
+                    circle_index += 1  # 独立计数器：pinned 项不占池索引
                     circle_scene = circle.scene()
                     if circle_scene != plot_scene:
                         if circle_scene is not None:
@@ -811,8 +830,9 @@ class CursorManager:
                 cursor_groups[cid] = []
             cursor_groups[cid].append({**item, '_orig_idx': orig_idx})
 
-        # 对每个 cursor 独立处理
-        all_layouts = []
+        # 对每个 cursor 独立处理（组内布局抽成可重入函数，
+        # 跨组避让命中后可带 force_side 二次调用）
+        groups = []
         all_filtered_out_indices = set()
         for cid, group_values in sorted(cursor_groups.items()):
             # --- Phase 1: 数据过滤 ---
@@ -824,18 +844,46 @@ class CursorManager:
                 continue
 
             # --- Phase 2: 布局计算 ---
-            # 获取该 cursor 的 scene 位置
             cursor_scene_pos = view_box.mapViewToScene(
                 QPointF(group_values[0]['x_pos'], group_values[0]['y_pos'])
             )
-
-            layouts, layout_hide_indices = self._compute_label_layout(
-                visible_labels, cursor_scene_pos, view_box,
+            layouts, layout_hide_indices, meta = self._layout_cursor_group(
+                cid, visible_labels, cursor_scene_pos, view_box,
                 x_min, x_max, y_min, y_max,
                 label_height_pixels, font_metrics,
             )
-            all_layouts.extend(layouts)
             all_filtered_out_indices.update(layout_hide_indices)
+            groups.append({
+                'cid': cid,
+                'visible': visible_labels,
+                'cursor_scene': cursor_scene_pos,
+                'layouts': layouts,
+                'hide': layout_hide_indices,
+                'meta': meta,
+            })
+
+        # 回收已消失 cursor 的滞回状态，防止字典键泄漏
+        alive_ids = set(cursor_groups)
+        self._column_state = {
+            cid: state for cid, state in self._column_state.items()
+            if cid in alive_ids
+        }
+
+        # --- 跨组避让：碰撞命中且两侧空间预算通过 → 向外分裂 ---
+        if (self.CURSOR_CROSS_AVOID and len(groups) == 2
+                and groups[0]['layouts'] and groups[1]['layouts']
+                and self._layouts_collide(
+                    groups[0]['layouts'], groups[1]['layouts'],
+                    label_height_pixels,
+                )):
+            self._apply_cross_group_avoidance(
+                groups, view_box, x_min, x_max, y_min, y_max,
+                label_height_pixels, font_metrics,
+            )
+
+        all_layouts = [layout for group in groups for layout in group['layouts']]
+        for group in groups:
+            all_filtered_out_indices.update(group['hide'])
 
         # --- Phase 3: 渲染 ---
         self._render_label_layout(all_layouts)
@@ -852,6 +900,132 @@ class CursorManager:
                 continue
             text_item = self._get_label_from_pool(idx)
             text_item.setVisible(False)
+
+    def _layout_cursor_group(
+        self,
+        cursor_id: int,
+        visible_labels: list,
+        cursor_scene_pos,
+        view_box,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        label_height_pixels: float,
+        font_metrics,
+        force_side: str | None = None,
+        feed_hysteresis: bool = True,
+    ) -> tuple:
+        """可重入的组内布局：返回 (layouts, hide_indices, meta)。
+
+        跨组避让命中后带 force_side 再次调用，不重复收集/过滤标签。
+        """
+        return self._compute_label_layout(
+            visible_labels, cursor_scene_pos, view_box,
+            x_min, x_max, y_min, y_max,
+            label_height_pixels, font_metrics,
+            cursor_id=cursor_id,
+            force_side=force_side,
+            feed_hysteresis=feed_hysteresis,
+        )
+
+    @staticmethod
+    def _layouts_collide(a: list, b: list, label_height_pixels: float) -> bool:
+        """两组标签矩形是否相交（跨组避让判定）。"""
+        for la in a:
+            wa = la.w or 1.0
+            for lb in b:
+                if abs(la.layout_y - lb.layout_y) >= label_height_pixels:
+                    continue
+                wb = lb.w or 1.0
+                if la.layout_x < lb.layout_x + wb and lb.layout_x < la.layout_x + wa:
+                    return True
+        return False
+
+    @staticmethod
+    def _layouts_within_view(layouts: list, meta: dict, h: float) -> bool:
+        """标签矩形是否全部落在视口内（x∈[plotL,plotR]、y∈[plotT,plotB]）。"""
+        if not meta:
+            return False
+        x0, x1 = meta['x_min_scene'], meta['x_max_scene']
+        y0, y1 = meta['y_min_scene'], meta['y_max_scene']
+        for layout in layouts:
+            width = layout.w or 1.0
+            if layout.layout_x < x0 - 0.5 or layout.layout_x + width > x1 + 0.5:
+                return False
+            if (layout.layout_y - h / 2 < y0 - 0.5
+                    or layout.layout_y + h / 2 > y1 + 0.5):
+                return False
+        return True
+
+    def _apply_cross_group_avoidance(
+        self,
+        groups: list,
+        view_box,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        label_height_pixels: float,
+        font_metrics,
+    ) -> None:
+        """跨组碰撞 → 向外分裂：光标靠左的组强制左、靠右的组强制右。
+
+        先校验两侧空间预算（所需列总宽 vs 光标到视口边缘的可用宽），
+        通过且重布局后零重叠、全部在视口内才接受；否则回退原布局并留
+        debug 日志（重叠优于消失，指标条如实显示）。重布局跳过滞回喂入。
+        按光标实际 scene x 排序（而非 cursor_id），保证「向外」不跨过邻光标。
+        """
+        left_group, right_group = sorted(
+            groups, key=lambda g: g['cursor_scene'].x()
+        )
+        common = (
+            view_box, x_min, x_max, y_min, y_max,
+            label_height_pixels, font_metrics,
+        )
+        l_left, hide_left, meta_left = self._layout_cursor_group(
+            left_group['cid'], left_group['visible'],
+            left_group['cursor_scene'], *common,
+            force_side='left', feed_hysteresis=False,
+        )
+        l_right, hide_right, meta_right = self._layout_cursor_group(
+            right_group['cid'], right_group['visible'],
+            right_group['cursor_scene'], *common,
+            force_side='right', feed_hysteresis=False,
+        )
+        if meta_left is None or meta_right is None:
+            logger.debug("[CURSOR] 跨组避让回退：重布局无可用标签")
+            return
+
+        left_need = meta_left['left_need']
+        left_avail = meta_left['left_available']
+        right_need = meta_right['right_need']
+        right_avail = meta_right['right_available']
+        if left_need > left_avail + 1e-6 or right_need > right_avail + 1e-6:
+            logger.debug(
+                "[CURSOR] 跨组避让回退：预算不足 left %.1f/%.1f right %.1f/%.1f",
+                left_need, left_avail, right_need, right_avail,
+            )
+            return
+
+        if self._layouts_collide(l_left, l_right, label_height_pixels):
+            logger.debug("[CURSOR] 跨组避让回退：向外分裂后仍重叠")
+            return
+        if (not self._layouts_within_view(l_left, meta_left, label_height_pixels)
+                or not self._layouts_within_view(
+                    l_right, meta_right, label_height_pixels
+                )):
+            logger.debug("[CURSOR] 跨组避让回退：向外分裂后标签越出视口")
+            return
+
+        left_group['layouts'] = l_left
+        left_group['hide'] = hide_left
+        right_group['layouts'] = l_right
+        right_group['hide'] = hide_right
+        logger.debug(
+            "[CURSOR] 跨组避让：向外分裂 left %.1f/%.1f right %.1f/%.1f",
+            left_need, left_avail, right_need, right_avail,
+        )
 
     def _filter_labels_phase1(
         self,
@@ -870,7 +1044,8 @@ class CursorManager:
         y 方向不做死区过滤：交点靠上/下边缘时标签由 _layout_column 的
         边界 clamp 吸附到边缘内侧完整显示（设计原则：交点在视图内时
         标签必须可见，宁可在视口内重叠也不画出视口消失）；y 出界的
-        交点已在上游 update_cursor_label 过滤（circle 与标签都不显示）。
+        交点在开启 CURSOR_EDGE_PIN 时同样入列并标记 pinned，ideal 由
+        列布局改写为视口上/下边缘（circle 仍不画）。
         """
         visible = [
             v for v in cursor_values
@@ -900,36 +1075,45 @@ class CursorManager:
         y_max: float,
         label_height_pixels: float,
         font_metrics,
+        cursor_id: int = 0,
+        force_side: str | None = None,
+        feed_hysteresis: bool = True,
     ) -> tuple:
         """Phase 2: 计算所有标签的布局位置（纯数学，不操作 UI）
 
-        返回 (layouts, hide_indices)。
+        返回 (layouts, hide_indices, meta)。
         hide_indices: 因窗口极小无法放置而需要隐藏的标签 pool index 集合。
+        meta: 跨组避让预算信息（左/右所需宽与可用宽）；无标签时为 None。
+        force_side: 'left'/'right' 强制单侧布局（跨组向外分裂用）；
+        feed_hysteresis=False 用于重布局，避免计数器双喂。
         """
         if not visible_labels:
-            return [], set()
+            return [], set(), None
 
-        # 计算标签宽度
+        # 计算标签宽度（pinned 项按带 ▲/▼ 前缀的最终文本测量，
+        # 否则边缘列宽不足会被 elide）
         max_label_width_pixels = 200  # 最大标签宽度（像素）
         label_widths_pixels = []
         for item in visible_labels:
-            text_width = font_metrics.horizontalAdvance(item['y_value'])
+            text_width = font_metrics.horizontalAdvance(
+                self._label_display_text(item)
+            )
             w = min(text_width + 12, max_label_width_pixels)
             label_widths_pixels.append(w)
+            # 宽度随 item 传给 _layout_column，由其写入 LabelLayout.w，
+            # 供列宽累计与跨组碰撞矩形使用。
+            item['_label_w'] = w
 
         max_label_width_px = max(label_widths_pixels)
 
         # 获取 y 轴占用宽度
-        y_axis_width = 0
-        left_axis = self.pw.plot_item.getAxis('left')
-        if left_axis:
-            y_axis_width = left_axis.width()
-
         view_width_pixels = max(1, view_box.width())
         view_height_pixels = max(1, view_box.height())
 
-        # Scene 坐标边界
-        x_min_scene = view_box.mapViewToScene(QPointF(x_min, 0)).x() + y_axis_width
+        # Scene 坐标边界。mapViewToScene(x_min) 已是 ViewBox 左界（轴区在
+        # ViewBox 之外），不能再叠加左轴宽度——重复计入会让左侧可用宽
+        # 凭空缩小，跨组避让误判「预算不足」而回退。
+        x_min_scene = view_box.mapViewToScene(QPointF(x_min, 0)).x()
         x_max_scene = view_box.mapViewToScene(QPointF(x_max, 0)).x()
         y_min_scene = view_box.mapViewToScene(QPointF(0, y_min)).y()
         y_max_scene = view_box.mapViewToScene(QPointF(0, y_max)).y()
@@ -960,14 +1144,20 @@ class CursorManager:
         # 尺寸后需连续 3 帧（HYSTERESIS_THRESHOLD）才收敛。
         if raw_capacity < 1:
             hide_indices = {item['_orig_idx'] for item in visible_labels}
-            return [], hide_indices
+            return [], hide_indices, None
 
         per_column_capacity = max(1, raw_capacity)
 
-        # 列数计算（带滞回）
+        # 列数计算（带滞回，按 cursor_id 分状态）
         n_labels = len(visible_labels)
         new_column_count = max(1, int(np.ceil(n_labels / per_column_capacity)))
-        column_count = self._apply_column_hysteresis(new_column_count)
+        if feed_hysteresis:
+            column_count = self._apply_column_hysteresis(
+                new_column_count, cursor_id
+            )
+        else:
+            # 跨组重布局：沿用原布局的列数，不双喂滞回计数器
+            column_count = self._column_state.get(cursor_id, (1, 0))[0]
 
         # 计算列放置方向
         cursor_scene_x = cursor_scene_pos.x() if cursor_scene_pos else 0
@@ -989,21 +1179,37 @@ class CursorManager:
         column_sides = self._compute_column_positions(
             column_count, right_available, left_available,
             max_label_width_px, col_gap_pixels,
+            force_side=force_side,
         )
         # column_sides: list of ('right', col_idx) or ('left', col_idx)
 
         # 分配标签到各列（均匀分配）
         labels_per_column = self._distribute_labels(visible_labels, column_count)
 
-        # 计算每列的场景 x 坐标（anchor=(0,0.5)，cx 即标签左边缘）
+        # 逐列取列内实际最大宽（分配后再定宽，避免列数估算同帧循环依赖；
+        # 列数仍用 max 宽保守估算）。
+        column_widths = [
+            max((col.get('_label_w', 0.0) for col in col_labels), default=0.0)
+            for col_labels in labels_per_column
+        ]
+
+        # 计算每列的场景 x 坐标（anchor=(0,0.5)，cx 即标签左边缘）。
+        # 累计偏移：offset_k = GAP + Σ_{j<k}(w_j + COL_GAP)，左右侧各自累计；
+        # 同侧从光标向外递增，宽列后接窄列不会自重叠。
         column_scene_x = []
-        for side, col_idx in column_sides:
-            offset = gap_to_cursor + col_idx * (max_label_width_px + col_gap_pixels)
+        side_offset = {'right': gap_to_cursor, 'left': gap_to_cursor}
+        for i, (side, _col_idx) in enumerate(column_sides):
+            col_width = (
+                column_widths[i] if i < len(column_widths)
+                else max_label_width_px
+            )
+            offset = side_offset[side]
             if side == 'right':
                 cx = cursor_scene_x + offset
             else:
-                cx = cursor_scene_x - offset - max_label_width_px
+                cx = cursor_scene_x - offset - col_width
             column_scene_x.append(cx)
+            side_offset[side] = offset + col_width + col_gap_pixels
 
         # 列内垂直堆叠
         column_scene_y_min = y_min_scene + margin_pixels_scene
@@ -1022,19 +1228,38 @@ class CursorManager:
             )
             all_layouts.extend(col_layouts)
 
-        return all_layouts, set()
+        # 跨组避让预算：同侧已用总宽（含列间距）与可用宽
+        meta = {
+            'left_need': side_offset['left'] - gap_to_cursor,
+            'right_need': side_offset['right'] - gap_to_cursor,
+            'left_available': left_available,
+            'right_available': right_available,
+            'x_min_scene': x_min_scene,
+            'x_max_scene': x_max_scene,
+            'y_min_scene': y_min_scene,
+            'y_max_scene': y_max_scene,
+        }
+        return all_layouts, set(), meta
 
-    def _apply_column_hysteresis(self, new_column_count: int) -> int:
-        """列数切换滞回：连续 3 次调用才切换，防止临界抖动"""
+    def _apply_column_hysteresis(
+        self, new_column_count: int, cursor_id: int = 0
+    ) -> int:
+        """列数切换滞回（按 cursor_id 独立）：连续 3 次调用才切换。
+
+        单游标固定 key=0，初值 (1, 0) 与旧单份状态一致；多游标组间不再
+        互相喂入计数器导致永远到不了 3 帧。
+        """
         HYSTERESIS_THRESHOLD = 3
-        if new_column_count != self._column_count:
-            self._column_hysteresis_counter += 1
-            if self._column_hysteresis_counter >= HYSTERESIS_THRESHOLD:
-                self._column_count = new_column_count
-                self._column_hysteresis_counter = 0
+        cols, counter = self._column_state.get(cursor_id, (1, 0))
+        if new_column_count != cols:
+            counter += 1
+            if counter >= HYSTERESIS_THRESHOLD:
+                cols = new_column_count
+                counter = 0
         else:
-            self._column_hysteresis_counter = 0
-        return self._column_count
+            counter = 0
+        self._column_state[cursor_id] = (cols, counter)
+        return cols
 
     @staticmethod
     def _possible_columns(available: float, col_width: float) -> int:
@@ -1048,15 +1273,21 @@ class CursorManager:
         left_available: float,
         max_label_width: float,
         col_gap: float,
+        force_side: str | None = None,
     ) -> list:
         """决定每列的放置方向（右侧优先，空间不足时启用左侧）
 
+        force_side='left'/'right'：跨组向外分裂时强制单侧。
         返回 list of (side, col_idx)
         """
         sides = []
         col_width = max_label_width + col_gap
         right_cols_possible = self._possible_columns(right_available, col_width)
         left_cols_possible = self._possible_columns(left_available, col_width)
+        if force_side == 'left':
+            right_cols_possible = 0
+        elif force_side == 'right':
+            left_cols_possible = 0
 
         # 优先填充右侧
         right_used = min(column_count, right_cols_possible)
@@ -1069,10 +1300,15 @@ class CursorManager:
         for i in range(left_used):
             sides.append(('left', i))
 
-        # 如果列数超出可用空间，全部压缩到右侧
+        # 如果列数超出可用空间，其余列压到指定侧（无 force 时右侧）；
+        # 列 x 由调用方按同侧累计偏移分配，不依赖 col_idx 连续。
+        fallback = force_side or 'right'
         if len(sides) < column_count:
+            used_on_fallback = (
+                right_used if fallback == 'right' else left_used
+            )
             for i in range(len(sides), column_count):
-                sides.append(('right', i - right_used))
+                sides.append((fallback, i - used_on_fallback))
 
         return sides
 
@@ -1114,6 +1350,31 @@ class CursorManager:
             return (col_y_min + col_y_max) / 2
         return max(lo, min(hi, target_y))
 
+    @staticmethod
+    def _label_display_text(item: dict) -> str:
+        """标签最终显示文本：pinned 项带 ▲/▼ 方向前缀。"""
+        if item.get("pinned"):
+            return ("▲ " if item.get("up") else "▼ ") + item["y_value"]
+        return item["y_value"]
+
+    def _ideal_label_scene_y(
+        self,
+        label: dict,
+        view_box: Any,
+        col_y_min: float,
+        col_y_max: float,
+        half_height: float,
+    ) -> float:
+        """标签理想中心 y：正常项贴交点上方，pinned 项吸附视口边缘内侧。"""
+        if label.get("pinned"):
+            if label.get("up"):
+                return col_y_min + half_height + 2
+            return col_y_max - half_height - 2
+        scene_pos = view_box.mapViewToScene(
+            QPointF(label["x_pos"], label["y_pos"])
+        )
+        return scene_pos.y() - self.LABEL_Y_OFFSET
+
     def _layout_column(
         self,
         labels: list,
@@ -1123,7 +1384,7 @@ class CursorManager:
         label_height_pixels: float,
         gap_pixels: float,
     ) -> list[LabelLayout]:
-        """列内垂直堆叠：自适应权重的约束垂直堆叠"""
+        """列内垂直堆叠：PAV 等渗回归求最小位移且保持最小间距"""
         n = len(labels)
         if n == 0:
             return []
@@ -1131,11 +1392,13 @@ class CursorManager:
         half_height = label_height_pixels / 2
         view_box = self.pw.plot_item.getViewBox()
 
-        # 单标签：放在交点上方（统一向上偏移 LABEL_Y_OFFSET）
+        # 单标签：放在交点上方（统一向上偏移 LABEL_Y_OFFSET）；
+        # pinned 项 ideal 吸附边缘内侧
         if n == 1:
             label = labels[0]
-            scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
-            target_y = scene_pos.y() - self.LABEL_Y_OFFSET  # 向上偏移
+            target_y = self._ideal_label_scene_y(
+                label, view_box, col_y_min, col_y_max, half_height
+            )
             target_y = self._clamp_label_y(
                 target_y, col_y_min, col_y_max, half_height
             )
@@ -1144,76 +1407,96 @@ class CursorManager:
                 index=label['_orig_idx'],
                 x_pos=label['x_pos'], y_pos=label['y_pos'],
                 y_value=label['y_value'], color=label['color'],
+                pinned=label.get('pinned', False), up=label.get('up', False),
+                w=label.get('_label_w', 0.0),
             )]
 
-        # 多标签：自适应权重堆叠
-        ideal_spacing = (col_y_max - col_y_min) / n
-        total_height = label_height_pixels + gap_pixels
-        results: list[LabelLayout] = []
+        # 多标签：PAV 等渗回归直解（最小位移 + 最小间距）。
+        # 标签已按 y_pos 降序（scene y 升序），ideal 即交点上方 LABEL_Y_OFFSET。
+        items = []
+        for label in labels:
+            items.append({
+                'ideal': self._ideal_label_scene_y(
+                    label, view_box, col_y_min, col_y_max, half_height
+                )
+            })
+        stacked_y = self._pav_stack(
+            items, col_y_min, col_y_max, label_height_pixels, gap_pixels
+        )
 
-        # 虚拟"上一个标签底部"：从列顶部开始，保证第一个标签也有最小位置约束
-        prev_bottom = col_y_min + half_height
-
-        for i, label in enumerate(labels):
-            scene_pos = view_box.mapViewToScene(QPointF(label['x_pos'], label['y_pos']))
-            # 所有标签统一向上偏移 LABEL_Y_OFFSET，保持间距一致
-            ideal_y = scene_pos.y() - self.LABEL_Y_OFFSET
-            uniform_y = col_y_min + ideal_spacing * (i + 0.5)  # 均匀分布
-
-            # 自适应权重：密集区域偏向均匀分布，稀疏区域偏向交点位置
-            local_density = self._count_nearby(labels, label['y_pos'],
-                                                radius=label_height_pixels * 3)
-            w_ideal = max(0.2, 1.0 - local_density * 0.15)
-            target_y = w_ideal * ideal_y + (1 - w_ideal) * uniform_y
-
-            # 动态最大偏移量
-            max_offset = label_height_pixels * (0.5 + n * 0.1)
-            max_offset = min(max_offset, label_height_pixels * 2)
-            target_y = max(ideal_y - max_offset, min(ideal_y + max_offset, target_y))
-
-            # 与上一个标签防重叠（包括第一个标签与列顶部的约束）
-            target_y = max(target_y, prev_bottom + gap_pixels + half_height)
-
-            # 边界 clamp（含倒挂防御）
-            target_y = self._clamp_label_y(
-                target_y, col_y_min, col_y_max, half_height
-            )
-
-            results.append(LabelLayout(
-                layout_x=col_scene_x, layout_y=target_y,
+        return [
+            LabelLayout(
+                layout_x=col_scene_x, layout_y=stacked_y[i],
                 index=label['_orig_idx'],
                 x_pos=label['x_pos'], y_pos=label['y_pos'],
                 y_value=label['y_value'], color=label['color'],
-            ))
+                pinned=label.get('pinned', False), up=label.get('up', False),
+                w=label.get('_label_w', 0.0),
+            )
+            for i, label in enumerate(labels)
+        ]
 
-            # 更新 prev_bottom 供下一个标签使用
-            prev_bottom = target_y + half_height
+    @staticmethod
+    def _pav_stack(
+        items: list,
+        top: float,
+        bottom: float,
+        h: float,
+        gap: float,
+    ) -> list[float]:
+        """PAV（pool adjacent violators）等渗回归：列内垂直堆叠直解。
 
-        # Pass 2: 正向扫描，修正边界 clamp 导致的重叠（自顶向下）
-        for i in range(1, len(results)):
-            prev_bottom = results[i - 1].layout_y + half_height
-            curr_top = results[i].layout_y - half_height
-            if curr_top < prev_bottom + gap_pixels:
-                results[i].layout_y = prev_bottom + gap_pixels + half_height
-                # 检查是否超出底部边界
-                results[i].layout_y = min(results[i].layout_y,
-                                           col_y_max - half_height)
+        最小化 Σ(y_i − ideal_i)²，约束 y_i ≥ y_{i−1} + h + gap（标签不重叠）。
+        items 为按 scene y 升序排列的 {'ideal': float}；返回各标签中心 y。
 
-        # Pass 3: 反向扫描，修正被推挤后产生的新重叠（自底向上）
-        for i in range(len(results) - 2, -1, -1):
-            next_top = results[i + 1].layout_y - half_height
-            curr_bottom = results[i].layout_y + half_height
-            if curr_bottom > next_top - gap_pixels:
-                results[i].layout_y = next_top - gap_pixels - half_height
-                # 检查是否超出顶部边界，超出则截断
-                results[i].layout_y = max(results[i].layout_y,
-                                           col_y_min + half_height)
+        变换 z_i = ideal_i − i·step 后约束变为 z 非降，PAV 合并违序块取均值
+        即得全局最优解（未触发边界 clamp 时）。簇围绕中心上下对称分裂，
+        避免单向下推的级联位移。边界 clamp 复用 ``_clamp_label_y``（含倒挂
+        防御），随后仅做有界正/反推，保证结果不越出列区域。
+        """
+        n = len(items)
+        if n == 0:
+            return []
 
-        return results
+        half_height = h / 2
+        step = h + gap
 
-    def _count_nearby(self, labels: list, y_pos: float, radius: float) -> int:
-        """计算 y_pos 附近 radius 范围内的标签数量"""
-        return sum(1 for l in labels if abs(l['y_pos'] - y_pos) <= radius)
+        if n == 1:
+            return [
+                CursorManager._clamp_label_y(
+                    items[0]['ideal'], top, bottom, half_height
+                )
+            ]
+
+        # 违序块合并：每块携带 (Σz, 块内标签数, 起始下标)
+        blocks: list[list[float]] = []
+        for i, item in enumerate(items):
+            blocks.append([item['ideal'] - i * step, 1, i])
+            while len(blocks) > 1:
+                last, prev = blocks[-1], blocks[-2]
+                if last[0] / last[1] >= prev[0] / prev[1] - 1e-9:
+                    break
+                prev[0] += last[0]
+                prev[1] += last[1]
+                blocks.pop()
+
+        y = [0.0] * n
+        for block_sum, count, start in blocks:
+            mean = block_sum / count
+            for i in range(start, start + int(count)):
+                y[i] = mean + i * step
+
+        y = [
+            CursorManager._clamp_label_y(v, top, bottom, half_height) for v in y
+        ]
+
+        # 有界前推：不把标签推出视口下边缘
+        for i in range(1, n):
+            y[i] = min(max(y[i], y[i - 1] + step), bottom - half_height)
+        # 有界后推：不把标签推出视口上边缘
+        for i in range(n - 2, -1, -1):
+            y[i] = max(min(y[i], y[i + 1] - step), top + half_height)
+        return y
 
     def _render_label_layout(self, layouts: list[LabelLayout]):
         """Phase 3: 按计算结果渲染标签"""
@@ -1238,8 +1521,11 @@ class CursorManager:
                     text_scene.removeItem(text_item)
                 pw.plot_item.addItem(text_item, ignoreBounds=True)
 
-            # 标签文本截断（防止过长文本导致列宽计算失准）
+            # 标签文本截断（防止过长文本导致列宽计算失准）。
+            # pinned 项按带 ▲/▼ 前缀的最终文本测宽，与布局阶段同口径。
             display_text = layout.y_value
+            if layout.pinned:
+                display_text = ("▲ " if layout.up else "▼ ") + display_text
             text_width = font_metrics.horizontalAdvance(display_text) + 12
             if text_width > MAX_LABEL_WIDTH_PIXELS:
                 display_text = font_metrics.elidedText(
@@ -1260,8 +1546,11 @@ class CursorManager:
             # 身份色：左侧 4px 全色条 + 90α 白底 + 曲线色描边（A1' 调整版）。
             # 色条不透明全色承担身份；白底 90α(≈35% 白) 让曲线/网格透上来；
             # 描边用曲线色 1.5px（main 原色），把文本框从白底里勾出来。
-            if (not hasattr(text_item, '_cached_chip_color')
-                    or text_item._cached_chip_color != layout.color):
+            # pinned 项描边改虚线；缓存键必须并入 pinned，否则颜色不变时
+            # 虚线/实线切换不会生效。
+            chip_key = (layout.color, layout.pinned)
+            if (not hasattr(text_item, '_cached_chip_key')
+                    or text_item._cached_chip_key != chip_key):
                 c = pg.mkColor(layout.color)
                 white = pg.mkColor("#FFFFFF")
                 white.setAlpha(90)
@@ -1271,9 +1560,11 @@ class CursorManager:
                 grad.setColorAt(0.80, white)
                 text_item.fill = QBrush(grad)
                 text_item.setColor(pg.mkColor("#000000"))
-                text_item.border = pg.mkPen(c, width=1.5)
-                text_item._cached_chip_color = layout.color
+                border_style = Qt.DashLine if layout.pinned else Qt.SolidLine
+                text_item.border = pg.mkPen(c, width=1.5, style=border_style)
+                text_item._cached_chip_key = chip_key
 
+            text_item.setOpacity(0.8 if layout.pinned else 1.0)
             text_item.setVisible(True)
 
             # 将 scene 坐标转回数据坐标（TextItem 添加到 plot_item 时使用数据坐标）
@@ -1284,7 +1575,8 @@ class CursorManager:
             text_item.setZValue(201)
             pw.multi_cursor_items.append(text_item)
 
-            # 引导线：交点 → 标签左缘（A2）。数据坐标，随视图缩放与标签同动。
+            # 引导线：交点 → 标签（A2）。数据坐标，随视图缩放与标签同动。
+            # pinned 项贴边显示，不画引导线（避免横穿视口的噪音线）。
             leader = self._get_leader_from_pool(layout.index)
             leader_scene = leader.scene()
             if leader_scene != plot_scene:
@@ -1293,17 +1585,33 @@ class CursorManager:
                 pw.plot_item.addItem(leader, ignoreBounds=True)
             p0 = view_box.mapViewToScene(QPointF(layout.x_pos, layout.y_pos))
             p1 = QPointF(layout.layout_x, layout.layout_y)
-            if (p1 - p0).manhattanLength() > 8:
-                d0 = view_box.mapSceneToView(p0)
-                d1 = view_box.mapSceneToView(p1)
-                leader.setData([d0.x(), d1.x()], [d0.y(), d1.y()])
+            if not layout.pinned and (p1 - p0).manhattanLength() > 8:
+                if self.CURSOR_LEADER_ELBOW:
+                    # 四点正交折线：p0 → (mx, p0.y) → (mx, p1.y) → p1。
+                    # 标签在右：mx = 左缘−6；标签在左：mx = 右缘+6。
+                    if layout.layout_x >= p0.x():
+                        mx = layout.layout_x - 6
+                    else:
+                        mx = layout.layout_x + text_width + 6
+                    scene_pts = [
+                        p0,
+                        QPointF(mx, p0.y()),
+                        QPointF(mx, p1.y()),
+                        p1,
+                    ]
+                else:
+                    scene_pts = [p0, p1]
+                view_pts = [view_box.mapSceneToView(pt) for pt in scene_pts]
+                leader.setData(
+                    [pt.x() for pt in view_pts], [pt.y() for pt in view_pts]
+                )
                 lc = pg.mkColor(layout.color)
                 lc.setAlpha(150)
                 leader.setPen(pg.mkPen(lc, width=1))
                 leader.setVisible(True)
                 pw.multi_cursor_items.append(leader)
             else:
-                leader.setVisible(False)  # 贴住交点时不画，避免噪音
+                leader.setVisible(False)  # 贴住交点或 pinned 时不画，避免噪音
 
     # ========================================================================
 
