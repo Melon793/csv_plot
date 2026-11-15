@@ -272,3 +272,90 @@ def test_clamp_label_y_inverted_interval_falls_back_to_center():
     assert CursorManager._clamp_label_y(-5.0, 0.0, 100.0, 10.0) == pytest.approx(10.0)
     assert CursorManager._clamp_label_y(50.0, 0.0, 100.0, 10.0) == pytest.approx(50.0)
     assert CursorManager._clamp_label_y(200.0, 0.0, 100.0, 10.0) == pytest.approx(90.0)
+
+
+# ---------- 批次2：Y 出界标签边缘吸附 ----------
+
+def _out_of_view_df() -> pd.DataFrame:
+    """5 条常数曲线：交点值 0/100/200/300/400，y 视口 [150,250] 时 4 个出界。"""
+    return pd.DataFrame(
+        {f"y{i}": np.full(100, float(v)) for i, v in enumerate((0, 100, 200, 300, 400))}
+    )
+
+
+def _setup_out_of_view(plot_factory, qapp, size=(500, 500)):
+    pw = _setup(plot_factory, _out_of_view_df(), size=size)
+    vb = pw.view_box
+    vb.setXRange(0, 99, padding=0.05)
+    vb.setYRange(150, 250, padding=0)
+    qapp.processEvents()
+    pw.vline.setVisible(True)
+    pw.vline.setPos(50.0)
+    _refresh(pw, times=4)  # 越过列数滞回
+    return pw
+
+
+def test_out_of_view_labels_pinned_not_hidden(plot_factory, qapp):
+    """y 出界交点：标签仍入列（pinned），circle 仍只在视口内交点创建"""
+    pw = _setup_out_of_view(plot_factory, qapp)
+
+    labels = _visible_labels(pw)
+    assert len(labels) == 5, f"4 个出界值必须吸附显示，实际可见 {len(labels)}"
+
+    circles = [c for c in pw._cursor_item_pool["circles"] if c.isVisible()]
+    assert len(circles) == 1, (
+        f"仅视口内交点（y=200）应建圆点，实际 {len(circles)} 个"
+    )
+
+
+def test_pinned_labels_arrow_direction(plot_factory, qapp):
+    """pinned 文本带 ▲/▼ 前缀，位置吸附到对应视口边缘"""
+    pw = _setup_out_of_view(plot_factory, qapp)
+    labels = {lbl.toPlainText(): lbl for lbl in _visible_labels(pw)}
+
+    assert set(labels) == {"▲ 400", "▲ 300", "200", "▼ 100", "▼ 0"}
+
+    view_rect = pw.view_box.sceneBoundingRect()
+    center_y = view_rect.center().y()
+    assert labels["▲ 400"].scenePos().y() < center_y
+    assert labels["▲ 300"].scenePos().y() < center_y
+    assert labels["▼ 100"].scenePos().y() > center_y
+    assert labels["▼ 0"].scenePos().y() > center_y
+
+
+def test_pinned_labels_disappear_when_back_in_view(plot_factory, qapp):
+    """缩回 y 视口后 pinned 消失：无前缀、circle 恢复为 5 个"""
+    pw = _setup_out_of_view(plot_factory, qapp)
+    assert any(lbl.toPlainText().startswith(("▲", "▼")) for lbl in _visible_labels(pw))
+
+    vb = pw.view_box
+    vb.setYRange(0, 400, padding=0)
+    qapp.processEvents()
+    _refresh(pw, times=4)
+
+    labels = _visible_labels(pw)
+    assert len(labels) == 5
+    assert all(not lbl.toPlainText().startswith(("▲", "▼")) for lbl in labels)
+    circles = [c for c in pw._cursor_item_pool["circles"] if c.isVisible()]
+    assert len(circles) == 5
+
+
+def test_pinned_labels_within_viewport_on_short_plot(plot_factory, qapp):
+    """矮图容量边界：全部出界的 pinned 标签压缩后仍在视口内，不消失"""
+    pw = _setup(plot_factory, _out_of_view_df(), size=(500, SHORT_SIZE[1]))
+    vb = pw.view_box
+    vb.setXRange(0, 99, padding=0.05)
+    # 全部交点低于视口 → 5 个 pinned 挤在底边
+    vb.setYRange(450, 550, padding=0)
+    qapp.processEvents()
+    pw.vline.setVisible(True)
+    pw.vline.setPos(50.0)
+    _refresh(pw, times=4)
+
+    labels = _visible_labels(pw)
+    assert len(labels) == 5
+    view_rect = vb.sceneBoundingRect()
+    for lbl in labels:
+        assert lbl.toPlainText().startswith("▼")
+        assert view_rect.left() <= lbl.scenePos().x() <= view_rect.right()
+        assert view_rect.top() <= lbl.scenePos().y() <= view_rect.bottom()
