@@ -186,8 +186,6 @@ class TestBlfFileBindings:
     """按文件记忆的完整配置：路径作键、size/mtime 作校验、LRU 20 份。"""
 
     def test_remember_and_read_roundtrip(self, app_settings, tmp_path):
-        from src.utils.paths import normalize_input_path
-
         blf = tmp_path / "demo.blf"
         blf.write_bytes(b"x")
         config = {
@@ -200,7 +198,7 @@ class TestBlfFileBindings:
         )
 
         entry = app_settings.get_blf_file_bindings()[
-            normalize_input_path(str(blf))
+            AppSettings.blf_memory_key(str(blf))
         ]
         assert entry["size"] == 1
         assert entry["mtime"] == 123.0
@@ -233,11 +231,9 @@ class TestBlfFileBindings:
                 config={"databases": []},
             )
         app_settings.forget_blf_file_binding(str(tmp_path / "a.blf"))
-        from src.utils.paths import normalize_input_path
-
         entries = app_settings.get_blf_file_bindings()
-        assert normalize_input_path(str(tmp_path / "a.blf")) not in entries
-        assert normalize_input_path(str(tmp_path / "b.blf")) in entries
+        assert AppSettings.blf_memory_key(str(tmp_path / "a.blf")) not in entries
+        assert AppSettings.blf_memory_key(str(tmp_path / "b.blf")) in entries
 
     def test_store_path_stays_inside_app_data_dir(self, tmp_path):
         path = AppSettings.blf_binding_store_path(str(tmp_path / "x.blf"))

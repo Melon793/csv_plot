@@ -1446,6 +1446,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 return current.restrict_to_pool(usable)
             return self._ask_can_databases(
                 file_path, initial_cfg=current, missing=bad,
+                known_channels=getattr(self.mw.loader, "channel_stats", None),
                 notice=BLF_TEXT_DB_MISSING.format(
                     paths=escape("\n".join(bad) or "（无）")
                 ),
@@ -1472,21 +1473,13 @@ class FileLoaderManager(MainWindowBaseManager):
                 return None
             return cfg
 
-        if remembered.pool:
-            # C：记忆命中但个别文件缺失/解析失败 → 弹窗 + 黄条说明
-            usable, bad = self._usable_db_paths(remembered.pool)
-            if bad and usable:
-                return self._ask_can_databases(
-                    file_path, initial_cfg=remembered, missing=bad,
-                    notice=BLF_TEXT_DB_MISSING.format(
-                        paths=escape("\n".join(bad))
-                    ),
-                )
-
-        # B：每次新导入都弹窗。预选优先级：旁车 YAML > 按文件记忆 > 全局记忆。
+        # 先尝试按文件记忆 / 旁车配置（它们可能带着绑定与别名）；没有命中时
+        # base 就是全局记忆，C 路径的缺文件检查对两者同样适用。
         base_cfg, extra_notice = self._initial_cfg_for_new_import(
             file_path, remembered
         )
+
+        # B：每次新导入都弹窗。预选优先级：旁车 YAML > 按文件记忆 > 全局记忆。
         if base_cfg.pool:
             usable, bad = self._usable_db_paths(base_cfg.pool)
             if bad and usable:
@@ -1522,7 +1515,7 @@ class FileLoaderManager(MainWindowBaseManager):
         base = remembered
         notice = ""
         entry = AppSettings().get_blf_file_bindings().get(
-            normalize_input_path(file_path)
+            AppSettings.blf_memory_key(file_path)
         )
         if entry:
             try:

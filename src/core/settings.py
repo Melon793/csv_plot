@@ -319,6 +319,15 @@ class AppSettings:
 
     BLF_FILE_BINDINGS_LIMIT = 20
 
+    @staticmethod
+    def blf_memory_key(blf_path: str) -> str:
+        """按文件记忆的键：与通道绑定同口径（normcase + 绝对路径）。
+
+        评审 P2：此前用 ``normalize_input_path``（不做大小写归一），Windows /
+        UNC 上同一文件的不同写法会漏命中，与 ``_path_key`` 口径分裂。
+        """
+        return os.path.normcase(os.path.abspath(normalize_input_path(blf_path)))
+
     def get_blf_file_bindings(self) -> dict[str, dict]:
         """``{规范化路径: {size, mtime, ts, config}}``。坏数据一律空 dict。"""
         raw = self._settings.value(ConfigKey.BLF_FILE_BINDINGS, "", type=str) or ""
@@ -341,7 +350,7 @@ class AppSettings:
         self, blf_path: str, *, size: int, mtime: float, config: dict
     ) -> None:
         """记住某份日志的配置；LRU（按 ts）保留最近 ``BLF_FILE_BINDINGS_LIMIT`` 份。"""
-        key = normalize_input_path(blf_path)
+        key = self.blf_memory_key(blf_path)
         if not key or not isinstance(config, dict):
             return
         entries = self.get_blf_file_bindings()
@@ -364,7 +373,7 @@ class AppSettings:
         )
 
     def forget_blf_file_binding(self, blf_path: str) -> None:
-        key = normalize_input_path(blf_path)
+        key = self.blf_memory_key(blf_path)
         entries = self.get_blf_file_bindings()
         if key in entries:
             entries.pop(key, None)

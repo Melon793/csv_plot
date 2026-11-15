@@ -786,3 +786,85 @@ def test_save_and_load_config_roundtrip(qapp, tmp_path, monkeypatch):
     finally:
         dlg2._shutdown_prescan()
         dlg2.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# 合并前评审回归（P0/P1/P2）
+# ---------------------------------------------------------------------------
+
+def test_single_channel_group_starts_collapsed_and_multi_expands(qapp, tmp_path):
+    """D1：多通道默认展开；单通道默认折叠（评审 P1）。"""
+    blf1, dbc1 = write_blf_pair(tmp_path / "one", n=8, buses=(0,))
+    dlg1 = CanDatabaseSelectorDialog(
+        data_file=str(blf1), initial_paths=[str(dbc1)]
+    )
+    try:
+        _pump_until(dlg1, lambda: dlg1._prescan_state in ("done", "failed"))
+        assert dlg1.bind_box.isChecked() is False
+        assert dlg1.bind_content.isHidden() is True
+    finally:
+        dlg1._shutdown_prescan()
+        dlg1.deleteLater()
+
+    blf2, dbc2 = write_blf_pair(tmp_path / "two", n=8, buses=(0, 1))
+    dlg2 = CanDatabaseSelectorDialog(
+        data_file=str(blf2), initial_paths=[str(dbc2)]
+    )
+    try:
+        _pump_until(dlg2, lambda: dlg2._prescan_state in ("done", "failed"))
+        assert dlg2.bind_box.isChecked() is True
+    finally:
+        dlg2._shutdown_prescan()
+        dlg2.deleteLater()
+
+
+def test_dropping_a_dbc_file_onto_the_pool_table_still_adds_it(qapp, tmp_path):
+    """评审 P1：库表接受自定义 MIME 后，外部文件拖入必须显式转发，不能靠冒泡。"""
+    blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
+    extra = write_dbc(tmp_path / "extra.dbc", CAN_FRAMES[:1])
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc)]
+    )
+    try:
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(extra))])
+        _keep_alive.append(mime)
+
+        enter = QDragEnterEvent(
+            QPoint(5, 5), Qt.DropAction.CopyAction, mime,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        )
+        dlg.table.dragEnterEvent(enter)
+        assert enter.isAccepted(), "表格必须接受外部文件拖入"
+
+        event = QDropEvent(
+            QPointF(5, 5), Qt.DropAction.CopyAction, mime,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        )
+        dlg.table.dropEvent(event)
+        assert str(extra) in [r.path for r in dlg.rows]
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_removing_a_bound_library_warns_and_falls_back_with_notice(qapp, tmp_path):
+    """评审 P1：绑定被移除后不能静默放宽，必须提示。"""
+    blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
+    dlg = CanDatabaseSelectorDialog(
+        data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
+    )
+    try:
+        _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
+        dlg._set_channel_binding(1, [str(partial)])
+        assert dlg._bindings.get(1) == (str(partial),)
+
+        dlg.table.selectRow(1)   # partial 在第二行
+        dlg._on_remove()
+
+        assert 1 not in dlg._bindings
+        assert "改为使用全局库" in dlg.notice.text()
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()

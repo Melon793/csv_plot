@@ -49,7 +49,7 @@ def test_validate_reports_duplicates_and_pool_external_bindings():
     assert any("池外" in s for s in issues)
 
 
-def test_restrict_to_pool_drops_removed_files_and_empty_channels(tmp_path):
+def test_restrict_to_pool_drops_removed_files_and_keeps_aliases(tmp_path):
     a = str(tmp_path / "a.dbc")
     b = str(tmp_path / "b.dbc")
     cfg = CanBindings.from_paths(
@@ -60,8 +60,15 @@ def test_restrict_to_pool_drops_removed_files_and_empty_channels(tmp_path):
 
     assert kept.pool == (a,)
     assert kept.by_channel == {0: (a,)}
-    # 通道 1 的绑定文件被移除 → 绑定清空 → 别名一起清掉（不留孤立别名）
-    assert kept.alias == {0: "动力"}
+    # 别名与绑定解耦：通道 1 的绑定文件被移除，别名仍保留（评审 P0）
+    assert kept.alias == {0: "动力", 1: "车身"}
+
+
+def test_restrict_to_pool_keeps_alias_for_a_channel_that_was_never_bound(tmp_path):
+    a = str(tmp_path / "a.dbc")
+    cfg = CanBindings.from_paths([a], alias={2: "底盘"})
+
+    assert cfg.restrict_to_pool([a]).alias == {2: "底盘"}
 
 
 def test_yaml_roundtrip_uses_one_based_channel_keys():

@@ -125,17 +125,21 @@ _DB_MIME = "application/x-canview-db"
 
 
 class _PoolTable(QTableWidget):
-    """库池表：拖行调序 + 拖到通道表绑定。
+    """库池表：拖行调序 + 拖到通道表绑定 + 外部文件拖入转发。
 
-    外部文件拖入仍由对话框级 ``dropEvent`` 处理：本表只接受自定义 MIME，
-    其余一律 ignore，事件冒泡到对话框，原有「拖 .dbc 进来」能力不变。
+    外部文件（text/uri-list）显式转发给对话框处理，不依赖「ignore 后是否
+    冒泡到父控件」的平台行为——评审 P1 指出那是未验证假设。
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._drag_row = -1
-        #: (src_row, dst_row) -> None，由对话框注入
+        self._drag_path = ""
+        #: (path, dst_row) -> None，由对话框注入；按路径而不是行号定位，
+        #: 避免预扫自动排序在拖拽期间改变行号（评审 P2 的竞态）
         self.on_move = None
+        #: (event) -> bool，外部文件拖入的接受/落盘委托给对话框
+        self.on_external_accept = None
+        self.on_external_drop = None
 
     def startDrag(self, supported_actions):  # noqa: N802 - Qt 命名
         row = self.currentRow()
@@ -145,7 +149,7 @@ class _PoolTable(QTableWidget):
         path = item.toolTip() if item is not None else ""
         if not path:
             return
-        self._drag_row = row
+        self._drag_path = path
         mime = QMimeData()
         mime.setData(_DB_MIME, path.encode("utf-8"))
         mime.setText(path)
@@ -156,27 +160,33 @@ class _PoolTable(QTableWidget):
     def dragEnterEvent(self, event):  # noqa: N802 - Qt 命名
         if event.mimeData().hasFormat(_DB_MIME):
             event.acceptProposedAction()
+        elif self.on_external_accept is not None and self.on_external_accept(event):
+            event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):  # noqa: N802 - Qt 命名
         if event.mimeData().hasFormat(_DB_MIME):
             event.acceptProposedAction()
+        elif self.on_external_accept is not None and self.on_external_accept(event):
+            event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):  # noqa: N802 - Qt 命名
-        if (not event.mimeData().hasFormat(_DB_MIME)
-                or event.source() is not self):
-            event.ignore()
+        if event.mimeData().hasFormat(_DB_MIME) and event.source() is self:
+            row = self.rowAt(int(event.position().toPoint().y()))
+            if row < 0:
+                row = self.rowCount() - 1
+            if self.on_move is not None and self._drag_path:
+                self.on_move(self._drag_path, row)
+            self._drag_path = ""
+            event.acceptProposedAction()
             return
-        row = self.rowAt(int(event.position().toPoint().y()))
-        if row < 0:
-            row = self.rowCount() - 1
-        if self.on_move is not None and self._drag_row >= 0:
-            self.on_move(self._drag_row, row)
-        self._drag_row = -1
-        event.acceptProposedAction()
+        if self.on_external_drop is not None and self.on_external_drop(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
 
 
 class _ChannelTable(QTableWidget):
@@ -456,7 +466,9 @@ class CanDatabaseSelectorDialog(QDialog):
         self.table.setDragEnabled(True)
         self.table.setAcceptDrops(True)
         self.table.setDragDropMode(QTableWidget.DragDropMode.DragDrop)
-        self.table.on_move = self._move_row
+        self.table.on_move = self._move_row_path
+        self.table.on_external_accept = self._accept_external_drag
+        self.table.on_external_drop = self._handle_external_drop
         self.table.currentCellChanged.connect(lambda *_: self._refresh_buttons())
         self.table.itemChanged.connect(self._on_note_changed)
         layout.addWidget(self.table, 1)
@@ -748,6 +760,24 @@ class CanDatabaseSelectorDialog(QDialog):
             return
         self._move_row(r, dst)
 
+    def _move_row_path(self, path: str, dst: int) -> None:
+        """拖拽调序：按路径定位源行，避免预扫自动排序把行号挪走。"""
+        for src, row in enumerate(self._rows):
+            if row.path == path:
+                self._move_row(src, dst)
+                return
+
+    def _accept_external_drag(self, event) -> bool:
+        return bool(self._drag_candidate_paths(event))
+
+    def _handle_external_drop(self, event) -> bool:
+        paths = self._drag_candidate_paths(event)
+        if not paths:
+            return False
+        self._user_edited = True
+        self.add_paths(paths)
+        return True
+
     def _move_row(self, src: int, dst: int) -> None:
         """调序唯一入口：↑/↓ 按钮与池表拖拽都走这里（播报 parity）。"""
         if not (0 <= src < len(self._rows)) or src == dst:
@@ -764,11 +794,27 @@ class CanDatabaseSelectorDialog(QDialog):
 
     def _on_remove(self) -> None:
         r = self.table.currentRow()
-        if 0 <= r < len(self._rows):
-            self._user_edited = True
-            del self._rows[r]
-            self._rebuild_table()
-            self._rebuild_channel_table()
+        if not (0 <= r < len(self._rows)):
+            return
+        row = self._rows[r]
+        dropped = [
+            ch for ch, files in self._bindings.items() if row.path in files
+        ]
+        self._user_edited = True
+        del self._rows[r]
+        if dropped:
+            # 被移除的库仍在绑定里：立即收敛并明确告知，不能静默放宽到全局池
+            for ch in dropped:
+                self._set_channel_binding(
+                    ch, [p for p in self._bindings.get(ch, ()) if p != row.path],
+                    rebuild=False,
+                )
+            self._append_notice(
+                f"库 {escape(os.path.basename(row.path))} 已被移除，"
+                "相关通道绑定已改为使用全局库。"
+            )
+        self._rebuild_table()
+        self._rebuild_channel_table()
 
     def _on_add_files(self) -> None:
         self._user_edited = True
@@ -945,12 +991,14 @@ class CanDatabaseSelectorDialog(QDialog):
             paths.append(path)
         elif not checked:
             paths = [p for p in paths if p != path]
-        self._set_channel_binding(channel, paths)
-        # 菜单属于即将被重建的按钮：等本轮事件收尾再重建，避免销毁打开中的菜单
+        # 菜单属于即将被重建的按钮：先只改状态，等本轮事件收尾再重建，
+        # 避免在 QAction.toggled 信号里销毁打开中的 QMenu。
+        self._set_channel_binding(channel, paths, rebuild=False)
         QTimer.singleShot(0, self._rebuild_channel_table)
 
     def _set_channel_binding(self, channel: int,
-                             paths: list[str] | tuple[str, ...]) -> None:
+                             paths: list[str] | tuple[str, ...],
+                             *, rebuild: bool = True) -> None:
         """绑定变更唯一入口：勾选面板 / 拖拽 / 一键恢复都走这里。"""
         pool = self._pool_paths()
         allowed = [p for p in pool if p in set(paths)]
@@ -964,7 +1012,8 @@ class CanDatabaseSelectorDialog(QDialog):
             "全局池" if channel not in self._bindings
             else "、".join(os.path.basename(p) for p in self._bindings[channel]),
         )
-        self._rebuild_channel_table()
+        if rebuild:
+            self._rebuild_channel_table()
 
     def _reset_channel_binding(self, channel: int) -> None:
         self._set_channel_binding(channel, [])
@@ -992,7 +1041,12 @@ class CanDatabaseSelectorDialog(QDialog):
             self._aliases[channel] = text
         else:
             self._aliases.pop(channel, None)
-        self._rebuild_channel_table()
+        # 只改第 0 列文本：重建表会销毁正在收尾的 QLineEdit（评审 P2）
+        for row in range(self.bind_table.rowCount()):
+            item = self.bind_table.item(row, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == channel:
+                item.setText(format_bus_channel(channel, self._aliases.get(channel)))
+                break
 
     def _on_add_channel(self) -> None:
         value, ok = QInputDialog.getInt(
@@ -1061,10 +1115,13 @@ class CanDatabaseSelectorDialog(QDialog):
             "已绑定通道只在其绑定库中找定义；找不到进未匹配列表，不会借用其他通道的库。"
         )
         if not self._bind_user_toggled:
+            # D1：多通道默认展开；单通道 / 尚无通道信息时默认折叠（后者展开
+            # 只为让「手动添加 / 先导入后重选」的出口可见）
+            expand = len(channels) > 1 or not channels
             self.bind_box.blockSignals(True)
-            self.bind_box.setChecked(True)
+            self.bind_box.setChecked(expand)
             self.bind_box.blockSignals(False)
-            self.bind_content.setVisible(True)
+            self.bind_content.setVisible(expand)
 
     # ------------------------------------------------------------------
     # 显式配置：保存 / 载入（旁车 YAML 或用户配置目录）
@@ -1180,10 +1237,7 @@ class CanDatabaseSelectorDialog(QDialog):
             event.ignore()
 
     def dropEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        paths = self._drag_candidate_paths(event)
-        if paths:
-            self._user_edited = True
-            self.add_paths(paths)
+        if self._handle_external_drop(event):
             event.acceptProposedAction()
         else:
             event.ignore()

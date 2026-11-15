@@ -97,9 +97,12 @@ class CanBindings:
     def restrict_to_pool(self, pool: Iterable[str]) -> "CanBindings":
         """池变化后的保守收敛：只保留仍属于新池的绑定文件。
 
-        用于「对话框当前还改不了绑定」的过渡路径（笔 2–3）：用户若在池里
-        移除了某文件，对应绑定随之删除；绑定因此**变空**的通道退回未绑定
-        （= 用全局池），而不是留下一个指向不存在文件的死引用。
+        用于「重载复用 loader 状态」这条路径。绑定因此**变空**的通道退回
+        未绑定（= 用全局池），而不是留下指向不存在文件的死引用。
+
+        **别名与绑定解耦**：别名是展示层属性，即使通道退回未绑定也必须保留
+        （评审 P0：此前只保留仍有绑定的通道，重载会把 `CAN2 车身CAN` 静默
+        降级成 `CAN2`，并经成功回写持久化，用户无法察觉）。
         """
         allowed = {_key(p) for p in (pool or ())}
         kept: dict[int, tuple[str, ...]] = {}
@@ -110,7 +113,7 @@ class CanBindings:
         return CanBindings(
             pool=tuple(str(p) for p in (pool or ()) if str(p)),
             by_channel=kept,
-            alias={ch: a for ch, a in self.alias.items() if ch in kept},
+            alias={ch: a for ch, a in self.alias.items() if ch >= 0},
         )
 
     # ------------------------------------------------------------------

@@ -35,7 +35,6 @@ from src.data.blf_loader import BLFLazyLoader
 from src.data.can_bindings import CanBindings, save_yaml, sidecar_config_path
 from src.data.loader import DataLoadThread
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
-from src.utils.paths import normalize_input_path
 from tests.fixtures.data_factory import CAN_FRAMES, write_blf_pair, write_dbc
 
 
@@ -1216,7 +1215,7 @@ def test_a_stale_file_memory_asks_before_reusing(
     import json
 
     entries = app_settings.get_blf_file_bindings()
-    key = normalize_input_path(str(blf))
+    key = AppSettings.blf_memory_key(str(blf))
     entries[key]["size"] = int(entries[key]["size"]) + 5
     app_settings.set_value(
         ConfigKey.BLF_FILE_BINDINGS, json.dumps(entries, ensure_ascii=False)
@@ -1255,7 +1254,7 @@ def test_a_successful_import_remembers_the_file_config(
     )
     threads[0].emit_done(loader)
 
-    entry = app_settings.get_blf_file_bindings()[normalize_input_path(str(blf))]
+    entry = app_settings.get_blf_file_bindings()[AppSettings.blf_memory_key(str(blf))]
     cfg = CanBindings.from_yaml_dict(entry["config"])
     assert cfg.pool == (str(dbc),)
     assert cfg.by_channel == {1: (str(dbc),)}
@@ -1289,7 +1288,7 @@ def test_unchecking_remember_also_forgets_the_file_config(
     blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
     remembered([str(dbc)])
     _remember_file_config(app_settings, blf, dbc)
-    assert normalize_input_path(str(blf)) in app_settings.get_blf_file_bindings()
+    assert AppSettings.blf_memory_key(str(blf)) in app_settings.get_blf_file_bindings()
     dialogs["answers"] = [
         (QDialog.DialogCode.Accepted,
          lambda dlg: dlg.remember_check.setChecked(False))
@@ -1297,7 +1296,7 @@ def test_unchecking_remember_also_forgets_the_file_config(
 
     manager.load_csv_file(str(blf))
 
-    assert normalize_input_path(str(blf)) not in app_settings.get_blf_file_bindings()
+    assert AppSettings.blf_memory_key(str(blf)) not in app_settings.get_blf_file_bindings()
 
 
 def test_zero_signal_texts_distinguish_the_three_causes():
@@ -1316,3 +1315,52 @@ def test_zero_signal_texts_distinguish_the_three_causes():
     )
     assert FileLoaderManager._no_signal_text("no_match") == BLF_TEXT_NO_SIGNAL
     assert FileLoaderManager._no_signal_text(None) == BLF_TEXT_NO_SIGNAL
+
+
+def test_a_reload_keeps_aliases_even_for_unbound_channels(
+    blf_flow, tmp_path, remembered, monkeypatch
+):
+    """评审 P0：重载走 restrict_to_pool，别名不得随「无绑定」一起被丢掉。"""
+    host, manager, threads = blf_flow
+    boom = _reject_on_sight(monkeypatch)
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0, 1))
+    loader = BLFLazyLoader(str(blf), db_paths=[str(dbc)], aliases={1: "车身CAN"})
+    host.loader = loader
+
+    manager._load_file(str(blf), is_reload=True)
+
+    assert boom == []
+    assert threads[0].aliases == {1: "车身CAN"}
+    loader.close()
+
+
+def test_zero_signal_warning_uses_the_binding_exclusion_text(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """评审 P2：三文案不只是在映射函数里对，真实导入路径也要传对。"""
+    import src.ui.file_loader_manager as flm
+    from src.core.config import BLF_TEXT_BINDING_EXCLUDED
+
+    host, manager, threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    unused = write_dbc(
+        tmp_path / "unused.dbc",
+        [{**CAN_FRAMES[0], "can_id": 0x7DF, "name": "NotInLog"}],
+    )
+    remembered([str(dbc)])
+    manager.load_csv_file(str(blf))
+
+    loader = BLFLazyLoader(
+        str(blf), db_paths=[str(dbc), str(unused)],
+        bindings={0: frozenset({str(unused)})},
+    )
+    warnings = []
+    monkeypatch.setattr(
+        flm.QMessageBox, "warning",
+        staticmethod(lambda *a: warnings.append(a)),
+    )
+
+    threads[0].emit_done(loader)
+
+    assert loader.zero_reason == "binding_excluded_all"
+    assert warnings and warnings[0][2] == BLF_TEXT_BINDING_EXCLUDED
