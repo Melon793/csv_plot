@@ -183,6 +183,92 @@ def test_cross_page_transfer_end_to_end(loaded_window, qapp):
     assert "已移动 speed：暂存区 → 页2·图1" in mw._message_text
 
 
+def test_return_to_origin_across_pages(loaded_window, qapp, dialog_stubs):
+    """剪空原图 → 切页 → 一键退回：样式保真、不切页、空图首绘不写场景。"""
+    mw = loaded_window
+    page1 = mw.pages[0]
+    pw1 = page1.plot_widgets[0].plot_widget
+    assert pw1.plot_variable("speed")
+    assert pw1.plot_variable("rpm")
+    snapshot_color = pw1.curves["speed"].color
+    assert pw1._multi_curve_manager.apply_curve_draw_mode("speed", "step-pre")
+    pw1.curves["speed"].draw_mode_source = "auto"
+    assert pw1._multi_curve_manager.apply_curve_symbol_policy("speed", "on")
+
+    mw.curve_shelf_btn.setChecked(True)
+    qapp.processEvents()
+    dialog = mw.curve_shelf_if_open()
+    assert dialog is not None and dialog.isVisible()
+
+    for name in ("speed", "rpm"):
+        mime = build_legend_var_mimedata([name], pw1)
+        set_active_legend_drag(pw1, [name])
+        try:
+            _drop(dialog.shelf, mime)
+        finally:
+            clear_active_legend_drag()
+    qapp.processEvents()
+    assert pw1.curves == {}  # 原图被剪空：退回必定走空图首绘分支
+    assert dialog.shelf.count() == 2
+
+    page2 = mw.new_page()
+    qapp.processEvents()
+    assert page2 is not None and mw.current_page is page2
+
+    for row in range(dialog.shelf.count()):
+        dialog.shelf.item(row).setSelected(True)
+    qapp.processEvents()
+    assert dialog.return_btn.isEnabled() is True
+
+    dialog.return_btn.click()
+    qapp.processEvents()
+
+    assert set(pw1.curves) == {"speed", "rpm"}
+    ci = pw1.curves["speed"]
+    assert ci.color == snapshot_color
+    assert ci.draw_mode == "step-pre"
+    assert ci.symbol_policy == "on"
+    assert ci.draw_mode_source == "auto"
+    assert mw.current_page is page2  # 静默落回：不切页
+    assert dialog.shelf.count() == 0
+    assert "已退回 speed、rpm：暂存区 → 页1·图1" in mw._message_text
+    assert not dialog_stubs["question"]
+    assert not dialog_stubs["warning"]
+    assert not dialog_stubs["critical"]
+
+
+def test_return_after_origin_page_closed_keeps_entry(loaded_window, qapp):
+    """原页关闭后退回不可执行：条目保留、按钮禁用，仍可手动拖出。"""
+    mw = loaded_window
+    page1 = mw.pages[0]
+    pw1 = page1.plot_widgets[0].plot_widget
+    assert pw1.plot_variable("speed")
+
+    mw.curve_shelf_btn.setChecked(True)
+    qapp.processEvents()
+    dialog = mw.curve_shelf_if_open()
+    mime = build_legend_var_mimedata(["speed"], pw1)
+    set_active_legend_drag(pw1, ["speed"])
+    try:
+        _drop(dialog.shelf, mime)
+    finally:
+        clear_active_legend_drag()
+    qapp.processEvents()
+
+    assert mw.new_page() is not None
+    qapp.processEvents()
+    mw.close_page(page1, confirm=False)  # e2e 的 question 替身恒为 No
+    qapp.processEvents()
+
+    entry = dialog.shelf.entry_for_name("speed")
+    assert entry is not None
+    assert dialog.shelf.returnable_entries() == []
+    dialog.shelf.item(0).setSelected(True)
+    qapp.processEvents()
+    assert dialog.return_btn.isEnabled() is False
+    assert dialog.shelf.count() == 1  # 不可退回不等于删条目
+
+
 def test_blf_abort_restore_skips_shelf_revalidate(loaded_window, qapp):
     """BLF 取消恢复路径（_restore_curves_after_abort）数据未变，不得触发置灰。"""
     mw = loaded_window
