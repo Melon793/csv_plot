@@ -56,7 +56,7 @@ class CursorManager:
     LABEL_GAP_TO_CURSOR = 10       # 标签左边缘到光标的水平间距
     LABEL_COL_GAP = 15            # 多列时列与列之间的间距
     LABEL_VERTICAL_GAP = 4        # 同一列内标签之间的垂直间距
-    LABEL_Y_OFFSET = 10           # 标签底部到交点的垂直距离（向上偏移）
+    LABEL_BOTTOM_GAP = 6          # 标签底边到交点的净空（像素；视觉净空 = +1px 布局补偿）
 
     # 形态开关：改常量后需重新构建/分发，非运行期开关
     CURSOR_EDGE_PIN = True         # Y 出界交点的标签吸附到视口边缘（▲/▼ 虚线）
@@ -1372,7 +1372,7 @@ class CursorManager:
         scene_pos = view_box.mapViewToScene(
             QPointF(label["x_pos"], label["y_pos"])
         )
-        return scene_pos.y() - self.LABEL_Y_OFFSET
+        return scene_pos.y() - half_height - self.LABEL_BOTTOM_GAP
 
     def _layout_column(
         self,
@@ -1391,7 +1391,7 @@ class CursorManager:
         half_height = label_height_pixels / 2
         view_box = self.pw.plot_item.getViewBox()
 
-        # 单标签：放在交点上方（统一向上偏移 LABEL_Y_OFFSET）；
+        # 单标签：放在交点上方，底边留 LABEL_BOTTOM_GAP 净空；
         # pinned 项 ideal 吸附边缘内侧
         if n == 1:
             label = labels[0]
@@ -1411,7 +1411,8 @@ class CursorManager:
             )]
 
         # 多标签：PAV 等渗回归直解（最小位移 + 最小间距）。
-        # 标签已按 y_pos 降序（scene y 升序），ideal 即交点上方 LABEL_Y_OFFSET。
+        # 标签已按 y_pos 降序（scene y 升序），ideal 为交点上方、
+        # 底边留 LABEL_BOTTOM_GAP 净空。
         items = []
         for label in labels:
             items.append({
