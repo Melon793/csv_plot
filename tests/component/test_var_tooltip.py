@@ -110,17 +110,31 @@ def test_header_tooltip_survives_model_rebuild(tab_dialog):
     assert "Press_G0" in tip
 
 
-def test_header_tooltip_out_of_range_section_returns_none():
-    """越界 section 不能抛 IndexError（headerData 会被视图用任意 section 查询）。"""
+@pytest.mark.parametrize(
+    "role",
+    [Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.DisplayRole],
+)
+@pytest.mark.parametrize("section", [5, -1])
+def test_header_out_of_range_section_returns_none(role, section):
+    """越界 section 不能抛 IndexError，也不能悄悄取到末列（section=-1）。
+
+    两种 role 口径必须一致：DisplayRole 此前漏了判断，越界抛 IndexError、
+    -1 返回最后一列的列名。
+    """
     df = pd.DataFrame({LONG: [1.0]})
     model = PandasTableModel(df, {})
-    assert (
-        model.headerData(5, Qt.Orientation.Horizontal, Qt.ItemDataRole.ToolTipRole)
-        is None
-    )
-    assert (
-        model.headerData(-1, Qt.Orientation.Horizontal, Qt.ItemDataRole.ToolTipRole)
-        is None
+    assert model.headerData(section, Qt.Orientation.Horizontal, role) is None
+
+
+def test_header_in_range_section_keeps_both_roles():
+    """护栏不得误伤正常列：首列两个 role 仍各自返回应有内容。"""
+    df = pd.DataFrame({LONG: [1.0]})
+    model = PandasTableModel(df, {})
+    assert model.headerData(
+        0, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
+    ) == f"{LONG}\n()"
+    assert LONG in model.headerData(
+        0, Qt.Orientation.Horizontal, Qt.ItemDataRole.ToolTipRole
     )
 
 

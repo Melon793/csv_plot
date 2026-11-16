@@ -195,12 +195,17 @@ class PandasTableModel(QAbstractTableModel):
     def headerData(self, section, orientation, role):
         if self._df.columns.empty:
             return None
+        # 横向 section 一律先判边界：视图/外部调用方可能用已过期的列号查询，
+        # df.columns[section] 越界抛 IndexError、section=-1 还会静默取到末列。
+        # 各 role（ToolTip/Display/未来的 role）共用这一道口径。
+        if orientation == Qt.Orientation.Horizontal and not (
+            0 <= section < len(self._df.columns)
+        ):
+            return None
         if (
             role == Qt.ItemDataRole.ToolTipRole
             and orientation == Qt.Orientation.Horizontal
         ):
-            if not 0 <= section < len(self._df.columns):
-                return None
             col_name = str(self._df.columns[section])
             return var_tooltip(col_name, self._units.get(col_name, ""))
         if role != Qt.ItemDataRole.DisplayRole:
