@@ -178,10 +178,14 @@ def test_labels_hidden_on_tiny_plot_without_crash(plot_factory, qapp):
     assert not _visible_labels(pw), "极矮图下标签应全部隐藏"
 
 
-# ---------- 用例 D（回归）：正常高度图 + 交点居中 → 位置与现行为一致 ----------
+# ---------- 用例 D（回归）：正常高度图 + 交点居中 → 底边净空符合常量 ----------
 
-def test_label_position_unchanged_for_centered_cross(plot_factory, qapp):
-    """正常高度图、交点在视图中部：单标签维持交点上方 10px 的既有行为"""
+def test_label_bottom_gap_for_centered_cross(plot_factory, qapp):
+    """正常高度图、交点在视图中部：标签底边在交点上方留出净空
+
+    历史：旧实现把 LABEL_Y_OFFSET 当中心偏移，底边落在交点 +0.5px（压线）；
+    现语义为底边净空（LABEL_BOTTOM_GAP=6，视觉净空 ≈7px 含布局补偿）。
+    """
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     vb = pw.view_box
     vb.setXRange(0, 99, padding=0.05)
@@ -195,11 +199,14 @@ def test_label_position_unchanged_for_centered_cross(plot_factory, qapp):
     assert len(labels) == 1
     peak_x = _x_where(pw, "y", 100.0)
     cross_scene_y = vb.mapViewToScene(QPointF(peak_x, 100.0)).y()
-    # TextItem anchor=(0, 0.5)：pos 即标签垂直中心；现行为 = 交点上偏 10px
+    # TextItem anchor=(0, 0.5)：pos 即标签垂直中心
     center_y = labels[0].scenePos().y()
-    assert center_y == pytest.approx(cross_scene_y - 10.0, abs=1.5), (
-        f"标签中心 y={center_y}，预期交点上方 10px（{cross_scene_y - 10.0}）"
+    label_h = labels[0].boundingRect().height()
+    bottom_gap = cross_scene_y - (center_y + label_h / 2)
+    assert bottom_gap == pytest.approx(7.0, abs=1.5), (
+        f"标签底边净空={bottom_gap}px，预期 ≈7px（LABEL_BOTTOM_GAP+布局补偿）"
     )
+    assert bottom_gap > 2.0, "底边必须在交点上方，不得压线"
 
 
 # ---------- 用例 E（双游标）：一游标交点靠边、另一居中 → 各自可见 ----------
