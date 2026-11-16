@@ -47,7 +47,7 @@ class LabelLayout:
     pinned: bool = False  # 交点 y 出界：标签吸附到视口边缘
     up: bool = False      # pinned 方向：交点在上方/下方视口外
     w: float = 0.0        # 标签渲染宽度（像素，含内边距与 ▲/▼ 前缀）
-    first_col: bool = False  # 是否最贴光标的一列（该列用直线引导线）
+    first_col: bool = False  # 是否「该侧最内列」（左右各一列，用直线引导线）
 
 
 class CursorManager:
@@ -58,6 +58,10 @@ class CursorManager:
     LABEL_COL_GAP = 15            # 多列时列与列之间的间距
     LABEL_VERTICAL_GAP = 2        # 同一列内标签之间的垂直间距（可见间隙 = +2px 布局补偿）
     LABEL_BOTTOM_GAP = 6          # 标签底边到交点的净空（像素；视觉净空 = +1px 布局补偿）
+    # 列预算余量（像素）：单侧可用宽 ≥ 列宽 + margin 才算一列。
+    # max_cols 截断与方向分配共用同一口径，避免「截断后分配数不足 →
+    # 外侧追加 → 出视口被裁」的消失路径。
+    COLUMN_BUDGET_MARGIN = 2
 
     # 形态开关：改常量后需重新构建/分发，非运行期开关
     CURSOR_EDGE_PIN = True         # Y 出界交点的标签吸附到视口边缘（▲/▼ 虚线）
@@ -831,8 +835,11 @@ class CursorManager:
             cursor_groups[cid].append({**item, '_orig_idx': orig_idx})
 
         # 对每个 cursor 独立处理（组内布局抽成可重入函数，
-        # 跨组避让命中后可带 force_side 二次调用）
-        groups = []
+        # 跨组避让命中后可带 force_side 二次调用）。
+        # 先做 Phase 1 过滤并收集非空组：交替判据必须用「过滤后可见组数」
+        # ——cursor_groups 在 x 过滤前建立，另一游标出界时会留下空组，
+        # 按原组数会误判为双游标而禁用交替。
+        pending_groups = []
         all_filtered_out_indices = set()
         for cid, group_values in sorted(cursor_groups.items()):
             # --- Phase 1: 数据过滤 ---
@@ -843,20 +850,30 @@ class CursorManager:
             if not visible_labels:
                 continue
 
+            pending_groups.append({
+                'cid': cid,
+                'visible': visible_labels,
+                'cursor_scene': view_box.mapViewToScene(
+                    QPointF(group_values[0]['x_pos'], group_values[0]['y_pos'])
+                ),
+            })
+
+        # 单游标（唯一可见组）列方向左右交替；双游标保持「右先左后 +
+        # 跨组向外分裂」，中间缝隙为禁区，任何情况下不向内塞列。
+        alternate_sides = len(pending_groups) == 1
+
+        groups = []
+        for pending in pending_groups:
             # --- Phase 2: 布局计算 ---
-            cursor_scene_pos = view_box.mapViewToScene(
-                QPointF(group_values[0]['x_pos'], group_values[0]['y_pos'])
-            )
             layouts, layout_hide_indices, meta = self._layout_cursor_group(
-                cid, visible_labels, cursor_scene_pos, view_box,
-                x_min, x_max, y_min, y_max,
+                pending['cid'], pending['visible'], pending['cursor_scene'],
+                view_box, x_min, x_max, y_min, y_max,
                 label_height_pixels, font_metrics,
+                alternate_sides=alternate_sides,
             )
             all_filtered_out_indices.update(layout_hide_indices)
             groups.append({
-                'cid': cid,
-                'visible': visible_labels,
-                'cursor_scene': cursor_scene_pos,
+                **pending,
                 'layouts': layouts,
                 'hide': layout_hide_indices,
                 'meta': meta,
@@ -915,10 +932,13 @@ class CursorManager:
         font_metrics,
         force_side: str | None = None,
         feed_hysteresis: bool = True,
+        alternate_sides: bool = False,
     ) -> tuple:
         """可重入的组内布局：返回 (layouts, hide_indices, meta)。
 
         跨组避让命中后带 force_side 再次调用，不重复收集/过滤标签。
+        alternate_sides: 单游标列方向左右交替；跨组重布局传 False
+        （force_side 优先，重布局不交替）。
         """
         return self._compute_label_layout(
             visible_labels, cursor_scene_pos, view_box,
@@ -927,6 +947,7 @@ class CursorManager:
             cursor_id=cursor_id,
             force_side=force_side,
             feed_hysteresis=feed_hysteresis,
+            alternate_sides=alternate_sides,
         )
 
     @staticmethod
@@ -987,11 +1008,13 @@ class CursorManager:
             left_group['cid'], left_group['visible'],
             left_group['cursor_scene'], *common,
             force_side='left', feed_hysteresis=False,
+            alternate_sides=False,
         )
         l_right, hide_right, meta_right = self._layout_cursor_group(
             right_group['cid'], right_group['visible'],
             right_group['cursor_scene'], *common,
             force_side='right', feed_hysteresis=False,
+            alternate_sides=False,
         )
         if meta_left is None or meta_right is None:
             logger.debug("[CURSOR] 跨组避让回退：重布局无可用标签")
@@ -1078,6 +1101,7 @@ class CursorManager:
         cursor_id: int = 0,
         force_side: str | None = None,
         feed_hysteresis: bool = True,
+        alternate_sides: bool = False,
     ) -> tuple:
         """Phase 2: 计算所有标签的布局位置（纯数学，不操作 UI）
 
@@ -1086,6 +1110,8 @@ class CursorManager:
         meta: 跨组避让预算信息（左/右所需宽与可用宽）；无标签时为 None。
         force_side: 'left'/'right' 强制单侧布局（跨组向外分裂用）；
         feed_hysteresis=False 用于重布局，避免计数器双喂。
+        alternate_sides: 列方向左右交替（单游标）；默认 False 保持旧
+        「右先左后」，双游标/重布局均走该路径。
         """
         if not visible_labels:
             return [], set(), None
@@ -1166,14 +1192,19 @@ class CursorManager:
         right_available = x_max_scene - cursor_scene_x - gap_to_cursor
         left_available = cursor_scene_x - gap_to_cursor - x_min_scene
 
-        # 列数按可用宽度截断：溢出列会被 _compute_column_positions 压缩到
-        # 右侧、绘制在视口外被裁剪（消失）。截断后超容量标签由
-        # _layout_column 的防重叠 Pass 压缩间距消化——最坏情况列内重叠，
-        # 但全部在视口内（重叠严格优于消失）。
+        # 列数按可用宽度截断：溢出列会被方向分配压到兜底侧、绘制在视口外被
+        # 裁剪（消失）。截断与分配共用 _possible_columns（含预算余量
+        # COLUMN_BUDGET_MARGIN），避免截断后分配数不足而向两侧追加。
+        # 截断后超容量标签由 _layout_column 的防重叠 Pass 压缩间距消化——
+        # 最坏情况列内重叠，但全部在视口内（重叠严格优于消失）。
         col_width = max_label_width_px + col_gap_pixels
         max_cols = (
-            self._possible_columns(right_available, col_width)
-            + self._possible_columns(left_available, col_width)
+            self._possible_columns(
+                right_available, col_width, self.COLUMN_BUDGET_MARGIN
+            )
+            + self._possible_columns(
+                left_available, col_width, self.COLUMN_BUDGET_MARGIN
+            )
         )
         column_count = max(1, min(column_count, max_cols))
 
@@ -1182,6 +1213,7 @@ class CursorManager:
             column_count, right_available, left_available,
             max_label_width_px, col_gap_pixels,
             force_side=force_side,
+            alternate=alternate_sides,
         )
         # column_sides: list of ('right', col_idx) or ('left', col_idx)
 
@@ -1200,8 +1232,12 @@ class CursorManager:
         # 计算每列的场景 x 坐标（anchor=(0,0.5)，cx 即标签左边缘）。
         # 累计偏移：offset_k = GAP + Σ_{j<k}(w_j + COL_GAP)，左右侧各自累计；
         # 同侧从光标向外递增，宽列后接窄列不会自重叠。
+        # first_col 语义为「该侧最内列」：两侧各有一列（depth 0）用直线引导线，
+        # 外侧列（depth ≥ 1）才走 elbow 折线。
         column_scene_x = []
+        first_col_flags = []
         side_offset = {'right': gap_to_cursor, 'left': gap_to_cursor}
+        side_depth = {'right': 0, 'left': 0}
         for i, (side, _col_idx) in enumerate(column_sides):
             col_width = (
                 column_widths[i] if i < len(column_widths)
@@ -1213,6 +1249,8 @@ class CursorManager:
             else:
                 cx = cursor_scene_x - offset - col_width
             column_scene_x.append(cx)
+            first_col_flags.append(side_depth[side] == 0)
+            side_depth[side] += 1
             side_offset[side] = offset + col_width + col_gap_pixels
 
         # 列内垂直堆叠
@@ -1229,7 +1267,7 @@ class CursorManager:
                 col_labels, column_scene_x[col_idx],
                 column_scene_y_min, column_scene_y_max,
                 label_height_pixels, vertical_gap_pixels,
-                first_col=(col_idx == 0),
+                first_col=first_col_flags[col_idx],
             )
             all_layouts.extend(col_layouts)
 
@@ -1267,9 +1305,19 @@ class CursorManager:
         return cols
 
     @staticmethod
-    def _possible_columns(available: float, col_width: float) -> int:
-        """单侧可容纳的列数（与 _compute_column_positions 同口径）"""
-        return max(0, int(available / col_width)) if available > col_width else 0
+    def _possible_columns(
+        available: float, col_width: float, margin: float = 0.0
+    ) -> int:
+        """单侧可容纳的列数（与 _assign_column_sides 同口径）。
+
+        margin: 预算余量（像素）。可用宽至少要有「列宽 + margin」才算
+        一列，避免刚好放得下的列在累计偏移后被浮点/描边吃掉半列。
+        调用方（max_cols 截断）必须传入同一个 margin 值。
+        """
+        need = col_width + margin
+        if available < need:
+            return 0
+        return int(available / need)
 
     @staticmethod
     def _column_capacity(available: float, h: float, gap: float) -> int:
@@ -1291,42 +1339,88 @@ class CursorManager:
         max_label_width: float,
         col_gap: float,
         force_side: str | None = None,
+        alternate: bool = True,
     ) -> list:
-        """决定每列的放置方向（右侧优先，空间不足时启用左侧）
+        """决定每列的放置方向（委托 _assign_column_sides）。
 
+        alternate=True（单游标）：右/左/右… 交替；False：旧「右先左后」。
         force_side='left'/'right'：跨组向外分裂时强制单侧。
-        返回 list of (side, col_idx)
+        返回 list of (side, col_idx)。
         """
-        sides = []
+        return self._assign_column_sides(
+            column_count, right_available, left_available,
+            max_label_width, col_gap,
+            force_side=force_side, alternate=alternate,
+        )
+
+    @staticmethod
+    def _assign_column_sides(
+        column_count: int,
+        right_available: float,
+        left_available: float,
+        max_label_width: float,
+        col_gap: float,
+        force_side: str | None = None,
+        alternate: bool = True,
+    ) -> list:
+        """列方向分配：返回 list of (side, col_idx)。
+
+        force_side: 'left'/'right' 强制单侧，优先级最高（跨组向外分裂）。
+        alternate=True（单游标）：偏好序列 右/左/右/左…，让标签贴住光标
+        两侧而非单侧堆叠；偏好侧无预算时换另一侧；两侧都无预算时追加到
+        占用较少的一侧（允许列重叠——重叠优于消失，不新增隐藏路径）。
+        alternate=False（双游标）：沿用旧「右先左后 + 越界压右」，中间
+        缝隙为禁区，双游标任何情况下都不向内塞列。
+
+        两侧预算（possible）与调用方 max_cols 截断共用
+        _possible_columns + COLUMN_BUDGET_MARGIN 同口径。
+        """
         col_width = max_label_width + col_gap
-        right_cols_possible = self._possible_columns(right_available, col_width)
-        left_cols_possible = self._possible_columns(left_available, col_width)
-        if force_side == 'left':
-            right_cols_possible = 0
-        elif force_side == 'right':
-            left_cols_possible = 0
+        margin = CursorManager.COLUMN_BUDGET_MARGIN
+        right_possible = CursorManager._possible_columns(
+            right_available, col_width, margin
+        )
+        left_possible = CursorManager._possible_columns(
+            left_available, col_width, margin
+        )
 
-        # 优先填充右侧
-        right_used = min(column_count, right_cols_possible)
-        for i in range(right_used):
-            sides.append(('right', i))
+        if force_side:
+            return [(force_side, i) for i in range(column_count)]
 
-        # 剩余列放左侧
-        remaining = column_count - right_used
-        left_used = min(remaining, left_cols_possible)
-        for i in range(left_used):
-            sides.append(('left', i))
+        if not alternate:
+            # 旧行为：优先填充右侧，剩余列放左侧，仍超出则压到右侧
+            sides = []
+            right_used = min(column_count, right_possible)
+            for i in range(right_used):
+                sides.append(('right', i))
 
-        # 如果列数超出可用空间，其余列压到指定侧（无 force 时右侧）；
-        # 列 x 由调用方按同侧累计偏移分配，不依赖 col_idx 连续。
-        fallback = force_side or 'right'
-        if len(sides) < column_count:
-            used_on_fallback = (
-                right_used if fallback == 'right' else left_used
-            )
+            remaining = column_count - right_used
+            left_used = min(remaining, left_possible)
+            for i in range(left_used):
+                sides.append(('left', i))
+
+            # 超出可用空间：其余列压到右侧（列 x 由调用方按同侧累计
+            # 偏移分配，不依赖 col_idx 连续）。
             for i in range(len(sides), column_count):
-                sides.append((fallback, i - used_on_fallback))
+                sides.append(('right', i - right_used))
+            return sides
 
+        # 交错分配：k 偶数偏好右、奇数偏好左
+        sides = []
+        used = {'right': 0, 'left': 0}
+        possible = {'right': right_possible, 'left': left_possible}
+        for k in range(column_count):
+            pref = 'right' if k % 2 == 0 else 'left'
+            other = 'left' if pref == 'right' else 'right'
+            if used[pref] < possible[pref]:
+                side = pref
+            elif used[other] < possible[other]:
+                side = other
+            else:
+                # 两侧都无预算：追加到占用较少侧（并列取右），允许重叠
+                side = 'right' if used['right'] <= used['left'] else 'left'
+            sides.append((side, used[side]))
+            used[side] += 1
         return sides
 
     @staticmethod
@@ -1632,7 +1726,7 @@ class CursorManager:
             )
             if not layout.pinned and (p1 - p0).manhattanLength() > 8:
                 if self.CURSOR_LEADER_ELBOW and not layout.first_col:
-                    # 第二列及更远：四点正交折线（直线会横穿第一列标签）。
+                    # 外侧列：四点正交折线（直线会横穿该侧最内列标签）。
                     mx = p1.x() - 6 if on_right else p1.x() + 6
                     scene_pts = [
                         p0,
@@ -1641,7 +1735,7 @@ class CursorManager:
                         p1,
                     ]
                 else:
-                    # 最内列（或关闭 elbow 开关）：直线，斜率区分归属
+                    # 每侧最内列（或关闭 elbow 开关）：直线，斜率区分归属
                     scene_pts = [p0, p1]
                 view_pts = [view_box.mapSceneToView(pt) for pt in scene_pts]
                 leader.setData(

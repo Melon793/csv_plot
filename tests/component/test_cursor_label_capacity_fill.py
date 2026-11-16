@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from PySide6.QtCore import QPointF
+
 from tests.component.test_cursor_label_edge import (
     _refresh,
     _setup,
@@ -111,10 +113,12 @@ def test_capacity_five_distributes_five_plus_one(plot_factory, qapp):
     assert len(labels) == 6
     xs = _column_xs(labels)
     assert len(xs) == 2, f"容量 5 时 6 个标签应两列，实际列 x={xs}"
-    col0 = [lbl for lbl in labels if abs(lbl.scenePos().x() - xs[0]) < 0.5]
-    col1 = [lbl for lbl in labels if abs(lbl.scenePos().x() - xs[1]) < 0.5]
-    assert len(col0) == 5 and len(col1) == 1, (
-        f"填满容量分配应为 5+1，实际 {len(col0)}+{len(col1)}"
+    # 交替排布后列按 x 升序不再等于分配顺序：按 side 分组再断言 5+1
+    cursor_x = pw.view_box.mapViewToScene(QPointF(50.0, 100.0)).x()
+    right_col = [lbl for lbl in labels if lbl.scenePos().x() > cursor_x]
+    left_col = [lbl for lbl in labels if lbl.scenePos().x() < cursor_x]
+    assert len(right_col) == 5 and len(left_col) == 1, (
+        f"填满容量分配应为 5 右 + 1 左，实际 {len(right_col)}+{len(left_col)}"
     )
 
 

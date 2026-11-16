@@ -1,7 +1,9 @@
 """多列紧凑宽度 / 跨组向外分裂 / 滞回分状态护栏（offscreen）。
 
 批次3 契约：
-- 列 x 按同侧累计偏移（宽列后接窄列不自重叠），列宽取列内实际最大宽；
+- 单游标列方向左右交替（右/左/右…），某侧无预算时退化单侧；
+- 列 x 按同侧累计偏移（宽列后接窄列不自重叠，左侧按右缘镜像锚定），
+  列宽取列内实际最大宽；
 - 双游标跨组碰撞 → 组0 左/组1 右向外分裂，先校验空间预算，
   通过且零重叠 + 全部在视口内才接受，否则回退原布局；
 - 列数滞回按 cursor_id 分状态，组间交替喂入不再互相饿死。
@@ -70,12 +72,13 @@ def _dual_columns_df():
     )
 
 
-# ---------- ① 紧凑列宽：宽列后接窄列不重叠 ----------
+# ---------- ① 紧凑列宽：同侧宽列后接窄列不重叠 ----------
 
 def test_compact_columns_wide_then_narrow_no_overlap(
     plot_factory, qapp, monkeypatch
 ):
-    # 高 y（先分配）= 宽文本，低 y = 窄文本 → 第1列宽、第2列窄
+    # 高 y（先分配）= 宽文本，低 y = 窄文本 → 第1列宽、第2列窄；
+    # 游标贴左缘 → 左侧无预算，两列都退化到右侧（单侧累计口径）
     df = pd.DataFrame({
         "a": np.full(100, 1234.5),
         "b": np.full(100, 2345.6),
@@ -99,34 +102,42 @@ def test_compact_columns_wide_then_narrow_no_overlap(
     _reset_view(pw, 0, 99, 0, 200000)
     qapp.processEvents()
     pw.vline.setVisible(True)
-    pw.vline.setPos(50.0)
+    pw.vline.setPos(2.0)  # 左侧预算≈0 → 交替退化为全右
     _refresh(pw, times=4)
 
+    mgr = pw._cursor_manager
     labels = _visible_labels(pw)
     assert len(labels) == 6
     xs = _column_xs(pw, labels)
     assert len(xs) == 2, f"应形成两列，实际列 x={xs}"
 
-    col0 = [l for l in labels if abs(l.scenePos().x() - xs[0]) < 0.5]
-    w0 = max(_text_width(pw, l) for l in col0)
-    gap = pw._cursor_manager.LABEL_COL_GAP
-    assert xs[1] >= xs[0] + w0 + gap - 0.5, (
+    cursor_scene_x = pw.view_box.mapViewToScene(QPointF(2.0, 100.0)).x()
+    assert all(x > cursor_scene_x for x in xs), (
+        f"游标贴左缘时两列都应在右侧，实际列 x={xs}"
+    )
+
+    col_inner = [l for l in labels if abs(l.scenePos().x() - xs[0]) < 0.5]
+    col_outer = [l for l in labels if abs(l.scenePos().x() - xs[1]) < 0.5]
+    w_inner = max(_text_width(pw, l) for l in col_inner)
+    assert w_inner > max(_text_width(pw, l) for l in col_outer), (
+        "前置：第1列（宽文本）应比第2列（窄文本）宽"
+    )
+    gap = mgr.LABEL_COL_GAP
+    assert abs(xs[0] - (cursor_scene_x + mgr.LABEL_GAP_TO_CURSOR)) < 0.5
+    assert abs(
+        xs[1] - (cursor_scene_x + mgr.LABEL_GAP_TO_CURSOR + w_inner + gap)
+    ) < 0.5, "第2列应按第1列实际宽累计（宽列后接窄列不自重叠）"
+    assert xs[1] >= xs[0] + w_inner + gap - 0.5, (
         "第2列压到了第1列标签上（未按累计偏移）"
     )
-    # 横向占用低于「全列统一按最宽」策略
-    cursor_scene_x = pw.view_box.mapViewToScene(QPointF(50.0, 100.0)).x()
-    global_max_w = max(_text_width(pw, l) for l in labels)
-    assert xs[1] - cursor_scene_x < (
-        pw._cursor_manager.LABEL_GAP_TO_CURSOR + global_max_w + gap + 0.5
-    )
 
 
-# ---------- ② 宽标签在第 2 列：列 x 只累计第1列实际宽 ----------
+# ---------- ② 交替两列：宽标签在左列，左列右缘贴 GAP ----------
 
-def test_second_column_wide_label_uses_first_column_width(
+def test_wide_labels_in_left_column_anchored_to_gap(
     plot_factory, qapp, monkeypatch
 ):
-    # 高 y = 窄文本 → 第1列窄；低 y = 宽文本 → 第2列宽
+    # 高 y = 窄文本 → 右侧最内列；低 y = 宽文本 → 左侧最内列
     df = pd.DataFrame({
         "a": np.full(100, 3.0),
         "b": np.full(100, 2.0),
@@ -140,7 +151,7 @@ def test_second_column_wide_label_uses_first_column_width(
         pw._cursor_manager, "_apply_column_hysteresis",
         lambda new_count, cursor_id=0: 2,
     )
-    # 容量 3：6 个 → 3+3，宽标签（低 y）落在第 2 列
+    # 容量 3：6 个 → 3+3；交替下第 2 列在左侧，宽标签（低 y）落在左列
     monkeypatch.setattr(
         pw._cursor_manager, "_column_capacity",
         lambda available, h, gap: 3,
@@ -151,23 +162,33 @@ def test_second_column_wide_label_uses_first_column_width(
     pw.vline.setPos(50.0)
     _refresh(pw, times=4)
 
-    labels = _visible_labels(pw)
-    xs = _column_xs(pw, labels)
-    assert len(xs) == 2
-    col0 = [l for l in labels if abs(l.scenePos().x() - xs[0]) < 0.5]
-    col1 = [l for l in labels if abs(l.scenePos().x() - xs[1]) < 0.5]
-    w0 = max(_text_width(pw, l) for l in col0)
-    w1 = max(_text_width(pw, l) for l in col1)
-    assert w1 > w0, "前置：第2列应比第1列宽"
-
     mgr = pw._cursor_manager
+    labels = _visible_labels(pw)
+    assert len(labels) == 6
     cursor_scene_x = pw.view_box.mapViewToScene(QPointF(50.0, 100.0)).x()
-    expected = (
-        cursor_scene_x + mgr.LABEL_GAP_TO_CURSOR + w0 + mgr.LABEL_COL_GAP
+    right_col = [l for l in labels if l.scenePos().x() > cursor_scene_x]
+    left_col = [l for l in labels if l.scenePos().x() < cursor_scene_x]
+    assert len(right_col) == 3 and len(left_col) == 3, (
+        f"交替应形成 3 右 + 3 左，实际 {len(right_col)} 右 + {len(left_col)} 左"
     )
-    assert abs(xs[1] - expected) < 0.5, (
-        f"第2列 x={xs[1]} 应按第1列实际宽累计（预期 {expected}）"
-    )
+
+    right_xs = {round(l.scenePos().x(), 3) for l in right_col}
+    left_xs = {round(l.scenePos().x(), 3) for l in left_col}
+    assert len(right_xs) == 1 and len(left_xs) == 1
+
+    w_right = max(_text_width(pw, l) for l in right_col)
+    w_left = max(_text_width(pw, l) for l in left_col)
+    assert w_left > w_right, "前置：左侧列应比右侧列宽"
+
+    right_x = right_xs.pop()
+    left_x = left_xs.pop()
+    # 右侧按左缘锚定，左侧按右缘锚定（镜像累计）
+    assert abs(
+        right_x - (cursor_scene_x + mgr.LABEL_GAP_TO_CURSOR)
+    ) < 0.5
+    assert abs(
+        (left_x + w_left) - (cursor_scene_x - mgr.LABEL_GAP_TO_CURSOR)
+    ) < 0.5, "左列右缘应贴光标−GAP（按自身实际宽镜像累计）"
 
 
 # ---------- ③ 单列退化：与既有行为一致 ----------
