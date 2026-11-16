@@ -1339,11 +1339,12 @@ class CursorManager:
         max_label_width: float,
         col_gap: float,
         force_side: str | None = None,
-        alternate: bool = True,
+        alternate: bool = False,
     ) -> list:
         """决定每列的放置方向（委托 _assign_column_sides）。
 
-        alternate=True（单游标）：右/左/右… 交替；False：旧「右先左后」。
+        alternate=True（单游标）：右/左/右… 交替；False：旧「右先左后」
+        （默认 False，与 _compute_label_layout 的 alternate_sides 默认一致）。
         force_side='left'/'right'：跨组向外分裂时强制单侧。
         返回 list of (side, col_idx)。
         """
@@ -1361,7 +1362,7 @@ class CursorManager:
         max_label_width: float,
         col_gap: float,
         force_side: str | None = None,
-        alternate: bool = True,
+        alternate: bool = False,
     ) -> list:
         """列方向分配：返回 list of (side, col_idx)。
 
@@ -1417,8 +1418,16 @@ class CursorManager:
             elif used[other] < possible[other]:
                 side = other
             else:
-                # 两侧都无预算：追加到占用较少侧（并列取右），允许重叠
-                side = 'right' if used['right'] <= used['left'] else 'left'
+                # 两侧都无预算（极窄图）：优先放到剩余空间更大的一侧，
+                # 尽量减少「列被视口裁掉」的概率；空间相同取右。
+                # 该分支属防御路径：max_cols 截断后通常不会走到。
+                side = (
+                    'right'
+                    if (right_available, -used['right']) >= (
+                        left_available, -used['left']
+                    )
+                    else 'left'
+                )
             sides.append((side, used[side]))
             used[side] += 1
         return sides

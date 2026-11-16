@@ -22,6 +22,7 @@ UNIT = COL_W + MARGIN                         # 一列最低可用宽 = 52
 
 
 def _sides(count, right, left, **kwargs):
+    kwargs.setdefault('alternate', True)  # 单游标默认口径；显式 False 覆盖
     return CursorManager._assign_column_sides(
         count, right, left, MAX_W, COL_GAP, **kwargs
     )
@@ -85,3 +86,22 @@ def test_force_side_overrides_alternation_and_budget():
         assert _only_sides(
             _sides(2, 0.0, 0.0, force_side=side)
         ) == [side] * 2
+
+def test_asymmetric_budgets_alternate_until_side_is_full():
+    """右 1 列 / 左 2 列：3 列 → 右、左、左（偏好侧满后换另一侧）"""
+    right, left = UNIT, 2 * UNIT
+    assert _only_sides(_sides(3, right, left)) == ['right', 'left', 'left']
+
+
+def test_both_sides_without_budget_prefers_larger_space():
+    """两侧都无预算：优先剩余空间更大的一侧（仍需保持列数不减少）"""
+    assert _only_sides(_sides(2, 10.0, 60.0)) == ['left', 'left']
+    assert _only_sides(_sides(2, 60.0, 10.0)) == ['right', 'right']
+    # 空间相同：并列取右
+    assert _only_sides(_sides(2, 10.0, 10.0)) == ['right', 'left']
+
+
+def test_default_alternate_is_false():
+    """静态函数默认与 _compute_column_positions 一致：默认旧右先左后"""
+    pairs = CursorManager._assign_column_sides(2, 500, 500, MAX_W, COL_GAP)
+    assert _only_sides(pairs) == ['right', 'right']

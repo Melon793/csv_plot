@@ -286,3 +286,32 @@ def test_both_inner_columns_use_straight_leaders(
         assert len(pts) == 2, "左内列应为两点直线"
         right_edge = lbl.scenePos().x() + _text_width(pw, lbl)
         assert abs(pts[-1].x() - right_edge) < 1e-6, "左列终点应为标签右缘"
+
+# ---------- 双游标但一组被 x 过滤：等价单游标，交替必须启用 ----------
+
+def test_dual_cursor_one_group_filtered_enables_alternation(
+    plot_factory, qapp, monkeypatch
+):
+    """判据用“过滤后可见组数”：B 出界被过滤后只剩 A，仍应右/左交替。
+
+    回归点：若有人把判据改回过滤前的 cursor_groups 数量，本用例会红。
+    """
+    pw = _setup(
+        plot_factory, _label_df((0, 40, 80, 120, 160, 200)), size=(700, 420)
+    )
+    _pin_columns(pw, monkeypatch, columns=2, capacity=3)
+    _reset_view(pw, 10, 40, -10, 220)  # 只容纳 A≈20 附近，B=80 出界
+    pw.plot_context.cursor_mode = "2 anchored cursor"
+    pw._cursor_manager.pinned_x_values = [20.0, 80.0]
+    qapp.processEvents()
+    pw.vline.setVisible(True)
+    pw.vline.setPos(20.0)
+    _refresh(pw, times=4)
+
+    labels = _visible_labels(pw)
+    assert len(labels) == 6, "只剩 A 组 6 个标签"
+    cursor_x = _cursor_scene_x(pw, 20.0)
+    right, left = _split_sides(labels, cursor_x)
+    assert len(right) == 3 and len(left) == 3, (
+        f"单组可见时应交替为 3 右 + 3 左，实际 {len(right)} 右 + {len(left)} 左"
+    )
