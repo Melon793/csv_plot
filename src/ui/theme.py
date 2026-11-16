@@ -157,8 +157,15 @@ CHIP_SEL_BD = ACCENT
 ON_ACCENT = on_accent_for(ACCENT)
 
 # 变量名悬停提示：Qt 对富文本提示不套默认内边距，字几乎贴框，必须显式 padding。
-# QSS padding **不是 1:1**：声明 1px 2px，实测"文字墨迹→可见边框"为 9/10/10/9 px
-# （Qt 在 padding 外还垫了一层）。改数值前先量，别按声明值想象。
+# QSS padding **不是 1:1**，各平台叠的底座不同（实测"文字墨迹→可见边框"）：
+#   macOS   1px 2px → 6.5 / 6.5 / 6.5 / 6.5 pt
+#   Windows 1px 2px → 6 / 7 / 6 / 8 px @96dpi（windowsvista，12px 字体）
+# Windows 侧更紧（win10_env 实测），改数值前两个平台都要量，别按声明值想象。
+#
+# 刻意**不画边框和圆角**：QToolTip 的浮层是不透明方窗（实测
+# WA_TranslucentBackground=False、windowOpacity=0.949），自绘圆角会在方窗里露出
+# 四个直角，成为"直角套圆角"。外形交给平台：Windows 自带 1px 深色边框，
+# macOS 是浅色边缘。
 #
 # 这是全应用唯一的应用级样式表，不违反上面"不放按钮 QSS"的决策：判据是规则有没有
 # 命中原生控件，本规则只有 QToolTip 选择器。实测（tmp 里 check_qss_metric_leak.py）
@@ -166,8 +173,6 @@ ON_ACCENT = on_accent_for(ACCENT)
 # sizeHint、表格行高、滚动条宽度全部不变。
 TOOLTIP_QSS = f"""QToolTip {{
     padding: 1px 2px;
-    border: 1px solid {SEP};
-    border-radius: 6px;
     background: {BG};
     color: {TEXT_PRIMARY};
 }}"""

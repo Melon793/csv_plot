@@ -35,12 +35,16 @@ def test_tooltip_with_unit():
 
 
 def test_tooltip_style_is_compact_card():
-    """QSS 走紧凑档：padding 1px 2px + 1px 边框 + 6px 圆角（实测墨迹→边框 9~10px）。"""
+    """QSS 只补留白与配色，外形（边框/圆角）交给平台：
+
+    QToolTip 浮层是不透明方窗，自绘圆角会在方窗里露出直角（直角套圆角）。
+    紧凑档实测：mac 6.5pt 四边，Windows 6~8px @96dpi。
+    """
     qss = theme.TOOLTIP_QSS
-    assert "QToolTip" in qss
     assert "padding: 1px 2px;" in qss
-    assert f"border: 1px solid {theme.SEP};" in qss
     assert f"background: {theme.BG};" in qss
+    assert "border-radius" not in qss
+    assert "border:" not in qss
 
 
 def test_tooltip_qss_only_targets_tooltip():
