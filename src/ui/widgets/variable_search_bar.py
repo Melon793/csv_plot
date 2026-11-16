@@ -22,6 +22,7 @@ from PySide6.QtGui import QColor, QPen
 from src.core.config import safe_qt_op
 from src.core.keyword_match import KeywordMatcher
 from src.ui import theme
+from src.ui.tooltip_text import var_tooltip
 
 from src.core.logger import get_logger
 from PySide6.QtWidgets import (
@@ -558,6 +559,8 @@ class VariableSearchBar(QWidget):
             valid = self._validity.get(var_name, -2)
 
             item = QListWidgetItem(self._build_display_text(var_name, is_existing))
+            # 提示不带 "(已添加)" 后缀：状态只影响显示文本，不影响完整名
+            item.setToolTip(var_tooltip(var_name, self._units.get(var_name, "")))
             item.setData(Qt.ItemDataRole.UserRole, var_name)
             item.setData(Qt.ItemDataRole.UserRole + 1, valid)
             item.setData(Qt.ItemDataRole.UserRole + 2, is_existing)

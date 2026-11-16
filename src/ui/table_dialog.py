@@ -47,6 +47,7 @@ from src.core.config import (
 )
 from src.ui import theme
 from src.ui.drag_drop import parse_var_names_from_mimedata
+from src.ui.tooltip_text import var_tooltip
 from src.core.logger import get_logger
 
 logger = get_logger("ui.table_dialog")
@@ -192,9 +193,17 @@ class PandasTableModel(QAbstractTableModel):
         return str(value) if pd.notnull(value) else ""
 
     def headerData(self, section, orientation, role):
-        if role != Qt.ItemDataRole.DisplayRole:
-            return None
         if self._df.columns.empty:
+            return None
+        if (
+            role == Qt.ItemDataRole.ToolTipRole
+            and orientation == Qt.Orientation.Horizontal
+        ):
+            if not 0 <= section < len(self._df.columns):
+                return None
+            col_name = str(self._df.columns[section])
+            return var_tooltip(col_name, self._units.get(col_name, ""))
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
             col_name = str(self._df.columns[section])
@@ -788,6 +797,12 @@ class DataTableDialog(QMainWindow):
                 unit = units.get(col, "")
                 unit_text = f" [{unit}]" if unit and unit != "-" else ""
                 combo.addItem(f"{col}{unit_text} — G{gi}", (col, gi))
+                # 弹窗宽度固定，长变量名会右截断；ToolTipRole 随 combo 模型进 completer 弹窗
+                combo.setItemData(
+                    combo.count() - 1,
+                    var_tooltip(col, unit),
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         combo.lineEdit().setText(text)
 
     def _on_var_locator_activated(self, index: int):

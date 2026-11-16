@@ -35,6 +35,7 @@ from src.core.data_types import (
 from src.core.logger import get_logger
 from src.ui import theme
 from src.ui.drag_drop import parse_var_names_from_mimedata
+from src.ui.tooltip_text import var_tooltip
 from src.ui.widgets.variable_search_bar import VariableSearchBar
 
 logger = get_logger(__name__)
@@ -782,6 +783,7 @@ class PlotVariableEditorDialog(QDialog):
         display_text = f"{var_name} ({unit})" if unit else var_name
         name_item = QTableWidgetItem(display_text)
         name_item.setData(Qt.ItemDataRole.UserRole, var_name)
+        name_item.setToolTip(var_tooltip(var_name, unit))
         name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
         self.var_table.setItem(row, 1, name_item)
 
@@ -887,6 +889,7 @@ class PlotVariableEditorDialog(QDialog):
         base = f"{var_name} ({unit})" if unit else var_name
         name_item = QTableWidgetItem(f"{base}（缺失）")
         name_item.setData(Qt.ItemDataRole.UserRole, var_name)
+        name_item.setToolTip(var_tooltip(var_name, unit))
         # 占位行标记（UserRole+1）：增量刷新据此识别占位行并回退全量重建，
         # 避免复活后残留灰名"（缺失）"文本（§6.3）
         name_item.setData(Qt.ItemDataRole.UserRole + 1, True)

@@ -43,6 +43,12 @@ def main():
     if os.path.exists(ico_path):
         app.setWindowIcon(QIcon(str(ico_path)))
 
+    # 提示样式是应用级单条规则（只有 QToolTip 选择器）：实测其它控件的
+    # sizeHint / 行高 / 滚动条宽度全部不变，原生绘制不受影响
+    from src.ui import theme
+
+    app.setStyleSheet(theme.TOOLTIP_QSS)
+
     app.setQuitOnLastWindowClosed(False)
     skip_splash = "--no-splash" in sys.argv or "--clone-window" in sys.argv
 

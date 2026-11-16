@@ -20,6 +20,7 @@ from src.core.logger import get_logger
 from src.core.config import VAR_INFO_MAX_TABS, is_grouped_loader
 from src.ui.drag_drop import build_var_mimedata
 from src.ui.drag_visuals import DragItem, build_drag_pixmap, drag_hotspot
+from src.ui.tooltip_text import var_tooltip
 from src.ui.variable_actions import (
     add_variables_to_blank_plot,
     add_variables_to_data_table,
@@ -350,6 +351,7 @@ class MyTableWidget(QTableWidget):
 
             # 存储原始变量名到UserRole+1（用于delegate绘制和所有操作）
             name_item.setData(Qt.ItemDataRole.UserRole + 1, original_name)
+            name_item.setToolTip(var_tooltip(original_name, unit))
 
             # 设置有效性数据（用于排序和delegate绘制彩色方块）
             name_item.setData(Qt.ItemDataRole.UserRole, valid_value)
@@ -640,6 +642,7 @@ class MyTableWidget(QTableWidget):
 
             # 存储原始变量名到UserRole+1（用于delegate绘制和所有操作）
             name_item.setData(Qt.ItemDataRole.UserRole + 1, name)
+            name_item.setToolTip(var_tooltip(name, unit))
 
             # 为所有item设置有效性数据（用于排序和delegate绘制彩色方块）
             name_item.setData(Qt.ItemDataRole.UserRole, valid)

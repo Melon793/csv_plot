@@ -156,6 +156,22 @@ CHIP_SEL_BD = ACCENT
 # 实色（accent）上的文字：白字对比度不足 4.5:1 时改用深字
 ON_ACCENT = on_accent_for(ACCENT)
 
+# 变量名悬停提示：Qt 对富文本提示不套默认内边距，字几乎贴框，必须显式 padding。
+# QSS padding **不是 1:1**：声明 1px 2px，实测"文字墨迹→可见边框"为 9/10/10/9 px
+# （Qt 在 padding 外还垫了一层）。改数值前先量，别按声明值想象。
+#
+# 这是全应用唯一的应用级样式表，不违反上面"不放按钮 QSS"的决策：判据是规则有没有
+# 命中原生控件，本规则只有 QToolTip 选择器。实测（tmp 里 check_qss_metric_leak.py）
+# 加上它以后 QPushButton / QCheckBox / QComboBox / QLineEdit / QTabWidget 的
+# sizeHint、表格行高、滚动条宽度全部不变。
+TOOLTIP_QSS = f"""QToolTip {{
+    padding: 1px 2px;
+    border: 1px solid {SEP};
+    border-radius: 6px;
+    background: {BG};
+    color: {TEXT_PRIMARY};
+}}"""
+
 # === 度量 ===
 R_FIELD = 4  # 值列字段框的圆角：框比按钮大一号，用更小一档才不显肿
 F_MUTED_PX = 12  # 次级文字（标签、页脚提示、副文案）
