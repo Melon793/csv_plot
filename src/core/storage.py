@@ -6,10 +6,9 @@ import re
 import yaml
 import uuid
 from pathlib import Path
-from datetime import datetime
 from typing import Optional
 from PySide6.QtCore import QObject, QFileSystemWatcher, Signal
-from src.core.template_models import PlotTemplate, TemplateMetadata
+from src.core.template_models import PlotTemplate, now_iso_monotonic
 from src.core.plot_config import TemplateStorageError
 from src.core.logger import get_logger
 
@@ -218,8 +217,9 @@ class TemplateStorage(QObject):
             if template:
                 template.metadata.id = self._generate_template_id()
                 template.metadata.source_file = str(external_path)
-                template.metadata.created_at = datetime.now().isoformat()
-                template.metadata.updated_at = datetime.now().isoformat()
+                stamp = now_iso_monotonic()
+                template.metadata.created_at = stamp
+                template.metadata.updated_at = stamp
                 return template
         except Exception as e:
             logger.error(f"Error importing template from {external_path}: {e}")

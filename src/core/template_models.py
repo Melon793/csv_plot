@@ -1,12 +1,40 @@
 """模板数据模型"""
 
 from __future__ import annotations
+import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterator, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.core.plot_config import PlotSessionConfig
+
+
+# 时间源与单调水位：测试替换 _clock 成冻结时钟，证明同刻度下仍严格递增。
+_clock = datetime.now
+_ts_lock = threading.Lock()
+_last_stamp = ""
+
+
+def now_iso_monotonic() -> str:
+    """当前时间的 ISO 串，并保证同进程内严格递增。
+
+    Windows 的系统时钟刻度约 15.6 ms（Qt 抬升后约 1 ms），连续保存会在
+    同一刻度内取到相同 ``updated_at``；模板列表按该字段倒序时便退化为
+    磁盘枚举序。这里在同一刻度内 +1 µs，保证后写入者的戳一定更大。
+
+    系统时钟回拨时戳保持在水位之上（最多领先回拨量），等墙钟追上来；
+    跨进程不保证单调，由调用方的排序二级键兜底。
+    """
+    global _last_stamp
+    with _ts_lock:
+        stamp = _clock().isoformat(timespec="microseconds")
+        if stamp <= _last_stamp:
+            stamp = (
+                datetime.fromisoformat(_last_stamp) + timedelta(microseconds=1)
+            ).isoformat(timespec="microseconds")
+        _last_stamp = stamp
+        return stamp
 
 
 @dataclass
@@ -23,11 +51,12 @@ class TemplateMetadata:
     source_file: Optional[str] = None
 
     def __post_init__(self):
-        now = datetime.now().isoformat()
-        if not self.created_at:
-            self.created_at = now
-        if not self.updated_at:
-            self.updated_at = now
+        if not self.created_at or not self.updated_at:
+            now = now_iso_monotonic()
+            if not self.created_at:
+                self.created_at = now
+            if not self.updated_at:
+                self.updated_at = now
 
     def to_dict(self) -> dict:
         """序列化为字典"""

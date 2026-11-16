@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
+from src.core import template_models
 from src.core.plot_config import (
     PlotSessionConfig,
     TemplateNameConflictError,
@@ -73,6 +76,54 @@ class TestDeleteAndDuplicate:
         assert dup.metadata.id != tpl.metadata.id
         assert dup.config == tpl.config
         assert len(manager.get_all_templates()) == 2
+
+
+class TestOrdering:
+    @staticmethod
+    def _freeze_clock(monkeypatch):
+        frozen = datetime(2026, 1, 1, 12, 0, 0)
+        monkeypatch.setattr(template_models, "_clock", lambda: frozen)
+        monkeypatch.setattr(template_models, "_last_stamp", "")
+
+    def test_back_to_back_saves_keep_latest_first_when_clock_is_frozen(
+        self, manager, monkeypatch
+    ):
+        """连存在同一时钟刻度下，后保存的模板仍必须排最前。
+
+        冻结时钟等价于 Windows 15.6 ms 刻度里连按两次保存：修复前
+        updated_at 相等，顺序退化为磁盘枚举序（glob 不支持排序）。
+        严格递增的断言是 100% 检出项；排序断言依赖 uuid 的偶然顺序，
+        只作端到端确认。
+        """
+        self._freeze_clock(monkeypatch)
+
+        saved = [
+            manager.save_template(_make_config(["v"]), f"t{i}") for i in range(3)
+        ]
+        stamps = [t.metadata.updated_at for t in saved]
+        assert stamps == sorted(stamps)
+        assert len(set(stamps)) == 3, f"同刻度取到重复时间戳：{stamps}"
+
+        assert [t.metadata.name for t in manager.get_all_templates()] == [
+            "t2",
+            "t1",
+            "t0",
+        ]
+
+    def test_update_existing_bumps_updated_at_under_frozen_clock(
+        self, manager, monkeypatch
+    ):
+        """更新路径（template_manager.py:108）同样走单调器，不能取到同值。"""
+        self._freeze_clock(monkeypatch)
+
+        tpl = manager.save_template(_make_config(["a"]), "t1")
+        first = tpl.metadata.updated_at
+        again = manager.save_template(
+            _make_config(["a", "b"]),
+            "t1",
+            template_id=tpl.metadata.id,
+        )
+        assert again.metadata.updated_at > first
 
 
 class TestSearch:

@@ -3,12 +3,16 @@
 from __future__ import annotations
 import copy
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from PySide6.QtCore import QObject, Signal
 from src.core.storage import TemplateStorage
-from src.core.template_models import PlotTemplate, TemplateMetadata, count_template_variables
+from src.core.template_models import (
+    PlotTemplate,
+    TemplateMetadata,
+    count_template_variables,
+    now_iso_monotonic,
+)
 from src.core.plot_config import (
     PlotSessionConfig,
     TemplateError,
@@ -39,11 +43,11 @@ class TemplateManager(QObject):
         self._storage.file_changed.connect(self._on_file_changed)
 
     def get_all_templates(self) -> list[PlotTemplate]:
-        """获取所有模板（按更新时间倒序）"""
+        """获取所有模板（按更新时间倒序；同刻用 id 兜底，顺序才确定）。"""
         templates = self._storage.get_all_templates()
         return sorted(
             templates,
-            key=lambda t: t.metadata.updated_at,
+            key=lambda t: (t.metadata.updated_at, t.metadata.id),
             reverse=True,
         )
 
@@ -101,7 +105,7 @@ class TemplateManager(QObject):
                 raise TemplateNotFoundError(f"Template {template_id} not found")
             existing.metadata.name = name
             existing.metadata.description = description
-            existing.metadata.updated_at = datetime.now().isoformat()
+            existing.metadata.updated_at = now_iso_monotonic()
             existing.config = config.to_dict()
             self._storage.write_template(existing)
             self.template_updated.emit(template_id)

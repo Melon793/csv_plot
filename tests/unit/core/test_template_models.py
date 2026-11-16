@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
+from src.core import template_models
 from src.core.plot_config import PlotConfig, PlotPageConfig, PlotSessionConfig
 from src.core.template_models import (
     PlotTemplate,
@@ -11,6 +14,7 @@ from src.core.template_models import (
     count_template_variables,
     extract_variables_from_config,
     iter_template_pages,
+    now_iso_monotonic,
 )
 
 
@@ -24,6 +28,55 @@ class TestTemplateMetadata:
         m = TemplateMetadata(id="abc123", name="t1", description="desc")
         restored = TemplateMetadata.from_dict(m.to_dict())
         assert restored == m
+
+
+class TestMonotonicClock:
+    """Windows 时钟刻度（约 15.6 ms）下同刻度取值不能相等。
+
+    真机分辨率复现不了，直接把模块时钟冻结：不 bump 必然同值，于是任何
+    平台都能证明单调性，而不是靠 macOS 的 µs 精度天然通过。
+    """
+
+    def test_frozen_clock_still_yields_strictly_increasing_stamps(
+        self, monkeypatch
+    ):
+        frozen = datetime(2026, 1, 1, 12, 0, 0)
+        monkeypatch.setattr(template_models, "_clock", lambda: frozen)
+        monkeypatch.setattr(template_models, "_last_stamp", "")
+
+        stamps = [now_iso_monotonic() for _ in range(5)]
+
+        assert stamps == sorted(stamps)
+        assert len(set(stamps)) == 5
+        assert all(s.startswith("2026-01-01T12:00:00") for s in stamps)
+        assert all(datetime.fromisoformat(s) >= frozen for s in stamps)
+
+    def test_clock_rollback_does_not_go_backwards(self, monkeypatch):
+        wall = [datetime(2026, 1, 1, 12, 0, 0, 500)]
+        monkeypatch.setattr(template_models, "_clock", lambda: wall[0])
+        monkeypatch.setattr(template_models, "_last_stamp", "")
+
+        first = now_iso_monotonic()
+        wall[0] = datetime(2026, 1, 1, 12, 0, 0)  # 墙钟回拨 500 ms
+        second = now_iso_monotonic()
+
+        assert second > first
+        assert (
+            datetime.fromisoformat(second) - datetime.fromisoformat(first)
+            == timedelta(microseconds=1)
+        )
+
+    def test_metadata_only_takes_stamp_when_missing(self, monkeypatch):
+        frozen = datetime(2026, 1, 1, 12, 0, 0)
+        monkeypatch.setattr(template_models, "_clock", lambda: frozen)
+        monkeypatch.setattr(template_models, "_last_stamp", "")
+
+        m1 = TemplateMetadata(id="a", name="t1")
+        assert m1.created_at == m1.updated_at
+
+        m2 = TemplateMetadata(id="b", name="t2", created_at="2020-01-01T00:00:00")
+        assert m2.created_at == "2020-01-01T00:00:00"
+        assert m2.updated_at > m1.updated_at
 
 
 class TestPlotTemplate:
