@@ -30,8 +30,13 @@ def test_multi_column_fill():
 
 def test_single_column_when_capacity_enough():
     assert _sizes(list(range(5)), 1, 5) == [5]
-    # 强制两列时仍优先填满第一列
+    # 5 个 / 容量 9 / 强制两列 → 4+1（每后续列至少留 1，其余堆到前列）
     assert _sizes(list(range(5)), 2, 9) == [4, 1]
+
+
+def test_more_columns_than_labels_keeps_empty_tail():
+    """列数滞回暂持多于标签数：尾部留空组，不丢标签、不改顺序。"""
+    assert _sizes(list(range(2)), 3, 9) == [1, 1, 0]
 
 
 def test_capacity_one():
