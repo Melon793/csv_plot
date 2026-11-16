@@ -47,6 +47,7 @@ class LabelLayout:
     pinned: bool = False  # 交点 y 出界：标签吸附到视口边缘
     up: bool = False      # pinned 方向：交点在上方/下方视口外
     w: float = 0.0        # 标签渲染宽度（像素，含内边距与 ▲/▼ 前缀）
+    first_col: bool = False  # 是否最贴光标的一列（该列用直线引导线）
 
 
 class CursorManager:
@@ -1228,6 +1229,7 @@ class CursorManager:
                 col_labels, column_scene_x[col_idx],
                 column_scene_y_min, column_scene_y_max,
                 label_height_pixels, vertical_gap_pixels,
+                first_col=(col_idx == 0),
             )
             all_layouts.extend(col_layouts)
 
@@ -1419,6 +1421,7 @@ class CursorManager:
         col_y_max: float,
         label_height_pixels: float,
         gap_pixels: float,
+        first_col: bool = False,
     ) -> list[LabelLayout]:
         """列内垂直堆叠：PAV 等渗回归求最小位移且保持最小间距"""
         n = len(labels)
@@ -1444,7 +1447,7 @@ class CursorManager:
                 x_pos=label['x_pos'], y_pos=label['y_pos'],
                 y_value=label['y_value'], color=label['color'],
                 pinned=label.get('pinned', False), up=label.get('up', False),
-                w=label.get('_label_w', 0.0),
+                w=label.get('_label_w', 0.0), first_col=first_col,
             )]
 
         # 多标签：PAV 等渗回归直解（最小位移 + 最小间距）。
@@ -1468,7 +1471,7 @@ class CursorManager:
                 x_pos=label['x_pos'], y_pos=label['y_pos'],
                 y_value=label['y_value'], color=label['color'],
                 pinned=label.get('pinned', False), up=label.get('up', False),
-                w=label.get('_label_w', 0.0),
+                w=label.get('_label_w', 0.0), first_col=first_col,
             )
             for i, label in enumerate(labels)
         ]
@@ -1621,15 +1624,16 @@ class CursorManager:
                     leader_scene.removeItem(leader)
                 pw.plot_item.addItem(leader, ignoreBounds=True)
             p0 = view_box.mapViewToScene(QPointF(layout.x_pos, layout.y_pos))
-            p1 = QPointF(layout.layout_x, layout.layout_y)
+            # 端点取标签朝向光标的边缘（左侧列取右缘，否则线会压进标签下方）
+            on_right = layout.layout_x >= p0.x()
+            p1 = QPointF(
+                layout.layout_x if on_right else layout.layout_x + text_width,
+                layout.layout_y,
+            )
             if not layout.pinned and (p1 - p0).manhattanLength() > 8:
-                if self.CURSOR_LEADER_ELBOW:
-                    # 四点正交折线：p0 → (mx, p0.y) → (mx, p1.y) → p1。
-                    # 标签在右：mx = 左缘−6；标签在左：mx = 右缘+6。
-                    if layout.layout_x >= p0.x():
-                        mx = layout.layout_x - 6
-                    else:
-                        mx = layout.layout_x + text_width + 6
+                if self.CURSOR_LEADER_ELBOW and not layout.first_col:
+                    # 第二列及更远：四点正交折线（直线会横穿第一列标签）。
+                    mx = p1.x() - 6 if on_right else p1.x() + 6
                     scene_pts = [
                         p0,
                         QPointF(mx, p0.y()),
@@ -1637,14 +1641,15 @@ class CursorManager:
                         p1,
                     ]
                 else:
+                    # 最内列（或关闭 elbow 开关）：直线，斜率区分归属
                     scene_pts = [p0, p1]
                 view_pts = [view_box.mapSceneToView(pt) for pt in scene_pts]
                 leader.setData(
                     [pt.x() for pt in view_pts], [pt.y() for pt in view_pts]
                 )
                 lc = pg.mkColor(layout.color)
-                lc.setAlpha(150)
-                leader.setPen(pg.mkPen(lc, width=1))
+                lc.setAlpha(200)
+                leader.setPen(pg.mkPen(lc, width=1.25))
                 leader.setVisible(True)
                 pw.multi_cursor_items.append(leader)
             else:
