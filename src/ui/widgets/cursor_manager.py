@@ -55,7 +55,7 @@ class CursorManager:
     # 标签间距参数（像素），新旧算法共用
     LABEL_GAP_TO_CURSOR = 10       # 标签左边缘到光标的水平间距
     LABEL_COL_GAP = 15            # 多列时列与列之间的间距
-    LABEL_VERTICAL_GAP = 4        # 同一列内标签之间的垂直间距
+    LABEL_VERTICAL_GAP = 2        # 同一列内标签之间的垂直间距（可见间隙 = +2px 布局补偿）
     LABEL_BOTTOM_GAP = 6          # 标签底边到交点的净空（像素；视觉净空 = +1px 布局补偿）
 
     # 形态开关：改常量后需重新构建/分发，非运行期开关
@@ -811,7 +811,7 @@ class CursorManager:
             self._cached_font_metrics = QFontMetrics(text_font)
             # 标签实际高度由 QTextDocument 默认 4px 边距决定，比 fm.height()
             # 多 8px；再留 2px 给描边外沿。旧公式 +6 少算 2px，使
-            # LABEL_VERTICAL_GAP=4 实际只剩 2px，相邻标签近乎粘连。
+            # 当时的 LABEL_VERTICAL_GAP=4 实际只剩 2px，相邻标签近乎粘连。
             if not sample_text_item.toPlainText():
                 sample_text_item.setText("0")
             self._cached_label_height_pixels = (
@@ -1129,12 +1129,14 @@ class CursorManager:
         vertical_gap_pixels = self.LABEL_VERTICAL_GAP  # 列内标签垂直间距
 
         gap_to_cursor = gap_pixels
-        label_height_total = label_height_pixels + vertical_gap_pixels
 
-        # 计算列容量
+        # 计算列容量（精确口径：n 个标签需 n*h+(n-1)*gap，
+        # 不能按 n*(h+gap) 估，否则临界行会多拆一列）
         margin_pixels_scene = label_height_pixels * 0.1
         available_height = scene_height - 2 * margin_pixels_scene
-        raw_capacity = int(available_height / label_height_total)
+        raw_capacity = self._column_capacity(
+            available_height, label_height_pixels, vertical_gap_pixels
+        )
 
         # 极限保护：图高连一行标签都放不下（< 标签高+间距+2×margin）→
         # 返回该 cursor 组全部 pool index 供统一隐藏。
@@ -1183,7 +1185,9 @@ class CursorManager:
         # column_sides: list of ('right', col_idx) or ('left', col_idx)
 
         # 分配标签到各列（均匀分配）
-        labels_per_column = self._distribute_labels(visible_labels, column_count)
+        labels_per_column = self._distribute_labels(
+            visible_labels, column_count, per_column_capacity
+        )
 
         # 逐列取列内实际最大宽（分配后再定宽，避免列数估算同帧循环依赖；
         # 列数仍用 max 宽保守估算）。
@@ -1265,6 +1269,18 @@ class CursorManager:
         """单侧可容纳的列数（与 _compute_column_positions 同口径）"""
         return max(0, int(available / col_width)) if available > col_width else 0
 
+    @staticmethod
+    def _column_capacity(available: float, h: float, gap: float) -> int:
+        """单列可容纳的标签数（精确口径）。
+
+        n 个标签实际需要 ``n*h + (n-1)*gap``，不能按 ``n*(h+gap)`` 估：
+        后者会多要 1 个 gap，临界行高时误判容量 n-1、白白多拆一列。
+        极矮兜底沿用旧阈值 ``available < h+gap`` → 0（连一行都放不下）。
+        """
+        if available < h + gap:
+            return 0
+        return int((available - h) / (h + gap) + 1e-9) + 1
+
     def _compute_column_positions(
         self,
         column_count: int,
@@ -1311,21 +1327,42 @@ class CursorManager:
 
         return sides
 
+    @staticmethod
     def _distribute_labels(
-        self, visible_labels: list, column_count: int
+        visible_labels: list, column_count: int, capacity: int
     ) -> list[list]:
-        """将标签均匀分配到各列"""
+        """按列容量填满分配：前列装满 capacity，剩余顺延。
+
+        与平均分配相比，能在容量有余时把后续标签留在最靠近光标的
+        第一列（如 6 个 / 容量 5 → 5+1，而不是 3+3）。
+
+        列数被可用宽度截断、或滞回暂持更少列时可能出现
+        ``n > capacity*column_count``，此时 PAV 已无法保证容量，
+        退回平均分配，避免末列被塞成 4+6。
+        """
         n = len(visible_labels)
         if n == 0:
             return [[] for _ in range(column_count)]
 
-        base = n // column_count
-        remainder = n % column_count
+        if n > capacity * column_count:
+            base = n // column_count
+            remainder = n % column_count
+            result = []
+            start = 0
+            for col in range(column_count):
+                size = base + (1 if col < remainder else 0)
+                result.append(visible_labels[start:start + size])
+                start += size
+            return result
 
         result = []
         start = 0
         for col in range(column_count):
-            size = base + (1 if col < remainder else 0)
+            left_cols = column_count - col
+            remaining = n - start
+            size = remaining if left_cols == 1 else min(
+                capacity, max(1, remaining - (left_cols - 1))
+            )
             result.append(visible_labels[start:start + size])
             start += size
         return result
