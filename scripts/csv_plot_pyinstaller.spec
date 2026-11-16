@@ -309,13 +309,18 @@ pyz = PYZ(
 )
 
 # ── EXE ────────────────────────────────────────────────────────
+# `exclude_binaries=True` 是 onedir 的开关：EXE 只产出引导程序并写到 WORKPATH，
+# binaries/datas 一律由下面的 COLLECT 收进 dist/csv_plot/_internal。
+# 若漏掉它，PyInstaller 会按 onefile 处理，额外在 dist 根目录再落一个 70+ MB 的
+# 全量 exe（api.py 里 "onefile mode - create executable in DISTPATH"），于是
+# 每次打包都多出一份与文件夹内 exe 完全相同的副本，运行时也按 onefile 解包到
+# %TEMP%\_MEIxxxx。Python-can 是 LGPL-3.0，分发要求用户可替换该包，这一点只有
+# onedir 产物天然满足，所以删掉的是 EXE 里的载荷，而不是 COLLECT。
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name=NAME,
     debug=False,
     bootloader_ignore_signals=False,
