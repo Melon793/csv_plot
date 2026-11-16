@@ -91,6 +91,11 @@ def test_compact_columns_wide_then_narrow_no_overlap(
         pw._cursor_manager, "_apply_column_hysteresis",
         lambda new_count, cursor_id=0: 2,
     )
+    # 显式固定容量，避免字体/DPI 影响列内容（填满分配下会改变哪列宽）
+    monkeypatch.setattr(
+        pw._cursor_manager, "_column_capacity",
+        lambda available, h, gap: 4,
+    )
     _reset_view(pw, 0, 99, 0, 200000)
     qapp.processEvents()
     pw.vline.setVisible(True)
@@ -123,9 +128,9 @@ def test_second_column_wide_label_uses_first_column_width(
 ):
     # 高 y = 窄文本 → 第1列窄；低 y = 宽文本 → 第2列宽
     df = pd.DataFrame({
-        "a": np.full(100, 300.0),
-        "b": np.full(100, 200.0),
-        "c": np.full(100, 100.0),
+        "a": np.full(100, 3.0),
+        "b": np.full(100, 2.0),
+        "c": np.full(100, 1.0),
         "d": np.full(100, 0.1234567),
         "e": np.full(100, 0.2345678),
         "f": np.full(100, 0.3456789),
@@ -134,6 +139,11 @@ def test_second_column_wide_label_uses_first_column_width(
     monkeypatch.setattr(
         pw._cursor_manager, "_apply_column_hysteresis",
         lambda new_count, cursor_id=0: 2,
+    )
+    # 容量 3：6 个 → 3+3，宽标签（低 y）落在第 2 列
+    monkeypatch.setattr(
+        pw._cursor_manager, "_column_capacity",
+        lambda available, h, gap: 3,
     )
     _reset_view(pw, 0, 99, 0, 200000)
     qapp.processEvents()
