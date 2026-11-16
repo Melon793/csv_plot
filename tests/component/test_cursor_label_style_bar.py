@@ -141,33 +141,24 @@ def test_label_height_cache_not_underestimated(plot_factory, qapp):
 
 
 def test_leader_line_connects_point_to_label(plot_factory, qapp):
-    """A2 引导线（elbow）：标签被推离交点时存在，端点仍落交点与标签左缘"""
+    """最内列引导线：两点直线，端点落交点与标签左缘"""
     pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     lbl = _show_label(pw)
     leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
     assert leaders, "标签离交点 >8px 时应有引导线"
     xs, ys = leaders[0].getData()
-    assert len(xs) == 4, "引导线应为 elbow 四点正交折线"
+    assert len(xs) == 2, "最内列应为两点直线（第二列才用 elbow）"
 
     vb = pw.view_box
     lab = vb.mapSceneToView(lbl.scenePos())  # 标签左缘中点（数据坐标）
     peak_x = _x_where(pw, "y", 100.0)
     ends = list(zip(xs, ys))
     assert abs(ends[0][0] - peak_x) < 1e-6 and abs(ends[0][1] - 100.0) < 1e-6, (
-        "折线起点应落在交点"
+        "直线起点应落在交点"
     )
     assert abs(ends[-1][0] - lab.x()) < 1e-6 and abs(ends[-1][1] - lab.y()) < 1e-6, (
-        "折线终点应落在标签左缘"
+        "直线终点应落在标签左缘"
     )
-
-    # 竖段位于标签列外侧 6px；两段拐点的 x 相同
-    label_left_scene = lbl.scenePos().x()
-    elbow_scene_x = vb.mapViewToScene(QPointF(xs[1], ys[1])).x()
-    assert abs(xs[1] - xs[2]) < 1e-9, "elbow 竖段 x 应一致"
-    assert abs((elbow_scene_x - label_left_scene) + 6.0) < 1e-6, (
-        "竖段应位于标签左缘外侧 6px"
-    )
-    assert abs(ys[1] - ys[0]) < 1e-9 and abs(ys[2] - ys[3]) < 1e-9
 
 
 def test_leader_pool_cleared_on_full_cleanup(plot_factory, qapp):

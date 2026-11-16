@@ -1,14 +1,17 @@
-"""引导线 elbow 正交路由护栏（offscreen component 测试）。
+"""引导线可读性护栏（offscreen component）。
 
-四点折线：交点 p0 → (mx, p0.y) → (mx, p1.y) → 标签左缘 p1。
-标签在右：mx = 标签左缘 − 6；标签在左：mx = 标签右缘 + 6。
-贴住交点（manhattan ≤ 8px）与 pinned 项不画。
+密集单列时 elbow 竖段共用同一 x 会叠成线束，因此：
+- 最内列（LabelLayout.first_col=True）用两点直线，斜率区分归属；
+- 第二列及更远仍用四点正交折线（直线会横穿第一列标签）；
+- 左侧列端点取标签右缘，避免线压进标签下方；
+- 贴住交点（manhattan ≤ 8px）与 pinned 项不画。
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from PySide6.QtCore import QPointF
 
@@ -22,39 +25,135 @@ from tests.component.test_cursor_label_edge import (
 )
 
 
-def test_elbow_vertical_segment_sits_outside_label_column(plot_factory, qapp):
-    """近同 y 簇被 PAV 推开：每条引导线为四点折线，竖段在标签列外侧 6px"""
-    df = pd.DataFrame(
-        {f"y{i}": np.full(100, 50.0 + i) for i in range(5)}
-    )
-    pw = _setup(plot_factory, df, size=(500, 260))
+def _leader_scene_pts(pw, leader) -> list[QPointF]:
+    vb = pw.view_box
+    xs, ys = leader.getData()
+    return [vb.mapViewToScene(QPointF(x, y)) for x, y in zip(xs, ys)]
+
+
+def _text_width(pw, lbl) -> float:
+    fm = pw._cursor_manager._cached_font_metrics
+    return fm.horizontalAdvance(lbl.toPlainText()) + 12
+
+
+def test_first_column_leader_is_straight(plot_factory, qapp):
+    """最内列：两点直线；端点落交点与标签左缘；线对比度提升"""
+    pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
     vb = pw.view_box
     vb.setXRange(0, 99, padding=0.05)
-    vb.setYRange(40, 60, padding=0)
+    vb.setYRange(0, 200, padding=0)
+    qapp.processEvents()
+    peak_x = _x_where(pw, "y", 100.0)
+    pw.vline.setVisible(True)
+    pw.vline.setPos(peak_x)
+    _refresh(pw)
+
+    labels = _visible_labels(pw)
+    assert len(labels) == 1
+    leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
+    assert leaders, "标签离交点 >8px 时应有引导线"
+    leader = leaders[0]
+    xs, _ = leader.getData()
+    assert len(xs) == 2, "最内列应为两点直线（不再走 elbow）"
+
+    pts = _leader_scene_pts(pw, leader)
+    cross = vb.mapViewToScene(QPointF(peak_x, 100.0))
+    assert abs(pts[0].x() - cross.x()) < 1e-6
+    assert abs(pts[0].y() - cross.y()) < 1e-6
+    assert abs(pts[-1].x() - labels[0].scenePos().x()) < 1e-6
+    assert abs(pts[-1].y() - labels[0].scenePos().y()) < 1e-6
+
+    pen = leader.opts.get("pen") or leader.pen
+    assert pen.color().alpha() == 200
+    assert pen.widthF() == pytest.approx(1.25)
+
+
+def test_elbow_second_column_uses_four_points(plot_factory, qapp):
+    """第二列（first_col=False）：仍为四点折线，竖段在标签左缘外侧 6px"""
+    pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
+    vb = pw.view_box
+    vb.setXRange(0, 99, padding=0.05)
+    vb.setYRange(0, 200, padding=0)
+    qapp.processEvents()
+    peak_x = _x_where(pw, "y", 100.0)
+    cross = vb.mapViewToScene(QPointF(peak_x, 100.0))
+    mgr = pw._cursor_manager
+    mgr._clear_cursor_items()
+    layout = LabelLayout(
+        layout_x=cross.x() + 120, layout_y=cross.y() + 40, index=0,
+        x_pos=peak_x, y_pos=100.0, y_value="100",
+        color=pw.curves["y"].color, first_col=False,
+    )
+    mgr._render_label_layout([layout])
+
+    leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
+    assert leaders
+    leader = leaders[0]
+    xs, ys = leader.getData()
+    assert len(xs) == 4
+    assert abs(xs[1] - xs[2]) < 1e-9
+    pts = _leader_scene_pts(pw, leader)
+    assert abs(pts[1].x() - (layout.layout_x - 6)) < 1e-6, "竖段 = 左缘 − 6"
+    assert abs(pts[-1].x() - layout.layout_x) < 1e-6, "终点 = 左缘"
+
+
+def test_left_column_straight_ends_at_right_edge(plot_factory, qapp):
+    """标签在光标左侧（最内列）：直线终点取标签右缘，不压进标签"""
+    df = pd.DataFrame({"y": np.full(100, 100.0)})
+    pw = _setup(plot_factory, df, size=(500, 420))
+    vb = pw.view_box
+    vb.setXRange(0, 99, padding=0.05)
+    vb.setYRange(0, 200, padding=0)
     qapp.processEvents()
     pw.vline.setVisible(True)
-    pw.vline.setPos(50.0)
-    _refresh(pw, times=2)
+    pw.vline.setPos(95.0)  # 右侧放不下一列 → 标签放到左侧
+    _refresh(pw)
 
-    leaders = pw._cursor_item_pool["leaders"]
-    labels = pw._cursor_item_pool["labels"]
-    checked = 0
-    for leader, label in zip(leaders, labels):
-        if not leader.isVisible() or not label.isVisible():
-            continue
-        xs, ys = leader.getData()
-        assert len(xs) == 4, "elbow 引导线应为四点折线"
-        assert abs(xs[1] - xs[2]) < 1e-9, "竖段 x 应一致"
-        assert abs(ys[0] - ys[1]) < 1e-9, "首段应水平"
-        assert abs(ys[2] - ys[3]) < 1e-9, "末段应水平"
+    labels = _visible_labels(pw)
+    assert len(labels) == 1
+    lbl = labels[0]
+    cross = vb.mapViewToScene(QPointF(95.0, 100.0))
+    assert lbl.scenePos().x() < cross.x(), "前置：标签应在光标左侧"
 
-        # 该用例标签全部在光标右侧：竖段 = 标签左缘 − 6px
-        label_left_scene = label.scenePos().x()
-        elbow_scene_x = vb.mapViewToScene(QPointF(xs[1], ys[1])).x()
-        assert abs((elbow_scene_x - label_left_scene) + 6.0) < 1e-6
-        checked += 1
+    leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
+    assert leaders
+    leader = leaders[0]
+    xs, _ = leader.getData()
+    assert len(xs) == 2, "最内列直线"
+    pts = _leader_scene_pts(pw, leader)
+    right_edge = lbl.scenePos().x() + _text_width(pw, lbl)
+    assert abs(pts[-1].x() - right_edge) < 1e-6, "终点应为标签右缘"
+    assert abs(pts[-1].y() - lbl.scenePos().y()) < 1e-6
 
-    assert checked >= 2, f"应至少检查 2 条引导线，实际 {checked}"
+
+def test_elbow_left_second_column_uses_right_edge(plot_factory, qapp):
+    """左侧第二列（first_col=False）：竖段 = 右缘 + 6，终点回右缘"""
+    pw = _setup(plot_factory, _make_peak_df(), size=(500, 420))
+    vb = pw.view_box
+    vb.setXRange(0, 99, padding=0.05)
+    vb.setYRange(0, 200, padding=0)
+    qapp.processEvents()
+    peak_x = _x_where(pw, "y", 100.0)
+    cross = vb.mapViewToScene(QPointF(peak_x, 100.0))
+    mgr = pw._cursor_manager
+    mgr._clear_cursor_items()
+    layout = LabelLayout(
+        layout_x=cross.x() - 150, layout_y=cross.y() + 40, index=0,
+        x_pos=peak_x, y_pos=100.0, y_value="100",
+        color=pw.curves["y"].color, first_col=False,
+    )
+    mgr._render_label_layout([layout])
+
+    leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
+    assert leaders
+    leader = leaders[0]
+    xs, _ = leader.getData()
+    assert len(xs) == 4
+    pts = _leader_scene_pts(pw, leader)
+    text_width = mgr._cached_font_metrics.horizontalAdvance("100") + 12
+    right_edge = layout.layout_x + text_width
+    assert abs(pts[1].x() - (right_edge + 6)) < 1e-6
+    assert abs(pts[-1].x() - right_edge) < 1e-6
 
 
 def test_no_leader_when_label_touches_cross(plot_factory, qapp):
@@ -71,49 +170,13 @@ def test_no_leader_when_label_touches_cross(plot_factory, qapp):
     layout = LabelLayout(
         layout_x=cross.x(), layout_y=cross.y(), index=0,
         x_pos=peak_x, y_pos=100.0, y_value="100",
-        color=pw.curves["y"].color,
+        color=pw.curves["y"].color, first_col=True,
     )
     pw._cursor_manager._render_label_layout([layout])
 
     assert not [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()], (
         "贴住交点时不应画引导线"
     )
-
-
-def test_elbow_left_column_uses_right_edge_guide(plot_factory, qapp):
-    """标签在光标左侧：竖段 = 标签右缘 + 6px（右缘按渲染文本宽计算）"""
-    df = pd.DataFrame({"y": np.full(100, 100.0)})
-    pw = _setup(plot_factory, df, size=(500, 420))
-    vb = pw.view_box
-    vb.setXRange(0, 99, padding=0.05)
-    vb.setYRange(0, 200, padding=0)
-    qapp.processEvents()
-    pw.vline.setVisible(True)
-    pw.vline.setPos(95.0)  # 右侧空间不足一个列宽 → 标签放左侧
-    _refresh(pw)
-
-    labels = _visible_labels(pw)
-    assert len(labels) == 1
-    lbl = labels[0]
-    cross = vb.mapViewToScene(QPointF(95.0, 100.0))
-    assert lbl.scenePos().x() < cross.x(), "前置：标签应位于光标左侧"
-
-    leaders = [ld for ld in pw._cursor_item_pool["leaders"] if ld.isVisible()]
-    assert leaders, "标签离交点 >8px 时应有引导线"
-    xs, ys = leaders[0].getData()
-    assert len(xs) == 4
-
-    text_width = (
-        pw._cursor_manager._cached_font_metrics.horizontalAdvance(
-            lbl.toPlainText()
-        ) + 12
-    )
-    elbow_scene_x = vb.mapViewToScene(QPointF(xs[1], ys[1])).x()
-    assert abs(elbow_scene_x - (lbl.scenePos().x() + text_width + 6)) < 1e-6
-    # 终点仍回标签左缘
-    label_left_scene = lbl.scenePos().x()
-    end_scene_x = vb.mapViewToScene(QPointF(xs[-1], ys[-1])).x()
-    assert abs(end_scene_x - label_left_scene) < 1e-6
 
 
 def test_pinned_labels_have_no_leader(plot_factory, qapp):
