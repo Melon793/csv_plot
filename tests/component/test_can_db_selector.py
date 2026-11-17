@@ -909,3 +909,95 @@ def test_a_manual_expand_survives_channel_table_rebuilds(qapp, tmp_path):
     finally:
         dlg._shutdown_prescan()
         dlg.deleteLater()
+
+
+def test_load_config_reorders_existing_pool_to_yaml_priority(qapp, tmp_path, monkeypatch):
+    """P1-3（第 5 轮）：载入配置必须把已有池重排成 YAML 顺序。
+
+    YAML 有序池 = 分享者的 first-match 优先级；add_paths 只追加不重排，
+    旧序保留会让同 ID 多库取错赢家（静默解出错误物理值）。YAML 未包含的
+    行保持相对顺序垫底（非破坏性）；显式载入置 _user_edited 防预扫重排。
+    """
+    import yaml
+
+    import src.ui.dialogs.can_db_selector as cds
+    from src.data.can_bindings import CanBindings
+
+    a = str(write_dbc(tmp_path / "a.dbc"))
+    b = str(write_dbc(tmp_path / "b.dbc"))
+    c = str(write_dbc(tmp_path / "c.dbc"))
+    target = tmp_path / "shared.canview.yaml"
+    sharer = CanBindings.from_paths([b, a], {}, {})
+    target.write_text(
+        yaml.safe_dump(sharer.to_yaml_dict(), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    dlg = CanDatabaseSelectorDialog(initial_paths=[a, b, c])
+    try:
+        monkeypatch.setattr(
+            cds.QFileDialog, "getOpenFileName",
+            staticmethod(lambda *a_, **k_: (str(target), "")),
+        )
+        dlg._on_load_config()
+        assert [r.path for r in dlg._rows] == [b, a, c], "池序必须按 YAML 优先级"
+        assert dlg._user_edited is True, "显式载入后预扫自动排序不得覆盖"
+        assert dlg.get_result_config().pool == (b, a, c)
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_load_config_appends_new_paths_then_reorders(qapp, tmp_path, monkeypatch):
+    """P1-3 混合场景：YAML 含当前行以外的新库 → 先追加再整体按 YAML 序重排。"""
+    import yaml
+
+    import src.ui.dialogs.can_db_selector as cds
+    from src.data.can_bindings import CanBindings
+
+    a = str(write_dbc(tmp_path / "a.dbc"))
+    b = str(write_dbc(tmp_path / "b.dbc"))
+    target = tmp_path / "shared.canview.yaml"
+    sharer = CanBindings.from_paths([b, a], {}, {})
+    target.write_text(
+        yaml.safe_dump(sharer.to_yaml_dict(), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    dlg = CanDatabaseSelectorDialog(initial_paths=[a])
+    try:
+        monkeypatch.setattr(
+            cds.QFileDialog, "getOpenFileName",
+            staticmethod(lambda *a_, **k_: (str(target), "")),
+        )
+        dlg._on_load_config()
+        assert [r.path for r in dlg._rows] == [b, a]
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()
+
+
+def test_load_config_duplicate_pool_paths_keep_first_index(qapp, tmp_path, monkeypatch):
+    """复审 NB-2：YAML 池含重复路径时按首次出现索引排序（first-match 语义）。"""
+    import yaml
+
+    import src.ui.dialogs.can_db_selector as cds
+    from src.data.can_bindings import CanBindings
+
+    a = str(write_dbc(tmp_path / "a.dbc"))
+    b = str(write_dbc(tmp_path / "b.dbc"))
+    target = tmp_path / "dup.canview.yaml"
+    sharer = CanBindings.from_paths([b, a, b], {}, {})
+    target.write_text(
+        yaml.safe_dump(sharer.to_yaml_dict(), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    dlg = CanDatabaseSelectorDialog(initial_paths=[a, b])
+    try:
+        monkeypatch.setattr(
+            cds.QFileDialog, "getOpenFileName",
+            staticmethod(lambda *a_, **k_: (str(target), "")),
+        )
+        dlg._on_load_config()
+        assert [r.path for r in dlg._rows] == [b, a]
+    finally:
+        dlg._shutdown_prescan()
+        dlg.deleteLater()

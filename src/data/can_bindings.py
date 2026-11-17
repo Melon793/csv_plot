@@ -159,24 +159,55 @@ class CanBindings:
 
     @classmethod
     def from_yaml_dict(cls, data: Mapping) -> "CanBindings":
-        """读 YAML dict；键一律按 1 基通道理解（写回时同样 1 基）。"""
+        """读 YAML dict；键一律按 1 基通道理解（写回时同样 1 基）。
+
+        形状非法一律抛 ``ValueError``（调用方按「坏配置」降级）：按文件记忆
+        路径只捕 ValueError，抛 AttributeError 会穿透导入链（P1-2，第 5 轮）。
+        """
         by_channel: dict[int, tuple[str, ...]] = {}
         alias: dict[int, str] = {}
-        for raw_ch, entry in (data.get("channels") or {}).items():
+        if not isinstance(data, Mapping):
+            raise ValueError("配置顶层必须是映射")
+        pool_raw = data.get("databases")
+        if pool_raw is None:
+            pool_raw = ()
+        if not isinstance(pool_raw, (list, tuple)):
+            raise ValueError("databases 必须是路径列表")
+        if any(not isinstance(p, str) for p in pool_raw):
+            raise ValueError("databases 含非字符串条目")
+        channels_raw = data.get("channels")
+        if channels_raw is None:
+            channels_raw = {}
+        if not isinstance(channels_raw, Mapping):
+            raise ValueError("channels 必须是映射（通道号 → {databases, alias}）")
+        for raw_ch, entry in channels_raw.items():
             try:
                 ch = int(raw_ch) - 1
             except (TypeError, ValueError):
                 raise ValueError(f"非法通道键：{raw_ch!r}（应为 1 基整数）") from None
             if ch < 0:
                 raise ValueError(f"非法通道键：{raw_ch!r}（应为 ≥ 1）")
-            entry = entry or {}
-            dbs = tuple(str(p) for p in (entry.get("databases") or ()))
+            if entry is None:
+                entry = {}
+            if not isinstance(entry, Mapping):
+                raise ValueError(f"通道 {raw_ch!r} 的配置必须是映射")
+            dbs_raw = entry.get("databases")
+            if dbs_raw is None:
+                dbs_raw = ()
+            if not isinstance(dbs_raw, (list, tuple)):
+                raise ValueError(f"通道 {raw_ch!r} 的 databases 必须是列表")
+            if any(not isinstance(p, str) for p in dbs_raw):
+                raise ValueError(f"通道 {raw_ch!r} 的 databases 含非字符串条目")
+            dbs = tuple(dbs_raw)
             if dbs:
                 # 空列表是「只有别名」的通道，不能当成绑定到空集（= 全部排除）
                 by_channel[ch] = dbs
-            if entry.get("alias"):
-                alias[ch] = str(entry["alias"])
-        return cls.from_paths(data.get("databases") or (), by_channel, alias)
+            raw_alias = entry.get("alias")
+            if raw_alias is not None and not isinstance(raw_alias, str):
+                raise ValueError(f"通道 {raw_ch!r} 的 alias 必须是字符串")
+            if raw_alias:
+                alias[ch] = raw_alias
+        return cls.from_paths(pool_raw, by_channel, alias)
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +269,21 @@ def load_yaml(path: str, blf_path: Optional[str] = None) -> tuple[CanBindings, l
             data = yaml.safe_load(handle)
     except OSError as exc:
         return CanBindings.empty(), [f"配置文件无法读取：{exc}"]
+    except UnicodeDecodeError as exc:
+        # P1-2（第 5 轮）：Windows 记事本等工具可能以 GBK/UTF-16 保存含中文
+        # 别名的配置；不捕则异常穿透导入链，该 BLF 每次导入必失败。
+        return CanBindings.empty(), [f"配置文件不是有效 UTF-8 编码：{exc}"]
     except yaml.YAMLError as exc:
         return CanBindings.empty(), [f"配置文件不是有效 YAML：{exc}"]
+    except RecursionError:
+        # 评审 B1（第 5 轮批次 2）：病态深层嵌套是合法 YAML 语法，但 PyYAML
+        # 递归下降会抛 RecursionError（不是 YAMLError 子类），同样不得穿透。
+        return CanBindings.empty(), ["配置文件嵌套过深，无法解析"]
+    except ValueError as exc:
+        # 复审 BL-1：PyYAML 时间戳构造对越界月/日/时抛裸 ValueError（如未加
+        # 引号的 2020-99-99），超长整数超 CPython 转换上限同理；必须排在
+        # UnicodeDecodeError（其子类）之后。顺带覆盖路径含 NUL 的 ValueError。
+        return CanBindings.empty(), [f"配置文件含非法标量值：{exc}"]
     if not isinstance(data, dict):
         return CanBindings.empty(), ["配置文件顶层必须是映射（schema / databases / channels）"]
 
@@ -249,8 +293,13 @@ def load_yaml(path: str, blf_path: Optional[str] = None) -> tuple[CanBindings, l
         if schema is None:
             issues.append(f"配置缺少 schema，已按 {SCHEMA_VERSION} 读取")
         else:
+            # 复审 BL-2：schema 位可能是别名炸弹（共享嵌套列表），repr 会指数
+            # 展开成数 GB 字符串冻结 GUI 线程。只展示字符串（截断）或类型名。
+            schema_desc = (
+                schema[:80] if isinstance(schema, str) else type(schema).__name__
+            )
             return CanBindings.empty(), [
-                f"配置版本 {schema!r} 不受支持（需要 {SCHEMA_VERSION}）"
+                f"配置版本 {schema_desc!r} 不受支持（需要 {SCHEMA_VERSION}）"
             ]
 
     bases: list[str] = []
@@ -264,19 +313,57 @@ def load_yaml(path: str, blf_path: Optional[str] = None) -> tuple[CanBindings, l
     memo: dict[str, str] = {}
     resolved = dict(data)
     resolved.pop("schema", None)
+    # P1-2（第 5 轮）：形状校验——合法 YAML 但错误形状（标量 channels、
+    # 标量条目、databases 写成单字符串）此前会抛 AttributeError/TypeError
+    # 穿透「不抛异常」契约，或把字符串逐字符迭代成伪库池。一律降级为 issues。
+    raw_dbs = data.get("databases")
+    if raw_dbs is None:
+        raw_dbs = []
+    if not isinstance(raw_dbs, (list, tuple)):
+        issues.append("databases 必须是路径列表（不支持标量/单字符串写法），已忽略")
+        raw_dbs = []
+    if any(not isinstance(p, str) for p in raw_dbs):
+        issues.append("databases 含非字符串条目，已忽略")
     resolved["databases"] = [
-        _resolve_db_path(p, bases, memo) for p in (data.get("databases") or [])
+        _resolve_db_path(p, bases, memo)
+        for p in raw_dbs if isinstance(p, str) and p
     ]
+    raw_channels = data.get("channels")
+    if raw_channels is None:
+        raw_channels = {}
+    if not isinstance(raw_channels, Mapping):
+        issues.append("channels 必须是映射（通道号 → {databases, alias}），已忽略")
+        raw_channels = {}
     channels: dict = {}
-    for raw_ch, entry in (data.get("channels") or {}).items():
-        entry = entry or {}
+    for raw_ch, entry in raw_channels.items():
+        if entry is None:
+            entry = {}
+        if not isinstance(entry, Mapping):
+            issues.append(f"通道 {raw_ch!r} 的配置必须是映射，已忽略")
+            continue
+        dbs = entry.get("databases")
+        if dbs is None:
+            dbs = []
+        if not isinstance(dbs, (list, tuple)):
+            issues.append(f"通道 {raw_ch!r} 的 databases 必须是列表，已忽略")
+            dbs = []
+        if any(not isinstance(p, str) for p in dbs):
+            issues.append(f"通道 {raw_ch!r} 的 databases 含非字符串条目，已忽略")
         item: dict = {
             "databases": [
-                _resolve_db_path(p, bases, memo) for p in (entry.get("databases") or [])
+                _resolve_db_path(p, bases, memo)
+                for p in dbs if isinstance(p, str) and p
             ]
         }
-        if entry.get("alias"):
-            item["alias"] = entry["alias"]
+        alias = entry.get("alias")
+        if alias is not None and not isinstance(alias, str):
+            # YAML 1.1 会把未加引号的 yes/no/on/off 解析成 bool
+            issues.append(
+                f"通道 {raw_ch!r} 的 alias 必须是字符串（yes/no 等请加引号），已忽略"
+            )
+            alias = None
+        if alias:
+            item["alias"] = alias
         channels[raw_ch] = item
     resolved["channels"] = channels
 

@@ -200,3 +200,163 @@ def test_yaml_roundtrip_keeps_alias_only_channels():
     assert loaded.alias == {1: "车身CAN"}
     assert loaded.by_channel == {0: ("p.dbc",)}
     assert loaded == cfg
+
+
+# ---------------------------------------------------------------------------
+# P1-2（第 5 轮）：合法 YAML 但错误形状 / 非 UTF-8 → issues 降级，不抛异常
+# ---------------------------------------------------------------------------
+
+def _write_yaml(tmp_path, text, name="bad.yaml"):
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+@pytest.mark.parametrize("text", [
+    "schema: canview/1\ndatabases: []\nchannels: abc\n",          # 标量 channels
+    "schema: canview/1\ndatabases: []\nchannels:\n  '1': oops\n",  # 标量条目
+    "schema: canview/1\ndatabases: []\nchannels: [a]\n",          # 列表 channels
+    "schema: canview/1\ndatabases: 5\nchannels: {}\n",            # int databases
+])
+def test_load_yaml_malformed_shapes_never_raise(tmp_path, text):
+    cfg, issues = load_yaml(_write_yaml(tmp_path, text))
+    assert cfg.pool == ()
+    assert issues, "坏形状必须给出 issue 而不是静默"
+
+
+def test_load_yaml_scalar_databases_does_not_iterate_chars(tmp_path):
+    """databases 写成单字符串时不得逐字符迭代出伪库池（会覆盖好的记忆）。"""
+    cfg, issues = load_yaml(_write_yaml(
+        tmp_path, "schema: canview/1\ndatabases: p.dbc\nchannels: {}\n"
+    ))
+    assert cfg.pool == ()
+    assert any("列表" in i for i in issues)
+
+
+def test_load_yaml_non_str_alias_is_reported_not_stringified(tmp_path):
+    """YAML 1.1 未加引号的 yes 解析成 bool；不得 str() 成 'True' 别名。"""
+    cfg, issues = load_yaml(_write_yaml(
+        tmp_path,
+        "schema: canview/1\ndatabases: []\nchannels:\n  '1':\n    alias: yes\n",
+    ))
+    assert cfg.alias == {}
+    assert any("alias" in i for i in issues)
+
+
+def test_load_yaml_non_utf8_file_returns_issues(tmp_path):
+    p = tmp_path / "gbk.yaml"
+    p.write_bytes(
+        "schema: canview/1\ndatabases: []\nchannels:\n  '1':\n    alias: 动力\n"
+        .encode("gbk")
+    )
+    cfg, issues = load_yaml(str(p))
+    assert cfg.pool == ()
+    assert any("UTF-8" in i for i in issues)
+
+
+@pytest.mark.parametrize("data", [
+    {"databases": [], "channels": [1]},
+    {"databases": [], "channels": {"1": "oops"}},
+    {"databases": 5, "channels": {}},
+    {"databases": "p.dbc", "channels": {}},
+    {"databases": [], "channels": {"1": {"alias": True}}},
+    {"databases": [], "channels": {"1": {"databases": "p.dbc"}}},
+])
+def test_from_yaml_dict_bad_shapes_raise_valueerror(data):
+    """按文件记忆路径只捕 ValueError：形状非法必须抛 ValueError 而非 AttributeError。"""
+    with pytest.raises(ValueError):
+        CanBindings.from_yaml_dict(data)
+
+
+def test_from_yaml_dict_valid_roundtrip_unchanged():
+    """防御不得误伤合法配置（含别名-only 通道与 1 基转换）。"""
+    cfg = CanBindings.from_paths(
+        ["p.dbc", "q.dbc"], by_channel={0: ["q.dbc"]}, alias={1: "动力CAN"}
+    )
+    assert CanBindings.from_yaml_dict(cfg.to_yaml_dict()) == cfg
+
+
+def test_load_yaml_deep_nesting_returns_issues(tmp_path):
+    """评审 B1：病态深层嵌套是合法 YAML 语法，RecursionError 不得穿透契约。"""
+    cfg, issues = load_yaml(_write_yaml(tmp_path, "[" * 3000 + "]" * 3000))
+    assert cfg.pool == ()
+    assert issues
+
+
+@pytest.mark.parametrize("data", [
+    5,                                                    # 顶层非映射（N1）
+    {"databases": ""},                                    # falsy 标量（N2）
+    {"databases": 0},
+    {"databases": False},
+    {"channels": []},                                     # falsy 非映射（N2）
+    {"databases": [123], "channels": {}},                 # 非 str 池条目（N3）
+    {"databases": [], "channels": {"1": {"databases": [123]}}},
+])
+def test_from_yaml_dict_more_bad_shapes_raise_valueerror(data):
+    with pytest.raises(ValueError):
+        CanBindings.from_yaml_dict(data)
+
+
+def test_from_yaml_dict_none_entry_and_mixed_keys_are_tolerated():
+    """正面护栏：None 条目与 int/str 混合 1 基键是合法手编辑形态，不得误伤。"""
+    cfg = CanBindings.from_yaml_dict({
+        "databases": ["p.dbc"],
+        "channels": {"1": None, 2: {"alias": "动力CAN"}},
+    })
+    assert cfg.pool == ("p.dbc",)
+    assert cfg.alias == {1: "动力CAN"}
+    assert cfg.by_channel == {}
+
+
+@pytest.mark.parametrize("text", [
+    "schema: canview/1\ndatabases: 2020-99-99\nchannels: {}\n",   # 越界月份
+    "schema: canview/1\ndatabases: []\nchannels:\n  '1':\n    alias: 2020-13-01\n",
+    "schema: canview/1\ndatabases: 2020-01-01T25:00:00\nchannels: {}\n",
+])
+def test_load_yaml_invalid_timestamp_scalar_returns_issues(tmp_path, text):
+    """复审 BL-1：PyYAML 时间戳构造抛裸 ValueError，不得穿透契约。"""
+    cfg, issues = load_yaml(_write_yaml(tmp_path, text))
+    assert cfg.pool == ()
+    assert issues
+
+
+def test_load_yaml_huge_integer_returns_issues(tmp_path):
+    """复审 BL-1：超 CPython int 转换上限（4300 位）的数字标量同样降级。"""
+    cfg, issues = load_yaml(_write_yaml(
+        tmp_path, "schema: canview/1\ndatabases: " + "9" * 5000 + "\nchannels: {}\n"
+    ))
+    assert cfg.pool == ()
+    assert issues
+
+
+def test_load_yaml_schema_alias_bomb_message_is_bounded(tmp_path):
+    """复审 BL-2：schema 位别名炸弹的 repr 指数展开不得进错误消息（冻结面）。"""
+    lines = ["x: &l0 [a,a,a,a,a,a,a,a,a]"]
+    for i in range(1, 6):
+        refs = ",".join(["*l%d" % (i - 1)] * 9)
+        lines.append("x%d: &l%d [%s]" % (i, i, refs))
+    lines.append("schema: *l5")
+    lines.append("databases: []")
+    lines.append("channels: {}")
+    cfg, issues = load_yaml(_write_yaml(tmp_path, "\n".join(lines) + "\n"))
+    assert cfg.pool == ()
+    assert issues and "不受支持" in issues[0]
+    assert len(issues[0]) < 200, "错误消息必须只含类型名/截断字符串，不得展开嵌套"
+
+
+def test_load_yaml_channel_falsy_databases_reports_issue(tmp_path):
+    """复审 NB-1：通道层 falsy 标量与顶层同口径——报 issue 而非静默吞掉。"""
+    cfg, issues = load_yaml(_write_yaml(
+        tmp_path,
+        "schema: canview/1\ndatabases: []\nchannels:\n  '1':\n    databases: 0\n",
+    ))
+    assert cfg.by_channel == {}
+    assert any("databases" in i for i in issues)
+
+
+def test_load_yaml_empty_string_db_entry_is_dropped(tmp_path):
+    """复审 NB-3：空字符串库条目不得被解析成配置目录本身混进池。"""
+    cfg, issues = load_yaml(_write_yaml(
+        tmp_path, "schema: canview/1\ndatabases: ['']\nchannels: {}\n"
+    ))
+    assert cfg.pool == ()

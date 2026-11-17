@@ -1197,6 +1197,19 @@ class CanDatabaseSelectorDialog(QDialog):
         cfg, issues = load_yaml(path, self._data_file)
         if cfg.pool:
             self.add_paths(cfg.pool)
+            # P1-3（第 5 轮）：YAML 有序池 = 分享者的优先级意图。add_paths 只
+            # 追加不重排，已有行会保持旧序 → first-match 取错库、静默解出错误
+            # 物理值。按载入顺序重排已有行；YAML 未包含的行保持相对顺序垫底
+            # （不删除，非破坏性）。精确字符串匹配与 add_paths 同口径。
+            order: dict[str, int] = {}
+            for i, p in enumerate(cfg.pool):
+                # setdefault 保留首次出现索引：重复路径按 first-match 语义
+                order.setdefault(normalize_input_path(str(p)), i)
+            self._rows.sort(key=lambda r: order.get(r.path, len(order)))
+            self._rebuild_table()
+            # 显式载入 = 用户意图：预扫完成后的自动排序不得覆盖（与拖拽/勾选
+            # 等手动操作同口径置位）。
+            self._user_edited = True
         pool = set(self._pool_paths())
         self._bindings = {
             ch: tuple(p for p in files if p in pool)
