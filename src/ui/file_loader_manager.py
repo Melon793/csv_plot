@@ -1336,7 +1336,7 @@ class FileLoaderManager(MainWindowBaseManager):
             else:
                 logger.info("后台加载文件 (%.1f MB)", file_size / 1024 / 1024)
 
-                self.mw._thread = DataLoadThread(
+                thread = DataLoadThread(
                     file_path,
                     desc_rows=desc_rows,
                     sep=delimiter_typ,
@@ -1344,6 +1344,11 @@ class FileLoaderManager(MainWindowBaseManager):
                     encoding=encoding,
                     sheet_name=sheet_name,
                 )
+                # P0-1（第 5 轮）：取消 BLF 后立刻导入大 CSV/MDF/Excel 时，
+                # 被取消的 BLF 线程可能还在跑，mw._thread 是它唯一强引用，
+                # 覆盖前必须收编（与 BLF→BLF 分支同口径）。
+                self._keep_alive_old_thread(thread)
+                self.mw._thread = thread
 
                 # ≥2MB 才弹：小文件同步读，弹一次模态反而比加载本身慢
                 self.mw._progress = QProgressDialog(
@@ -1705,21 +1710,8 @@ class FileLoaderManager(MainWindowBaseManager):
             bindings=cfg.normalized_loader_bindings(),
             aliases=cfg.alias_map(),
         )
-        # QThread 的 Python 包装器一丢最后一条强引用就当场析构 C++ 对象，Qt 直接
-        # std::terminate（实测：丢掉运行中线程的唯一引用后继续跑事件循环 →
-        # ``QThread: Destroyed while thread is still running`` + SIGABRT）。
-        # 取消路径刻意不 wait()（不能让 UI 等一个可能还在写大块内存的线程），
-        # 而 ``mw._thread`` 是旧线程的唯一强引用 —— 用户在取消后点「重载」（无
-        # 对话框、按钮已被恢复）就会在这一行覆盖它。先把还在跑的旧线程挂进保活
-        # 列表，等它真正跑完再丢。与 MainWindow._shutdown_var_info_worker
-        # 对变量信息统计线程做的兜底是同一条纪律。
-        refs = self._blf_thread_refs
-        if refs is None:
-            refs = self._blf_thread_refs = []
-        refs[:] = [t for t in refs if t.isRunning()]
-        old = getattr(self.mw, "_thread", None)
-        if old is not None and old is not thread and old.isRunning():
-            refs.append(old)
+        # 覆盖 mw._thread 前先保住还在跑的旧线程（见 _keep_alive_old_thread）
+        self._keep_alive_old_thread(thread)
         self.mw._thread = thread
 
         dialog = QProgressDialog(f"正在扫描 BLF 报文… [{name}]", "取消", 0, 100, self.mw)
@@ -1752,6 +1744,27 @@ class FileLoaderManager(MainWindowBaseManager):
             lambda path: self._on_blf_cancelled(path, is_reload, load_version)
         )
         thread.start()
+
+    def _keep_alive_old_thread(self, new_thread) -> None:
+        """覆盖 ``mw._thread`` 前把还在跑的旧线程收编进保活列表。
+
+        QThread 的 Python 包装器一丢最后一条强引用就当场析构 C++ 对象，Qt 直接
+        std::terminate（实测：丢掉运行中线程的唯一引用后继续跑事件循环 →
+        ``QThread: Destroyed while thread is still running`` + SIGABRT）。
+        取消路径刻意不 wait()（不能让 UI 等一个可能还在写大块内存的线程），
+        而 ``mw._thread`` 是旧线程的唯一强引用 —— 用户在取消后点「重载」（无
+        对话框、按钮已被恢复）就会在赋值行覆盖它。BLF 与非 BLF 后台分支覆盖前
+        都必须走本收编（第 5 轮审查 P0-1：此前只护 BLF→BLF，取消 BLF 后立刻
+        导入 CSV/MDF/Excel 同样会崩）。与 MainWindow._shutdown_var_info_worker
+        对变量信息统计线程做的兜底是同一条纪律。
+        """
+        refs = self._blf_thread_refs
+        if refs is None:
+            refs = self._blf_thread_refs = []
+        refs[:] = [t for t in refs if t.isRunning()]
+        old = getattr(self.mw, "_thread", None)
+        if old is not None and old is not new_thread and old.isRunning():
+            refs.append(old)
 
     def _on_blf_progress(self, value: int, load_version: int = -1) -> None:
         if load_version >= 0 and load_version != self._blf_load_version:

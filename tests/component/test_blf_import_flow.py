@@ -700,6 +700,70 @@ def test_a_cancelled_but_still_running_thread_survives_a_real_reload(
             assert thread.wait(5000), "线程未能收尾"
 
 
+def test_a_cancelled_blf_thread_survives_a_csv_background_import(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """P0-1（第 5 轮）：BLF 取消后立刻导入大 CSV，旧线程同样不能被覆盖析构。
+
+    既有 B-1 守卫只覆盖 BLF→BLF 重载；非 BLF 后台分支（≥2MB 同步阈值以上）
+    直接 ``mw._thread = DataLoadThread(...)`` 覆盖，被取消的 BLF 线程唯一强
+    引用消失 → ``QThread: Destroyed while thread is still running`` + SIGABRT。
+    与 B-1 确定性版本同构：真 QThread 门控 run，以「保活列表成员断言」为
+    确定性守卫（run 期间 Python 栈帧自持 self，gc 压测只是伴随手段）。
+    """
+    import src.ui.file_loader_manager as flm
+    from tests.fixtures.data_factory import write_csv
+
+    host, manager, _threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+
+    made: list[_HeldRealThread] = []
+
+    def _factory(file_path, parent=None, db_paths=None, bindings=None,
+                 aliases=None, **kwargs):
+        thread = _HeldRealThread(file_path, parent=parent, db_paths=db_paths,
+                                 bindings=bindings, aliases=aliases)
+        made.append(thread)
+        return thread
+
+    monkeypatch.setattr(flm, "DataLoadThread", _factory)
+    # ≥2MB 才走后台分支（_Threshold_Size_Mb）：6 万行 × 5 列 ≈ 2.4MB
+    big_csv = write_csv(
+        tmp_path / "big.csv",
+        header=["a", "b", "c", "d", "e"],
+        rows=[[i, i * 0.5, i * 1.5, i * 2.5, i * 3.5] for i in range(60000)],
+    )
+    old_ref: DataLoadThread | None = None
+    try:
+        manager.load_csv_file(str(blf))
+        old = made[0]
+        assert old.entered.wait(2.0), "run() 没进来 = 线程根本没跑起来"
+        _cancel_btn(manager._blf_progress).click()
+        assert old.isRunning() is True, "request_cancel 只置标记，不会让线程立刻退出"
+
+        manager.load_csv_file(str(big_csv))  # CSV 后台分支覆盖 mw._thread
+        assert len(made) == 2, "必须走后台分支（文件需 ≥2MB），否则守卫没测到靶点"
+        old_ref = old
+        del made[0], old
+        gc.collect()                          # 伴随压测；确定性守卫是下面的成员断言
+
+        assert old_ref in manager._blf_thread_refs, "旧 BLF 线程必须被保活列表接住"
+        assert old_ref.isRunning() is True, "gc 后线程还活着（没被 Qt 析构）"
+        assert old_ref is not host._thread
+    finally:
+        progress = getattr(host, "_progress", None)
+        if progress is not None:
+            progress.close()
+        if old_ref is not None:
+            old_ref.release()
+            made.append(old_ref)
+        for thread in made:
+            thread.release()
+        for thread in made:
+            assert thread.wait(5000), "线程未能收尾"
+
+
 # ---------------------------------------------------------------------------
 # C：记忆命中但有文件缺失
 # ---------------------------------------------------------------------------
