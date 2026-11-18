@@ -281,3 +281,16 @@ def transparent_scroll_style() -> str:
         "QScrollArea { background: transparent; border: none; }"
         "QScrollArea > QWidget > QWidget { background: transparent; }"
     )
+
+
+# 表格选中项：显式给出背景/文字色，让 QStyleSheetStyle 接管 item 绘制，
+# 跳过 Windows 11 原生样式在选中项左缘画的 1px 强调色竖条（Qt 的
+# CE_ItemViewItem vertical marker，会压在首字符上）。
+# 颜色走 palette(highlight)/palette(highlighted-text)，跟随系统强调色与
+# 深浅模式；只命中 item，表头/滚动条/未选中项仍走平台绘制。
+TABLE_SELECTION_QSS = (
+    "QTableWidget::item:selected, QTableView::item:selected {"
+    " background-color: palette(highlight);"
+    " color: palette(highlighted-text);"
+    "}"
+)
