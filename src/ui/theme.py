@@ -284,8 +284,8 @@ def transparent_scroll_style() -> str:
 
 
 # 表格选中项：显式给出背景/文字色，让 QStyleSheetStyle 接管 item 绘制，
-# 跳过 Windows 11 原生样式在选中项左缘画的 1px 强调色竖条（Qt 的
-# CE_ItemViewItem vertical marker，会压在首字符上）。
+# 跳过 Windows 11 原生样式在选中项左缘画的 1px 强调色竖条（Qt 6.11 的
+# PE_PanelItemViewRow，QTableView 每格调用一次，会压在首字符上）。
 # 颜色走 palette(highlight)/palette(highlighted-text)，跟随系统强调色与
 # 深浅模式；只命中 item，表头/滚动条/未选中项仍走平台绘制。
 TABLE_SELECTION_QSS = (
@@ -294,3 +294,22 @@ TABLE_SELECTION_QSS = (
     " color: palette(highlighted-text);"
     "}"
 )
+
+# 底层样式名：必须在 QApplication.setStyleSheet 之前记录。设了应用级样式表
+# 之后 app.style() 变成 QStyleSheetStyle 包装层，objectName()/name() 都是
+# 空串，无法再区分底层样式（QStyleSheetStyle 也不暴露 baseStyle）。
+_base_style_name = ""
+
+
+def set_base_style_name(name: str) -> None:
+    global _base_style_name
+    _base_style_name = name or ""
+
+
+def table_selection_qss() -> str:
+    """表格选中接管规则：仅 windows11 样式返回规则，其余返回空串。
+
+    竖条是 Windows 11 样式的行为，Win10（windowsvista）/macOS/Fusion 没有，
+    不该跟着改选中观感；上游修复该样式或样式改名后本规则自动不再生效。
+    """
+    return TABLE_SELECTION_QSS if _base_style_name == "windows11" else ""

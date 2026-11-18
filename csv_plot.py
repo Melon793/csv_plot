@@ -47,6 +47,9 @@ def main():
     # sizeHint / 行高 / 滚动条宽度全部不变，原生绘制不受影响
     from src.ui import theme
 
+    # 设了应用级样式表后 app.style() 的 name 会变空，表格选中接管按底层
+    # 样式名分流，必须在下面这行之前记录
+    theme.set_base_style_name(app.style().objectName())
     app.setStyleSheet(theme.TOOLTIP_QSS)
 
     app.setQuitOnLastWindowClosed(False)

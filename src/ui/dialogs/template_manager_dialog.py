@@ -109,7 +109,7 @@ class TemplateManagerDialog(QDialog):
         )
         # 显式接管选中项绘制：Win11 原生样式会给每个选中单元格左缘画
         # 1px 强调色竖条（压在文字上），见 theme.TABLE_SELECTION_QSS
-        self._table.setStyleSheet(theme.TABLE_SELECTION_QSS)
+        self._table.setStyleSheet(theme.table_selection_qss())
         splitter.addWidget(self._table)
 
         # 详情面板

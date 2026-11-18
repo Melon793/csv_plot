@@ -456,7 +456,7 @@ class DataTableDialog(QMainWindow):
         # 显式接管选中项绘制：Win11 原生样式会给每个选中单元格左缘画
         # 1px 强调色竖条（压在文字上）。设在对话框上，frozen_view /
         # main_view / tab 模式后续新建的 view 都继承同一条规则
-        self.setStyleSheet(theme.TABLE_SELECTION_QSS)
+        self.setStyleSheet(theme.table_selection_qss())
         self.window_geometry = None
         self.scatter_plot_windows = []
         self._skip_close_confirmation = False
