@@ -555,6 +555,12 @@ class MyTableWidget(QTableWidget):
             drag.setHotSpot(drag_hotspot())
 
         drag.exec(Qt.DropAction.MoveAction)
+        # P1-6（第 5 轮）：释放 QDrag/QMimeData/缩略图，防长会话累积；
+        # exec 期间源控件被销毁时 C++ 对象已亡，静默跳过（评审 N1）
+        try:
+            drag.deleteLater()
+        except RuntimeError:
+            pass
 
     def mouseDoubleClickEvent(self, event):
         index = self.indexAt(event.pos())

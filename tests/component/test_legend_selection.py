@@ -242,6 +242,10 @@ class _FakeDrag:
         self.captured["names"] = parse_var_names_from_mimedata(self.mime)
         return Qt.DropAction.MoveAction
 
+    def deleteLater(self):
+        # P1-6（第 5 轮）：真实代码 exec 后释放 QDrag，替身实现该接口
+        pass
+
 
 def test_drag_selected_set_uses_batch_mime(three_curves, monkeypatch):
     import src.ui.widgets.plot_ui_manager as pum

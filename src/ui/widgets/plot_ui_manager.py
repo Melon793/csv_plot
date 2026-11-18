@@ -1093,6 +1093,12 @@ class LegendTextBrowser(QTextBrowser):
             drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
         finally:
             clear_active_legend_drag()
+            # P1-6（第 5 轮）：释放 QDrag/QMimeData/缩略图，防长会话累积；
+            # exec 期间源控件被销毁时 C++ 对象已亡，静默跳过（评审 N1）
+            try:
+                drag.deleteLater()
+            except RuntimeError:
+                pass
 
     # ------------------------------------------------------------------
     # P1 legend 多选：选择集 + 高亮 + 批量入口

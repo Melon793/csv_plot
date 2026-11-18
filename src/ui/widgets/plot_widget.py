@@ -24,6 +24,7 @@ from src.ui.drag_drop import (
     is_active_legend_batch_drag,
     is_copy_modifier,
     is_legend_drag_active,
+    is_shelf_drag_active,
     parse_shelf_mime_payload,
     set_active_legend_drag,
 )
@@ -584,6 +585,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 desired_text = self._build_skip_indicator_text(var_names, action)
             else:
                 desired_text = self._build_indicator_text(var_names, action, already)
+        elif is_shelf_drag_active():
+            # P1-5（第 5 轮）：暂存区来源与 hover 拦截同语义（Alt=复制出 /
+            # 无修饰=移出，判重 skip）。此前漏分支落入变量列表 Shift 轮询，
+            # 120ms 守卫把正确文案覆盖成「释放以添加/替换」。
+            copy_pressed = is_copy_modifier(mods)
+            action = "复制" if copy_pressed else "移动"
+            desired_text = self._build_skip_indicator_text(var_names, action)
         else:
             # 变量列表来源：轮询 Shift（添加/替换切换）
             shift_pressed = bool(mods & Qt.KeyboardModifier.ShiftModifier)
@@ -1305,6 +1313,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             # 场景收尾必须由 _finalize_batch_add(scene=False) 独占：
             # 单条路径不进批量尾巴，会把场景写回隐藏页
             batch = True
+        # P1-4（第 5 轮）：scene=False（隐藏页退回/落地）必须锁住整条
+        # range-change → 交互防抖 → 游标刷新链（_update_axes_for_multi_curve
+        # 无条件跑，sigRangeChanged 会进 event_handler）。与 reload 的
+        # replots_after_loading 置 _is_updating_data 同纪律；try/finally 复位。
+        prev_updating = getattr(self, "_is_updating_data", False)
+        if not scene:
+            self._is_updating_data = True
         try:
             if batch:
                 self._batch_adding = True
@@ -1344,6 +1359,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         finally:
             if batch:
                 self._batch_adding = False
+            if not scene:
+                self._is_updating_data = prev_updating
 
         if batch and result.added:
             self.curves_changed.emit()
@@ -1485,7 +1502,26 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 ci = target.curves.get(var)
                 if ci is None or ci.visible == want:
                     return
-                target._multi_curve_manager.toggle_curve_visibility_by_name(var)
+                # P1-4（第 5 轮）：延迟一拍落地时目标页可能已切走（隐藏）。
+                # toggle 尾部的 update_cursor_label 会写隐藏页场景，须与
+                # _transfer_curves(scene=False) 同纪律置数据锁；可见页不锁。
+                page = getattr(target, "page", None)
+                host = target.window()
+                hidden = (
+                    page is not None
+                    and host is not None
+                    and getattr(host, "current_page", None) is not page
+                )
+                prev = getattr(target, "_is_updating_data", False)
+                if hidden:
+                    target._is_updating_data = True
+                try:
+                    target._multi_curve_manager.toggle_curve_visibility_by_name(var)
+                finally:
+                    if hidden:
+                        target._is_updating_data = prev
+                        # 评审 N-D：游标刷新被锁跳过，显式置脏保证激活补建
+                        target.mark_dirty_for_activation()
             except RuntimeError:
                 logger.debug("legend 拖拽：目标 plot 已销毁，跳过显隐恢复")
 
@@ -2172,6 +2208,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
         finally:
             clear_active_legend_drag()
+            # P1-6（第 5 轮）：释放 QDrag/QMimeData/缩略图，防长会话累积；
+            # exec 期间源控件被销毁时 C++ 对象已亡，静默跳过（评审 N1）
+            try:
+                drag.deleteLater()
+            except RuntimeError:
+                pass
             # QDrag 消费 release → pyqtgraph scene 会残留 dragButtons/
             # clickEvents；不清会让下一次点击被当成「结束上一次拖拽」
             self._reset_scene_drag_state()

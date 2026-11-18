@@ -371,6 +371,13 @@ class CurveShelfWidget(QListWidget):
             )
         finally:
             clear_active_shelf_drag()
+            # P1-6（第 5 轮）：QDrag(self) 的 C++ 所有权挂在源控件下，exec
+            # 返回后不 deleteLater 会连同 QMimeData/缩略图累积到源控件销毁。
+            # exec 期间源控件被销毁时 C++ 对象已亡，静默跳过（评审 N1）。
+            try:
+                drag.deleteLater()
+            except RuntimeError:
+                pass
 
     # ------------------------------------------------------------------
     # 拖入（legend / 变量列表）

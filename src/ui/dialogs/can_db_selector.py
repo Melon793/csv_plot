@@ -156,6 +156,12 @@ class _PoolTable(QTableWidget):
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+        # P1-6（第 5 轮）：释放 QDrag/QMimeData，防反复拖拽累积；
+        # exec 期间源控件被销毁时 C++ 对象已亡，静默跳过（评审 N1）
+        try:
+            drag.deleteLater()
+        except RuntimeError:
+            pass
 
     def dragEnterEvent(self, event):  # noqa: N802 - Qt 命名
         if event.mimeData().hasFormat(_DB_MIME):

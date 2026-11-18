@@ -464,6 +464,10 @@ def test_start_drag_emits_shelf_mime_and_clears_registry(shelf, monkeypatch):
             FakeDrag.exec_actions = actions
             return Qt.DropAction.MoveAction
 
+        def deleteLater(self):
+            # P1-6（第 5 轮）：真实代码 exec 后释放 QDrag，替身实现该接口
+            pass
+
     monkeypatch.setattr(shelf_mod, "QDrag", FakeDrag)
     _drop_into_shelf(widget, build_var_mimedata(["b", "c"]))
     for row in range(widget.count()):
@@ -510,6 +514,10 @@ class _NoopDrag:
 
     def exec(self, actions):
         return Qt.DropAction.IgnoreAction
+
+    def deleteLater(self):
+        # P1-6（第 5 轮）：真实代码 exec 后释放 QDrag，替身实现该接口
+        pass
 
 
 # ---------------------------------------------------------------------------

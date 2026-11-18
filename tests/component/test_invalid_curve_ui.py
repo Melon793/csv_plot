@@ -196,6 +196,9 @@ def test_start_var_drag_proceeds_for_real_curve(plot_factory, monkeypatch):
         def setHotSpot(self, *a): pass
         def exec(self, *a):
             return None
+        def deleteLater(self):
+            # P1-6（第 5 轮）：真实代码 exec 后释放 QDrag，替身实现该接口
+            pass
 
     monkeypatch.setattr("src.ui.widgets.plot_ui_manager.QDrag", _FakeDrag)
     monkeypatch.setattr(

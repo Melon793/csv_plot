@@ -338,6 +338,20 @@ class CursorManager:
         if self._is_cursor_update_locked():
             return
 
+        # P1-4（第 5 轮）：隐藏页一律不写游标场景。同步链已由
+        # _is_updating_data 锁住，但 pyqtgraph 延迟 autoRange / 防抖定时器
+        # 可能在锁释放后才落地，入口须再查页归属（与
+        # cursor_sync_manager._defers_scene_write 同语义：page=None 或宿主
+        # 无 current_page 视为可见；切页激活时 current_page 已是目标页，
+        # refresh_cursor_labels 不受影响）。
+        pw = self.pw
+        page = getattr(pw, "page", None)
+        if page is not None:
+            host = pw.window()
+            current = getattr(host, "current_page", None) if host is not None else None
+            if current is not None and page is not current:
+                return
+
         if self._cursor_label_busy:
             return
 

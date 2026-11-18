@@ -115,6 +115,10 @@ class _FakeDrag:
         }
         return Qt.DropAction.IgnoreAction
 
+    def deleteLater(self):
+        # P1-6（第 5 轮）：真实代码 exec 后释放 QDrag，替身实现该接口
+        self.deleted = True
+
 
 @pytest.fixture()
 def fake_drag(monkeypatch):
