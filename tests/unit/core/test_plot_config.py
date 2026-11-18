@@ -187,3 +187,73 @@ class TestTemplateExceptions:
             TemplateStorageError,
         ):
             assert issubclass(exc_type, TemplateError)
+
+
+class TestCellRowCol:
+    """P1-7（第 5 轮）：(row, col) 坐标可选字段，旧档零回归。"""
+
+    def test_roundtrip_keeps_row_col(self):
+        cfg = PlotConfig(curves=["a"], cell_index=4, cell_row=1, cell_col=1)
+        data = cfg.to_dict()
+        assert data["cell_row"] == 1 and data["cell_col"] == 1
+        restored = PlotConfig.from_dict(data)
+        assert restored == cfg
+
+    def test_old_dict_without_row_col_falls_back_to_none(self):
+        restored = PlotConfig.from_dict({"curves": ["a"], "cell_index": 3})
+        assert restored.cell_index == 3
+        assert restored.cell_row is None and restored.cell_col is None
+        assert "cell_row" not in restored.to_dict()
+
+    def test_malformed_row_col_tolerated_as_none(self):
+        restored = PlotConfig.from_dict(
+            {"curves": [], "cell_row": "abc", "cell_col": {}}
+        )
+        assert restored.cell_row is None and restored.cell_col is None
+
+    def test_row_col_written_only_when_both_present(self):
+        assert "cell_row" not in PlotConfig(curves=[], cell_row=1).to_dict()
+        assert "cell_col" not in PlotConfig(curves=[], cell_col=1).to_dict()
+
+
+class TestMalformedConfigTolerance:
+    """评审 B1（第 5 轮批次 4）：手写畸形档在 from_dict 层收口。"""
+
+    def test_curves_null_or_scalar_becomes_empty_list(self):
+        assert PlotConfig.from_dict({"curves": None}).curves == []
+        assert PlotConfig.from_dict({"curves": "speed"}).curves == []
+
+    def test_non_dict_plots_are_skipped(self):
+        page = PlotPageConfig.from_dict(
+            {"plots": ["speed", {"curves": ["rpm"]}, 5]}
+        )
+        assert [p.curves for p in page.plots] == [["rpm"]]
+        session = PlotSessionConfig.from_dict({"plots": ["speed", {"curves": []}]})
+        assert len(session.plots) == 1
+
+    def test_non_dict_factors_tolerated(self):
+        page = PlotPageConfig.from_dict({"row_height_factors": "abc", "plots": []})
+        assert page.row_height_factors == {}
+
+    def test_invalid_int_still_raises_valueerror_for_entry_catch(self):
+        import pytest
+        with pytest.raises(ValueError):
+            PlotPageConfig.from_dict({"layout_rows": "abc", "plots": []})
+
+    def test_curves_elements_are_stringified(self):
+        """复审 BL-3：数字通道名 str 化后可匹配；unhashable/null 不得逃槽。"""
+        cfg = PlotConfig.from_dict({"curves": [123, None, ["x"], {"n": 1}]})
+        assert cfg.curves[0] == "123"
+        assert None not in cfg.curves
+        assert all(isinstance(c, str) for c in cfg.curves)
+
+    def test_invalid_curves_scalar_becomes_empty(self):
+        assert PlotConfig.from_dict({"invalid_curves": "abc"}).invalid_curves == []
+        assert PlotConfig.from_dict({"invalid_curves": 5}).invalid_curves == []
+
+    def test_v1_top_level_layout_invalid_raises_in_from_dict(self):
+        import pytest
+        with pytest.raises(ValueError):
+            PlotSessionConfig.from_dict({"layout_rows": "abc", "plots": []})
+        # null 键存在时 or 1 兜底（与页级同口径）
+        assert PlotSessionConfig.from_dict({"layout_rows": None}).layout_rows == 1

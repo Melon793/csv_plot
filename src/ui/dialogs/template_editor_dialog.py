@@ -320,6 +320,16 @@ class TemplateEditorDialog(QDialog):
                         lines.append(f"        cell_index: {int(cell_index)}")
                     except (TypeError, ValueError):
                         pass
+                # P1-7（第 5 轮）：row/col 与 cell_index 同契约——漏写等于
+                # 「编辑 → 保存」抹掉跨 stride 对位信息，套用重新错位/丢弃
+                cell_row = plot.get("cell_row")
+                cell_col = plot.get("cell_col")
+                if cell_row is not None and cell_col is not None:
+                    try:
+                        lines.append(f"        cell_row: {int(cell_row)}")
+                        lines.append(f"        cell_col: {int(cell_col)}")
+                    except (TypeError, ValueError):
+                        pass
 
         return "\n".join(lines) + "\n"
 
@@ -464,9 +474,19 @@ class TemplateEditorDialog(QDialog):
 
         # P1-L：导出端为稀疏格子记了 cell_index，预览必须按它落位；
         # 旧档无该字段时回退 enumerate 对位（与 apply 端口径一致）
+        # P1-7（第 5 轮）：row/col 优先——预览网格步长是可见 cols，
+        # cell_index 的 built stride 在扩后缩场景会错位（与 apply 端同口径）
         cell_plots = {}
         for fallback_index, plot in enumerate(plots):
             if not isinstance(plot, dict):
+                continue
+            cr, cc = plot.get("cell_row"), plot.get("cell_col")
+            if (
+                isinstance(cr, int) and not isinstance(cr, bool)
+                and isinstance(cc, int) and not isinstance(cc, bool)
+                and cr >= 0 and cc >= 0
+            ):
+                cell_plots.setdefault(cr * cols + cc, plot)
                 continue
             ci = plot.get("cell_index")
             if isinstance(ci, int) and not isinstance(ci, bool) and ci >= 0:
@@ -636,7 +656,13 @@ class TemplateEditorDialog(QDialog):
                 QMessageBox.warning(self, "警告", error)
                 return
 
-            session_config = PlotSessionConfig.from_dict(config)
+            try:
+                session_config = PlotSessionConfig.from_dict(config)
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                # P1-8（第 5 轮）：_validate_config_for_save 未覆盖的非法 int
+                # 字段不得让异常逃出保存槽
+                QMessageBox.warning(self, "警告", f"配置无法解析：{exc}")
+                return
             page_count = len(session_config.normalized_pages())
             session_config.active_page = min(
                 max(session_config.active_page, 0), page_count - 1

@@ -118,6 +118,9 @@ class PlotConfigManager(QObject):
             invalid_names = strategy.get_invalid_curve_names()
             # 判空口径含占位（§8.2/R16）：纯占位格子也是用户资产，不得静默丢弃
             if curve_names or invalid_names:
+                # P1-7（第 5 轮）：同时记 (row, col)——cell_index 的扁平步长是
+                # 导出端 built stride，跨会话/缩列后与目标页不一致会错位丢弃
+                row, col = divmod(index, page.grid_cols)
                 page_config.plots.append(
                     PlotConfig(
                         curves=list(curve_names),
@@ -125,6 +128,8 @@ class PlotConfigManager(QObject):
                         # P1-L：记真实格子索引——空格子不进列表，套用端按
                         # enumerate 对位会错位（上轮 P1-10，多页语境下页内错位）
                         cell_index=index,
+                        cell_row=row,
+                        cell_col=col,
                     )
                 )
         return page_config
@@ -238,6 +243,29 @@ class PlotConfigManager(QObject):
                     # P1-L：优先按 cell_index 落位（导出端记录的真实格子索引）；
                     # 旧档无该字段（None）时回退 enumerate 对位（旧行为，零回归）
                     cell = plot_config.cell_index
+                    # P1-7（第 5 轮）：row/col 与 stride 无关，优先按目标页
+                    # built stride 换算，修复跨会话/缩列后的错位与越界丢弃
+                    if (
+                        plot_config.cell_row is not None
+                        and plot_config.cell_col is not None
+                    ):
+                        # 评审 B2：目标机容量钳制（cols_max < 模板列数）时
+                        # col 可能 ≥ grid_cols，直接换算会回绕到下一行错位
+                        # 覆盖；越界显式跳过（row 越界由下方 cell 校验兜底）
+                        if (
+                            plot_config.cell_row < 0
+                            or plot_config.cell_col < 0
+                            or plot_config.cell_col >= page.grid_cols
+                        ):
+                            logger.warning(
+                                "Plot[%d] cell_row/col=%s/%s 超出目标页网格，跳过",
+                                index, plot_config.cell_row, plot_config.cell_col,
+                            )
+                            continue
+                        cell = (
+                            plot_config.cell_row * page.grid_cols
+                            + plot_config.cell_col
+                        )
                     if cell is not None:
                         if (
                             cell < 0
@@ -496,7 +524,12 @@ class PlotConfigManager(QObject):
             logger.error("❌ 找不到模板: %s", template_id)
             return False
 
-        config = PlotSessionConfig.from_dict(template.config)
+        try:
+            config = PlotSessionConfig.from_dict(template.config)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # P1-8（第 5 轮）：手写/损坏档的非法 int 字段不得让异常逃出 Qt 槽
+            logger.error("模板[%s]配置解析失败: %s", template_id, exc)
+            return False
 
         if check_match and current_vars is not None:
             ratio, matched, unmatched = self.check_template_match(

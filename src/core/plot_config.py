@@ -22,28 +22,58 @@ class PlotConfig:
     #: 前移错位。可选字段——仅非 None 才写键；旧档缺省 None，套用端回退
     #: enumerate 对位（旧行为，零回归）。
     cell_index: int | None = None
+    #: P1-7（第 5 轮）：格子的 (行, 列) 坐标。cell_index 是导出端「已建网格」
+    #: 的扁平索引，built stride 与可见列数不一致时（扩后缩、页 1 满容量建矩阵、
+    #: 页重排）跨会话恢复会错位/越界丢弃。row/col 与 stride 无关，套用端按目标
+    #: 页 grid_cols 换算。可选字段——仅非 None 才写键；旧档缺省回退 cell_index
+    #: （旧行为，零回归）。
+    cell_row: int | None = None
+    cell_col: int | None = None
 
     def to_dict(self) -> dict:
-        """序列化为字典（invalid_curves/cell_index 仅有值才写，保持旧档兼容）"""
+        """序列化为字典（invalid_curves/cell_index/cell_row/cell_col 仅有值才写，保持旧档兼容）"""
         data = {"curves": self.curves}
         if self.invalid_curves:
             data["invalid_curves"] = list(self.invalid_curves)
         if self.cell_index is not None:
             data["cell_index"] = int(self.cell_index)
+        if self.cell_row is not None and self.cell_col is not None:
+            data["cell_row"] = int(self.cell_row)
+            data["cell_col"] = int(self.cell_col)
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlotConfig":
-        """从字典反序列化（缺省 invalid_curves 容错为空列表；cell_index 容错 None）"""
+        """从字典反序列化（缺省 invalid_curves 容错为空列表；cell_index/cell_row/cell_col 容错 None）"""
         raw_cell = data.get("cell_index")
         try:
             cell_index = None if raw_cell is None else int(raw_cell)
         except (TypeError, ValueError):
             cell_index = None
+        try:
+            raw_row, raw_col = data.get("cell_row"), data.get("cell_col")
+            cell_row = None if raw_row is None else int(raw_row)
+            cell_col = None if raw_col is None else int(raw_col)
+        except (TypeError, ValueError):
+            cell_row = cell_col = None
+        curves = data.get("curves") or []
+        if not isinstance(curves, list):
+            # 评审 B1：curves: null / 标量不得让下游 set.update 抛 TypeError
+            curves = []
+        # 复审 BL-3：元素级守卫——数字通道名（YAML 未加引号）str 化后仍能
+        # 与 var_names 匹配；null 丢弃；unhashable（list/dict）str 化避免
+        # check_template_match / _show_match_low_dialog 在入口 try 外抛 TypeError
+        curves = [str(c) for c in curves if c is not None]
+        invalid = data.get("invalid_curves") or []
+        if not isinstance(invalid, list):
+            invalid = []
+        invalid = [str(c) for c in invalid if c is not None]
         return cls(
-            curves=data.get("curves", []),
-            invalid_curves=data.get("invalid_curves", []) or [],
+            curves=curves,
+            invalid_curves=invalid,
             cell_index=cell_index,
+            cell_row=cell_row,
+            cell_col=cell_col,
         )
 
 
@@ -72,16 +102,26 @@ class PlotPageConfig:
     @classmethod
     def from_dict(cls, data: dict) -> "PlotPageConfig":
         # JSON 会把 int 键序列化成字符串；YAML 正常，但旧档可能被手工编辑过
+        factors_raw = data.get("row_height_factors") or {}
+        if not isinstance(factors_raw, dict):
+            # 评审 B1：手写档 factors 写成标量时 .items() 抛 AttributeError
+            factors_raw = {}
         factors = {
             int(row): int(value)
-            for row, value in (data.get("row_height_factors") or {}).items()
+            for row, value in factors_raw.items()
         }
         return cls(
             title=str(data.get("title", "") or ""),
             layout_rows=int(data.get("layout_rows", 1) or 1),
             layout_cols=int(data.get("layout_cols", 1) or 1),
             row_height_factors=factors,
-            plots=[PlotConfig.from_dict(p) for p in data.get("plots", []) or []],
+            # 评审 B1：非 dict plot（如 plots: ["speed"]）对齐预览端
+            # _iter_config_plots 的跳过口径，不得抛 AttributeError
+            plots=[
+                PlotConfig.from_dict(p)
+                for p in (data.get("plots") or [])
+                if isinstance(p, dict)
+            ],
         )
 
 
@@ -170,12 +210,18 @@ class PlotSessionConfig:
             for page in (data.get("pages") or [])
             if isinstance(page, dict)
         ]
-        plots = [PlotConfig.from_dict(p) for p in data.get("plots", []) or []]
+        plots = [
+            PlotConfig.from_dict(p)
+            for p in (data.get("plots") or [])
+            if isinstance(p, dict)
+        ]
         mark_range = data.get("saved_mark_range")
         return cls(
             created_at=data.get("created_at", ""),
-            layout_rows=data.get("layout_rows", 1),
-            layout_cols=data.get("layout_cols", 1),
+            # 复审 BL-3：v1 顶层 layout 与页级同口径 int 收口——非法即抛
+            # ValueError 落入入口 except，不得留到 try 外的 normalized_pages
+            layout_rows=int(data.get("layout_rows", 1) or 1),
+            layout_cols=int(data.get("layout_cols", 1) or 1),
             time_factor=data.get("time_factor", 1.0),
             time_offset=data.get("time_offset", 0.0),
             plots=plots,

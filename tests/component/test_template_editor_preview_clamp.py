@@ -154,3 +154,31 @@ def test_yaml_regeneration_carries_cell_index():
     }
     text = TemplateEditorDialog._generate_yaml_with_comments(config)
     assert "cell_index: 1" in text
+
+
+def test_editor_roundtrip_keeps_cell_row_col():
+    """P1-7 复审 BL-1（第 5 轮）：编辑器「打开 → 保存」全文再生成必须携带
+    cell_row/cell_col，漏写等于抹掉跨 stride 对位信息，套用重新错位。"""
+    import yaml
+
+    from src.core.plot_config import PlotSessionConfig
+
+    config = {
+        "pages": [
+            {
+                "title": "p",
+                "layout_rows": 2,
+                "layout_cols": 2,
+                "plots": [
+                    {"curves": ["speed"], "cell_index": 3,
+                     "cell_row": 1, "cell_col": 0},
+                ],
+            }
+        ]
+    }
+    text = TemplateEditorDialog._generate_yaml_with_comments(config)
+    assert "cell_row: 1" in text and "cell_col: 0" in text
+    restored = PlotSessionConfig.from_dict(yaml.safe_load(text))
+    plot = restored.normalized_pages()[0].plots[0]
+    assert (plot.cell_row, plot.cell_col) == (1, 0)
+    assert plot.cell_index == 3

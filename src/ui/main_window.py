@@ -2022,7 +2022,16 @@ class MainWindow(QMainWindow):
             return
         if self.reject_when_loading("套用模板"):
             return
-        config = PlotSessionConfig.from_dict(template.config)
+        try:
+            config = PlotSessionConfig.from_dict(template.config)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # P1-8（第 5 轮）：畸形模板（非法 layout_rows/行高因子等）不得让
+            # 异常逃出菜单 triggered 槽（打包形态可致 abort）；预览端
+            # iter_template_pages 本就容错，应用端同口径降级为警告。
+            QMessageBox.warning(
+                self, "模板损坏", f"模板[{name}]配置无法解析：{exc}"
+            )
+            return
         current_vars = list(self.loader.var_names)
         ratio, matched, unmatched = self.plot_config_manager.check_template_match(
             config, current_vars
