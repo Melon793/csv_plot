@@ -75,6 +75,36 @@ def test_axis_segment_reports_axis_then_the_active_correction(loaded_window):
     assert mw._axis_segment.text() == "x轴：time (s)（比例系数:0.01, 偏移量:5）"
 
 
+def test_template_apply_refreshes_axis_segment(loaded_window):
+    """模板/自动恢复带非默认基准：套用后状态栏必须立刻带出系数与偏移。
+
+    状态栏 x 轴段是缓存文案（只在加载收尾与抽屉应用时重算），抽屉则是打开
+    时现读 mw.factor。apply_config 曾经只写全局值不刷新，现场表现就是
+    "抽屉里 0.1、底部还停在 x轴：Index"。
+    """
+    from src.core.plot_config import PlotSessionConfig
+
+    mw = loaded_window
+    mw._update_axis_segment()
+    assert "比例系数" not in mw._axis_segment.text(), "前置：默认基准下不显示系数"
+
+    config = PlotSessionConfig.from_dict(
+        {
+            "layout_rows": 1,
+            "layout_cols": 1,
+            "time_factor": 0.1,
+            "time_offset": 0.0,
+            "plots": [{"curves": ["speed"]}],
+        }
+    )
+    assert mw.plot_config_manager.apply_config(mw, config) is True
+
+    assert mw.factor == pytest.approx(0.1)
+    assert "（比例系数:0.1, 偏移量:0）" in mw._axis_segment.text(), (
+        "模板写入了全局基准却没补刷状态栏缓存文案"
+    )
+
+
 def test_segments_are_clickable(main_window):
     """两段可点击：手型光标 + clicked 信号（点开抽屉的行为另有整链用例）。"""
     from PySide6.QtGui import QMouseEvent

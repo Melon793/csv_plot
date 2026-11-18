@@ -292,6 +292,10 @@ class PlotConfigManager(QObject):
             # 全局时间基准：所有页都要重算数据层，隐藏页由 scene=False 分级
             main_window.factor = config.time_factor
             main_window.offset = config.time_offset
+            # 状态栏 x 轴段是缓存文案，只在加载收尾/抽屉应用时重算；模板与
+            # auto-save 套用同样改了全局基准，必须同规格补刷，否则抽屉
+            # 现读 mw.factor 显示 0.1、底部还停在"x轴：Index"
+            self._refresh_axis_segment(main_window)
 
             needs_time_recompute = (
                 config.time_factor != 1.0 or config.time_offset != 0.0
@@ -365,6 +369,21 @@ class PlotConfigManager(QObject):
             logger.error("❌ 应用配置失败: %s", e, exc_info=True)
             return False
 
+    @staticmethod
+    def _refresh_axis_segment(main_window) -> None:
+        """补刷状态栏 x 轴段（缓存文案）。
+
+        替身可无该方法；补刷是装饰性的，控件已销毁等异常也不能把已经
+        落地的模板套用变成「应用失败」——它发生在 factor/offset 写入之后。
+        """
+        update = getattr(main_window, "_update_axis_segment", None)
+        if not callable(update):
+            return
+        try:
+            update()
+        except Exception:
+            logger.debug("补刷状态栏 x 轴段失败", exc_info=True)
+
     def _apply_single_page_config(self, main_window, config: PlotSessionConfig) -> bool:
         """旧式替身（无 pages）：保持原先单页应用路径。"""
         main_window.layout_manager.set_plots_visible(
@@ -372,6 +391,7 @@ class PlotConfigManager(QObject):
         )
         main_window.factor = config.time_factor
         main_window.offset = config.time_offset
+        self._refresh_axis_segment(main_window)
 
         applied_count = 0
         visible_containers = [c for c in main_window.plot_widgets if not c.isHidden()]
