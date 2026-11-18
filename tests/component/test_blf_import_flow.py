@@ -765,6 +765,104 @@ def test_a_cancelled_blf_thread_survives_a_csv_background_import(
 
 
 # ---------------------------------------------------------------------------
+# P1-10（第 5 轮）：F 回环重开遇入口早退必须收口残留标志/暂存 loader
+# ---------------------------------------------------------------------------
+
+def test_f_loop_early_exit_clears_flags_and_pending(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """F 回环（_restart_blf_import → load_csv_file）遇文件消失/尺寸拒绝时，
+    _blf_force_dialog/_blf_preset_cfg/_blf_pending_loader 不得残留：
+    残留会劫持下一次任意 BLF 导入进 F 分支，配置恰相同则静默取消导入，
+    暂存报文桶（可能几百 MB）无限期滞留（probe E5 实测）。"""
+    import src.ui.file_loader_manager as flm
+    from src.data.can_bindings import CanBindings
+
+    host, manager, _threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    for m in ("warning", "critical", "question"):
+        monkeypatch.setattr(
+            flm.QMessageBox, m, staticmethod(lambda *a, **k: None)
+        )
+
+    # 模拟 _on_blf_done F 路径置位后的状态
+    manager._blf_force_dialog = True
+    manager._blf_preset_cfg = CanBindings.from_paths([str(dbc)], {}, {})
+    pending = _make_loader(blf, dbc)
+    manager._blf_pending_loader = pending
+
+    # 文件已消失 → _validate_file_path 早退
+    manager.load_csv_file(str(tmp_path / "gone.blf"))
+    assert manager._blf_force_dialog is False
+    assert manager._blf_preset_cfg is None
+    assert manager._blf_pending_loader is None
+    assert pending._closed is True, "暂存桶必须真释放（close），不得只置 None"
+
+
+def test_f_loop_size_refusal_clears_flags_and_pending(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """>1GB 确认框答 No（_check_file_size 早退）同口径收口。"""
+    import os
+
+    import src.ui.file_loader_manager as flm
+    from src.data.can_bindings import CanBindings
+
+    host, manager, _threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    monkeypatch.setattr(
+        flm.QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+    )
+    monkeypatch.setattr(
+        flm.QMessageBox, "warning", staticmethod(lambda *a, **k: None)
+    )
+    manager._blf_force_dialog = True
+    manager._blf_preset_cfg = CanBindings.from_paths([str(dbc)], {}, {})
+    pending = _make_loader(blf, dbc)
+    manager._blf_pending_loader = pending
+
+    big = tmp_path / "big.blf"
+    big.write_bytes(b"")
+    os.truncate(str(big), 1024 * 1024 * 1024 + 1)  # 稀疏文件，不占磁盘
+    manager.load_csv_file(str(big))
+    assert manager._blf_force_dialog is False
+    assert manager._blf_preset_cfg is None
+    assert manager._blf_pending_loader is None
+    assert pending._closed is True
+
+
+def test_f_loop_loading_guard_exit_clears_flags(
+    blf_flow, tmp_path, remembered, dialogs, monkeypatch
+):
+    """第三个早退点：_is_loading_new_data 守卫（评审 N3）。"""
+    import src.ui.file_loader_manager as flm
+    from src.data.can_bindings import CanBindings
+
+    host, manager, _threads = blf_flow
+    blf, dbc = write_blf_pair(tmp_path, n=16, buses=(0,))
+    remembered([str(dbc)])
+    monkeypatch.setattr(
+        flm.QMessageBox, "warning", staticmethod(lambda *a, **k: None)
+    )
+    manager._blf_force_dialog = True
+    manager._blf_preset_cfg = CanBindings.from_paths([str(dbc)], {}, {})
+    pending = _make_loader(blf, dbc)
+    manager._blf_pending_loader = pending
+    host._is_loading_new_data = True
+    try:
+        manager.load_csv_file(str(blf))
+    finally:
+        host._is_loading_new_data = False
+    assert manager._blf_force_dialog is False
+    assert manager._blf_preset_cfg is None
+    assert manager._blf_pending_loader is None
+    assert pending._closed is True
+
+
+# ---------------------------------------------------------------------------
 # C：记忆命中但有文件缺失
 # ---------------------------------------------------------------------------
 

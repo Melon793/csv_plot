@@ -14,7 +14,7 @@ import types
 
 import pandas as pd
 import pytest
-from PySide6.QtCore import QByteArray, QSize
+from PySide6.QtCore import QByteArray, QSize, Qt
 
 from src.core.settings import ConfigKey
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -131,3 +131,43 @@ def test_fixed_columns_content_sized(editor_host):
         width = dlg.var_table.columnWidth(col)
         assert width >= minimum, f"列 {col} 宽度 {width} 低于下限 {minimum}"
     assert dlg._columns_sized is True
+
+
+@pytest.mark.parametrize("state", ["isMinimized", "isMaximized"])
+def test_minimized_or_maximized_close_does_not_save_geometry(
+    editor_host, app_settings, qapp, monkeypatch, state
+):
+    """P1-9（第 5 轮）：最小化/最大化态关窗不得把窗口状态存盘（下次开窗丢窗）。
+
+    offscreen 平台不真实呈现最小化态，用替身钉住状态判定分支；
+    与 curve_shelf / mark_stats / table_dialog 的守卫同口径。
+    """
+    dlg, _pw, _host = editor_host
+    dlg.show()
+    qapp.processEvents()
+    monkeypatch.setattr(dlg, state, lambda: True)
+    dlg.close()
+    qapp.processEvents()
+    assert app_settings.get_plot_variable_editor_geometry() is None, (
+        f"{state} 态关窗必须跳过几何保存"
+    )
+
+
+def test_restore_self_rescues_minimized_legacy_geometry(
+    editor_host, app_settings, qapp, monkeypatch
+):
+    """P1-9 评审 N1：旧脏存档（含最小化态）restore 成功后必须自救还原，
+    否则存档进入吸收态（开窗即最小化 → 关窗跳过保存 → 永远脏）。
+    与 mark_stats.load_geom 强制 WindowNoState 同款。"""
+    dlg, _pw, _host = editor_host
+    dlg.show()
+    dlg.resize(650, 480)
+    qapp.processEvents()
+    dlg._save_geometry()  # 正常态存档
+    calls = []
+    monkeypatch.setattr(dlg, "isMinimized", lambda: True)
+    monkeypatch.setattr(dlg, "setWindowState", lambda s: calls.append(s))
+    dlg._restore_geometry()
+    assert calls and calls[0] == Qt.WindowState.WindowNoState, (
+        "restore 出最小化态必须强制 WindowNoState 自救"
+    )

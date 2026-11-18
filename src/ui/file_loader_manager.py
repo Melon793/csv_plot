@@ -954,14 +954,19 @@ class FileLoaderManager(MainWindowBaseManager):
 
         if getattr(self.mw, "_is_loading_new_data", False):
             self.mw.load_btn.setEnabled(True)
+            # P1-10（第 5 轮）：F 回环重开走本入口，任何早退都必须收口残留
+            # 标志/暂存 loader（_restart_blf_import docstring 自述的契约）
+            self._give_up_blf_restart()
             return
 
         if not self._validate_file_path(file_path):
             self.mw.load_btn.setEnabled(True)
+            self._give_up_blf_restart()
             return
 
         if not self._check_file_size(file_path):
             self.mw.load_btn.setEnabled(True)
+            self._give_up_blf_restart()
             return
 
         try:
@@ -970,9 +975,12 @@ class FileLoaderManager(MainWindowBaseManager):
             self._report_load_failure("内存不足", "文件太大，内存不足。请尝试加载较小的文件。")
             # 内存不足是唯一允许连带释放旧数据的失败：不腾出内存连重试都做不了
             self._abort_load_after_failure(e, "内存不足退出", release_old=True)
+            self._give_up_blf_restart()
         except Exception as e:
             self._report_load_failure("加载错误", f"加载文件时发生错误: {str(e)}")
             self._abort_load_after_failure(e, "加载失败退出")
+            # P1-10（第 5 轮）：异常出口同属 F 回环出口，标志/暂存桶同口径收口
+            self._give_up_blf_restart()
         finally:
             mw = self._live_mw()
             if mw is not None:

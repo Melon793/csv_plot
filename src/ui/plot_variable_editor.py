@@ -457,6 +457,11 @@ class PlotVariableEditorDialog(QDialog):
             and self.restoreGeometry(geometry)
             and self._geometry_on_screen()
         ):
+            # P1-9（第 5 轮）：旧脏存档自救——存档含最小化态时 restore 成功
+            # 且 normalGeometry 在屏内会提前 return，窗口保持最小化（丢窗）；
+            # 与 mark_stats.load_geom 末尾强制 WindowNoState 同款。
+            if self.isMinimized():
+                self.setWindowState(Qt.WindowState.WindowNoState)
             return
 
         # 自适应初始宽：固定列实际宽 + 变量名列最小宽 + 表格边框与
@@ -475,6 +480,12 @@ class PlotVariableEditorDialog(QDialog):
             )
 
     def _save_geometry(self):
+        # P1-9（第 5 轮）：最小化/最大化时 saveGeometry 会把窗口状态一并存盘，
+        # 下次开窗直接以最小化出现（等于丢窗）；同 curve_shelf / mark_stats
+        # 口径跳过（table_dialog 只 guard 最小化、最大化属用户偏好，编辑器
+        # 是 Tool 窗，跟随多数派）。
+        if self.isMinimized() or self.isMaximized():
+            return
         from src.core.settings import AppSettings
 
         AppSettings().set_plot_variable_editor_geometry(self.saveGeometry())
