@@ -700,7 +700,11 @@ class CursorManager:
 
                     y_val = y_data[idx]
                     x_actual = x_data[idx]
-                    if np.isnan(x_actual) or np.isnan(y_val):
+                    # P1-1（第 5 轮）：inf 与 NaN 同口径跳过。边缘吸附把出界
+                    # 样本保留入列后，inf 会落到格式化分支：enum 的 int(inf)
+                    # 抛 OverflowError、时间格式 inf%86400→nan 抛 ValueError，
+                    # 被整帧 except 吞掉 → 所有曲线标签全灭（probe E1 实测）。
+                    if not np.isfinite(x_actual) or not np.isfinite(y_val):
                         continue
                     # Y 出界：circle 仍不画（维持现状）；开启边缘吸附时标签
                     # 仍入列并标记 pinned，ideal 在布局阶段改写为视口边缘。
