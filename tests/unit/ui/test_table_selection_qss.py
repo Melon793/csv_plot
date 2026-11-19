@@ -20,6 +20,16 @@ def test_disables_win11_focus_ring_for_both_views():
     assert "QTableWidget, QTableView { outline: 0; }" in theme.TABLE_SELECTION_QSS
 
 
+def test_item_view_outline_only_on_windows11(monkeypatch):
+    monkeypatch.setattr(theme, "_base_style_name", "windows11")
+    assert (
+        theme.item_view_outline_qss("QTableWidget")
+        == "QTableWidget { outline: 0; }"
+    )
+    monkeypatch.setattr(theme, "_base_style_name", "macos")
+    assert theme.item_view_outline_qss("QTableWidget") == ""
+
+
 def test_set_base_style_name_normalizes_empty(monkeypatch):
     monkeypatch.setattr(theme, "_base_style_name", "")
     theme.set_base_style_name(None)

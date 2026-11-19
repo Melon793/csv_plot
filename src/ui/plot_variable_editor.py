@@ -197,6 +197,7 @@ class PlotVariableEditorDialog(QDialog):
             QCheckBox {{
                 font-size: 12px;
             }}
+            {theme.item_view_outline_qss("QTableWidget")}
         """)
 
         # 设置列宽

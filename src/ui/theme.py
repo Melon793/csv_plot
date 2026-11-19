@@ -317,3 +317,12 @@ def table_selection_qss() -> str:
     不该跟着改选中观感；上游修复该样式或样式改名后本规则自动不再生效。
     """
     return TABLE_SELECTION_QSS if _base_style_name == "windows11" else ""
+
+
+def item_view_outline_qss(selector: str = "QTableWidget, QTableView") -> str:
+    """仅 windows11：关掉 item view 的焦点框（外黑内白圆角，会压住当前格）。
+
+    组件自带 ::item:selected 样式时（如绘图变量编辑器），焦点框仍需单独
+    关闭；非 Win11 样式没有这条框，返回空串。
+    """
+    return f"{selector} {{ outline: 0; }}" if _base_style_name == "windows11" else ""
