@@ -15,6 +15,11 @@ def test_skips_other_styles(monkeypatch):
         assert theme.table_selection_qss() == ""
 
 
+def test_disables_win11_focus_ring_for_both_views():
+    # 焦点框是 PE_FrameFocusRect，QSS 的 ::item 规则管不到，必须显式 outline: 0
+    assert "QTableWidget, QTableView { outline: 0; }" in theme.TABLE_SELECTION_QSS
+
+
 def test_set_base_style_name_normalizes_empty(monkeypatch):
     monkeypatch.setattr(theme, "_base_style_name", "")
     theme.set_base_style_name(None)

@@ -288,11 +288,15 @@ def transparent_scroll_style() -> str:
 # PE_PanelItemViewRow，QTableView 每格调用一次，会压在首字符上）。
 # 颜色走 palette(highlight)/palette(highlighted-text)，跟随系统强调色与
 # 深浅模式；只命中 item，表头/滚动条/未选中项仍走平台绘制。
+# outline: 0 关掉 Win11 焦点框（外黑内白圆角，PE_FrameFocusRect 不受
+# ::item 规则约束），它原本会压住选中格四边并侵入文字区；当前格仍由
+# 实心选中色标识。
 TABLE_SELECTION_QSS = (
     "QTableWidget::item:selected, QTableView::item:selected {"
     " background-color: palette(highlight);"
     " color: palette(highlighted-text);"
     "}"
+    " QTableWidget, QTableView { outline: 0; }"
 )
 
 # 底层样式名：必须在 QApplication.setStyleSheet 之前记录。设了应用级样式表
