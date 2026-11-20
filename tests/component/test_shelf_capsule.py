@@ -26,7 +26,7 @@ from src.ui.drag_drop import (
     set_active_legend_drag,
 )
 from src.ui.widgets.curve_shelf import CurveShelfWidget, ShelfEntry
-from src.ui.widgets.plot_tabs import PlotTabsWidget
+from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
 
 # 手工构造的 QDropEvent 不接管 mimeData 所有权，必须外部保活
 _keep_alive: list = []
@@ -197,6 +197,66 @@ def test_plus_never_overlaps_scroll_arrows(qtbot, pages, width):
     assert arrows, "该参数下滚动箭头应可见，否则用例失去意义"
     for arrow in arrows:
         assert plus_rect.intersects(_rect_in(arrow, tabs)) is False
+
+
+def test_plus_parks_in_reserved_slot_when_tabs_fill(qtbot):
+    """页签满时「＋」必须停到胶囊左侧的槽位，不得压住最后一页的关闭 ×。
+
+    回归点：16 页上限下，1366 宽的真实主窗口页签栏只有约 1015px；
+    若「＋」仍按跟随最后一个页签定位，会盖住最后一页的关闭按钮。
+    """
+    tabs = _make_tabs(qtbot, pages=MAX_PAGES, width=900)
+    bar = tabs.tabBar()
+    plus = tabs.new_page_button
+    capsule = tabs.shelf_capsule
+    last_close = tabs.close_button(MAX_PAGES - 1)
+    assert last_close is not None
+
+    plus_rect = _rect_in(plus, tabs)
+    close_rect = _rect_in(last_close, tabs)
+    cap_rect = _rect_in(capsule, tabs)
+
+    assert plus.isEnabled() is False, "MAX_PAGES 时「＋」应禁用"
+    assert plus_rect.intersects(close_rect) is False
+    assert plus_rect.right() < cap_rect.left()
+    # 槽位在 tabBar 之外：页签和滚动箭头都不可能压住「＋」
+    assert plus_rect.left() >= bar.geometry().right()
+
+
+def test_plus_reparks_after_resize_and_capsule_toggle(qtbot):
+    """resize / 胶囊显隐后「＋」必须重新落位，不能沿用旧槽位或被裁掉。"""
+    tabs = _make_tabs(qtbot, pages=MAX_PAGES - 1, width=900)
+    plus = tabs.new_page_button
+    capsule = tabs.shelf_capsule
+
+    def snapshot() -> int:
+        QApplication.processEvents()
+        last_close = tabs.close_button(tabs.count() - 1)
+        plus_rect = _rect_in(plus, tabs)
+        close_rect = _rect_in(last_close, tabs)
+        cap_rect = _rect_in(capsule, tabs)
+        assert plus_rect.intersects(close_rect) is False
+        assert plus_rect.right() < cap_rect.left()
+        assert plus_rect.left() >= 0
+        assert plus_rect.right() < tabs.width(), "「＋」被窗口右缘裁掉"
+        return plus.x()
+
+    x_900 = snapshot()
+    tabs.resize(1100, 360)
+    x_1100 = snapshot()
+    assert x_1100 != x_900, "变宽后「＋」仍在旧槽位"
+
+    tabs.resize(700, 360)
+    x_700 = snapshot()
+    assert x_700 != x_1100, "变窄后「＋」仍在旧槽位"
+
+    x_before_hide = snapshot()
+    capsule.hide()
+    x_hidden = snapshot()
+    assert x_hidden > x_before_hide, "胶囊隐藏后「＋」未跟到新槽位"
+    capsule.show()
+    x_shown = snapshot()
+    assert x_shown < x_hidden, "胶囊恢复后「＋」未退回原槽位"
 
 
 # ---------------------------------------------------------------------------

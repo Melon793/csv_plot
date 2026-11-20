@@ -1,8 +1,9 @@
 """绘图区标签容器（PlotTabsWidget）。
 
 设计文档 §4.4：选 ``QTabWidget`` 子类，可拖动 / 省略号；标签尾部放「＋」
-新建页（跟随最后一个标签）。**不启用** ``setTabBarAutoHide(True)``：它会把
-「＋」一并隐藏，导致只有一页时入口消失。
+新建页（平时跟随最后一个标签，页签放不下时停到暂存区胶囊左侧的预留槽）。
+**不启用** ``setTabBarAutoHide(True)``：它会把「＋」一并隐藏，导致只有一页时
+入口消失。
 
 未加载数据时整个标签栏隐藏（同 VSCode：无文件即无标签栏），数据闸门
 ``set_new_page_enabled(True)`` 开启后显示且从此常显——空标签没有信息量，
@@ -22,16 +23,22 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QTabBar, QTabWidget, QToolButton
+from PySide6.QtWidgets import QHBoxLayout, QTabBar, QTabWidget, QToolButton, QWidget
 
 from src.ui.drag_drop import SHELF_MIME_FORMAT
 from src.ui import theme
 from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
 
-#: 绘图页数量上限（设计文档 §4.4）
-MAX_PAGES = 8
+#: 绘图页数量上限（设计文档 §4.4；2026-11-20 由 8 提升到 16）
+MAX_PAGES = 16
+
+#: 「＋」预留槽宽度：页签放不下时停到暂存区胶囊左侧，避免压住最后一个页签的关闭按钮
+_PLUS_SLOT_WIDTH = 28
+
+#: 角位容器右缘留白（与胶囊保持视觉间距）
+_CORNER_RIGHT_MARGIN = 2
 
 #: 曲线暂存区入口回滚开关：False 时只保留 top_bar 旧按钮（MainWindow 同步读它）
 _SHELF_CAPSULE_ENTRY = True
@@ -358,9 +365,9 @@ class _TabsBar(QTabBar):
 
     PySide6 里 ``tabLayoutChanged`` 信号未暴露（同名属性是 protected 虚
     方法），故经 ``QTabWidget.setTabBar`` 挂入子类重写。重命名 ``setTabText``
-    只改变标签宽度，不走插 / 删 / Resize 任何路径——「＋」位置会过期并被
-    拉宽的标签盖住；此钩子在插 / 删 / 拖动 / 重命名等一切布局变化后都会
-    触发，一处覆盖全部。
+    只改变标签宽度，不走插 / 删 / Resize 任何路径——「＋」位置会过期；
+    此钩子在插 / 删 / 拖动 / 重命名等一切布局变化后都会触发，一处覆盖全部。
+    「＋」不再挂在 tabBar 上，钩子只负责重算「跟随最后一个页签 / 停入预留槽」。
     """
 
     def __init__(self, owner: "PlotTabsWidget"):
@@ -411,26 +418,46 @@ class PlotTabsWidget(QTabWidget):
         self._new_page_allowed = False
         # 未加载数据：初始隐藏（set_new_page_enabled(True) 时显示）
         self.tabBar().setVisible(False)
-        # 暂存区入口：页签栏右端角位胶囊（36×20，构造期即隐藏，闸门开启才露面）
+        # 角位容器：[「＋」预留槽][暂存区胶囊]。
+        # 「＋」不再挂在 tabBar 上：页签栏右侧必须永久留出槽位，页签再满也
+        # 不会压住最后一个页签的关闭按钮或滚动箭头。少量页签时「＋」仍紧跟
+        # 最后一个页签，只是父控件换成这里，便于停入槽位。
         self._shelf_capsule = None
+        self._corner_container = QWidget(self)
+        corner_layout = QHBoxLayout(self._corner_container)
+        corner_layout.setContentsMargins(0, 0, _CORNER_RIGHT_MARGIN, 0)
+        corner_layout.setSpacing(0)
+        self._plus_slot = QWidget(self._corner_container)
+        self._plus_slot.setFixedWidth(_PLUS_SLOT_WIDTH)
+        corner_layout.addWidget(self._plus_slot)
         if _SHELF_CAPSULE_ENTRY:
-            self._shelf_capsule = _ShelfCapsuleButton(self)
+            self._shelf_capsule = _ShelfCapsuleButton(self._corner_container)
             self._shelf_capsule.toggle_requested.connect(
                 self.shelf_toggle_requested
             )
             self._shelf_capsule.drop_requested.connect(self.shelf_drop_requested)
             self._shelf_capsule.drag_hovered.connect(self.shelf_drag_hovered)
-            self.setCornerWidget(
-                self._shelf_capsule, Qt.Corner.TopRightCorner
+            corner_layout.addWidget(
+                self._shelf_capsule, 0, Qt.AlignmentFlag.AlignVCenter
             )
-        # 「＋」跟随最后一个标签，而不是钉在标签栏最右端
-        self._new_page_btn = _NewPageButton(self.tabBar())
+        self.setCornerWidget(
+            self._corner_container, Qt.Corner.TopRightCorner
+        )
+        self._corner_container.setVisible(False)
+        # 「＋」跟随最后一个标签；空间不足时停到胶囊左侧的预留槽
+        self._new_page_btn = _NewPageButton(self)
         self._new_page_btn.setFixedSize(26, 24)
         self._new_page_btn.clicked.connect(self._on_new_page_clicked)
+        self._new_page_btn.setVisible(False)
 
         self.tabCloseRequested.connect(self.close_page_requested)
         self.tabBarDoubleClicked.connect(self.rename_page_requested)
         self.tabBar().installEventFilter(self)
+        # 角位容器位置由 QTabWidget 在 tabBar resize 之后才更新；必须监听它
+        # 自己的 Move/Resize，否则「＋」会沿用旧槽位（变宽浮在页签上、变窄被裁）。
+        self._corner_container.installEventFilter(self)
+        if self._shelf_capsule is not None:
+            self._shelf_capsule.installEventFilter(self)
         self._sync_new_page_button()
         self._place_new_page_button()
 
@@ -467,65 +494,73 @@ class PlotTabsWidget(QTabWidget):
         if self._shelf_capsule is not None:
             self._shelf_capsule.setEnabled(bool(enabled))
 
-    def _place_shelf_capsule(self) -> None:
-        """把角位胶囊在页签栏高度内垂直居中。
-
-        QTabWidget 摆放角位控件时按平台样式对齐（cocoa 贴顶、Fusion 贴底），
-        写死 20px 高的胶囊因此会随平台出现上下留白不均。这里只改 y 不改尺寸，
-        不影响 36px 占位契约与「＋」避让计算。
-        """
-        capsule = getattr(self, "_shelf_capsule", None)
-        if capsule is None:
-            return
-        y = max(0, (self.tabBar().height() - capsule.height()) // 2)
-        if capsule.y() != y:
-            capsule.move(capsule.x(), y)
-
-    def event(self, event) -> bool:  # noqa: N802 - Qt 命名
-        handled = super().event(event)
-        # 角位控件由 QTabWidget 的布局在每次布局/换肤/显隐后重新摆放，
-        # 必须在 super() 之后覆盖；只 move 不改尺寸，不会再次触发布局。
-        if event.type() in (
-            QEvent.Type.LayoutRequest,
-            QEvent.Type.Resize,
-            QEvent.Type.Show,
-            QEvent.Type.StyleChange,
-        ):
-            self._place_shelf_capsule()
-        return handled
-
     def close_button(self, index: int) -> QToolButton | None:
         """指定页的自绘关闭按钮（测试共用）。"""
         return self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
 
-    def _place_new_page_button(self) -> None:
-        """把「＋」放到最后一个标签右侧；空间不足时贴右缘。
+    def _sync_corner_width(self) -> None:
+        """按胶囊显隐同步角位容器宽度，保证隐藏时 36px 全额归还给页签栏。
 
-        右翻页箭头可见时上界收紧到箭头左侧：箭头是 QTabBar 的原生子控件，
-        会盖在同级自绘按钮上（既有缺陷；角位胶囊把冲突窗宽从 ≤500 拉到
-        ≤540，这里一并按最小改动修掉）。
+        QTabWidget 只在自身布局周期读取角位控件宽度；胶囊单独 hide 不会让
+        外层重新计算。这里显式定宽并 updateGeometry，随后页签栏会重新铺排。
+        """
+        container = getattr(self, "_corner_container", None)
+        slot = getattr(self, "_plus_slot", None)
+        if container is None or slot is None:
+            return
+        width = slot.width() + _CORNER_RIGHT_MARGIN
+        capsule = getattr(self, "_shelf_capsule", None)
+        if capsule is not None and capsule.isVisible():
+            width += capsule.sizeHint().width()
+        if container.width() != width:
+            container.setFixedWidth(width)
+            container.updateGeometry()
+            self.updateGeometry()
+
+    def _place_new_page_button(self) -> None:
+        """把「＋」放到最后一个标签右侧；放不下时停到胶囊左侧的预留槽。
+
+        「＋」是 ``PlotTabsWidget`` 的子控件而非 tabBar 子控件：
+        - 少量页签：紧跟最后一个页签右侧（保持既有交互）；
+        - 页签满 / 出现滚动箭头 / 右侧放不下：停到 ``_plus_slot``，
+          槽位在 tabBar 之外，页签和关闭按钮永远不会被压住。
+
+        角位容器由 [预留槽][胶囊] 组成，tabBar 宽度天然扣掉这两段，
+        因此不需要再按滚动箭头或右缘做临时钳制。
         """
         # setTabBar 挂钩子后 Qt 会在构造期同步触发布局回调，此时「＋」
         # 尚未创建——直接跳过（__init__ 尾部会显式放置一次）。
         button = getattr(self, "_new_page_btn", None)
-        if button is None:
+        slot = getattr(self, "_plus_slot", None)
+        if button is None or slot is None:
             return
         bar = self.tabBar()
-        if bar.count() > 0:
-            last_rect = bar.tabRect(bar.count() - 1)
-            x = last_rect.right() + 5 if last_rect.isValid() else 5
+        if not bar.isVisible() or bar.count() == 0 or not button.isVisible():
+            return
+        container = getattr(self, "_corner_container", None)
+        if (
+            container is not None
+            and bar.height() > 0
+            and container.height() != bar.height()
+        ):
+            # 角位容器按页签栏高度定高，胶囊由布局垂直居中；只管高度，
+            # 宽度仍由 [槽][胶囊] 的 sizeHint 决定（隐藏胶囊时归还 36px）。
+            container.setFixedHeight(bar.height())
+        bar_pos = bar.mapTo(self, QPoint(0, 0))
+        last_rect = bar.tabRect(bar.count() - 1)
+        slot_pos = slot.mapTo(self, QPoint(0, 0))
+        slot_center = max(
+            2, slot_pos.x() + (slot.width() - button.width()) // 2
+        )
+        if self._visible_scroll_buttons():
+            # 滚动箭头占住 tabBar 右缘：直接停槽，避免「＋」压箭头或页签
+            x = slot_center
         else:
-            x = 5
-        limit = max(2, bar.width() - button.width() - 2)
-        scrolls = self._visible_scroll_buttons()
-        if scrolls:
-            # 用最左侧的可见箭头兜底：左右箭头几何会互相重叠（实测左箭头
-            # 起点更靠左），只让右箭头会让「＋」压住左箭头。
-            limit = min(
-                limit, max(2, min(a.x() for a in scrolls) - button.width() - 2)
+            following = (
+                bar_pos.x() + last_rect.right() + 5 if last_rect.isValid() else 5
             )
-        x = min(x, limit)
-        y = max(0, (bar.height() - button.height()) // 2)
+            x = min(following, slot_center)
+        y = bar_pos.y() + max(0, (bar.height() - button.height()) // 2)
         button.move(x, y)
         button.raise_()
 
@@ -575,11 +610,16 @@ class PlotTabsWidget(QTabWidget):
         """
         self._new_page_allowed = bool(enabled)
         self.tabBar().setVisible(enabled)
-        # 角位控件不跟随页签栏隐藏（G3），必须显式同步，否则未加载数据时
-        # 会露出一个可见可点的死按钮
+        # 角位容器 / 胶囊 / 「＋」不跟随页签栏隐藏（G3），必须显式同步，
+        # 否则未加载数据时会露出一个可见可点的死按钮
+        if self._corner_container is not None:
+            self._corner_container.setVisible(bool(enabled))
         if self._shelf_capsule is not None:
             self._shelf_capsule.setVisible(bool(enabled))
+        self._new_page_btn.setVisible(bool(enabled))
+        self._sync_corner_width()
         self._sync_new_page_button()
+        self._place_new_page_button()
 
     def new_page_enabled(self) -> bool:
         return self._can_add_page()
@@ -618,6 +658,13 @@ class PlotTabsWidget(QTabWidget):
     # 中键关闭 / 「＋」跟随标签重排
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):
+        if obj is getattr(self, "_corner_container", None):
+            if event.type() in (QEvent.Type.Move, QEvent.Type.Resize):
+                self._place_new_page_button()
+        if obj is getattr(self, "_shelf_capsule", None):
+            if event.type() in (QEvent.Type.Hide, QEvent.Type.Show):
+                self._sync_corner_width()
+                self._place_new_page_button()
         if obj is self.tabBar():
             event_type = event.type()
             if (

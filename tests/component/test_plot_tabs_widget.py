@@ -1,7 +1,7 @@
 """PlotTabsWidget：尾部「＋」闸门、上限、信号转发与数据驱动的标签栏可见性。
 
 对应设计文档 §4.4 与决策 D-D（未加载数据时禁用「＋」并隐藏整个标签栏，
-加载成功后显示且从此常显；上限 8 页）。「＋」位置由 tabLayoutChange
+加载成功后显示且从此常显；上限由 `MAX_PAGES` 决定）。「＋」位置由 tabLayoutChange
 钩子驱动，重命名变宽也不得重叠。
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QLabel, QToolButton
 
 from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
@@ -176,13 +176,14 @@ def test_plus_reposition_after_rename(tabs, qapp):
 
     tabs.setTabText(1, "超长绘图页名称超长绘图页名称超长")
     qapp.processEvents()
-    last_right = bar.tabRect(bar.count() - 1).right()
+    bar_x = bar.mapTo(tabs, QPoint(0, 0)).x()
+    last_right = bar_x + bar.tabRect(bar.count() - 1).right()
     assert plus.x() > last_right, "重命名变长后「＋」被标签盖住"
 
     wide_x = plus.x()
     tabs.setTabText(1, "短名")
     qapp.processEvents()
-    last_right = bar.tabRect(bar.count() - 1).right()
+    last_right = bar_x + bar.tabRect(bar.count() - 1).right()
     assert plus.x() > last_right
     assert plus.x() < wide_x, "重命名改短后「＋」位置没有跟回来"
 
@@ -199,9 +200,11 @@ def test_plus_follows_last_tab_instead_of_far_right(tabs, qapp):
     button = _plus_button(tabs)
     last = bar.tabRect(2)
     assert last.isValid()
+    bar_x = bar.mapTo(tabs, QPoint(0, 0)).x()
+    last_right = bar_x + last.right()
     # 紧挨最后一个标签右侧，而不是标签栏最右端
-    assert 0 <= button.x() - last.right() <= 12
-    assert button.x() + button.width() < bar.width() - 100
+    assert 0 <= button.x() - last_right <= 12
+    assert button.x() + button.width() < bar_x + bar.width() - 100
 
 
 # ---------------------------------------------------------------------------
