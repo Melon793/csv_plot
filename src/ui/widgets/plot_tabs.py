@@ -18,13 +18,15 @@
 拖动 / **重命名**等一切布局变化都会重算位置（PySide6 未暴露信号版
 ``tabLayoutChanged``，故经 ``setTabBar`` 挂入子类重写虚方法）。
 
+原生滚动箭头替换为与「＋」/ 关闭按钮同源的矢量字形。
+
 本类只负责标签交互与信号转发，页对象的增删与切页时序由 MainWindow 掌握。
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QTabBar, QTabWidget, QToolButton, QWidget
 
 from src.ui.drag_drop import SHELF_MIME_FORMAT
@@ -46,6 +48,15 @@ _SHELF_CAPSULE_ENTRY = True
 #: 角位胶囊尺寸：宽度写死 36（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）
 _SHELF_CAPSULE_SIZE = QSize(36, 20)
 
+#: 标签栏底色：标签与滚动按钮共用，滚动按钮靠它遮住边界下被压住的部分标签
+_TAB_BAR_BG = "#f3f3f3"
+
+#: 滚动箭头：与 ＋/× 同一套扁平图标语言（16px 矢量、无边框、hover 圆角灰底）
+_SCROLL_ARROW_ICON_SIZE = 16
+_SCROLL_ARROW_COLOR = "#5a5a5a"
+_SCROLL_ARROW_ACTIVE = "#1f1f1f"
+_SCROLL_ARROW_DISABLED = "#b5b5b5"
+
 #: 激活页顶部强调线（与拖拽视觉同一份品牌蓝）
 _ACCENT_COLOR = DRAG_ACCENT
 
@@ -57,7 +68,7 @@ _ACCENT_COLOR = DRAG_ACCENT
 #: 必须配合 ``tabBar().setDrawBase(False)`` 才看得到这里的底色。
 _TABS_STYLE = f"""
 QTabWidget::pane {{ border: 0; border-top: 1px solid #e5e5e5; }}
-QTabBar {{ background: #f3f3f3; }}
+QTabBar {{ background: {_TAB_BAR_BG}; }}
 QTabBar::tab {{
     background: transparent;
     color: #616161;
@@ -70,6 +81,28 @@ QTabBar::tab:selected {{
     background: #ffffff;
     color: #1f1f1f;
     border-top: 2px solid {_ACCENT_COLOR};
+}}
+"""
+
+#: 原生滚动箭头换成与自绘按钮一致的扁平视觉；底色遮住滚动边界下
+#: 被压住的部分标签。点击 / autoRepeat 仍由 QTabBar 原生按钮承担。
+_SCROLL_ARROW_STYLE = f"""
+QToolButton {{
+    background: {_TAB_BAR_BG};
+    border: none;
+    margin: 0;
+    padding: 0;
+}}
+QToolButton:hover {{
+    background: #e0e0e0;
+    border-radius: 4px;
+}}
+QToolButton:pressed {{
+    background: #dcdcdc;
+    border-radius: 4px;
+}}
+QToolButton:disabled {{
+    background: {_TAB_BAR_BG};
 }}
 """
 
@@ -360,6 +393,60 @@ class _ShelfCapsuleButton(_FlatIconButton):
         )
 
 
+def _scroll_arrow_pixmap(direction: str, color: str, dpr: int) -> QPixmap:
+    """画 16px chevron；使用逻辑坐标，DPR 由 QPixmap 自带。"""
+    logical = _SCROLL_ARROW_ICON_SIZE
+    pixmap = QPixmap(logical * dpr, logical * dpr)
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color), 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    center = logical / 2.0
+    arm = 4.2
+    if direction == "left":
+        painter.drawLine(
+            QPointF(center + arm * 0.45, center - arm),
+            QPointF(center - arm * 0.55, center),
+        )
+        painter.drawLine(
+            QPointF(center - arm * 0.55, center),
+            QPointF(center + arm * 0.45, center + arm),
+        )
+    else:
+        painter.drawLine(
+            QPointF(center - arm * 0.45, center - arm),
+            QPointF(center + arm * 0.55, center),
+        )
+        painter.drawLine(
+            QPointF(center + arm * 0.55, center),
+            QPointF(center - arm * 0.45, center + arm),
+        )
+    painter.end()
+    return pixmap
+
+
+def _scroll_arrow_icon(direction: str) -> QIcon:
+    """返回 normal / active / disabled 三态的矢量 chevron。"""
+    icon = QIcon()
+    for mode, color in (
+        (QIcon.Mode.Normal, _SCROLL_ARROW_COLOR),
+        (QIcon.Mode.Active, _SCROLL_ARROW_ACTIVE),
+        (QIcon.Mode.Selected, _SCROLL_ARROW_ACTIVE),
+        (QIcon.Mode.Disabled, _SCROLL_ARROW_DISABLED),
+    ):
+        for dpr in (1, 2, 3):
+            icon.addPixmap(
+                _scroll_arrow_pixmap(direction, color, dpr),
+                mode,
+                QIcon.State.Off,
+            )
+    return icon
+
+
 class _TabsBar(QTabBar):
     """挂 ``tabLayoutChange`` 官方布局钩子的标签栏。
 
@@ -376,6 +463,9 @@ class _TabsBar(QTabBar):
 
     def tabLayoutChange(self):  # noqa: N802 - Qt 命名
         super().tabLayoutChange()
+        # QTabBar 可能在本钩子触发的布局周期里才创建/重排滚动按钮；
+        # 这里补一次，保证原生箭头不会在显示后退回平台样式。
+        self._owner._style_scroll_buttons()
         self._owner._place_new_page_button()
 
 
@@ -400,6 +490,8 @@ class PlotTabsWidget(QTabWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 箭头图标只在首次样式化时生成，tabLayoutChange 会反复补样式
+        self._scroll_arrow_icons: dict[str, QIcon] = {}
         # 必须在一切 tabBar() 使用之前挂入：布局钩子依赖自定义子类
         self.setTabBar(_TabsBar(self))
         self.setDocumentMode(True)
@@ -414,6 +506,7 @@ class PlotTabsWidget(QTabWidget):
         # macOS 原生样式会画 #bebebe 的 tab bar base，盖住 QSS 底色；
         # 关掉后由 QSS 的 #f3f3f3 接管（Windows/Fusion 本来没有这层）。
         self.tabBar().setDrawBase(False)
+        self._style_scroll_buttons()
 
         self._new_page_allowed = False
         # 未加载数据：初始隐藏（set_new_page_enabled(True) 时显示）
@@ -470,6 +563,45 @@ class PlotTabsWidget(QTabWidget):
     def shelf_capsule(self) -> _ShelfCapsuleButton | None:
         """暂存区胶囊（测试、拖拽放行判据与托盘锚点共用）；回滚开关关闭时为 None。"""
         return self._shelf_capsule
+
+    def _style_scroll_buttons(self) -> None:
+        """把 QTabBar 原生滚动箭头换成与 ＋/× 同一套的扁平矢量字形。
+
+        按钮本身、点击与 autoRepeat 都保留；只替换绘制。底色调成标签栏
+        同色，滚动边界下被压住的部分标签不会透出来。
+        """
+        for child in self.tabBar().children():
+            if not isinstance(child, QToolButton):
+                continue
+            name = (child.objectName() or "").lower()
+            if "scroll" not in name:
+                continue
+            if child.arrowType() == Qt.ArrowType.NoArrow and not child.icon().isNull():
+                continue  # 已经换成自绘箭头；tabLayoutChange 会频繁回调
+            if "left" in name:
+                direction = "left"
+            elif "right" in name:
+                direction = "right"
+            else:
+                direction = (
+                    "left"
+                    if child.arrowType() == Qt.ArrowType.LeftArrow
+                    else "right"
+                )
+            icon = self._scroll_arrow_icons.get(direction)
+            if icon is None:
+                icon = _scroll_arrow_icon(direction)
+                self._scroll_arrow_icons[direction] = icon
+            child.setArrowType(Qt.ArrowType.NoArrow)
+            child.setIcon(icon)
+            child.setIconSize(
+                QSize(_SCROLL_ARROW_ICON_SIZE, _SCROLL_ARROW_ICON_SIZE)
+            )
+            child.setStyleSheet(_SCROLL_ARROW_STYLE)
+            child.setCursor(Qt.CursorShape.ArrowCursor)
+            child.setToolTip(
+                "向左滚动标签" if direction == "left" else "向右滚动标签"
+            )
 
     # ------------------------------------------------------------------
     # 暂存区胶囊：计数 / 勾选态 / 加载闸门（本类只转发，不认识 MainWindow）

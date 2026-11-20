@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtWidgets import QLabel, QToolButton
 
 from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
@@ -205,6 +205,22 @@ def test_plus_follows_last_tab_instead_of_far_right(tabs, qapp):
     # 紧挨最后一个标签右侧，而不是标签栏最右端
     assert 0 <= button.x() - last_right <= 12
     assert button.x() + button.width() < bar_x + bar.width() - 100
+
+
+def test_scroll_arrows_use_flat_custom_icons(tabs, qapp):
+    _add_pages(tabs, MAX_PAGES)
+    qapp.processEvents()
+    scroll_buttons = [
+        child
+        for child in tabs.tabBar().children()
+        if isinstance(child, QToolButton)
+        and "scroll" in (child.objectName() or "").lower()
+    ]
+    assert len(scroll_buttons) == 2
+    for button in scroll_buttons:
+        assert button.arrowType() == Qt.ArrowType.NoArrow
+        assert not button.icon().isNull()
+        assert button.iconSize() == QSize(16, 16)
 
 
 # ---------------------------------------------------------------------------
