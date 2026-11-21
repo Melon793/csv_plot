@@ -142,7 +142,8 @@ _SWATCH_RADIUS = 5     # 圆角半径
 _SWATCH_HOVER_RING = QColor("#bdbdbd")
 _SWATCH_SELECT_RING = QColor(theme.ACCENT)
 _COLOR_LABELS = {
-    "#0072B2": "蓝色",
+    "#425CE0": "靛蓝",
+    "#0072B2": "蓝色",  # 旧首色：历史模板/配置仍存该 hex，保留供 tooltip 命名
     "#D62728": "红色",
     "#009E73": "青绿",
     "#CC79A7": "粉紫",
