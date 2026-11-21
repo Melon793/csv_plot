@@ -41,7 +41,7 @@ def _load_units(path, *, has_unit: bool | None = None) -> tuple[list[str], str]:
     不在关键词表内属既有行为），编码测试聚焦解码层。
     """
     fmt = FastDataLoader._auto_detect_format(str(path))
-    names, units, used, _ = FastDataLoader._load_header_units(
+    names, units, used, _, _ = FastDataLoader._load_header_units(
         str(path), desc_rows=fmt.header_row, sep=fmt.sep or ",",
         has_unit=fmt.has_unit if has_unit is None else has_unit,
         encoding=fmt.encoding,
@@ -254,7 +254,7 @@ class TestEncodingE2E:
         write_csv(p, header=["time", "speed", "rpm", "flag"], units=None,
                   rows=make_simple_rows()[:5])
         fmt = FastDataLoader._auto_detect_format(str(p))
-        names, units, used, has_unit = FastDataLoader._load_header_units(
+        names, units, used, has_unit, _ = FastDataLoader._load_header_units(
             str(p), desc_rows=fmt.header_row, sep=fmt.sep,
             has_unit=False, encoding=fmt.encoding,
         )
@@ -275,3 +275,59 @@ class TestEncodingE2E:
         got, used = _load_units(p)
         assert len(got) == 2
         assert used in ENCODING_FALLBACKS or used == "cp949"
+
+
+# ---------- D1：源头 FFFD 限域修复 ----------
+
+class TestSourceFffdRepair:
+    @staticmethod
+    def _load(path):
+        # 显式传 utf-8：D1 测修复层，与探测层解耦（小文件探测误判是另一课题）
+        return FastDataLoader._load_header_units(
+            str(path), desc_rows=0, sep=",", has_unit=True, encoding="utf-8",
+        )
+
+    def test_fffd_c_repaired_with_count_and_log(self, tmp_path, caplog):
+        p = tmp_path / "fffd.csv"
+        write_csv(p, header=["T1", "T2", "T3"],
+                  units=["\ufffdC", "\ufffdCA", "Nm"], rows=[[1, 2, 3]])
+        with caplog.at_level("INFO", logger="data.loader"):
+            names, units, _, _, fixes = self._load(p)
+        assert units["T1"] == "°C"
+        assert units["T2"] == "°CA"
+        assert units["T3"] == "Nm"
+        assert fixes == 2
+        assert any("源头乱码修复" in r.message for r in caplog.records)
+
+    def test_ambiguous_patterns_untouched(self, tmp_path):
+        p = tmp_path / "ambiguous.csv"
+        write_csv(p, header=["A", "B", "C"],
+                  units=["\ufffdF", "1/cm\ufffd", "\ufffdC"], rows=[[1, 2, 3]])
+        _, units, _, _, fixes = self._load(p)
+        assert units["A"] == "\ufffdF"      # °F/µF 歧义，不修
+        assert units["B"] == "1/cm\ufffd"   # ³/² 不确定，不修
+        assert units["C"] == "°C"
+        assert fixes == 1
+
+    def test_idempotent_reload(self, tmp_path):
+        p = tmp_path / "idem.csv"
+        write_csv(p, header=["T1", "T2"], units=["\ufffdC", "Nm"], rows=[[1, 2]])
+        _, units1, _, _, fixes1 = self._load(p)
+        _, units2, _, _, fixes2 = self._load(p)
+        assert units1 == units2 == {"T1": "°C", "T2": "Nm"}
+        assert fixes1 == fixes2 == 1  # 不写回源文件，每次读到同样的源头乱码
+
+    def test_no_fffd_zero_fixes(self, tmp_path):
+        p = tmp_path / "clean.csv"
+        write_csv(p, header=["T1", "T2"], units=["°C", "Nm"], rows=[[1, 2]])
+        _, units, _, _, fixes = self._load(p)
+        assert units["T1"] == "°C"
+        assert fixes == 0
+
+    def test_loader_exposes_fix_count(self, tmp_path):
+        p = tmp_path / "attr.csv"
+        write_csv(p, header=["T1", "T2"], units=["\ufffdC", "\ufffdC"],
+                  rows=[[1, 2], [3, 4]])
+        loader = FastDataLoader(str(p), has_unit=True, sep=",", encoding="utf-8")
+        assert loader.fffd_unit_fixes == 2
+        assert loader.units["T1"] == "°C"

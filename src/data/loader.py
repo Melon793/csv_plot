@@ -574,15 +574,16 @@ class FastDataLoader(BaseDataLoader):
         self.has_unit = has_unit
         self._allow_gc = allow_gc
 
-        self._var_names, self._units, self.encoding_used, self.has_unit = (
-            self._load_header_units(
-                self._path,
-                desc_rows=self.desc_rows,
-                usecols=self.usecols,
-                sep=self.sep,
-                has_unit=self.has_unit,
-                encoding=encoding,
-            )
+        (
+            self._var_names, self._units, self.encoding_used, self.has_unit,
+            self.fffd_unit_fixes,
+        ) = self._load_header_units(
+            self._path,
+            desc_rows=self.desc_rows,
+            usecols=self.usecols,
+            sep=self.sep,
+            has_unit=self.has_unit,
+            encoding=encoding,
         )
         _perf_mark("表头/单位")
 
@@ -678,7 +679,8 @@ class FastDataLoader(BaseDataLoader):
             encoding: 预检测的文件编码，为 None 时内部自动检测
 
         Returns:
-            tuple: (变量名列表, {变量名: 单位}, 最终编码, 实际使用的has_unit)
+            tuple: (变量名列表, {变量名: 单位}, 最终编码, 实际使用的has_unit,
+            源头乱码修复处数)
         """
         nrows_read = 5 if has_unit else 1
 
@@ -787,7 +789,21 @@ class FastDataLoader(BaseDataLoader):
             units = dict(zip(var_names, df.iloc[1].fillna("").astype(str).tolist()))
         else:
             units = dict(zip(var_names, ["-"] * len(var_names)))
-        return var_names, units, enc, actual_has_unit
+        # D1: 部分导出工具在写出前就把 ° 有损转成 U+FFFD（文件字节 EF BF BD），
+        # 解码层无法恢复。仅单位行、仅 \uFFFDC 前缀做高置信推断（°C/°CA 系）；
+        # \uFFFDF 可能是 °F 也可能是 µF，1/cm\uFFFD 的 ³/² 不确定，都不修。
+        fffd_fixes = 0
+        for name, u in units.items():
+            n = u.count("\ufffdC")
+            if n:
+                fffd_fixes += n
+                units[name] = u.replace("\ufffdC", "°C")
+        if fffd_fixes:
+            logger.info(
+                "单位行源头乱码修复: %d 处 \\uFFFDC→°C（导出工具已丢失°字符）",
+                fffd_fixes,
+            )
+        return var_names, units, enc, actual_has_unit, fffd_fixes
 
     @staticmethod
     def _infer_schema(

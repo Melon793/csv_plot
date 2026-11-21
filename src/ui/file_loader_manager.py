@@ -2284,6 +2284,13 @@ class FileLoaderManager(MainWindowBaseManager):
             0.0, time.perf_counter() - getattr(self, "_load_started_at", time.perf_counter())
         )
         self.mw.end_load_feedback()
+        # D1 披露：源头乱码修复必须让用户知情（所有加载路径都汇到这里）
+        fffd_fixes = getattr(self.mw.loader, "fffd_unit_fixes", 0) or 0
+        if fffd_fixes:
+            self.mw._broadcast(
+                f"已推断修复 {fffd_fixes} 处单位乱码（°C，源文件导出时已丢失°字符）",
+                level="warning",
+            )
         self.mw.update_file_status(
             file_path,
             row_count=self._current_data_length,
