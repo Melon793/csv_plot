@@ -675,7 +675,7 @@ def test_overflow_indicator_hidden_when_no_overflow(tabs, qapp):
     assert not tabs._overflow_bar.isVisible()
 
 
-def test_overflow_indicator_visible_and_tracks_scroll(tabs, qapp):
+def test_overflow_indicator_visible_and_tracks_scroll(tabs, qapp, qtbot):
     tabs.resize(640, 360)
     _add_pages(tabs, 16)
     qapp.processEvents()
@@ -691,6 +691,26 @@ def test_overflow_indicator_visible_and_tracks_scroll(tabs, qapp):
     _wheel_bar(tabs, -120, qapp)
     qapp.processEvents()
     assert ind._offset > offset0, "滚动后指示条偏移应同步"
+    # auto-hide：停滚且鼠标不在栏上 500ms 后隐藏
+    # （offscreen show() 会合成 enter，先模拟鼠标离开页签栏）
+    bar.leaveEvent(QEvent(QEvent.Type.Leave))
+    qtbot.wait(700)
+    assert not ind.isVisible(), "空闲 500ms 后应 auto-hide"
+    # 鼠标进入页签栏 → 常显（超过 500ms 也不隐）
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QEnterEvent
+
+    bar.enterEvent(QEnterEvent(QPointF(0, 0), QPointF(0, 0), QPointF(0, 0)))
+    assert ind.isVisible()
+    qtbot.wait(700)
+    assert ind.isVisible(), "鼠标在栏上期间应常显"
+    # 离开立即隐藏
+    bar.leaveEvent(QEvent(QEvent.Type.Leave))
+    assert not ind.isVisible()
+    # 再滚一次 → 重新 reveal
+    _wheel_bar(tabs, -120, qapp)
+    qapp.processEvents()
+    assert ind.isVisible()
 
 
 # ----------------------------------------------------------------------

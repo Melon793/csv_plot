@@ -28,7 +28,7 @@ API，滚轮经程序化 ``click()`` 驱动其内部偏移；Qt 每次布局会�
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -62,6 +62,10 @@ _TAB_MAX_WIDTH = 200
 
 #: 溢出指示条高度（V-A）：对齐 VSCode 标题栏滚动条默认 3px；仅指示不交互
 _OVERFLOW_BAR_HEIGHT = 3
+
+#: 指示条 auto-hide 延迟（对齐 VSCode HIDE_TIMEOUT=500）：停止滚动且鼠标
+#: 不在页签栏上 500ms 后隐藏；鼠标在栏上期间常显，离开立即隐藏
+_OVERFLOW_BAR_HIDE_MS = 500
 
 #: 角位容器右缘留白（与胶囊保持视觉间距）
 _CORNER_RIGHT_MARGIN = 2
@@ -703,6 +707,14 @@ class _TabsBar(QTabBar):
         # 滚动偏移变化不走 tabLayoutChange，但必然重绘 → 借重绘同步指示条
         self._owner._sync_overflow_indicator()
 
+    def enterEvent(self, event):  # noqa: N802 - Qt 命名
+        super().enterEvent(event)
+        self._owner._on_bar_mouse_enter()
+
+    def leaveEvent(self, event):  # noqa: N802 - Qt 命名
+        super().leaveEvent(event)
+        self._owner._on_bar_mouse_leave()
+
     def tabSizeHint(self, index):  # noqa: N802 - Qt 命名
         """V-A fit：自然宽封顶 ``_TAB_MAX_WIDTH``，超长名截断靠 tooltip 兜底。"""
         base = super().tabSizeHint(index)
@@ -778,8 +790,16 @@ class PlotTabsWidget(QTabWidget):
         # macOS 原生样式会画 #bebebe 的 tab bar base，盖住 QSS 底色；
         # 关掉后由 QSS 的 #f3f3f3 接管（Windows/Fusion 本来没有这层）。
         self.tabBar().setDrawBase(False)
-        # 溢出指示条（V-A）：页签栏底缘 3px，仅溢出时显示
+        # 溢出指示条（V-A）：页签栏底缘 3px，auto-hide（VSCode Auto 语义）
         self._overflow_bar = _TabOverflowIndicator(self)
+        self._bar_mouse_over = False
+        self._bar_last_offset = 0
+        self._bar_was_overflow = False
+        self._bar_hide_timer = QTimer(self)
+        self._bar_hide_timer.setSingleShot(True)
+        self._bar_hide_timer.setInterval(_OVERFLOW_BAR_HIDE_MS)
+        self._bar_hide_timer.timeout.connect(self._hide_overflow_bar)
+        self.tabBar().tabMoved.connect(lambda _f, _t: self._reveal_overflow_bar())
 
         self._new_page_allowed = False
         # 未加载数据：初始隐藏（set_new_page_enabled(True) 时显示）
@@ -888,13 +908,20 @@ class PlotTabsWidget(QTabWidget):
         return left, right
 
     def _sync_overflow_indicator(self) -> None:
-        """按 tabRect 反推偏移/总量，刷新底缘 3px 指示条（溢出才显示）。"""
+        """按 tabRect 反推偏移/总量刷新指示条；auto-hide 由 reveal/hide 管理。
+
+        reveal 触发：溢出 onset、滚动偏移变化、鼠标进入页签栏、拖拽重排。
+        其余重绘只更新 metrics/几何，不改变显隐（避免把已淡出的条又点亮）。
+        """
         indicator = getattr(self, "_overflow_bar", None)
         if indicator is None:
             return
         bar = self.tabBar()
         if not bar.isVisible() or bar.count() == 0 or bar.width() <= 0:
             indicator.hide()
+            self._bar_hide_timer.stop()
+            self._bar_was_overflow = False
+            self._bar_last_offset = 0
             return
         first = bar.tabRect(0)
         last = bar.tabRect(bar.count() - 1)
@@ -902,12 +929,45 @@ class PlotTabsWidget(QTabWidget):
         visible = bar.width()
         if total <= visible + 1:
             indicator.hide()
+            self._bar_hide_timer.stop()
+            self._bar_was_overflow = False
+            self._bar_last_offset = 0
             return
-        indicator.set_metrics(total, visible, max(0, -first.x()))
+        offset = max(0, -first.x())
+        indicator.set_metrics(total, visible, offset)
         pos = bar.mapTo(self, QPoint(0, bar.height() - _OVERFLOW_BAR_HEIGHT))
         indicator.setGeometry(pos.x(), pos.y(), visible, _OVERFLOW_BAR_HEIGHT)
-        indicator.show()
-        indicator.raise_()
+        onset = not self._bar_was_overflow
+        scrolled = offset != self._bar_last_offset
+        self._bar_was_overflow = True
+        self._bar_last_offset = offset
+        if onset or scrolled:
+            self._reveal_overflow_bar()
+        elif self._bar_mouse_over:
+            indicator.show()
+            indicator.raise_()
+
+    def _reveal_overflow_bar(self) -> None:
+        if not self._bar_was_overflow:
+            return
+        self._overflow_bar.show()
+        self._overflow_bar.raise_()
+        if self._bar_mouse_over:
+            self._bar_hide_timer.stop()
+        else:
+            self._bar_hide_timer.start(_OVERFLOW_BAR_HIDE_MS)
+
+    def _hide_overflow_bar(self) -> None:
+        if not self._bar_mouse_over:
+            self._overflow_bar.hide()
+
+    def _on_bar_mouse_enter(self) -> None:
+        self._bar_mouse_over = True
+        self._reveal_overflow_bar()
+
+    def _on_bar_mouse_leave(self) -> None:
+        self._bar_mouse_over = False
+        self._hide_overflow_bar()
 
     # ------------------------------------------------------------------
     # 暂存区胶囊：计数 / 勾选态 / 加载闸门（本类只转发，不认识 MainWindow）
