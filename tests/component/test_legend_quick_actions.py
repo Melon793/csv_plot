@@ -519,16 +519,19 @@ def test_t5a_palette_grid_structure(plot_factory):
             assert re.search(r"[\u4e00-\u9fff]", swatch.toolTip())
         assert selected[0].toolTip().endswith("（当前）")
 
-        # 两组分段控件：绘制方式 + 数据点，各 3 段且当前值选中
+        # 三组分段控件：绘制方式 + 数据点 + 样式预设，当前值选中
         segs = _panel_segs(panel)
-        assert len(segs) == 2, "面板应含绘制方式 / 数据点两组分段"
+        assert len(segs) == 3, "面板应含绘制方式 / 数据点 / 样式预设三组分段"
         draw_btns = segs[0].findChildren(QPushButton)
         assert [b.text() for b in draw_btns] == ["直线", "阶梯后", "阶梯前"]
         assert [b.isChecked() for b in draw_btns] == [True, False, False]
         symbol_btns = segs[1].findChildren(QPushButton)
         assert [b.text() for b in symbol_btns] == ["自动", "显示", "隐藏"]
         assert [b.isChecked() for b in symbol_btns] == [True, False, False]
-        for btn in draw_btns + symbol_btns:
+        preset_btns = segs[2].findChildren(QPushButton)
+        assert [b.text() for b in preset_btns] == ["默认", "粗实", "虚线", "点线"]
+        assert [b.isChecked() for b in preset_btns] == [True, False, False, False]
+        for btn in draw_btns + symbol_btns + preset_btns:
             assert btn.toolTip(), "分段按钮应有全称 tooltip"
     finally:
         menu.deleteLater()

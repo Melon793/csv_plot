@@ -65,6 +65,10 @@ from src.core.data_types import (
     DRAW_MODE_SOURCE_AUTO,
     DRAW_MODE_STEP_POST,
     DRAW_MODE_STEP_PRE,
+    LINE_PRESET_AUTO,
+    LINE_PRESET_BOLD,
+    LINE_PRESET_DASH,
+    LINE_PRESET_DOT,
     SYMBOL_POLICY_AUTO,
     SYMBOL_POLICY_OFF,
     SYMBOL_POLICY_ON,
@@ -82,6 +86,12 @@ SYMBOL_POLICY_LABELS = {
     SYMBOL_POLICY_AUTO: "自动",
     SYMBOL_POLICY_ON: "始终显示",
     SYMBOL_POLICY_OFF: "始终隐藏",
+}
+LINE_PRESET_LABELS = {
+    LINE_PRESET_AUTO: "默认",
+    LINE_PRESET_BOLD: "粗实线",
+    LINE_PRESET_DASH: "虚线",
+    LINE_PRESET_DOT: "点线",
 }
 from src.ui.drag_drop import (
     build_legend_var_mimedata,
@@ -274,6 +284,12 @@ _SEG_SYMBOL_ITEMS = (
     (SYMBOL_POLICY_ON, "显示", "始终显示"),
     (SYMBOL_POLICY_OFF, "隐藏", "始终隐藏"),
 )
+_SEG_LINE_PRESET_ITEMS = (
+    (LINE_PRESET_AUTO, "默认", "默认（自动粗细，实线）"),
+    (LINE_PRESET_BOLD, "粗实", "粗实线（持久突出）"),
+    (LINE_PRESET_DASH, "虚线", "虚线（参考/次要曲线）"),
+    (LINE_PRESET_DOT, "点线", "点线（第三区分档）"),
+)
 
 # 面板标题行变量名最大宽度（超出 elide 截断，全文进 tooltip）
 _PANEL_VAR_NAME_MAX_WIDTH = 200
@@ -371,6 +387,31 @@ def _symbol_policy_icon(policy: str) -> QPixmap:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawPie(rect, 90 * 16, 180 * 16)
+    painter.end()
+    return pixmap
+
+
+def _line_preset_icon(preset: str) -> QPixmap:
+    """样式预设 18×18 线段示意图标：用真实 QPen 宽度/线型画，所见即所得。"""
+    dpr = 1.0
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        dpr = screen.devicePixelRatio()
+    pixmap = QPixmap(round(18 * dpr), round(18 * dpr))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter, color = _icon_painter(pixmap)
+    if preset == LINE_PRESET_BOLD:
+        pen = QPen(color, 4.0)
+    elif preset == LINE_PRESET_DASH:
+        pen = QPen(color, 2.0, Qt.PenStyle.DashLine)
+    elif preset == LINE_PRESET_DOT:
+        pen = QPen(color, 2.0, Qt.PenStyle.DotLine)
+    else:  # LINE_PRESET_AUTO：细实线（symbol 态口径）
+        pen = QPen(color, 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.drawLine(QPointF(2.5, 9.0), QPointF(15.5, 9.0))
     painter.end()
     return pixmap
 
@@ -847,8 +888,8 @@ class LegendTextBrowser(QTextBrowser):
 
         Args:
             var_name: 目标曲线（须已在 pw.curves 中）
-            picked: 选择收集 dict（键 color / draw_mode / symbol_policy，
-                单选语义：任一选择即关菜单，最多一个键）
+            picked: 选择收集 dict（键 color / draw_mode / symbol_policy /
+                line_preset，单选语义：任一选择即关菜单，最多一个键）
             holder: 长度 1 的 list，元素为需要关闭的顶层菜单
             draw_group_suffix: 绘制方式分组标签后缀（枚举通道自动阶梯
                 时传「（枚举通道自动）」以保留可解释性标注）
@@ -858,6 +899,7 @@ class LegendTextBrowser(QTextBrowser):
         current = ci.color
         draw_mode = getattr(ci, "draw_mode", DRAW_MODE_AUTO)
         symbol_policy = getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO)
+        line_preset = getattr(ci, "line_preset", LINE_PRESET_AUTO)
 
         def _pick(key: str, value: str) -> None:
             picked[key] = value
@@ -926,9 +968,14 @@ class LegendTextBrowser(QTextBrowser):
             (value, label, full, _symbol_policy_icon(value))
             for value, label, full in _SEG_SYMBOL_ITEMS
         ]
+        preset_items = [
+            (value, label, full, _line_preset_icon(value))
+            for value, label, full in _SEG_LINE_PRESET_ITEMS
+        ]
         for title, items, cur, key in (
             (f"绘制方式{draw_group_suffix}", draw_items, draw_mode, "draw_mode"),
             ("数据点", symbol_items, symbol_policy, "symbol_policy"),
+            ("样式", preset_items, line_preset, "line_preset"),
         ):
             cap = QLabel(title, host)
             cap.setStyleSheet("color: palette(mid);")
@@ -960,7 +1007,7 @@ class LegendTextBrowser(QTextBrowser):
         return menu, act_more
 
     def _apply_curve_panel_picks(self, var_name: str, picked: dict[str, str]) -> None:
-        """快捷面板关闭后统一执行选择（色 / 绘制方式 / 数据点）。
+        """快捷面板关闭后统一执行选择（色 / 绘制方式 / 数据点 / 样式预设）。
 
         单选语义（任一选择即关菜单）：dict 最多一个键，用 if/elif 表达。
         复查归属（打开期间曲线可能被 reload/编辑器删除）+ 同值 no-op；
@@ -995,6 +1042,14 @@ class LegendTextBrowser(QTextBrowser):
             ):
                 if callable(show):
                     show(f"已切换 {var_name} 数据点显示：{SYMBOL_POLICY_LABELS[value]}")
+        elif "line_preset" in picked:
+            value = picked["line_preset"]
+            if (
+                getattr(ci, "line_preset", LINE_PRESET_AUTO) != value
+                and mcm.apply_curve_line_preset(var_name, value)
+            ):
+                if callable(show):
+                    show(f"已切换 {var_name} 样式：{LINE_PRESET_LABELS[value]}")
 
     def _exec_curve_panel(self, var_name: str, global_pos: QPoint) -> None:
         """色块左键：弹出曲线快捷面板（色板 + 绘制方式 + 数据点）+「更多颜色…」。
@@ -1316,6 +1371,12 @@ class LegendTextBrowser(QTextBrowser):
                         and mcm.apply_curve_symbol_policy(name, value)
                     ):
                         changed += 1
+                elif key == "line_preset":
+                    if (
+                        getattr(ci, "line_preset", LINE_PRESET_AUTO) != value
+                        and mcm.apply_curve_line_preset(name, value)
+                    ):
+                        changed += 1
         finally:
             pw._batch_adding = previous_batch
         if changed:
@@ -1326,6 +1387,8 @@ class LegendTextBrowser(QTextBrowser):
                 label = "颜色"
             elif key == "draw_mode":
                 label = f"绘制方式：{DRAW_MODE_LABELS[value]}"
+            elif key == "line_preset":
+                label = f"样式：{LINE_PRESET_LABELS[value]}"
             else:
                 label = f"数据点显示：{SYMBOL_POLICY_LABELS[value]}"
             if callable(show):

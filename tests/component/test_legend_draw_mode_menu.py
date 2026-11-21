@@ -123,7 +123,7 @@ def _style_panel_of(menus):
 def _seg_buttons(panel, index):
     """取第 index 组分段控件的按钮 dict（label → QPushButton）。"""
     segs = panel.findChildren(_SegmentedControl)
-    assert len(segs) == 2
+    assert len(segs) == 3  # 绘制方式 / 数据点 / 样式预设
     return {b.text(): b for b in segs[index].findChildren(QPushButton)}
 
 
