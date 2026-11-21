@@ -85,8 +85,9 @@ def three_curve_window(plotted_window, qapp, qtbot):
 def _expected_width(pw, name, *, selected):
     """按当前 symbol 判定算出应有 pen 宽（与 _apply_curve_style 同口径）。
 
-    reload 后曲线重建，symbol 策略回到 auto；用本函数代替硬编码 4/2，
-    断言既不受模式影响，也不会因为"先刷一遍再断言"而掩盖投影缺失。
+    reload 后钉住的 symbol 策略经 saved_state 恢复、auto 来源重新判定；
+    用本函数代替硬编码 4/2，断言既不受模式影响，也不会因为"先刷一遍
+    再断言"而掩盖投影缺失。
     """
     ci = pw.curves[name]
     x_min, x_max = pw.view_box.viewRange()[0]

@@ -12,7 +12,12 @@ from src.core.config import (
     is_grouped_loader,
     compute_global_x_limits,
 )
-from src.core.data_types import DRAW_MODE_SOURCE_USER, LINE_PRESET_AUTO, step_mode_for
+from src.core.data_types import (
+    DRAW_MODE_SOURCE_USER,
+    LINE_PRESET_AUTO,
+    SYMBOL_POLICY_AUTO,
+    step_mode_for,
+)
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
@@ -755,6 +760,12 @@ class CursorSyncManager(MainWindowBaseManager):
                                 != LINE_PRESET_AUTO
                                 else None
                             ),
+                            "symbol_policy": (
+                                ci.symbol_policy
+                                if getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO)
+                                != SYMBOL_POLICY_AUTO
+                                else None
+                            ),
                         }
                         for var_name, ci in widget.curves.items()
                     }
@@ -833,6 +844,11 @@ class CursorSyncManager(MainWindowBaseManager):
                                     pinned_preset = state.get("line_preset")
                                     if pinned_preset:
                                         widget.curves[var_name].line_preset = pinned_preset
+                                    # 恢复钉住的数据点策略（外观束跨会话已存
+                                    # symbol_policy，reload 同口径接力；auto 不存）
+                                    pinned_policy = state.get("symbol_policy")
+                                    if pinned_policy:
+                                        widget.curves[var_name].symbol_policy = pinned_policy
                                     # 恢复可见性
                                     widget.curves[var_name].visible = state["visible"]
                                     if widget.curves[var_name].curve is not None:
