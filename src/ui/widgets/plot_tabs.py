@@ -44,6 +44,12 @@ from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
 #: 绘图页数量上限（设计文档 §4.4；2026-11-20 由 8 提升到 16）
 MAX_PAGES = 16
 
+#: 页签宽度下限（T8）：Qt 默认「先压缩页签、压不下才滚动」，16 页窄窗下
+#: 全部截成「pag…」且不出滚动箭头。96px = 默认名「page 16」文本 46 +
+#: padding 18 + 关闭 × 18 + 呼吸 14（macOS 实测）；Windows 字体度量不同，
+#: 常量定稿前需在 Windows 复测。溢出导航由滚轮（T4）与页目录（T6）承担。
+_MIN_TAB_WIDTH = 96
+
 #: 「＋」预留槽宽度：页签放不下时停到暂存区胶囊左侧，避免压住最后一个页签的关闭按钮
 _PLUS_SLOT_WIDTH = 28
 
@@ -485,6 +491,32 @@ class _TabsBar(QTabBar):
         self._owner._place_scroll_buttons()
         self._owner._place_new_page_button()
 
+    def minimumTabSizeHint(self, index):  # noqa: N802 - Qt 命名
+        """T8：拦住 Qt 的无限压缩，保证每个可见页签可读。"""
+        base = super().minimumTabSizeHint(index)
+        return QSize(max(_MIN_TAB_WIDTH, base.width()), base.height())
+
+    def tabSizeHint(self, index):  # noqa: N802 - Qt 命名
+        """T8：滚动模式下 Qt 按自然宽布局（可小于下限），同样要抬到 96px。"""
+        base = super().tabSizeHint(index)
+        return QSize(max(_MIN_TAB_WIDTH, base.width()), base.height())
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt 命名
+        """T4：页签区滚轮＝横向滚动页签，不切页（QTabBar 默认会切页）。
+
+        滚动仍由原生滚动按钮承担（一次一格＝一个页签）；按钮在 B 阶段
+        隐藏后程序化 ``click()`` 依然驱动内部偏移。放得下时吞掉事件，
+        既不切页也不漏给下层绘图区当缩放。
+        """
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta != 0:
+            direction = "left" if delta > 0 else "right"
+            for button in self._owner._scroll_buttons():
+                if direction in (button.objectName() or "").lower():
+                    button.click()
+                    break
+        event.accept()
+
 
 class PlotTabsWidget(QTabWidget):
     """多绘图页标签容器。
@@ -768,12 +800,16 @@ class PlotTabsWidget(QTabWidget):
         不同版本/平台命名可能是 ``ScrollLeftButton`` /
         ``qt_tabbar_scrollbutton_left``，故按 "scroll" 关键字匹配。
         """
+        return [b for b in self._scroll_buttons() if b.isVisible()]
+
+    def _scroll_buttons(self) -> list[QToolButton]:
+        """全部原生滚动按钮（含隐藏）：滚轮程序化驱动不依赖可见性。"""
         out = []
         for child in self.tabBar().children():
             if not child.isWidgetType():
                 continue
             name = (child.objectName() or "").lower()
-            if "scroll" in name and child.isVisible():
+            if "scroll" in name:
                 out.append(child)
         return out
 

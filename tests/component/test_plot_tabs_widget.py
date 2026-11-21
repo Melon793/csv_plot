@@ -468,3 +468,63 @@ def test_context_menu_batch_items_disabled_at_edges(tabs):
     assert by_text["关闭其他"].isEnabled()
     assert not by_text["关闭右侧"].isEnabled()
     menu.deleteLater()
+
+
+# ----------------------------------------------------------------------
+# T4 + T8：滚轮横向滚动（不切页）＋ 96px 页签宽度下限
+# ----------------------------------------------------------------------
+def _wheel_bar(tabs: PlotTabsWidget, delta_y: int, qapp) -> None:
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    bar = tabs.tabBar()
+    pos = QPointF(10, bar.height() / 2)
+    event = QWheelEvent(
+        pos,
+        bar.mapToGlobal(pos.toPoint()),
+        QPoint(0, 0),
+        QPoint(0, delta_y),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    qapp.sendEvent(bar, event)
+
+
+def test_min_tab_width_floor_stops_shrinking(tabs, qapp):
+    tabs.resize(640, 360)
+    _add_pages(tabs, 16)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    assert all(bar.tabRect(i).width() >= 96 for i in range(16))
+    assert tabs._visible_scroll_buttons()      # 压不下 → 出滚动箭头
+
+
+def test_wheel_scrolls_without_switching_page(tabs, qapp):
+    tabs.resize(640, 360)
+    _add_pages(tabs, 16)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    bar.setCurrentIndex(0)
+    x0 = bar.tabRect(0).x()
+    _wheel_bar(tabs, -120, qapp)               # 滚轮下滑 → 向右滚
+    qapp.processEvents()
+    assert bar.currentIndex() == 0             # 不切页
+    x1 = bar.tabRect(0).x()
+    assert x1 < x0
+    _wheel_bar(tabs, 120, qapp)                # 上滑 → 滚回
+    qapp.processEvents()
+    assert bar.tabRect(0).x() > x1
+    assert bar.currentIndex() == 0
+
+
+def test_wheel_without_overflow_does_not_switch(tabs, qapp):
+    tabs.resize(1200, 360)
+    _add_pages(tabs, 2)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    bar.setCurrentIndex(0)
+    _wheel_bar(tabs, -120, qapp)
+    qapp.processEvents()
+    assert bar.currentIndex() == 0
