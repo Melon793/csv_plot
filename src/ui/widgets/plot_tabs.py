@@ -29,7 +29,7 @@ API，滚轮经程序化 ``click()`` 驱动其内部偏移；Qt 每次布局会�
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -943,6 +943,12 @@ class PlotTabsWidget(QTabWidget):
         # 最后一个页签，只是父控件换成这里，便于停入槽位。
         self._shelf_capsule = None
         self._corner_container = QWidget(self)
+        # 角位容器默认露 QTabWidget 的 palette Window 色（Win/Fusion #efefef），
+        # 与 tabBar QSS #f3f3f3 形成竖缝；刷成标签栏同色消除色差
+        self._corner_container.setAutoFillBackground(True)
+        corner_palette = self._corner_container.palette()
+        corner_palette.setColor(QPalette.ColorRole.Window, QColor(_TAB_BAR_BG))
+        self._corner_container.setPalette(corner_palette)
         corner_layout = QHBoxLayout(self._corner_container)
         corner_layout.setContentsMargins(0, 0, _CORNER_RIGHT_MARGIN, 0)
         corner_layout.setSpacing(0)

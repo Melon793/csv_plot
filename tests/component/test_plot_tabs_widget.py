@@ -777,3 +777,24 @@ def test_dir_new_row_enter_triggers_and_disabled_at_limit(tabs, qtbot, qapp):
     qtbot.mouseClick(popup._new_row, Qt.MouseButton.LeftButton)
     assert created == [True], "上限禁用后不得再发射"
     popup.hide()
+
+
+def test_corner_background_matches_tab_bar_across_styles(tabs, qapp):
+    """角位容器与 tabBar 底色恒等（Win/Fusion palette 缝回归）。"""
+    from PySide6.QtWidgets import QApplication
+
+    _add_pages(tabs, 3)
+    qapp.processEvents()
+    original = QApplication.style().objectName()
+    try:
+        for style in ("Windows", "Fusion"):
+            QApplication.setStyle(style)
+            qapp.processEvents()
+            img = tabs.grab().toImage()
+            bar = tabs.tabBar()
+            y = bar.height() // 2
+            assert img.pixelColor(bar.width() - 6, y).name() == img.pixelColor(
+                bar.width() + 10, y
+            ).name(), f"{style} 下角位与标签栏存在色差"
+    finally:
+        QApplication.setStyle(original)
