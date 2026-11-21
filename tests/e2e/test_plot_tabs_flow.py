@@ -410,3 +410,27 @@ def test_ctrl_pgdown_key_switches_page(loaded_window, qtbot):
     mw.activate_page(mw.pages[0])
     QTest.keyClick(mw, Qt.Key.Key_PageDown, Qt.KeyboardModifier.ControlModifier)
     qtbot.waitUntil(lambda: mw.current_page is mw.pages[1], timeout=2000)
+
+
+# ----------------------------------------------------------------------
+# T6：页目录 ▾ —— 全部页一屏全见，点行切页
+# ----------------------------------------------------------------------
+def test_page_directory_selects_page(loaded_window, qtbot):
+    from PySide6.QtCore import Qt
+
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    mw.activate_page(mw.pages[0])
+
+    qtbot.mouseClick(mw.plot_tabs._dir_btn, Qt.MouseButton.LeftButton)
+    popup = mw.plot_tabs._dir_popup
+    qtbot.waitUntil(popup.isVisible, timeout=2000)
+    rows = [
+        popup._rows_layout.itemAt(i).widget()
+        for i in range(popup._rows_layout.count())
+    ]
+    assert len(rows) == 2
+    qtbot.mouseClick(rows[1], Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: mw.current_page is second, timeout=2000)
+    assert not popup.isVisible()

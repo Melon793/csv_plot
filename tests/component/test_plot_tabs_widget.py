@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel, QToolButton
 
@@ -528,3 +528,90 @@ def test_wheel_without_overflow_does_not_switch(tabs, qapp):
     _wheel_bar(tabs, -120, qapp)
     qapp.processEvents()
     assert bar.currentIndex() == 0
+
+
+# ----------------------------------------------------------------------
+# T6：角位「▾」页目录 + 锚定下拉
+# ----------------------------------------------------------------------
+def _open_dir_popup(tabs, qtbot, qapp):
+    qtbot.mouseClick(tabs._dir_btn, Qt.MouseButton.LeftButton)
+    popup = tabs._dir_popup
+    qtbot.addWidget(popup)
+    qapp.processEvents()
+    return popup
+
+
+def _dir_rows(popup):
+    return [
+        popup._rows_layout.itemAt(i).widget()
+        for i in range(popup._rows_layout.count())
+    ]
+
+
+def test_dir_button_gate_and_corner_width(tabs, qapp):
+    tabs.set_new_page_enabled(False)
+    qapp.processEvents()
+    assert not tabs._dir_btn.isVisible()
+    tabs.set_new_page_enabled(True)
+    qapp.processEvents()
+    assert tabs._dir_btn.isVisible()
+    # [＋槽 28][▾ 20][胶囊 36][右缘 2]
+    assert tabs._corner_container.width() == 86
+
+
+def test_dir_popup_lists_pages_and_selects(tabs, qtbot, qapp):
+    _add_pages(tabs, 5)
+    tabs.set_page_list_provider(
+        lambda: [(f"完整页名 {i + 1}", "2×2", i == 2) for i in range(5)]
+    )
+    got = []
+    tabs.page_selected.connect(lambda i: got.append(i))
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    assert popup.isVisible()
+    rows = _dir_rows(popup)
+    assert len(rows) == 5
+    labels = rows[2].findChildren(QLabel)
+    assert any("完整页名 3" in lb.text() for lb in labels)
+    qtbot.mouseClick(rows[3], Qt.MouseButton.LeftButton)
+    assert got == [3]
+    assert not popup.isVisible()
+
+
+def test_dir_popup_fallback_without_provider(tabs, qtbot, qapp):
+    _add_pages(tabs, 3)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    rows = _dir_rows(popup)
+    assert len(rows) == 3
+    labels = rows[0].findChildren(QLabel)
+    assert any("page 1" in lb.text() for lb in labels)
+    popup.hide()
+
+
+def test_dir_popup_row_close_and_footer_new(tabs, qtbot, qapp):
+    _add_pages(tabs, 3)
+    closed, created = [], []
+    tabs.close_page_requested.connect(lambda i: closed.append(i))
+    tabs.new_page_requested.connect(lambda: created.append(True))
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QEnterEvent
+
+    row = _dir_rows(popup)[1]
+    row.enterEvent(QEnterEvent(QPointF(0, 0), QPointF(0, 0), QPointF(0, 0)))
+    assert row._close.isVisible()
+    qtbot.mouseClick(row._close, Qt.MouseButton.LeftButton)
+    assert closed == [1]
+    assert not popup.isVisible()
+
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    qtbot.mouseClick(popup._new_btn, Qt.MouseButton.LeftButton)
+    assert created == [True]
+    assert not popup.isVisible()
+
+
+def test_dir_popup_esc_closes(tabs, qtbot, qapp):
+    _add_pages(tabs, 2)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    assert popup.isVisible()
+    QTest.keyClick(popup, Qt.Key.Key_Escape)
+    assert not popup.isVisible()

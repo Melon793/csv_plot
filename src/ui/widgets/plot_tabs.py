@@ -26,14 +26,19 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
+    QLabel,
     QMenu,
+    QPushButton,
+    QScrollArea,
     QTabBar,
     QTabWidget,
     QToolTip,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -61,6 +66,9 @@ _SHELF_CAPSULE_ENTRY = True
 
 #: 角位胶囊尺寸：宽度写死 36（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）
 _SHELF_CAPSULE_SIZE = QSize(36, 20)
+
+#: 页目录按钮尺寸（T6）：角位变为 [＋槽 28][▾ 20][胶囊 36]；G1 口径 sizeHint=fixedSize
+_DIR_BUTTON_SIZE = QSize(20, 20)
 
 #: 标签栏底色：标签与滚动按钮共用，滚动按钮靠它遮住边界下被压住的部分标签
 _TAB_BAR_BG = "#f3f3f3"
@@ -414,6 +422,210 @@ class _ShelfCapsuleButton(_FlatIconButton):
         )
 
 
+class _PageDirectoryButton(_FlatIconButton):
+    """角位「▾」页目录入口（T6）：全部页一屏全见的补充入口，横条照常工作。"""
+
+    _COLOR_NORMAL = "#5a5a5a"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("pageDirectoryButton")
+        self.setFixedSize(_DIR_BUTTON_SIZE)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
+        return QSize(_DIR_BUTTON_SIZE)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
+        return QSize(_DIR_BUTTON_SIZE)
+
+    def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
+        center = QPointF(self.rect().center())
+        pen = QPen(color, 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(
+            QPointF(center.x() - 3.5, center.y() - 1.5),
+            QPointF(center.x(), center.y() + 2.5),
+        )
+        painter.drawLine(
+            QPointF(center.x(), center.y() + 2.5),
+            QPointF(center.x() + 3.5, center.y() - 1.5),
+        )
+
+
+class _DirectoryRow(QWidget):
+    """页目录单行：激活●＋页名＋布局角标＋hover 才现的 ×。"""
+
+    def __init__(self, popup: "_PageDirectoryPopup", index: int,
+                 title: str, badge: str, current: bool):
+        super().__init__(popup._rows_host)
+        self._popup = popup
+        self._index = index
+        self.setObjectName("dirRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"#dirRow:hover {{ background: {DRAG_ACCENT_SOFT}; }}")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(8)
+        dot = QLabel(self)
+        dot.setFixedSize(8, 8)
+        dot.setStyleSheet(
+            f"background: {_ACCENT_COLOR if current else 'transparent'};"
+            " border-radius: 4px;"
+        )
+        lay.addWidget(dot)
+        name = QLabel(self)
+        fm = QFontMetrics(name.font())
+        name.setText(
+            fm.elidedText(title, Qt.TextElideMode.ElideRight, popup._NAME_ELIDE_WIDTH)
+        )
+        name.setToolTip(title)
+        if current:
+            font = name.font()
+            font.setBold(True)
+            name.setFont(font)
+        lay.addWidget(name, 1)
+        if badge:
+            badge_label = QLabel(badge, self)
+            badge_label.setStyleSheet(
+                "color: #8a8a8a; background: #f0f2f5; border-radius: 4px;"
+                " padding: 0 6px; font-size: 10px;"
+            )
+            lay.addWidget(badge_label)
+        self._close = _CloseTabButton(self)
+        self._close.setFixedSize(16, 16)
+        self._close.setToolTip("关闭绘图页")
+        self._close.setVisible(False)
+        self._close.clicked.connect(
+            lambda _checked=False: popup._on_close(self._index)
+        )
+        lay.addWidget(self._close)
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        self._close.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        self._close.setVisible(False)
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._popup._on_select(self._index)
+        super().mouseReleaseEvent(event)
+
+
+class _PageDirectoryPopup(QWidget):
+    """锚定在「▾」正下方右对齐的页目录（T6）。
+
+    数据经 owner 的 ``page_list_provider`` 每次打开时实时求值（固定顺序，
+    保空间记忆）；点行切页、行尾 × 关页、底部＋新建，全部转发 owner 既有
+    信号。``Qt.Popup`` 自带点外关闭，Esc 在 keyPressEvent 补；超高 clamp＋
+    滚动（小屏兜底）。不做过滤框与拖拽重排——横条拖拽仍在，16 项可扫读。
+    """
+
+    _MAX_WIDTH = 320
+    _NAME_ELIDE_WIDTH = 200
+
+    def __init__(self, owner: "PlotTabsWidget"):
+        super().__init__(
+            owner, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+        )
+        self._owner = owner
+        self.setObjectName("pageDirectoryPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            "#pageDirectoryPopup { background: #ffffff;"
+            " border: 1px solid #d5dbe3; border-radius: 6px; }"
+        )
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(5, 5, 5, 5)
+        outer.setSpacing(0)
+        self._scroll = QScrollArea(self)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._rows_host = QWidget()
+        self._rows_layout = QVBoxLayout(self._rows_host)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(0)
+        self._scroll.setWidget(self._rows_host)
+        outer.addWidget(self._scroll)
+        self._new_btn = QPushButton("＋  新建绘图页", self)
+        self._new_btn.setCursor(Qt.CursorShape.ArrowCursor)
+        self._new_btn.setStyleSheet(
+            "QPushButton { border: none; border-top: 1px solid #eceff3;"
+            f" color: {_ACCENT_COLOR}; font-weight: 600; text-align: left;"
+            " padding: 7px 10px; }"
+            f"QPushButton:hover {{ background: {DRAG_ACCENT_SOFT}; }}"
+            "QPushButton:disabled { color: #b5b5b5; }"
+        )
+        self._new_btn.clicked.connect(self._on_new)
+        outer.addWidget(self._new_btn)
+
+    def open_for(self, anchor: QWidget) -> None:
+        provider = self._owner._page_list_provider
+        if provider is not None:
+            entries = list(provider())
+        else:
+            entries = [
+                (self._owner.tabText(i), "", i == self._owner.currentIndex())
+                for i in range(self._owner.count())
+            ]
+        while self._rows_layout.count():
+            item = self._rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for index, (title, badge, current) in enumerate(entries):
+            self._rows_layout.addWidget(
+                _DirectoryRow(self, index, title, badge, current)
+            )
+        self._new_btn.setEnabled(self._owner.new_page_enabled())
+        self._rows_host.adjustSize()
+        rows_height = self._rows_host.sizeHint().height()
+        chrome = self._new_btn.sizeHint().height() + 10
+        screen = QApplication.screenAt(
+            anchor.mapToGlobal(QPoint(0, 0))
+        ) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        anchor_bottom = anchor.mapToGlobal(QPoint(0, anchor.height())).y()
+        max_rows_height = max(120, avail.bottom() - anchor_bottom - 10 - chrome)
+        self._scroll.setFixedHeight(min(rows_height, max_rows_height))
+        self.adjustSize()
+        if self.width() > self._MAX_WIDTH:
+            self.setFixedWidth(self._MAX_WIDTH)
+        pos = anchor.mapToGlobal(
+            QPoint(anchor.width() - self.width(), anchor.height() + 4)
+        )
+        pos.setX(max(avail.left() + 4, min(pos.x(), avail.right() - self.width() - 4)))
+        self.move(pos)
+        self.show()
+        self.setFocus()
+
+    def _on_select(self, index: int) -> None:
+        self.hide()
+        self._owner.page_selected.emit(index)
+
+    def _on_close(self, index: int) -> None:
+        self.hide()
+        self._owner.close_page_requested.emit(index)
+
+    def _on_new(self) -> None:
+        self.hide()
+        self._owner.new_page_requested.emit()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(event)
+
+
 def _scroll_arrow_pixmap(direction: str, color: str, dpr: int) -> QPixmap:
     """按图标槽位尺寸矢量直绘 chevron；DPR 由 QPixmap 自带，不做位图缩放。"""
     logical = _SCROLL_BUTTON_ICON_SIZE
@@ -527,6 +739,7 @@ class PlotTabsWidget(QTabWidget):
         rename_page_requested(int): 双击标签。
         close_other_pages_requested(int): 右键菜单「关闭其他」。
         close_right_pages_requested(int): 右键菜单「关闭右侧」。
+        page_selected(int): 页目录下拉里点选某页。
         shelf_toggle_requested(bool): 点击右端暂存区胶囊。
         shelf_drop_requested(object): 拖拽落在胶囊上，参数为原始 QDropEvent。
         shelf_drag_hovered(bool): 拖拽进入/离开胶囊。
@@ -537,6 +750,7 @@ class PlotTabsWidget(QTabWidget):
     rename_page_requested = Signal(int)
     close_other_pages_requested = Signal(int)
     close_right_pages_requested = Signal(int)
+    page_selected = Signal(int)
     shelf_toggle_requested = Signal(bool)
     shelf_drop_requested = Signal(object)
     shelf_drag_hovered = Signal(bool)
@@ -546,6 +760,8 @@ class PlotTabsWidget(QTabWidget):
         # 页签全名 tooltip 的数据源（MainWindow 注入，hover 时实时求值，
         # 改名/换布局/增删曲线后无需任何同步点，不会过期）
         self._tab_info_provider = None
+        # 页目录数据源（MainWindow 注入）：() -> [(title, badge, current), ...]
+        self._page_list_provider = None
         # 箭头图标只在首次样式化时生成，tabLayoutChange 会反复补样式
         self._scroll_arrow_icons: dict[str, QIcon] = {}
         # 必须在一切 tabBar() 使用之前挂入：布局钩子依赖自定义子类
@@ -579,6 +795,15 @@ class PlotTabsWidget(QTabWidget):
         self._plus_slot = QWidget(self._corner_container)
         self._plus_slot.setFixedWidth(_PLUS_SLOT_WIDTH)
         corner_layout.addWidget(self._plus_slot)
+        # 页目录「▾」（T6）：停预留槽右侧、胶囊左侧，与＋/×同一套扁平语言
+        self._dir_btn = _PageDirectoryButton(self._corner_container)
+        self._dir_btn.setVisible(False)
+        self._dir_btn.installEventFilter(self)
+        corner_layout.addWidget(self._dir_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._dir_popup = _PageDirectoryPopup(self)
+        self._dir_btn.clicked.connect(
+            lambda: self._dir_popup.open_for(self._dir_btn)
+        )
         if _SHELF_CAPSULE_ENTRY:
             self._shelf_capsule = _ShelfCapsuleButton(self._corner_container)
             self._shelf_capsule.toggle_requested.connect(
@@ -629,6 +854,13 @@ class PlotTabsWidget(QTabWidget):
         曲线数永远取当前值，调用方无需在状态变化处补同步。
         """
         self._tab_info_provider = provider
+
+    def set_page_list_provider(self, provider) -> None:
+        """注入 ``provider() -> [(title, badge, current), ...]``：页目录数据源。
+
+        每次打开下拉时实时求值；缺省回退为 tabText（无角标）。
+        """
+        self._page_list_provider = provider
 
     def _style_scroll_buttons(self) -> None:
         """把 QTabBar 原生滚动箭头换成与 ＋/× 同一套的扁平矢量字形。
@@ -739,6 +971,9 @@ class PlotTabsWidget(QTabWidget):
         if container is None or slot is None:
             return
         width = slot.width() + _CORNER_RIGHT_MARGIN
+        dir_btn = getattr(self, "_dir_btn", None)
+        if dir_btn is not None and dir_btn.isVisible():
+            width += dir_btn.sizeHint().width()
         capsule = getattr(self, "_shelf_capsule", None)
         if capsule is not None and capsule.isVisible():
             width += capsule.sizeHint().width()
@@ -874,6 +1109,9 @@ class PlotTabsWidget(QTabWidget):
             self._corner_container.setVisible(bool(enabled))
         if self._shelf_capsule is not None:
             self._shelf_capsule.setVisible(bool(enabled))
+        self._dir_btn.setVisible(bool(enabled))
+        if not enabled:
+            self._dir_popup.hide()
         self._new_page_btn.setVisible(bool(enabled))
         self._sync_corner_width()
         self._sync_new_page_button()
@@ -916,6 +1154,14 @@ class PlotTabsWidget(QTabWidget):
     # 中键关闭 / 「＋」跟随标签重排
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):
+        if obj is getattr(self, "_dir_btn", None):
+            if event.type() == QEvent.Type.ToolTip:
+                provider = self._page_list_provider
+                count = len(provider()) if provider is not None else self.count()
+                QToolTip.showText(
+                    event.globalPos(), f"页目录（{count} 页）：全部绘图页一览", self._dir_btn
+                )
+                return True
         if obj is getattr(self, "_corner_container", None):
             if event.type() in (QEvent.Type.Move, QEvent.Type.Resize):
                 self._place_new_page_button()

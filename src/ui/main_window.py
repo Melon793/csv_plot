@@ -569,6 +569,17 @@ class MainWindow(QMainWindow):
             f"{self._page_curve_count(page)} 条曲线"
         )
 
+    def _page_directory_entries(self) -> list[tuple[str, str, bool]]:
+        """页目录数据（T6）：固定页序＋布局角标＋激活标记，打开时实时求值。"""
+        return [
+            (
+                page.title,
+                f"{page.rows_current}×{page.cols_current}",
+                page is self._current_page,
+            )
+            for page in self.pages
+        ]
+
     def _on_tab_close_requested(self, index: int) -> None:
         self.close_page(self.page_at_tab(index))
 
@@ -1225,6 +1236,10 @@ class MainWindow(QMainWindow):
         self.plot_tabs.close_other_pages_requested.connect(self._close_other_pages)
         self.plot_tabs.close_right_pages_requested.connect(self._close_right_pages)
         self.plot_tabs.set_tab_info_provider(self._tab_tooltip_text)
+        self.plot_tabs.set_page_list_provider(self._page_directory_entries)
+        self.plot_tabs.page_selected.connect(
+            lambda index: self.activate_page(self.page_at_tab(index))
+        )
         self.plot_tabs.shelf_toggle_requested.connect(self.toggle_curve_shelf)
         self.plot_tabs.shelf_drop_requested.connect(self._on_shelf_capsule_drop)
         self.plot_tabs.shelf_drag_hovered.connect(self._on_shelf_capsule_hover)
