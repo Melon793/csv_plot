@@ -1441,11 +1441,12 @@ class LegendTextBrowser(QTextBrowser):
         dialog = get_shelf()
         origin = self._badge_label_for(pw)
         added: list[str] = []
+        updated = 0
         for name in names:
             ci = pw.curves.get(name)
             if ci is None:
                 continue
-            dialog.shelf.add_entry(
+            outcome = dialog.shelf.add_entry(
                 ShelfEntry.from_curve_info(
                     name,
                     ci,
@@ -1454,6 +1455,9 @@ class LegendTextBrowser(QTextBrowser):
                     origin_plot=pw if cut else None,
                 )
             )
+            # 第 6 轮 P2-34：同名覆盖更新计数，与拖入区播报同规格
+            if outcome == "updated":
+                updated += 1
             added.append(name)
         if not added:
             return
@@ -1491,6 +1495,7 @@ class LegendTextBrowser(QTextBrowser):
             "cut" if cut else "shelf_copy",
             added,
             src_label=origin,
+            updated=updated,
         )
 
     def _badge_label_for(self, plot_widget: Any) -> str:

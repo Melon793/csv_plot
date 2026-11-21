@@ -973,12 +973,16 @@ class MultiCurveManager:
         ci = pw.curves.get(var_name)
         if ci is None or ci.curve is None:
             return False
+        # 第 6 轮 C-3：异常回滚字段——先写后试时若应用失败，残留的钉住值
+        # 会让调用方同值 no-op 守卫把重试当「已应用」跳过（pen 未刷却静默）
+        old_preset = ci.line_preset
         ci.line_preset = preset
         try:
             x_min, x_max = pw.view_box.viewRange()[0]
             show = resolve_symbol_show(ci, x_max - x_min)
             pw._apply_curve_style(var_name, show)
         except Exception:
+            ci.line_preset = old_preset
             logger.error("应用样式预设失败: var=%s", var_name, exc_info=True)
             return False
         # 批量窗口内抑制逐条 emit（与 draw_mode/symbol_policy 同口径）

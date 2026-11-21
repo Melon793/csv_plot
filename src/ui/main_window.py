@@ -403,7 +403,10 @@ class MainWindow(QMainWindow):
             self._schedule_page_activation(new)
             return
         old = self._current_page
-        self._prev_page = old
+        # 第 6 轮 C1：关当前页后 close_page 置 _current_page=None 再激活邻居，
+        # old=None 不得把仍存活的 MRU 历史覆盖掉（否则 Ctrl+Tab 静默失效）
+        if old is not None:
+            self._prev_page = old
         old_range = None
         if old is not None:
             old_range = old.grab_master_x_range()
@@ -622,6 +625,9 @@ class MainWindow(QMainWindow):
             return
         if not widget_alive(page.widget):
             self.pages.remove(page)
+            # 第 6 轮 C5：死控件分支同样清 MRU 引用，防滞留已 dispose 的页
+            if self._prev_page is page:
+                self._prev_page = None
             return
         if len(self.pages) == 1:
             self.activate_page(page)
@@ -1860,6 +1866,11 @@ class MainWindow(QMainWindow):
         # 再收抽屉：状态栏抽屉是独立的 Popup 顶层窗口，主窗口销毁时若还开着，
         # 它就会留在屏幕上，鼠标/键盘 grab 也悬在半路
         self._close_status_drawers()
+        # 第 6 轮 C3：页目录 popup 同属独立 Qt.Popup 顶层窗口，退出时收起，
+        # 防嵌套事件循环期间 grab 悬置（与抽屉同类问题）
+        dir_popup = getattr(self.plot_tabs, "_dir_popup", None)
+        if dir_popup is not None:
+            dir_popup.hide()
         # 暂存区浮窗是独立顶层窗口，主窗口销毁前先收起
         shelf = self.curve_shelf_if_open()
         if shelf is not None:
