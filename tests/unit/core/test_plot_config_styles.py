@@ -55,7 +55,6 @@ def test_to_dict_without_styles_matches_legacy_keys():
         {"speed": {"color": "not-a-color"}},
         {"speed": {"line_preset": "diagonal"}},
         {"speed": {"line_preset": "auto"}},
-        {"speed": {"draw_mode": "auto"}},
         {"speed": {"draw_mode": "diagonal"}},
         {"speed": {"symbol_policy": "auto"}},
         {"speed": {"symbol_policy": "sometimes"}},
@@ -71,6 +70,17 @@ def test_from_dict_keeps_valid_partial_entry():
         "curve_styles": {"speed": {"color": "red", "line_preset": "auto"}},
     })
     assert cfg.curve_styles == {"speed": {"color": "red"}}
+
+
+def test_user_pinned_draw_mode_auto_survives_roundtrip():
+    """user 钉住的显式直线（枚举通道 override）跨模板链保持，往返幂等。"""
+    cfg = PlotConfig(
+        curves=["enum_ch"],
+        curve_styles={"enum_ch": {"color": "red", "draw_mode": "auto"}},
+    )
+    restored = PlotConfig.from_dict(cfg.to_dict())
+    assert restored.curve_styles == cfg.curve_styles
+    assert PlotConfig.from_dict(restored.to_dict()).curve_styles == cfg.curve_styles
 
 
 def test_strategy_styles_color_always_others_pinned_only():

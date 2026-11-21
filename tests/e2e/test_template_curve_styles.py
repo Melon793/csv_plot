@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import pytest
 from PySide6.QtCore import Qt
 
 from tests.fixtures.data_factory import make_simple_rows, write_csv
@@ -149,6 +148,40 @@ def test_styles_name_missing_from_data_demotes_gray(loaded_window, qtbot):
     pw = _pw0(mw)
     assert "ghost_x" in pw.invalid_curves
     assert pw.invalid_curves["ghost_x"].color == INVALID_CURVE_COLOR
+
+
+def test_hidden_page_scene_false_apply_restores_styles(loaded_window, qtbot):
+    """隐藏页套用分支（scene=False）：_batch_adding 窗口内恢复外观束。"""
+    mw = loaded_window
+    _styled_window(mw)
+    cfg = mw.plot_config_manager.export_current_config(mw)
+    plot_cfg = cfg.pages[0].plots[0]
+    pw = _pw0(mw)
+    mgr = mw.plot_config_manager
+    assert mgr._apply_plot_config(pw, plot_cfg, mw, 0, scene=False) is True
+    qtbot.wait(100)
+    settle()
+    _assert_styles(pw)
+
+
+def test_partial_bundle_mixes_palette_rotation(loaded_window, qtbot):
+    """束只覆盖 speed：rpm 无束条目走色板轮转（部分束混排）。"""
+    mw = loaded_window
+    cfg = PlotSessionConfig(pages=[PlotPageConfig(
+        title="图 1", layout_rows=1, layout_cols=1,
+        plots=[PlotConfig(
+            curves=["speed", "rpm"],
+            curve_styles={"speed": {"color": "#D62728", "line_preset": LINE_PRESET_DASH}},
+        )],
+    )])
+    assert mw.plot_config_manager.apply_config(mw, cfg) is True
+    qtbot.wait(100)
+    settle()
+    pw = _pw0(mw)
+    assert pw.curves["speed"].color == "#D62728"
+    assert pw.curves["speed"].line_preset == LINE_PRESET_DASH
+    assert pw.curves["rpm"].color == DEFAULT_CURVE_COLORS[1]
+    assert pw.curves["rpm"].line_preset == "auto"
 
 
 def test_reload_after_apply_keeps_styles(loaded_window, qtbot, tmp_path):

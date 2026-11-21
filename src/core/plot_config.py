@@ -93,15 +93,16 @@ class PlotConfig:
     def _parse_curve_styles(raw: Any) -> dict[str, dict]:
         """外观束逐字段守卫（B1/BL-3 风格）：畸形手写档不得让异常逃出槽。
 
-        auto 值三字段一律丢：放行 draw_mode:'auto' 会在套用端把来源钉成
-        'user'，吞掉枚举通道的自动阶梯判定（束只承载偏离默认值）。
+        preset/policy 的 auto 值丢（= 默认值，无承载意义）；draw_mode 的
+        'auto' **保留**——它只可能来自 user 钉住的显式直线（枚举通道用户
+        override），套用端 apply 入口钉 source='user' 恰好复现该意图；
+        丢弃会造成模板链独丢、与 reload/搬运链不一致且往返不幂等。
         """
         if not isinstance(raw, dict):
             return {}
         from PySide6.QtGui import QColor
 
         from src.core.data_types import (
-            DRAW_MODE_AUTO,
             DRAW_MODES,
             LINE_PRESET_AUTO,
             LINE_PRESETS,
@@ -121,7 +122,7 @@ class PlotConfig:
             if preset in LINE_PRESETS and preset != LINE_PRESET_AUTO:
                 entry["line_preset"] = preset
             mode = entry_raw.get("draw_mode")
-            if mode in DRAW_MODES and mode != DRAW_MODE_AUTO:
+            if mode in DRAW_MODES:
                 entry["draw_mode"] = mode
             policy = entry_raw.get("symbol_policy")
             if policy in SYMBOL_POLICIES and policy != SYMBOL_POLICY_AUTO:

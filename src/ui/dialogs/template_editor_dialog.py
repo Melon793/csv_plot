@@ -330,6 +330,22 @@ class TemplateEditorDialog(QDialog):
                         lines.append(f"        cell_col: {int(cell_col)}")
                     except (TypeError, ValueError):
                         pass
+                # 外观束与占位/坐标同契约（R16 同类）：漏写等于「编辑 → 保存」
+                # 清空跨会话外观。子树用 safe_dump 再生成（字符串自动加引号，
+                # 避免 YAML 1.1 把 on/off 解析成布尔），整体缩进 8 空格对齐 plot 键
+                styles = plot.get("curve_styles")
+                if isinstance(styles, dict) and styles:
+                    lines.append(
+                        "        # 曲线外观束：颜色/线型/绘制方式/数据点（跨会话复现）"
+                    )
+                    dumped = yaml.safe_dump(
+                        {"curve_styles": styles},
+                        default_flow_style=False,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+                    for style_line in dumped.rstrip("\n").split("\n"):
+                        lines.append("        " + style_line)
 
         return "\n".join(lines) + "\n"
 
