@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel, QToolButton
 
 from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
@@ -220,7 +221,96 @@ def test_scroll_arrows_use_flat_custom_icons(tabs, qapp):
     for button in scroll_buttons:
         assert button.arrowType() == Qt.ArrowType.NoArrow
         assert not button.icon().isNull()
-        assert button.iconSize() == QSize(16, 16)
+        assert button.iconSize() == QSize(12, 12)
+
+
+def _scroll_buttons(tabs):
+    out = {}
+    for child in tabs.tabBar().children():
+        if isinstance(child, QToolButton) and "scroll" in (child.objectName() or "").lower():
+            out["left" if "left" in child.objectName().lower() else "right"] = child
+    return out
+
+
+def test_scroll_buttons_adjacent_within_reserved_zone(tabs, qapp):
+    _add_pages(tabs, MAX_PAGES)
+    tabs.setCurrentIndex(MAX_PAGES - 1)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    btns = _scroll_buttons(tabs)
+    left, right = btns["left"], btns["right"]
+    assert left.isVisible() and right.isVisible(), "16 页窄窗应进入滚动模式"
+    assert left.geometry().right() < right.geometry().x(), "两按钮不得重叠"
+    assert right.geometry().right() <= bar.width() - 1
+    last = bar.tabRect(bar.count() - 1)
+    assert last.right() < left.geometry().x(), "按钮不得压住最后一个标签"
+    assert left.isEnabled() and not right.isEnabled(), "停在最右：左可用右禁用"
+
+
+def test_scroll_geometry_self_heals_on_resize(tabs, qapp):
+    _add_pages(tabs, MAX_PAGES)
+    tabs.setCurrentIndex(MAX_PAGES - 1)
+    qapp.processEvents()
+    for width in (500, 640, 500):
+        tabs.resize(width, 360)
+        qapp.processEvents()
+        bar = tabs.tabBar()
+        btns = _scroll_buttons(tabs)
+        assert btns["left"].isVisible(), "窄窗应始终处于滚动模式"
+        assert btns["left"].geometry().right() < btns["right"].geometry().x()
+        assert btns["right"].geometry().right() <= bar.width() - 1
+
+
+def test_scroll_geometry_survives_gate_hide_show(tabs, qapp):
+    _add_pages(tabs, MAX_PAGES)
+    tabs.setCurrentIndex(MAX_PAGES - 1)
+    qapp.processEvents()
+    tabs.set_new_page_enabled(False)
+    qapp.processEvents()
+    tabs.resize(420, 360)
+    qapp.processEvents()
+    tabs.set_new_page_enabled(True)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    btns = _scroll_buttons(tabs)
+    assert btns["left"].isVisible() and btns["right"].isVisible()
+    assert btns["left"].geometry().right() < btns["right"].geometry().x()
+    assert btns["right"].geometry().right() <= bar.width() - 1
+
+
+def test_right_scroll_click_advances_from_left_end(tabs, qapp):
+    _add_pages(tabs, MAX_PAGES)
+    tabs.setCurrentIndex(0)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    btns = _scroll_buttons(tabs)
+    assert bar.tabRect(MAX_PAGES - 1).right() > bar.width(), "停最左时末页应在视野外"
+    assert not btns["left"].isEnabled() and btns["right"].isEnabled()
+    for _ in range(60):
+        if bar.tabRect(MAX_PAGES - 1).right() <= bar.width():
+            break
+        QTest.mouseClick(btns["right"], Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+    assert bar.tabRect(MAX_PAGES - 1).right() <= bar.width(), "右箭头应能滚到末页"
+
+
+def test_left_scroll_click_returns_to_first_page(tabs, qapp):
+    _add_pages(tabs, MAX_PAGES)
+    tabs.setCurrentIndex(MAX_PAGES - 1)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    left = _scroll_buttons(tabs)["left"]
+    assert bar.tabRect(0).x() < 0, "停在最右时第一页应在视野外"
+    for _ in range(60):
+        if bar.tabRect(0).x() >= 0:
+            break
+        QTest.mouseClick(left, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+    assert bar.tabRect(0).x() >= 0, "真实点击左箭头应能滚回第一页"
+    assert not left.isEnabled(), "滚到最左后左箭头应禁用"
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(0).center())
+    qapp.processEvents()
+    assert tabs.currentIndex() == 0, "第一页应可点击切换"
 
 
 # ---------------------------------------------------------------------------

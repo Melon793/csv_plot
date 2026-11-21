@@ -51,11 +51,18 @@ _SHELF_CAPSULE_SIZE = QSize(36, 20)
 #: 标签栏底色：标签与滚动按钮共用，滚动按钮靠它遮住边界下被压住的部分标签
 _TAB_BAR_BG = "#f3f3f3"
 
-#: 滚动箭头：与 ＋/× 同一套扁平图标语言（16px 矢量、无边框、hover 圆角灰底）
-_SCROLL_ARROW_ICON_SIZE = 16
+#: 滚动箭头：与 ＋/× 同一套扁平图标语言（矢量直绘、无边框、hover 圆角灰底）
 _SCROLL_ARROW_COLOR = "#5a5a5a"
 _SCROLL_ARROW_ACTIVE = "#1f1f1f"
 _SCROLL_ARROW_DISABLED = "#b5b5b5"
+
+#: 滚动按钮槽位：Qt 只给标签栏右缘预留 31px（实测标签区右界=barW−32），
+#: 原生却把两按钮重叠摆放（macOS 重叠约 11px），左箭头字形被右按钮盖住、
+#: 真实点击落到右按钮；停在最右时右按钮 disabled，于是再也滚不回第一页。
+#: 重排为相邻两个 15px 槽（共 30px≤31px zone）：不压末标签、不溢出右缘；
+#: 图标按 12px 矢量直绘，避免位图非整数缩放发虚。
+_SCROLL_BUTTON_WIDTH = 15
+_SCROLL_BUTTON_ICON_SIZE = 12
 
 #: 激活页顶部强调线（与拖拽视觉同一份品牌蓝）
 _ACCENT_COLOR = DRAG_ACCENT
@@ -394,19 +401,20 @@ class _ShelfCapsuleButton(_FlatIconButton):
 
 
 def _scroll_arrow_pixmap(direction: str, color: str, dpr: int) -> QPixmap:
-    """画 16px chevron；使用逻辑坐标，DPR 由 QPixmap 自带。"""
-    logical = _SCROLL_ARROW_ICON_SIZE
+    """按图标槽位尺寸矢量直绘 chevron；DPR 由 QPixmap 自带，不做位图缩放。"""
+    logical = _SCROLL_BUTTON_ICON_SIZE
+    scale = logical / 16.0
     pixmap = QPixmap(logical * dpr, logical * dpr)
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color), 1.6)
+    pen = QPen(QColor(color), 1.6 * scale)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
     center = logical / 2.0
-    arm = 4.2
+    arm = 4.2 * scale
     if direction == "left":
         painter.drawLine(
             QPointF(center + arm * 0.45, center - arm),
@@ -466,6 +474,7 @@ class _TabsBar(QTabBar):
         # QTabBar 可能在本钩子触发的布局周期里才创建/重排滚动按钮；
         # 这里补一次，保证原生箭头不会在显示后退回平台样式。
         self._owner._style_scroll_buttons()
+        self._owner._place_scroll_buttons()
         self._owner._place_new_page_button()
 
 
@@ -595,13 +604,45 @@ class PlotTabsWidget(QTabWidget):
             child.setArrowType(Qt.ArrowType.NoArrow)
             child.setIcon(icon)
             child.setIconSize(
-                QSize(_SCROLL_ARROW_ICON_SIZE, _SCROLL_ARROW_ICON_SIZE)
+                QSize(_SCROLL_BUTTON_ICON_SIZE, _SCROLL_BUTTON_ICON_SIZE)
             )
             child.setStyleSheet(_SCROLL_ARROW_STYLE)
             child.setCursor(Qt.CursorShape.ArrowCursor)
             child.setToolTip(
                 "向左滚动标签" if direction == "left" else "向右滚动标签"
             )
+
+    def _place_scroll_buttons(self) -> None:
+        """把两个滚动按钮重排进 Qt 预留的右缘 zone，相邻不重叠。
+
+        Qt 原生布局让右按钮叠在左按钮上面，左箭头字形落在被盖区、
+        真实鼠标点击落到右按钮；停在最右时右按钮 disabled，点击毫无
+        反应，第一页永远滚不回来。Qt 每次布局都会重设几何，故本方法
+        挂在 ``tabLayoutChange`` 里于布局之后修正；按钮隐藏（页签放得
+        下）时不动，避免把停放在屏外的按钮拖进视野。
+        """
+        bar = self.tabBar()
+        buttons = self._visible_scroll_buttons()
+        if len(buttons) != 2:
+            return
+        left = right = None
+        for child in buttons:
+            name = (child.objectName() or "").lower()
+            if "left" in name:
+                left = child
+            elif "right" in name:
+                right = child
+        if left is None or right is None:
+            return
+        width, height = bar.width(), bar.height()
+        if height <= 0 or width < 2 * _SCROLL_BUTTON_WIDTH:
+            return
+        right.setGeometry(
+            width - _SCROLL_BUTTON_WIDTH, 0, _SCROLL_BUTTON_WIDTH, height
+        )
+        left.setGeometry(
+            width - 2 * _SCROLL_BUTTON_WIDTH, 0, _SCROLL_BUTTON_WIDTH, height
+        )
 
     # ------------------------------------------------------------------
     # 暂存区胶囊：计数 / 勾选态 / 加载闸门（本类只转发，不认识 MainWindow）
