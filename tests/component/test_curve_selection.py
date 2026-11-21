@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtTest import QTest
@@ -1561,6 +1561,7 @@ def test_qtest_ctrl_click_then_dblclick_keeps_selection_no_editor(
 
     assert opened == [], "Ctrl+双击曲线不得打开变量编辑器"
     assert pw._legend_selection == {"a"}
+    assert pw._curve_click_press_pos is None, "合成双击不得留下陈旧 press 记录"
 
 
 def test_bare_dblclick_in_viewbox_still_opens_editor(hit_plot, monkeypatch):
@@ -1572,3 +1573,43 @@ def test_bare_dblclick_in_viewbox_still_opens_editor(hit_plot, monkeypatch):
     _dblclick(pw, _vp(pw, _scene_at(pw, "a")))
 
     assert opened == [1]
+
+
+def _x_axis_label_pos(pw):
+    """X 轴标签区（底 30px）中心，与 mouseDoubleClickEvent 的检测几何同源。"""
+    scene = pw.axis_x.mapToScene(pw.axis_x.boundingRect()).boundingRect()
+    label_rect = QRectF(
+        scene.left(), scene.bottom() - 30.0, scene.width(), 30.0
+    )
+    return pw.mapFromScene(label_rect.center())
+
+
+def test_ctrl_dblclick_on_axis_label_does_not_open_axis_dialog(
+    hit_plot, monkeypatch
+):
+    """守卫覆盖轴标签区：Ctrl+双击不弹 AxisDialog（裸双击仍弹，证明
+    注入点确实落在轴标签分支而非绘图区）。"""
+    import src.ui.dialogs.axis as axis_mod
+
+    pw = hit_plot
+    created = []
+
+    class _FakeAxisDialog:
+        def __init__(self, axis, view_box, axis_type, plot_widget, parent=None):
+            created.append(axis_type)
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(axis_mod, "AxisDialog", _FakeAxisDialog)
+
+    pos = _x_axis_label_pos(pw)
+    _dblclick(pw, pos)
+    assert created == ["X"], "前提：注入点应进入 X 轴对话框分支"
+
+    created.clear()
+    _dblclick(pw, pos, Qt.KeyboardModifier.ControlModifier)
+    assert created == [], "Ctrl/⌘ 双击轴标签区不得弹 AxisDialog"
