@@ -61,6 +61,9 @@ _PLUS_SLOT_WIDTH = 28
 #: Windows 字体度量不同，常量合并前需复测。
 _TAB_MAX_WIDTH = 200
 
+#: 溢出指示条高度（V-A）：对齐 VSCode 标题栏滚动条默认 3px；仅指示不交互
+_OVERFLOW_BAR_HEIGHT = 3
+
 #: 角位容器右缘留白（与胶囊保持视觉间距）
 _CORNER_RIGHT_MARGIN = 2
 
@@ -606,6 +609,49 @@ class _PageDirectoryPopup(QWidget):
         super().keyPressEvent(event)
 
 
+class _TabOverflowIndicator(QWidget):
+    """页签栏底缘 3px 溢出指示条（V-A，VSCode 标题栏滚动条形态）。
+
+    仅指示、不交互（``WA_TransparentForMouseEvents``）：拇指宽度＝可见比例、
+    位置＝滚动偏移比例。Qt 无公开 scroll offset API，metrics 由
+    ``tabRect`` 反推（首签 x 为负即偏移）。可拖拽版留二期（写偏移只能经
+    隐藏按钮步进，会吸附页边界）。
+    """
+
+    _THUMB_COLOR = QColor("#c9c9c9")
+    _MIN_THUMB = 12
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFixedHeight(_OVERFLOW_BAR_HEIGHT)
+        self._total = 0
+        self._visible = 0
+        self._offset = 0
+        self.hide()
+
+    def set_metrics(self, total: int, visible: int, offset: int) -> None:
+        self._total = total
+        self._visible = visible
+        self._offset = offset
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if self._total <= self._visible or self._visible <= 0:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._THUMB_COLOR)
+        width = self.width()
+        thumb = max(self._MIN_THUMB, int(width * self._visible / self._total))
+        thumb = min(thumb, width)
+        span = self._total - self._visible
+        x = int((width - thumb) * self._offset / span) if span > 0 else 0
+        painter.drawRoundedRect(QRectF(x, 0, thumb, self.height()), 1.5, 1.5)
+        painter.end()
+
+
 class _TabsBar(QTabBar):
     """挂 ``tabLayoutChange`` 官方布局钩子的标签栏。
 
@@ -626,6 +672,12 @@ class _TabsBar(QTabBar):
         # 在官方布局钩子里藏回去（按钮保留隐藏态供滚轮程序化驱动）。
         self._owner._hide_scroll_buttons()
         self._owner._place_new_page_button()
+        self._owner._sync_overflow_indicator()
+
+    def paintEvent(self, event):  # noqa: N802 - Qt 命名
+        super().paintEvent(event)
+        # 滚动偏移变化不走 tabLayoutChange，但必然重绘 → 借重绘同步指示条
+        self._owner._sync_overflow_indicator()
 
     def tabSizeHint(self, index):  # noqa: N802 - Qt 命名
         """V-A fit：自然宽封顶 ``_TAB_MAX_WIDTH``，超长名截断靠 tooltip 兜底。"""
@@ -702,6 +754,8 @@ class PlotTabsWidget(QTabWidget):
         # macOS 原生样式会画 #bebebe 的 tab bar base，盖住 QSS 底色；
         # 关掉后由 QSS 的 #f3f3f3 接管（Windows/Fusion 本来没有这层）。
         self.tabBar().setDrawBase(False)
+        # 溢出指示条（V-A）：页签栏底缘 3px，仅溢出时显示
+        self._overflow_bar = _TabOverflowIndicator(self)
 
         self._new_page_allowed = False
         # 未加载数据：初始隐藏（set_new_page_enabled(True) 时显示）
@@ -808,6 +862,28 @@ class PlotTabsWidget(QTabWidget):
             elif rect.left() > width:
                 right += 1
         return left, right
+
+    def _sync_overflow_indicator(self) -> None:
+        """按 tabRect 反推偏移/总量，刷新底缘 3px 指示条（溢出才显示）。"""
+        indicator = getattr(self, "_overflow_bar", None)
+        if indicator is None:
+            return
+        bar = self.tabBar()
+        if not bar.isVisible() or bar.count() == 0 or bar.width() <= 0:
+            indicator.hide()
+            return
+        first = bar.tabRect(0)
+        last = bar.tabRect(bar.count() - 1)
+        total = last.right() - first.x() + 1
+        visible = bar.width()
+        if total <= visible + 1:
+            indicator.hide()
+            return
+        indicator.set_metrics(total, visible, max(0, -first.x()))
+        pos = bar.mapTo(self, QPoint(0, bar.height() - _OVERFLOW_BAR_HEIGHT))
+        indicator.setGeometry(pos.x(), pos.y(), visible, _OVERFLOW_BAR_HEIGHT)
+        indicator.show()
+        indicator.raise_()
 
     # ------------------------------------------------------------------
     # 暂存区胶囊：计数 / 勾选态 / 加载闸门（本类只转发，不认识 MainWindow）
@@ -981,6 +1057,7 @@ class PlotTabsWidget(QTabWidget):
         self._sync_corner_width()
         self._sync_new_page_button()
         self._place_new_page_button()
+        self._sync_overflow_indicator()
 
     def new_page_enabled(self) -> bool:
         return self._can_add_page()

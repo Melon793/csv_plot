@@ -663,3 +663,31 @@ def test_fit_long_name_capped_at_max(tabs, qapp):
     qapp.processEvents()
     bar = tabs.tabBar()
     assert bar.tabRect(0).width() == 200
+
+
+# ----------------------------------------------------------------------
+# V-A：3px 溢出指示条（仅指示、不交互、溢出才显示、随滚动同步）
+# ----------------------------------------------------------------------
+def test_overflow_indicator_hidden_when_no_overflow(tabs, qapp):
+    tabs.resize(1200, 360)
+    _add_pages(tabs, 2)
+    qapp.processEvents()
+    assert not tabs._overflow_bar.isVisible()
+
+
+def test_overflow_indicator_visible_and_tracks_scroll(tabs, qapp):
+    tabs.resize(640, 360)
+    _add_pages(tabs, 16)
+    qapp.processEvents()
+    ind = tabs._overflow_bar
+    bar = tabs.tabBar()
+    assert ind.isVisible()
+    assert ind.height() == 3
+    assert ind.width() == bar.width()
+    assert ind.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    assert ind.y() == bar.mapTo(tabs, QPoint(0, bar.height() - 3)).y()
+    assert ind._total > ind._visible
+    offset0 = ind._offset
+    _wheel_bar(tabs, -120, qapp)
+    qapp.processEvents()
+    assert ind._offset > offset0, "滚动后指示条偏移应同步"
