@@ -27,7 +27,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QTabBar, QTabWidget, QToolButton, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QTabBar,
+    QTabWidget,
+    QToolTip,
+    QToolButton,
+    QWidget,
+)
 
 from src.ui.drag_drop import SHELF_MIME_FORMAT
 from src.ui import theme
@@ -499,6 +506,9 @@ class PlotTabsWidget(QTabWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 页签全名 tooltip 的数据源（MainWindow 注入，hover 时实时求值，
+        # 改名/换布局/增删曲线后无需任何同步点，不会过期）
+        self._tab_info_provider = None
         # 箭头图标只在首次样式化时生成，tabLayoutChange 会反复补样式
         self._scroll_arrow_icons: dict[str, QIcon] = {}
         # 必须在一切 tabBar() 使用之前挂入：布局钩子依赖自定义子类
@@ -572,6 +582,14 @@ class PlotTabsWidget(QTabWidget):
     def shelf_capsule(self) -> _ShelfCapsuleButton | None:
         """暂存区胶囊（测试、拖拽放行判据与托盘锚点共用）；回滚开关关闭时为 None。"""
         return self._shelf_capsule
+
+    def set_tab_info_provider(self, provider) -> None:
+        """注入 ``provider(index) -> str``：页签 hover tooltip 文案（可含换行）。
+
+        返回空串则该页签不弹 tooltip。provider 在 hover 瞬间求值，页名/布局/
+        曲线数永远取当前值，调用方无需在状态变化处补同步。
+        """
+        self._tab_info_provider = provider
 
     def _style_scroll_buttons(self) -> None:
         """把 QTabBar 原生滚动箭头换成与 ＋/× 同一套的扁平矢量字形。
@@ -840,6 +858,14 @@ class PlotTabsWidget(QTabWidget):
                 self._place_new_page_button()
         if obj is self.tabBar():
             event_type = event.type()
+            if event_type == QEvent.Type.ToolTip:
+                provider = self._tab_info_provider
+                if provider is not None:
+                    index = self.tabBar().tabAt(event.pos())
+                    text = provider(index) if index >= 0 else ""
+                    if text:
+                        QToolTip.showText(event.globalPos(), text, self.tabBar())
+                    return True
             if (
                 event_type == QEvent.Type.MouseButtonRelease
                 and event.button() == Qt.MouseButton.MiddleButton

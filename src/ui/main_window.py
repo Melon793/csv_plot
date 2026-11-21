@@ -533,6 +533,26 @@ class MainWindow(QMainWindow):
         self._broadcast(f"已新建「{page.title}」", "info")
         return page
 
+    def _page_curve_count(self, page: PlotPage) -> int:
+        """页内曲线总数（含无效曲线）；tooltip 与关页确认共用同一口径。"""
+        return sum(
+            len(getattr(container.plot_widget, "curves", None) or [])
+            + len(getattr(container.plot_widget, "invalid_curves", None) or [])
+            for container in page.plot_widgets
+        )
+
+    def _tab_tooltip_text(self, index: int) -> str:
+        """页签 hover 全名出口：截断后仍可辨识页（T1）。hover 时实时求值。"""
+        page = self.page_at_tab(index)
+        if page is None:
+            return ""
+        return (
+            f"{page.title}\n"
+            f"第 {index + 1}/{self.plot_tabs.count()} 页 · "
+            f"{page.rows_current}×{page.cols_current} 布局 · "
+            f"{self._page_curve_count(page)} 条曲线"
+        )
+
     def _on_tab_close_requested(self, index: int) -> None:
         self.close_page(self.page_at_tab(index))
 
@@ -551,11 +571,7 @@ class MainWindow(QMainWindow):
             self.activate_page(page)
             self.cursor_sync_manager.clear_all_plots()
             return
-        has_curves = any(
-            getattr(container.plot_widget, "curves", None)
-            or getattr(container.plot_widget, "invalid_curves", None)
-            for container in page.plot_widgets
-        )
+        has_curves = self._page_curve_count(page) > 0
         if confirm and has_curves:
             answer = QMessageBox.question(
                 self,
@@ -1158,6 +1174,7 @@ class MainWindow(QMainWindow):
         self.plot_tabs.new_page_requested.connect(self.new_page)
         self.plot_tabs.close_page_requested.connect(self._on_tab_close_requested)
         self.plot_tabs.rename_page_requested.connect(self._on_tab_rename_requested)
+        self.plot_tabs.set_tab_info_provider(self._tab_tooltip_text)
         self.plot_tabs.shelf_toggle_requested.connect(self.toggle_curve_shelf)
         self.plot_tabs.shelf_drop_requested.connect(self._on_shelf_capsule_drop)
         self.plot_tabs.shelf_drag_hovered.connect(self._on_shelf_capsule_hover)

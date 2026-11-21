@@ -372,3 +372,56 @@ def test_shelf_capsule_state_api_forwards(qapp, qtbot):
     assert capsule.isEnabled() is False
     tabs.set_shelf_enabled(True)
     assert capsule.isEnabled() is True
+
+
+# ----------------------------------------------------------------------
+# T1：页签全名 tooltip（provider hover 时实时求值，无同步点）
+# ----------------------------------------------------------------------
+def _send_tab_tooltip(tabs: PlotTabsWidget, index: int, qapp) -> None:
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QHelpEvent
+
+    bar = tabs.tabBar()
+    rect = bar.tabRect(index)
+    event = QHelpEvent(
+        QEvent.Type.ToolTip, rect.center(), bar.mapToGlobal(rect.center())
+    )
+    qapp.sendEvent(bar, event)
+
+
+def test_tab_tooltip_shows_provider_text(tabs, qapp):
+    from PySide6.QtWidgets import QToolTip
+
+    _add_pages(tabs, 3)
+    tabs.set_tab_info_provider(lambda i: f"完整页名 {i + 1}\n第 {i + 1}/3 页")
+    _send_tab_tooltip(tabs, 1, qapp)
+    assert "完整页名 2" in QToolTip.text()
+    assert "第 2/3 页" in QToolTip.text()
+
+
+def test_tab_tooltip_reevaluated_on_each_hover(tabs, qapp):
+    from PySide6.QtWidgets import QToolTip
+
+    _add_pages(tabs, 2)
+    state = {"name": "旧名"}
+    tabs.set_tab_info_provider(lambda i: state["name"])
+    _send_tab_tooltip(tabs, 0, qapp)
+    assert QToolTip.text() == "旧名"
+    state["name"] = "改名后"
+    _send_tab_tooltip(tabs, 0, qapp)
+    assert QToolTip.text() == "改名后"
+
+
+def test_tab_tooltip_empty_text_suppressed(tabs, qapp):
+    from PySide6.QtWidgets import QToolTip
+
+    _add_pages(tabs, 2)
+    QToolTip.hideText()
+    tabs.set_tab_info_provider(lambda i: "")
+    _send_tab_tooltip(tabs, 0, qapp)
+    assert QToolTip.text() == ""
+
+
+def test_tab_tooltip_without_provider_falls_through(tabs, qapp):
+    _add_pages(tabs, 2)
+    _send_tab_tooltip(tabs, 0, qapp)  # 无 provider：不拦截、不崩
