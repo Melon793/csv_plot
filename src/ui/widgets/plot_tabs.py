@@ -370,33 +370,35 @@ class _ShelfCapsuleButton(_FlatIconButton):
         painter.end()
 
     def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
-        """托盘字形：下开口方框（左侧 + 顶边 + 右侧）+ 向下箭头。"""
-        center = QPointF(15, self.height() / 2)
-        pen = QPen(color, 1.3)
+        """抽屉盒字形（C2）：盖＋盒＋把手三段横线，14px 盒、1.2px 线宽。
+
+        语义＝临时存放的抽屉（多件暂存随取），取代旧「盒＋下箭头」
+        （后者读作下载/导入动作）。居左配合 chip 内联计数。
+        """
+        origin = QPointF(15, self.height() / 2) - QPointF(7, 7)
+        pen = QPen(color, 1.2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        half_w = 6.0
-        top = center.y() - 5.5
-        bottom = center.y() + 5.0
-        left = center.x() - half_w
-        right = center.x() + half_w
-        # 方框：顶边 + 两侧竖线，底部开口
-        painter.drawLine(QPointF(left, top), QPointF(right, top))
-        painter.drawLine(QPointF(left, top), QPointF(left, bottom))
-        painter.drawLine(QPointF(right, top), QPointF(right, bottom))
-        # 向下箭头：从方框内指向开口
-        painter.drawLine(
-            QPointF(center.x(), top + 2.0), QPointF(center.x(), bottom + 2.0)
+        painter.drawRoundedRect(
+            QRectF(origin.x() + 2, origin.y() + 2.4, 10, 3), 0.8, 0.8
         )
         painter.drawLine(
-            QPointF(center.x() - 2.6, bottom - 0.4),
-            QPointF(center.x(), bottom + 2.0),
+            QPointF(origin.x() + 3, origin.y() + 5.4),
+            QPointF(origin.x() + 3, origin.y() + 11.6),
         )
         painter.drawLine(
-            QPointF(center.x() + 2.6, bottom - 0.4),
-            QPointF(center.x(), bottom + 2.0),
+            QPointF(origin.x() + 3, origin.y() + 11.6),
+            QPointF(origin.x() + 11, origin.y() + 11.6),
+        )
+        painter.drawLine(
+            QPointF(origin.x() + 11, origin.y() + 11.6),
+            QPointF(origin.x() + 11, origin.y() + 5.4),
+        )
+        painter.drawLine(
+            QPointF(origin.x() + 5.6, origin.y() + 8),
+            QPointF(origin.x() + 8.4, origin.y() + 8),
         )
 
     def _draw_count(self, painter: QPainter) -> None:
