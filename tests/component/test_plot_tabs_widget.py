@@ -463,7 +463,7 @@ def test_context_menu_batch_items_disabled_at_edges(tabs):
 
 
 # ----------------------------------------------------------------------
-# T4 + T8：滚轮横向滚动（不切页）＋ 96px 页签宽度下限
+# T4：滚轮横向滚动（不切页）＋ 页签宽度恢复 main 自然宽（T8 已回退）
 # ----------------------------------------------------------------------
 def _wheel_bar(tabs: PlotTabsWidget, delta_y: int, qapp) -> None:
     from PySide6.QtCore import QPointF
@@ -484,12 +484,16 @@ def _wheel_bar(tabs: PlotTabsWidget, delta_y: int, qapp) -> None:
     qapp.sendEvent(bar, event)
 
 
-def test_min_tab_width_floor_stops_shrinking(tabs, qapp):
+def test_tab_width_keeps_main_natural_behavior(tabs, qapp):
+    """T8 回退：页签恢复 main 自然宽（默认名 < 96px），不再人为加宽。
+
+    16 页窄窗仍进入溢出，辨识靠 T1 全名 tooltip＋T6 页目录，滚动靠 T4 滚轮。
+    """
     tabs.resize(640, 360)
     _add_pages(tabs, 16)
     qapp.processEvents()
     bar = tabs.tabBar()
-    assert all(bar.tabRect(i).width() >= 96 for i in range(16))
+    assert all(bar.tabRect(i).width() < 96 for i in range(16))
     assert bar.tabRect(15).right() > bar.width()   # 压不下 → 进入溢出
 
 

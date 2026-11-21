@@ -52,12 +52,6 @@ from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
 #: 绘图页数量上限（设计文档 §4.4；2026-11-20 由 8 提升到 16）
 MAX_PAGES = 16
 
-#: 页签宽度下限（T8）：Qt 默认「先压缩页签、压不下才滚动」，16 页窄窗下
-#: 全部截成「pag…」且不出滚动箭头。96px = 默认名「page 16」文本 46 +
-#: padding 18 + 关闭 × 18 + 呼吸 14（macOS 实测）；Windows 字体度量不同，
-#: 常量定稿前需在 Windows 复测。溢出导航由滚轮（T4）与页目录（T6）承担。
-_MIN_TAB_WIDTH = 96
-
 #: 「＋」预留槽宽度：页签放不下时停到暂存区胶囊左侧，避免压住最后一个页签的关闭按钮
 _PLUS_SLOT_WIDTH = 28
 
@@ -614,16 +608,6 @@ class _TabsBar(QTabBar):
         # 在官方布局钩子里藏回去（按钮保留隐藏态供滚轮程序化驱动）。
         self._owner._hide_scroll_buttons()
         self._owner._place_new_page_button()
-
-    def minimumTabSizeHint(self, index):  # noqa: N802 - Qt 命名
-        """T8：拦住 Qt 的无限压缩，保证每个可见页签可读。"""
-        base = super().minimumTabSizeHint(index)
-        return QSize(max(_MIN_TAB_WIDTH, base.width()), base.height())
-
-    def tabSizeHint(self, index):  # noqa: N802 - Qt 命名
-        """T8：滚动模式下 Qt 按自然宽布局（可小于下限），同样要抬到 96px。"""
-        base = super().tabSizeHint(index)
-        return QSize(max(_MIN_TAB_WIDTH, base.width()), base.height())
 
     def wheelEvent(self, event):  # noqa: N802 - Qt 命名
         """T4：页签区滚轮＝横向滚动页签，不切页（QTabBar 默认会切页）。
