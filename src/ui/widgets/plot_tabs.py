@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui.drag_drop import SHELF_MIME_FORMAT
-from src.ui import theme
 from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
 
 #: 绘图页数量上限（设计文档 §4.4；2026-11-20 由 8 提升到 16）
@@ -70,8 +69,9 @@ _CORNER_RIGHT_MARGIN = 2
 #: 曲线暂存区入口回滚开关：False 时只保留 top_bar 旧按钮（MainWindow 同步读它）
 _SHELF_CAPSULE_ENTRY = True
 
-#: 角位胶囊尺寸：宽度写死 36（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）
-_SHELF_CAPSULE_SIZE = QSize(36, 20)
+#: 角位胶囊尺寸（方案 A）：52×20 chip＝14px 字形＋4px 间距＋内联计数；
+#: 宽度写死（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）
+_SHELF_CAPSULE_SIZE = QSize(52, 20)
 
 #: 页目录按钮尺寸（T6）：角位变为 [＋槽 28][▾ 20][胶囊 36]；G1 口径 sizeHint=fixedSize
 _DIR_BUTTON_SIZE = QSize(20, 20)
@@ -121,6 +121,15 @@ class _FlatIconButton(QToolButton):
     _BG_PRESSED = QColor("#dcdcdc")
     _BG_RADIUS = 4
 
+    #: 方案 A：rest 态常驻容器（1px 边框＋白底圆角 chip），解「不像按钮」。
+    #: 仅角位「切换/容器入口」（▾、胶囊）启用；＋/× 等条内动作保持扁平。
+    _CHIP_REST = False
+    _CHIP_BG = QColor("#ffffff")
+    _CHIP_BORDER = QColor("#d0d0d0")
+    _CHIP_BORDER_HOVER = QColor("#bdbdbd")
+    _CHIP_BG_DISABLED = QColor("#fafafa")
+    _CHIP_BORDER_DISABLED = QColor("#e3e3e3")
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # 不抢焦点：点完后焦点应留在原交互入口（如搜索框）
@@ -139,10 +148,26 @@ class _FlatIconButton(QToolButton):
     def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
         raise NotImplementedError
 
+    def _paint_chip_base(self, painter: QPainter) -> None:
+        """rest 常驻 chip：白底＋1px 边框；hover 灰底深边框；禁用浅灰。"""
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if not self.isEnabled():
+            bg, border = self._CHIP_BG_DISABLED, self._CHIP_BORDER_DISABLED
+        elif self.underMouse():
+            bg = self._BG_PRESSED if self.isDown() else self._BG_HOVER
+            border = self._CHIP_BORDER_HOVER
+        else:
+            bg, border = self._CHIP_BG, self._CHIP_BORDER
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.isEnabled() and self.underMouse():
+        if self._CHIP_REST:
+            self._paint_chip_base(painter)
+        elif self.isEnabled() and self.underMouse():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(self._BG_PRESSED if self.isDown() else self._BG_HOVER)
             painter.drawRoundedRect(
@@ -209,7 +234,7 @@ class _NewPageButton(_FlatIconButton):
 
 
 class _ShelfCapsuleButton(_FlatIconButton):
-    """页签栏右端 36×20 的曲线暂存区入口：托盘字形 + 常驻计数徽章。
+    """页签栏右端 52×20 chip 的曲线暂存区入口：字形 + 内联计数（方案 A）。
 
     它同时是 **drop 落点**：浮窗关着时也必须能收拖拽（否则退回"先开窗才能
     拖"的鸡生蛋）。只发信号、不持有 shelf 引用（分层见模块 docstring），
@@ -314,30 +339,39 @@ class _ShelfCapsuleButton(_FlatIconButton):
         self.drop_requested.emit(event)
 
     # -- 绘制 ----------------------------------------------------------
+    def _glyph_color(self) -> QColor:
+        if self.isChecked():
+            return QColor(_ACCENT_COLOR)
+        return super()._glyph_color()
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(1, 1, -1, -1)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         if self.isChecked():
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(DRAG_ACCENT_SOFT))
-            painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
-        elif self.isEnabled() and self.underMouse():
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._BG_PRESSED if self.isDown() else self._BG_HOVER)
-            painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
+            bg, border = QColor(DRAG_ACCENT_SOFT), QColor(_ACCENT_COLOR)
+        elif not self.isEnabled():
+            bg, border = self._CHIP_BG_DISABLED, self._CHIP_BORDER_DISABLED
+        elif self.underMouse():
+            bg = self._BG_PRESSED if self.isDown() else self._BG_HOVER
+            border = self._CHIP_BORDER_HOVER
+        else:
+            bg, border = self._CHIP_BG, self._CHIP_BORDER
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
         self._draw_glyph(painter, self._glyph_color())
         if self._drag_hot:
             pen = QPen(QColor(_ACCENT_COLOR), 1.4)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
-        self._draw_badge(painter)
+        self._draw_count(painter)
         painter.end()
 
     def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
         """托盘字形：下开口方框（左侧 + 顶边 + 右侧）+ 向下箭头。"""
-        center = QPointF(self.rect().center())
+        center = QPointF(15, self.height() / 2)
         pen = QPen(color, 1.3)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -365,29 +399,16 @@ class _ShelfCapsuleButton(_FlatIconButton):
             QPointF(center.x(), bottom + 2.0),
         )
 
-    def _draw_badge(self, painter: QPainter) -> None:
-        """右上角实心圆计数徽章；count==0 不画，>99 画 99+。"""
-        if self._count <= 0:
-            return
+    def _draw_count(self, painter: QPainter) -> None:
+        """chip 内联计数（字形右侧）；>99 画 99+，字号随位数收缩。"""
         text = f"{self._BADGE_MAX}+" if self._count > self._BADGE_MAX else str(self._count)
-        # 字号/半径随位数收缩：8px 下 "99+" 实测 18px，13px 圆必裁
-        if len(text) > 2:
-            radius, font_px = 7.5, 6
-        elif len(text) > 1:
-            radius, font_px = 6.5, 7
-        else:
-            radius, font_px = 5.5, 8
-        center = QPointF(self.width() - 1 - radius, 1 + radius)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(_ACCENT_COLOR))
-        painter.drawEllipse(center, radius, radius)
         font = painter.font()
-        font.setPixelSize(font_px)
+        font.setPixelSize(9 if len(text) > 2 else 11)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QColor(theme.ON_ACCENT))
+        painter.setPen(self._glyph_color())
         painter.drawText(
-            QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2),
+            QRectF(24, 0, self.width() - 30, self.height()),
             Qt.AlignmentFlag.AlignCenter,
             text,
         )
@@ -397,6 +418,7 @@ class _PageDirectoryButton(_FlatIconButton):
     """角位「▾」页目录入口（T6）：全部页一屏全见的补充入口，横条照常工作。"""
 
     _COLOR_NORMAL = "#5a5a5a"
+    _CHIP_REST = True
 
     def __init__(self, parent=None):
         super().__init__(parent)

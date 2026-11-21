@@ -551,8 +551,8 @@ def test_dir_button_gate_and_corner_width(tabs, qapp):
     tabs.set_new_page_enabled(True)
     qapp.processEvents()
     assert tabs._dir_btn.isVisible()
-    # [＋槽 28][▾ 20][胶囊 36][右缘 2]
-    assert tabs._corner_container.width() == 86
+    # [＋槽 28][▾ 20][胶囊 52][右缘 2]（方案 A）
+    assert tabs._corner_container.width() == 102
 
 
 def test_dir_popup_lists_pages_and_selects(tabs, qtbot, qapp):
@@ -691,3 +691,24 @@ def test_overflow_indicator_visible_and_tracks_scroll(tabs, qapp):
     _wheel_bar(tabs, -120, qapp)
     qapp.processEvents()
     assert ind._offset > offset0, "滚动后指示条偏移应同步"
+
+
+# ----------------------------------------------------------------------
+# 方案 A：角位双 chip 常驻容器；胶囊内联计数；＋ 保持扁平
+# ----------------------------------------------------------------------
+def test_corner_chips_rest_container_and_plus_stays_flat(tabs, qapp):
+    _add_pages(tabs, 3)
+    qapp.processEvents()
+    assert tabs._dir_btn._CHIP_REST is True
+    assert hasattr(tabs.shelf_capsule, "_draw_count")   # 胶囊自绘 chip＋内联计数
+    assert tabs.new_page_button._CHIP_REST is False
+    assert tabs.shelf_capsule.width() == 52
+    # rest / 计数 0 / 99+ / 打开态 / 禁用态 绘制均不崩
+    for count in (0, 3, 100):
+        tabs.set_shelf_count(count)
+        tabs.shelf_capsule.grab()
+    tabs.set_shelf_active(True)
+    tabs.shelf_capsule.grab()
+    tabs.set_shelf_enabled(False)
+    tabs.shelf_capsule.grab()
+    tabs._dir_btn.grab()

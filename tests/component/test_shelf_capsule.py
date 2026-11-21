@@ -115,7 +115,7 @@ def test_capsule_sizehint_matches_fixed_size(capsule_shelf):
     capsule = tabs.shelf_capsule
     assert capsule is not None
     assert capsule.sizeHint() == capsule.minimumSizeHint()
-    assert capsule.sizeHint().width() == capsule.width() == 36
+    assert capsule.sizeHint().width() == capsule.width() == 52
     assert capsule.sizeHint().height() == capsule.height() == 20
     assert capsule.acceptDrops() is True
 
@@ -156,8 +156,8 @@ def test_capsule_returns_width_when_hidden(capsule_shelf):
     QApplication.processEvents()
     without_capsule = bar.width()
     # G2：36px 记在尺寸契约里，隐藏后必须全额归还（实测正好 36）
-    assert without_capsule - with_capsule == 36
-    assert capsule.sizeHint().width() == 36
+    assert without_capsule - with_capsule == 52
+    assert capsule.sizeHint().width() == 52
     capsule.show()
     QApplication.processEvents()
     assert bar.width() == with_capsule
@@ -350,7 +350,7 @@ def test_drop_rejected_while_loading(capsule_shelf):
 
 
 # ---------------------------------------------------------------------------
-# 徽章 / 点击 / 加载闸门
+# 内联计数 / 点击 / 加载闸门
 # ---------------------------------------------------------------------------
 
 
