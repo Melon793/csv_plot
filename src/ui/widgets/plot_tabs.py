@@ -1337,6 +1337,14 @@ class PlotTabsWidget(QTabWidget):
                 return True
         if obj is getattr(self, "_corner_container", None):
             if event.type() in (QEvent.Type.Move, QEvent.Type.Resize):
+                # Win/Fusion 下 QTabWidget 按风格 hint 的区域（实测 44px）
+                # 垂直居中角位容器，而真实 tab 条只有 28px → 容器被放低 8px，
+                # chip 与页签错位。显式对齐到 tab 条顶边（mac 区域=条高，无操作）
+                container = self._corner_container
+                bar = self.tabBar()
+                target_y = bar.mapTo(self, QPoint(0, 0)).y()
+                if container.y() != target_y:
+                    container.move(container.x(), target_y)
                 self._place_new_page_button()
         if obj is getattr(self, "_shelf_capsule", None):
             if event.type() in (QEvent.Type.Hide, QEvent.Type.Show):

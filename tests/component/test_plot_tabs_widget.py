@@ -814,3 +814,26 @@ def test_dir_popup_height_exact_no_dead_zone(tabs, qtbot, qapp):
     popup = _open_dir_popup(tabs, qtbot, qapp)
     assert popup.height() == 16 * 26 + 9 + 26 + 10
     popup.hide()
+
+
+def test_corner_chips_vertically_centered_with_tabs_across_styles(tabs, qapp):
+    """Win/Fusion 角位容器被风格 hint 区域放低 8px 的错位回归。"""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+
+    _add_pages(tabs, 2)
+    qapp.processEvents()
+    original = QApplication.style().objectName()
+    try:
+        for style in ("Windows", "Fusion", "macOS"):
+            QApplication.setStyle(style)
+            qapp.processEvents()
+            bar = tabs.tabBar()
+            bar_y = bar.mapTo(tabs, QPoint(0, 0)).y()
+            assert tabs._corner_container.mapTo(tabs, QPoint(0, 0)).y() == bar_y
+            tab_center = bar.tabRect(0).center().y()
+            for btn in (tabs._dir_btn, tabs.shelf_capsule):
+                center = btn.mapTo(tabs, QPoint(0, btn.height() // 2)).y()
+                assert abs(center - (bar_y + tab_center)) <= 1, f"{style} chip 垂直错位"
+    finally:
+        QApplication.setStyle(original)
