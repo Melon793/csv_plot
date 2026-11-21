@@ -12,7 +12,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from src.core.config import XRANGE_THRESHOLD_FOR_SYMBOLS
+from src.core.config import (
+    BOLD_PRESET_LINE_WIDTH,
+    DASH_DOT_PRESET_LINE_WIDTH,
+    THICK_LINE_WIDTH,
+    THIN_LINE_WIDTH,
+    XRANGE_THRESHOLD_FOR_SYMBOLS,
+)
 from src.core.value_format import decimals_for_step
 
 if TYPE_CHECKING:
@@ -62,6 +68,39 @@ SYMBOL_POLICY_AUTO = "auto"
 SYMBOL_POLICY_ON = "on"
 SYMBOL_POLICY_OFF = "off"
 SYMBOL_POLICIES = (SYMBOL_POLICY_AUTO, SYMBOL_POLICY_ON, SYMBOL_POLICY_OFF)
+
+# ---- 曲线样式预设（line_preset）取值 ----
+# 单字段打包线宽+线型：'auto' = 现有状态机（symbol 态细 1 / 无 symbol 粗 2，
+# 实线）；'bold'/'dash'/'dot' = 用户钉住，基础宽度恒定不随 symbol 态切换。
+# 与 draw_mode 同口径：会话内存活，reload 经 saved_state 恢复钉住值。
+LINE_PRESET_AUTO = "auto"
+LINE_PRESET_BOLD = "bold"
+LINE_PRESET_DASH = "dash"
+LINE_PRESET_DOT = "dot"
+LINE_PRESETS = (LINE_PRESET_AUTO, LINE_PRESET_BOLD, LINE_PRESET_DASH, LINE_PRESET_DOT)
+
+
+def resolve_line_pen(ci: "CurveInfo", show_symbols: bool, highlighted: bool) -> tuple[float, str]:
+    """单曲线线宽/线型唯一解析点（热路径与显式应用共用）。
+
+    返回 (width, style)，style 为 'solid' | 'dash' | 'dot'（core 层不依赖
+    Qt，调用方映射到 Qt.PenStyle）。选中高亮 = 生效基础宽度 +2：auto 态
+    1+2=3 / 2+2=4 与 HIGHLIGHT_THIN/LINE_WIDTH 数值一致，既有行为不变。
+    symbol 尺寸联动公式（width+2）由调用方按同一 width 计算。
+    """
+    preset = getattr(ci, "line_preset", LINE_PRESET_AUTO)
+    if preset == LINE_PRESET_BOLD:
+        width, style = BOLD_PRESET_LINE_WIDTH, "solid"
+    elif preset == LINE_PRESET_DASH:
+        width, style = DASH_DOT_PRESET_LINE_WIDTH, "dash"
+    elif preset == LINE_PRESET_DOT:
+        width, style = DASH_DOT_PRESET_LINE_WIDTH, "dot"
+    else:
+        width = THIN_LINE_WIDTH if show_symbols else THICK_LINE_WIDTH
+        style = "solid"
+    if highlighted:
+        width += 2
+    return width, style
 
 
 def step_mode_for(draw_mode: str) -> str | None:
@@ -201,6 +240,9 @@ class CurveInfo:
     # 选择（编辑器/图例菜单），会话内不被自动判定覆盖。reload 后经
     # saved_state 恢复（见 cursor_sync_manager.replots_after_loading）
     draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
+    # 样式预设（线宽+线型打包）：'auto' | 'bold' | 'dash' | 'dot'，
+    # 与 draw_mode 同口径（会话内 + reload saved_state 恢复钉住值）
+    line_preset: str = LINE_PRESET_AUTO
 
     def __post_init__(self):
         """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""

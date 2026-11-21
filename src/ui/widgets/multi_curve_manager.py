@@ -19,17 +19,14 @@ from urllib.parse import quote
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QPointF, QTimer
+from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMessageBox
 from src.core.config import (
     CURVE_HIT_TOLERANCE_PX,
     DEFAULT_LINE_WIDTH,
     HIGHLIGHT_CURVE_Z,
-    HIGHLIGHT_LINE_WIDTH,
-    HIGHLIGHT_THIN_LINE_WIDTH,
-    THICK_LINE_WIDTH,
-    THIN_LINE_WIDTH,
+    PRESET_CURVE_Z,
     is_grouped_loader,
     widget_alive,
 )
@@ -38,8 +35,11 @@ from src.core.data_types import (
     DRAW_MODE_SOURCE_AUTO,
     DRAW_MODE_SOURCE_USER,
     DRAW_MODE_STEP_POST,
+    LINE_PRESETS,
+    LINE_PRESET_AUTO,
     SYMBOL_POLICIES,
     CurveInfo,
+    resolve_line_pen,
     resolve_symbol_show,
     step_mode_for,
 )
@@ -61,6 +61,13 @@ if TYPE_CHECKING:
 # 实测 ≤1.9e-9px（评审 G7，含 ±1e6 极端 x 域），取其 ~500 倍作阈值：既吸收
 # 噪声让"恰好容差 / 精确并列"的判定确定，又远小于任何可感知的像素差。
 _HIT_DISTANCE_EPS_PX = 1e-6
+
+# resolve_line_pen 的 style 字符串 → Qt 线型（core 层不依赖 Qt）
+_PEN_STYLE_MAP = {
+    "solid": Qt.PenStyle.SolidLine,
+    "dash": Qt.PenStyle.DashLine,
+    "dot": Qt.PenStyle.DotLine,
+}
 
 
 def _min_segment_distance_px(
@@ -549,12 +556,29 @@ class MultiCurveManager:
                     if ci.draw_mode_source == DRAW_MODE_SOURCE_USER
                     else None
                 )
+                pinned_preset = (
+                    ci.line_preset
+                    if getattr(ci, "line_preset", LINE_PRESET_AUTO) != LINE_PRESET_AUTO
+                    else None
+                )
                 success = pw.add_variable_to_plot(
                     var_name,
                     skip_existence_check=True,
                     preferred_color=ci.color,
                     announce_step=False,
                 )
+                if success and pinned_preset and var_name in pw.curves:
+                    new_ci = pw.curves[var_name]
+                    new_ci.line_preset = pinned_preset
+                    if new_ci.curve is not None:
+                        try:
+                            x_min, x_max = pw.view_box.viewRange()[0]
+                            show = resolve_symbol_show(new_ci, x_max - x_min)
+                            pw._apply_curve_style(var_name, show)
+                        except Exception:
+                            logger.debug(
+                                "重建恢复样式预设失败: %s", var_name, exc_info=True
+                            )
                 if success and pinned_mode and var_name in pw.curves:
                     new_ci = pw.curves[var_name]
                     new_ci.draw_mode = pinned_mode
@@ -784,9 +808,9 @@ class MultiCurveManager:
         """将指定曲线的颜色更新为给定颜色（编辑器与图例调色板共用入口）。
 
         从 plot_variable_editor._apply_color_to_curve 整体下沉（刷新链
-        逐项不变）：ci.color → pen（保留原宽）→ symbol pen/brush → 清
-        缓存 pen key → update_legend → 立即 UI 刷新 → 清游标项 → 重置
-        游标节流 → 游标标签。
+        逐项不变）：ci.color → pen（按预设+当前 symbol/选中态解析）→
+        symbol pen/brush → 清缓存 pen key → update_legend → 立即 UI 刷新
+        → 清游标项 → 重置游标节流 → 游标标签。
 
         Args:
             var_name: 变量名
@@ -803,13 +827,18 @@ class MultiCurveManager:
         ci.color = color_name
         if ci.curve is not None:
             curve_obj = ci.curve
-            old_pen = curve_obj.opts.get("pen")
-            width = DEFAULT_LINE_WIDTH
-            if hasattr(old_pen, "widthF"):
-                width = old_pen.widthF()
-            elif hasattr(old_pen, "width"):
-                width = old_pen.width()
-            curve_obj.setPen(pg.mkPen(color=color_name, width=width))
+            # 宽度/线型由预设解析（单一真相源），不再从 old_pen 读宽：
+            # 必须按当前 symbol 态 + 选中态解析，否则选中态改色会丢 hl 宽度，
+            # 且后续热路径受 _is_interacting 门控可能长期不补刷
+            x_min, x_max = pw.view_box.viewRange()[0]
+            show_symbols = resolve_symbol_show(ci, x_max - x_min)
+            highlighted = ci.visible and var_name in (
+                getattr(pw, "_legend_selection", ()) or ()
+            )
+            width, style = resolve_line_pen(ci, show_symbols, highlighted)
+            curve_obj.setPen(
+                pg.mkPen(color=color_name, width=width, style=_PEN_STYLE_MAP[style])
+            )
 
             # 如果curve当前有symbols，也需要更新symbol的颜色
             if hasattr(curve_obj, "_has_symbols") and curve_obj._has_symbols:
@@ -838,7 +867,8 @@ class MultiCurveManager:
         connect 等既有 opts 不受影响（symbol 仍画在原始数据点上）。
         'auto' → stepMode=None（回到直线）。
 
-        与线色同口径：仅会话内存活，reload/重开后回到默认 'auto'。
+        与线色同口径：会话内存活；reload 经 saved_state 恢复用户钉住值
+        （source=='user'），'auto' 来源按新数据元数据重新判定。
 
         Returns:
             是否实际应用。变量不存在或 draw_mode 非法时返回 False。
@@ -894,6 +924,36 @@ class MultiCurveManager:
             logger.error("应用 symbol 策略失败: var=%s", var_name, exc_info=True)
             return False
         # 同 apply_curve_draw_mode：批量窗口内抑制逐条 emit
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
+        return True
+
+    def apply_curve_line_preset(self, var_name: str, preset: str) -> bool:
+        """切换单曲线样式预设：默认 / 粗实线 / 虚线 / 点线。
+
+        只写 ``ci.line_preset`` 并按当前可见区间立即应用一次
+        （与 apply_curve_symbol_policy 同口径：显式用户动作不走交互守卫）。
+        后续缩放/滚动由 update_plot_style 热路径经 resolve_line_pen 保持。
+
+        Returns:
+            是否实际应用。变量不存在或 preset 非法时返回 False。
+        """
+        pw = self.pw
+        if preset not in LINE_PRESETS:
+            logger.warning("[LINE_PRESET] 非法取值: %s", preset)
+            return False
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return False
+        ci.line_preset = preset
+        try:
+            x_min, x_max = pw.view_box.viewRange()[0]
+            show = resolve_symbol_show(ci, x_max - x_min)
+            pw._apply_curve_style(var_name, show)
+        except Exception:
+            logger.error("应用样式预设失败: var=%s", var_name, exc_info=True)
+            return False
+        # 批量窗口内抑制逐条 emit（与 draw_mode/symbol_policy 同口径）
         if not getattr(pw, "_batch_adding", False):
             pw.curves_changed.emit()
         return True
@@ -955,26 +1015,30 @@ class MultiCurveManager:
                 getattr(pw, "_legend_selection", ()) or ()
             )
             hl_suffix = "_hl" if highlighted else ""
+            preset = getattr(ci, "line_preset", LINE_PRESET_AUTO)
+            width, style = resolve_line_pen(ci, show_symbols, highlighted)
 
             if show_symbols:
-                cache_key = f'thin_{color}{hl_suffix}'
+                cache_key = f'thin_{color}_{preset}{hl_suffix}'
                 if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                    width = HIGHLIGHT_THIN_LINE_WIDTH if highlighted else THIN_LINE_WIDTH
-                    pen = pg.mkPen(color=color, width=width)
+                    pen = pg.mkPen(color=color, width=width, style=_PEN_STYLE_MAP[style])
                     curve.setPen(pen)
                     curve._cached_pen_key = cache_key
+                    # symbol 尺寸随生效宽度联动（width+2），高亮/预设切换
+                    # 改宽时已存在的 symbol 也要跟着缩放，否则埋进粗线
+                    if getattr(curve, '_has_symbols', False):
+                        curve.setSymbolSize(width + 2)
 
                 if not hasattr(curve, '_has_symbols') or not curve._has_symbols:
                     curve.setSymbol('s')
-                    curve.setSymbolSize(3)
+                    curve.setSymbolSize(width + 2)
                     curve.setSymbolPen(color)
                     curve.setSymbolBrush(color)
                     curve._has_symbols = True
             else:
-                cache_key = f'thick_{color}{hl_suffix}'
+                cache_key = f'thick_{color}_{preset}{hl_suffix}'
                 if not hasattr(curve, '_cached_pen_key') or curve._cached_pen_key != cache_key:
-                    width = HIGHLIGHT_LINE_WIDTH if highlighted else THICK_LINE_WIDTH
-                    pen = pg.mkPen(color=color, width=width)
+                    pen = pg.mkPen(color=color, width=width, style=_PEN_STYLE_MAP[style])
                     curve.setPen(pen)
                     curve._cached_pen_key = cache_key
 
@@ -983,8 +1047,13 @@ class MultiCurveManager:
                     curve._has_symbols = False
 
             # z 同步：同样进缓存判定，未变化不调 setZValue（避免无谓重绘）。
-            # 曲线默认 z=0（本模块与 plot_data_manager 均无其他 setZValue）。
-            target_z = HIGHLIGHT_CURVE_Z if highlighted else 0
+            # 三层：默认 0 < 钉住预设 PRESET_CURVE_Z < 选中 HIGHLIGHT_CURVE_Z。
+            # 钉住预设提 Z 消除"重合段谁盖谁随添加顺序"的不稳定语义。
+            target_z = (
+                HIGHLIGHT_CURVE_Z if highlighted
+                else PRESET_CURVE_Z if preset != LINE_PRESET_AUTO
+                else 0
+            )
             if getattr(curve, "_cached_hl_z", 0) != target_z:
                 curve.setZValue(target_z)
                 curve._cached_hl_z = target_z

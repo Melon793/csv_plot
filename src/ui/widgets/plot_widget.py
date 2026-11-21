@@ -1441,6 +1441,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         ):
             mcm.apply_curve_symbol_policy(name, want_policy)
 
+        want_preset = getattr(style, "line_preset", None)
+        if want_preset and getattr(ci, "line_preset", "auto") != want_preset:
+            mcm.apply_curve_line_preset(name, want_preset)
+
         if getattr(style, "visible", True) is False:
             self._schedule_visibility_restore(name, False)
 

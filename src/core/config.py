@@ -142,6 +142,10 @@ THIN_LINE_WIDTH = 1  # 细线宽
 # 缩放/滚动热路径重刷不会丢高亮。
 HIGHLIGHT_LINE_WIDTH = 4        # 选中粗线态 2→4
 HIGHLIGHT_THIN_LINE_WIDTH = 3   # 选中 symbol 态 1→3
+# 样式预设钉住态基础宽度（不随 symbol 态 1↔2 切换；选中高亮统一 +2）
+BOLD_PRESET_LINE_WIDTH = 4      # 粗实线预设（3 与默认粗 2 差仅 1px，真机验证不足）
+DASH_DOT_PRESET_LINE_WIDTH = 2  # 虚线/点线预设（2 也是 dot 低 DPI 可见性护栏）
+PRESET_CURVE_Z = 5              # 钉住预设曲线提 Z：确定压过默认曲线(0)，选中(10)仍最高
 HIGHLIGHT_CURVE_Z = 10          # 选中曲线临时 z（曲线0 < 10 < vline100）
 CURVE_HIT_TOLERANCE_PX = 8      # plot 点击命中容差（逻辑像素，Qt 已归一 DPI）
 # 曲线长按搬运：按住左键不动达到该时长后抬起副框（命中曲线才算），

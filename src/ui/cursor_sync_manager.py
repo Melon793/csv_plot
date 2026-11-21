@@ -12,7 +12,7 @@ from src.core.config import (
     is_grouped_loader,
     compute_global_x_limits,
 )
-from src.core.data_types import DRAW_MODE_SOURCE_USER, step_mode_for
+from src.core.data_types import DRAW_MODE_SOURCE_USER, LINE_PRESET_AUTO, step_mode_for
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
@@ -749,6 +749,12 @@ class CursorSyncManager(MainWindowBaseManager):
                                 == DRAW_MODE_SOURCE_USER
                                 else None
                             ),
+                            "line_preset": (
+                                ci.line_preset
+                                if getattr(ci, "line_preset", LINE_PRESET_AUTO)
+                                != LINE_PRESET_AUTO
+                                else None
+                            ),
                         }
                         for var_name, ci in widget.curves.items()
                     }
@@ -821,6 +827,12 @@ class CursorSyncManager(MainWindowBaseManager):
                                                     "reload 恢复绘制方式失败: %s",
                                                     var_name, exc_info=True,
                                                 )
+                                    # 恢复用户钉住的样式预设（只写字段；pen 由
+                                    # reload 收尾 _refresh_curve_paint_path 统一
+                                    # 刷到，循环内不逐条 emit/刷 pen）
+                                    pinned_preset = state.get("line_preset")
+                                    if pinned_preset:
+                                        widget.curves[var_name].line_preset = pinned_preset
                                     # 恢复可见性
                                     widget.curves[var_name].visible = state["visible"]
                                     if widget.curves[var_name].curve is not None:

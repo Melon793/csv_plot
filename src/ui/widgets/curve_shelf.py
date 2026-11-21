@@ -38,6 +38,7 @@ from src.core.config import widget_alive
 from src.core.data_types import (
     DRAW_MODE_AUTO,
     DRAW_MODE_SOURCE_AUTO,
+    LINE_PRESET_AUTO,
     SYMBOL_POLICY_AUTO,
 )
 from src.core.logger import get_logger
@@ -84,6 +85,7 @@ class ShelfEntry:
     symbol_policy: str = SYMBOL_POLICY_AUTO
     # 快照保真：出区落地后必须回写，不得被 apply 入口误钉成 'user'
     draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
+    line_preset: str = LINE_PRESET_AUTO
     origin_label: str = ""
     stale: bool = False
     #: 剪切入区的来源绘图（弱引用，不延长生命周期）；复制/变量列表入区为 None
@@ -120,6 +122,7 @@ class ShelfEntry:
             draw_mode_source=getattr(
                 ci, "draw_mode_source", DRAW_MODE_SOURCE_AUTO
             ),
+            line_preset=getattr(ci, "line_preset", LINE_PRESET_AUTO),
             origin_label=origin_label,
             origin_plot_ref=ref,
         )
@@ -230,6 +233,7 @@ class CurveShelfWidget(QListWidget):
                 "draw_mode",
                 "symbol_policy",
                 "draw_mode_source",
+                "line_preset",
                 "origin_label",
                 # 来源引用必须跟随最近一次入区：剪入 A 后又从 B 剪入同名
                 # 变量时，退回目标必须是 B（漏掉会静默退错图）

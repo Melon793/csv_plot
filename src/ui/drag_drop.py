@@ -23,6 +23,7 @@ from PySide6.QtCore import QMimeData
 from src.core.data_types import (
     DRAW_MODE_AUTO,
     DRAW_MODE_SOURCE_AUTO,
+    LINE_PRESET_AUTO,
     SYMBOL_POLICY_AUTO,
 )
 
@@ -223,6 +224,7 @@ class CurveStyleSnapshot:
     draw_mode: str = DRAW_MODE_AUTO
     symbol_policy: str = SYMBOL_POLICY_AUTO
     draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
+    line_preset: str = LINE_PRESET_AUTO
 
     @classmethod
     def from_curve_info(cls, ci: Any) -> "CurveStyleSnapshot":
@@ -235,6 +237,7 @@ class CurveStyleSnapshot:
             draw_mode_source=getattr(
                 ci, "draw_mode_source", DRAW_MODE_SOURCE_AUTO
             ),
+            line_preset=getattr(ci, "line_preset", LINE_PRESET_AUTO),
         )
 
 
