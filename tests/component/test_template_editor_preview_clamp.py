@@ -182,3 +182,40 @@ def test_editor_roundtrip_keeps_cell_row_col():
     plot = restored.normalized_pages()[0].plots[0]
     assert (plot.cell_row, plot.cell_col) == (1, 0)
     assert plot.cell_index == 3
+
+
+def test_preview_out_of_range_col_not_wrapped(editor, qapp):
+    """第 6 轮 P2-45：手写档 cell_col ≥ layout_cols 不得回绕到下一行渲染，
+    与套用端显式跳过同口径。"""
+    import yaml
+    from PySide6.QtWidgets import QLabel
+
+    config = {
+        "pages": [
+            {
+                "layout_rows": 1,
+                "layout_cols": 2,
+                "plots": [
+                    {"curves": ["speed"], "cell_row": 0, "cell_col": 5},
+                    # 评审 NB2：界内正对照，钉住渲染确实发生（防 0 帧空转）
+                    {"curves": ["ctrl"], "cell_row": 0, "cell_col": 0},
+                ],
+            }
+        ]
+    }
+    editor._yaml_edit.setPlainText(yaml.safe_dump(config, allow_unicode=True))
+    qapp.processEvents()
+    # 初始示例 YAML 的旧帧走 deleteLater，须 flush 后再断言（防陈旧帧假阳）
+    from tests.fixtures.waits import flush_deferred_deletes
+    flush_deferred_deletes()
+    # 预览网格 1×2：按布局项取格（findChildren 会混入角位 chip 等结构帧）
+    layout = editor._preview_layout
+    assert layout.count() == 2, f"预览必须真渲染 2 格：{layout.count()}"
+    texts = []
+    for i in range(layout.count()):
+        w = layout.itemAt(i).widget()
+        texts.append(" ".join(lab.text() for lab in w.findChildren(QLabel)))
+    assert any("ctrl" in t for t in texts), f"界内正对照必须渲染：{texts}"
+    assert not any("speed" in t for t in texts), (
+        f"越界 col 的曲线不得回绕渲染进预览格子：{texts}"
+    )

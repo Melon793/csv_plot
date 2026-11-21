@@ -331,6 +331,9 @@ class TemplateManagerDialog(QDialog):
         )
         dialog.template_saved.connect(self._on_template_edited)
         dialog.exec()
+        # 第 6 轮 E-3：带 parent 的 exec 对话框不随包装器释放，
+        # 不 deleteLater 会在长寿命 manager 下累积信号连接
+        dialog.deleteLater()
 
     def _on_import_clicked(self):
         """导入模板"""
@@ -393,6 +396,7 @@ class TemplateManagerDialog(QDialog):
         )
         dialog.template_saved.connect(self._on_template_edited)
         dialog.exec()
+        dialog.deleteLater()  # 第 6 轮 E-3：同 _on_new_clicked
 
     def _on_duplicate_clicked(self):
         """复制模板"""

@@ -484,9 +484,11 @@ class TemplateEditorDialog(QDialog):
             if (
                 isinstance(cr, int) and not isinstance(cr, bool)
                 and isinstance(cc, int) and not isinstance(cc, bool)
-                and cr >= 0 and cc >= 0
             ):
-                cell_plots.setdefault(cr * cols + cc, plot)
+                # 第 6 轮 P2-45：cc ≥ cols 会回绕到下一行渲染，与套用端
+                # 显式跳过同口径（越界不渲染）
+                if cr >= 0 and 0 <= cc < cols:
+                    cell_plots.setdefault(cr * cols + cc, plot)
                 continue
             ci = plot.get("cell_index")
             if isinstance(ci, int) and not isinstance(ci, bool) and ci >= 0:
@@ -749,6 +751,7 @@ class TemplateEditorDialog(QDialog):
         box.setDefaultButton(cancel_btn)
         box.exec()
         clicked = box.clickedButton()
+        box.deleteLater()  # 第 6 轮 E-4：exec 后释放（clicked 指针同步读取不受影响）
         if overwrite_btn is not None and clicked is overwrite_btn:
             return "overwrite"
         if clicked is rename_btn:

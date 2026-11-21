@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.core.config import widget_alive
 from src.ui.drag_drop import SHELF_MIME_FORMAT
 from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
 
@@ -1361,11 +1362,19 @@ class PlotTabsWidget(QTabWidget):
             event_type = event.type()
             if event_type == QEvent.Type.ToolTip:
                 provider = self._tab_info_provider
-                if provider is not None:
-                    index = self.tabBar().tabAt(event.pos())
-                    text = provider(index) if index >= 0 else ""
+                # 第 6 轮 C11：销毁期残留 ToolTip 事件不得摸半销毁控件
+                if provider is not None and widget_alive(self):
+                    try:
+                        index = self.tabBar().tabAt(event.pos())
+                        text = provider(index) if index >= 0 else ""
+                    except RuntimeError:
+                        text = ""
                     if text:
-                        QToolTip.showText(event.globalPos(), text, self.tabBar())
+                        # 第 6 轮 NB6：页标题用户可编辑含 <b> 等序列，
+                        # 与 shelf/var_tooltip 同口径转义 + <qt> 还原
+                        import html
+                        rich = "<qt>" + html.escape(text).replace("\n", "<br>") + "</qt>"
+                        QToolTip.showText(event.globalPos(), rich, self.tabBar())
                     return True
             if (
                 event_type == QEvent.Type.MouseButtonRelease

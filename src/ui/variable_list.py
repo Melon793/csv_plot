@@ -459,6 +459,7 @@ class MyTableWidget(QTableWidget):
         menu.addAction(act_var_info)
 
         menu.exec(self.mapToGlobal(pos))
+        menu.deleteLater()  # 第 6 轮 E-2 同族：exec 后释放
 
     def _show_variable_info(self, var_names):
         """打开变量信息窗口（全局单例 + 标签页累积）。

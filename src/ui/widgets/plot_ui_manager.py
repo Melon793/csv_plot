@@ -829,6 +829,8 @@ class LegendTextBrowser(QTextBrowser):
         act_copy = menu.addAction("复制变量名")
 
         chosen = menu.exec(global_pos)
+        # 第 6 轮 E-1：exec 后释放（早退分支同样覆盖），与三个面板入口同口径
+        menu.deleteLater()
         if chosen is None:
             return
         # 菜单打开期间占位可能已复活/被删（reload、编辑器）：分发前复查

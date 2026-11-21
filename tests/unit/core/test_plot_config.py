@@ -215,6 +215,15 @@ class TestCellRowCol:
         assert "cell_row" not in PlotConfig(curves=[], cell_row=1).to_dict()
         assert "cell_col" not in PlotConfig(curves=[], cell_col=1).to_dict()
 
+    def test_bool_cell_keys_rejected(self):
+        """第 6 轮 P2-44：int(True)→1 会静默落错格，bool 一律容错 None
+        （与预览端排除 bool 口径对齐）。"""
+        cfg = PlotConfig.from_dict(
+            {"curves": [], "cell_index": True, "cell_row": False, "cell_col": True}
+        )
+        assert cfg.cell_index is None
+        assert cfg.cell_row is None and cfg.cell_col is None
+
 
 class TestMalformedConfigTolerance:
     """评审 B1（第 5 轮批次 4）：手写畸形档在 from_dict 层收口。"""

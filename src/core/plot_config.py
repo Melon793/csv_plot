@@ -47,13 +47,24 @@ class PlotConfig:
         """从字典反序列化（缺省 invalid_curves 容错为空列表；cell_index/cell_row/cell_col 容错 None）"""
         raw_cell = data.get("cell_index")
         try:
-            cell_index = None if raw_cell is None else int(raw_cell)
+            # 第 6 轮 P2-44：bool 拒收（int(True)→1 会静默落错格，
+            # 与预览端排除 bool 的口径对齐）
+            cell_index = (
+                None if raw_cell is None or isinstance(raw_cell, bool)
+                else int(raw_cell)
+            )
         except (TypeError, ValueError):
             cell_index = None
         try:
             raw_row, raw_col = data.get("cell_row"), data.get("cell_col")
-            cell_row = None if raw_row is None else int(raw_row)
-            cell_col = None if raw_col is None else int(raw_col)
+            cell_row = (
+                None if raw_row is None or isinstance(raw_row, bool)
+                else int(raw_row)
+            )
+            cell_col = (
+                None if raw_col is None or isinstance(raw_col, bool)
+                else int(raw_col)
+            )
         except (TypeError, ValueError):
             cell_row = cell_col = None
         curves = data.get("curves") or []
