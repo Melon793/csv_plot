@@ -641,3 +641,25 @@ def test_dir_popup_background_is_white_not_gray(tabs, qtbot, qapp):
     assert not popup._scroll.viewport().autoFillBackground()
     assert not popup._rows_host.autoFillBackground()
     popup.hide()
+
+
+# ----------------------------------------------------------------------
+# V-A fit：不压缩（最小宽＝自然宽）＋ 200px 封顶（VSCode 默认 fit 语义）
+# ----------------------------------------------------------------------
+def test_fit_no_compression_short_tabs_keep_natural_width(tabs, qapp):
+    tabs.resize(1288, 360)
+    _add_pages(tabs, 16)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    for i in range(16):
+        assert bar.tabRect(i).width() == bar.tabSizeHint(i).width(), "fit 不得压缩"
+    assert bar.tabRect(0).width() < 96       # 短签＝main 自然宽，不人为撑宽
+    assert bar.tabRect(15).right() > bar.width()   # 放不下 → 溢出滚动
+
+
+def test_fit_long_name_capped_at_max(tabs, qapp):
+    tabs.resize(1288, 360)
+    tabs.addTab(QLabel("x"), "长" * 60)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    assert bar.tabRect(0).width() == 200

@@ -55,6 +55,12 @@ MAX_PAGES = 16
 #: 「＋」预留槽宽度：页签放不下时停到暂存区胶囊左侧，避免压住最后一个页签的关闭按钮
 _PLUS_SLOT_WIDTH = 28
 
+#: 页签宽度上限（V-A fit 语义）：VSCode 默认 fit 不压缩、按完整标签宽布局，
+#: 放不下就溢出滚动。经典 fit 无上限，但本页名可为很长 CJK，故封顶 200px，
+#: 超出截断＋T1 全名 tooltip 兜底。短签保持自然宽（main 口径，不人为撑宽）。
+#: Windows 字体度量不同，常量合并前需复测。
+_TAB_MAX_WIDTH = 200
+
 #: 角位容器右缘留白（与胶囊保持视觉间距）
 _CORNER_RIGHT_MARGIN = 2
 
@@ -620,6 +626,18 @@ class _TabsBar(QTabBar):
         # 在官方布局钩子里藏回去（按钮保留隐藏态供滚轮程序化驱动）。
         self._owner._hide_scroll_buttons()
         self._owner._place_new_page_button()
+
+    def tabSizeHint(self, index):  # noqa: N802 - Qt 命名
+        """V-A fit：自然宽封顶 ``_TAB_MAX_WIDTH``，超长名截断靠 tooltip 兜底。"""
+        base = super().tabSizeHint(index)
+        return QSize(min(base.width(), _TAB_MAX_WIDTH), base.height())
+
+    def minimumTabSizeHint(self, index):  # noqa: N802 - Qt 命名
+        """V-A fit：最小宽＝自然宽 → Qt 压不动 → 溢出滚动而非压缩页签。
+
+        与曾回退的 T8 下限不同：这里不抬高低签，短签仍是 main 的自然宽。
+        """
+        return self.tabSizeHint(index)
 
     def wheelEvent(self, event):  # noqa: N802 - Qt 命名
         """T4：页签区滚轮＝横向滚动页签，不切页（QTabBar 默认会切页）。
