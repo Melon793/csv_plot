@@ -146,6 +146,16 @@ class TestBuildEncodingChain:
         chain2 = _build_encoding_chain(sample2, "cp949")
         assert chain2[0] == "cp1252"
 
+    def test_compound_units_gb_big5_isolated_hanzi_not_trusted(self):
+        """最终评审 B-1：gb18030/big5 把 cp1252 字节对解成孤立汉字
+        （m³·s → m雪s），总数 ≥2 但无连续跑 → 不信任 det，投票纠正。"""
+        sample = ('"' + '","'.join(["m³·s"] * 2) + '"\n1,2\n').encode("cp1252")
+        assert _build_encoding_chain(sample, "big5")[0] == "cp1252"
+        assert _build_encoding_chain(sample, "gb18030")[0] == "cp1252"
+        sample30 = ('"' + '","'.join(["m³·s"] * 30) + '"\n1,2\n').encode("cp1252")
+        assert _build_encoding_chain(sample30, "big5")[0] == "cp1252"
+        assert _build_encoding_chain(sample30, "gb18030")[0] == "cp1252"
+
     @pytest.mark.parametrize("det", ["gb2312", "gbk"])
     def test_gb_alias_to_superset(self, det):
         sample = '"摄氏度","牛·米"\n'.encode("gb18030") * 20

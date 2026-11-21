@@ -1511,8 +1511,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         - 幂等比对：目标可能因"同名占位复活"（visible_preference=False）
           本已隐藏，无条件 toggle 会把隐藏态翻成可见；visible 一致直接返回。
         - toggle_curve_visibility_by_name 在 curve 不在场景中时走
-          _recreate_curve（重建后为可见），该极端场景下隐藏态丢失——
-          继承自既有行为的已知限制，非本次引入，正常 drop 路径不触发。
+          _recreate_curve；第 6 轮批次 B 已让重建钉住恢复 visible/policy，
+          隐藏态不再丢失（原「已知限制」注记随修复消除）。
         """
         def _restore(target=self, var=var_name):
             try:

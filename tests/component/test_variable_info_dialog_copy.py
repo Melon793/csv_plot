@@ -474,6 +474,10 @@ class _FakeMenu:
     def exec(self, pos):  # noqa: N802 - 跟 Qt 同名
         return None
 
+    def deleteLater(self):
+        # 第 6 轮 E-2：真实代码 exec 后释放菜单，替身实现该接口
+        pass
+
     @property
     def items(self):
         return list(self._items)

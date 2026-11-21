@@ -70,6 +70,10 @@ def _fake_menu_env(monkeypatch, choose_text=None):
                     return act
             return None
 
+        def deleteLater(self):
+            # 第 6 轮 E-1：真实代码 exec 后释放菜单，替身实现该接口
+            pass
+
     import src.ui.widgets.plot_ui_manager as pum
     monkeypatch.setattr(pum, "QMenu", _FakeMenu)
     return menus

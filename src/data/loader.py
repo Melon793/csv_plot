@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import gc
+import re
 import time
 from pathlib import Path
 from typing import Callable
@@ -89,7 +90,10 @@ def _skip_symbol_vote(sample: bytes, det: str) -> bool:
         # 评审 B2：解码结果须含成片汉字才信任 det——cp949/shift_jis 能把
         # cp1252 复合单位（m³·s = 6D B3 B7 73）strict 解成谚文/片假名，
         # 符号后随高位但无汉字内容 → 不信任，放行投票纠正。
-        if sum(1 for c in decoded if "\u4e00" <= c <= "\u9fff") < 2:
+        # 最终评审 B-1：gb18030/big5 会把 cp1252 高位字节对解成**孤立**汉字
+        # （m³·s → m雪s），总数 ≥2 挡不住；须 ≥2 连续汉字跑（真中文表头
+        # 成词连续），与「成片」注释口径一致。
+        if not re.search(r"[\u4e00-\u9fff]{2,}", decoded):
             return False
         positions = [
             i for i, b in enumerate(sample)
