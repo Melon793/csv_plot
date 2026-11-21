@@ -38,6 +38,7 @@ from src.core.data_types import (
     LINE_PRESETS,
     LINE_PRESET_AUTO,
     SYMBOL_POLICIES,
+    SYMBOL_POLICY_AUTO,
     CurveInfo,
     resolve_line_pen,
     resolve_symbol_show,
@@ -561,23 +562,39 @@ class MultiCurveManager:
                     if getattr(ci, "line_preset", LINE_PRESET_AUTO) != LINE_PRESET_AUTO
                     else None
                 )
+                # 第 6 轮 P1-C：数据点策略与显隐同属用户钉住状态，重建不得
+                # 静默重置（add_variable_to_plot 新建 CurveInfo 回落 auto/可见）。
+                # 与 reload 接力（cursor_sync_manager saved_state）同族保真。
+                pinned_policy = (
+                    ci.symbol_policy
+                    if getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO) != SYMBOL_POLICY_AUTO
+                    else None
+                )
+                pinned_visible = ci.visible
                 success = pw.add_variable_to_plot(
                     var_name,
                     skip_existence_check=True,
                     preferred_color=ci.color,
                     announce_step=False,
                 )
-                if success and pinned_preset and var_name in pw.curves:
+                if success and var_name in pw.curves:
                     new_ci = pw.curves[var_name]
-                    new_ci.line_preset = pinned_preset
-                    if new_ci.curve is not None:
+                    if pinned_policy:
+                        new_ci.symbol_policy = pinned_policy
+                    if not pinned_visible:
+                        new_ci.visible = False
+                        if new_ci.curve is not None:
+                            new_ci.curve.setVisible(False)
+                    if pinned_preset:
+                        new_ci.line_preset = pinned_preset
+                    if (pinned_preset or pinned_policy) and new_ci.curve is not None:
                         try:
                             x_min, x_max = pw.view_box.viewRange()[0]
                             show = resolve_symbol_show(new_ci, x_max - x_min)
                             pw._apply_curve_style(var_name, show)
                         except Exception:
                             logger.debug(
-                                "重建恢复样式预设失败: %s", var_name, exc_info=True
+                                "重建恢复样式预设/数据点策略失败: %s", var_name, exc_info=True
                             )
                 if success and pinned_mode and var_name in pw.curves:
                     new_ci = pw.curves[var_name]
@@ -593,6 +610,17 @@ class MultiCurveManager:
                             logger.debug(
                                 "重建恢复绘制方式失败: %s", var_name, exc_info=True
                             )
+                if success and var_name in pw.curves and (
+                    not pinned_visible or pinned_policy or pinned_preset or pinned_mode
+                ):
+                    # 评审 B-1/NB-1：add 内部已用瞬态 visible=True/auto 投影建过
+                    # legend 并 emit curves_changed；全部恢复（含 draw_mode）完成后
+                    # 再刷一次对齐，否则安全网路径（无其它 legend 重建）图例显示 ■、
+                    # 编辑器勾选「可见」/策略 auto，与真实态脱节（点击反向显隐）。
+                    # 刷新殿后：避免 legend 异常连带跳过 mode 恢复（NB-3）。
+                    if not getattr(pw, "_batch_adding", False):
+                        self.update_legend()
+                        pw.curves_changed.emit()
         except Exception:
             logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)
 
