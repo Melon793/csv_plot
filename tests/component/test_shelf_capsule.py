@@ -183,7 +183,8 @@ def test_capsule_never_overlaps_plus(qtbot, pages, width):
 
 
 @pytest.mark.parametrize("pages,width", [(8, 360), (8, 420), (8, 540)])
-def test_plus_never_overlaps_scroll_arrows(qtbot, pages, width):
+def test_plus_never_overlaps_corner_buttons(qtbot, pages, width):
+    """方向 B：箭头永不显示；溢出窄窗下「＋」不得压住 ▾ 目录与胶囊。"""
     tabs = _make_tabs(qtbot, pages=pages, width=width)
     bar = tabs.tabBar()
     plus_rect = _rect_in(tabs.new_page_button, tabs)
@@ -192,11 +193,12 @@ def test_plus_never_overlaps_scroll_arrows(qtbot, pages, width):
         for child in bar.children()
         if child.isWidgetType()
         and "scroll" in (child.objectName() or "").lower()
-        and child.isVisible()
     ]
-    assert arrows, "该参数下滚动箭头应可见，否则用例失去意义"
+    assert arrows, "原生滚动按钮应存在（隐藏态供滚轮程序化驱动）"
     for arrow in arrows:
-        assert plus_rect.intersects(_rect_in(arrow, tabs)) is False
+        assert not arrow.isVisible(), "方向 B：‹ › 不得显示"
+    assert plus_rect.intersects(_rect_in(tabs._dir_btn, tabs)) is False
+    assert plus_rect.intersects(_rect_in(tabs.shelf_capsule, tabs)) is False
 
 
 def test_plus_parks_in_reserved_slot_when_tabs_fill(qtbot):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel, QToolButton
 
@@ -208,22 +208,6 @@ def test_plus_follows_last_tab_instead_of_far_right(tabs, qapp):
     assert button.x() + button.width() < bar_x + bar.width() - 100
 
 
-def test_scroll_arrows_use_flat_custom_icons(tabs, qapp):
-    _add_pages(tabs, MAX_PAGES)
-    qapp.processEvents()
-    scroll_buttons = [
-        child
-        for child in tabs.tabBar().children()
-        if isinstance(child, QToolButton)
-        and "scroll" in (child.objectName() or "").lower()
-    ]
-    assert len(scroll_buttons) == 2
-    for button in scroll_buttons:
-        assert button.arrowType() == Qt.ArrowType.NoArrow
-        assert not button.icon().isNull()
-        assert button.iconSize() == QSize(12, 12)
-
-
 def _scroll_buttons(tabs):
     out = {}
     for child in tabs.tabBar().children():
@@ -232,36 +216,29 @@ def _scroll_buttons(tabs):
     return out
 
 
-def test_scroll_buttons_adjacent_within_reserved_zone(tabs, qapp):
+# ---------------------------------------------------------------------------
+# 方向 B：‹ › 永不显示；溢出导航＝滚轮 + 隐藏按钮程序化驱动 + ▾ 目录
+# ---------------------------------------------------------------------------
+def test_scroll_arrows_never_visible(tabs, qapp):
     _add_pages(tabs, MAX_PAGES)
-    tabs.setCurrentIndex(MAX_PAGES - 1)
     qapp.processEvents()
-    bar = tabs.tabBar()
     btns = _scroll_buttons(tabs)
-    left, right = btns["left"], btns["right"]
-    assert left.isVisible() and right.isVisible(), "16 页窄窗应进入滚动模式"
-    assert left.geometry().right() < right.geometry().x(), "两按钮不得重叠"
-    assert right.geometry().right() <= bar.width() - 1
-    last = bar.tabRect(bar.count() - 1)
-    assert last.right() < left.geometry().x(), "按钮不得压住最后一个标签"
-    assert left.isEnabled() and not right.isEnabled(), "停在最右：左可用右禁用"
+    assert len(btns) == 2
+    assert not btns["left"].isVisible() and not btns["right"].isVisible()
 
 
-def test_scroll_geometry_self_heals_on_resize(tabs, qapp):
+def test_arrows_stay_hidden_on_resize(tabs, qapp):
     _add_pages(tabs, MAX_PAGES)
     tabs.setCurrentIndex(MAX_PAGES - 1)
     qapp.processEvents()
     for width in (500, 640, 500):
         tabs.resize(width, 360)
         qapp.processEvents()
-        bar = tabs.tabBar()
         btns = _scroll_buttons(tabs)
-        assert btns["left"].isVisible(), "窄窗应始终处于滚动模式"
-        assert btns["left"].geometry().right() < btns["right"].geometry().x()
-        assert btns["right"].geometry().right() <= bar.width() - 1
+        assert not btns["left"].isVisible() and not btns["right"].isVisible()
 
 
-def test_scroll_geometry_survives_gate_hide_show(tabs, qapp):
+def test_arrows_stay_hidden_after_gate_cycle(tabs, qapp):
     _add_pages(tabs, MAX_PAGES)
     tabs.setCurrentIndex(MAX_PAGES - 1)
     qapp.processEvents()
@@ -271,30 +248,27 @@ def test_scroll_geometry_survives_gate_hide_show(tabs, qapp):
     qapp.processEvents()
     tabs.set_new_page_enabled(True)
     qapp.processEvents()
-    bar = tabs.tabBar()
     btns = _scroll_buttons(tabs)
-    assert btns["left"].isVisible() and btns["right"].isVisible()
-    assert btns["left"].geometry().right() < btns["right"].geometry().x()
-    assert btns["right"].geometry().right() <= bar.width() - 1
+    assert not btns["left"].isVisible() and not btns["right"].isVisible()
 
 
-def test_right_scroll_click_advances_from_left_end(tabs, qapp):
+def test_hidden_right_button_scrolls_to_last_page(tabs, qapp):
     _add_pages(tabs, MAX_PAGES)
     tabs.setCurrentIndex(0)
     qapp.processEvents()
     bar = tabs.tabBar()
-    btns = _scroll_buttons(tabs)
+    right = _scroll_buttons(tabs)["right"]
+    assert not right.isVisible()
     assert bar.tabRect(MAX_PAGES - 1).right() > bar.width(), "停最左时末页应在视野外"
-    assert not btns["left"].isEnabled() and btns["right"].isEnabled()
     for _ in range(60):
         if bar.tabRect(MAX_PAGES - 1).right() <= bar.width():
             break
-        QTest.mouseClick(btns["right"], Qt.MouseButton.LeftButton)
+        right.click()
         qapp.processEvents()
-    assert bar.tabRect(MAX_PAGES - 1).right() <= bar.width(), "右箭头应能滚到末页"
+    assert bar.tabRect(MAX_PAGES - 1).right() <= bar.width(), "隐藏右按钮应能滚到末页"
 
 
-def test_left_scroll_click_returns_to_first_page(tabs, qapp):
+def test_hidden_left_button_returns_to_first_page(tabs, qapp):
     _add_pages(tabs, MAX_PAGES)
     tabs.setCurrentIndex(MAX_PAGES - 1)
     qapp.processEvents()
@@ -304,13 +278,31 @@ def test_left_scroll_click_returns_to_first_page(tabs, qapp):
     for _ in range(60):
         if bar.tabRect(0).x() >= 0:
             break
-        QTest.mouseClick(left, Qt.MouseButton.LeftButton)
+        left.click()
         qapp.processEvents()
-    assert bar.tabRect(0).x() >= 0, "真实点击左箭头应能滚回第一页"
-    assert not left.isEnabled(), "滚到最左后左箭头应禁用"
+    assert bar.tabRect(0).x() >= 0, "隐藏左按钮应能滚回第一页"
     QTest.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(0).center())
     qapp.processEvents()
     assert tabs.currentIndex() == 0, "第一页应可点击切换"
+
+
+def test_dir_tooltip_reports_hidden_counts(tabs, qapp):
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QToolTip
+
+    tabs.resize(640, 360)
+    _add_pages(tabs, MAX_PAGES)
+    qapp.processEvents()
+    btn = tabs._dir_btn
+    event = QHelpEvent(
+        QEvent.Type.ToolTip,
+        btn.rect().center(),
+        btn.mapToGlobal(btn.rect().center()),
+    )
+    qapp.sendEvent(btn, event)
+    text = QToolTip.text()
+    assert "页目录（16 页）" in text
+    assert "右隐" in text and "左隐 0" in text
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +490,7 @@ def test_min_tab_width_floor_stops_shrinking(tabs, qapp):
     qapp.processEvents()
     bar = tabs.tabBar()
     assert all(bar.tabRect(i).width() >= 96 for i in range(16))
-    assert tabs._visible_scroll_buttons()      # 压不下 → 出滚动箭头
+    assert bar.tabRect(15).right() > bar.width()   # 压不下 → 进入溢出
 
 
 def test_wheel_scrolls_without_switching_page(tabs, qapp):

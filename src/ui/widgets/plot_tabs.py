@@ -18,7 +18,10 @@
 拖动 / **重命名**等一切布局变化都会重算位置（PySide6 未暴露信号版
 ``tabLayoutChanged``，故经 ``setTabBar`` 挂入子类重写虚方法）。
 
-原生滚动箭头替换为与「＋」/ 关闭按钮同源的矢量字形。
+原生滚动箭头不再显示（方向 B）：溢出导航由页签区滚轮（T4）与角位「▾」
+页目录（T6）承担，右缘让位给页签。按钮本体保留为隐藏态——Qt 无公开滚动
+API，滚轮经程序化 ``click()`` 驱动其内部偏移；Qt 每次布局会重新显示它们，
+``tabLayoutChange`` 钩子里再藏回去。
 
 本类只负责标签交互与信号转发，页对象的增删与切页时序由 MainWindow 掌握。
 """
@@ -26,7 +29,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -70,21 +73,8 @@ _SHELF_CAPSULE_SIZE = QSize(36, 20)
 #: 页目录按钮尺寸（T6）：角位变为 [＋槽 28][▾ 20][胶囊 36]；G1 口径 sizeHint=fixedSize
 _DIR_BUTTON_SIZE = QSize(20, 20)
 
-#: 标签栏底色：标签与滚动按钮共用，滚动按钮靠它遮住边界下被压住的部分标签
+#: 标签栏底色：角位容器与页签栏共用，保持右缘视觉连续
 _TAB_BAR_BG = "#f3f3f3"
-
-#: 滚动箭头：与 ＋/× 同一套扁平图标语言（矢量直绘、无边框、hover 圆角灰底）
-_SCROLL_ARROW_COLOR = "#5a5a5a"
-_SCROLL_ARROW_ACTIVE = "#1f1f1f"
-_SCROLL_ARROW_DISABLED = "#b5b5b5"
-
-#: 滚动按钮槽位：Qt 只给标签栏右缘预留 31px（实测标签区右界=barW−32），
-#: 原生却把两按钮重叠摆放（macOS 重叠约 11px），左箭头字形被右按钮盖住、
-#: 真实点击落到右按钮；停在最右时右按钮 disabled，于是再也滚不回第一页。
-#: 重排为相邻两个 15px 槽（共 30px≤31px zone）：不压末标签、不溢出右缘；
-#: 图标按 12px 矢量直绘，避免位图非整数缩放发虚。
-_SCROLL_BUTTON_WIDTH = 15
-_SCROLL_BUTTON_ICON_SIZE = 12
 
 #: 激活页顶部强调线（与拖拽视觉同一份品牌蓝）
 _ACCENT_COLOR = DRAG_ACCENT
@@ -110,28 +100,6 @@ QTabBar::tab:selected {{
     background: #ffffff;
     color: #1f1f1f;
     border-top: 2px solid {_ACCENT_COLOR};
-}}
-"""
-
-#: 原生滚动箭头换成与自绘按钮一致的扁平视觉；底色遮住滚动边界下
-#: 被压住的部分标签。点击 / autoRepeat 仍由 QTabBar 原生按钮承担。
-_SCROLL_ARROW_STYLE = f"""
-QToolButton {{
-    background: {_TAB_BAR_BG};
-    border: none;
-    margin: 0;
-    padding: 0;
-}}
-QToolButton:hover {{
-    background: #e0e0e0;
-    border-radius: 4px;
-}}
-QToolButton:pressed {{
-    background: #dcdcdc;
-    border-radius: 4px;
-}}
-QToolButton:disabled {{
-    background: {_TAB_BAR_BG};
 }}
 """
 
@@ -626,61 +594,6 @@ class _PageDirectoryPopup(QWidget):
         super().keyPressEvent(event)
 
 
-def _scroll_arrow_pixmap(direction: str, color: str, dpr: int) -> QPixmap:
-    """按图标槽位尺寸矢量直绘 chevron；DPR 由 QPixmap 自带，不做位图缩放。"""
-    logical = _SCROLL_BUTTON_ICON_SIZE
-    scale = logical / 16.0
-    pixmap = QPixmap(logical * dpr, logical * dpr)
-    pixmap.setDevicePixelRatio(dpr)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color), 1.6 * scale)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    center = logical / 2.0
-    arm = 4.2 * scale
-    if direction == "left":
-        painter.drawLine(
-            QPointF(center + arm * 0.45, center - arm),
-            QPointF(center - arm * 0.55, center),
-        )
-        painter.drawLine(
-            QPointF(center - arm * 0.55, center),
-            QPointF(center + arm * 0.45, center + arm),
-        )
-    else:
-        painter.drawLine(
-            QPointF(center - arm * 0.45, center - arm),
-            QPointF(center + arm * 0.55, center),
-        )
-        painter.drawLine(
-            QPointF(center + arm * 0.55, center),
-            QPointF(center - arm * 0.45, center + arm),
-        )
-    painter.end()
-    return pixmap
-
-
-def _scroll_arrow_icon(direction: str) -> QIcon:
-    """返回 normal / active / disabled 三态的矢量 chevron。"""
-    icon = QIcon()
-    for mode, color in (
-        (QIcon.Mode.Normal, _SCROLL_ARROW_COLOR),
-        (QIcon.Mode.Active, _SCROLL_ARROW_ACTIVE),
-        (QIcon.Mode.Selected, _SCROLL_ARROW_ACTIVE),
-        (QIcon.Mode.Disabled, _SCROLL_ARROW_DISABLED),
-    ):
-        for dpr in (1, 2, 3):
-            icon.addPixmap(
-                _scroll_arrow_pixmap(direction, color, dpr),
-                mode,
-                QIcon.State.Off,
-            )
-    return icon
-
-
 class _TabsBar(QTabBar):
     """挂 ``tabLayoutChange`` 官方布局钩子的标签栏。
 
@@ -697,10 +610,9 @@ class _TabsBar(QTabBar):
 
     def tabLayoutChange(self):  # noqa: N802 - Qt 命名
         super().tabLayoutChange()
-        # QTabBar 可能在本钩子触发的布局周期里才创建/重排滚动按钮；
-        # 这里补一次，保证原生箭头不会在显示后退回平台样式。
-        self._owner._style_scroll_buttons()
-        self._owner._place_scroll_buttons()
+        # Qt 每次布局都会重新显示原生滚动按钮；方向 B 不显示箭头，
+        # 在官方布局钩子里藏回去（按钮保留隐藏态供滚轮程序化驱动）。
+        self._owner._hide_scroll_buttons()
         self._owner._place_new_page_button()
 
     def minimumTabSizeHint(self, index):  # noqa: N802 - Qt 命名
@@ -762,8 +674,6 @@ class PlotTabsWidget(QTabWidget):
         self._tab_info_provider = None
         # 页目录数据源（MainWindow 注入）：() -> [(title, badge, current), ...]
         self._page_list_provider = None
-        # 箭头图标只在首次样式化时生成，tabLayoutChange 会反复补样式
-        self._scroll_arrow_icons: dict[str, QIcon] = {}
         # 必须在一切 tabBar() 使用之前挂入：布局钩子依赖自定义子类
         self.setTabBar(_TabsBar(self))
         self.setDocumentMode(True)
@@ -778,14 +688,13 @@ class PlotTabsWidget(QTabWidget):
         # macOS 原生样式会画 #bebebe 的 tab bar base，盖住 QSS 底色；
         # 关掉后由 QSS 的 #f3f3f3 接管（Windows/Fusion 本来没有这层）。
         self.tabBar().setDrawBase(False)
-        self._style_scroll_buttons()
 
         self._new_page_allowed = False
         # 未加载数据：初始隐藏（set_new_page_enabled(True) 时显示）
         self.tabBar().setVisible(False)
-        # 角位容器：[「＋」预留槽][暂存区胶囊]。
+        # 角位容器：[「＋」预留槽][▾ 页目录][暂存区胶囊]。
         # 「＋」不再挂在 tabBar 上：页签栏右侧必须永久留出槽位，页签再满也
-        # 不会压住最后一个页签的关闭按钮或滚动箭头。少量页签时「＋」仍紧跟
+        # 不会压住最后一个页签的关闭按钮。少量页签时「＋」仍紧跟
         # 最后一个页签，只是父控件换成这里，便于停入槽位。
         self._shelf_capsule = None
         self._corner_container = QWidget(self)
@@ -862,76 +771,29 @@ class PlotTabsWidget(QTabWidget):
         """
         self._page_list_provider = provider
 
-    def _style_scroll_buttons(self) -> None:
-        """把 QTabBar 原生滚动箭头换成与 ＋/× 同一套的扁平矢量字形。
+    def _hide_scroll_buttons(self) -> None:
+        """方向 B：原生滚动箭头永不显示，右缘让位给页签。
 
-        按钮本身、点击与 autoRepeat 都保留；只替换绘制。底色调成标签栏
-        同色，滚动边界下被压住的部分标签不会透出来。
+        按钮本体保留隐藏态——Qt 无公开滚动 API，滚轮（T4）经程序化
+        ``click()`` 驱动其内部偏移。Qt 每次布局会重新显示它们，故挂在
+        ``tabLayoutChange`` 里于布局之后藏回。
         """
-        for child in self.tabBar().children():
-            if not isinstance(child, QToolButton):
-                continue
-            name = (child.objectName() or "").lower()
-            if "scroll" not in name:
-                continue
-            if child.arrowType() == Qt.ArrowType.NoArrow and not child.icon().isNull():
-                continue  # 已经换成自绘箭头；tabLayoutChange 会频繁回调
-            if "left" in name:
-                direction = "left"
-            elif "right" in name:
-                direction = "right"
-            else:
-                direction = (
-                    "left"
-                    if child.arrowType() == Qt.ArrowType.LeftArrow
-                    else "right"
-                )
-            icon = self._scroll_arrow_icons.get(direction)
-            if icon is None:
-                icon = _scroll_arrow_icon(direction)
-                self._scroll_arrow_icons[direction] = icon
-            child.setArrowType(Qt.ArrowType.NoArrow)
-            child.setIcon(icon)
-            child.setIconSize(
-                QSize(_SCROLL_BUTTON_ICON_SIZE, _SCROLL_BUTTON_ICON_SIZE)
-            )
-            child.setStyleSheet(_SCROLL_ARROW_STYLE)
-            child.setCursor(Qt.CursorShape.ArrowCursor)
-            child.setToolTip(
-                "向左滚动标签" if direction == "left" else "向右滚动标签"
-            )
+        for button in self._scroll_buttons():
+            if button.isVisible():
+                button.hide()
 
-    def _place_scroll_buttons(self) -> None:
-        """把两个滚动按钮重排进 Qt 预留的右缘 zone，相邻不重叠。
-
-        Qt 原生布局让右按钮叠在左按钮上面，左箭头字形落在被盖区、
-        真实鼠标点击落到右按钮；停在最右时右按钮 disabled，点击毫无
-        反应，第一页永远滚不回来。Qt 每次布局都会重设几何，故本方法
-        挂在 ``tabLayoutChange`` 里于布局之后修正；按钮隐藏（页签放得
-        下）时不动，避免把停放在屏外的按钮拖进视野。
-        """
+    def _hidden_tab_counts(self) -> tuple[int, int]:
+        """视野外左侧/右侧的页数（▾ tooltip 的溢出计数，T5 的 B 形态）。"""
         bar = self.tabBar()
-        buttons = self._visible_scroll_buttons()
-        if len(buttons) != 2:
-            return
-        left = right = None
-        for child in buttons:
-            name = (child.objectName() or "").lower()
-            if "left" in name:
-                left = child
-            elif "right" in name:
-                right = child
-        if left is None or right is None:
-            return
-        width, height = bar.width(), bar.height()
-        if height <= 0 or width < 2 * _SCROLL_BUTTON_WIDTH:
-            return
-        right.setGeometry(
-            width - _SCROLL_BUTTON_WIDTH, 0, _SCROLL_BUTTON_WIDTH, height
-        )
-        left.setGeometry(
-            width - 2 * _SCROLL_BUTTON_WIDTH, 0, _SCROLL_BUTTON_WIDTH, height
-        )
+        width = bar.width()
+        left = right = 0
+        for index in range(bar.count()):
+            rect = bar.tabRect(index)
+            if rect.right() < 0:
+                left += 1
+            elif rect.left() > width:
+                right += 1
+        return left, right
 
     # ------------------------------------------------------------------
     # 暂存区胶囊：计数 / 勾选态 / 加载闸门（本类只转发，不认识 MainWindow）
@@ -987,11 +849,11 @@ class PlotTabsWidget(QTabWidget):
 
         「＋」是 ``PlotTabsWidget`` 的子控件而非 tabBar 子控件：
         - 少量页签：紧跟最后一个页签右侧（保持既有交互）；
-        - 页签满 / 出现滚动箭头 / 右侧放不下：停到 ``_plus_slot``，
+        - 页签满 / 末标签在屏外 / 右侧放不下：停到 ``_plus_slot``，
           槽位在 tabBar 之外，页签和关闭按钮永远不会被压住。
 
-        角位容器由 [预留槽][胶囊] 组成，tabBar 宽度天然扣掉这两段，
-        因此不需要再按滚动箭头或右缘做临时钳制。
+        角位容器由 [预留槽][▾][胶囊] 组成，tabBar 宽度天然扣掉这几段，
+        因此不需要再按右缘做临时钳制。
         """
         # setTabBar 挂钩子后 Qt 会在构造期同步触发布局回调，此时「＋」
         # 尚未创建——直接跳过（__init__ 尾部会显式放置一次）。
@@ -1017,25 +879,14 @@ class PlotTabsWidget(QTabWidget):
         slot_center = max(
             2, slot_pos.x() + (slot.width() - button.width()) // 2
         )
-        if self._visible_scroll_buttons():
-            # 滚动箭头占住 tabBar 右缘：直接停槽，避免「＋」压箭头或页签
-            x = slot_center
-        else:
-            following = (
-                bar_pos.x() + last_rect.right() + 5 if last_rect.isValid() else 5
-            )
-            x = min(following, slot_center)
+        # 方向 B 无可见箭头：紧跟末标签，放不下（含末标签在屏外）停预留槽
+        following = (
+            bar_pos.x() + last_rect.right() + 5 if last_rect.isValid() else 5
+        )
+        x = min(following, slot_center)
         y = bar_pos.y() + max(0, (bar.height() - button.height()) // 2)
         button.move(x, y)
         button.raise_()
-
-    def _visible_scroll_buttons(self) -> list[QToolButton]:
-        """可见的翻页滚动箭头（Qt 未暴露公开 API，按 objectName 反查）。
-
-        不同版本/平台命名可能是 ``ScrollLeftButton`` /
-        ``qt_tabbar_scrollbutton_left``，故按 "scroll" 关键字匹配。
-        """
-        return [b for b in self._scroll_buttons() if b.isVisible()]
 
     def _scroll_buttons(self) -> list[QToolButton]:
         """全部原生滚动按钮（含隐藏）：滚轮程序化驱动不依赖可见性。"""
@@ -1158,8 +1009,10 @@ class PlotTabsWidget(QTabWidget):
             if event.type() == QEvent.Type.ToolTip:
                 provider = self._page_list_provider
                 count = len(provider()) if provider is not None else self.count()
+                left, right = self._hidden_tab_counts()
+                overflow = f" · 左隐 {left} / 右隐 {right}" if (left or right) else ""
                 QToolTip.showText(
-                    event.globalPos(), f"页目录（{count} 页）：全部绘图页一览", self._dir_btn
+                    event.globalPos(), f"页目录（{count} 页）{overflow}", self._dir_btn
                 )
                 return True
         if obj is getattr(self, "_corner_container", None):
