@@ -611,3 +611,33 @@ def test_dir_popup_esc_closes(tabs, qtbot, qapp):
     assert popup.isVisible()
     QTest.keyClick(popup, Qt.Key.Key_Escape)
     assert not popup.isVisible()
+
+
+def test_dir_popup_long_current_name_stays_inside(tabs, qtbot, qapp):
+    """长名＋加粗当前行：省略按最终字体度量，行/角标/× 不得溢出 popup。"""
+    _add_pages(tabs, 3)
+    long_title = "a" * 30 + "史蒂夫" + "s" * 20
+    tabs.set_page_list_provider(
+        lambda: [("page 1", "1×1", False), ("page 2", "1×1", False),
+                 (long_title, "2×2", True)]
+    )
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    row = _dir_rows(popup)[2]
+    assert row.width() <= popup.width()
+    for child in row.findChildren(QLabel) + [row._close]:
+        right = child.mapTo(popup, QPoint(0, 0)).x() + child.width()
+        assert right <= popup.width(), "长名行的角标/× 被挤出 popup"
+    name = [lb for lb in row.findChildren(QLabel) if lb.toolTip() == long_title][0]
+    assert name.text().endswith("…")
+    assert name.font().bold()
+    popup.hide()
+
+
+def test_dir_popup_background_is_white_not_gray(tabs, qtbot, qapp):
+    _add_pages(tabs, 2)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    assert "background: #ffffff" in popup.styleSheet()
+    assert "QScrollArea { background: transparent" in popup.styleSheet()
+    assert not popup._scroll.viewport().autoFillBackground()
+    assert not popup._rows_host.autoFillBackground()
+    popup.hide()

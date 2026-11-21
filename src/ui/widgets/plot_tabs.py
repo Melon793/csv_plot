@@ -439,15 +439,22 @@ class _DirectoryRow(QWidget):
         )
         lay.addWidget(dot)
         name = QLabel(self)
+        if current:
+            font = name.font()
+            font.setBold(True)
+            name.setFont(font)
+        # 省略必须按最终字体（含加粗）度量：先算省略后加粗会让实际渲染
+        # 宽于省略宽，长名行溢出 popup 右缘、挤掉角标与 ×
         fm = QFontMetrics(name.font())
         name.setText(
             fm.elidedText(title, Qt.TextElideMode.ElideRight, popup._NAME_ELIDE_WIDTH)
         )
         name.setToolTip(title)
-        if current:
-            font = name.font()
-            font.setBold(True)
-            name.setFont(font)
+        # 平台字体更宽时允许收缩裁剪，绝不把行撑出 popup
+        name.setMinimumWidth(0)
+        policy = name.sizePolicy()
+        policy.setHorizontalPolicy(policy.Policy.Ignored)
+        name.setSizePolicy(policy)
         lay.addWidget(name, 1)
         if badge:
             badge_label = QLabel(badge, self)
@@ -501,6 +508,7 @@ class _PageDirectoryPopup(QWidget):
         self.setStyleSheet(
             "#pageDirectoryPopup { background: #ffffff;"
             " border: 1px solid #d5dbe3; border-radius: 6px; }"
+            "#pageDirectoryPopup QScrollArea { background: transparent; border: none; }"
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(5, 5, 5, 5)
@@ -511,18 +519,22 @@ class _PageDirectoryPopup(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        # viewport/rows 容器默认灰底会盖住白色 popup 底（观感发灰），统一透明；
+        # setWidget 会重置 autoFillBackground，故 rows_host 的透明在其后设置
+        self._scroll.viewport().setAutoFillBackground(False)
         self._rows_host = QWidget()
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(0)
         self._scroll.setWidget(self._rows_host)
+        self._rows_host.setAutoFillBackground(False)
         outer.addWidget(self._scroll)
         self._new_btn = QPushButton("＋  新建绘图页", self)
         self._new_btn.setCursor(Qt.CursorShape.ArrowCursor)
         self._new_btn.setStyleSheet(
             "QPushButton { border: none; border-top: 1px solid #eceff3;"
-            f" color: {_ACCENT_COLOR}; font-weight: 600; text-align: left;"
-            " padding: 7px 10px; }"
+            f" background: #ffffff; color: {_ACCENT_COLOR}; font-weight: 600;"
+            " text-align: left; padding: 7px 10px; }"
             f"QPushButton:hover {{ background: {DRAG_ACCENT_SOFT}; }}"
             "QPushButton:disabled { color: #b5b5b5; }"
         )
