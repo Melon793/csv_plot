@@ -10,13 +10,21 @@ from typing import Any
 class PlotConfig:
     """单个 Plot 的配置
 
-    ``invalid_curves`` 是失效占位的变量名（方案 B2，§8.1）：仅存名字，颜色随
-    ``InvalidCurveRef`` 在运行期保存、不进模板（与"模板不含颜色"现状一致）。
+    ``invalid_curves`` 是失效占位的变量名（方案 B2，§8.1）：仅存名字，
+    占位运行期颜色随 InvalidCurveRef、模板来源占位固定灰（§8.3/§12.2）。
     可选字段——序列化时仅在非空才写键，旧模板/旧 auto-save 缺省读作空列表，
     旧版软件读新模板忽略未知键，往返零影响。
+
+    ``curve_styles`` 是曲线外观束（2026-11-21 边界决策：外观升级为布局
+    资产，取代原"模板不含颜色"声明）：变量名 → {color 恒写, line_preset /
+    draw_mode / symbol_policy 仅偏离默认值才写}。模板与 auto-save 共用，
+    跨会话/跨机器复现强调布局；缺键 = 色板轮转等默认行为（旧档零回归）。
     """
     curves: list[str] = field(default_factory=list)  # 曲线变量名列表
     invalid_curves: list[str] = field(default_factory=list)  # 失效占位变量名列表
+    #: 曲线外观束（可选键，仅非空才写）：见类 docstring 与
+    #: .qoder/plans/curve_styles_template_dev.md §2
+    curve_styles: dict[str, dict] = field(default_factory=dict)
     #: P1-L（上轮 P1-10）：本格在页内的真实格子索引（row*grid_cols+col）。
     #: 空可见格子不进导出列表，套用端若按 enumerate 对位会把后面的曲线整体
     #: 前移错位。可选字段——仅非 None 才写键；旧档缺省 None，套用端回退
@@ -31,7 +39,7 @@ class PlotConfig:
     cell_col: int | None = None
 
     def to_dict(self) -> dict:
-        """序列化为字典（invalid_curves/cell_index/cell_row/cell_col 仅有值才写，保持旧档兼容）"""
+        """序列化为字典（invalid_curves/cell_index/cell_row/cell_col/curve_styles 仅有值才写，保持旧档兼容）"""
         data = {"curves": self.curves}
         if self.invalid_curves:
             data["invalid_curves"] = list(self.invalid_curves)
@@ -40,6 +48,10 @@ class PlotConfig:
         if self.cell_row is not None and self.cell_col is not None:
             data["cell_row"] = int(self.cell_row)
             data["cell_col"] = int(self.cell_col)
+        if self.curve_styles:
+            data["curve_styles"] = {
+                name: dict(styles) for name, styles in self.curve_styles.items()
+            }
         return data
 
     @classmethod
@@ -74,7 +86,49 @@ class PlotConfig:
             cell_index=cell_index,
             cell_row=cell_row,
             cell_col=cell_col,
+            curve_styles=cls._parse_curve_styles(data.get("curve_styles")),
         )
+
+    @staticmethod
+    def _parse_curve_styles(raw: Any) -> dict[str, dict]:
+        """外观束逐字段守卫（B1/BL-3 风格）：畸形手写档不得让异常逃出槽。
+
+        auto 值三字段一律丢：放行 draw_mode:'auto' 会在套用端把来源钉成
+        'user'，吞掉枚举通道的自动阶梯判定（束只承载偏离默认值）。
+        """
+        if not isinstance(raw, dict):
+            return {}
+        from PySide6.QtGui import QColor
+
+        from src.core.data_types import (
+            DRAW_MODE_AUTO,
+            DRAW_MODES,
+            LINE_PRESET_AUTO,
+            LINE_PRESETS,
+            SYMBOL_POLICY_AUTO,
+            SYMBOL_POLICIES,
+        )
+
+        styles: dict[str, dict] = {}
+        for name, entry_raw in raw.items():
+            if not isinstance(entry_raw, dict):
+                continue
+            entry: dict = {}
+            color = entry_raw.get("color")
+            if isinstance(color, str) and QColor(color).isValid():
+                entry["color"] = color
+            preset = entry_raw.get("line_preset")
+            if preset in LINE_PRESETS and preset != LINE_PRESET_AUTO:
+                entry["line_preset"] = preset
+            mode = entry_raw.get("draw_mode")
+            if mode in DRAW_MODES and mode != DRAW_MODE_AUTO:
+                entry["draw_mode"] = mode
+            policy = entry_raw.get("symbol_policy")
+            if policy in SYMBOL_POLICIES and policy != SYMBOL_POLICY_AUTO:
+                entry["symbol_policy"] = policy
+            if entry:
+                styles[str(name)] = entry
+        return styles
 
 
 @dataclass

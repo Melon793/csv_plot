@@ -8,6 +8,13 @@ from abc import ABC, abstractmethod
 from typing import Any
 import numpy as np
 
+from src.core.data_types import (
+    DRAW_MODE_SOURCE_AUTO,
+    DRAW_MODE_SOURCE_USER,
+    LINE_PRESET_AUTO,
+    SYMBOL_POLICY_AUTO,
+)
+
 
 class CurveStrategy(ABC):
     @abstractmethod
@@ -30,6 +37,9 @@ class CurveStrategy(ABC):
 
     @abstractmethod
     def get_curve_line_width(self, name: str) -> int: ...
+
+    @abstractmethod
+    def get_curve_styles(self, name: str) -> dict: ...
 
 
 class UnifiedCurveStrategy(CurveStrategy):
@@ -81,3 +91,23 @@ class UnifiedCurveStrategy(CurveStrategy):
             pen = info.curve.opts.get("pen", None)
             return pen.width() if pen else 1
         return 1
+
+    def get_curve_styles(self, name: str) -> dict:
+        """曲线外观束（模板/auto-save 捕获端）：color 恒写，其余仅偏离默认值。
+
+        draw_mode 仅 user 钉住才写（auto 来源让套用端按新数据元数据重新
+        判定，与 reload saved_state 同口径）；变量不存在 → {}。
+        """
+        info = self._pw.curves.get(name)
+        if info is None:
+            return {}
+        styles: dict = {"color": info.color}
+        preset = getattr(info, "line_preset", LINE_PRESET_AUTO)
+        if preset != LINE_PRESET_AUTO:
+            styles["line_preset"] = preset
+        if getattr(info, "draw_mode_source", DRAW_MODE_SOURCE_AUTO) == DRAW_MODE_SOURCE_USER:
+            styles["draw_mode"] = info.draw_mode
+        policy = getattr(info, "symbol_policy", SYMBOL_POLICY_AUTO)
+        if policy != SYMBOL_POLICY_AUTO:
+            styles["symbol_policy"] = policy
+        return styles

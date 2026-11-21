@@ -74,6 +74,9 @@ class PlotConfigManager(QObject):
                             curves=list(curve_names),
                             invalid_curves=list(invalid_names),
                             cell_index=cell_index,
+                            curve_styles=self._capture_curve_styles(
+                                strategy, curve_names
+                            ),
                         )
                     )
             config.plots = plots
@@ -96,6 +99,22 @@ class PlotConfigManager(QObject):
             config.saved_mark_range = [float(saved_range[0]), float(saved_range[1])]
 
         return config
+
+    @staticmethod
+    def _capture_curve_styles(strategy, curve_names) -> dict:
+        """捕获外观束；老替身 strategy 无 get_curve_styles 时容错为空。
+
+        既有 e2e 的 strategy 替身只有 get_curve_names/get_invalid_curve_names
+        （test_template_cell_stride 等），导出端不得因协议扩展打破它们。
+        """
+        get_styles = getattr(strategy, "get_curve_styles", None)
+        if not callable(get_styles):
+            return {}
+        return {
+            name: styles
+            for name in curve_names
+            if (styles := get_styles(name))
+        }
 
     @staticmethod
     def _export_page(page) -> PlotPageConfig:
@@ -130,6 +149,9 @@ class PlotConfigManager(QObject):
                         cell_index=index,
                         cell_row=row,
                         cell_col=col,
+                        curve_styles=PlotConfigManager._capture_curve_styles(
+                            strategy, curve_names
+                        ),
                     )
                 )
         return page_config
@@ -435,6 +457,7 @@ class PlotConfigManager(QObject):
         available = set(main_window.loader.var_names) if has_loader else set()
         # 单曲线首绘走 plot_variable（保留既有首绘语义），其余走批量入口
         single_scene_first = scene and len(curve_names) == 1
+        curve_styles = getattr(plot_config, "curve_styles", {}) or {}
 
         if not scene:
             # 隐藏页：只建数据层；游标/标签收尾由切页时的 restore_scene 补
@@ -444,13 +467,23 @@ class PlotConfigManager(QObject):
             for i, var_name in enumerate(curve_names):
                 if has_loader and var_name in available:
                     logger.debug("Plot[%d] 添加曲线: %s", plot_index, var_name)
+                    # 外观束 color 走 preferred_color 通道（避免事后改色
+                    # 二次 pen 刷新）；None = 现状色板轮转（旧档零回归）
+                    preferred = (curve_styles.get(var_name) or {}).get("color")
                     # quiet=True：套用是程序化批量路径，失败不在中途弹模态框
                     if single_scene_first and i == 0:
-                        ok = plot_widget.plot_variable(var_name, quiet=True)
+                        ok = plot_widget.plot_variable(
+                            var_name, quiet=True, preferred_color=preferred
+                        )
                     else:
-                        ok = plot_widget.add_variable_to_plot(var_name, quiet=True)
+                        ok = plot_widget.add_variable_to_plot(
+                            var_name, quiet=True, preferred_color=preferred
+                        )
                     if ok:
                         added_count += 1
+                        self._apply_curve_styles(
+                            plot_widget, var_name, curve_styles.get(var_name) or {}
+                        )
                     elif var_name in plot_widget.curves:
                         # 畸形模板的重名条目（curves=["a","a"]）：失败原因是
                         # 「已在绘图中」而非「不可绘制」，不得 demote——demote
@@ -510,6 +543,29 @@ class PlotConfigManager(QObject):
                         plot_index, exc_info=True,
                     )
                 plot_widget.mark_dirty_for_activation()
+
+    @staticmethod
+    def _apply_curve_styles(plot_widget, var_name: str, styles: dict) -> None:
+        """套用端恢复外观束非 color 字段（color 已走 preferred_color）。
+
+        顺序 preset → draw_mode → symbol_policy：setData 重建保留 pen
+        opts；symbol_policy 收尾按当前可见跨度重判。draw_mode apply 入口
+        自动钉 source='user'——束内只存 user 钉住值，语义恰好正确。
+        可见页逐条 emit 与逐条 add 现状同口径；隐藏页在 _batch_adding
+        窗口内自动抑制。
+        """
+        if not styles:
+            return
+        mcm = plot_widget._multi_curve_manager
+        preset = styles.get("line_preset")
+        if preset:
+            mcm.apply_curve_line_preset(var_name, preset)
+        mode = styles.get("draw_mode")
+        if mode:
+            mcm.apply_curve_draw_mode(var_name, mode)
+        policy = styles.get("symbol_policy")
+        if policy:
+            mcm.apply_curve_symbol_policy(var_name, policy)
 
     @staticmethod
     def check_template_match(config: PlotSessionConfig, current_vars: list[str]) -> tuple[float, set[str], set[str]]:
