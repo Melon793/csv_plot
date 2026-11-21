@@ -342,3 +342,71 @@ def test_batch_close_reports_curve_pages(loaded_window, qtbot, dialog_stubs):
         for _, text in dialog_stubs["question"]
     )
     assert len(mw.pages) == 3                # No → 未动
+
+
+# ----------------------------------------------------------------------
+# T3：Ctrl+PgUp/Dn 顺序切页 + Ctrl+Tab MRU 对比翻切
+# ----------------------------------------------------------------------
+def test_neighbor_page_switch_clamps_at_bounds(loaded_window, qtbot):
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    third = mw.new_page()
+    _wait_new_page_matrix(qtbot, third)
+    mw.activate_page(mw.pages[0])
+
+    mw._activate_neighbor_page(1)
+    assert mw.current_page is mw.pages[1]
+    mw._activate_neighbor_page(1)
+    assert mw.current_page is mw.pages[2]
+    mw._activate_neighbor_page(1)          # 末页边界：停住不循环
+    assert mw.current_page is mw.pages[2]
+    mw._activate_neighbor_page(-1)
+    assert mw.current_page is mw.pages[1]
+    mw._activate_neighbor_page(-1)
+    mw._activate_neighbor_page(-1)         # 首页边界
+    assert mw.current_page is mw.pages[0]
+
+
+def test_ctrl_tab_mru_toggles_between_two_pages(loaded_window, qtbot):
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    first = mw.pages[0]
+    mw.activate_page(first)                # MRU：second → first
+
+    mw._toggle_mru_page()
+    assert mw.current_page is second
+    mw._toggle_mru_page()
+    assert mw.current_page is first
+
+
+def test_mru_cleared_when_prev_page_closed(loaded_window, qtbot):
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    first = mw.pages[0]
+    mw.activate_page(first)
+    mw.close_page(second, confirm=False)
+    mw._toggle_mru_page()                  # 上一激活页已销毁：不动
+    assert mw.current_page is first
+
+
+def test_page_switch_shortcuts_registered(loaded_window):
+    mw = loaded_window
+    assert mw._page_prev_shortcut.key().toString() == "Ctrl+PgUp"
+    assert mw._page_next_shortcut.key().toString() == "Ctrl+PgDown"
+    assert mw._page_mru_shortcut.key().toString() == "Ctrl+Tab"
+    assert mw._page_mru_back_shortcut.key().toString() == "Ctrl+Shift+Tab"
+
+
+def test_ctrl_pgdown_key_switches_page(loaded_window, qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    mw.activate_page(mw.pages[0])
+    QTest.keyClick(mw, Qt.Key.Key_PageDown, Qt.KeyboardModifier.ControlModifier)
+    qtbot.waitUntil(lambda: mw.current_page is mw.pages[1], timeout=2000)

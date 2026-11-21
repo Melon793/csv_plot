@@ -380,6 +380,21 @@ class MainWindow(QMainWindow):
             return
         self._switch_to_page(self.page_at_tab(index))
 
+    def _activate_neighbor_page(self, delta: int) -> None:
+        """Ctrl+PgUp/Dn 顺序切页（T3）：到边界停住，不循环。"""
+        tabs = self.plot_tabs
+        count = tabs.count()
+        if count <= 1:
+            return
+        target = min(max(0, tabs.currentIndex() + delta), count - 1)
+        self.activate_page(self.page_at_tab(target))
+
+    def _toggle_mru_page(self) -> None:
+        """Ctrl+Tab 对比翻切（T3）：在最近两页之间来回，无历史则不动。"""
+        prev = self._prev_page
+        if prev is not None and prev in self.pages and prev is not self._current_page:
+            self.activate_page(prev)
+
     def _switch_to_page(self, new: PlotPage | None) -> None:
         """切页时序（§5.2）：抓旧范围 → 两页 epoch+1 → 取消待办 → 延迟激活。"""
         if new is None:
@@ -388,6 +403,7 @@ class MainWindow(QMainWindow):
             self._schedule_page_activation(new)
             return
         old = self._current_page
+        self._prev_page = old
         old_range = None
         if old is not None:
             old_range = old.grab_master_x_range()
@@ -625,6 +641,8 @@ class MainWindow(QMainWindow):
         finally:
             self.plot_tabs.blockSignals(False)
         self.pages.remove(page)
+        if self._prev_page is page:
+            self._prev_page = None
         page.dispose()
 
         if is_current:
@@ -877,6 +895,8 @@ class MainWindow(QMainWindow):
         self._bootstrap_state: dict = {}
         self.pages: list[PlotPage] = []
         self._current_page: PlotPage | None = None
+        #: MRU 上一激活页（T3 Ctrl+Tab 对比翻切）；关页时若命中则清空
+        self._prev_page: PlotPage | None = None
         self._is_switching = False
         self._x_range_follow_enabled = True
         #: 延迟激活（parented 单次定时器；打包环境不用三参 singleShot）
@@ -1280,6 +1300,16 @@ class MainWindow(QMainWindow):
 
         self._shelf_shortcut = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
         self._shelf_shortcut.activated.connect(self._toggle_curve_shelf_shortcut)
+
+        # 绘图页切换（T3）：顺序切页 + MRU 对比翻切，窗口级快捷键
+        self._page_prev_shortcut = QShortcut(QKeySequence("Ctrl+PgUp"), self)
+        self._page_prev_shortcut.activated.connect(lambda: self._activate_neighbor_page(-1))
+        self._page_next_shortcut = QShortcut(QKeySequence("Ctrl+PgDown"), self)
+        self._page_next_shortcut.activated.connect(lambda: self._activate_neighbor_page(1))
+        self._page_mru_shortcut = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        self._page_mru_shortcut.activated.connect(self._toggle_mru_page)
+        self._page_mru_back_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        self._page_mru_back_shortcut.activated.connect(self._toggle_mru_page)
 
     # ------------------------------------------------------------------
     # 状态栏：常驻四块 —— 文件段 / x 轴段（可点开抽屉）/ 消息区 / 日志入口
