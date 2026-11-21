@@ -592,7 +592,8 @@ class MainWindow(QMainWindow):
     def _batch_close_pages(self, pages: list[PlotPage]) -> None:
         """批量关页（T2）：一次汇总确认，确认后逐页走既有 close_page 销毁链。
 
-        「关闭其他/右侧」都保留当前页，不会落到最后一页「只清空」分支。
+        保留的是右键索引页；索引页非当前页时当前页会随批量关闭并走既有
+        激活链。索引页恒在，故不会落到最后一页「只清空」分支。
         """
         targets = [p for p in pages if p in self.pages and widget_alive(p.widget)]
         if not targets:
@@ -1321,9 +1322,19 @@ class MainWindow(QMainWindow):
         self._page_prev_shortcut.activated.connect(lambda: self._activate_neighbor_page(-1))
         self._page_next_shortcut = QShortcut(QKeySequence("Ctrl+PgDown"), self)
         self._page_next_shortcut.activated.connect(lambda: self._activate_neighbor_page(1))
-        self._page_mru_shortcut = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        # macOS 上 Qt 把 Ctrl+Tab 映射为 ⌘⇥（被系统截走，应用收不到）→
+        # 用 MetaModifier 绑物理 ⌃⇥（VSCode mac 同口径）；其余平台 Ctrl+Tab
+        if sys.platform == "darwin":
+            mru_seq = QKeySequence(Qt.MetaModifier | Qt.Key_Tab)
+            mru_back_seq = QKeySequence(
+                Qt.MetaModifier | Qt.ShiftModifier | Qt.Key_Tab
+            )
+        else:
+            mru_seq = QKeySequence("Ctrl+Tab")
+            mru_back_seq = QKeySequence("Ctrl+Shift+Tab")
+        self._page_mru_shortcut = QShortcut(mru_seq, self)
         self._page_mru_shortcut.activated.connect(self._toggle_mru_page)
-        self._page_mru_back_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        self._page_mru_back_shortcut = QShortcut(mru_back_seq, self)
         self._page_mru_back_shortcut.activated.connect(self._toggle_mru_page)
 
     # ------------------------------------------------------------------

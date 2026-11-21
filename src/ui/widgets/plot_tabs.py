@@ -725,6 +725,7 @@ class _PageDirectoryPopup(QWidget):
             item = self._rows_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()   # 先藏再删：DeferredDelete 回卷前不留同位幽灵行
                 widget.deleteLater()
         for index, (title, badge, current) in enumerate(entries):
             self._rows_layout.addWidget(
@@ -753,6 +754,10 @@ class _PageDirectoryPopup(QWidget):
             QPoint(anchor.width() - self.width(), anchor.height() + 4)
         )
         pos.setX(max(avail.left() + 4, min(pos.x(), avail.right() - self.width() - 4)))
+        anchor_top = anchor.mapToGlobal(QPoint(0, 0)).y()
+        if pos.y() + self.height() > avail.bottom() - 4:
+            pos.setY(anchor_top - self.height() - 4)   # 下方放不下 → 上翻
+        pos.setY(max(avail.top() + 4, pos.y()))
         self.move(pos)
         self.show()
         self.setFocus()
@@ -1142,7 +1147,7 @@ class PlotTabsWidget(QTabWidget):
         return self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
 
     def _sync_corner_width(self) -> None:
-        """按胶囊显隐同步角位容器宽度，保证隐藏时 36px 全额归还给页签栏。
+        """按胶囊显隐同步角位容器宽度，保证隐藏时 52px 全额归还给页签栏。
 
         QTabWidget 只在自身布局周期读取角位控件宽度；胶囊单独 hide 不会让
         外层重新计算。这里显式定宽并 updateGeometry，随后页签栏会重新铺排。
@@ -1190,7 +1195,7 @@ class PlotTabsWidget(QTabWidget):
             and container.height() != bar.height()
         ):
             # 角位容器按页签栏高度定高，胶囊由布局垂直居中；只管高度，
-            # 宽度仍由 [槽][胶囊] 的 sizeHint 决定（隐藏胶囊时归还 36px）。
+            # 宽度仍由 [槽][胶囊] 的 sizeHint 决定（隐藏胶囊时归还 52px）。
             container.setFixedHeight(bar.height())
         bar_pos = bar.mapTo(self, QPoint(0, 0))
         last_rect = bar.tabRect(bar.count() - 1)
@@ -1261,7 +1266,9 @@ class PlotTabsWidget(QTabWidget):
         index = self.tabBar().tabAt(pos)
         if index < 0:
             return
-        self._build_tab_menu(index).exec(self.tabBar().mapToGlobal(pos))
+        menu = self._build_tab_menu(index)
+        menu.exec(self.tabBar().mapToGlobal(pos))
+        menu.deleteLater()   # 父对象常驻会逐次泄漏 QMenu（审查实测 5 次右键 5 个）
 
     # ------------------------------------------------------------------
     # 「＋」可用性：未加载数据 / 已达上限时禁用（决策 D-D / §4.4）

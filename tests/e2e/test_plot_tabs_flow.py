@@ -393,11 +393,61 @@ def test_mru_cleared_when_prev_page_closed(loaded_window, qtbot):
 
 
 def test_page_switch_shortcuts_registered(loaded_window):
+    import sys
+
+    from PySide6.QtGui import QKeySequence
+
     mw = loaded_window
     assert mw._page_prev_shortcut.key().toString() == "Ctrl+PgUp"
     assert mw._page_next_shortcut.key().toString() == "Ctrl+PgDown"
-    assert mw._page_mru_shortcut.key().toString() == "Ctrl+Tab"
-    assert mw._page_mru_back_shortcut.key().toString() == "Ctrl+Shift+Tab"
+    # native 口径：mac 的 Ctrl+Tab 会被映射成 ⌘⇥（系统截走），必须绑物理 ⌃⇥
+    native = QKeySequence.SequenceFormat.NativeText
+    if sys.platform == "darwin":
+        assert mw._page_mru_shortcut.key().toString(native) == "⌃⇥"
+        assert mw._page_mru_back_shortcut.key().toString(native) == "⌃⇧⇥"
+    else:
+        assert mw._page_mru_shortcut.key().toString(native) == "Ctrl+Tab"
+        assert mw._page_mru_back_shortcut.key().toString(native) == "Ctrl+Shift+Tab"
+
+
+def test_mru_real_key_toggles(loaded_window, qtbot):
+    import sys
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    first = mw.pages[0]
+    mw.activate_page(first)
+    modifier = (
+        Qt.KeyboardModifier.MetaModifier
+        if sys.platform == "darwin"
+        else Qt.KeyboardModifier.ControlModifier
+    )
+    QTest.keyClick(mw, Qt.Key.Key_Tab, modifier)
+    qtbot.waitUntil(lambda: mw.current_page is second, timeout=2000)
+    QTest.keyClick(mw, Qt.Key.Key_Tab, modifier)
+    qtbot.waitUntil(lambda: mw.current_page is first, timeout=2000)
+
+
+def test_close_other_pages_from_non_current_index(loaded_window, qtbot, monkeypatch):
+    """批量中途关到当前页：走既有激活链，索引页保留。"""
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    third = mw.new_page()
+    _wait_new_page_matrix(qtbot, third)
+    mw.activate_page(third)                # 当前页在批量目标里
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    mw._close_other_pages(0)
+    assert mw.pages == [mw.pages[0]] or len(mw.pages) == 1
+    assert mw.current_page is mw.pages[0]
+    assert mw.plot_tabs.count() == 1
 
 
 def test_ctrl_pgdown_key_switches_page(loaded_window, qtbot):

@@ -842,3 +842,33 @@ def test_corner_chips_vertically_centered_with_tabs_across_styles(tabs, qapp):
                 assert abs(center - (bar_y + tab_center)) <= 1, f"{style} chip 垂直错位"
     finally:
         QApplication.setStyle(original)
+
+
+def test_dir_popup_rebuild_leaves_no_ghost_rows(tabs, qtbot, qapp):
+    from PySide6.QtCore import QEvent
+
+    _add_pages(tabs, 6)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    tabs.set_page_list_provider(lambda: [("page 1", "", True), ("page 2", "", False)])
+    popup.open_for(tabs._dir_btn)
+    qapp.processEvents()
+    qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    host = popup._rows_host
+    assert len([c for c in host.children() if c.isWidgetType()]) == 2
+    popup.hide()
+
+
+def test_dir_popup_flips_above_when_below_screen_edge(tabs, qtbot, qapp):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+
+    _add_pages(tabs, MAX_PAGES)
+    screen = QApplication.primaryScreen().availableGeometry()
+    tabs.move(0, screen.bottom() - 40)     # 页签栏贴屏幕底
+    qapp.processEvents()
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    anchor_top = tabs._dir_btn.mapToGlobal(QPoint(0, 0)).y()
+    assert popup.y() + popup.height() <= anchor_top, "下方放不下应上翻"
+    assert popup.y() >= screen.top()
+    popup.hide()
+    tabs.move(0, 0)
