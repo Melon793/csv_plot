@@ -27,6 +27,79 @@ logger = get_logger("data.loader")
 # gb18030 覆盖中文 Windows 导出文件；cp1252/latin-1 收尾保证链末位必然可解码。
 ENCODING_FALLBACKS: tuple[str, ...] = ("utf-8", "gb18030", "cp1252", "latin-1")
 
+# 编码探测采样量：2000B 时长表头文件（如 962 列）采样窗内纯 ASCII，探测退化为
+# ascii、回退链让 gb18030 把 cp1252 的 °C(B0 43) 吞成汉字「癈」。64KB 实测 ~3ms。
+_ENCODING_SAMPLE_SIZE = 65536
+# 单位符号投票：cp1252 试解码采样后，这些符号占高位字节比例 ≥0.5 说明文件
+# 大概率是 cp1252 系单位文件（真中文/Big5/俄文实测比值 ≤0.10）。
+_UNIT_SYMBOLS = frozenset("°µ³²‰")
+_SYMBOL_VOTE_RATIO = 0.5
+_UTF16_32_BOMS = (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff")
+
+
+def _skip_symbol_vote(sample: bytes, det: str) -> bool:
+    """投票会截胡判对的探测值时跳过。"""
+    # 条件a：样本中出现的符号字节 det 与 cp1252 映射全一致 → 提升无收益
+    # （如 det=cp1250 且只有 °：B0 两编码同值，cp1250 自己就能解对）。
+    # det 单字节解码失败（CJK 前导字节）视为不一致。
+    seen = {
+        bytes([b]) for b in sample
+        if b >= 0x80
+        and bytes([b]).decode("cp1252", errors="replace") in _UNIT_SYMBOLS
+    }
+    same = True
+    for b in seen:
+        try:
+            if b.decode(det) != b.decode("cp1252"):
+                same = False
+                break
+        except (UnicodeDecodeError, LookupError):
+            same = False
+            break
+    if same:
+        return True
+    # 条件b：det=cp1251 且解出成片西里尔文 → 大概率判对，信任。
+    # 仅限 cp1251：iso8859_5 会把 cp1251 字节解成"另一套西里尔"（B0=А 非 °）。
+    if det == "cp1251":
+        try:
+            decoded = sample.decode(det, errors="strict")
+            if sum(1 for c in decoded if "\u0400" <= c <= "\u04ff") >= 3:
+                return True
+        except (UnicodeDecodeError, LookupError):
+            pass
+    return False
+
+
+def _build_encoding_chain(raw_sample: bytes, detected: str | None) -> list[str]:
+    """按探测值 + 单位符号投票生成 strict 回退链（链尾恒为 latin-1 兜底）。
+
+    只调整链首优先级，不删候选：cp1252 strict 遇 0x81 等未定义字节失败时
+    探测值仍有机会，最坏不劣于固定链。
+    """
+    det = (detected or "utf-8").lower().replace("-", "_")
+    if det == "utf_8":
+        det = "utf-8"  # 与 ENCODING_FALLBACKS 拼写一致，链去重才有效
+    # BOM 是硬证据；utf16/32 的 NUL 交错是强信号（实测无 BOM 变体探测也可靠）。
+    # 两者直接信 det 且跳过投票——cp1252 能把含 NUL 的字节流"成功"解成垃圾。
+    if raw_sample.startswith(_UTF16_32_BOMS) or det.startswith(("utf_16", "utf_32")):
+        return list(dict.fromkeys([det, *ENCODING_FALLBACKS]))
+    if det in ("gb2312", "gbk"):
+        det = "gb18030"  # 安全超集别名；其余 CJK 探测值保持首位
+    probe = raw_sample.decode("cp1252", errors="replace")
+    high = sum(1 for b in raw_sample if b >= 0x80)
+    sym = sum(1 for c in probe if c in _UNIT_SYMBOLS)
+    vote = (
+        high > 0 and sym >= 1 and sym / high >= _SYMBOL_VOTE_RATIO
+        and not _skip_symbol_vote(raw_sample, det)
+    )
+    if vote:
+        # det=utf_8/ascii 时 utf-8 恒首：真 utf-8 的 °(C2 B0) 试解码也出 °，
+        # 不能让 cp1252 截胡 utf-8 文件。
+        head = ["utf-8", "cp1252"] if det in ("ascii", "utf-8") else ["cp1252", det]
+    else:
+        head = [det]
+    return list(dict.fromkeys([*head, *ENCODING_FALLBACKS]))
+
 
 class DataLoadThread(QThread):
     """
@@ -321,17 +394,15 @@ class FastDataLoader(BaseDataLoader):
         """
         from charset_normalizer import from_bytes
 
-        sample_size = 2000
         with Path(file_path).open("rb") as f:
-            raw_sample = f.read(sample_size)
+            raw_sample = f.read(_ENCODING_SAMPLE_SIZE)
 
         result = from_bytes(raw_sample).best()
-        detected_encoding = (
-            result.encoding if (result and result.encoding) else "utf-8"
-        )
         # 回退链一律用严格解码筛选（见下方 P0-5 注释），因此把候选全部列出
         # 比按 coherence 截断更安全：错误候选会自己失败并让位。
-        encodings_to_try = list(dict.fromkeys([detected_encoding, *ENCODING_FALLBACKS]))
+        encodings_to_try = _build_encoding_chain(
+            raw_sample, result.encoding if result else None
+        )
 
         lines: list[str] = []
         physical_lines: list[int] = []
@@ -620,19 +691,12 @@ class FastDataLoader(BaseDataLoader):
             # 自行检测编码
             from charset_normalizer import from_bytes
 
-            sample_size = 2000
-
             with Path(path).open("rb") as f:
-                raw_sample = f.read(sample_size)
+                raw_sample = f.read(_ENCODING_SAMPLE_SIZE)
 
             result = from_bytes(raw_sample).best()
-            if result and result.encoding:
-                detected_enc = result.encoding
-            else:
-                detected_enc = "utf-8"
-
-            encodings_to_try = list(
-                dict.fromkeys([detected_enc, *ENCODING_FALLBACKS])
+            encodings_to_try = _build_encoding_chain(
+                raw_sample, result.encoding if result else None
             )
 
         for enc in encodings_to_try:
@@ -648,7 +712,7 @@ class FastDataLoader(BaseDataLoader):
                     engine="python",
                 )
                 break
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, UnicodeError, LookupError):
                 continue
         else:
             raise RuntimeError("无法以任何可用编码读取文件")
