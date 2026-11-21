@@ -331,3 +331,80 @@ class TestSourceFffdRepair:
         loader = FastDataLoader(str(p), has_unit=True, sep=",", encoding="utf-8")
         assert loader.fffd_unit_fixes == 2
         assert loader.units["T1"] == "°C"
+
+
+# ---------- FFFD 签名守卫（小 utf-8 文件被误判 CJK/单字节编码） ----------
+
+class TestFffdSignatureGuard:
+    @pytest.mark.parametrize("det", ["shift_jis_2004", "gb18030", "big5", "cp1250"])
+    def test_guard_promotes_utf8_keeps_det(self, det):
+        sample = '"V1","V2"\n"\ufffdC","Nm"\n1,2\n'.encode("utf-8")
+        chain = _build_encoding_chain(sample, det)
+        assert chain[0] == "utf-8"
+        assert det in chain
+        assert chain[-1] == "latin-1"
+
+    def test_mixed_sample_strict_fail_no_guard(self):
+        # 含签名但混有 cp1252 的 °(B0)：utf-8 strict 失败 → 不守卫
+        sample = b'"V1","V2"\n"\xef\xbf\xbdC","\xb0C"\n1,2\n'
+        chain = _build_encoding_chain(sample, "gb18030")
+        assert chain[0] == "gb18030"
+
+    def test_no_signature_unchanged(self):
+        sample = '"°C","Nm"\n1,2\n'.encode("utf-8")
+        chain = _build_encoding_chain(sample, "utf_8")
+        assert chain[0] == "utf-8"
+
+    def test_kunjin_kao_semantically_equivalent(self):
+        # 锟斤拷的 GBK 字节恰为 EF BF BD×2：守卫触发后 utf-8 还原 U+FFFD，
+        # 语义等价（D1 可接管），非致损
+        sample = '"锟斤拷C","Nm"\n1,2\n'.encode("gb18030")
+        chain = _build_encoding_chain(sample, "gb18030")
+        assert chain[0] == "utf-8"
+        assert sample.decode("utf-8").count("\ufffd") == 2
+
+    def test_real_chinese_with_kunjin_kao_not_guarded(self):
+        sample = ("试验描述锟斤拷" + "温度压力流量" * 50).encode("gb18030")
+        chain = _build_encoding_chain(sample, "gb18030")
+        assert chain[0] == "gb18030"
+
+    def test_small_fffd_file_natural_detection_and_repair(self, tmp_path):
+        # Windows 探针 BAD 场景转正：小 utf-8 FFFD 文件曾被判 shift_jis_2004
+        p = tmp_path / "small_fffd.csv"
+        units = ["\ufffdC", "\ufffdCA", "\ufffdC", "Nm", "1/cm\ufffd", "%"]
+        p.write_bytes(('"V1","V2","V3","V4","V5","V6"\n"'
+                       + '","'.join(units) + '"\n1,2,3,4,5,6\n').encode("utf-8"))
+        fmt = FastDataLoader._auto_detect_format(str(p))
+        names, got, used, _, fixes = FastDataLoader._load_header_units(
+            str(p), desc_rows=fmt.header_row, sep=fmt.sep,
+            has_unit=fmt.has_unit, encoding=fmt.encoding)
+        assert used == "utf-8"
+        assert [got[n] for n in names] == ["°C", "°CA", "°C", "Nm", "1/cm\ufffd", "%"]
+        assert fixes == 3
+
+    def test_utf8_bom_plus_fffd(self, tmp_path):
+        p = tmp_path / "bom_fffd.csv"
+        p.write_bytes('"V1","V2"\n"\ufffdC","Nm"\n1,2\n'.encode("utf-8-sig"))
+        fmt = FastDataLoader._auto_detect_format(str(p))
+        names, got, used, _, fixes = FastDataLoader._load_header_units(
+            str(p), desc_rows=fmt.header_row, sep=fmt.sep,
+            has_unit=fmt.has_unit, encoding=fmt.encoding)
+        assert names[0] == "V1"  # BOM 不得泄漏进列名
+        assert got[names[0]] == "°C"
+        assert fixes == 1
+
+    def test_fffd_beyond_sample_window_mixed_loads(self, tmp_path):
+        # >64KB 长表头把 FFFD 挤出采样窗：守卫不触发（既有窗口限制），
+        # 混合编码文件仍须沿链兜底完成加载不崩溃
+        p = tmp_path / "beyond_window.csv"
+        long_header = ",".join(f"VAR_LONG_NAME_{i:06d}" for i in range(3500))
+        assert len(long_header.encode("ascii")) > 65536
+        raw = (long_header.encode("ascii") + b"\n"
+               + b'"\xef\xbf\xbdC","\xb0C"' + b',"\""' * 3498 + b"\n"
+               + b"1,2" + b",0" * 3498 + b"\n")
+        p.write_bytes(raw)
+        fmt = FastDataLoader._auto_detect_format(str(p))
+        names, got, used, _, _ = FastDataLoader._load_header_units(
+            str(p), desc_rows=fmt.header_row, sep=fmt.sep or ",",
+            has_unit=True, encoding=fmt.encoding)
+        assert len(names) == 3500  # 加载完成即可，单位值属已知窗口限制

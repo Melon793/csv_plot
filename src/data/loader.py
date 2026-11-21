@@ -83,6 +83,16 @@ def _build_encoding_chain(raw_sample: bytes, detected: str | None) -> list[str]:
     # 两者直接信 det 且跳过投票——cp1252 能把含 NUL 的字节流"成功"解成垃圾。
     if raw_sample.startswith(_UTF16_32_BOMS) or det.startswith(("utf_16", "utf_32")):
         return list(dict.fromkeys([det, *ENCODING_FALLBACKS]))
+    # U+FFFD 的 utf-8 编码 EF BF BD 是"上游有损转码"签名；shift_jis/gb18030 等
+    # 会把它当合法多字节吞掉（魹ｽ/嚙瘠），走不到 D1 修复层。签名命中且采样
+    # utf-8 strict 成功才守卫——真 CJK 文本的高位字节几乎必然使 strict 失败。
+    if b"\xef\xbf\xbd" in raw_sample:
+        try:
+            raw_sample.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            pass
+        else:
+            return list(dict.fromkeys(["utf-8", det, *ENCODING_FALLBACKS]))
     if det in ("gb2312", "gbk"):
         det = "gb18030"  # 安全超集别名；其余 CJK 探测值保持首位
     probe = raw_sample.decode("cp1252", errors="replace")
