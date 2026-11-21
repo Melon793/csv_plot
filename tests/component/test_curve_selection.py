@@ -1494,3 +1494,81 @@ def test_batch_menu_clear_after_collection_emptied_is_silent(
 
     assert pw._legend_selection == set()
     assert messages == [], f"集合已空仍播报：{messages}"
+
+
+# ---------------------------------------------------------------------------
+# 双击 × Ctrl/⌘ 守卫：选择手势不得被合成双击劫持成编辑器
+# ---------------------------------------------------------------------------
+
+
+def _dblclick(pw, pos, mods=Qt.KeyboardModifier.NoModifier):
+    p = QPointF(pos)
+    ev = QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        p,
+        p,
+        QPointF(0.0, 0.0),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        mods,
+    )
+    pw.mouseDoubleClickEvent(ev)
+
+
+def test_ctrl_click_miss_then_retry_dblclick_does_not_open_editor(
+    hit_plot, monkeypatch
+):
+    """Ctrl+空白未命中（零反馈）后原地补点被 Qt 合成双击：不得弹
+    变量编辑器，选择集保持（用户意图是选曲线，不是开编辑器）。"""
+    pw = hit_plot
+    pw.legend_label._toggle_legend_selection("b")
+    opened = []
+    monkeypatch.setattr(pw, "open_variable_editor", lambda: opened.append(1))
+
+    blank = _vp(pw, _blank_scene(pw))
+    _click(pw, blank, mods=Qt.KeyboardModifier.ControlModifier)
+    _dblclick(pw, blank, Qt.KeyboardModifier.ControlModifier)
+
+    assert opened == [], "Ctrl/⌘ 双击不得打开变量编辑器"
+    assert pw._legend_selection == {"b"}, "Ctrl+空白保持选择"
+
+
+def test_qtest_ctrl_click_then_dblclick_keeps_selection_no_editor(
+    hit_plot, qapp, monkeypatch
+):
+    """真实派发链路：Ctrl 单击命中选中后，原地补点被合成双击
+    （offscreen 下 QTest.mouseDClick 只派发 dblclick 一个事件，
+    前序 click 由 mouseClick 补上）：选择保持且不弹编辑器。"""
+    pw = hit_plot
+    opened = []
+    monkeypatch.setattr(pw, "open_variable_editor", lambda: opened.append(1))
+    pos = _vp(pw, _scene_at(pw, "a"))
+
+    QTest.mouseClick(
+        pw.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier,
+        pos,
+    )
+    assert pw._legend_selection == {"a"}, "前提：首击应命中选中"
+    QTest.mouseDClick(
+        pw.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier,
+        pos,
+    )
+    qapp.processEvents()
+
+    assert opened == [], "Ctrl+双击曲线不得打开变量编辑器"
+    assert pw._legend_selection == {"a"}
+
+
+def test_bare_dblclick_in_viewbox_still_opens_editor(hit_plot, monkeypatch):
+    """守卫不过度扩张：裸双击绘图区仍走编辑器入口（回归护栏）。"""
+    pw = hit_plot
+    opened = []
+    monkeypatch.setattr(pw, "open_variable_editor", lambda: opened.append(1))
+
+    _dblclick(pw, _vp(pw, _scene_at(pw, "a")))
+
+    assert opened == [1]

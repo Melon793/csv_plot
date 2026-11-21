@@ -1775,6 +1775,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                # ⌘/Ctrl 专属曲线选择：首击未命中后原地补点会被 Qt 合成双击，
+                # 不得因此弹编辑器/轴对话框（选择手势交回基类，不在此消费）
+                super().mouseDoubleClickEvent(event)
+                return
             scene_pos = self.mapToScene(event.pos())
             
             # 获取坐标轴区域
