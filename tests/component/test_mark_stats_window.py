@@ -352,6 +352,10 @@ class _HeaderMenuStub:
                 return act
         return None
 
+    def deleteLater(self):
+        # 第 6 轮 E-2：真实代码 exec 后释放菜单，替身实现该接口
+        pass
+
 
 @pytest.fixture()
 def header_menu(monkeypatch):

@@ -28,6 +28,8 @@ API，滚轮经程序化 ``click()`` 驱动其内部偏移；Qt 每次布局会�
 
 from __future__ import annotations
 
+import html
+
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
@@ -1372,7 +1374,6 @@ class PlotTabsWidget(QTabWidget):
                     if text:
                         # 第 6 轮 NB6：页标题用户可编辑含 <b> 等序列，
                         # 与 shelf/var_tooltip 同口径转义 + <qt> 还原
-                        import html
                         rich = "<qt>" + html.escape(text).replace("\n", "<br>") + "</qt>"
                         QToolTip.showText(event.globalPos(), rich, self.tabBar())
                     return True

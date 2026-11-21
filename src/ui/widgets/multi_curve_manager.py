@@ -394,7 +394,8 @@ class MultiCurveManager:
         只动需要变化的曲线，收尾一次性刷新（legend + 轴 + 光标标签），
         避免逐条切换导致的 N 次重绘；不 emit curves_changed（与左键切换
         显隐同源，避免编辑器↔plot 信号回环；_recreate_curve 稀有路径会经
-        add_variable_to_plot 触发 emit，与 toggle 同形的既有行为）。
+        add_variable_to_plot 触发 emit，并在恢复钉住状态后补发一次对齐
+        投影——第 6 轮批次 B，与 toggle 同形的既有行为）。
 
         Args:
             targets: 变量名 → 期望可见性（无需变化的项由本函数内部过滤）
