@@ -364,6 +364,7 @@ class _ShelfCapsuleButton(_FlatIconButton):
         painter.setPen(QPen(border, 1))
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
+        self._layout_content(painter)
         self._draw_glyph(painter, self._glyph_color())
         if self._drag_hot:
             pen = QPen(QColor(_ACCENT_COLOR), 1.4)
@@ -373,13 +374,35 @@ class _ShelfCapsuleButton(_FlatIconButton):
         self._draw_count(painter)
         painter.end()
 
+    def _layout_content(self, painter: QPainter) -> None:
+        """「14px 字形盒＋4px＋计数实测宽」整组水平居中。
+
+        计数宽度随位数变化（0 / 12 / 99+），固定槽位会让单数字时右侧留
+        死区、整组偏左（Windows 真机反馈的错位感）；按实测宽居中后左右
+        留白恒等。
+        """
+        text = self._count_text()
+        font = painter.font()
+        font.setPixelSize(9 if len(text) > 2 else 11)
+        font.setBold(True)
+        tw = QFontMetrics(font).horizontalAdvance(text)
+        group = 14 + 4 + tw
+        left = (self.width() - group) / 2
+        self._glyph_cx = left + 7
+        self._count_rect = QRectF(left + 18, 0, tw, self.height())
+        self._count_font = font
+
+    def _count_text(self) -> str:
+        return f"{self._BADGE_MAX}+" if self._count > self._BADGE_MAX else str(self._count)
+
     def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
         """抽屉盒字形（C2）：盖＋盒＋把手三段横线，14px 盒、1.2px 线宽。
 
         语义＝临时存放的抽屉（多件暂存随取），取代旧「盒＋下箭头」
         （后者读作下载/导入动作）。居左配合 chip 内联计数。
         """
-        origin = QPointF(15, self.height() / 2) - QPointF(7, 7)
+        cx = getattr(self, "_glyph_cx", 15)
+        origin = QPointF(cx, self.height() / 2) - QPointF(7, 7)
         pen = QPen(color, 1.2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -406,17 +429,13 @@ class _ShelfCapsuleButton(_FlatIconButton):
         )
 
     def _draw_count(self, painter: QPainter) -> None:
-        """chip 内联计数（字形右侧）；>99 画 99+，字号随位数收缩。"""
-        text = f"{self._BADGE_MAX}+" if self._count > self._BADGE_MAX else str(self._count)
-        font = painter.font()
-        font.setPixelSize(9 if len(text) > 2 else 11)
-        font.setBold(True)
-        painter.setFont(font)
+        """chip 内联计数（字形右侧 4px，左对齐于整组居中槽）。"""
+        painter.setFont(self._count_font)
         painter.setPen(self._glyph_color())
         painter.drawText(
-            QRectF(24, 0, self.width() - 30, self.height()),
-            Qt.AlignmentFlag.AlignCenter,
-            text,
+            self._count_rect,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            self._count_text(),
         )
 
 

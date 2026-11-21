@@ -732,3 +732,17 @@ def test_corner_chips_rest_container_and_plus_stays_flat(tabs, qapp):
     tabs.set_shelf_enabled(False)
     tabs.shelf_capsule.grab()
     tabs._dir_btn.grab()
+
+
+def test_capsule_content_group_centered_for_all_counts(tabs, qapp):
+    """字形＋4px＋计数实测宽整组居中：左右留白恒等（Win 真机错位回归）。"""
+    _add_pages(tabs, 2)
+    qapp.processEvents()
+    cap = tabs.shelf_capsule
+    for count in (0, 3, 12, 100):
+        tabs.set_shelf_count(count)
+        cap.grab()
+        left = cap._glyph_cx - 7
+        right = cap.width() - cap._count_rect.right()
+        assert abs(left - right) < 0.6, f"count={count} 左右留白不等"
+        assert abs(cap._count_rect.left() - (cap._glyph_cx + 7) - 4) < 0.01
