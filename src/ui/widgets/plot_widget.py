@@ -36,7 +36,7 @@ from src.ui.drag_visuals import (
     transfer_hint,
 )
 from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
-from src.ui.transfer_broadcast import announce_selection, broadcast_text, broadcast_transfer
+from src.ui.transfer_broadcast import announce_selection, broadcast_transfer
 from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
@@ -1141,8 +1141,21 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             quiet=False,
             batch=False,
         )
-        if degraded and name in result.added:
-            broadcast_text(self.window(), "源绘图已关闭，已按复制处理")
+        # 第 6 轮 P2-33：单变量与批量同口径统一播报（含降级注记），
+        # 不再仅 degraded 时出声、成功移动/复制静默。
+        # 评审 B1：结果守卫与出区 _announce_transfer_result 同口径——
+        # ask-合并（merged-only，源已删）恢复旧静默，不得错报「未搬运」。
+        if result.added or result.skipped or result.failed:
+            broadcast_transfer(
+                self.window(),
+                "copy" if copy_pressed else "move",
+                result.added,
+                src_label=self._plot_badge_label_for(source),
+                dst_label=self._plot_badge_label(),
+                skipped=result.skipped,
+                failed=result.failed,
+                degraded=degraded and bool(result.added),
+            )
         # 落点成功：只清目标自己的旧选择（全 skip 时保持）
         if result.added:
             self._clear_own_selection()
