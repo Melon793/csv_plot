@@ -556,6 +556,34 @@ class MainWindow(QMainWindow):
     def _on_tab_close_requested(self, index: int) -> None:
         self.close_page(self.page_at_tab(index))
 
+    def _close_other_pages(self, index: int) -> None:
+        self._batch_close_pages([p for i, p in enumerate(self.pages) if i != index])
+
+    def _close_right_pages(self, index: int) -> None:
+        self._batch_close_pages(list(self.pages[index + 1 :]))
+
+    def _batch_close_pages(self, pages: list[PlotPage]) -> None:
+        """批量关页（T2）：一次汇总确认，确认后逐页走既有 close_page 销毁链。
+
+        「关闭其他/右侧」都保留当前页，不会落到最后一页「只清空」分支。
+        """
+        targets = [p for p in pages if p in self.pages and widget_alive(p.widget)]
+        if not targets:
+            return
+        with_curves = sum(1 for p in targets if self._page_curve_count(p) > 0)
+        detail = f"（其中 {with_curves} 页含曲线）" if with_curves else ""
+        answer = QMessageBox.question(
+            self,
+            "批量关闭绘图页",
+            f"将关闭 {len(targets)} 个绘图页{detail}，确定？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        for page in targets:
+            self.close_page(page, confirm=False)
+
     def close_page(self, page: PlotPage | None, *, confirm: bool = True) -> None:
         """关闭页；最后一页保留，只清空内容（§5.4）。
 
@@ -1174,6 +1202,8 @@ class MainWindow(QMainWindow):
         self.plot_tabs.new_page_requested.connect(self.new_page)
         self.plot_tabs.close_page_requested.connect(self._on_tab_close_requested)
         self.plot_tabs.rename_page_requested.connect(self._on_tab_rename_requested)
+        self.plot_tabs.close_other_pages_requested.connect(self._close_other_pages)
+        self.plot_tabs.close_right_pages_requested.connect(self._close_right_pages)
         self.plot_tabs.set_tab_info_provider(self._tab_tooltip_text)
         self.plot_tabs.shelf_toggle_requested.connect(self.toggle_curve_shelf)
         self.plot_tabs.shelf_drop_requested.connect(self._on_shelf_capsule_drop)

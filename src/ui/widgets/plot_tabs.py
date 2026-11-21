@@ -29,6 +29,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QMenu,
     QTabBar,
     QTabWidget,
     QToolTip,
@@ -492,6 +493,8 @@ class PlotTabsWidget(QTabWidget):
         new_page_requested: 点击标签尾部的「＋」。
         close_page_requested(int): 点标签关闭按钮或中键点击标签。
         rename_page_requested(int): 双击标签。
+        close_other_pages_requested(int): 右键菜单「关闭其他」。
+        close_right_pages_requested(int): 右键菜单「关闭右侧」。
         shelf_toggle_requested(bool): 点击右端暂存区胶囊。
         shelf_drop_requested(object): 拖拽落在胶囊上，参数为原始 QDropEvent。
         shelf_drag_hovered(bool): 拖拽进入/离开胶囊。
@@ -500,6 +503,8 @@ class PlotTabsWidget(QTabWidget):
     new_page_requested = Signal()
     close_page_requested = Signal(int)
     rename_page_requested = Signal(int)
+    close_other_pages_requested = Signal(int)
+    close_right_pages_requested = Signal(int)
     shelf_toggle_requested = Signal(bool)
     shelf_drop_requested = Signal(object)
     shelf_drag_hovered = Signal(bool)
@@ -564,6 +569,8 @@ class PlotTabsWidget(QTabWidget):
 
         self.tabCloseRequested.connect(self.close_page_requested)
         self.tabBarDoubleClicked.connect(self.rename_page_requested)
+        self.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tabBar().customContextMenuRequested.connect(self._on_tab_context_menu)
         self.tabBar().installEventFilter(self)
         # 角位容器位置由 QTabWidget 在 tabBar resize 之后才更新；必须监听它
         # 自己的 Move/Resize，否则「＋」会沿用旧槽位（变宽浮在页签上、变窄被裁）。
@@ -790,6 +797,30 @@ class PlotTabsWidget(QTabWidget):
             if bar.tabButton(index, QTabBar.ButtonPosition.RightSide) is button:
                 self.close_page_requested.emit(index)
                 return
+
+    # ------------------------------------------------------------------
+    # 右键菜单（T2）：重命名 / 关闭 / 关闭其他 / 关闭右侧
+    # ------------------------------------------------------------------
+    def _build_tab_menu(self, index: int) -> QMenu:
+        menu = QMenu(self)
+        action = menu.addAction("重命名")
+        action.triggered.connect(lambda: self.rename_page_requested.emit(index))
+        menu.addSeparator()
+        action = menu.addAction("关闭")
+        action.triggered.connect(lambda: self.close_page_requested.emit(index))
+        action = menu.addAction("关闭其他")
+        action.setEnabled(self.count() > 1)
+        action.triggered.connect(lambda: self.close_other_pages_requested.emit(index))
+        action = menu.addAction("关闭右侧")
+        action.setEnabled(index < self.count() - 1)
+        action.triggered.connect(lambda: self.close_right_pages_requested.emit(index))
+        return menu
+
+    def _on_tab_context_menu(self, pos: QPoint) -> None:
+        index = self.tabBar().tabAt(pos)
+        if index < 0:
+            return
+        self._build_tab_menu(index).exec(self.tabBar().mapToGlobal(pos))
 
     # ------------------------------------------------------------------
     # 「＋」可用性：未加载数据 / 已达上限时禁用（决策 D-D / §4.4）

@@ -288,3 +288,57 @@ def test_rename_rejects_duplicate_title(loaded_window, qtbot, monkeypatch):
     )
     mw._on_tab_rename_requested(mw.plot_tabs.indexOf(p2.widget))
     assert p2.title == "分析 B"
+
+
+# ----------------------------------------------------------------------
+# T2：批量关页（右键菜单「关闭其他/关闭右侧」）——一次汇总确认
+# ----------------------------------------------------------------------
+def test_close_other_pages_batch_confirm_yes(loaded_window, qtbot, monkeypatch):
+    mw = loaded_window
+    first = mw.pages[0]
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    third = mw.new_page()
+    _wait_new_page_matrix(qtbot, third)
+    mw.activate_page(first)
+
+    calls = []
+
+    def yes(parent, title, text, *args, **kwargs):
+        calls.append(text)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(yes))
+    mw._close_other_pages(0)
+    assert len(calls) == 1
+    assert "将关闭 2 个绘图页" in calls[0]
+    assert mw.pages == [first]
+    assert mw.plot_tabs.count() == 1
+
+
+def test_close_right_pages_cancel_keeps_pages(loaded_window, qtbot, dialog_stubs):
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    third = mw.new_page()
+    _wait_new_page_matrix(qtbot, third)
+
+    mw._close_right_pages(0)                 # 替身默认 No → 全保留
+    assert len(mw.pages) == 3
+    assert any("将关闭 2 个绘图页" in text for _, text in dialog_stubs["question"])
+
+
+def test_batch_close_reports_curve_pages(loaded_window, qtbot, dialog_stubs):
+    mw = loaded_window
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    second.plot_widgets[0].plot_widget.demote_to_invalid("speed", "gray")
+    third = mw.new_page()
+    _wait_new_page_matrix(qtbot, third)
+
+    mw._close_right_pages(0)
+    assert any(
+        "将关闭 2 个绘图页（其中 1 页含曲线）" in text
+        for _, text in dialog_stubs["question"]
+    )
+    assert len(mw.pages) == 3                # No → 未动
