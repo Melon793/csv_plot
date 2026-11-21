@@ -2289,7 +2289,7 @@ class FileLoaderManager(MainWindowBaseManager):
         if fffd_fixes:
             self.mw._broadcast(
                 f"已推断修复 {fffd_fixes} 处单位乱码（°C，源文件导出时已丢失°字符）",
-                level="warning",
+                level="warn",
             )
         self.mw.update_file_status(
             file_path,

@@ -116,7 +116,7 @@ class TestBuildEncodingChain:
         chain = _build_encoding_chain(bom + "a\x00b\x00".encode("latin-1"), "utf_16_le")
         assert chain[0] == "utf_16_le"
 
-    @pytest.mark.parametrize("det", ["utf_16_le", "utf_16_be", "utf_32_le"])
+    @pytest.mark.parametrize("det", ["utf_16_le", "utf_16_be", "utf_32_le", "utf_32_be"])
     def test_utf16_32_without_bom_trusted(self, det):
         sample = '"°C","µm"\n1,2\n'.encode(det)
         chain = _build_encoding_chain(sample, det)
@@ -220,7 +220,7 @@ class TestEncodingE2E:
         assert got == units
         assert used == "cp1250"
 
-    @pytest.mark.parametrize("enc", ["utf-16", "utf-16-le", "utf-16-be", "utf-32-le"])
+    @pytest.mark.parametrize("enc", ["utf-16", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
     def test_utf16_32_variants(self, tmp_path, enc):
         units = ["°C", "µm", "m³", "Nm", "bar", "%"] * 50
         text = (",".join(f"VAR_{i:04d}" for i in range(300)) + "\n"
