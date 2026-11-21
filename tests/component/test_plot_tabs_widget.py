@@ -493,7 +493,12 @@ def test_tab_width_keeps_main_natural_behavior(tabs, qapp):
     _add_pages(tabs, 16)
     qapp.processEvents()
     bar = tabs.tabBar()
-    assert all(bar.tabRect(i).width() < 96 for i in range(16))
+    # 平台中立：宽＝自然 hint（无下限撑宽、无压缩），且未触 200 封顶。
+    # 曾用 <96 作 Mac 字体代理值，Windows 自然宽 112/124 误报（2026-11-21 实测）
+    assert all(
+        bar.tabRect(i).width() == bar.tabSizeHint(i).width() < 200
+        for i in range(16)
+    )
     assert bar.tabRect(15).right() > bar.width()   # 压不下 → 进入溢出
 
 
@@ -653,7 +658,7 @@ def test_fit_no_compression_short_tabs_keep_natural_width(tabs, qapp):
     bar = tabs.tabBar()
     for i in range(16):
         assert bar.tabRect(i).width() == bar.tabSizeHint(i).width(), "fit 不得压缩"
-    assert bar.tabRect(0).width() < 96       # 短签＝main 自然宽，不人为撑宽
+    assert bar.tabRect(0).width() == bar.tabSizeHint(0).width() < 200  # 自然宽
     assert bar.tabRect(15).right() > bar.width()   # 放不下 → 溢出滚动
 
 
