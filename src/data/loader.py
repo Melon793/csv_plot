@@ -34,6 +34,11 @@ _ENCODING_SAMPLE_SIZE = 65536
 # 大概率是 cp1252 系单位文件（真中文/Big5/俄文实测比值 ≤0.10）。
 _UNIT_SYMBOLS = frozenset("°µ³²‰")
 _SYMBOL_VOTE_RATIO = 0.5
+# CJK 家族探测值：投票截胡判对的 CJK 探测值时须额外甄别（条件c）。
+# gb2312/gbk 在 _build_encoding_chain 里已别名化为 gb18030。
+_CJK_ENCODINGS = frozenset({
+    "gb18030", "big5", "cp949", "euc_kr", "euc_jp", "shift_jis", "cp932", "cp950",
+})
 _UTF16_32_BOMS = (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff")
 
 
@@ -67,6 +72,35 @@ def _skip_symbol_vote(sample: bytes, det: str) -> bool:
                 return True
         except (UnicodeDecodeError, LookupError):
             pass
+    # 条件c（第 6 轮 P1-A）：det 为 CJK 家族且采样可按 det strict 解码时，
+    # 看符号字节的后随字节——cp1252 单位符号（°C/µS/m³）后随 ASCII 字母；
+    # GB 系真中文里这些字节是前导字节、后随高位字节（「车速」GBK=B3 B5，
+    # B3/B5 恰映射 ³/µ，短表头比值可达 0.5 触发投票，cp1252 strict 假成功
+    # 静默 mojibake）。后随 ASCII 占比 < 阈值 → 信任 det，跳过投票。
+    # 启发式局限（记 P2）：Big5/cp949 的 ASCII 尾字节合法且常见，短表头
+    # 仍可能被截胡（基线同行为，非本条件引入）；采样末字节恰为符号字节时
+    # 缺后随≠CJK 证据，分母只统计有后随字节的位置（评审 B1）。
+    det_family = {"shift_jis_2004": "shift_jis", "big5hkscs": "big5"}.get(det, det)
+    if det_family in _CJK_ENCODINGS:
+        try:
+            decoded = sample.decode(det, errors="strict")
+        except (UnicodeDecodeError, LookupError):
+            return False
+        # 评审 B2：解码结果须含成片汉字才信任 det——cp949/shift_jis 能把
+        # cp1252 复合单位（m³·s = 6D B3 B7 73）strict 解成谚文/片假名，
+        # 符号后随高位但无汉字内容 → 不信任，放行投票纠正。
+        if sum(1 for c in decoded if "\u4e00" <= c <= "\u9fff") < 2:
+            return False
+        positions = [
+            i for i, b in enumerate(sample)
+            if b >= 0x80
+            and bytes([b]).decode("cp1252", errors="replace") in _UNIT_SYMBOLS
+            and i + 1 < len(sample)
+        ]
+        if positions:
+            ascii_next = sum(1 for i in positions if sample[i + 1] < 0x80)
+            if ascii_next / len(positions) < _SYMBOL_VOTE_RATIO:
+                return True
     return False
 
 

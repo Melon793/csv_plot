@@ -98,6 +98,54 @@ class TestBuildEncodingChain:
         chain = _build_encoding_chain(sample, "gb18030")
         assert chain[0] == "gb18030"
 
+    def test_short_chinese_header_symbol_bytes_not_hijacked(self):
+        """第 6 轮 P1-A：「车速」GBK=B3 B5 恰映射 cp1252 的 ³/µ，短表头
+        比值可达 0.5；条件c 按后随字节甄别（CJK 前导后随高位）信任 det。"""
+        sample = (",".join(["车速"] * 6) + "\n").encode("gb18030") * 10
+        assert _skip_symbol_vote(sample, "gb18030") is True
+        chain = _build_encoding_chain(sample, "gb18030")
+        assert chain[0] == "gb18030"
+
+    def test_cjk_det_degree_units_still_votes(self):
+        """条件c 不得误伤：cp1252 的 °C 被误判为 CJK 时，符号字节后随
+        ASCII（B0 43），占比 ≥ 阈值 → 放行投票纠正。"""
+        sample = '"°C","°C"\n1,2\n'.encode("cp1252")
+        chain = _build_encoding_chain(sample, "gb18030")
+        assert chain[0] == "cp1252"
+        chain = _build_encoding_chain(sample, "big5")
+        assert chain[0] == "cp1252"
+
+    def test_trailing_symbol_byte_is_not_cjk_evidence(self):
+        """评审 B1：采样末字节恰为符号字节（无尾换行）时缺后随≠CJK 证据，
+        不得跳过投票——cp1252 的 m³ 被误判 cp932 时仍须纠正。"""
+        sample = b"V1\nm\xb3"
+        chain = _build_encoding_chain(sample, "cp932")
+        assert chain[0] == "cp1252"
+        chain = _build_encoding_chain(sample, "shift_jis")
+        assert chain[0] == "cp1252"
+
+    def test_cjk_family_aliases_normalized(self):
+        """评审 N2：shift_jis_2004/big5hkscs 等家族别名归一后享受条件c。"""
+        # 日文样本：shift_jis 与 shift_jis_2004 口径一致（温度含汉字）
+        jp = (",".join(["温度"] * 6) + "\n").encode("shift_jis") * 10
+        assert _skip_symbol_vote(jp, "shift_jis") is True
+        assert _skip_symbol_vote(jp, "shift_jis_2004") is True
+        # big5hkscs 归一到 big5：gb18030 中文样本 strict 可解且含汉字
+        cn = (",".join(["车速"] * 6) + "\n").encode("gb18030") * 10
+        assert _skip_symbol_vote(cn, "big5hkscs") is True
+
+    def test_compound_units_not_reverse_hijacked(self):
+        """评审 B2：纯 cp1252 复合单位 m³·s（B3 后随 B7 中点，高位）被
+        误判 cp949 时，解码无汉字 → 条件c 不信任 det，投票仍纠正。"""
+        units = ["m³·s"] * 30
+        sample = ('"' + '","'.join(units) + '"\n1,2\n').encode("cp1252")
+        chain = _build_encoding_chain(sample, "cp949")
+        assert chain[0] == "cp1252"
+        # ° 紧跟重音字母（n°é）同型：cp949 解成谚文无汉字
+        sample2 = ('"' + '","'.join(["n°é"] * 30) + '"\n').encode("cp1252")
+        chain2 = _build_encoding_chain(sample2, "cp949")
+        assert chain2[0] == "cp1252"
+
     @pytest.mark.parametrize("det", ["gb2312", "gbk"])
     def test_gb_alias_to_superset(self, det):
         sample = '"摄氏度","牛·米"\n'.encode("gb18030") * 20
@@ -175,6 +223,23 @@ class TestEncodingE2E:
         p.write_bytes(text.encode("gb18030"))
         got, used = _load_units(p)
         assert got == units
+        assert used == "gb18030"
+
+    def test_short_chinese_header_gb18030_end_to_end(self, tmp_path):
+        """第 6 轮 P1-A 端到端：短中文表头 + ASCII 单位/数据，探测判对
+        gb18030 时不得被投票截胡成 cp1252 mojibake（³µËÙ）。
+        60 列使探测稳定判 gb18030（少列时探测器误判 cp949 属另一层问题）。"""
+        p = tmp_path / "车速.csv"
+        text = (",".join(["车速"] * 60) + "\n"
+                + ",".join(["km/h"] * 60) + "\n"
+                + ",".join(["1.5"] * 60) + "\n")
+        p.write_bytes(text.encode("gb18030"))
+        fmt = FastDataLoader._auto_detect_format(str(p))
+        names, units, used, _, _ = FastDataLoader._load_header_units(
+            str(p), desc_rows=fmt.header_row, sep=fmt.sep or ",",
+            has_unit=True, encoding=fmt.encoding,
+        )
+        assert names == ["车速"] + [f"车速_{i}" for i in range(1, 60)]
         assert used == "gb18030"
 
     def test_chinese_utf8(self, tmp_path):

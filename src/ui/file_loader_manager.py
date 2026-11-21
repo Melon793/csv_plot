@@ -2284,52 +2284,62 @@ class FileLoaderManager(MainWindowBaseManager):
             0.0, time.perf_counter() - getattr(self, "_load_started_at", time.perf_counter())
         )
         self.mw.end_load_feedback()
-        # D1 披露：源头乱码修复必须让用户知情（所有加载路径都汇到这里）
+        # 评审 NB1：前段 UI 收尾与自动恢复同包异常隔离，保「D1 披露必达」
+        try:
+            self.mw.update_file_status(
+                file_path,
+                row_count=self._current_data_length,
+                channel_count=len(self.mw.var_names or []),
+                elapsed_s=elapsed_s,
+            )
+            self.set_button_status(True)
+
+            # 自动恢复：replots_after_loading 优先，auto-save 仅作降级兜底。
+            # 评审 N4：整块异常隔离——容器销毁竞态等 RuntimeError 不得跳过
+            # 下方的 D1 披露（移位前披露先发出，移位后必须保「披露必达」）。
+            if hasattr(self.mw, 'plot_config_manager'):
+                any_curve_restored = any(
+                    not container.isHidden() and bool(container.plot_widget.curves)
+                    for container in self._iter_all_containers()
+                )
+
+                if any_curve_restored:
+                    logger.info("replots_after_loading 已恢复曲线，跳过自动恢复")
+                else:
+                    current_vars = []
+                    if hasattr(self.mw, 'data') and self.mw.data is not None:
+                        current_vars = list(self.mw.data.columns)
+                    elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'var_names'):
+                        current_vars = list(self.mw.loader.var_names)
+
+                    should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(current_vars)
+                    if should_apply:
+                        saved_config = (
+                            self.mw.plot_config_manager.auto_save_manager.load_auto_save()
+                        )
+                        success = self.mw.plot_config_manager.apply_config(
+                            self.mw, saved_config
+                        )
+                        if success:
+                            logger.info("自动恢复配置成功: %s", reason)
+                            self._announce_auto_restore(saved_config, current_vars)
+                        else:
+                            logger.warning("自动恢复配置失败")
+                    else:
+                        logger.info("不应用自动保存: %s", reason)
+        except Exception:
+            logger.warning("加载收尾/自动恢复阶段异常（不影响 D1 披露）", exc_info=True)
+
+        # D1 披露：源头乱码修复必须让用户知情（所有加载路径都汇到这里）。
+        # 第 6 轮 P1-B：必须放在自动恢复播报**之后**——同一回调内两次
+        # setText 之间没有事件循环迭代，先播的披露会被「自动恢复…」顶掉，
+        # 推断性数据改写（°C）在最常见路径（重开上次画过的文件）静默化。
         fffd_fixes = getattr(self.mw.loader, "fffd_unit_fixes", 0) or 0
         if fffd_fixes:
             self.mw._broadcast(
                 f"已推断修复 {fffd_fixes} 处单位乱码（°C，源文件导出时已丢失°字符）",
                 level="warn",
             )
-        self.mw.update_file_status(
-            file_path,
-            row_count=self._current_data_length,
-            channel_count=len(self.mw.var_names or []),
-            elapsed_s=elapsed_s,
-        )
-        self.set_button_status(True)
-        
-        # 自动恢复：replots_after_loading 优先，auto-save 仅作降级兜底
-        if hasattr(self.mw, 'plot_config_manager'):
-            any_curve_restored = any(
-                not container.isHidden() and bool(container.plot_widget.curves)
-                for container in self._iter_all_containers()
-            )
-
-            if any_curve_restored:
-                logger.info("replots_after_loading 已恢复曲线，跳过自动恢复")
-            else:
-                current_vars = []
-                if hasattr(self.mw, 'data') and self.mw.data is not None:
-                    current_vars = list(self.mw.data.columns)
-                elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'var_names'):
-                    current_vars = list(self.mw.loader.var_names)
-
-                should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(current_vars)
-                if should_apply:
-                    saved_config = (
-                        self.mw.plot_config_manager.auto_save_manager.load_auto_save()
-                    )
-                    success = self.mw.plot_config_manager.apply_config(
-                        self.mw, saved_config
-                    )
-                    if success:
-                        logger.info("自动恢复配置成功: %s", reason)
-                        self._announce_auto_restore(saved_config, current_vars)
-                    else:
-                        logger.warning("自动恢复配置失败")
-                else:
-                    logger.info("不应用自动保存: %s", reason)
 
     def _announce_auto_restore(self, config, current_vars) -> None:
         """自动恢复也是套用了一套通道映射，文案交给 ``mw._announce_applied``。
