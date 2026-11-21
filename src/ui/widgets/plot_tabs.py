@@ -665,6 +665,7 @@ class _PageDirectoryPopup(QWidget):
     """
 
     _MAX_WIDTH = 320
+    _MIN_WIDTH = 200
     _NAME_ELIDE_WIDTH = 200
 
     def __init__(self, owner: "PlotTabsWidget"):
@@ -739,10 +740,15 @@ class _PageDirectoryPopup(QWidget):
         avail = screen.availableGeometry()
         anchor_bottom = anchor.mapToGlobal(QPoint(0, anchor.height())).y()
         max_rows_height = max(120, avail.bottom() - anchor_bottom - 10 - chrome)
-        self._scroll.setFixedHeight(min(rows_height, max_rows_height))
-        self.adjustSize()
-        if self.width() > self._MAX_WIDTH:
-            self.setFixedWidth(self._MAX_WIDTH)
+        rows_h = min(rows_height, max_rows_height)
+        self._scroll.setFixedHeight(rows_h)
+        # 显式定高定宽：adjustSize 会被 QScrollArea 的 expanding sizeHint
+        # 干扰（单页时多撑 29px 全灌进分隔线块，形成死区）
+        width = max(
+            self._rows_host.sizeHint().width(), self._new_row.sizeHint().width()
+        ) + 10
+        self.setFixedWidth(min(max(width, self._MIN_WIDTH), self._MAX_WIDTH))
+        self.setFixedHeight(rows_h + 9 + _DIR_ROW_HEIGHT + 10)
         pos = anchor.mapToGlobal(
             QPoint(anchor.width() - self.width(), anchor.height() + 4)
         )

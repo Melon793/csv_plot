@@ -798,3 +798,19 @@ def test_corner_background_matches_tab_bar_across_styles(tabs, qapp):
             ).name(), f"{style} 下角位与标签栏存在色差"
     finally:
         QApplication.setStyle(original)
+
+
+def test_dir_popup_height_exact_no_dead_zone(tabs, qtbot, qapp):
+    """单页/多页 popup 高度＝行高×N＋分隔块9＋新建行26＋外margin10，无死区。"""
+    _add_pages(tabs, 1)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    assert popup.height() == 26 + 9 + 26 + 10
+    sep = popup.layout().itemAt(1).widget()
+    assert sep.height() == 9
+    assert popup.width() >= 200, "单页 popup 不得窄到截断页名"
+    popup.hide()
+    for _ in range(15):
+        tabs.addTab(QLabel("x"), "page x")
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    assert popup.height() == 16 * 26 + 9 + 26 + 10
+    popup.hide()
