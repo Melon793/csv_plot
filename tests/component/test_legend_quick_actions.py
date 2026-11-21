@@ -152,6 +152,33 @@ def test_editor_set_variable_color_updates_table_on_success(
     assert pw.curves["a"].color == "#123456"
 
 
+def test_editor_color_picker_initial_follows_row_color(editor_env, monkeypatch):
+    """取色初值跟随行现状色：真实曲线取曲线色、占位行取保留原色。
+
+    护栏：占位行不在 curves 里，历史初值是色板外纯蓝 "blue"（#0000FF），
+    与占位保留原色不符且选色不落地；修复后初值必须等于 ref.color。
+    """
+    dlg, pw = editor_env
+    captured = []
+    monkeypatch.setattr(
+        QColorDialog,
+        "getColor",
+        staticmethod(lambda initial, *a, **k: captured.append(initial.name()) or QColor()),
+    )
+
+    pw.curves["a"].color = "#123456"
+    dlg.var_table.selectRow(0)
+    dlg.set_variable_color()
+    assert captured[-1] == "#123456"
+
+    pw.demote_to_invalid("a", "#882255", True)
+    dlg.load_current_curves()
+    dlg.var_table.selectRow(0)
+    assert dlg.var_table.item(0, 1).data(Qt.ItemDataRole.UserRole) == "a"
+    dlg.set_variable_color()
+    assert captured[-1] == "#882255"
+
+
 # ---------------------------------------------------------------------------
 # Step 3a：图例锚点拆分 + 调色板菜单
 # ---------------------------------------------------------------------------
