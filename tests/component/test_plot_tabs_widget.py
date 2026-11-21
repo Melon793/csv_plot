@@ -600,7 +600,7 @@ def test_dir_popup_row_close_and_footer_new(tabs, qtbot, qapp):
     assert not popup.isVisible()
 
     popup = _open_dir_popup(tabs, qtbot, qapp)
-    qtbot.mouseClick(popup._new_btn, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(popup._new_row, Qt.MouseButton.LeftButton)
     assert created == [True]
     assert not popup.isVisible()
 
@@ -746,3 +746,34 @@ def test_capsule_content_group_centered_for_all_counts(tabs, qapp):
         right = cap.width() - cap._count_rect.right()
         assert abs(left - right) < 0.6, f"count={count} 左右留白不等"
         assert abs(cap._count_rect.left() - (cap._glyph_cx + 7) - 4) < 0.01
+
+
+def test_dir_rows_and_footer_share_fixed_height(tabs, qtbot, qapp):
+    """A：目录行与 footer 新建行同高 26px，Win/mac 节奏恒等。"""
+    _add_pages(tabs, 3)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    rows = _dir_rows(popup)
+    assert all(r.height() == 26 for r in rows)
+    assert popup._new_row.height() == 26
+    popup.hide()
+
+
+def test_dir_new_row_enter_triggers_and_disabled_at_limit(tabs, qtbot, qapp):
+    _add_pages(tabs, 3)
+    created = []
+    tabs.new_page_requested.connect(lambda: created.append(True))
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    popup._new_row.setFocus()
+    QTest.keyClick(popup._new_row, Qt.Key.Key_Return)
+    assert created == [True]
+    popup.hide()
+
+    tabs.addTab(QLabel("x"), "page 4")
+    for _ in range(MAX_PAGES - 4):
+        tabs.addTab(QLabel("x"), "page x")
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    assert not popup._new_row.isEnabled()
+    QTest.keyClick(popup._new_row, Qt.Key.Key_Return)
+    qtbot.mouseClick(popup._new_row, Qt.MouseButton.LeftButton)
+    assert created == [True], "上限禁用后不得再发射"
+    popup.hide()

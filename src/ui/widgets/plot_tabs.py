@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPushButton,
     QScrollArea,
     QTabBar,
     QTabWidget,
@@ -77,8 +76,11 @@ _SHELF_CAPSULE_ENTRY = True
 #: 宽度写死（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）
 _SHELF_CAPSULE_SIZE = QSize(52, 20)
 
-#: 页目录按钮尺寸（T6）：角位变为 [＋槽 28][▾ 20][胶囊 36]；G1 口径 sizeHint=fixedSize
+#: 页目录按钮尺寸（T6）：角位变为 [＋槽 28][▾ 20][胶囊 52]；G1 口径 sizeHint=fixedSize
 _DIR_BUTTON_SIZE = QSize(20, 20)
+
+#: 目录行高（含 footer 新建行）：固定值消除 Win/mac 字体度量差，列表节奏恒等
+_DIR_ROW_HEIGHT = 26
 
 #: 标签栏底色：角位容器与页签栏共用，保持右缘视觉连续
 _TAB_BAR_BG = "#f3f3f3"
@@ -481,9 +483,8 @@ class _DirectoryRow(QWidget):
         self._popup = popup
         self._index = index
         self.setObjectName("dirRow")
+        self.setFixedHeight(_DIR_ROW_HEIGHT)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"#dirRow:hover {{ background: {DRAG_ACCENT_SOFT}; }}")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 4, 8, 4)
         lay.setSpacing(8)
@@ -528,18 +529,130 @@ class _DirectoryRow(QWidget):
         )
         lay.addWidget(self._close)
 
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().paintEvent(event)
+        if self.isEnabled() and self.underMouse():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(DRAG_ACCENT_SOFT))
+            painter.drawRoundedRect(
+                QRectF(self.rect()).adjusted(2, 2, -2, -2), 4, 4
+            )
+            painter.end()
+
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         self._close.setVisible(True)
+        self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         self._close.setVisible(False)
+        self.update()
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         if event.button() == Qt.MouseButton.LeftButton:
             self._popup._on_select(self._index)
         super().mouseReleaseEvent(event)
+
+
+class _PlusGlyph(QWidget):
+    """纯绘制矢量＋（与角位 _NewPageButton 同源字形），不接收鼠标。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(13, 13)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._color = QColor(_ACCENT_COLOR)
+
+    def set_color(self, color: QColor) -> None:
+        self._color = color
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        center = QPointF(self.rect().center())
+        pen = QPen(self._color, 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        arm = 6.5
+        painter.drawLine(center + QPointF(0, -arm), center + QPointF(0, arm))
+        painter.drawLine(center + QPointF(-arm, 0), center + QPointF(arm, 0))
+        painter.end()
+
+
+class _DirectoryNewRow(QWidget):
+    """目录底部「新建绘图页」行：与目录行同构（同高／同内缩圆角 hover）。
+
+    取代 QPushButton：后者 padding 14 比行 margin 8 高一截、hover 整条方角
+    填色、＋ 用文本字形（Windows 基线漂移）——三病根一次根治。键盘可达性
+    由 StrongFocus ＋ Enter/Space 补回。
+    """
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("dirNewRow")
+        self.setFixedHeight(_DIR_ROW_HEIGHT)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(8)
+        self._glyph = _PlusGlyph(self)
+        lay.addWidget(self._glyph)
+        self._label = QLabel("新建绘图页", self)
+        font = self._label.font()
+        font.setBold(True)
+        self._label.setFont(font)
+        lay.addWidget(self._label, 1)
+        self._sync_enabled()
+
+    def _sync_enabled(self) -> None:
+        color = _ACCENT_COLOR if self.isEnabled() else "#b5b5b5"
+        self._label.setStyleSheet(f"color: {color};")
+        self._glyph.set_color(QColor(color))
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt 命名
+        super().setEnabled(enabled)
+        self._sync_enabled()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().paintEvent(event)
+        if self.isEnabled() and self.underMouse():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(DRAG_ACCENT_SOFT))
+            painter.drawRoundedRect(
+                QRectF(self.rect()).adjusted(2, 2, -2, -2), 4, 4
+            )
+            painter.end()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if self.isEnabled() and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if self.isEnabled() and event.key() in (
+            Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space
+        ):
+            self.clicked.emit()
+            return
+        super().keyPressEvent(event)
 
 
 class _PageDirectoryPopup(QWidget):
@@ -585,17 +698,18 @@ class _PageDirectoryPopup(QWidget):
         self._scroll.setWidget(self._rows_host)
         self._rows_host.setAutoFillBackground(False)
         outer.addWidget(self._scroll)
-        self._new_btn = QPushButton("＋  新建绘图页", self)
-        self._new_btn.setCursor(Qt.CursorShape.ArrowCursor)
-        self._new_btn.setStyleSheet(
-            "QPushButton { border: none; border-top: 1px solid #eceff3;"
-            f" background: #ffffff; color: {_ACCENT_COLOR}; font-weight: 600;"
-            " text-align: left; padding: 7px 10px; }"
-            f"QPushButton:hover {{ background: {DRAG_ACCENT_SOFT}; }}"
-            "QPushButton:disabled { color: #b5b5b5; }"
-        )
-        self._new_btn.clicked.connect(self._on_new)
-        outer.addWidget(self._new_btn)
+        sep_wrap = QWidget(self)
+        sep_lay = QHBoxLayout(sep_wrap)
+        sep_lay.setContentsMargins(8, 4, 8, 4)
+        sep_lay.setSpacing(0)
+        sep = QWidget(sep_wrap)
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background: #eceff3;")
+        sep_lay.addWidget(sep)
+        outer.addWidget(sep_wrap)
+        self._new_row = _DirectoryNewRow(self)
+        self._new_row.clicked.connect(self._on_new)
+        outer.addWidget(self._new_row)
 
     def open_for(self, anchor: QWidget) -> None:
         provider = self._owner._page_list_provider
@@ -615,10 +729,10 @@ class _PageDirectoryPopup(QWidget):
             self._rows_layout.addWidget(
                 _DirectoryRow(self, index, title, badge, current)
             )
-        self._new_btn.setEnabled(self._owner.new_page_enabled())
+        self._new_row.setEnabled(self._owner.new_page_enabled())
         self._rows_host.adjustSize()
         rows_height = self._rows_host.sizeHint().height()
-        chrome = self._new_btn.sizeHint().height() + 10
+        chrome = _DIR_ROW_HEIGHT + 9 + 10   # 新建行＋分隔线块(1+8)＋外 margin
         screen = QApplication.screenAt(
             anchor.mapToGlobal(QPoint(0, 0))
         ) or QApplication.primaryScreen()
