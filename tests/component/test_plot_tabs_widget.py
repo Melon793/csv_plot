@@ -398,10 +398,11 @@ def test_tab_tooltip_reevaluated_on_each_hover(tabs, qapp):
     state = {"name": "旧名"}
     tabs.set_tab_info_provider(lambda i: state["name"])
     _send_tab_tooltip(tabs, 0, qapp)
-    assert QToolTip.text() == "旧名"
+    # 第 6 轮 NB6：tooltip 转义 + <qt> 富文本口径（与 shelf/var_tooltip 一致）
+    assert QToolTip.text() == "<qt>旧名</qt>"
     state["name"] = "改名后"
     _send_tab_tooltip(tabs, 0, qapp)
-    assert QToolTip.text() == "改名后"
+    assert QToolTip.text() == "<qt>改名后</qt>"
 
 
 def test_tab_tooltip_empty_text_suppressed(tabs, qapp):

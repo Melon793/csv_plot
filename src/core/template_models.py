@@ -134,7 +134,11 @@ def iter_template_pages(config: dict | None) -> Iterator[dict]:
 def _iter_config_plots(config: dict | None):
     """按页遍历子图配置；手写 YAML 里的非 dict 项直接跳过。"""
     for page in iter_template_pages(config):
-        for plot in page.get("plots", []) or []:
+        plots = page.get("plots") or []
+        # 第 6 轮 NB4：plots 标量（手写畸形档）不得抛 TypeError
+        if not isinstance(plots, list):
+            continue
+        for plot in plots:
             if isinstance(plot, dict):
                 yield plot
 
@@ -142,8 +146,11 @@ def _iter_config_plots(config: dict | None):
 def count_template_variables(config: dict) -> int:
     var_set = set()
     for plot in _iter_config_plots(config):
-        curves = plot.get("curves", []) or []
-        var_set.update(curves)
+        curves = plot.get("curves") or []
+        # 第 6 轮 P2-48：与 PlotConfig.from_dict 同口径 str 化守卫，
+        # 畸形导入档（unhashable/null 元素）不得在模板列表 UI 抛 TypeError
+        if isinstance(curves, list):
+            var_set.update(str(c) for c in curves if c is not None)
     return len(var_set)
 
 

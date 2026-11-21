@@ -13,13 +13,14 @@ PlotWidget._transfer_curves 与 _handle_shelf_drop。
 
 from __future__ import annotations
 
+import html
 import uuid
 import weakref
 from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QDrag, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QDrag, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -144,10 +145,13 @@ class ShelfEntry:
     def style_summary(self) -> str:
         """tooltip 用的样式摘要。"""
         vis = "显示" if self.visible else "隐藏"
+        # 第 6 轮 B-2：预设纳入摘要（字段已进搬运链，摘要漏格会信息缺失）
+        preset = getattr(self, "line_preset", LINE_PRESET_AUTO)
+        preset_part = f" · 预设：{preset}" if preset != LINE_PRESET_AUTO else ""
         return (
             f"{self.var_name}\n来源：{self.origin_label or '未知'}\n"
             f"颜色：{self.color or '默认'} · {vis}\n"
-            f"绘制方式：{self.draw_mode} · 数据点：{self.symbol_policy}"
+            f"绘制方式：{self.draw_mode} · 数据点：{self.symbol_policy}{preset_part}"
         )
 
 
@@ -311,14 +315,22 @@ class CurveShelfWidget(QListWidget):
         item.setIcon(_color_icon(entry.color))
         tooltip = entry.style_summary()
         if entry.stale:
-            item.setForeground(QColor("#9a9a9a"))
+            # 第 6 轮 P2-51：stale 用 Disabled Text（暗色下硬编码灰不可读）
+            item.setForeground(
+                self.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text)
+            )
             tooltip += "\n当前数据中不存在（不可拖出）"
         else:
-            item.setForeground(QColor("#1f1f1f"))
+            # 评审 NB1：清空前景 brush 让 delegate 走实时 palette——
+            # 快照式 setForeground 在运行期暗色切换后不重刷，且会覆盖
+            # 选中态 HighlightedText
+            item.setData(Qt.ItemDataRole.ForegroundRole, None)
             extra = self._return_tooltip_line(entry)
             if extra:
                 tooltip += "\n" + extra
-        item.setToolTip(tooltip)
+        # 第 6 轮 P2-50：与 var_tooltip 同口径转义 + <qt> 富文本还原，
+        # 变量名含 <b> 等序列不被当标签吃掉、换行不塌
+        item.setToolTip("<qt>" + html.escape(tooltip).replace("\n", "<br>") + "</qt>")
         flags = (
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable

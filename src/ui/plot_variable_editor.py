@@ -479,6 +479,10 @@ class PlotVariableEditorDialog(QDialog):
                 main_window.x() + (main_window.width() - geo.width()) // 2,
                 main_window.y() + (main_window.height() - geo.height()) // 2,
             )
+        # 第 6 轮 NB1：回退分支同样自救——脏存档含最小化态且 normalGeometry
+        # 落已拔屏幕时走这里，windowState 仍可能为最小化（与屏内分支同款）
+        if self.isMinimized():
+            self.setWindowState(Qt.WindowState.WindowNoState)
 
     def _save_geometry(self):
         # P1-9（第 5 轮）：最小化/最大化时 saveGeometry 会把窗口状态一并存盘，

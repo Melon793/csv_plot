@@ -923,6 +923,7 @@ class VarInfoPage(QWidget):
                 lambda _checked=False, s=style, lab=label: self._copy_path_variant(raw, s, lab)
             )
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+        menu.deleteLater()  # 第 6 轮 E-2 同族：exec 后释放
 
     def _on_copy_selection(self) -> None:
         """Ctrl+C 复制树中选中的行（tab 分隔，可直接粘贴进表格）。

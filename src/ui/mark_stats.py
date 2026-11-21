@@ -832,6 +832,7 @@ class MarkStatsWindow(QDialog):
         menu.addSeparator()
         order_act = menu.addAction("自定义列顺序…")
         chosen = menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
+        menu.deleteLater()  # 第 6 轮 E-2 同族：exec 后释放
         if chosen is None:
             return
         if chosen is order_act:

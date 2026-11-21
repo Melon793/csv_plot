@@ -1732,6 +1732,8 @@ class DataTableDialog(QMainWindow):
         scatter_added = self._build_plot_menu(menu, analysis)
         self._build_copy_menu(menu, analysis, scatter_added)
         menu.exec(view.mapToGlobal(pos))
+        # 第 6 轮 E-2：exec 后释放，防长寿命对话框下右键菜单累积
+        menu.deleteLater()
 
     def _analyze_selection(self, view):
         """分析当前视图及另一视图的选中内容，返回分析结果字典；无选中时返回 None。"""
@@ -2540,6 +2542,7 @@ class DataTableDialog(QMainWindow):
         act_clear.triggered.connect(self._clear_all_columns)
 
         selected = menu.exec(header.mapToGlobal(pos))
+        menu.deleteLater()  # 第 6 轮 E-2：exec 后释放
         if selected is None or selected not in (act_delete, act_freeze):
             return
         if state is not None:
@@ -2735,6 +2738,7 @@ class DataTableDialog(QMainWindow):
             act_close_all.setToolTip(close_tip)
 
         selected = menu.exec(tab_bar.mapToGlobal(pos))
+        menu.deleteLater()  # 第 6 轮 E-2：exec 后释放
         if selected is None:
             return
         # exec 自己跑嵌套事件循环，菜单打开期间后台重载可以完成并重建 tab。

@@ -171,3 +171,23 @@ def test_restore_self_rescues_minimized_legacy_geometry(
     assert calls and calls[0] == Qt.WindowState.WindowNoState, (
         "restore 出最小化态必须强制 WindowNoState 自救"
     )
+
+
+def test_fallback_branch_also_rescues_minimized_state(
+    editor_host, app_settings, qapp, monkeypatch
+):
+    """第 6 轮 NB1：脏存档 + normalGeometry 落已拔屏幕 → 走回退分支，
+    windowState 仍可能最小化，回退末尾同样强制 WindowNoState。"""
+    dlg, _pw, _host = editor_host
+    dlg.show()
+    dlg.resize(650, 480)
+    qapp.processEvents()
+    dlg._save_geometry()
+    calls = []
+    monkeypatch.setattr(dlg, "isMinimized", lambda: True)
+    monkeypatch.setattr(dlg, "_geometry_on_screen", lambda: False)
+    monkeypatch.setattr(dlg, "setWindowState", lambda s: calls.append(s))
+    dlg._restore_geometry()
+    assert calls and calls[-1] == Qt.WindowState.WindowNoState, (
+        "回退分支末尾必须自救最小化态"
+    )
