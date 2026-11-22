@@ -278,6 +278,9 @@ def test_reopen_labels_aligned_before_first_frame(loaded_window, qapp, qtbot, mo
     mw = loaded_window
     _settle_loading(mw, qtbot)
     pw = mw.plot_widgets[0].plot_widget
+    # 切断 16ms 定时器通路：高负载下它可能合法提前触发并掩盖"无修复"缺陷，
+    # no-op 后位置断言只依赖落点后的同步补刷（评审 P2-1 加固）
+    monkeypatch.setattr(mw._crosshair_update_timer, "start", lambda *a, **k: None)
     # 标签重建链要求有可见曲线（loaded_window 只加载不绘图）
     assert pw.plot_variable("speed")
     qapp.processEvents()
