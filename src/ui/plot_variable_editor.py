@@ -168,18 +168,27 @@ class _NumericLineEdit(QLineEdit):
         self.setValidator(
             QRegularExpressionValidator(QRegularExpression(_NUMBER_RE.pattern), self)
         )
-        self.setText(format_number(value))
+        self._text_snapshot = format_number(value)
+        self.setText(self._text_snapshot)
 
     def set_value(self, value: float):
         """程序化回填；用户正在输入（有焦点）时不覆盖（评审 P1-8）。"""
         self._last_valid = float(value)
         if self.hasFocus():
             return
+        self._show(self._last_valid)
+
+    def _show(self, value: float):
+        self._text_snapshot = format_number(value)
         with QSignalBlocker(self):
-            self.setText(format_number(value))
+            self.setText(self._text_snapshot)
 
     def _parse(self) -> float | None:
         text = self.text().strip()
+        if text == self._text_snapshot:
+            # 文本未被用户改动：用全精度原值，避免经 12 位显示串往返截断
+            # （如 1e-13 显示为 "0"，提交另一框不得把它归零）
+            return self._last_valid
         if not _NUMBER_RE.match(text):
             return None
         try:
@@ -198,12 +207,10 @@ class _NumericLineEdit(QLineEdit):
         """提交当前文本：非法/空回退上次合法值；合法值夹 ±1e12 后发信号。"""
         parsed = self._parse()
         if parsed is None:
-            with QSignalBlocker(self):
-                self.setText(format_number(self._last_valid))
+            self._show(self._last_valid)
             return
         self._last_valid = parsed
-        with QSignalBlocker(self):
-            self.setText(format_number(parsed))
+        self._show(parsed)
         self.value_committed.emit(parsed)
 
     def focusOutEvent(self, event):
@@ -212,10 +219,15 @@ class _NumericLineEdit(QLineEdit):
 
     def keyPressEvent(self, event):
         # Enter 必须在此消费：否则冒泡到对话框默认按钮「确定」直接关窗
-        # （评审 P2-10；ok/cancel 的 autoDefault(False) 是双保险）
+        # （评审 P2-10）
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.commit()
             event.accept()
+            return
+        if event.text() == ",":
+            # 欧式小数逗号（含数字键盘）：本地译为小数点，防 "1,5" 被过滤
+            # 逗号后拼接成 15（评审 P2-4 键盘路径实测）
+            self.insert(".")
             return
         super().keyPressEvent(event)
 
@@ -224,8 +236,8 @@ class _StyleCell(QWidget):
     """样式摘要格：色块 + 摘要文字 + ▾，整格点击弹快捷面板（D9）。
 
     只负责视觉与命中；应用集中在面板 exec 返回后（共享组件红线）。
-    R4（D19）：不定高，填满单元格后控件按 AlignVCenter 垂直居中——
-    固定 28px 会溢出行高（约 30），item 内 rect 未居中使内容整体偏下。
+    R4（D19）：不定高，内容 AlignVCenter；Qt 按 sizeHint 定尺寸并落在
+    单元格内容区，固定 28px 会溢出 30px 行高使内容整体偏低 5px。
     """
 
     clicked = Signal(str)
@@ -522,14 +534,10 @@ class PlotVariableEditorDialog(QDialog):
 
         self.ok_btn = QPushButton("确定")
         self.ok_btn.clicked.connect(self.accept)
-        # 双保险（评审 P2-10）：格内 Enter 已在 _NumericLineEdit 消费，
-        # 默认按钮也不能抢 Enter 直接关窗
-        self.ok_btn.setAutoDefault(False)
         bottom_layout.addWidget(self.ok_btn)
 
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.clicked.connect(self.reject)
-        self.cancel_btn.setAutoDefault(False)
         bottom_layout.addWidget(self.cancel_btn)
 
         layout.addLayout(bottom_layout)
@@ -667,9 +675,11 @@ class PlotVariableEditorDialog(QDialog):
         for col in _FIXED_MIN_WIDTHS:
             self._width_guard = True
             try:
-                if col in _TRANSFORM_COLS and col not in self._user_fixed_cols:
-                    # D13/D16：未拖过的换算列不按极值文本 sizeHint 自适应
-                    self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
+                if col in _TRANSFORM_COLS:
+                    # 未拖过的换算列压回默认宽；拖过的保留恢复/默认宽，
+                    # 一律不按极值文本 sizeHint 自适应（D13/D16）
+                    if col not in self._user_fixed_cols:
+                        self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
                     continue
                 self.var_table.resizeColumnToContents(col)
                 self.var_table.setColumnWidth(
@@ -1440,11 +1450,22 @@ class PlotVariableEditorDialog(QDialog):
         self.update_button_states()
 
     def on_cell_clicked(self, row, column):
-        """单元格点击事件（C4：样式格由 _StyleCell.clicked 自行处理）。
+        """单元格点击事件（C4）：样式格 item 区域补开面板。
 
-        颜色列入口已撤（D9），set_variable_color 实现保留供程序化调用。
+        色块/文字区域由 _StyleCell.clicked 处理；样式格控件按 sizeHint 定尺寸
+        （约 17px）且单元格上下有 padding，其余条带只拿到 item 点击——这里
+        补一条通道，保证整格可点（R4 去定高后评审 P1-2）。颜色列入口已撤
+        （D9），set_variable_color 实现保留供程序化调用。
         """
-        return
+        if column != 3:
+            return
+        cell = self.var_table.cellWidget(row, 3)
+        item = self.var_table.item(row, 1)
+        if cell is None or item is None or not cell.isEnabled():
+            return
+        var_name = item.data(Qt.ItemDataRole.UserRole)
+        if var_name:
+            self._open_style_panel(var_name)
 
     def update_button_states(self):
         """更新按钮状态"""

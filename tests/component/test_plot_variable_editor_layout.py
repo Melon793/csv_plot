@@ -11,6 +11,8 @@ import types
 
 import pandas as pd
 import pytest
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 
 import src.ui.plot_variable_editor as ed_mod
 from src.core.settings import ConfigKey
@@ -156,3 +158,31 @@ class TestStyleCellAlignment:
         assert abs(swatch_center - edit_center) <= 2, (
             f"色块中心 {swatch_center} 与邻列输入框中心 {edit_center} 不同高"
         )
+
+    def test_style_cell_item_band_click_opens_panel(
+        self, editor_env, qapp, monkeypatch
+    ):
+        """评审 P1-2：样式格控件只覆盖 ~17px，行内其余条带点击也要开面板。"""
+        dlg, _pw = editor_env
+        dlg.resize(900, 600)
+        dlg.show()
+        settle()
+        opened = []
+        monkeypatch.setattr(
+            ed_mod, "exec_curve_panel",
+            lambda pw_, var, pos: opened.append(var),
+        )
+        table = dlg.var_table
+        viewport = table.viewport()
+        cell = table.cellWidget(0, 3)
+        geom = cell.geometry()
+        click_y = geom.bottom() + 3
+        assert click_y < table.rowHeight(0), "行内控件下方应还有条带"
+        pos = QPoint(geom.center().x(), click_y)
+        QTest.mouseClick(
+            viewport, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier, pos,
+        )
+        settle()
+        var = table.item(0, 1).data(Qt.ItemDataRole.UserRole)
+        assert opened == [var]

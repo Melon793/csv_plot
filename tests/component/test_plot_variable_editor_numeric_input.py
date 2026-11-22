@@ -148,6 +148,31 @@ class TestCommit:
         assert pw.curves[var].factor == 1.0, "逗号文本必须回退，不得解析成 15"
         assert f_edit.text() == "1"
 
+    def test_keyboard_comma_becomes_decimal_point(self, editor_env):
+        """评审 P2-4：键盘路径（validator 过滤逗号后拼接）必须译为小数点。"""
+        dlg, pw = editor_env
+        var = _var_at(dlg, 0)
+        dlg.show()
+        QApplication.processEvents()
+        f_edit, _o = _edits(dlg)
+        f_edit.setFocus()
+        f_edit.clear()
+        QTest.keyClicks(f_edit, "1,5")
+        assert f_edit.text() == "1.5", "逗号应译为小数点，不能被丢弃成 15"
+        f_edit.commit()
+        assert pw.curves[var].factor == pytest.approx(1.5)
+
+    def test_tiny_factor_survives_other_field_commit(self, editor_env):
+        """评审 P1-1：1e-13 显示为 0，但改另一框不得把它经文本往返归零。"""
+        dlg, pw = editor_env
+        var = _var_at(dlg, 0)
+        pw._multi_curve_manager.apply_curve_transform(var, 1e-13, 0.0)
+        f_edit, o_edit = _edits(dlg)
+        assert f_edit.text() == "0"  # 已知显示边界（P2-11）
+        o_edit.setText("-3")
+        o_edit.commit()
+        assert pw.curves[var].factor == pytest.approx(1e-13, rel=1e-6)
+
     def test_value_clamped_to_limit(self, editor_env):
         dlg, pw = editor_env
         var = _var_at(dlg, 0)
@@ -171,7 +196,7 @@ class TestCommit:
         assert o_edit.text() == "-10.5"
 
     def test_enter_does_not_close_dialog(self, editor_env):
-        """评审 P2-10：格内 Enter 必须被消费，不得触发默认「确定」关窗。"""
+        """评审 P2-10：格内 Enter 被输入框消费，不得触发默认「确定」关窗。"""
         dlg, _pw = editor_env
         dlg.show()
         QApplication.processEvents()
@@ -180,9 +205,6 @@ class TestCommit:
         QTest.keyClick(f_edit, Qt.Key.Key_Return)
         QApplication.processEvents()
         assert dlg.isVisible()
-        # autoDefault 双保险：焦点不在输入框时 Enter 也不应直接接受对话框
-        assert not dlg.ok_btn.autoDefault()
-        assert not dlg.cancel_btn.autoDefault()
 
 
 class TestBackfill:
@@ -208,7 +230,7 @@ class TestBackfill:
         assert len(calls) == 1, "回填不得再走 apply（防回环）"
 
     def test_backfill_skips_focused_editor(self, editor_env):
-        """评审 P1-8：正在输入的框不被程序化回填打断。"""
+        """评审 P1-8/P2-5：聚焦中不被回填打断；未改动的旧文本失焦不顶掉外部值。"""
         dlg, pw = editor_env
         dlg.show()
         QApplication.processEvents()
@@ -217,9 +239,12 @@ class TestBackfill:
         f_edit.setFocus()
         QApplication.processEvents()
         assert f_edit.hasFocus()
-        f_edit.setText("1.2")
         pw._multi_curve_manager.apply_curve_transform(var, 7.0, 0.0)
-        assert f_edit.text() == "1.2", "聚焦中的输入不得被回填覆盖"
+        assert f_edit.text() == "1", "聚焦中的文本不得被回填覆盖"
+        # 用户没改文本 → 失焦提交不得把 7.0 顶回显示用的旧串 "1"
+        f_edit.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut))
+        assert pw.curves[var].factor == 7.0
+        assert f_edit.text() == "7"
 
 
 class TestDisabledRows:

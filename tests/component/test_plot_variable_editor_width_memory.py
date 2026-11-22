@@ -35,6 +35,9 @@ def editor_env(plot_factory, qapp, app_settings):
     dlg = PlotVariableEditorDialog(pw)
     qapp.processEvents()
     yield dlg, pw
+    # 拖宽触发的 debounce 定时器若在清键后落地，会把本用例固定列写回共享
+    # ini（同 worker 其它文件读到脏存档）；先停表再销毁。
+    dlg._width_save_timer.stop()
     if dlg.isVisible():
         dlg.close()
     dlg.deleteLater()
@@ -156,6 +159,23 @@ class TestArchiveRestore:
             assert dlg2.var_table.columnWidth(5) == ed_mod._TRANSFORM_COL_WIDTH
             assert 4 in dlg2._user_fixed_cols
             assert 5 not in dlg2._user_fixed_cols
+        finally:
+            dlg2.deleteLater()
+
+    def test_corrupt_archive_keeps_fixed_transform_col_default(
+        self, editor_env, app_settings, qapp
+    ):
+        """评审 P2-6：widths 长度非法 + fixed 含 4 时不得被内容自适应撑宽。"""
+        dlg, pw = editor_env
+        dlg.close()
+        app_settings.set_plot_variable_editor_column_widths(
+            [46, 210, 170, 168, 84]
+        )
+        app_settings.set_plot_variable_editor_fixed_cols([4])
+        dlg2 = PlotVariableEditorDialog(pw)
+        qapp.processEvents()
+        try:
+            assert dlg2.var_table.columnWidth(4) == ed_mod._TRANSFORM_COL_WIDTH
         finally:
             dlg2.deleteLater()
 
