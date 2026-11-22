@@ -30,6 +30,10 @@ class ConfigKey(StrEnum):
     # 绘图变量编辑器窗口几何（QByteArray）：位置 + 大小，失效屏幕
     # （多显示器拔插后位置落已不存在的屏幕）由窗口侧校验拦截并回退
     PLOT_VARIABLE_EDITOR_GEOMETRY = "plot_variable_editor/geometry"
+    # 编辑器列宽（list[int]，6 列）与用户拖拽固定列（list[int]）：跨重启记忆，
+    # 不进模板（列宽是个人视图偏好，D1/D10）。类型不符视为无存档。
+    PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS = "plot_variable_editor/column_widths"
+    PLOT_VARIABLE_EDITOR_FIXED_COLS = "plot_variable_editor/fixed_cols"
     # 曲线暂存区浮窗几何（QByteArray）：跨重启记忆；失效屏幕由窗口侧守卫
     CURVE_SHELF_GEOMETRY = "curve_shelf/geometry"
     TEMPLATE_LAST_ID = "template/last_id"
@@ -228,6 +232,44 @@ class AppSettings:
 
     def set_plot_variable_editor_geometry(self, geometry: Any) -> None:
         self._settings.setValue(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, geometry)
+
+    def get_plot_variable_editor_column_widths(self) -> Any:
+        """读取编辑器列宽存档；无存档/类型不符/长度非法返回 None。
+
+        防御口径同 geometry：ini 脏值（str/含非 int/负值）一律视为无存档，
+        由窗口侧走默认初值，避免 restore 时抛异常或落极端窄列。
+        """
+        widths = self._settings.value(ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS)
+        if not isinstance(widths, (list, tuple)) or not widths:
+            return None
+        out = []
+        for w in widths:
+            if isinstance(w, bool) or not isinstance(w, int) or w <= 0:
+                return None
+            out.append(int(w))
+        return out
+
+    def set_plot_variable_editor_column_widths(self, widths: Any) -> None:
+        self._settings.setValue(
+            ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS, [int(w) for w in widths]
+        )
+
+    def get_plot_variable_editor_fixed_cols(self) -> Any:
+        """读取用户拖拽固定列集合存档；类型不符返回 None（同列宽口径）。"""
+        cols = self._settings.value(ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS)
+        if not isinstance(cols, (list, tuple)):
+            return None
+        out = []
+        for c in cols:
+            if isinstance(c, bool) or not isinstance(c, int) or c < 0:
+                return None
+            out.append(int(c))
+        return out
+
+    def set_plot_variable_editor_fixed_cols(self, cols: Any) -> None:
+        self._settings.setValue(
+            ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS, [int(c) for c in cols]
+        )
 
     def get_curve_shelf_geometry(self) -> Any:
         """读取暂存区浮窗几何；无存档/空值/类型不符返回 None（同编辑器口径）。"""

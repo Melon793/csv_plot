@@ -141,9 +141,10 @@ def test_editor_set_variable_color_updates_table_on_success(
     dlg.set_variable_color()
 
     assert pw.curves["a"].color == "#123456"
-    color_widget = dlg.var_table.cellWidget(0, 2)
-    assert color_widget is not None
-    assert "#123456" in color_widget.styleSheet()
+    # C4：色块收进 col3 样式摘要格（swatch），col2 现为 Legend 名输入框
+    style_cell = dlg.var_table.cellWidget(0, 3)
+    assert style_cell is not None
+    assert "#123456" in style_cell.swatch.styleSheet()
 
     # 无效颜色（isValid 为 False）：颜色与表格样式均不变
     monkeypatch.setattr(

@@ -43,8 +43,8 @@ def editor_host(plot_factory, qapp, app_settings):
 
 
 def _expected_initial_width(dlg, host):
-    fixed = sum(dlg.var_table.columnWidth(c) for c in (0, 2, 3, 4))
-    return min(fixed + 260 + 24 + 40, int(host.width() * 0.9))
+    fixed = sum(dlg.var_table.columnWidth(c) for c in (0, 3, 4, 5))
+    return min(fixed + 380 + 24 + 40, int(host.width() * 0.9))
 
 
 def test_first_open_adaptive_geometry(editor_host):
@@ -126,7 +126,7 @@ def test_minimum_size_enforced(editor_host):
 def test_fixed_columns_content_sized(editor_host):
     """首帧数据填充后固定列内容自适应：宽度 >= 下限（防极端窄值截断）。"""
     dlg, _pw, _host = editor_host
-    minimums = {0: 44, 2: 64, 3: 72, 4: 76}
+    minimums = {0: 44, 3: 96, 4: 70, 5: 70}
     for col, minimum in minimums.items():
         width = dlg.var_table.columnWidth(col)
         assert width >= minimum, f"列 {col} 宽度 {width} 低于下限 {minimum}"

@@ -3,14 +3,16 @@
 from __future__ import annotations
 import re
 import sys
-from PySide6.QtCore import QItemSelectionModel, Qt, QSignalBlocker
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QItemSelectionModel, Qt, QSignalBlocker, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QVBoxLayout,
     QHBoxLayout,
+    QLineEdit,
     QMenu,
     QPushButton,
     QLabel,
@@ -22,12 +24,17 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QWidget,
 )
-from src.core.config import DEFAULT_CURVE_COLOR, DEFAULT_CURVE_COLORS
+from src.core.config import DEFAULT_CURVE_COLOR, DEFAULT_CURVE_COLORS, widget_alive
+from src.core.curve_transform import NON_NUMERIC_FORMATS
 from src.core.data_types import (
     DRAW_MODE_AUTO,
     DRAW_MODE_SOURCE_AUTO,
     DRAW_MODE_STEP_POST,
     DRAW_MODE_STEP_PRE,
+    LINE_PRESET_AUTO,
+    LINE_PRESET_BOLD,
+    LINE_PRESET_DASH,
+    LINE_PRESET_DOT,
     SYMBOL_POLICY_AUTO,
     SYMBOL_POLICY_OFF,
     SYMBOL_POLICY_ON,
@@ -36,6 +43,7 @@ from src.core.logger import get_logger
 from src.ui import theme
 from src.ui.drag_drop import parse_var_names_from_mimedata
 from src.ui.tooltip_text import var_tooltip
+from src.ui.widgets.curve_style_panel import exec_curve_panel
 from src.ui.widgets.variable_search_bar import VariableSearchBar
 
 logger = get_logger(__name__)
@@ -52,6 +60,101 @@ _SYMBOL_POLICY_OPTIONS = [
     ("始终显示", SYMBOL_POLICY_ON),
     ("始终隐藏", SYMBOL_POLICY_OFF),
 ]
+
+# C4（D9=A2）：6 列布局。颜色/绘制方式/数据点/样式收进「样式」摘要列，
+# 点击弹 legend 同款快捷面板；新增 Legend 名 / Factor / Offset 行内编辑。
+_COL_COUNT = 6
+_COL_LABELS = ["显示", "变量名", "Legend 名", "样式", "Factor", "Offset"]
+_COL_DEFAULT_WIDTHS = [46, 210, 170, 168, 84, 84]
+_ELASTIC_COLS = (1, 2)  # 双弹性列：吸收窗口余量（D10）
+_FIXED_MIN_WIDTHS = {0: 44, 3: 96, 4: 70, 5: 70}
+
+# 样式摘要短标签（只列非默认项，全默认显「默认」）
+_PRESET_SHORT = {
+    LINE_PRESET_AUTO: "", LINE_PRESET_BOLD: "粗实",
+    LINE_PRESET_DASH: "虚线", LINE_PRESET_DOT: "点线",
+}
+_DRAW_SHORT = {
+    DRAW_MODE_AUTO: "", DRAW_MODE_STEP_POST: "阶梯后", DRAW_MODE_STEP_PRE: "阶梯前",
+}
+_SYMBOL_SHORT = {
+    SYMBOL_POLICY_AUTO: "", SYMBOL_POLICY_ON: "显示", SYMBOL_POLICY_OFF: "隐藏",
+}
+
+
+def _style_summary(ci) -> str:
+    """样式摘要列文字：非默认项 join，全默认显「默认」（D9 演示口径）。"""
+    parts = [
+        _PRESET_SHORT.get(getattr(ci, "line_preset", LINE_PRESET_AUTO), ""),
+        _DRAW_SHORT.get(getattr(ci, "draw_mode", DRAW_MODE_AUTO), ""),
+        _SYMBOL_SHORT.get(getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO), ""),
+    ]
+    parts = [p for p in parts if p]
+    return " · ".join(parts) if parts else "默认"
+
+
+def _name_badges(ci) -> str:
+    """变量名列徽标后缀（D7）：自定义名=名，非默认换算=ƒ。"""
+    s = ""
+    if getattr(ci, "display_name", ""):
+        s += " ·名"
+    if getattr(ci, "factor", 1.0) != 1.0 or getattr(ci, "offset", 0.0) != 0.0:
+        s += " ·ƒ"
+    return s
+
+
+def _transform_disabled(ci) -> bool:
+    """枚举/日期/纯时间通道禁用数值变换（D4）。"""
+    return getattr(ci, "y_format", "") in NON_NUMERIC_FORMATS
+
+
+class _StyleCell(QWidget):
+    """样式摘要格：色块 + 摘要文字 + ▾，整格点击弹快捷面板（D9）。
+
+    只负责视觉与命中；应用集中在面板 exec 返回后（共享组件红线）。
+    """
+
+    clicked = Signal(str)
+
+    def __init__(self, var_name: str, parent=None):
+        super().__init__(parent)
+        self.var_name = var_name
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(6)
+        self.swatch = QLabel(self)
+        self.swatch.setFixedSize(24, 15)
+        self.text = QLabel(self)
+        self.text.setStyleSheet("color: #444;")
+        carat = QLabel("▾", self)
+        carat.setStyleSheet("color: #8a8f94;")
+        lay.addWidget(self.swatch)
+        lay.addWidget(self.text, 1)
+        lay.addWidget(carat)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(28)
+
+    def set_state(self, color: str, summary: str, enabled: bool = True):
+        self.swatch.setStyleSheet(
+            f"background-color: {color}; border: 1px solid #333;"
+        )
+        self.text.setText(summary)
+        self.setEnabled(enabled)
+        self.setToolTip(
+            "点击修改颜色/绘制方式/数据点/样式" if enabled
+            else "变量缺失，恢复后可改样式"
+        )
+
+    def mouseReleaseEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+            and self.isEnabled()
+        ):
+            self.clicked.emit(self.var_name)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 def _mode_combo(options, current, on_change):
@@ -105,9 +208,16 @@ class PlotVariableEditorDialog(QDialog):
         # 最近一次排序前的行序快照（单层，供"撤销上次排序"回退）
         self._last_sort_order: list[str] | None = None
 
-        # 固定列（显示/颜色/绘制方式/数据点）是否已完成首次内容自适应：
+        # 固定列（显示/样式/Factor/Offset）是否已完成首次内容自适应：
         # 仅首帧数据填充后执行一次，后续 reload 不重算（尊重用户手动拖拽）
         self._columns_sized = False
+
+        # C4 列宽引擎（D1+D10）：双弹性列 + 定宽列 + 最小宽 + 横滚兜底 +
+        # 全局记忆。_width_guard 防程序化 setColumnWidth 与 sectionResized
+        # 回写互相触发（照 variable_info_dialog 防自激口径）
+        self._width_guard = False
+        self._user_fixed_cols: set[int] = set()
+        self._col_min: dict[int, int] = {}
 
         # 高DPI支持 - PySide6中不需要WA_UseHighDpiPixmaps
         # PySide6默认支持高DPI，通过样式表控制字体大小
@@ -164,12 +274,10 @@ class PlotVariableEditorDialog(QDialog):
             self.search_bar = None
         # ======================
 
-        # 创建表格
+        # 创建表格（C4：6 列，D9=A2 合并样式列）
         self.var_table = QTableWidget()
-        self.var_table.setColumnCount(5)
-        self.var_table.setHorizontalHeaderLabels(
-            ["显示", "变量名", "颜色", "绘制方式", "数据点"]
-        )
+        self.var_table.setColumnCount(_COL_COUNT)
+        self.var_table.setHorizontalHeaderLabels(_COL_LABELS)
 
         # 设置表格属性
         self.var_table.setDragDropMode(QTableWidget.DragDropMode.DropOnly)
@@ -200,19 +308,24 @@ class PlotVariableEditorDialog(QDialog):
             {theme.item_view_outline_qss("QTableWidget")}
         """)
 
-        # 设置列宽
+        # 设置列宽（C4/D10：全列 Interactive 可拖；弹性分配在 resizeEvent）
         header = self.var_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)  # 显示列固定宽度
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # 变量名列自适应
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  # 颜色列固定宽度
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)  # 绘制方式列固定宽度
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)  # 数据点列固定宽度
-        # 固定列先给保底宽度（首帧数据填充后由 _adjust_fixed_column_widths
-        # 按表头 + 单元格控件内容自适应重算，跨平台字体差异下不手工拍值）
-        self.var_table.setColumnWidth(0, 60)  # 显示列
-        self.var_table.setColumnWidth(2, 80)  # 颜色列
-        self.var_table.setColumnWidth(3, 78)  # 绘制方式列
-        self.var_table.setColumnWidth(4, 84)  # 数据点列
+        for col in range(_COL_COUNT):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
+        header.setSectionsClickable(True)
+        # 每列最小宽 = 表头文字宽 + 余量（跨平台不拍像素）
+        fm = header.fontMetrics()
+        for col, label in enumerate(_COL_LABELS):
+            self._col_min[col] = fm.horizontalAdvance(label) + 14
+        for col, minimum in _FIXED_MIN_WIDTHS.items():
+            self._col_min[col] = max(self._col_min[col], minimum)
+        self._init_column_widths()
+        header.sectionResized.connect(self._on_section_resized)
+        header.sectionHandleDoubleClicked.connect(self._on_handle_double_clicked)
+        # 行右键重置菜单（D8）
+        self.var_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.var_table.customContextMenuRequested.connect(self._on_row_context_menu)
 
         layout.addWidget(self.var_table)
 
@@ -409,18 +522,119 @@ class PlotVariableEditorDialog(QDialog):
         self.update_button_states()
 
     def _adjust_fixed_column_widths(self):
-        """固定列（显示/颜色/绘制方式/数据点）按内容自适应列宽。
+        """定宽列（显示/样式/Factor/Offset）按内容自适应列宽。
 
         首帧数据填充后执行一次（此时单元格控件已就位，宽度由表头 +
-        复选框/色块/下拉框实际内容决定，跨平台字体差异下不手工拍值）；
+        复选框/摘要格/_spinbox 实际内容决定，跨平台字体差异下不手工拍值）；
         设下限防极端窄值，后续 reload 不重算以尊重用户手动拖拽。
         """
-        minimums = {0: 44, 2: 64, 3: 72, 4: 76}
-        for col in minimums:
+        for col in _FIXED_MIN_WIDTHS:
+            self._width_guard = True
+            try:
+                self.var_table.resizeColumnToContents(col)
+                self.var_table.setColumnWidth(
+                    col, max(self.var_table.columnWidth(col), self._col_min[col])
+                )
+            finally:
+                self._width_guard = False
+        self._distribute_column_widths()
+
+    # ------------------------------------------------------------------
+    # C4 列宽引擎（D1+D10）
+    # ------------------------------------------------------------------
+    def _init_column_widths(self):
+        """初值：有存档用存档（含用户固定列），无存档用默认宽。"""
+        from src.core.settings import AppSettings
+
+        settings = AppSettings()
+        widths = settings.get_plot_variable_editor_column_widths()
+        fixed = settings.get_plot_variable_editor_fixed_cols()
+        self._width_guard = True
+        try:
+            if widths is not None and len(widths) == _COL_COUNT:
+                for col, w in enumerate(widths):
+                    self.var_table.setColumnWidth(col, max(w, self._col_min[col]))
+                if fixed is not None:
+                    self._user_fixed_cols = {
+                        c for c in fixed if 0 <= c < _COL_COUNT
+                    }
+            else:
+                for col, w in enumerate(_COL_DEFAULT_WIDTHS):
+                    self.var_table.setColumnWidth(col, w)
+        finally:
+            self._width_guard = False
+
+    def _save_column_widths(self):
+        from src.core.settings import AppSettings
+
+        settings = AppSettings()
+        settings.set_plot_variable_editor_column_widths(
+            [self.var_table.columnWidth(c) for c in range(_COL_COUNT)]
+        )
+        settings.set_plot_variable_editor_fixed_cols(sorted(self._user_fixed_cols))
+
+    def _active_elastic(self) -> list[int]:
+        return [c for c in _ELASTIC_COLS if c not in self._user_fixed_cols]
+
+    def _distribute_column_widths(self):
+        """窗口余量按默认比例分给双弹性列；缩到最小宽后横滚兜底。"""
+        if self._width_guard:
+            return
+        elastic = self._active_elastic()
+        if not elastic:
+            return
+        viewport_w = self.var_table.viewport().width()
+        if viewport_w <= 0:
+            return
+        fixed_sum = sum(
+            self.var_table.columnWidth(c)
+            for c in range(_COL_COUNT)
+            if c not in elastic
+        )
+        avail = viewport_w - fixed_sum
+        min_sum = sum(self._col_min[c] for c in elastic)
+        self._width_guard = True
+        try:
+            if avail >= min_sum:
+                def_sum = sum(_COL_DEFAULT_WIDTHS[c] for c in elastic)
+                for c in elastic:
+                    share = int(avail * _COL_DEFAULT_WIDTHS[c] / def_sum)
+                    self.var_table.setColumnWidth(c, max(share, self._col_min[c]))
+            else:
+                # 余量不足：弹性列落最小宽，总宽超视口 → 横向滚动兜底
+                for c in elastic:
+                    self.var_table.setColumnWidth(c, self._col_min[c])
+        finally:
+            self._width_guard = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._distribute_column_widths()
+
+    def _on_section_resized(self, col: int, _old: int, new: int):
+        """用户拖拽 → 该列转固定（退出弹性分配）；夹最小宽。"""
+        if self._width_guard:
+            return
+        if new < self._col_min[col]:
+            self._width_guard = True
+            try:
+                self.var_table.setColumnWidth(col, self._col_min[col])
+            finally:
+                self._width_guard = False
+        self._user_fixed_cols.add(col)
+
+    def _on_handle_double_clicked(self, col: int):
+        """双击分隔线：恢复弹性 + 内容自适应（D1）。"""
+        self._user_fixed_cols.discard(col)
+        self._width_guard = True
+        try:
             self.var_table.resizeColumnToContents(col)
             self.var_table.setColumnWidth(
-                col, max(self.var_table.columnWidth(col), minimums[col])
+                col, max(self.var_table.columnWidth(col), self._col_min[col])
             )
+        finally:
+            self._width_guard = False
+        self._distribute_column_widths()
 
     def _geometry_on_screen(self) -> bool:
         """当前窗口几何是否与任一现存屏幕的可用区域相交。
@@ -465,10 +679,10 @@ class PlotVariableEditorDialog(QDialog):
                 self.setWindowState(Qt.WindowState.WindowNoState)
             return
 
-        # 自适应初始宽：固定列实际宽 + 变量名列最小宽 + 表格边框与
-        # 滚动条余量 + 窗口边框余量
-        fixed = sum(self.var_table.columnWidth(c) for c in (0, 2, 3, 4))
-        width = fixed + 260 + 24 + 40
+        # 自适应初始宽：定宽列实际宽 + 双弹性列默认宽 + 表格边框与
+        # 滚动条余量 + 窗口边框余量（C4：6 列口径）
+        fixed = sum(self.var_table.columnWidth(c) for c in _FIXED_MIN_WIDTHS)
+        width = fixed + 380 + 24 + 40
         main_window = self.plot_widget.window()
         if main_window is not None:
             width = min(width, int(main_window.width() * 0.9))
@@ -565,10 +779,11 @@ class PlotVariableEditorDialog(QDialog):
         self.update_button_states()
 
     def _refresh_rows_in_place(self):
-        """就地刷新表格行的可见性/颜色/绘制方式/数据点（不重建控件）
+        """就地刷新表格行（不重建控件）：可见性/徽标/Legend 名/样式摘要/换算。
 
         用于 curves 集合与顺序均未变的场景（如颜色修改、外部可见性变更，
-        或图例右键菜单切换绘制方式后的回填）。
+        或图例面板切换样式后的回填）。程序化回填一律 QSignalBlocker，
+        防 valueChanged/editingFinished 回环（评审 P1-6）。
         """
         table = self.var_table
         for row in range(table.rowCount()):
@@ -580,28 +795,28 @@ class PlotVariableEditorDialog(QDialog):
             if checkbox is not None:
                 with QSignalBlocker(checkbox):
                     checkbox.setChecked(curve_info.visible)
-            color_widget = table.cellWidget(row, 2)
-            if color_widget is not None:
-                color_widget.setStyleSheet(
-                    f"background-color: {curve_info.color}; border: 1px solid #333;"
-                )
-            draw_combo = table.cellWidget(row, 3)
-            if draw_combo is not None:
-                with QSignalBlocker(draw_combo):
-                    index = draw_combo.findData(
-                        getattr(curve_info, "draw_mode", DRAW_MODE_AUTO)
-                    )
-                    if index >= 0:
-                        draw_combo.setCurrentIndex(index)
-                draw_combo.setToolTip(self._draw_mode_tooltip(curve_info))
-            symbol_combo = table.cellWidget(row, 4)
-            if symbol_combo is not None:
-                with QSignalBlocker(symbol_combo):
-                    index = symbol_combo.findData(
-                        getattr(curve_info, "symbol_policy", SYMBOL_POLICY_AUTO)
-                    )
-                    if index >= 0:
-                        symbol_combo.setCurrentIndex(index)
+            unit = self.plot_widget.units.get(var_name, "")
+            base = f"{var_name} ({unit})" if unit else var_name
+            name_item = table.item(row, 1)
+            if name_item is not None:
+                name_item.setText(base + _name_badges(curve_info))
+            name_edit = table.cellWidget(row, 2)
+            if name_edit is not None:
+                with QSignalBlocker(name_edit):
+                    name_edit.setText(getattr(curve_info, "display_name", ""))
+            style_cell = table.cellWidget(row, 3)
+            if style_cell is not None:
+                style_cell.set_state(curve_info.color, _style_summary(curve_info))
+            f_spin = table.cellWidget(row, 4)
+            o_spin = table.cellWidget(row, 5)
+            if f_spin is not None:
+                with QSignalBlocker(f_spin):
+                    f_spin.setValue(getattr(curve_info, "factor", 1.0))
+                f_spin.setEnabled(not _transform_disabled(curve_info))
+            if o_spin is not None:
+                with QSignalBlocker(o_spin):
+                    o_spin.setValue(getattr(curve_info, "offset", 0.0))
+                o_spin.setEnabled(not _transform_disabled(curve_info))
 
     def _get_selected_row(self) -> int | None:
         """获取当前选中的行号"""
@@ -794,45 +1009,123 @@ class PlotVariableEditorDialog(QDialog):
         )
         self.var_table.setCellWidget(row, 0, checkbox)
 
-        # 变量名和单位
+        # 变量名和单位（C4：徽标后缀 名/ƒ，D7）
         unit = self.plot_widget.units.get(var_name, "")
         display_text = f"{var_name} ({unit})" if unit else var_name
-        name_item = QTableWidgetItem(display_text)
+        name_item = QTableWidgetItem(display_text + _name_badges(curve_info))
         name_item.setData(Qt.ItemDataRole.UserRole, var_name)
         name_item.setToolTip(var_tooltip(var_name, unit))
         name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
         self.var_table.setItem(row, 1, name_item)
 
-        # 颜色 - 使用QWidget显示真实颜色
-        color = curve_info.color
-        color_widget = QWidget()
-        color_widget.setStyleSheet(
-            f"background-color: {color}; border: 1px solid #333;"
+        # Legend 名（C4/D2：空=默认，整串替换；editingFinished 提交）
+        default_name = display_text
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText(default_name)
+        name_edit.setText(getattr(curve_info, "display_name", ""))
+        name_edit.setToolTip(f"自定义 Legend 显示名；留空恢复默认：{default_name}")
+        name_edit.editingFinished.connect(
+            lambda name=var_name, ed=name_edit: self._on_legend_name_changed(name, ed)
         )
-        color_widget.setFixedSize(30, 20)
-        self.var_table.setCellWidget(row, 2, color_widget)
+        self.var_table.setCellWidget(row, 2, name_edit)
 
-        # 同时设置一个隐藏的item来存储数据
-        color_item = QTableWidgetItem()
-        color_item.setData(Qt.ItemDataRole.UserRole, var_name)
-        color_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
-        self.var_table.setItem(row, 2, color_item)
+        # 样式摘要格（C4/D9：色块+非默认项摘要，点击弹 legend 同款面板）
+        style_cell = _StyleCell(var_name)
+        style_cell.set_state(curve_info.color, _style_summary(curve_info))
+        style_cell.clicked.connect(self._open_style_panel)
+        self.var_table.setCellWidget(row, 3, style_cell)
 
-        # 绘制方式 / 数据点（下拉框；itemData 绑 data_types 常量）
-        draw_combo = _mode_combo(
-            _DRAW_MODE_OPTIONS,
-            getattr(curve_info, "draw_mode", DRAW_MODE_AUTO),
-            lambda mode, label, name=var_name: self._on_draw_mode_changed(name, mode, label),
+        # Factor / Offset（C4/D3/D4：spinbox 行内编辑，非数值通道置灰）
+        factor_spin, offset_spin = self._make_transform_spins(row, var_name, curve_info)
+        self.var_table.setCellWidget(row, 4, factor_spin)
+        self.var_table.setCellWidget(row, 5, offset_spin)
+
+    def _make_transform_spins(self, row: int, var_name: str, ci, force_disabled: bool = False):
+        """Factor/Offset spinbox 对（程序化初值静默；valueChanged 走共享入口）。"""
+        disabled = force_disabled or _transform_disabled(ci)
+        spins = []
+        for value in (getattr(ci, "factor", 1.0), getattr(ci, "offset", 0.0)):
+            spin = QDoubleSpinBox()
+            spin.setRange(-1e12, 1e12)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.1)
+            spin.setKeyboardTracking(False)
+            with QSignalBlocker(spin):
+                spin.setValue(value)
+            spin.setEnabled(not disabled)
+            if disabled:
+                spin.setToolTip("枚举/时间通道不支持数值变换")
+            spins.append(spin)
+        factor_spin, offset_spin = spins
+        factor_spin.valueChanged.connect(
+            lambda _v, name=var_name: self._on_transform_changed(name)
         )
-        draw_combo.setToolTip(self._draw_mode_tooltip(curve_info))
-        self.var_table.setCellWidget(row, 3, draw_combo)
-
-        symbol_combo = _mode_combo(
-            _SYMBOL_POLICY_OPTIONS,
-            getattr(curve_info, "symbol_policy", SYMBOL_POLICY_AUTO),
-            lambda policy, label, name=var_name: self._on_symbol_policy_changed(name, policy, label),
+        offset_spin.valueChanged.connect(
+            lambda _v, name=var_name: self._on_transform_changed(name)
         )
-        self.var_table.setCellWidget(row, 4, symbol_combo)
+        return factor_spin, offset_spin
+
+    def _row_of_var(self, var_name: str) -> int | None:
+        for row in range(self.var_table.rowCount()):
+            item = self.var_table.item(row, 1)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == var_name:
+                return row
+        return None
+
+    def _on_legend_name_changed(self, var_name: str, edit: QLineEdit):
+        """Legend 名提交：空串=恢复默认（共享入口，播报 parity）。"""
+        self.plot_widget._multi_curve_manager.apply_curve_display_name(
+            var_name, edit.text().strip()
+        )
+
+    def _on_transform_changed(self, var_name: str):
+        """Factor/Offset 变更：读两 spinbox 现值走共享入口（同值 no-op）。"""
+        row = self._row_of_var(var_name)
+        if row is None:
+            return
+        f_spin = self.var_table.cellWidget(row, 4)
+        o_spin = self.var_table.cellWidget(row, 5)
+        if f_spin is None or o_spin is None:
+            return
+        self.plot_widget._multi_curve_manager.apply_curve_transform(
+            var_name, f_spin.value(), o_spin.value()
+        )
+
+    def _open_style_panel(self, var_name: str):
+        """样式格点击：singleShot(0) 弹共享面板（存活守卫，frozen 两参口径）。"""
+        pw = self.plot_widget
+        if var_name not in pw.curves:
+            return
+
+        def _show():
+            if widget_alive(self) and widget_alive(pw) and var_name in pw.curves:
+                exec_curve_panel(pw, var_name, QCursor.pos())
+
+        QTimer.singleShot(0, _show)
+
+    def _on_row_context_menu(self, pos):
+        """行右键重置菜单（D8）：重置显示名/变换/全部，走共享入口。"""
+        row = self.var_table.rowAt(pos.y())
+        if row < 0:
+            return
+        item = self.var_table.item(row, 1)
+        if item is None:
+            return
+        var_name = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        act_name = menu.addAction("重置显示名")
+        act_xf = menu.addAction("重置变换（factor=1, offset=0）")
+        act_all = menu.addAction("重置该行全部")
+        chosen = menu.exec(self.var_table.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+        mcm = self.plot_widget._multi_curve_manager
+        if chosen is act_name:
+            mcm.apply_curve_display_name(var_name, "")
+        elif chosen is act_xf:
+            mcm.apply_curve_transform(var_name, 1.0, 0.0)
+        elif chosen is act_all:
+            mcm.apply_curve_display_name(var_name, "")
+            mcm.apply_curve_transform(var_name, 1.0, 0.0)
 
     @staticmethod
     def _draw_mode_tooltip(curve_info) -> str:
@@ -913,17 +1206,25 @@ class PlotVariableEditorDialog(QDialog):
         name_item.setForeground(QColor("gray"))
         self.var_table.setItem(row, 1, name_item)
 
-        color_widget = QWidget()
-        color_widget.setStyleSheet(
-            f"background-color: {ref.color}; border: 1px solid #333;"
+        # C4：占位行同样有 Legend 名（可编辑，D6）/样式摘要（置灰）/
+        # Factor/Offset（置灰显存档值，复活后生效）
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText(base)
+        name_edit.setText(getattr(ref, "display_name", ""))
+        name_edit.editingFinished.connect(
+            lambda name=var_name, ed=name_edit: self._on_legend_name_changed(name, ed)
         )
-        color_widget.setFixedSize(30, 20)
-        self.var_table.setCellWidget(row, 2, color_widget)
+        self.var_table.setCellWidget(row, 2, name_edit)
 
-        color_item = QTableWidgetItem()
-        color_item.setData(Qt.ItemDataRole.UserRole, var_name)
-        color_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
-        self.var_table.setItem(row, 2, color_item)
+        style_cell = _StyleCell(var_name)
+        style_cell.set_state(ref.color, "默认", enabled=False)
+        self.var_table.setCellWidget(row, 3, style_cell)
+
+        factor_spin, offset_spin = self._make_transform_spins(
+            row, var_name, ref, force_disabled=True
+        )
+        self.var_table.setCellWidget(row, 4, factor_spin)
+        self.var_table.setCellWidget(row, 5, offset_spin)
 
     def _on_checkbox_changed(self, var_name, state):
         """复选框状态变化处理（统一版）
@@ -954,9 +1255,11 @@ class PlotVariableEditorDialog(QDialog):
         self.update_button_states()
 
     def on_cell_clicked(self, row, column):
-        """单元格点击事件"""
-        if column == 2:  # 颜色列
-            self.set_variable_color(row)
+        """单元格点击事件（C4：样式格由 _StyleCell.clicked 自行处理）。
+
+        颜色列入口已撤（D9），set_variable_color 实现保留供程序化调用。
+        """
+        return
 
     def update_button_states(self):
         """更新按钮状态"""
@@ -987,6 +1290,7 @@ class PlotVariableEditorDialog(QDialog):
     def closeEvent(self, event):
         """关闭时断开 curves_changed 信号，避免重复打开编辑器导致信号连接累积"""
         self._save_geometry()
+        self._save_column_widths()
         try:
             self.plot_widget.curves_changed.disconnect(self._on_curves_changed_incremental)
         except (TypeError, RuntimeError):
@@ -1178,13 +1482,12 @@ class PlotVariableEditorDialog(QDialog):
 
         if color.isValid():
             updated = self._apply_color_to_curve(var_name, color.name())
-            # 更新表格项颜色（仅当颜色实际应用时；变量已删则不刷）
+            # 更新表格样式格色块（仅当颜色实际应用时；变量已删则不刷）
             if updated:
-                color_widget = self.var_table.cellWidget(row, 2)
-                if color_widget:
-                    color_widget.setStyleSheet(
-                        f"background-color: {color.name()}; border: 1px solid #333;"
-                    )
+                style_cell = self.var_table.cellWidget(row, 3)
+                ci = self.plot_widget.curves.get(var_name)
+                if style_cell is not None and ci is not None:
+                    style_cell.set_state(color.name(), _style_summary(ci))
 
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
