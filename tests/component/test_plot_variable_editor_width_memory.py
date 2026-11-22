@@ -96,6 +96,7 @@ class TestSaveOnEveryClosePath:
         qapp.processEvents()
 
         dlg2 = PlotVariableEditorDialog(pw)
+        dlg2.show()
         qapp.processEvents()
         try:
             assert dlg2.var_table.columnWidth(1) == 333

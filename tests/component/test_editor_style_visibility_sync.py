@@ -117,6 +117,17 @@ class TestVisibilitySharedEntry:
         assert pw._multi_curve_manager.apply_curve_visibility(var, False) is True
 
 
+class TestClosedEditorStopsListening:
+    def test_accept_disconnects_curves_changed(self, editor_env):
+        """评审 P1-1：确定/取消只 hide，隐藏实例不得继续响应后续 emit。"""
+        dlg, pw = editor_env
+        var = _var_at(dlg)
+        dlg.accept()
+        csp.apply_curve_panel_picks(pw, var, {"color": "#abcdef"})
+        cell = dlg.var_table.cellWidget(0, 3)
+        assert "#abcdef" not in cell.swatch.styleSheet()
+
+
 class TestInvalidVisibility:
     def test_invalid_checkbox_writes_preference_only(self, plot_factory, qapp):
         df = pd.DataFrame({"a": [1.0, 2.0]})

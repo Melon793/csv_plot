@@ -101,6 +101,20 @@ class TestReviveWithTransform:
 
 
 class TestRecreateAndDemote:
+    def test_hidden_transformed_recreate_keeps_limits_of_visible(self, plot_factory):
+        """评审 P1-2：重建瞬间 add 置 visible=True，重算必须在显隐恢复之后。"""
+        pw = plot_factory()
+        _add_raw(pw, "a", (1.0, 2.0, 3.0))
+        _add_raw(pw, "b", (40.0, 50.0, 60.0))
+        assert pw._multi_curve_manager.apply_curve_transform("a", 100.0, 0.0)
+        assert pw._multi_curve_manager.apply_curve_visibility("a", False)
+        assert _limits(pw) == pytest.approx([30.0, 70.0])
+
+        pw._multi_curve_manager._recreate_curve("a")
+
+        assert pw.curves["a"].visible is False
+        assert _limits(pw) == pytest.approx([30.0, 70.0]), "隐藏曲线污染了 limits"
+
     def test_recreate_keeps_projected_limits(self, plot_factory):
         pw = plot_factory()
         _add_raw(pw)

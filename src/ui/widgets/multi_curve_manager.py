@@ -618,16 +618,6 @@ class MultiCurveManager:
                                 logger.debug(
                                     "重建恢复换算失败: %s", var_name, exc_info=True
                                 )
-                    # add 路径按默认换算（raw）定过 limits；恢复换算后必须按
-                    # 投影数据重算，否则重建出的曲线被陈旧 limits 钳制（F4）
-                    if pinned_transform:
-                        try:
-                            self._update_axes_for_multi_curve(allow_y_expand=False)
-                        except Exception:
-                            logger.debug(
-                                "重建恢复换算后 Y 范围重算失败: %s",
-                                var_name, exc_info=True,
-                            )
                     if pinned_policy:
                         new_ci.symbol_policy = pinned_policy
                     if not pinned_visible:
@@ -644,6 +634,18 @@ class MultiCurveManager:
                         except Exception:
                             logger.debug(
                                 "重建恢复样式预设/数据点策略失败: %s", var_name, exc_info=True
+                            )
+                    # add 路径按默认换算（raw）定过 limits；恢复换算后必须按
+                    # 投影数据重算。必须放在 visible/policy/preset 全部恢复后：
+                    # 重建瞬间 add 置 visible=True，提前重算会把已隐藏曲线的
+                    # 投影值计入 limits（评审 P1-2）
+                    if pinned_transform:
+                        try:
+                            self._update_axes_for_multi_curve(allow_y_expand=False)
+                        except Exception:
+                            logger.debug(
+                                "重建恢复换算后 Y 范围重算失败: %s",
+                                var_name, exc_info=True,
                             )
                 if success and pinned_mode and var_name in pw.curves:
                     new_ci = pw.curves[var_name]

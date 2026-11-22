@@ -1342,11 +1342,13 @@ class PlotVariableEditorDialog(QDialog):
         )
 
     def done(self, result: int):
-        """统一收口确定/取消（含 Esc）：hide 前落盘几何与列宽。
+        """统一收口确定/取消（含 Esc）：hide 前落盘并断开信号。
 
-        accept/reject 不经过 closeEvent，此前多数关闭路径根本没有写盘。
+        accept/reject 不经过 closeEvent，此前多数关闭路径根本没有写盘，
+        且隐藏实例仍挂在主窗下继续响应 curves_changed（评审 P1-1）。
         """
         self._save_editor_state()
+        self._teardown()
         super().done(result)
 
     def _save_editor_state(self):
@@ -1354,18 +1356,30 @@ class PlotVariableEditorDialog(QDialog):
         self._save_geometry()
         self._save_column_widths()
 
-    def closeEvent(self, event):
-        """关闭时断开 curves_changed 信号，避免重复打开编辑器导致信号连接累积"""
-        self._save_editor_state()
+    def _teardown(self):
+        """断开 curves_changed 信号（幂等；done 与 closeEvent 双入口）。
+
+        编辑器是主窗下的非模态 Tool，确定/取消只 hide 不销毁；若不断连，
+        隐藏实例会对每次改色/显隐/换算的 emit 继续做表格增量刷新。
+        """
         try:
-            self.plot_widget.curves_changed.disconnect(self._on_curves_changed_incremental)
+            self.plot_widget.curves_changed.disconnect(
+                self._on_curves_changed_incremental
+            )
         except (TypeError, RuntimeError):
             pass
         if self.search_bar is not None:
             try:
-                self.plot_widget.curves_changed.disconnect(self.search_bar._on_curves_changed)
+                self.plot_widget.curves_changed.disconnect(
+                    self.search_bar._on_curves_changed
+                )
             except (TypeError, RuntimeError):
                 pass
+
+    def closeEvent(self, event):
+        """关闭时落盘并断开 curves_changed，避免重复打开导致信号连接累积"""
+        self._save_editor_state()
+        self._teardown()
         super().closeEvent(event)
 
     def remove_selected_variable(self):
