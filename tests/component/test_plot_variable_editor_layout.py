@@ -5,6 +5,8 @@ R3：列宽分布只在 resizeEvent 执行；构造/恢复几何后视口尺寸�
 补一次分布（singleShot(0) 等布局落定）。
 R4：_StyleCell 曾 setFixedHeight(28)，溢出行高（约 30）使内容整体偏下；
 改为填满单元格 + AlignVCenter。像素断言统一用 viewport 坐标系（P0-3）。
+R5（D20）：行高钉在 _ROW_HEIGHT，行内输入框高度由行高决定（框高 = 行高 −
+1 − 2×item padding），太矮会把 QLineEdit 压扁到字体行高上下只剩 1px。
 """
 
 import types
@@ -111,6 +113,31 @@ class TestShowDistribution:
             dlg2.deleteLater()
 
 
+class TestRowHeightAndInputBox:
+    def test_row_height_keeps_input_box_off_squashed(self, editor_env, qapp):
+        """D20：行高钉在 _ROW_HEIGHT，行内输入框不再被压到字体行高上下 1px。
+
+        框高由表格决定（单元格高 − 2×::item padding 6px），与 QLineEdit 自身的
+        sizeHint 无关；旧 30px 行高把框压到 17px（字体行高 15px，上下各 1px）。
+        这里只钉"高度杠杆生效 + 上下至少各留 2px"，不拍绝对像素（三平台字体不同）。
+        """
+        dlg, _pw = editor_env
+        dlg.resize(900, 600)
+        dlg.show()
+        settle()
+        table = dlg.var_table
+        assert table.rowHeight(0) == ed_mod._ROW_HEIGHT
+        for col in (2, 4, 5):
+            edit = table.cellWidget(0, col)
+            assert edit is not None
+            assert edit.height() > 20, (
+                f"列 {col} 输入框高 {edit.height()}，仍被压扁"
+            )
+            assert edit.height() >= edit.fontMetrics().height() + 4, (
+                f"列 {col} 输入框 {edit.height()}px 装不下 {edit.fontMetrics().height()}px 文本"
+            )
+
+
 class TestStyleCellAlignment:
     def test_style_cell_centered_not_fixed_height(self, editor_env, qapp):
         """样式格不再定高 28；控件按 sizeHint 居中（格中心 == 行中心）。
@@ -162,7 +189,7 @@ class TestStyleCellAlignment:
     def test_style_cell_item_band_click_opens_panel(
         self, editor_env, qapp, monkeypatch
     ):
-        """评审 P1-2：样式格控件只覆盖 ~17px，行内其余条带点击也要开面板。"""
+        """评审 P1-2：样式格控件只覆盖单元格内容区（约 25px），行内其余条带点击也要开面板。"""
         dlg, _pw = editor_env
         dlg.resize(900, 600)
         dlg.show()

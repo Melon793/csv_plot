@@ -91,6 +91,13 @@ _ELASTIC_MIN = {1: 140, 2: 120}
 _TRANSFORM_COLS = (4, 5)
 _TRANSFORM_COL_WIDTH = 84
 
+# 行高（D20）：单元格里 QLineEdit 的高度由表格决定，不由它自己的 sizeHint 决定 ——
+# 实测 框高 = 行高 − 1 − 2×「::item padding 6px」，QSS 的 padding 只吃内容区、
+# 不会把框撑高。默认 30px 行高把框压到 17px（字体行高 15），文字上下各只剩 1px；
+# 38px 给出 25px 框高（描边内 23px），文字上下各约 4px 且框本身不再低于自身的
+# 23px 自然高度。代价：600px 高的窗口可见整行从 11 行降到 9 行（viewport 345px）。
+_ROW_HEIGHT = 38
+
 # 列宽存盘 debounce：主窗销毁不走 closeEvent，拖宽后延迟落盘兜底（评审 P1-6）
 _COLUMN_SAVE_DELAY_MS = 400
 
@@ -238,7 +245,8 @@ class _StyleCell(QWidget):
 
     只负责视觉与命中；应用集中在面板 exec 返回后（共享组件红线）。
     R4（D19）：不定高，内容 AlignVCenter；Qt 按 sizeHint 定尺寸并落在
-    单元格内容区，固定 28px 会溢出 30px 行高使内容整体偏低 5px。
+    单元格内容区，固定高度会溢出把内容顶偏（旧版 setFixedHeight(28) 在
+    30px 行高下偏低 5px）。
     """
 
     clicked = Signal(str)
@@ -434,6 +442,8 @@ class PlotVariableEditorDialog(QDialog):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.var_table.setAlternatingRowColors(True)
+        # 行高（D20）：行内输入框的高度跟着行高走，见 _ROW_HEIGHT 注释
+        self.var_table.verticalHeader().setDefaultSectionSize(_ROW_HEIGHT)
         self.var_table.setStyleSheet(f"""
             QTableWidget {{
                 gridline-color: #d0d0d0;
@@ -450,6 +460,25 @@ class PlotVariableEditorDialog(QDialog):
             }}
             QCheckBox {{
                 font-size: 12px;
+            }}
+            /* 行内输入框（Legend 名 / Factor / Offset）：裸 QLineEdit 由平台样式
+               绘制，Win11 上是"上/左右几乎全白 + 底边一条深线"，白底表格里只看
+               得见那一条线；这里统一成与 theme.path_field_style() 同款的描边框，
+               跨平台一致。纵向留白交给行高（_ROW_HEIGHT），padding 只调左右：
+               Factor/Offset 列窄，4px 会再吃掉 4px 文本区（D13 的窄列取舍）。 */
+            QLineEdit {{
+                background-color: {theme.BG};
+                border: 1px solid #ccc;
+                border-radius: {theme.R_FIELD}px;
+                padding: 0 2px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {theme.ACCENT};
+            }}
+            QLineEdit:disabled {{
+                color: {theme.TEXT_MUTED};
+                background-color: #fafafa;
+                border-color: #e0e0e0;
             }}
             {theme.item_view_outline_qss("QTableWidget")}
         """)
@@ -1453,10 +1482,10 @@ class PlotVariableEditorDialog(QDialog):
     def on_cell_clicked(self, row, column):
         """单元格点击事件（C4）：样式格 item 区域补开面板。
 
-        色块/文字区域由 _StyleCell.clicked 处理；样式格控件按 sizeHint 定尺寸
-        （约 17px）且单元格上下有 padding，其余条带只拿到 item 点击——这里
-        补一条通道，保证整格可点（R4 去定高后评审 P1-2）。颜色列入口已撤
-        （D9），set_variable_color 实现保留供程序化调用。
+        色块/文字区域由 _StyleCell.clicked 处理；样式格控件只覆盖单元格内容区
+        （行高 _ROW_HEIGHT 减上下 padding 6，约 25px），其余条带只拿到 item
+        点击——这里补一条通道，保证整格可点（R4 去定高后评审 P1-2）。颜色列
+        入口已撤（D9），set_variable_color 实现保留供程序化调用。
         """
         if column != 3:
             return
