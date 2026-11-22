@@ -262,13 +262,15 @@ class PlotDataManager:
             if scene:
                 pw._update_header_for_curves()
     
-            special_limits = self.handle_single_point_limits(x_values, y_contiguous)
+            # F4（D15）：limits/视野一律按投影后的 y_plot 计算，否则复活
+            # 带回换算时限制仍按 raw 收紧，右键自动 Y 会被陈旧 limits 钳制
+            special_limits = self.handle_single_point_limits(x_values, y_plot)
             if special_limits:
                 min_x, max_x, min_y, max_y = special_limits
                 self._axis_manager._set_safe_y_range(min_y, max_y)
             else:
-                data_min_y = np.nanmin(y_contiguous)
-                data_max_y = np.nanmax(y_contiguous)
+                data_min_y = np.nanmin(y_plot)
+                data_max_y = np.nanmax(y_plot)
                 self._axis_manager._set_safe_y_range(data_min_y, data_max_y, set_limits=True)
     
                 # v5.x 修复问题 B：Y viewRange 基于“用户当前 viewRange 与新数据范围的交集”计算。
@@ -280,7 +282,7 @@ class PlotDataManager:
                 x_min = max(view_x_min, data_x_min)
                 x_max = min(view_x_max, data_x_max)
                 min_y, max_y = self._get_y_range_in_x_window(
-                    x_values, y_contiguous, x_min, x_max
+                    x_values, y_plot, x_min, x_max
                 )
                 self._axis_manager._set_safe_y_range(min_y, max_y, set_limits=False)
                 logger.debug(
@@ -845,6 +847,17 @@ class PlotDataManager:
             factor=factor,
             offset=offset,
         )
+        # F4：删曲线后按剩余可见集合收缩 Y limits（模板 scene 混有 demote
+        # 的格子；reload/隐藏页在批量窗口内由收尾统一重算，此处跳过）
+        if not getattr(pw, "_batch_adding", False):
+            mcm = getattr(pw, "_multi_curve_manager", None)
+            if mcm is not None:
+                try:
+                    mcm._update_axes_for_multi_curve(allow_y_expand=False)
+                except Exception:
+                    logger.debug(
+                        "demote 后 Y 范围重算失败: %s", var_name, exc_info=True
+                    )
         logger.debug(
             "[INVALID] demote_to_invalid: var=%s, color=%s, visible_pref=%s",
             var_name, color, visible_preference,

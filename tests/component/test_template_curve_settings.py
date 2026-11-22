@@ -44,6 +44,31 @@ class TestCollect:
 
 
 class TestApply:
+    def test_apply_transform_recomputes_y_limits(self, pw_env):
+        """X3/F4：模板先按 raw 画完再套换算，套用后 limits 必须覆盖投影值。"""
+        pw, host = pw_env
+        cfg = PlotConfig(
+            curves=["a"],
+            curve_settings={"a": {"factor": 2.0, "offset": -10.0}},
+        )
+        PlotConfigManager()._apply_plot_config(pw, cfg, host, 0)
+        lo, hi = pw.view_box.state["limits"]["yLimits"]
+        # a 原始 [1,2,3] → 投影 [-8,-6,-4]
+        assert lo <= -8.0 and hi >= -4.0
+        view_lo, view_hi = pw.view_box.viewRange()[1]
+        assert view_lo <= -8.0 + 1e-6 and view_hi >= -4.0 - 1e-6
+
+    def test_hidden_page_transform_limits_recomputed(self, pw_env):
+        """隐藏页 scene=False：finalize 按投影 y_data 重算 limits。"""
+        pw, host = pw_env
+        cfg = PlotConfig(
+            curves=["a"],
+            curve_settings={"a": {"factor": 2.0, "offset": -10.0}},
+        )
+        PlotConfigManager()._apply_plot_config(pw, cfg, host, 0, scene=False)
+        lo, hi = pw.view_box.state["limits"]["yLimits"]
+        assert lo <= -8.0 and hi >= -4.0
+
     def test_apply_restores_name_and_transform(self, pw_env):
         pw, host = pw_env
         cfg = PlotConfig(

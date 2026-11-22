@@ -618,6 +618,16 @@ class MultiCurveManager:
                                 logger.debug(
                                     "重建恢复换算失败: %s", var_name, exc_info=True
                                 )
+                    # add 路径按默认换算（raw）定过 limits；恢复换算后必须按
+                    # 投影数据重算，否则重建出的曲线被陈旧 limits 钳制（F4）
+                    if pinned_transform:
+                        try:
+                            self._update_axes_for_multi_curve(allow_y_expand=False)
+                        except Exception:
+                            logger.debug(
+                                "重建恢复换算后 Y 范围重算失败: %s",
+                                var_name, exc_info=True,
+                            )
                     if pinned_policy:
                         new_ci.symbol_policy = pinned_policy
                     if not pinned_visible:
@@ -1102,6 +1112,12 @@ class MultiCurveManager:
                 var_name, f, o, exc_info=True,
             )
             return False
+        # F4（D15）：limits 按投影后数据重算；视野落在新 limits 内则原样保留
+        # （连续调参不跳视图），超出则由 pyqtgraph 按新 limits 夹紧
+        try:
+            self._update_axes_for_multi_curve(allow_y_expand=False)
+        except Exception:
+            logger.debug("变换后 Y 范围重算失败: %s", var_name, exc_info=True)
         if not getattr(pw, "_batch_adding", False):
             pw.curves_changed.emit()
         if hasattr(pw, "_queue_ui_refresh"):
@@ -1528,7 +1544,8 @@ class MultiCurveManager:
                             all_data_max_y = np.nanmax(combined_y)
                             pw._set_safe_y_range(all_data_min_y, all_data_max_y, set_limits=True)
 
-                    special_limits = pw.handle_single_point_limits(x_values, y_values)
+                    # F4（D15）：视图扩张/单点兜底同样按投影后的 y_plot 计算
+                    special_limits = pw.handle_single_point_limits(x_values, y_plot)
                     if special_limits:
                         min_x, max_x, min_y, max_y = special_limits
                         has_other_curves = len(pw.curves) > 1
@@ -1545,11 +1562,11 @@ class MultiCurveManager:
                         # 窗口内看不到这些数据，不应以其全量范围扩张视野
                         window_mask = (x_values >= x_min) & (x_values <= x_max)
                         window_has_data = x_min <= x_max and bool(
-                            np.any(np.isfinite(y_values[window_mask]))
+                            np.any(np.isfinite(y_plot[window_mask]))
                             if window_mask.any() else False
                         )
 
-                        new_min_y, new_max_y = pw._get_y_range_in_x_window(x_values, y_values, x_min, x_max)
+                        new_min_y, new_max_y = pw._get_y_range_in_x_window(x_values, y_plot, x_min, x_max)
                         has_other_curves = len(pw.curves) > 1
 
                         if not has_other_curves:

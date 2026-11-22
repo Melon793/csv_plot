@@ -550,6 +550,17 @@ class PlotConfigManager(QObject):
             curve_settings = getattr(plot_config, "curve_settings", {}) or {}
             if curve_settings:
                 self._apply_curve_settings(plot_widget, curve_settings)
+                # F4（D15）：上面按默认换算画完曲线后才套换算，Y limits 仍是
+                # raw 范围；此处按投影数据重算并让视野纳入新数据（模板套用
+                # 是从零还原视图，允许扩张）。隐藏页由 _finalize_batch_add 收尾。
+                if scene:
+                    try:
+                        plot_widget._multi_curve_manager._update_axes_for_multi_curve()
+                    except Exception:
+                        logger.debug(
+                            "Plot[%d] 模板换算后 Y 范围重算失败",
+                            plot_index, exc_info=True,
+                        )
 
             # scene 路径的曲线绘制已各自刷新过 header；若新增了占位或还原了
             # 显示名，需再刷新一次让占位/自定义名进图例（demote/直写不刷 header）。
