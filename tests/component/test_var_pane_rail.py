@@ -285,6 +285,44 @@ class TestGeometryGuards:
         assert mw.main_splitter.sizes()[0] == target
         assert mw._var_pane_saved_width == target
         assert mw._message_text == EXPANDED_MSG
+        # 评审 r1 P1-1 回归：单 move 拖动（首 move 即末 move）也要走正常
+        # 分支的记忆逻辑 —— user_adjusted/default_width 更新，且下次
+        # resize 的定宽维持不得把新宽度拉回旧默认宽
+        assert mw.var_table_user_adjusted is True
+        assert mw.var_table_default_width == target
+        mw.layout_manager._apply_fixed_splitter_width()
+        QApplication.processEvents()
+        assert mw.main_splitter.sizes()[0] == target
+
+    def test_collapsed_manual_signal_without_mouse_stays_collapsed(self, rail_env):
+        """mouseButtons 守卫的真覆盖：无按键的 splitterMoved 不得自动展开。
+
+        本 Qt 版本 setSizes 不发射 splitterMoved，直接 emit 才能打到守卫。
+        """
+        mw, _ = rail_env
+        _collapse(mw)
+        mw.main_splitter.splitterMoved.emit(150, 1)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is True
+        assert mw.var_table_user_adjusted is False
+        assert mw.var_table_default_width != VAR_PANE_RAIL_WIDTH
+
+    def test_collapsed_signal_with_left_button_expands(self, rail_env, monkeypatch):
+        """守卫的另一侧：左键按住的 splitterMoved 即展开；合成信号没改几何，
+        sizes 仍 28，宽度记忆不得被 rail 宽污染。"""
+        mw, _ = rail_env
+        _collapse(mw)
+        monkeypatch.setattr(
+            QApplication, "mouseButtons",
+            staticmethod(lambda: Qt.MouseButton.LeftButton),
+        )
+        mw.main_splitter.splitterMoved.emit(150, 1)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is False
+        assert mw.var_table_default_width != VAR_PANE_RAIL_WIDTH
+        assert mw._var_pane_saved_width != VAR_PANE_RAIL_WIDTH
 
     def test_programmatic_setsizes_while_collapsed_no_auto_expand(self, rail_env):
         """程序化改宽（setSizes 实测不发 splitterMoved）不得触发自动展开/污染记忆。"""
@@ -466,6 +504,15 @@ class TestPersistence:
         QApplication.processEvents()
         assert settings.get_var_pane_width() == 350
 
+    def test_collapsed_single_move_drag_width_persisted(self, rail_env, qtbot):
+        """评审 r1 P1-1：折叠态单 move 拖出的宽度也要防抖落盘。"""
+        mw, settings = rail_env
+        _collapse(mw)
+        target = max(400, mw.left_widget.minimumSizeHint().width() + 50)
+        _drag_handle_to(mw, target)
+        qtbot.wait(450)
+        assert settings.get_var_pane_width() == target
+
     def test_missing_keys_default(self, isolated_settings):
         assert isolated_settings.get_var_pane_collapsed() is False
         assert isolated_settings.get_var_pane_width() is None
@@ -540,11 +587,18 @@ class TestStartupRestore:
         finally:
             _close_window(mw, qapp)
 
-    def test_restore_collapsed_announces(self, qapp, app_settings, monkeypatch, qtbot, tmp_path):
-        """启动恢复也走统一入口：播报与手动折叠同规格（首次带 Ctrl+O 提示）。"""
+    def test_restore_collapsed_announces_without_consuming_first_hint(
+        self, qapp, app_settings, monkeypatch, qtbot, tmp_path
+    ):
+        """启动恢复走统一入口同规格播报，但不消耗首次 Ctrl+O 提示额度
+        （评审 r1 P2-3：构造期播报可能被 CLI 加载消息即刻覆盖）。"""
         _seed_raw_ini(tmp_path, monkeypatch, [("var_pane/collapsed", "true")])
         mw = _build_window(monkeypatch, qtbot)
         try:
+            assert mw._message_text == COLLAPSED_MSG
+            assert mw._var_pane_collapse_announced is False
+            _expand(mw)
+            _collapse(mw)
             assert mw._message_text == COLLAPSED_MSG_FIRST
         finally:
             _close_window(mw, qapp)

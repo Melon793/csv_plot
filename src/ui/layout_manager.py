@@ -425,23 +425,28 @@ class LayoutManager(MainWindowBaseManager):
             # 折叠期不写宽度记忆：28 不是用户期望的展开宽度，写进去会让
             # var_table_default_width / 持久化宽度被 rail 宽度污染。
             # 只有真鼠标拖动（左键按住）才算「折叠态拖手柄即展开」——
-            # toggle_plot_area 等程序化 setSizes 不带按键，不得触发自动展开
-            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-                sizes = mw.main_splitter.sizes()
-                if sizes and sizes[0] > VAR_PANE_RAIL_WIDTH:
-                    # 用户拖出来的宽度优先于折叠时记住的宽度
-                    mw._var_pane_saved_width = sizes[0]
-                self.set_var_pane_collapsed(False, reason="handle_drag")
-            return
+            # 程序化改宽不带按键，不得触发自动展开
+            if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+                return
+            sizes = mw.main_splitter.sizes()
+            if sizes and sizes[0] > VAR_PANE_RAIL_WIDTH:
+                # 预捕获拖动当下宽度（emit 时已被 splitter 钳制，非中间值）：
+                # 展开的 setSizes 用它，避免 mid-drag 被拉回旧记忆宽
+                mw._var_pane_saved_width = sizes[0]
+            self.set_var_pane_collapsed(False, reason="handle_drag")
+            # 展开后落入正常分支：单 move 拖动（首 move 即末 move，快速一甩）
+            # 也要走宽度记忆＋防抖落盘，否则新宽度下次 resize 被旧默认宽拉回
         mw.var_table_user_adjusted = True
         mw._splitter_ready = True
 
         sizes = mw.main_splitter.sizes()
-        if len(sizes) >= 1:
+        # 只记真展开宽：rail 宽 28 不得进记忆（合成信号/极端钳制的兜底）
+        if len(sizes) >= 1 and sizes[0] > VAR_PANE_RAIL_WIDTH:
             mw.var_table_default_width = sizes[0]
-        # D12：用户拖出的展开宽度防抖落盘（拖动期间 splitterMoved 连发，
-        # 不能每发一次就 sync 一次磁盘）
-        self._schedule_var_pane_width_save()
+            mw._var_pane_saved_width = sizes[0]
+            # D12：用户拖出的展开宽度防抖落盘（拖动期间 splitterMoved 连发，
+            # 不能每发一次就 sync 一次磁盘）
+            self._schedule_var_pane_width_save()
 
     def _schedule_var_pane_width_save(self):
         """400ms 防抖持久化展开宽度。定时器 parented 到 mw（禁三参
@@ -636,7 +641,9 @@ class LayoutManager(MainWindowBaseManager):
             with QSignalBlocker(splitter):
                 splitter.setSizes([width, max(total - width, 0)])
         logger.info("[LAYOUT] 变量区%s (reason=%s)", "折叠" if collapsed else "展开", reason)
-        self._announce_var_pane_state(collapsed)
+        # 启动恢复不消耗首次提示：构造期播报可能即刻被 CLI 加载消息覆盖，
+        # 用户没看到 Ctrl+O 提示就把本会话额度空耗掉（评审 r1 P2-3）
+        self._announce_var_pane_state(collapsed, with_first_hint=(reason != "restore"))
         # D12：折叠态即写即持久化；折叠时连同记住的展开宽度一起落盘
         settings = AppSettings()
         settings.set_var_pane_collapsed(collapsed)
@@ -649,12 +656,12 @@ class LayoutManager(MainWindowBaseManager):
             not getattr(self.mw, "_var_pane_collapsed", False), reason=reason
         )
 
-    def _announce_var_pane_state(self, collapsed: bool) -> None:
+    def _announce_var_pane_state(self, collapsed: bool, *, with_first_hint: bool = True) -> None:
         """播报单函数：各入口同规格；首次折叠附带 Ctrl+O 副作用提示。"""
         mw = self.mw
         if collapsed:
             text = "变量区已折叠（Ctrl+B 展开）"
-            if not getattr(mw, "_var_pane_collapse_announced", False):
+            if with_first_hint and not getattr(mw, "_var_pane_collapse_announced", False):
                 text += "；导入文件可用 Ctrl+O"
                 mw._var_pane_collapse_announced = True
         else:
@@ -1246,6 +1253,7 @@ class LayoutManager(MainWindowBaseManager):
         etype = event.type()
         if (
             etype == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
             and hasattr(mw, "main_splitter")
             and obj is mw.main_splitter.handle(1)
         ):
