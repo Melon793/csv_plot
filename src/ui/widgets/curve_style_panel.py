@@ -473,9 +473,30 @@ def build_style_panel_widget(
         ("数据点", symbol_items, symbol_policy, "symbol_policy"),
         ("样式", preset_items, line_preset, "line_preset"),
     ):
-        cap = QLabel(title, host)
-        cap.setStyleSheet("color: palette(mid);")
-        vbox.addWidget(cap)
+        if key == "line_preset":
+            # 性能已知限制行内注（2026-11-21 拍板 C）：非实线 pen 走
+            # drawPath 描边，大数据量滚轮显著慢于实线；标题行右侧空白
+            # 容纳小注，零新增高度。出处 docs/help.md 已知限制。
+            cap_row = QWidget(host)
+            cap_lay = QHBoxLayout(cap_row)
+            cap_lay.setContentsMargins(0, 0, 0, 0)
+            cap_lay.setSpacing(6)
+            cap = QLabel(title, cap_row)
+            cap.setStyleSheet("color: palette(mid);")
+            note = QLabel("(大数据量建议实线)", cap_row)
+            if note.font().pointSizeF() > 0:
+                note_font = note.font()
+                note_font.setPointSizeF(note_font.pointSizeF() - 1)
+                note.setFont(note_font)
+            note.setStyleSheet("color: palette(mid);")
+            cap_lay.addWidget(cap)
+            cap_lay.addWidget(note)
+            cap_lay.addStretch(1)
+            vbox.addWidget(cap_row)
+        else:
+            cap = QLabel(title, host)
+            cap.setStyleSheet("color: palette(mid);")
+            vbox.addWidget(cap)
         seg = _SegmentedControl(
             items, cur, lambda v, k=key: _pick(k, v), parent=host
         )

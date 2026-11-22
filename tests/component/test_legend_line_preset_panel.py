@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QLabel, QPushButton
 
 from tests.fixtures.waits import settle
 
@@ -83,3 +83,20 @@ def test_batch_preset_apply_and_announce(preset_plot):
     assert pw.curves["v"].line_preset == LINE_PRESET_DASH
     assert pw.curves["w"].line_preset == LINE_PRESET_DASH
     assert msgs == ["已修改 2 个变量的样式：虚线"]
+
+
+def test_style_caption_has_inline_perf_note(preset_plot):
+    """「样式」标题行右侧常驻性能小注：同行、更小字号、行宽不超面板。"""
+    pw = preset_plot
+    panel = pw.legend_label._build_style_panel_widget("v", {}, [])
+    labels = panel.findChildren(QLabel)
+    note = next((l for l in labels if l.text() == "(大数据量建议实线)"), None)
+    cap = next((l for l in labels if l.text() == "样式"), None)
+    assert note is not None and cap is not None
+    panel.layout().activate()
+    assert note.y() == cap.y()  # 同一行，零新增高度
+    if note.font().pointSizeF() > 0 and cap.font().pointSizeF() > 0:
+        assert note.font().pointSizeF() < cap.font().pointSizeF()
+    row = note.parentWidget()
+    assert row.sizeHint().width() <= panel.sizeHint().width()  # 不换行
+    panel.deleteLater()
