@@ -742,9 +742,15 @@ class _PageDirectoryPopup(QWidget):
             anchor.mapToGlobal(QPoint(0, 0))
         ) or QApplication.primaryScreen()
         avail = screen.availableGeometry()
+        anchor_top = anchor.mapToGlobal(QPoint(0, 0)).y()
         anchor_bottom = anchor.mapToGlobal(QPoint(0, anchor.height())).y()
         max_rows_height = max(120, avail.bottom() - anchor_bottom - 10 - chrome)
         rows_h = min(rows_height, max_rows_height)
+        flip_up = anchor_bottom + 4 + rows_h + chrome > avail.bottom() - 4
+        if flip_up:
+            # 上翻后可视预算在锚点上方，不能再按下方剩余空间截行高
+            max_rows_height = max(120, anchor_top - avail.top() - 10 - chrome)
+            rows_h = min(rows_height, max_rows_height)
         self._scroll.setFixedHeight(rows_h)
         # 显式定高定宽：adjustSize 会被 QScrollArea 的 expanding sizeHint
         # 干扰（单页时多撑 29px 全灌进分隔线块，形成死区）
@@ -757,8 +763,7 @@ class _PageDirectoryPopup(QWidget):
             QPoint(anchor.width() - self.width(), anchor.height() + 4)
         )
         pos.setX(max(avail.left() + 4, min(pos.x(), avail.right() - self.width() - 4)))
-        anchor_top = anchor.mapToGlobal(QPoint(0, 0)).y()
-        if pos.y() + self.height() > avail.bottom() - 4:
+        if flip_up:
             pos.setY(anchor_top - self.height() - 4)   # 下方放不下 → 上翻
         pos.setY(max(avail.top() + 4, pos.y()))
         self.move(pos)
@@ -1054,9 +1059,10 @@ class PlotTabsWidget(QTabWidget):
         left = right = 0
         for index in range(bar.count()):
             rect = bar.tabRect(index)
+            # right()==0 / left()==width-1 时仍有一列像素可见，不算隐藏
             if rect.right() < 0:
                 left += 1
-            elif rect.left() > width:
+            elif rect.left() >= width:
                 right += 1
         return left, right
 

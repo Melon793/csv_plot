@@ -873,3 +873,47 @@ def test_dir_popup_flips_above_when_below_screen_edge(tabs, qtbot, qapp):
     assert popup.y() >= screen.top()
     popup.hide()
     tabs.move(0, 0)
+
+
+def test_dir_popup_flip_up_recomputes_height_from_above_space(
+    tabs, qtbot, qapp, monkeypatch
+):
+    """上翻后行高预算＝锚点上方空间，不得再按下方剩余截成 120px。"""
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QApplication
+
+    class _FakeScreen:
+        def availableGeometry(self):
+            return QRect(0, 0, 800, 600)
+
+    monkeypatch.setattr(QApplication, "screenAt", lambda *a: _FakeScreen())
+    _add_pages(tabs, MAX_PAGES)
+    tabs.move(0, 560)     # 锚点贴 800×600 假屏幕底缘
+    qapp.processEvents()
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    anchor_top = tabs._dir_btn.mapToGlobal(QPoint(0, 0)).y()
+    assert anchor_top >= 560
+    expected_rows = min(MAX_PAGES * 26, max(120, anchor_top - 10 - 45))
+    assert popup._scroll.height() == expected_rows, "上翻后应按上方空间重算行高"
+    assert popup.height() == expected_rows + 9 + 26 + 10
+    assert popup.y() + popup.height() <= anchor_top
+    popup.hide()
+    tabs.move(0, 0)
+
+
+def test_hidden_tab_counts_single_pixel_boundary(tabs, qapp, monkeypatch):
+    """right()==0 / left()==width-1 仍有一列像素可见不算隐藏；left()==width 零像素须计右隐。"""
+    from PySide6.QtCore import QRect
+
+    _add_pages(tabs, 4)
+    qapp.processEvents()
+    bar = tabs.tabBar()
+    width = bar.width()
+    rects = [
+        QRect(-100, 0, 100, 30),        # right()=-1：完全在左视野外
+        QRect(-99, 0, 100, 30),         # right()=0：仍露 1px
+        QRect(width - 1, 0, 100, 30),   # left=width-1：仍露 1px
+        QRect(width, 0, 100, 30),       # left=width：零像素
+    ]
+    monkeypatch.setattr(bar, "tabRect", lambda index: rects[index])
+    assert tabs._hidden_tab_counts() == (1, 1)
