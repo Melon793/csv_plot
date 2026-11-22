@@ -1626,10 +1626,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.curves_changed.emit()
 
     def demote_to_invalid(
-        self, var_name: str, color: str, visible_preference: bool = True
+        self, var_name: str, color: str, visible_preference: bool = True,
+        *, display_name: str | None = None,
+        factor: float | None = None, offset: float | None = None,
     ) -> None:
         """把不可绘制的变量降级为失效占位 → 委托到 PlotDataManager（不 emit）"""
-        self._plot_data_manager.demote_to_invalid(var_name, color, visible_preference)
+        self._plot_data_manager.demote_to_invalid(
+            var_name, color, visible_preference,
+            display_name=display_name, factor=factor, offset=offset,
+        )
 
     def clear_current_plot(self) -> None:
         """清当前子图 + 播报（右键菜单与双击中键两个用户入口共用）。

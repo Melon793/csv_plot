@@ -37,6 +37,7 @@ from src.core.data_types import (
     step_mode_for,
 )
 from src.core.logger import get_logger
+from src.core.curve_transform import project_y
 
 logger = get_logger("widget.plot_data")
 
@@ -206,6 +207,12 @@ class PlotDataManager:
             else:
                 color = DEFAULT_CURVE_COLOR
             initial_visible = True if revive_ref is None else revive_ref.visible_preference
+            # 编辑器强化轮 D3/D6：复活带回显示名/换算；投影收口在构造点
+            # （y_raw 持原始值，重投影只从 y_raw 出发防叠乘）
+            _dn = revive_ref.display_name if revive_ref is not None else ""
+            _f = revive_ref.factor if revive_ref is not None else 1.0
+            _o = revive_ref.offset if revive_ref is not None else 0.0
+            y_plot = project_y(y_contiguous, _f, _o, y_format or '')
             _pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             # 枚举通道自动阶梯（decide_initial_draw_mode：O(1) 元数据查表，
             # CSV/Excel 恒 'auto'）。构造时直接传 stepMode，避免事后 setData
@@ -216,7 +223,7 @@ class PlotDataManager:
             # 原行为一致）；含 NaN（ragged CSV 短通道尾部补 NaN）时自动切 'finite'
             # 断线，避免 NaN 坐标进入 Qt 光栅化产生平台相关的横线伪影。
             curve = pw.plot_item.plot(
-                x_values, y_contiguous, pen=_pen, name=var_name,
+                x_values, y_plot, pen=_pen, name=var_name,
                 stepMode=step_mode_for(initial_mode),
             )
     
@@ -225,7 +232,11 @@ class PlotDataManager:
                 var_name=var_name,
                 curve=curve,
                 x_data=x_values,
-                y_data=y_contiguous,
+                y_data=y_plot,
+                y_raw=y_contiguous,
+                display_name=_dn,
+                factor=_f,
+                offset=_o,
                 original_index=original_index,
                 color=color,
                 y_format=y_format or '',
@@ -793,7 +804,9 @@ class PlotDataManager:
         return invalid.pop(var_name)
 
     def demote_to_invalid(
-        self, var_name: str, color: str, visible_preference: bool = True
+        self, var_name: str, color: str, visible_preference: bool = True,
+        *, display_name: str | None = None,
+        factor: float | None = None, offset: float | None = None,
     ) -> None:
         """把不可绘制的变量降级为失效占位（reload / 模板应用调用）。
 
@@ -803,6 +816,10 @@ class PlotDataManager:
         + ``curves.clear()`` 清掉，demote 在重建循环内按 saved_state 的
         color/visible 落 dict，时序自洽。逐条不 emit curves_changed（防循环内
         信号回环），由调用方在收尾统一补发（§4.5）。
+
+        编辑器强化轮 D6：display_name/factor/offset 显式传入优先（reload
+        场景曲线已清空，靠 saved_state 接力）；缺省时从仍在 curves 里的
+        旧 ci 捕获（模板应用场景），再缺省落默认值。
         """
         pw = self.pw
         invalid = pw.invalid_curves
@@ -810,6 +827,13 @@ class PlotDataManager:
         assert not (var_name in pw.curves and var_name in invalid), (
             f"变量 {var_name} 同时在 curves 与 invalid_curves"
         )
+        old_ci = pw.curves.get(var_name)
+        if display_name is None:
+            display_name = old_ci.display_name if old_ci is not None else ""
+        if factor is None:
+            factor = old_ci.factor if old_ci is not None else 1.0
+        if offset is None:
+            offset = old_ci.offset if old_ci is not None else 0.0
         if var_name in pw.curves:
             # 非 reload 场景（模板应用）可能曲线仍在：先轻量移除
             self._remove_single_curve_light(var_name)
@@ -817,6 +841,9 @@ class PlotDataManager:
             var_name=var_name,
             color=color or "gray",
             visible_preference=bool(visible_preference),
+            display_name=display_name,
+            factor=factor,
+            offset=offset,
         )
         logger.debug(
             "[INVALID] demote_to_invalid: var=%s, color=%s, visible_pref=%s",

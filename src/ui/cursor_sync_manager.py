@@ -14,6 +14,7 @@ from src.core.config import (
     compute_global_x_limits,
 )
 from src.core.data_types import DRAW_MODE_SOURCE_USER, LINE_PRESET_AUTO, step_mode_for
+from src.core.curve_transform import reproject
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
@@ -818,6 +819,11 @@ class CursorSyncManager(MainWindowBaseManager):
                                 != LINE_PRESET_AUTO
                                 else None
                             ),
+                            # 编辑器强化轮 D3/D6：显示名/换算跨 reload 接力
+                            # （demote 发生在 curves.clear() 之后，拿不到旧 ci）
+                            "display_name": ci.display_name,
+                            "factor": ci.factor,
+                            "offset": ci.offset,
                         }
                         for var_name, ci in widget.curves.items()
                     }
@@ -855,7 +861,10 @@ class CursorSyncManager(MainWindowBaseManager):
                             if not _var_is_plottable(var_name):
                                 # 失效 → 降级为占位（取代旧的 continue 静默删除）
                                 widget.demote_to_invalid(
-                                    var_name, state["color"], state["visible"]
+                                    var_name, state["color"], state["visible"],
+                                    display_name=state.get("display_name", ""),
+                                    factor=state.get("factor", 1.0),
+                                    offset=state.get("offset", 0.0),
                                 )
                                 logger.debug(
                                     "[RELOAD] Plot[%d] 变量 %s 失效，降级为占位",
@@ -896,6 +905,28 @@ class CursorSyncManager(MainWindowBaseManager):
                                     pinned_preset = state.get("line_preset")
                                     if pinned_preset:
                                         widget.curves[var_name].line_preset = pinned_preset
+                                    # 编辑器强化轮 D3/D6：恢复显示名/换算。
+                                    # 重投影从 y_raw 出发 + 无条件 setData（不依赖
+                                    # pinned_mode 分支）；循环内不逐条 emit
+                                    ci_rs = widget.curves[var_name]
+                                    ci_rs.display_name = state.get("display_name", "")
+                                    rs_f = state.get("factor", 1.0)
+                                    rs_o = state.get("offset", 0.0)
+                                    if rs_f != 1.0 or rs_o != 0.0:
+                                        ci_rs.factor = rs_f
+                                        ci_rs.offset = rs_o
+                                        reproject(ci_rs)
+                                        if ci_rs.curve is not None:
+                                            try:
+                                                ci_rs.curve.setData(
+                                                    ci_rs.x_data, ci_rs.y_data,
+                                                    stepMode=step_mode_for(ci_rs.draw_mode),
+                                                )
+                                            except Exception:
+                                                logger.debug(
+                                                    "reload 恢复换算失败: %s",
+                                                    var_name, exc_info=True,
+                                                )
                                     # 恢复可见性
                                     widget.curves[var_name].visible = state["visible"]
                                     if widget.curves[var_name].curve is not None:
@@ -913,7 +944,10 @@ class CursorSyncManager(MainWindowBaseManager):
                                 # quiet=True 保证失败不在 reload 中途弹模态框
                                 # （半重建状态 + 嵌套事件循环，行为未定义）。
                                 widget.demote_to_invalid(
-                                    var_name, state["color"], state["visible"]
+                                    var_name, state["color"], state["visible"],
+                                    display_name=state.get("display_name", ""),
+                                    factor=state.get("factor", 1.0),
+                                    offset=state.get("offset", 0.0),
                                 )
                                 logger.debug(
                                     "[RELOAD] Plot[%d] 变量 %s 重建失败，降级为占位",

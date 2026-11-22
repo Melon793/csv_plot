@@ -45,6 +45,7 @@ from src.core.data_types import (
     step_mode_for,
 )
 from src.core.logger import get_logger
+from src.core.curve_transform import project_y, reproject
 from src.ui.drag_drop import (
     ANCHOR_SCHEME,
     COLOR_SCHEME,
@@ -572,6 +573,11 @@ class MultiCurveManager:
                     else None
                 )
                 pinned_visible = ci.visible
+                # 编辑器强化轮 D3/D6：显示名/换算同属用户设置，重建不得丢
+                pinned_display_name = ci.display_name
+                pinned_factor = ci.factor
+                pinned_offset = ci.offset
+                pinned_transform = pinned_factor != 1.0 or pinned_offset != 0.0
                 success = pw.add_variable_to_plot(
                     var_name,
                     skip_existence_check=True,
@@ -580,6 +586,23 @@ class MultiCurveManager:
                 )
                 if success and var_name in pw.curves:
                     new_ci = pw.curves[var_name]
+                    new_ci.display_name = pinned_display_name
+                    if pinned_transform:
+                        new_ci.factor = pinned_factor
+                        new_ci.offset = pinned_offset
+                        # 重投影只从 y_raw 出发；setData 无条件补（下方
+                        # pinned_mode 分支不覆盖无钉住绘制方式的场景）
+                        reproject(new_ci)
+                        if new_ci.curve is not None:
+                            try:
+                                new_ci.curve.setData(
+                                    new_ci.x_data, new_ci.y_data,
+                                    stepMode=step_mode_for(new_ci.draw_mode),
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "重建恢复换算失败: %s", var_name, exc_info=True
+                                )
                     if pinned_policy:
                         new_ci.symbol_policy = pinned_policy
                     if not pinned_visible:
@@ -613,6 +636,7 @@ class MultiCurveManager:
                             )
                 if success and var_name in pw.curves and (
                     not pinned_visible or pinned_policy or pinned_preset or pinned_mode
+                    or pinned_transform or pinned_display_name
                 ):
                     # 评审 B-1/NB-1：add 内部已用瞬态 visible=True/auto 投影建过
                     # legend 并 emit curves_changed；全部恢复（含 draw_mode）完成后
@@ -1189,6 +1213,11 @@ class MultiCurveManager:
                         initial_visible = (
                             True if revive_ref is None else revive_ref.visible_preference
                         )
+                        # 编辑器强化轮 D3/D6：复活带回显示名/换算，投影收口构造点
+                        _dn = revive_ref.display_name if revive_ref is not None else ""
+                        _f = revive_ref.factor if revive_ref is not None else 1.0
+                        _o = revive_ref.offset if revive_ref is not None else 0.0
+                        y_plot = project_y(y_contiguous, _f, _o, y_format or '')
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
                         # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
                         initial_mode = self._data_manager.decide_initial_draw_mode(
@@ -1198,7 +1227,7 @@ class MultiCurveManager:
                         # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
                         # 避免 NaN 坐标进入 Qt 光栅化产生横线伪影。
                         curve = pw.plot_item.plot(
-                            x_values, y_contiguous, pen=pen, name=var_name,
+                            x_values, y_plot, pen=pen, name=var_name,
                             stepMode=step_mode_for(initial_mode),
                         )
 
@@ -1206,7 +1235,11 @@ class MultiCurveManager:
                             var_name=var_name,
                             curve=curve,
                             x_data=x_values,
-                            y_data=y_contiguous,
+                            y_data=y_plot,
+                            y_raw=y_contiguous,
+                            display_name=_dn,
+                            factor=_f,
+                            offset=_o,
                             original_index=original_index,
                             color=color,
                             y_format=y_format or '',
@@ -1312,6 +1345,11 @@ class MultiCurveManager:
             )
 
             initial_visible = True if revive_ref is None else revive_ref.visible_preference
+            # 编辑器强化轮 D3/D6：复活带回显示名/换算，投影收口构造点
+            _dn = revive_ref.display_name if revive_ref is not None else ""
+            _f = revive_ref.factor if revive_ref is not None else 1.0
+            _o = revive_ref.offset if revive_ref is not None else 0.0
+            y_plot = project_y(y_values, _f, _o, y_format or '')
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
             initial_mode = self._data_manager.decide_initial_draw_mode(
@@ -1321,7 +1359,7 @@ class MultiCurveManager:
             # 含 NaN（ragged CSV 尾部补 NaN）自动断线，避免 NaN 坐标进入 Qt
             # 光栅化产生横线伪影。
             curve = pw.plot_item.plot(
-                x_values, y_values,
+                x_values, y_plot,
                 pen=pen,
                 name=var_name,
                 stepMode=step_mode_for(initial_mode),
@@ -1331,7 +1369,11 @@ class MultiCurveManager:
                 var_name=var_name,
                 curve=curve,
                 x_data=x_values,
-                y_data=y_values,
+                y_data=y_plot,
+                y_raw=y_values,
+                display_name=_dn,
+                factor=_f,
+                offset=_o,
                 original_index=original_index,
                 color=color,
                 y_format=y_format or '',

@@ -243,9 +243,22 @@ class CurveInfo:
     # 样式预设（线宽+线型打包）：'auto' | 'bold' | 'dash' | 'dot'，
     # 与 draw_mode 同口径（会话内 + reload saved_state 恢复钉住值）
     line_preset: str = LINE_PRESET_AUTO
+    # 自定义显示名 / 线性变换（编辑器强化轮 D2/D3）：
+    # display_name 空 = 默认 "var (unit)"，非空整串替换（legend 消费）；
+    # y' = factor*y + offset 统一投影进 y_data，y_raw 持原始值，
+    # 重投影只从 y_raw 出发防叠乘。非数值格式（enum/date/s）禁用变换
+    # （见 core.curve_transform）。模板经 curve_settings 持久化（D5）。
+    display_name: str = ""
+    factor: float = 1.0
+    offset: float = 0.0
+    y_raw: np.ndarray | None = None
 
     def __post_init__(self):
         """自动从 x_data 计算缓存的 x_min / x_max 和 point_density"""
+        # y_raw 缺省回落 y_data：兼容不感知变换的既有构造点/测试夹具
+        # （默认 factor/offset 下二者等价）
+        if self.y_raw is None:
+            self.y_raw = self.y_data
         self._refresh_x_cache()
 
     def _refresh_x_cache(self):
@@ -286,6 +299,11 @@ class InvalidCurveRef:
     var_name: str
     color: str = "gray"
     visible_preference: bool = True  # 复活时恢复用户上次显隐选择
+    # 编辑器强化轮 D6：失效占位一并保留显示名/换算设置，复活时原样带回
+    # （模板 curve_settings 按名为键存储，占位期间不丢）
+    display_name: str = ""
+    factor: float = 1.0
+    offset: float = 0.0
 
 
 @dataclass
