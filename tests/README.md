@@ -81,8 +81,16 @@ unit 11.9s → 8.4s）。选型结论：
 - 本机 10 核（4 性能核）：日常直接用默认 `-n auto`；需要给后台任务留余量时再显式 `-n 4`
   （更慢，不作默认）。另：同时跑两套全量（或与并行会话的 pytest 并发）会互相拖死，
   一次只跑一套；
-- 3.14 + PySide6 6.12 的 **Windows 基线与 Nuitka 打包未验证**；下次 Windows 构建前
-  先在该环境跑一次 `uv sync && uv run pytest`。
+- **Windows 基线（2026-11-22，`win10_env` 2 vCPU / Python 3.13.18 / PySide6 6.12.0 /
+  pandas 3.1.1，`-n auto` = 2 worker）**：`2919 passed / 4 failed / 1 skipped / 112.8s`。
+  4 个失败均为既有平台差异、非本次升级引入：字体更宽导致轴抽屉 485>440、预览行
+  459<540；用例硬编码 POSIX 路径（`/Volumes/...` 被归一成 `C:\Volumes\...`）；
+  `test_new_tab_aligns_anchor_on_creation` 单跑也失败（首可见行 0.0 vs 锚点 0.4，
+  疑为切页时视图未完成布局，待查）。skip 1 条为「仅 POSIX：反斜杠是合法文件名字符」。
+- **Python 3.14 在 Windows 暂不可用**：`zstd==1.5.7.2` 无 cp314 Windows 轮子，
+  1.5.7.3 已被上游 yank（not thread safe），`uv sync` 会回退源码构建并因缺 MSVC
+  失败。Windows 侧暂用 `uv sync --python 3.13` + `uv run --python 3.13 pytest`
+  （`--python` 覆盖 `.python-version`）。Nuitka 打包仍未验证。
 
 **两道护栏**（`pyproject.toml` 的 `addopts` + `tests/conftest.py`）：
 
