@@ -549,11 +549,11 @@ class PlotVariableEditorDialog(QDialog):
         self.update_button_states()
 
     def _adjust_fixed_column_widths(self):
-        """定宽列（显示/样式/Factor/Offset）按内容自适应列宽。
+        """定宽列首帧自适应：col0/col3 按内容，col4/5 固定宽 84（D13）。
 
         首帧数据填充后执行一次（此时单元格控件已就位，宽度由表头 +
-        复选框/摘要格/_spinbox 实际内容决定，跨平台字体差异下不手工拍值）；
-        设下限防极端窄值，后续 reload 不重算以尊重用户手动拖拽。
+        复选框/摘要格实际内容决定，跨平台字体差异下不手工拍值）；
+        换算列例外——NoButtons 后按极值文本 sizeHint 会膨胀，固定窄宽。
         """
         for col in _FIXED_MIN_WIDTHS:
             self._width_guard = True
@@ -656,6 +656,15 @@ class PlotVariableEditorDialog(QDialog):
         """用户拖拽 → 该列转固定（退出弹性分配）；夹最小宽。"""
         if self._width_guard:
             return
+        if col in _TRANSFORM_COLS:
+            # D13 评审 P2-2：换算列定宽不可拖——读档会压回 84，拖宽只在本
+            # 会话生效属"自相矛盾"；直接压回，不入固定列、不触发存盘。
+            self._width_guard = True
+            try:
+                self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
+            finally:
+                self._width_guard = False
+            return
         if new < self._col_min[col]:
             self._width_guard = True
             try:
@@ -667,7 +676,14 @@ class PlotVariableEditorDialog(QDialog):
         self._width_save_timer.start()
 
     def _on_handle_double_clicked(self, col: int):
-        """双击分隔线：恢复弹性 + 内容自适应（D1）。"""
+        """双击分隔线：恢复弹性 + 内容自适应（D1）。换算列固定宽不可调。"""
+        if col in _TRANSFORM_COLS:
+            self._width_guard = True
+            try:
+                self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
+            finally:
+                self._width_guard = False
+            return
         self._user_fixed_cols.discard(col)
         self._width_guard = True
         try:
@@ -1352,9 +1368,16 @@ class PlotVariableEditorDialog(QDialog):
         super().done(result)
 
     def _save_editor_state(self):
-        """落盘窗口几何 + 列宽（幂等；done 与 closeEvent 双入口）。"""
-        self._save_geometry()
-        self._save_column_widths()
+        """落盘窗口几何 + 列宽（幂等；done 与 closeEvent 双入口）。
+
+        评审 P2-5：写盘异常不得让 done()/closeEvent 抛错（否则对话框关不掉），
+        只记 debug 日志。
+        """
+        try:
+            self._save_geometry()
+            self._save_column_widths()
+        except Exception:
+            logger.debug("编辑器状态落盘失败", exc_info=True)
 
     def _teardown(self):
         """断开 curves_changed 信号（幂等；done 与 closeEvent 双入口）。

@@ -136,3 +136,18 @@ class TestRecreateAndDemote:
         lo, hi = _limits(pw)
         assert hi == pytest.approx(4.0, abs=1e-9), "删掉大值曲线后 limits 未收缩"
         assert lo == pytest.approx(0.0, abs=1e-9)
+    def test_revive_with_transform_view_expansion_uses_projected(self, plot_factory):
+        """评审 P2-4：复活带换算时视图扩张须用投影 y_plot 而非 raw。"""
+        pw = plot_factory()
+        ci = _add_raw(pw)  # raw [1,2,3]
+        ci.factor, ci.offset = 2.0, 10.0
+        pw.demote_to_invalid("a", ci.color, ci.visible)
+        assert pw.add_variable_to_plot(
+            "a", x_values=np.arange(3, dtype=float),
+            y_values=np.array([1.0, 2.0, 3.0]),
+        )
+        new_ci = pw.curves["a"]
+        assert new_ci.factor == 2.0 and new_ci.offset == 10.0
+        view_lo, view_hi = _view_y(pw)
+        assert view_lo > 3.0, f"视图扩张误用原始值: {view_lo}"
+        assert view_lo <= 12.0 and view_hi >= 16.0

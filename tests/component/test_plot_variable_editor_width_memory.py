@@ -38,6 +38,12 @@ def editor_env(plot_factory, qapp, app_settings):
     if dlg.isVisible():
         dlg.close()
     dlg.deleteLater()
+    # 评审 P1-1：teardown close() 会经 closeEvent 把 333/固定列写回；配置目录
+    # 是会话级共享，不清键会污染同 worker 后续用例（顺序依赖）。显式回干净态。
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS, "")
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS, "")
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, "")
+    app_settings.sync()
 
 
 class TestTransformColumnLayout:
@@ -47,6 +53,16 @@ class TestTransformColumnLayout:
             spin = dlg.var_table.cellWidget(0, col)
             assert spin.buttonSymbols() == QAbstractSpinBox.ButtonSymbols.NoButtons
             assert spin.minimumWidth() == 60
+            assert dlg.var_table.columnWidth(col) == ed_mod._TRANSFORM_COL_WIDTH
+
+    def test_transform_col_drag_rejected(self, editor_env):
+        """评审 P2-2：换算列拖拽/双击被压回定宽，且不入固定列（防重开闪回）。"""
+        dlg, _pw = editor_env
+        for col in (4, 5):
+            dlg._on_section_resized(col, 84, 300)
+            assert dlg.var_table.columnWidth(col) == ed_mod._TRANSFORM_COL_WIDTH
+            assert col not in dlg._user_fixed_cols
+            dlg._on_handle_double_clicked(col)
             assert dlg.var_table.columnWidth(col) == ed_mod._TRANSFORM_COL_WIDTH
 
     def test_huge_value_does_not_widen_column(self, editor_env):
