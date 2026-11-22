@@ -1284,7 +1284,8 @@ class PlotVariableEditorDialog(QDialog):
     def _on_checkbox_changed(self, var_name, state):
         """复选框状态变化处理（统一版）
 
-        真实曲线切 ``CurveInfo.visible``（立即显隐）；失效占位切
+        真实曲线走 ``apply_curve_visibility`` 共享入口（legend/轴/光标 +
+        一次 curves_changed，与图例点名称同口径）；失效占位切
         ``InvalidCurveRef.visible_preference``（复活时生效，当前无曲线可显隐）。
         变量名两侧互斥（不变量），故按存在侧分派。
         """
@@ -1294,11 +1295,9 @@ class PlotVariableEditorDialog(QDialog):
         )
 
         if var_name in self.plot_widget.curves:
-            self.plot_widget.curves[var_name].visible = is_visible
-            ci = self.plot_widget.curves[var_name]
-            if ci.curve is not None:
-                ci.curve.setVisible(is_visible)
-            self.plot_widget._update_header_for_curves()
+            self.plot_widget._multi_curve_manager.apply_curve_visibility(
+                var_name, is_visible
+            )
             return
 
         invalid = getattr(self.plot_widget, "invalid_curves", None)
@@ -1489,10 +1488,21 @@ class PlotVariableEditorDialog(QDialog):
         if not color_cycle:
             return
 
-        if self.plot_widget.curves:
-            for idx, var_name in enumerate(self.plot_widget.curves.keys()):
-                color_name = color_cycle[idx % len(color_cycle)]
-                self._apply_color_to_curve(var_name, color_name)
+        pw = self.plot_widget
+        changed = 0
+        # 批量窗口：逐条改色只刷自身，收尾 emit 一次（评审 P1-10）
+        previous_batch = getattr(pw, "_batch_adding", False)
+        pw._batch_adding = True
+        try:
+            if pw.curves:
+                for idx, var_name in enumerate(pw.curves.keys()):
+                    color_name = color_cycle[idx % len(color_cycle)]
+                    if self._apply_color_to_curve(var_name, color_name):
+                        changed += 1
+        finally:
+            pw._batch_adding = previous_batch
+        if changed:
+            pw.curves_changed.emit()
 
         # 重新加载表格以更新颜色显示
         selected_row = self._get_selected_row()

@@ -207,7 +207,11 @@ class PandasTableModel(QAbstractTableModel):
             and orientation == Qt.Orientation.Horizontal
         ):
             col_name = str(self._df.columns[section])
-            return var_tooltip(col_name, self._units.get(col_name, ""))
+            # D14：数据表读原始值，不跟随编辑器显示换算（游标/标记统计已用投影值）
+            return (
+                var_tooltip(col_name, self._units.get(col_name, ""))
+                + "\n数值为原始值，不含编辑器中的显示换算"
+            )
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:

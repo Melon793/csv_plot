@@ -356,40 +356,33 @@ class MultiCurveManager:
             pw.update_legend_label("channel name")
 
     def toggle_curve_visibility_by_name(self, var_name: str):
-        """通过变量名切换曲线可见性
+        """通过变量名切换曲线可见性（图例名称点击/拖拽恢复共用入口）。
 
-        点击图例中的曲线名时调用，切换该曲线的显示/隐藏状态。
-        如果曲线对象失效（不在scene中），会尝试重新创建。
+        统一走 ``_apply_visibility``：差量更新 + 单次刷新 + 一次
+        curves_changed，与编辑器复选框共享同一语义（评审 P0-3 parity）。
 
         Args:
             var_name: 要切换可见性的变量名
         """
         pw = self.pw
-
         if var_name not in pw.curves:
             return
+        self._apply_visibility({var_name: not pw.curves[var_name].visible})
 
-        ci = pw.curves[var_name]
-        ci.visible = not ci.visible
-        new_visible = ci.visible
+    def apply_curve_visibility(self, var_name: str, visible: bool) -> bool:
+        """设置单曲线显隐的显式值入口（编辑器复选框等显式动作，F5）。
 
-        if ci.curve is not None:
-            curve_obj = ci.curve
-            try:
-                if curve_obj.scene() is not None:
-                    curve_obj.setVisible(new_visible)
-                else:
-                    self._recreate_curve(var_name)
-            except Exception:
-                self._recreate_curve(var_name)
+        与 toggle 同源，区别只在语义是「设为某值」而非取反；隐藏/显示都会
+        按可见集合重算 Y limits（显示允许扩张视野，隐藏不拉远用户视野）。
 
-        self.update_legend()
-
-        # 仅「显示」时允许按数据扩张视野；隐藏不新增可见数据，不拉远用户视野
-        self._update_axes_for_multi_curve(allow_y_expand=new_visible)
-
-        if pw.vline.isVisible():
-            pw.update_cursor_label()
+        Returns:
+            是否实际应用。变量不存在或可见性未变化返回 False。
+        """
+        pw = self.pw
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.visible == bool(visible):
+            return False
+        return self._apply_visibility({var_name: bool(visible)})
 
     def can_solo(self, var_name: str) -> bool:
         """「仅显示 var_name」是否会改变可见性（供菜单决定该项是否置灰）
@@ -408,13 +401,15 @@ class MultiCurveManager:
         return any(not ci.visible for ci in self.pw.curves.values())
 
     def _apply_visibility(self, targets: dict[str, bool]) -> bool:
-        """批量应用可见性：差量更新 + 单次刷新（solo / show all 共用）。
+        """批量应用可见性：差量更新 + 单次刷新（solo / show all / toggle /
+        编辑器复选框共用）。
 
         只动需要变化的曲线，收尾一次性刷新（legend + 轴 + 光标标签），
-        避免逐条切换导致的 N 次重绘；不 emit curves_changed（与左键切换
-        显隐同源，避免编辑器↔plot 信号回环；_recreate_curve 稀有路径会经
-        add_variable_to_plot 触发 emit，并在恢复钉住状态后补发一次对齐
-        投影——第 6 轮批次 B，与 toggle 同形的既有行为）。
+        避免逐条切换导致的 N 次重绘。收尾 emit 一次 ``curves_changed``
+        （批量窗口内抑制），让编辑器复选框/图例与真实态同步；编辑器回填
+        一律 QSignalBlocker，不会形成「编辑器↔plot」信号回环（评审 P0-3：
+        推翻此前「不 emit」的契约）。``_recreate_curve`` 稀有路径会经
+        add_variable_to_plot 额外触发一次 emit，不影响语义。
 
         Args:
             targets: 变量名 → 期望可见性（无需变化的项由本函数内部过滤）
@@ -449,6 +444,8 @@ class MultiCurveManager:
         )
         if pw.vline.isVisible():
             pw.update_cursor_label()
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
         return True
 
     def solo_curve_visibility(self, var_name: str) -> bool:
@@ -929,6 +926,10 @@ class MultiCurveManager:
             pw._last_cursor_update_time = 0
         if pw.vline.isVisible():
             pw.update_cursor_label()
+        # 与其余 style 入口（draw_mode/symbol/preset/display_name/transform）
+        # 同口径：通知编辑器就地刷色块/摘要；批量窗口内由调用方收尾统一 emit
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
         return True
 
     def apply_curve_draw_mode(self, var_name: str, draw_mode: str) -> bool:

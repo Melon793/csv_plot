@@ -781,3 +781,14 @@ class TestExportAndGeometry:
 
         assert VariableInfoDialog._instance is None
         assert dlg.worker.isRunning() is False, "线程必须停止，否则析构时崩溃"
+
+
+class TestRawValueNote:
+    def test_stats_group_tooltip_marks_raw_values(self, env):
+        """D14：统计读原始值，tooltip 明示不含编辑器显示换算。"""
+        dlg = VariableInfoDialog.popup(["speed"], parent=env.mw)
+        page = dlg._pages["speed"]
+        top = page.tree.topLevelItem(0)
+        assert top.text(0) == "统计特征"
+        assert "原始值" in top.toolTip(0)
+        assert "原始值" in top.toolTip(1)

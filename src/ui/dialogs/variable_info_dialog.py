@@ -726,6 +726,11 @@ class VarInfoPage(QWidget):
         # 统计特征置顶：这是用户最常看的内容，无需展开分组即可读到
         self._stats_item = QTreeWidgetItem(self.tree, ["统计特征", ""])
         self._stats_item.setFirstColumnSpanned(False)
+        # D14：统计读原始数据，不跟随编辑器里的显示换算；游标/标记统计
+        # 已用投影值，此处明示口径差异
+        _raw_note = "原始值，不含编辑器中的显示换算（factor/offset）"
+        self._stats_item.setToolTip(0, _raw_note)
+        self._stats_item.setToolTip(1, _raw_note)
         font = self._stats_item.font(0)
         font.setBold(True)
         self._stats_item.setFont(0, font)
