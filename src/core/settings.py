@@ -30,8 +30,9 @@ class ConfigKey(StrEnum):
     # 绘图变量编辑器窗口几何（QByteArray）：位置 + 大小，失效屏幕
     # （多显示器拔插后位置落已不存在的屏幕）由窗口侧校验拦截并回退
     PLOT_VARIABLE_EDITOR_GEOMETRY = "plot_variable_editor/geometry"
-    # 编辑器列宽（list[int]，6 列）与用户拖拽固定列（list[int]）：跨重启记忆，
-    # 不进模板（列宽是个人视图偏好，D1/D10）。类型不符视为无存档。
+    # 编辑器列宽（6 列）与用户拖拽固定列：跨重启记忆，不进模板（列宽是
+    # 个人视图偏好，D1/D10）。以 JSON 单字符串存储（同上 BLF_DB_NOTES 先例），
+    # 规避 ini 后端列表值跨进程读回类型不稳定（D12）；类型不符视为无存档。
     PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS = "plot_variable_editor/column_widths"
     PLOT_VARIABLE_EDITOR_FIXED_COLS = "plot_variable_editor/fixed_cols"
     # 曲线暂存区浮窗几何（QByteArray）：跨重启记忆；失效屏幕由窗口侧守卫
@@ -233,43 +234,87 @@ class AppSettings:
     def set_plot_variable_editor_geometry(self, geometry: Any) -> None:
         self._settings.setValue(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, geometry)
 
-    def get_plot_variable_editor_column_widths(self) -> Any:
+    @staticmethod
+    def _parse_int_list(raw: Any, *, min_value: int) -> list[int] | None:
+        """解析整数列表：JSON 串优先，兼容旧版直接写入的列表值（D12）。
+
+        ini 后端把 ``list[int]`` 写成复合键、跨进程读回类型不稳定（单元素
+        退化为 str、多元素为 list[str]），故新写入统一 JSON 单字符串。
+        读取侧同时吃：JSON 数组串 / 旧 list[int] / 旧 list[str] /
+        单元素退化 str / 逗号串。任一元素非法（bool/非数字/小于下限）
+        即整份视为无存档（返回 None），避免恢复出半截脏列宽。
+        """
+        if raw is None:
+            return None
+        if isinstance(raw, (list, tuple)):
+            items: list = list(raw)
+        elif isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return None
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, (int, float)) and not isinstance(data, bool):
+                # 旧 ini 单元素列表退化成裸数字串（如 "84"）
+                items = [data]
+            elif data is None:
+                # 旧 ini 遗留：QSettings 单元素列表退化成 str / 逗号串
+                items = [part for part in text.split(",") if part.strip()]
+            else:
+                return None
+        else:
+            return None
+        out: list[int] = []
+        for value in items:
+            if isinstance(value, bool):
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            if parsed < min_value:
+                return None
+            out.append(parsed)
+        return out
+
+    def get_plot_variable_editor_column_widths(self) -> list[int] | None:
         """读取编辑器列宽存档；无存档/类型不符/长度非法返回 None。
 
         防御口径同 geometry：ini 脏值（str/含非 int/负值）一律视为无存档，
         由窗口侧走默认初值，避免 restore 时抛异常或落极端窄列。
         """
-        widths = self._settings.value(ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS)
-        if not isinstance(widths, (list, tuple)) or not widths:
-            return None
-        out = []
-        for w in widths:
-            if isinstance(w, bool) or not isinstance(w, int) or w <= 0:
-                return None
-            out.append(int(w))
-        return out
+        return (
+            self._parse_int_list(
+                self._settings.value(ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS),
+                min_value=1,
+            )
+            or None
+        )
 
     def set_plot_variable_editor_column_widths(self, widths: Any) -> None:
         self._settings.setValue(
-            ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS, [int(w) for w in widths]
+            ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS,
+            json.dumps([int(w) for w in widths]),
         )
+        self._settings.sync()
 
-    def get_plot_variable_editor_fixed_cols(self) -> Any:
+    def get_plot_variable_editor_fixed_cols(self) -> list[int] | None:
         """读取用户拖拽固定列集合存档；类型不符返回 None（同列宽口径）。"""
-        cols = self._settings.value(ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS)
-        if not isinstance(cols, (list, tuple)):
-            return None
-        out = []
-        for c in cols:
-            if isinstance(c, bool) or not isinstance(c, int) or c < 0:
-                return None
-            out.append(int(c))
-        return out
+        return self._parse_int_list(
+            self._settings.value(ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS),
+            min_value=0,
+        )
 
     def set_plot_variable_editor_fixed_cols(self, cols: Any) -> None:
         self._settings.setValue(
-            ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS, [int(c) for c in cols]
+            ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS,
+            json.dumps([int(c) for c in cols]),
         )
+        self._settings.sync()
 
     def get_curve_shelf_geometry(self) -> Any:
         """读取暂存区浮窗几何；无存档/空值/类型不符返回 None（同编辑器口径）。"""

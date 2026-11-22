@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 from src.core.settings import AppSettings, ConfigKey
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestConfigDirInjection:
@@ -163,6 +169,131 @@ class TestPlotVariableEditorGeometry:
         # 同上：上一用例写入的几何会残留在 ini，先显式清键
         app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, "")
         assert app_settings.get_plot_variable_editor_geometry() is None
+
+
+class TestPlotVariableEditorWidthStore:
+    """编辑器列宽/固定列存储（D12）：JSON 单字符串 + 旧格式容错 + 跨进程。"""
+
+    WIDTHS = [46, 210, 170, 168, 84, 84]
+
+    @staticmethod
+    def _run(code: str, config_dir):
+        env = dict(os.environ)
+        env["CSV_PLOT_CONFIG_DIR"] = str(config_dir)
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=_PROJECT_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_json_roundtrip_and_singleton_reset(self, app_settings):
+        app_settings.set_plot_variable_editor_column_widths(self.WIDTHS)
+        app_settings.set_plot_variable_editor_fixed_cols([1, 3])
+        AppSettings._reset_for_tests()
+        s = AppSettings()
+        assert s.get_plot_variable_editor_column_widths() == self.WIDTHS
+        assert s.get_plot_variable_editor_fixed_cols() == [1, 3]
+        AppSettings._reset_for_tests()
+
+    def test_empty_fixed_cols_is_valid(self, app_settings):
+        app_settings.set_plot_variable_editor_fixed_cols([])
+        assert app_settings.get_plot_variable_editor_fixed_cols() == []
+
+    def test_legacy_list_values_are_accepted(self, app_settings):
+        # 旧版直接写 list：同进程缓存可能是 int 列表，跨进程多为 str 列表
+        app_settings.set_value(
+            ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS, self.WIDTHS
+        )
+        assert app_settings.get_plot_variable_editor_column_widths() == self.WIDTHS
+        app_settings.set_value(
+            ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS,
+            [str(w) for w in self.WIDTHS],
+        )
+        assert app_settings.get_plot_variable_editor_column_widths() == self.WIDTHS
+        app_settings.set_value(
+            ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS, ["1", "3"]
+        )
+        assert app_settings.get_plot_variable_editor_fixed_cols() == [1, 3]
+
+    def test_garbage_is_rejected(self, app_settings):
+        key = ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS
+        for raw in ("{not json", "[1, -2, 3]", '[true, 1]', "[1, 'x']", "[]", "{}"):
+            app_settings.set_value(key, raw)
+            assert app_settings.get_plot_variable_editor_column_widths() is None, raw
+
+    def test_cross_process_write_then_read(self, tmp_path):
+        """真跨进程往返：ini 后端不会把 list 原样带回（同进程测试会掩盖）。"""
+        write = (
+            "import json\n"
+            "from src.core.settings import AppSettings\n"
+            "s = AppSettings()\n"
+            "s.set_plot_variable_editor_column_widths(%r)\n"
+            "s.set_plot_variable_editor_fixed_cols([1, 3])\n" % (self.WIDTHS,)
+        )
+        done = self._run(write, tmp_path)
+        assert done.returncode == 0, done.stderr
+
+        read = (
+            "import json\n"
+            "from src.core.settings import AppSettings\n"
+            "s = AppSettings()\n"
+            "print(json.dumps({\n"
+            "  'w': s.get_plot_variable_editor_column_widths(),\n"
+            "  'f': s.get_plot_variable_editor_fixed_cols(),\n"
+            "}))\n"
+        )
+        result = self._run(read, tmp_path)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload == {"w": self.WIDTHS, "f": [1, 3]}
+
+    def test_cross_process_legacy_str_list_and_single_str(self, tmp_path):
+        """旧版 QSettings 列表跨进程退化：list[str] / 单元素 str 都要吃。"""
+        write = (
+            "from PySide6.QtCore import QSettings\n"
+            "s = QSettings(%r, QSettings.Format.IniFormat)\n"
+            "s.setValue('plot_variable_editor/column_widths', %r)\n"
+            "s.setValue('plot_variable_editor/fixed_cols', ['1', '3'])\n"
+            "s.sync()\n"
+            % (
+                str(tmp_path / "app.ini"),
+                [str(w) for w in self.WIDTHS],
+            )
+        )
+        assert self._run(write, tmp_path).returncode == 0
+        read = (
+            "import json\n"
+            "from src.core.settings import AppSettings\n"
+            "s = AppSettings()\n"
+            "print(json.dumps({\n"
+            "  'w': s.get_plot_variable_editor_column_widths(),\n"
+            "  'f': s.get_plot_variable_editor_fixed_cols(),\n"
+            "}))\n"
+        )
+        result = self._run(read, tmp_path)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload == {"w": self.WIDTHS, "f": [1, 3]}
+
+        # 单元素列表退化成 str（ini 后端经典行为）
+        write_single = (
+            "from PySide6.QtCore import QSettings\n"
+            "s = QSettings(%r, QSettings.Format.IniFormat)\n"
+            "s.setValue('plot_variable_editor/column_widths', '84')\n"
+            "s.sync()\n" % (str(tmp_path / "app.ini"),)
+        )
+        assert self._run(write_single, tmp_path).returncode == 0
+        read_single = (
+            "from src.core.settings import AppSettings\n"
+            "print(AppSettings().get_plot_variable_editor_column_widths())\n"
+        )
+        result = self._run(read_single, tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().splitlines()[-1] == "[84]"
 
 
 class TestPersistence:

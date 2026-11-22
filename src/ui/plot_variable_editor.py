@@ -7,6 +7,7 @@ from PySide6.QtCore import QItemSelectionModel, Qt, QSignalBlocker, QTimer, Sign
 from PySide6.QtGui import QColor, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -68,6 +69,16 @@ _COL_LABELS = ["显示", "变量名", "Legend 名", "样式", "Factor", "Offset"
 _COL_DEFAULT_WIDTHS = [46, 210, 170, 168, 84, 84]
 _ELASTIC_COLS = (1, 2)  # 双弹性列：吸收窗口余量（D10）
 _FIXED_MIN_WIDTHS = {0: 44, 3: 96, 4: 70, 5: 70}
+# 弹性列最小宽独立常量（评审 P1-7）：_FIXED_MIN_WIDTHS 兼作固定列集合，
+# 往里加 1/2 会被 _adjust/_restore 当成固定列迭代，故单独维护。
+_ELASTIC_MIN = {1: 140, 2: 120}
+# Factor/Offset 定宽（D13）：NoButtons 后列宽不随极值文本 sizeHint 膨胀，
+# 存档里的旧膨胀值恢复时也强制压回该宽（评审 P0-1）。
+_TRANSFORM_COLS = (4, 5)
+_TRANSFORM_COL_WIDTH = 84
+
+# 列宽存盘 debounce：主窗销毁不走 closeEvent，拖宽后延迟落盘兜底（评审 P1-6）
+_COLUMN_SAVE_DELAY_MS = 400
 
 # 样式摘要短标签（只列非默认项，全默认显「默认」）
 _PRESET_SHORT = {
@@ -229,6 +240,13 @@ class PlotVariableEditorDialog(QDialog):
         self._user_fixed_cols: set[int] = set()
         self._col_min: dict[int, int] = {}
 
+        # 拖宽后 debounce 存盘（两参 singleShot 口径的 QTimer 实例版；
+        # 随 self 销毁自动断开，避免主窗销毁时漏存）
+        self._width_save_timer = QTimer(self)
+        self._width_save_timer.setSingleShot(True)
+        self._width_save_timer.setInterval(_COLUMN_SAVE_DELAY_MS)
+        self._width_save_timer.timeout.connect(self._save_column_widths)
+
         # 高DPI支持 - PySide6中不需要WA_UseHighDpiPixmaps
         # PySide6默认支持高DPI，通过样式表控制字体大小
 
@@ -329,6 +347,8 @@ class PlotVariableEditorDialog(QDialog):
         for col, label in enumerate(_COL_LABELS):
             self._col_min[col] = fm.horizontalAdvance(label) + 14
         for col, minimum in _FIXED_MIN_WIDTHS.items():
+            self._col_min[col] = max(self._col_min[col], minimum)
+        for col, minimum in _ELASTIC_MIN.items():
             self._col_min[col] = max(self._col_min[col], minimum)
         self._init_column_widths()
         header.sectionResized.connect(self._on_section_resized)
@@ -538,6 +558,10 @@ class PlotVariableEditorDialog(QDialog):
         for col in _FIXED_MIN_WIDTHS:
             self._width_guard = True
             try:
+                if col in _TRANSFORM_COLS:
+                    # D13：换算列固定宽，不按极值文本 sizeHint 自适应
+                    self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
+                    continue
                 self.var_table.resizeColumnToContents(col)
                 self.var_table.setColumnWidth(
                     col, max(self.var_table.columnWidth(col), self._col_min[col])
@@ -560,6 +584,11 @@ class PlotVariableEditorDialog(QDialog):
         try:
             if widths is not None and len(widths) == _COL_COUNT:
                 for col, w in enumerate(widths):
+                    if col in _TRANSFORM_COLS:
+                        # 评审 P0-1：旧档里被 sizeHint 撑大的 4/5 宽一律压回
+                        # 定宽，否则 _columns_sized=True 跳过后 F2 永不生效
+                        self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
+                        continue
                     self.var_table.setColumnWidth(col, max(w, self._col_min[col]))
                 if fixed is not None:
                     self._user_fixed_cols = {
@@ -575,6 +604,8 @@ class PlotVariableEditorDialog(QDialog):
             self._width_guard = False
 
     def _save_column_widths(self):
+        if not widget_alive(self):
+            return
         from src.core.settings import AppSettings
 
         settings = AppSettings()
@@ -632,6 +663,8 @@ class PlotVariableEditorDialog(QDialog):
             finally:
                 self._width_guard = False
         self._user_fixed_cols.add(col)
+        # 拖宽即时落盘兜底：主窗销毁/进程退出不走 closeEvent，等不到 done()
+        self._width_save_timer.start()
 
     def _on_handle_double_clicked(self, col: int):
         """双击分隔线：恢复弹性 + 内容自适应（D1）。"""
@@ -645,6 +678,7 @@ class PlotVariableEditorDialog(QDialog):
         finally:
             self._width_guard = False
         self._distribute_column_widths()
+        self._width_save_timer.start()
 
     def _geometry_on_screen(self) -> bool:
         """当前窗口几何是否与任一现存屏幕的可用区域相交。
@@ -1055,11 +1089,17 @@ class PlotVariableEditorDialog(QDialog):
             spin.setDecimals(6)
             spin.setSingleStep(0.1)
             spin.setKeyboardTracking(False)
+            # D13：去掉步进箭头（打字为主，箭头挤占宽度并放大 sizeHint）；
+            # 键盘 ↑↓ 与滚轮微调仍可用
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            spin.setMinimumWidth(60)
             with QSignalBlocker(spin):
                 spin.setValue(value)
             spin.setEnabled(not disabled)
             if disabled:
                 spin.setToolTip("枚举/时间通道不支持数值变换")
+            else:
+                spin.setToolTip("可直接输入，或用键盘 ↑↓ / 滚轮微调")
             spins.append(spin)
         factor_spin, offset_spin = spins
         factor_spin.valueChanged.connect(
@@ -1302,10 +1342,22 @@ class PlotVariableEditorDialog(QDialog):
             and selected_row < self.var_table.rowCount() - 1
         )
 
-    def closeEvent(self, event):
-        """关闭时断开 curves_changed 信号，避免重复打开编辑器导致信号连接累积"""
+    def done(self, result: int):
+        """统一收口确定/取消（含 Esc）：hide 前落盘几何与列宽。
+
+        accept/reject 不经过 closeEvent，此前多数关闭路径根本没有写盘。
+        """
+        self._save_editor_state()
+        super().done(result)
+
+    def _save_editor_state(self):
+        """落盘窗口几何 + 列宽（幂等；done 与 closeEvent 双入口）。"""
         self._save_geometry()
         self._save_column_widths()
+
+    def closeEvent(self, event):
+        """关闭时断开 curves_changed 信号，避免重复打开编辑器导致信号连接累积"""
+        self._save_editor_state()
         try:
             self.plot_widget.curves_changed.disconnect(self._on_curves_changed_incremental)
         except (TypeError, RuntimeError):
