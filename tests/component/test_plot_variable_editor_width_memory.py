@@ -47,12 +47,13 @@ def editor_env(plot_factory, qapp, app_settings):
 
 
 class TestTransformColumnLayout:
-    def test_no_buttons_and_narrow(self, editor_env):
+    def test_text_edits_and_narrow(self, editor_env):
+        """D17：换算列为纯文本输入（非 spinbox），默认列宽 84。"""
         dlg, _pw = editor_env
         for col in (4, 5):
-            spin = dlg.var_table.cellWidget(0, col)
-            assert spin.buttonSymbols() == QAbstractSpinBox.ButtonSymbols.NoButtons
-            assert spin.minimumWidth() == 60
+            edit = dlg.var_table.cellWidget(0, col)
+            assert isinstance(edit, ed_mod._NumericLineEdit)
+            assert not isinstance(edit, QAbstractSpinBox)
             assert dlg.var_table.columnWidth(col) == ed_mod._TRANSFORM_COL_WIDTH
 
     def test_transform_col_drag_keeps_width_and_persists(self, editor_env, qapp):

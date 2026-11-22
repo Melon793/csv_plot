@@ -1,16 +1,28 @@
 """绘图变量编辑器"""
 
 from __future__ import annotations
+import math
 import re
 import sys
-from PySide6.QtCore import QItemSelectionModel, Qt, QSignalBlocker, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QKeySequence, QShortcut
+from PySide6.QtCore import (
+    QItemSelectionModel,
+    QRegularExpression,
+    Qt,
+    QSignalBlocker,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QKeySequence,
+    QRegularExpressionValidator,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QAbstractSpinBox,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
@@ -118,6 +130,94 @@ def _name_badges(ci) -> str:
 def _transform_disabled(ci) -> bool:
     """枚举/日期/纯时间通道禁用数值变换（D4）。"""
     return getattr(ci, "y_format", "") in NON_NUMERIC_FORMATS
+
+
+# Factor/Offset 文本输入（D17）：严格十进制，禁逗号（locale 千分/小数逗号）
+# 与科学计数法；空白由 commit 前 strip 处理。
+_NUMBER_RE = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)$")
+_TRANSFORM_MAX_ABS = 1e12
+
+
+def format_number(value) -> str:
+    """换算数值的输入框显示文本：去尾零，-0→0，非有限/异常兜底 "0"。
+
+    已知边界（评审 P2-11）：超过 12 位小数显示损失；|v|<1e-13 显示 "0"。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    if not math.isfinite(v) or v == 0:
+        return "0"
+    return f"{v:.12f}".rstrip("0").rstrip(".")
+
+
+class _NumericLineEdit(QLineEdit):
+    """Factor/Offset 行内数值输入（D17）：只打字，无步进/滚轮。
+
+    失焦与 Enter 主动 commit —— Invalid/空文本下 editingFinished 不触发
+    （评审 P0-1 实测）；严格正则拒绝逗号，避免 QDoubleValidator 的 locale
+    fixup 把 "1,5" 变成 15（评审 P0-2）。
+    """
+
+    value_committed = Signal(float)
+
+    def __init__(self, value: float, parent=None):
+        super().__init__(parent)
+        self._last_valid = float(value)
+        self.setValidator(
+            QRegularExpressionValidator(QRegularExpression(_NUMBER_RE.pattern), self)
+        )
+        self.setText(format_number(value))
+
+    def set_value(self, value: float):
+        """程序化回填；用户正在输入（有焦点）时不覆盖（评审 P1-8）。"""
+        self._last_valid = float(value)
+        if self.hasFocus():
+            return
+        with QSignalBlocker(self):
+            self.setText(format_number(value))
+
+    def _parse(self) -> float | None:
+        text = self.text().strip()
+        if not _NUMBER_RE.match(text):
+            return None
+        try:
+            parsed = float(text)
+        except ValueError:
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return max(-_TRANSFORM_MAX_ABS, min(_TRANSFORM_MAX_ABS, parsed))
+
+    def value(self) -> float:
+        parsed = self._parse()
+        return self._last_valid if parsed is None else parsed
+
+    def commit(self):
+        """提交当前文本：非法/空回退上次合法值；合法值夹 ±1e12 后发信号。"""
+        parsed = self._parse()
+        if parsed is None:
+            with QSignalBlocker(self):
+                self.setText(format_number(self._last_valid))
+            return
+        self._last_valid = parsed
+        with QSignalBlocker(self):
+            self.setText(format_number(parsed))
+        self.value_committed.emit(parsed)
+
+    def focusOutEvent(self, event):
+        self.commit()
+        super().focusOutEvent(event)
+
+    def keyPressEvent(self, event):
+        # Enter 必须在此消费：否则冒泡到对话框默认按钮「确定」直接关窗
+        # （评审 P2-10；ok/cancel 的 autoDefault(False) 是双保险）
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.commit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _StyleCell(QWidget):
@@ -418,10 +518,14 @@ class PlotVariableEditorDialog(QDialog):
 
         self.ok_btn = QPushButton("确定")
         self.ok_btn.clicked.connect(self.accept)
+        # 双保险（评审 P2-10）：格内 Enter 已在 _NumericLineEdit 消费，
+        # 默认按钮也不能抢 Enter 直接关窗
+        self.ok_btn.setAutoDefault(False)
         bottom_layout.addWidget(self.ok_btn)
 
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.clicked.connect(self.reject)
+        self.cancel_btn.setAutoDefault(False)
         bottom_layout.addWidget(self.cancel_btn)
 
         layout.addLayout(bottom_layout)
@@ -871,16 +975,14 @@ class PlotVariableEditorDialog(QDialog):
             style_cell = table.cellWidget(row, 3)
             if style_cell is not None:
                 style_cell.set_state(curve_info.color, _style_summary(curve_info))
-            f_spin = table.cellWidget(row, 4)
-            o_spin = table.cellWidget(row, 5)
-            if f_spin is not None:
-                with QSignalBlocker(f_spin):
-                    f_spin.setValue(getattr(curve_info, "factor", 1.0))
-                f_spin.setEnabled(not _transform_disabled(curve_info))
-            if o_spin is not None:
-                with QSignalBlocker(o_spin):
-                    o_spin.setValue(getattr(curve_info, "offset", 0.0))
-                o_spin.setEnabled(not _transform_disabled(curve_info))
+            f_edit = table.cellWidget(row, 4)
+            o_edit = table.cellWidget(row, 5)
+            if f_edit is not None:
+                f_edit.set_value(getattr(curve_info, "factor", 1.0))
+                f_edit.setEnabled(not _transform_disabled(curve_info))
+            if o_edit is not None:
+                o_edit.set_value(getattr(curve_info, "offset", 0.0))
+                o_edit.setEnabled(not _transform_disabled(curve_info))
 
     def _get_selected_row(self) -> int | None:
         """获取当前选中的行号"""
@@ -1093,42 +1195,27 @@ class PlotVariableEditorDialog(QDialog):
         style_cell.clicked.connect(self._open_style_panel)
         self.var_table.setCellWidget(row, 3, style_cell)
 
-        # Factor / Offset（C4/D3/D4：spinbox 行内编辑，非数值通道置灰）
-        factor_spin, offset_spin = self._make_transform_spins(row, var_name, curve_info)
-        self.var_table.setCellWidget(row, 4, factor_spin)
-        self.var_table.setCellWidget(row, 5, offset_spin)
+        # Factor / Offset（C4/D3/D4/D17：行内文本输入，非数值通道置灰）
+        factor_edit, offset_edit = self._make_transform_edits(var_name, curve_info)
+        self.var_table.setCellWidget(row, 4, factor_edit)
+        self.var_table.setCellWidget(row, 5, offset_edit)
 
-    def _make_transform_spins(self, row: int, var_name: str, ci, force_disabled: bool = False):
-        """Factor/Offset spinbox 对（程序化初值静默；valueChanged 走共享入口）。"""
+    def _make_transform_edits(self, var_name: str, ci, force_disabled: bool = False):
+        """Factor/Offset 文本输入对（D17：只打字，无步进/滚轮）。"""
         disabled = force_disabled or _transform_disabled(ci)
-        spins = []
+        edits = []
         for value in (getattr(ci, "factor", 1.0), getattr(ci, "offset", 0.0)):
-            spin = QDoubleSpinBox()
-            spin.setRange(-1e12, 1e12)
-            # 评审 P2-5：6 位小数，避免模板高精度 factor 回填被舍入、一触碰即改精度
-            spin.setDecimals(6)
-            spin.setSingleStep(0.1)
-            spin.setKeyboardTracking(False)
-            # D13：去掉步进箭头（打字为主，箭头挤占宽度并放大 sizeHint）；
-            # 键盘 ↑↓ 与滚轮微调仍可用
-            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            spin.setMinimumWidth(60)
-            with QSignalBlocker(spin):
-                spin.setValue(value)
-            spin.setEnabled(not disabled)
-            if disabled:
-                spin.setToolTip("枚举/时间通道不支持数值变换")
-            else:
-                spin.setToolTip("可直接输入，或用键盘 ↑↓ / 滚轮微调")
-            spins.append(spin)
-        factor_spin, offset_spin = spins
-        factor_spin.valueChanged.connect(
-            lambda _v, name=var_name: self._on_transform_changed(name)
-        )
-        offset_spin.valueChanged.connect(
-            lambda _v, name=var_name: self._on_transform_changed(name)
-        )
-        return factor_spin, offset_spin
+            edit = _NumericLineEdit(value)
+            edit.setEnabled(not disabled)
+            edit.setToolTip(
+                "枚举/时间通道不支持数值变换" if disabled
+                else "可直接输入数字（支持小数与正负号）"
+            )
+            edit.value_committed.connect(
+                lambda _v, name=var_name: self._on_transform_changed(name)
+            )
+            edits.append(edit)
+        return edits[0], edits[1]
 
     def _row_of_var(self, var_name: str) -> int | None:
         for row in range(self.var_table.rowCount()):
@@ -1144,17 +1231,22 @@ class PlotVariableEditorDialog(QDialog):
         )
 
     def _on_transform_changed(self, var_name: str):
-        """Factor/Offset 变更：读两 spinbox 现值走共享入口（同值 no-op）。"""
+        """Factor/Offset 提交：读两框现值走共享入口（同值 no-op）并回写规范文本。"""
         row = self._row_of_var(var_name)
         if row is None:
             return
-        f_spin = self.var_table.cellWidget(row, 4)
-        o_spin = self.var_table.cellWidget(row, 5)
-        if f_spin is None or o_spin is None:
+        f_edit = self.var_table.cellWidget(row, 4)
+        o_edit = self.var_table.cellWidget(row, 5)
+        if f_edit is None or o_edit is None:
             return
         self.plot_widget._multi_curve_manager.apply_curve_transform(
-            var_name, f_spin.value(), o_spin.value()
+            var_name, f_edit.value(), o_edit.value()
         )
+        ci = self.plot_widget.curves.get(var_name)
+        if ci is not None:
+            # 统一回写规范文本（去尾零/夹紧）；聚焦中的框由 set_value 自行跳过
+            f_edit.set_value(getattr(ci, "factor", 1.0))
+            o_edit.set_value(getattr(ci, "offset", 0.0))
 
     def _open_style_panel(self, var_name: str):
         """样式格点击：singleShot(0) 弹共享面板（存活守卫，frozen 两参口径）。"""
@@ -1295,11 +1387,11 @@ class PlotVariableEditorDialog(QDialog):
         style_cell.set_state(ref.color, "默认", enabled=False)
         self.var_table.setCellWidget(row, 3, style_cell)
 
-        factor_spin, offset_spin = self._make_transform_spins(
-            row, var_name, ref, force_disabled=True
+        factor_edit, offset_edit = self._make_transform_edits(
+            var_name, ref, force_disabled=True
         )
-        self.var_table.setCellWidget(row, 4, factor_spin)
-        self.var_table.setCellWidget(row, 5, offset_spin)
+        self.var_table.setCellWidget(row, 4, factor_edit)
+        self.var_table.setCellWidget(row, 5, offset_edit)
 
     def _on_checkbox_changed(self, var_name, state):
         """复选框状态变化处理（统一版）

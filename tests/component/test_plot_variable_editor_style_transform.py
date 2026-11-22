@@ -10,7 +10,7 @@ import types
 import pandas as pd
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDoubleSpinBox, QLineEdit, QMenu
+from PySide6.QtWidgets import QLineEdit, QMenu
 
 import src.ui.plot_variable_editor as ed_mod
 from src.core.data_types import (
@@ -116,8 +116,8 @@ class TestStructure:
         for row in range(table.rowCount()):
             assert isinstance(table.cellWidget(row, 2), QLineEdit)
             assert isinstance(table.cellWidget(row, 3), ed_mod._StyleCell)
-            assert isinstance(table.cellWidget(row, 4), QDoubleSpinBox)
-            assert isinstance(table.cellWidget(row, 5), QDoubleSpinBox)
+            assert isinstance(table.cellWidget(row, 4), ed_mod._NumericLineEdit)
+            assert isinstance(table.cellWidget(row, 5), ed_mod._NumericLineEdit)
             assert table.cellWidget(row, 4).isEnabled()
 
     def test_all_columns_interactive(self, editor_env):
@@ -188,28 +188,30 @@ class TestLegendNameAndTransform:
         edit.editingFinished.emit()
         assert pw.curves[var].display_name == ""
 
-    def test_factor_spin_projects_y(self, editor_env):
+    def test_factor_edit_projects_y(self, editor_env):
         dlg, pw = editor_env
         var = _var_at(dlg, 0)
-        f_spin = dlg.var_table.cellWidget(0, 4)
-        o_spin = dlg.var_table.cellWidget(0, 5)
-        f_spin.setValue(2.0)
-        o_spin.setValue(-10.0)
+        f_edit = dlg.var_table.cellWidget(0, 4)
+        o_edit = dlg.var_table.cellWidget(0, 5)
+        f_edit.setText("2")
+        f_edit.commit()
+        o_edit.setText("-10")
+        o_edit.commit()
         ci = pw.curves[var]
         assert ci.factor == 2.0 and ci.offset == -10.0
         import numpy as np
         np.testing.assert_allclose(ci.y_data, 2.0 * ci.y_raw - 10.0)
         assert "·ƒ" in dlg.var_table.item(0, 1).text()
 
-    def test_refresh_backfills_spins_without_loop(self, editor_env):
-        """外部改换算 → curves_changed 就地回填 spinbox（ blocker 防回环）。"""
+    def test_refresh_backfills_edits_without_loop(self, editor_env):
+        """外部改换算 → curves_changed 就地回填输入框（不回环）。"""
         dlg, pw = editor_env
         var = _var_at(dlg, 0)
         assert pw._multi_curve_manager.apply_curve_transform(var, 3.0, 1.0)
-        assert dlg.var_table.cellWidget(0, 4).value() == 3.0
-        assert dlg.var_table.cellWidget(0, 5).value() == 1.0
+        assert dlg.var_table.cellWidget(0, 4).text() == "3"
+        assert dlg.var_table.cellWidget(0, 5).text() == "1"
 
-    def test_enum_channel_spins_disabled(self, editor_env):
+    def test_enum_channel_edits_disabled(self, editor_env):
         dlg, pw = editor_env
         var = _var_at(dlg, 0)
         pw.curves[var].y_format = "enum"
