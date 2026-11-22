@@ -553,13 +553,14 @@ class PlotVariableEditorDialog(QDialog):
         button_layout.addStretch()
         layout.addLayout(button_layout)
 
-        # 说明文本
-        info_label = QLabel("提示：从变量列表拖拽变量到此窗口可添加新变量")
-        info_label.setStyleSheet("color: gray; font-size: 12px; margin-top: 10px;")
-        layout.addWidget(info_label)
-
-        # 底部按钮
+        # 底部：提示（左）+ 确定/取消（右）合为一行（D21）。此前提示是单独
+        # 一整行、按钮又一行，白白多占 33px（27 行高 + 6 间距）；并排实测只需
+        # 476px，比最小窗宽 560 还宽松。提示不再要 margin-top：它在按钮行里
+        # 会被布局垂直居中，留着会把文字压偏 10px。
         bottom_layout = QHBoxLayout()
+        info_label = QLabel("提示：拖拽变量到此窗口，或用上方搜索框添加")
+        info_label.setStyleSheet("color: gray; font-size: 12px;")
+        bottom_layout.addWidget(info_label)
         bottom_layout.addStretch()
 
         self.ok_btn = QPushButton("确定")

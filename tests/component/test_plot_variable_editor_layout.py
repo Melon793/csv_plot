@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QLabel
 
 import src.ui.plot_variable_editor as ed_mod
 from src.core.settings import ConfigKey
@@ -111,6 +112,30 @@ class TestShowDistribution:
         finally:
             dlg2.close()
             dlg2.deleteLater()
+
+
+class TestBottomBarSingleRow:
+    def test_hint_and_dialog_buttons_share_one_row(self, editor_env, qapp):
+        """D21：提示与确定/取消同一行，且最小窗宽下提示不被压缩。
+
+        此前提示是 QVBoxLayout 里单独的一项（自己一行），按钮又在下一行，
+        底部白占 33px（27 行高 + 6 间距）。并排实测只需约 476px < 最小宽 560。
+        """
+        dlg, _pw = editor_env
+        dlg.resize(560, 400)
+        dlg.show()
+        settle()
+        hint = next(
+            w for w in dlg.findChildren(QLabel) if w.text().startswith("提示：")
+        )
+        ok, cancel = dlg.ok_btn, dlg.cancel_btn
+        assert hint.parent() is ok.parent(), "提示与按钮需在同一个水平布局里"
+        assert abs(hint.geometry().center().y() - ok.geometry().center().y()) <= 2
+        assert abs(cancel.geometry().center().y() - ok.geometry().center().y()) <= 2
+        assert hint.geometry().right() < ok.geometry().left() < cancel.geometry().left()
+        assert hint.width() >= hint.sizeHint().width(), (
+            f"最小窗宽下提示被压缩：{hint.width()} < {hint.sizeHint().width()}"
+        )
 
 
 class TestRowHeightAndInputBox:
