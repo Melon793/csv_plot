@@ -14,6 +14,7 @@ from typing import Any, Iterable, Optional, Sequence, Type
 
 from PySide6.QtCore import QSettings
 
+from src.core.config import VAR_PANE_RAIL_WIDTH
 from src.utils.paths import normalize_input_path
 
 _logger = logging.getLogger(__name__)
@@ -61,6 +62,10 @@ class ConfigKey(StrEnum):
     # 标记统计窗口表头状态（QHeaderView.saveState() 的 QByteArray，ini 后端
     # 存 base64）：列宽 + 视觉列序 + 隐藏位。
     MARK_STATS_HEADER_STATE = "mark_stats/header_state"
+    # 变量区细边栏（D12）：折叠态 bool + 展开宽度 int，跨重启记忆。rail
+    # 常驻保证折叠态有物理恢复入口，才敢恢复折叠态（方案 A 对 B 的本质优势）。
+    VAR_PANE_COLLAPSED = "var_pane/collapsed"
+    VAR_PANE_WIDTH = "var_pane/width"
 
 
 class AppSettings:
@@ -538,4 +543,48 @@ class AppSettings:
     def set_mark_stats_header_state(self, state: Any) -> None:
         """写入表头状态（QHeaderView.saveState() 的 QByteArray），即写即持久化。"""
         self._settings.setValue(ConfigKey.MARK_STATS_HEADER_STATE, state)
+        self._settings.sync()
+
+    # ------------------------------------------------------------------
+    # 变量区细边栏（D12）：折叠态 + 展开宽度
+    # ------------------------------------------------------------------
+
+    def get_var_pane_collapsed(self) -> bool:
+        """读取变量区折叠态；缺失/脏值一律回退 False（展开）。
+
+        刻意不用 ``type=bool``：实测 QVariant 把除 "false"/"0" 外的任意非空
+        字符串都转成 True（"banana"→True），脏 ini 会凭空恢复出折叠态。
+        只认 bool 或 QSettings 写入的 "true"/"false" 字面量（ini 跨进程读回
+        是 str），其余视为无存档。
+        """
+        raw = self._settings.value(ConfigKey.VAR_PANE_COLLAPSED)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            text = raw.strip().lower()
+            if text == "true":
+                return True
+            if text == "false":
+                return False
+        return False
+
+    def set_var_pane_collapsed(self, collapsed: bool) -> None:
+        self._settings.setValue(ConfigKey.VAR_PANE_COLLAPSED, bool(collapsed))
+        self._settings.sync()
+
+    def get_var_pane_width(self) -> int | None:
+        """读取变量区展开宽度；无存档/类型不符/超范围返回 None（窗口侧走默认）。
+
+        防御口径同编辑器列宽：ini 标量跨进程读回是 str，显式 type=int；
+        ≤ rail 宽（展开态必须比折叠态宽）或大得离谱（>8192）视为无存档。
+        """
+        raw = self._settings.value(ConfigKey.VAR_PANE_WIDTH, 0, type=int)
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return None
+        if raw <= VAR_PANE_RAIL_WIDTH or raw > 8192:
+            return None
+        return raw
+
+    def set_var_pane_width(self, width: int) -> None:
+        self._settings.setValue(ConfigKey.VAR_PANE_WIDTH, int(width))
         self._settings.sync()

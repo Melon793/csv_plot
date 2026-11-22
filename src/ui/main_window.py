@@ -1917,6 +1917,9 @@ class MainWindow(QMainWindow):
             __import__("PySide6").__version__,
         )
 
+        # D12：启动恢复变量区宽度/折叠态（须在 manager 接线完成后）
+        self.layout_manager.restore_var_pane_state()
+
     def _handle_cli_args(self):
         if "--clone-window" in sys.argv:
             return

@@ -22,6 +22,7 @@ from src.core.config import (
 )
 from src.utils.paths import normalize_input_path
 from src.core.logger import get_logger
+from src.core.settings import AppSettings
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.ui.table_dialog import DataTableDialog
 from src.ui.mark_stats import MarkStatsWindow
@@ -407,6 +408,12 @@ class LayoutManager(MainWindowBaseManager):
                 plot_widget.mark_being_destroyed()
 
     def _handle_close(self):
+        # D12：退出前把防抖窗口里还没落盘的展开宽度冲掉（崩溃丢宽度可忍，
+        # 正常退出不丢）
+        timer = getattr(self.mw, "_var_pane_width_save_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+            self._save_var_pane_width()
         self._mark_all_plots_being_destroyed()
         if DataTableDialog._instance is not None:
             DataTableDialog._instance.set_skip_close_confirmation(True)
@@ -432,6 +439,55 @@ class LayoutManager(MainWindowBaseManager):
         sizes = mw.main_splitter.sizes()
         if len(sizes) >= 1:
             mw.var_table_default_width = sizes[0]
+        # D12：用户拖出的展开宽度防抖落盘（拖动期间 splitterMoved 连发，
+        # 不能每发一次就 sync 一次磁盘）
+        self._schedule_var_pane_width_save()
+
+    def _schedule_var_pane_width_save(self):
+        """400ms 防抖持久化展开宽度。定时器 parented 到 mw（禁三参
+        singleShot：打包 exe 里该重载会 TypeError），窗口销毁随之回收。"""
+        mw = self.mw
+        timer = getattr(mw, "_var_pane_width_save_timer", None)
+        if timer is None:
+            timer = QTimer(mw)
+            timer.setSingleShot(True)
+            timer.setInterval(400)
+            timer.timeout.connect(self._save_var_pane_width)
+            mw._var_pane_width_save_timer = timer
+        timer.start()
+
+    def _save_var_pane_width(self):
+        mw = self._mw_ref()
+        if mw is None or not _widget_alive(mw):
+            return
+        if getattr(mw, "_var_pane_collapsed", False):
+            return
+        if not hasattr(mw, "main_splitter"):
+            return
+        sizes = mw.main_splitter.sizes()
+        if sizes and sizes[0] > VAR_PANE_RAIL_WIDTH:
+            AppSettings().set_var_pane_width(int(sizes[0]))
+
+    def restore_var_pane_state(self) -> None:
+        """启动恢复变量区展开宽度/折叠态（D12）。
+
+        脏值由 settings 防御口径回退默认；rail 常驻保证折叠态有物理恢复
+        入口，才敢恢复折叠态。宽度恢复不置 user_adjusted —— 后续窗口
+        resize 仍由 _apply_fixed_splitter_width 按恢复的默认宽维持。
+        """
+        mw = self.mw
+        settings = AppSettings()
+        width = settings.get_var_pane_width()
+        if width is not None:
+            mw.var_table_default_width = width
+            mw._var_pane_saved_width = width
+            sizes = mw.main_splitter.sizes()
+            total = sum(sizes)
+            if total > width:
+                with QSignalBlocker(mw.main_splitter):
+                    mw.main_splitter.setSizes([width, total - width])
+        if settings.get_var_pane_collapsed():
+            self.set_var_pane_collapsed(True, reason="restore")
 
     def _ensure_splitter_ready(self):
         mw = self._mw_ref()
@@ -554,7 +610,13 @@ class LayoutManager(MainWindowBaseManager):
         sizes = splitter.sizes()
         total = sum(sizes)
         if collapsed:
-            if sizes and sizes[0] > VAR_PANE_RAIL_WIDTH:
+            # 只在布局就绪后信任 sizes[0]：启动恢复期（_splitter_ready 尚为
+            # False）构造尺寸还没落地，捕获会把持久化宽度覆盖成钳制初值
+            if (
+                sizes
+                and sizes[0] > VAR_PANE_RAIL_WIDTH
+                and getattr(mw, "_splitter_ready", False)
+            ):
                 mw._var_pane_saved_width = sizes[0]
             mw._var_pane_collapsed = True
             mw.left_widget.setMinimumWidth(VAR_PANE_RAIL_WIDTH)
@@ -575,6 +637,11 @@ class LayoutManager(MainWindowBaseManager):
                 splitter.setSizes([width, max(total - width, 0)])
         logger.info("[LAYOUT] 变量区%s (reason=%s)", "折叠" if collapsed else "展开", reason)
         self._announce_var_pane_state(collapsed)
+        # D12：折叠态即写即持久化；折叠时连同记住的展开宽度一起落盘
+        settings = AppSettings()
+        settings.set_var_pane_collapsed(collapsed)
+        if collapsed:
+            settings.set_var_pane_width(int(mw._var_pane_saved_width))
 
     def toggle_var_pane(self, *, reason: str) -> None:
         """双态切换（Ctrl+B / 手柄双击共用）。"""

@@ -31,8 +31,17 @@ EXPANDED_MSG = "变量区已展开"
 
 
 @pytest.fixture()
-def rail_env(qapp, app_settings, monkeypatch, qtbot, tmp_path):
-    """真实 MainWindow + 隔离 AppSettings，返回 (mw, settings)。"""
+def isolated_settings(qapp, app_settings, monkeypatch, tmp_path):
+    """指向 tmp_path 的隔离 AppSettings 单例（折叠态/宽度不泄漏给其他用例）。"""
+    monkeypatch.setenv("CSV_PLOT_CONFIG_DIR", str(tmp_path / "config"))
+    from src.core.settings import AppSettings
+
+    AppSettings._reset_for_tests()
+    yield AppSettings()
+    AppSettings._reset_for_tests()
+
+
+def _build_window(monkeypatch, qtbot):
     import src.ui.main_window as main_window_mod
 
     # 与 e2e _small_plot_matrix 同口径：1×1 矩阵省构造耗时
@@ -43,27 +52,32 @@ def rail_env(qapp, app_settings, monkeypatch, qtbot, tmp_path):
         "PLOT_COL_CURRENT_DEFAULT",
     ):
         monkeypatch.setattr(main_window_mod, name, 1)
-
-    monkeypatch.setenv("CSV_PLOT_CONFIG_DIR", str(tmp_path / "config"))
-    from src.core.settings import AppSettings
-
-    AppSettings._reset_for_tests()
-    settings = AppSettings()
-
     monkeypatch.setattr("sys.argv", ["csv_plot_rail_test"])
     mw = main_window_mod.MainWindow()
-    qtbot.addWidget(mw)
+    # 刻意不 qtbot.addWidget：MainWindow 带 WA_DeleteOnClose，收尾 flush 后
+    # C++ 对象已销毁，qtbot 的自动 close 会撞 RuntimeError 并污染下一例。
+    # 生命周期由 _close_window 自管（close + flush）。
     mw.resize(1200, 800)
     mw.show()
     QApplication.processEvents()
-    yield mw, settings
+    return mw
+
+
+def _close_window(mw, qapp):
     try:
         mw.close()
     except RuntimeError:
         pass  # 用例体内可能已自行关闭
     QApplication.processEvents()
     flush_deferred_deletes()
-    AppSettings._reset_for_tests()
+
+
+@pytest.fixture()
+def rail_env(isolated_settings, monkeypatch, qtbot, qapp):
+    """真实 MainWindow + 隔离 AppSettings，返回 (mw, settings)。"""
+    mw = _build_window(monkeypatch, qtbot)
+    yield mw, isolated_settings
+    _close_window(mw, qapp)
 
 
 def _collapse(mw):
@@ -386,3 +400,151 @@ class TestRailHygiene:
 
         assert with_btn - without_btn < VAR_PANE_RAIL_WIDTH
         assert mw.var_collapse_btn.width() == VAR_PANE_RAIL_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# D12：折叠态/宽度持久化与启动恢复（C1b）
+# ---------------------------------------------------------------------------
+
+
+def _raw_ini(settings):
+    """另开一个 QSettings 实例直读 ini 文件（模拟跨进程读回 str 的场景）。"""
+    from PySide6.QtCore import QSettings
+
+    return QSettings(
+        str(settings.config_dir / "app.ini"), QSettings.Format.IniFormat
+    )
+
+
+def _seed_raw_ini(tmp_path, monkeypatch, pairs):
+    """在 AppSettings 单例建立前直写 ini（启动恢复用例的脏值/存档布景）。"""
+    from PySide6.QtCore import QSettings
+
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CSV_PLOT_CONFIG_DIR", str(cfg))
+    from src.core.settings import AppSettings
+
+    AppSettings._reset_for_tests()
+    raw = QSettings(str(cfg / "app.ini"), QSettings.Format.IniFormat)
+    for key, value in pairs:
+        raw.setValue(key, value)
+    raw.sync()
+
+
+class TestPersistence:
+    def test_collapse_persists_state_and_width(self, rail_env):
+        mw, settings = rail_env
+        _drag_handle_to(mw, 350)
+        _collapse(mw)
+
+        assert settings.get_var_pane_collapsed() is True
+        assert settings.get_var_pane_width() == 350
+        # ini 落盘形态直接看文件文本：QSettings 同进程读回会把 "true" 自动
+        # 转 bool，跨进程/手改 ini 才见 str —— getter 两种都必须吃得下
+        ini_text = (settings.config_dir / "app.ini").read_text(encoding="utf-8")
+        assert "collapsed=true" in ini_text
+        assert "width=350" in ini_text
+
+    def test_expand_persists_false(self, rail_env):
+        mw, settings = rail_env
+        _collapse(mw)
+        _expand(mw)
+        assert settings.get_var_pane_collapsed() is False
+
+    def test_drag_width_persisted_after_debounce(self, rail_env, qtbot):
+        mw, settings = rail_env
+        _drag_handle_to(mw, 350)
+        assert settings.get_var_pane_width() is None  # 防抖窗口内还没落盘
+        qtbot.wait(450)
+        assert settings.get_var_pane_width() == 350
+
+    def test_close_flushes_pending_width(self, rail_env, qapp):
+        mw, settings = rail_env
+        _drag_handle_to(mw, 350)
+        mw.close()  # 不等防抖：正常退出必须冲掉未落盘的宽度
+        QApplication.processEvents()
+        assert settings.get_var_pane_width() == 350
+
+    def test_missing_keys_default(self, isolated_settings):
+        assert isolated_settings.get_var_pane_collapsed() is False
+        assert isolated_settings.get_var_pane_width() is None
+
+    def test_dirty_collapsed_values_fallback(self, isolated_settings):
+        """type=bool 会把 "banana" 转成 True（实测）——脏值必须回退展开。"""
+        raw = _raw_ini(isolated_settings)
+        for dirty in ("banana", "1", "yes", "on", ""):
+            raw.setValue("var_pane/collapsed", dirty)
+            raw.sync()
+            isolated_settings.sync()
+            assert isolated_settings.get_var_pane_collapsed() is False, dirty
+        # 合法字面量（大小写不敏感）照常认
+        raw.setValue("var_pane/collapsed", "true")
+        raw.sync()
+        isolated_settings.sync()
+        assert isolated_settings.get_var_pane_collapsed() is True
+        raw.setValue("var_pane/collapsed", "false")
+        raw.sync()
+        isolated_settings.sync()
+        assert isolated_settings.get_var_pane_collapsed() is False
+
+    def test_dirty_width_values_fallback(self, isolated_settings):
+        raw = _raw_ini(isolated_settings)
+        for dirty in ("abc", "-5", "28", "0", "99999", "true"):
+            raw.setValue("var_pane/width", dirty)
+            raw.sync()
+            isolated_settings.sync()
+            assert isolated_settings.get_var_pane_width() is None, dirty
+        raw.setValue("var_pane/width", "350")
+        raw.sync()
+        isolated_settings.sync()
+        assert isolated_settings.get_var_pane_width() == 350
+
+
+class TestStartupRestore:
+    def test_restore_collapsed_and_width(self, qapp, app_settings, monkeypatch, qtbot, tmp_path):
+        _seed_raw_ini(
+            tmp_path, monkeypatch,
+            [("var_pane/collapsed", "true"), ("var_pane/width", "350")],
+        )
+        mw = _build_window(monkeypatch, qtbot)
+        try:
+            assert mw._var_pane_collapsed is True
+            assert mw.main_splitter.sizes()[0] == VAR_PANE_RAIL_WIDTH
+            assert mw.var_pane_rail.isVisible()
+
+            _expand(mw)
+            assert mw.main_splitter.sizes()[0] == 350
+        finally:
+            _close_window(mw, qapp)
+
+    def test_restore_width_only(self, qapp, app_settings, monkeypatch, qtbot, tmp_path):
+        _seed_raw_ini(tmp_path, monkeypatch, [("var_pane/width", "350")])
+        mw = _build_window(monkeypatch, qtbot)
+        try:
+            assert mw._var_pane_collapsed is False
+            assert mw.var_table_default_width == 350
+            assert mw.main_splitter.sizes()[0] == 350
+        finally:
+            _close_window(mw, qapp)
+
+    def test_dirty_ini_falls_back_to_expanded(self, qapp, app_settings, monkeypatch, qtbot, tmp_path):
+        _seed_raw_ini(
+            tmp_path, monkeypatch,
+            [("var_pane/collapsed", "banana"), ("var_pane/width", "abc")],
+        )
+        mw = _build_window(monkeypatch, qtbot)
+        try:
+            assert mw._var_pane_collapsed is False
+            assert mw.var_table_default_width == 280  # 默认宽，未被脏值污染
+        finally:
+            _close_window(mw, qapp)
+
+    def test_restore_collapsed_announces(self, qapp, app_settings, monkeypatch, qtbot, tmp_path):
+        """启动恢复也走统一入口：播报与手动折叠同规格（首次带 Ctrl+O 提示）。"""
+        _seed_raw_ini(tmp_path, monkeypatch, [("var_pane/collapsed", "true")])
+        mw = _build_window(monkeypatch, qtbot)
+        try:
+            assert mw._message_text == COLLAPSED_MSG_FIRST
+        finally:
+            _close_window(mw, qapp)
