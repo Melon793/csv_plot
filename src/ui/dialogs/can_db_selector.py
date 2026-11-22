@@ -66,6 +66,7 @@ from src.data.can_database import SUPPORTED_DB_EXTS, CanDatabaseSet, import_type
 from src.data.blf_loader import prescan_blf_frames
 from src.core.gc_guard import no_autogc
 from src.core.logger import get_logger
+from src.ui.table_selection import select_table_row
 from src.utils.paths import normalize_input_path
 
 logger = get_logger("ui.can_db_selector")
@@ -810,7 +811,7 @@ class CanDatabaseSelectorDialog(QDialog):
         self._rows.insert(dst, row)
         self._rebuild_table()
         self._rebuild_channel_table()
-        self.table.selectRow(dst)
+        select_table_row(self.table, dst)
         logger.info("CAN 数据库优先级调整: %s -> 第 %d 位",
                     os.path.basename(row.path), dst + 1)
 

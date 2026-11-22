@@ -30,6 +30,7 @@ from src.core.plot_config import (
 from src.core.logger import get_logger
 from src.ui import theme
 from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
+from src.ui.table_selection import select_table_row
 
 
 logger = get_logger(__name__)
@@ -235,7 +236,7 @@ class TemplateManagerDialog(QDialog):
             self._refresh_selection_actions()
             return
 
-        self._table.selectRow(selected_row)
+        select_table_row(self._table, selected_row)
         # 行号没变时 selectRow 不发信号，原地改名就没人刷新详情
         self._on_selection_changed()
 

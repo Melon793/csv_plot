@@ -55,6 +55,7 @@ from src.core.data_types import (
 from src.core.logger import get_logger
 from src.ui import theme
 from src.ui.drag_drop import parse_var_names_from_mimedata
+from src.ui.table_selection import select_table_row
 from src.ui.tooltip_text import var_tooltip
 from src.ui.widgets.curve_style_panel import exec_curve_panel
 from src.ui.widgets.variable_search_bar import VariableSearchBar
@@ -636,7 +637,7 @@ class PlotVariableEditorDialog(QDialog):
             # 变量不在表格中（理论上不会发生，防御性兜底）
             return
         # 选中该行并复用核心删除逻辑（不含会话重置）
-        self.var_table.selectRow(target_row)
+        select_table_row(self.var_table, target_row)
         self._remove_selected_variable_impl()
         self.update_button_states()
         # 标记为"本次刚移除"：增量更新标记，变量回原位
@@ -1045,7 +1046,7 @@ class PlotVariableEditorDialog(QDialog):
         self._last_sort_order = None
         self._apply_curve_order(order)
         self.load_current_curves()
-        self.var_table.selectRow(target_row)
+        select_table_row(self.var_table, target_row)
 
     def _apply_curve_order(self, new_order: list[str]):
         """根据给定顺序重排plot中的曲线"""
@@ -1608,7 +1609,7 @@ class PlotVariableEditorDialog(QDialog):
                 next_row = row_count - 1
 
             # 选中整行
-            self.var_table.selectRow(next_row)
+            select_table_row(self.var_table, next_row)
 
         # 删空时才通知其他 widget（与改造前 emit 行为一致；
         # 部分删除不 emit，避免与编辑器自身行删除双刷新形成回环）
@@ -1681,7 +1682,7 @@ class PlotVariableEditorDialog(QDialog):
         selected_row = self._get_selected_row()
         self.load_current_curves()
         if selected_row is not None and selected_row < self.var_table.rowCount():
-            self.var_table.selectRow(selected_row)
+            select_table_row(self.var_table, selected_row)
 
     def _apply_color_to_curve(self, var_name: str, color_name: str) -> bool:
         """将指定变量的颜色更新为给定颜色（委托 manager，返回是否实际应用）。
