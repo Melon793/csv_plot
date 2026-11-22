@@ -130,9 +130,67 @@ class PlotConfigManager(QObject):
                         cell_index=index,
                         cell_row=row,
                         cell_col=col,
+                        # 编辑器强化轮 D5/D6：显示名/换算随模板（含占位）
+                        curve_settings=PlotConfigManager._collect_curve_settings(plot_widget),
                     )
                 )
         return page_config
+
+    @staticmethod
+    def _collect_curve_settings(plot_widget) -> dict:
+        """收集逐曲线显示名/换算（仅非默认键；占位一并存，D6）。"""
+        settings: dict = {}
+        sources = list((getattr(plot_widget, "curves", {}) or {}).items()) + list(
+            (getattr(plot_widget, "invalid_curves", {}) or {}).items()
+        )
+        for name, ci in sources:
+            entry: dict = {}
+            dn = getattr(ci, "display_name", "")
+            if dn:
+                entry["display_name"] = dn
+            f = getattr(ci, "factor", 1.0)
+            o = getattr(ci, "offset", 0.0)
+            if f != 1.0:
+                entry["factor"] = f
+            if o != 0.0:
+                entry["offset"] = o
+            if entry:
+                settings[name] = entry
+        return settings
+
+    @staticmethod
+    def _apply_curve_settings(plot_widget, settings: dict) -> None:
+        """静默还原显示名/换算（D5/D6）：直写字段 + 从 y_raw 重投影。
+
+        套用是程序化批量路径，不走 apply_curve_* 入口（避免逐条播报/emit）；
+        legend 由调用方收尾统一刷新。占位只写字段（复活时构造点消费）。
+        """
+        from src.core.curve_transform import reproject
+        from src.core.data_types import step_mode_for
+
+        for name, entry in (settings or {}).items():
+            ci = plot_widget.curves.get(name)
+            ref = (getattr(plot_widget, "invalid_curves", {}) or {}).get(name)
+            target = ci if ci is not None else ref
+            if target is None:
+                continue
+            if "display_name" in entry:
+                target.display_name = entry["display_name"]
+            if "factor" in entry or "offset" in entry:
+                target.factor = entry.get("factor", 1.0)
+                target.offset = entry.get("offset", 0.0)
+                if ci is not None:
+                    reproject(ci)
+                    if ci.curve is not None:
+                        try:
+                            ci.curve.setData(
+                                ci.x_data, ci.y_data,
+                                stepMode=step_mode_for(ci.draw_mode),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "模板还原换算失败: var=%s", name, exc_info=True
+                            )
 
     def _reconcile_pages(self, main_window, page_count: int) -> None:
         """让页数量与模板一致：复用已有页、多的删、少的建（§6.5）。"""
@@ -488,10 +546,17 @@ class PlotConfigManager(QObject):
                     continue
                 plot_widget.demote_to_invalid(var_name, INVALID_CURVE_COLOR, True)
 
-            # scene 路径的曲线绘制已各自刷新过 header；若新增了占位，需再刷新
-            # 一次让占位条目进图例（demote 是纯数据操作，不刷 header，§4.2）。
+            # 编辑器强化轮 D5/D6：静默还原显示名/换算（含占位），legend 收尾统一刷
+            curve_settings = getattr(plot_config, "curve_settings", {}) or {}
+            if curve_settings:
+                self._apply_curve_settings(plot_widget, curve_settings)
+
+            # scene 路径的曲线绘制已各自刷新过 header；若新增了占位或还原了
+            # 显示名，需再刷新一次让占位/自定义名进图例（demote/直写不刷 header）。
             # 非活动页由 finally 的 _finalize_batch_add(update_header=True) 统一刷新。
-            if scene and getattr(plot_widget, "invalid_curves", None):
+            if scene and (
+                getattr(plot_widget, "invalid_curves", None) or curve_settings
+            ):
                 plot_widget._update_header_for_curves()
 
             return added_count > 0

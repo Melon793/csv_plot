@@ -1,6 +1,7 @@
 """Plot 会话配置数据结构"""
 
 from __future__ import annotations
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -29,9 +30,14 @@ class PlotConfig:
     #: （旧行为，零回归）。
     cell_row: int | None = None
     cell_col: int | None = None
+    #: 编辑器强化轮 D5/D6：逐曲线显示名/换算 {变量名: {display_name,factor,offset}}。
+    #: 可选字段——仅非空才写键、条目仅非默认键；旧档缺省读作空 dict，
+    #: 旧版软件读新模板忽略未知键，往返零影响（沿用 invalid_curves 惯例）。
+    #: 失效占位的设置一并存（按名为键），复活时带回。
+    curve_settings: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        """序列化为字典（invalid_curves/cell_index/cell_row/cell_col 仅有值才写，保持旧档兼容）"""
+        """序列化为字典（invalid_curves/cell_index/cell_row/cell_col/curve_settings 仅有值才写，保持旧档兼容）"""
         data = {"curves": self.curves}
         if self.invalid_curves:
             data["invalid_curves"] = list(self.invalid_curves)
@@ -40,6 +46,10 @@ class PlotConfig:
         if self.cell_row is not None and self.cell_col is not None:
             data["cell_row"] = int(self.cell_row)
             data["cell_col"] = int(self.cell_col)
+        if self.curve_settings:
+            data["curve_settings"] = {
+                str(k): dict(v) for k, v in self.curve_settings.items()
+            }
         return data
 
     @classmethod
@@ -85,7 +95,40 @@ class PlotConfig:
             cell_index=cell_index,
             cell_row=cell_row,
             cell_col=cell_col,
+            curve_settings=parse_curve_settings(data.get("curve_settings")),
         )
+
+
+def parse_curve_settings(raw) -> dict:
+    """curve_settings 容错解析（D5，照 cell_index 第 6 轮 P2-44 守卫口径）。
+
+    非 dict → 空；键 str 化；条目非 dict 丢弃；display_name 仅非空 str；
+    factor/offset bool 拒收、float try/except、非有限数丢弃、仅留非默认值；
+    未知键忽略。全默认条目不保留（与 to_dict 仅非默认写键同口径）。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for key, val in raw.items():
+        if key is None or not isinstance(val, dict):
+            continue
+        entry: dict = {}
+        dn = val.get("display_name")
+        if isinstance(dn, str) and dn.strip():
+            entry["display_name"] = dn
+        for fld, dflt in (("factor", 1.0), ("offset", 0.0)):
+            v = val.get(fld)
+            if v is None or isinstance(v, bool):
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(fv) and fv != dflt:
+                entry[fld] = fv
+        if entry:
+            out[str(key)] = entry
+    return out
 
 
 @dataclass

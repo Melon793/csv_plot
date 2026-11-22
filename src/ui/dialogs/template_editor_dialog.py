@@ -312,6 +312,25 @@ class TemplateEditorDialog(QDialog):
                     lines.append("        invalid_curves:")
                     for name in invalid:
                         lines.append(f"          - {cls._yaml_scalar(name)}")
+                # 编辑器强化轮 D5：逐曲线显示名/换算必须随全文再生成携带——
+                # 漏写等于「编辑 → 保存」静默丢用户设置（与上方 invalid_curves
+                # 同类事故防线）。仅非空条目/非默认键写出。
+                settings = plot.get("curve_settings") or {}
+                if isinstance(settings, dict) and settings:
+                    lines.append("        # 逐曲线显示名/换算（仅非默认键）")
+                    lines.append("        curve_settings:")
+                    for name, entry in settings.items():
+                        if not isinstance(entry, dict) or not entry:
+                            continue
+                        lines.append(f"          {cls._yaml_scalar(name)}:")
+                        if entry.get("display_name"):
+                            lines.append(
+                                "            display_name: "
+                                + cls._yaml_scalar(entry["display_name"])
+                            )
+                        for fld in ("factor", "offset"):
+                            if fld in entry:
+                                lines.append(f"            {fld}: {entry[fld]}")
                 # P1-L：格子索引必须随全文再生成携带——漏写等于「编辑 → 保存」
                 # 抹掉空格子对位信息，套用时曲线整体前移错位（上轮 P1-10）
                 cell_index = plot.get("cell_index")
