@@ -1468,7 +1468,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if (want_f, want_o) != (
             getattr(ci, "factor", 1.0), getattr(ci, "offset", 0.0)
         ):
-            mcm.apply_curve_transform(name, want_f, want_o)
+            # 搬运不抢目标图视野：单条搬运 batch=False 也会走到这里（P1-5）
+            mcm.apply_curve_transform(name, want_f, want_o, allow_y_rescue=False)
 
         if getattr(style, "visible", True) is False:
             self._schedule_visibility_restore(name, False)

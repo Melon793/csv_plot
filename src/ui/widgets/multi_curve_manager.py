@@ -77,6 +77,35 @@ _PEN_STYLE_MAP = {
 }
 
 
+# 平直曲线（窗口内 min==max）的跨度阈值：小于它按单点判可见
+_VISIBLE_FLAT_EPS = 1e-12
+
+
+def _visible_in_window(x, y, x0: float, x1: float, view_y) -> bool:
+    """曲线在「当前 X 窗口 ∩ Y 视野」内是否有可见数据（R5 事件式判据）。
+
+    自实现掩码：``pw._get_y_range_in_x_window`` 一类 helper 在空窗时会回退
+    全量数据（P1-1），会把"窗外数据"误判成可见。这里空窗一律返回 False。
+
+    平直段（窗口内 min==max）按"点是否落在视野内"判定；否则要求与视野
+    有正长度交集。非有限 y 不参与。
+    """
+    xa = np.ravel(np.asarray(x, dtype=float))
+    ya = np.ravel(np.asarray(y, dtype=float))
+    if xa.size == 0 or ya.size != xa.size:
+        return False
+    mask = (xa >= x0) & (xa <= x1) & np.isfinite(ya)
+    if not mask.any():
+        return False
+    ys = ya[mask]
+    lo = float(ys.min())
+    hi = float(ys.max())
+    vlo, vhi = float(view_y[0]), float(view_y[1])
+    if hi - lo < _VISIBLE_FLAT_EPS:
+        return vlo <= lo <= vhi
+    return min(hi, vhi) > max(lo, vlo)
+
+
 def _min_segment_distance_px(
     px: float,
     py: float,
@@ -1078,13 +1107,28 @@ class MultiCurveManager:
                     show(f"已重置 {var_name} 显示名")
         return True
 
-    def apply_curve_transform(self, var_name: str, factor: float, offset: float) -> bool:
+    def apply_curve_transform(
+        self,
+        var_name: str,
+        factor: float,
+        offset: float,
+        *,
+        allow_y_rescue: bool = True,
+    ) -> bool:
         """设置单曲线线性换算 y' = factor·y + offset（D3，共享入口）。
 
         重投影只从 ``ci.y_raw`` 出发（防叠乘）；setData 后走改色同族刷新链
         （UI 立即刷新含 Y 轴/统计 → 清游标项 → 节流清零 → 游标标签），
         游标读数/标记统计跟随变换后值。枚举/日期/纯时间（enum/date/s）与
         失效占位拒收；非有限数拒收；同值 no-op。
+
+        R5：换算把曲线整体移出当前视野时，自动执行本子图的「基于 X 调整 Y
+        轴」（``auto_y_in_x_range`` 叶子入口；页级 Ctrl+Y 的跨子图联动不在
+        此列）并冻结 Y（``_rescue_y_after_transform``），播报合并进既有一条。
+
+        Args:
+            allow_y_rescue: 是否允许 R5 救援。单条搬运（batch=False 也会走本
+                入口）必须显式传 False：搬运不应抢目标图的用户视野。
 
         Returns:
             是否实际应用。拒收/不存在/同值/setData 失败返回 False。
@@ -1104,6 +1148,14 @@ class MultiCurveManager:
             return False
         if ci.factor == f and ci.offset == o:
             return False
+        # R5：判据要用「换算前视野 + 换算前显示值」，必须在重投影与
+        # limits/Y 重算之前判定（ci.y_data 此刻仍是旧投影；隐藏曲线不参与）
+        pre_visible = False
+        if allow_y_rescue and ci.visible and ci.y_data is not None:
+            x0, x1 = pw.view_box.viewRange()[0]
+            pre_visible = _visible_in_window(
+                ci.x_data, ci.y_data, x0, x1, pw.view_box.viewRange()[1]
+            )
         ci.factor, ci.offset = f, o
         reproject(ci)
         try:
@@ -1120,6 +1172,9 @@ class MultiCurveManager:
             self._update_axes_for_multi_curve(allow_y_expand=False)
         except Exception:
             logger.debug("变换后 Y 范围重算失败: %s", var_name, exc_info=True)
+        rescued = False
+        if pre_visible and not getattr(pw, "_batch_adding", False):
+            rescued = self._rescue_y_after_transform(ci)
         if not getattr(pw, "_batch_adding", False):
             pw.curves_changed.emit()
         if hasattr(pw, "_queue_ui_refresh"):
@@ -1132,11 +1187,50 @@ class MultiCurveManager:
         if not getattr(pw, "_batch_adding", False):
             show = getattr(pw.window(), "_show_status_message", None)
             if callable(show):
+                # D22：救援提示合并进既有一条播报，不二次播报
+                suffix = "（超出视野，已适配 Y）" if rescued else ""
                 if f == 1.0 and o == 0.0:
-                    show(f"已重置 {var_name} 换算")
+                    show(f"已重置 {var_name} 换算{suffix}")
                 else:
-                    show(f"已修改 {var_name} 换算：y' = {format_transform(f, o)}")
+                    show(f"已修改 {var_name} 换算：y' = {format_transform(f, o)}{suffix}")
         return True
+
+    def _rescue_y_after_transform(self, ci: CurveInfo) -> bool:
+        """R5：换算后曲线整体移出视野时救援 Y 并冻结（D21–D24）。
+
+        判据是事件式的：换算前该曲线在 X 窗口内可见，且换算后与非空 Y
+        视野完全无交集才出手（A/E/F 等负例除 D15 的 limits 夹紧外不额外
+        动视野）。判定只看被编辑曲线，执行走本子图 ``auto_y_in_x_range``
+        的可见曲线并集（D23；页级 Ctrl+Y 入口会遍历整页子图并播报，此处
+        不调用，避免双播报）。X 视野全程不动。
+
+        冻结顺序：``updateAutoRange`` 同步落实后先关 Y autoRange、再
+        ``setAutoVisible``——后者会排队一次重算，若此时 autoRange 仍开着，
+        那次重算按全量数据（autoVisibleOnly 已被置 False）把视野拉回整条
+        曲线范围，救援就白做了。
+        """
+        pw = self.pw
+        try:
+            vb = pw.view_box
+            # 用户已开启「Y 跟随可见段」：setData 已排队重算，下一帧会自动
+            # 适配，"移出视野"只是同步视图的假象，救援反而会静默关掉跟随。
+            if vb.state["autoRange"][1]:
+                return False
+            x0, x1 = vb.viewRange()[0]
+            if _visible_in_window(ci.x_data, ci.y_data, x0, x1, vb.viewRange()[1]):
+                return False
+            pw.auto_y_in_x_range()
+            vb.updateAutoRange()  # 排队更新在 offscreen/无 paint 时不可靠（P2）
+            vb.disableAutoRange(axis=vb.YAxis)  # D24：先冻结，防粘滞
+            vb.setAutoVisible(x=False, y=False)
+            return True
+        except Exception:
+            logger.debug(
+                "换算后 Y 轴救援失败: %s",
+                getattr(ci, "var_name", "?"),
+                exc_info=True,
+            )
+            return False
 
     def _on_legend_anchor_clicked(self, url):
         """锚点点击按 scheme 分发（图例快速改色方案 §2.3）
