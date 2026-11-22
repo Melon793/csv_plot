@@ -5,6 +5,7 @@ import numpy as np
 from collections import OrderedDict
 
 from PySide6.QtCore import QSignalBlocker
+from PySide6.QtGui import QCursor
 
 from src.core.config import (
     MIN_INDEX_LENGTH,
@@ -287,6 +288,68 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw.pinned_x_values = []
         self.mw.cursor_btn.setChecked(checked)
         self.mw.cursor_btn.setText("隐藏游标" if checked else "显示游标")
+        if checked:
+            # 须在 setChecked(True) 之后：sync_crosshair 入口检查按钮状态
+            self._place_free_cursor_on_open()
+            # 落点后立即同步刷标签：toggle_cursor 已把圆点/数值标签画在旧位置，
+            # 而 sync_crosshair 的标签刷新走 16ms 定时器——不补这一刀，首帧会渲染
+            # "线在新位置、标签在旧位置"的撕裂态（用户可见的"闪一下"）。
+            self.refresh_cursor_labels()
+
+    def _place_free_cursor_on_open(self):
+        """打开自由游标时的落点（方案 B + 鼠标快照）。
+
+        出生值 x=0 会被 setBounds 钳到数据域左端，红线与 Y 轴/曲线起点
+        重叠，用户以为游标没打开。落点规则：
+        1. 鼠标在某个可见子图绘图区内 → 落鼠标 X（打开瞬间一次性快照，
+           不是持续全局跟随；解决"按 Ctrl+R 时线不在鼠标下"）；
+        2. 鼠标在所有绘图区外 → 落源 plot 视图中央。
+        均钳进游标域后走 sync_crosshair 同步到所有可见子图。
+        固定模式不受影响：右键菜单带 context_x 会立即覆盖此位置。
+        """
+        under = self._mouse_plot_under_cursor()
+        if under is not None:
+            x, widget = under
+            domain = widget._cursor_x_domain()
+            if domain is not None:
+                x = self._clamp_value(x, domain[0], domain[1])
+            self.sync_crosshair(x, widget)
+            return
+        source = self._get_cursor_source_plot()
+        if source is None or not hasattr(source, "view_box"):
+            return
+        try:
+            view_min, view_max = source.view_box.viewRange()[0]
+        except Exception as e:
+            logger.debug("打开游标取视图范围失败: %s", e)
+            return
+        if view_min is None or view_max is None:
+            return
+        center = (view_min + view_max) / 2
+        domain = source._cursor_x_domain()
+        if domain is not None:
+            center = self._clamp_value(center, domain[0], domain[1])
+        self.sync_crosshair(center, source)
+
+    def _mouse_plot_under_cursor(self):
+        """一次性快照：鼠标在可见子图绘图区内则返回 (view_x, widget)。
+
+        判定与 mouse_moved 同口径（plot_item.sceneBoundingRect），排除
+        legend/坐标轴等区域。不在任何绘图区内返回 None。
+        """
+        try:
+            global_pos = QCursor.pos()
+            for container in self.mw.plot_widgets:
+                if not container.isVisible():
+                    continue
+                widget = container.plot_widget
+                scene_pos = widget.mapToScene(widget.mapFromGlobal(global_pos))
+                if widget.plot_item.sceneBoundingRect().contains(scene_pos):
+                    view_x = widget.plot_item.vb.mapSceneToView(scene_pos).x()
+                    return view_x, widget
+        except Exception as e:
+            logger.debug("打开游标读取鼠标位置失败: %s", e)
+        return None
 
     def _realign_pinned_cursor_after_time_correction(
         self, old_factor, old_offset, new_factor, new_offset
