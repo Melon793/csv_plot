@@ -65,6 +65,28 @@ def app_settings(qapp):
     AppSettings._reset_for_tests()
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """每个用例前清掉合成鼠标事件残留的应用级修饰键。
+
+    QTest 带 Ctrl/Shift 的合成事件会写入全局修饰键缓存且不 release；
+    ``QAbstractItemView.selectRow`` 没有事件对象可读，会回退读
+    ``QGuiApplication.keyboardModifiers()``——残留 Shift 被当成扩选，
+    选中区间为空。表现为 xdist 并行下固定几例（selectRow 后选中为空）
+    随机失败，串行固定顺序恰好不触发。一次 NoModifier 合成点击即可复位。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    app = QApplication.instance()
+    if app is None or app.keyboardModifiers() == Qt.KeyboardModifier.NoModifier:
+        return
+    QTest.mouseClick(
+        QWidget(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+    )
+
+
 def pytest_collection_modifyitems(items):
     """按测试文件所在目录自动打分层 marker。"""
     for item in items:

@@ -74,6 +74,11 @@ uv sync --group dev
 - e2e 并行整体稳定，但**仍有偶发挂起**：2026-10-30 的三次并行全量中有 1 次 4 个 worker
   全部 0% CPU 卡住（陷阱 #10 的残余窗口，其中一个 worker 还被重启过），重跑 17.6s 通过。
   撞到 `--timeout=120` 报出全线程栈时按该条排查并重跑，不要当成新回归；
+- **合成事件修饰键残留（2026-11-22 已修）**：`QTest` 带 Ctrl/Shift 的合成鼠标事件会写入
+  应用级修饰键缓存且不 release；`QAbstractItemView.selectRow` 无事件对象时回退读
+  `keyboardModifiers()`，残留 Shift 被当成扩选 → 选中为空（xdist 下固定几例随机失败，
+  串行顺序恰好不触发）。`tests/conftest.py::pytest_runtest_setup` 每例前用一次 NoModifier
+  合成点击复位；产品侧程序化整行选中统一走 `src/ui/table_selection.select_table_row`；
 - 本机 10 核（4 性能核）：`-n 4` 与 `-n auto` 的差别在 1s 内，选 `-n 4` 留出余量给
   后台任务，也避免 10 个 worker 争用导致时序敏感用例抖动。
 
