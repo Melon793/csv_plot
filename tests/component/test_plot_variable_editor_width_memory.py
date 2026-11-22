@@ -55,15 +55,50 @@ class TestTransformColumnLayout:
             assert spin.minimumWidth() == 60
             assert dlg.var_table.columnWidth(col) == ed_mod._TRANSFORM_COL_WIDTH
 
-    def test_transform_col_drag_rejected(self, editor_env):
-        """评审 P2-2：换算列拖拽/双击被压回定宽，且不入固定列（防重开闪回）。"""
-        dlg, _pw = editor_env
+    def test_transform_col_drag_keeps_width_and_persists(self, editor_env, qapp):
+        """D16（反转 v1 P2-2）：换算列可拖；拖过即固定 + 落盘，重开恢复。"""
+        dlg, pw = editor_env
+        dlg.resize(1100, 600)
         for col in (4, 5):
-            dlg._on_section_resized(col, 84, 300)
-            assert dlg.var_table.columnWidth(col) == ed_mod._TRANSFORM_COL_WIDTH
-            assert col not in dlg._user_fixed_cols
-            dlg._on_handle_double_clicked(col)
-            assert dlg.var_table.columnWidth(col) == ed_mod._TRANSFORM_COL_WIDTH
+            dlg._on_section_resized(col, ed_mod._TRANSFORM_COL_WIDTH, 150)
+            dlg.var_table.setColumnWidth(col, 150)
+        assert dlg.var_table.columnWidth(4) == 150
+        assert dlg.var_table.columnWidth(5) == 150
+        assert {4, 5} <= dlg._user_fixed_cols
+        dlg._save_column_widths()
+
+        dlg2 = PlotVariableEditorDialog(pw)
+        qapp.processEvents()
+        try:
+            assert dlg2.var_table.columnWidth(4) == 150
+            assert dlg2.var_table.columnWidth(5) == 150
+            assert {4, 5} <= dlg2._user_fixed_cols
+        finally:
+            dlg2.deleteLater()
+
+    def test_transform_col_drag_clamps_min_width(self, editor_env):
+        """换算列拖到过窄时夹回列最小宽。"""
+        dlg, _pw = editor_env
+        dlg._on_section_resized(4, ed_mod._TRANSFORM_COL_WIDTH, 10)
+        assert dlg.var_table.columnWidth(4) == dlg._col_min[4]
+
+    def test_transform_col_double_click_restores_84_and_saves(
+        self, editor_env, app_settings
+    ):
+        """双击换算列：回默认宽 84 + 退出固定列 + 落盘（评审 P1-5）。"""
+        dlg, _pw = editor_env
+        dlg._on_section_resized(4, ed_mod._TRANSFORM_COL_WIDTH, 150)
+        dlg.var_table.setColumnWidth(4, 150)
+        dlg._on_handle_double_clicked(4)
+        assert dlg.var_table.columnWidth(4) == ed_mod._TRANSFORM_COL_WIDTH
+        assert 4 not in dlg._user_fixed_cols
+        assert dlg._width_save_timer.isActive()
+        dlg._width_save_timer.stop()
+        dlg._save_column_widths()
+        assert AppSettings().get_plot_variable_editor_column_widths()[4] == (
+            ed_mod._TRANSFORM_COL_WIDTH
+        )
+        assert 4 not in (AppSettings().get_plot_variable_editor_fixed_cols() or [])
 
     def test_huge_value_does_not_widen_column(self, editor_env):
         """极值文本（1234.500000）不得把列撑回 sizeHint 宽度。"""
@@ -83,14 +118,16 @@ class TestTransformColumnLayout:
 
 
 class TestArchiveRestore:
-    def test_archive_still_clamps_transform_cols(self, editor_env, app_settings, qapp):
-        """评审 P0-1：旧档里的 200px 膨胀值必须压回定宽，否则自适应永不生效。"""
+    def test_archive_still_clamps_unfixed_transform_cols(
+        self, editor_env, app_settings, qapp
+    ):
+        """D16：未固定换算列仍压回 84（旧档 sizeHint 膨胀值不恢复）。"""
         dlg, pw = editor_env
         dlg.close()
         app_settings.set_plot_variable_editor_column_widths(
             [46, 210, 170, 168, 200, 200]
         )
-        app_settings.set_plot_variable_editor_fixed_cols([1, 3, 4, 5])
+        app_settings.set_plot_variable_editor_fixed_cols([1, 3])
         dlg2 = PlotVariableEditorDialog(pw)
         qapp.processEvents()
         try:
@@ -98,6 +135,43 @@ class TestArchiveRestore:
             assert dlg2.var_table.columnWidth(5) == ed_mod._TRANSFORM_COL_WIDTH
             assert dlg2.var_table.columnWidth(3) == 168
             assert dlg2._columns_sized is True
+        finally:
+            dlg2.deleteLater()
+
+    def test_archive_restores_dragged_transform_col(
+        self, editor_env, app_settings, qapp
+    ):
+        """D16：存档固定列含 4 时恢复存档宽；未固定的 5 仍回 84。"""
+        dlg, pw = editor_env
+        dlg.close()
+        app_settings.set_plot_variable_editor_column_widths(
+            [46, 210, 170, 168, 150, 200]
+        )
+        app_settings.set_plot_variable_editor_fixed_cols([4])
+        dlg2 = PlotVariableEditorDialog(pw)
+        qapp.processEvents()
+        try:
+            assert dlg2.var_table.columnWidth(4) == 150
+            assert dlg2.var_table.columnWidth(5) == ed_mod._TRANSFORM_COL_WIDTH
+            assert 4 in dlg2._user_fixed_cols
+            assert 5 not in dlg2._user_fixed_cols
+        finally:
+            dlg2.deleteLater()
+
+    def test_empty_fixed_archive_compatible(self, editor_env, app_settings, qapp):
+        """settings 返回空固定列列表：等同"未拖过"，换算列回 84。"""
+        dlg, pw = editor_env
+        dlg.close()
+        app_settings.set_plot_variable_editor_column_widths(
+            [46, 210, 170, 168, 200, 200]
+        )
+        app_settings.set_plot_variable_editor_fixed_cols([])
+        dlg2 = PlotVariableEditorDialog(pw)
+        qapp.processEvents()
+        try:
+            assert dlg2._user_fixed_cols == set()
+            assert dlg2.var_table.columnWidth(4) == ed_mod._TRANSFORM_COL_WIDTH
+            assert dlg2.var_table.columnWidth(5) == ed_mod._TRANSFORM_COL_WIDTH
         finally:
             dlg2.deleteLater()
 

@@ -19,6 +19,7 @@ from src.core.data_types import (
     SYMBOL_POLICY_ON,
     InvalidCurveRef,
 )
+from src.core.settings import ConfigKey
 from src.ui.plot_variable_editor import PlotVariableEditorDialog, _mode_combo
 from src.ui.widgets import curve_style_panel as csp
 
@@ -26,7 +27,12 @@ NAMES = ["a", "b"]
 
 
 @pytest.fixture()
-def editor_env(plot_factory, qapp):
+def editor_env(plot_factory, qapp, app_settings):
+    # 列宽 debounce 落盘写的是会话级共享 ini：不清键时同 worker 其它文件会
+    # 读到本文件的固定列存档（弹性列分配被跳过 → 顺序依赖假失败）。
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS, "")
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS, "")
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, "")
     df = pd.DataFrame({name: [float(i), float(i + 1)] for i, name in enumerate(NAMES)})
     pw = plot_factory(df)
     host = pw.window()
@@ -37,9 +43,16 @@ def editor_env(plot_factory, qapp):
     dlg = PlotVariableEditorDialog(pw)
     qapp.processEvents()
     yield dlg, pw
+    # 拖宽触发的 debounce 定时器若在 teardown 后落地，会把本用例的固定列
+    # 写进共享 ini；先停表再销毁（同 width_memory 的 P1-1 口径）。
+    dlg._width_save_timer.stop()
     if dlg.isVisible():
         dlg.close()
     dlg.deleteLater()
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS, "")
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS, "")
+    app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, "")
+    app_settings.sync()
 
 
 def _var_at(dlg, row):

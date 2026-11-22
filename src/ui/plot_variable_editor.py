@@ -72,8 +72,9 @@ _FIXED_MIN_WIDTHS = {0: 44, 3: 96, 4: 70, 5: 70}
 # 弹性列最小宽独立常量（评审 P1-7）：_FIXED_MIN_WIDTHS 兼作固定列集合，
 # 往里加 1/2 会被 _adjust/_restore 当成固定列迭代，故单独维护。
 _ELASTIC_MIN = {1: 140, 2: 120}
-# Factor/Offset 定宽（D13）：NoButtons 后列宽不随极值文本 sizeHint 膨胀，
-# 存档里的旧膨胀值恢复时也强制压回该宽（评审 P0-1）。
+# Factor/Offset 换算列：默认宽 84，不按极值文本 sizeHint 自适应（D13）。
+# D16 反转 v1 P2-2 的"禁拖"：换算列可拖，拖过即入固定列并持久化，
+# 未拖过的列才压回 84（用户偏好可调优先）。
 _TRANSFORM_COLS = (4, 5)
 _TRANSFORM_COL_WIDTH = 84
 
@@ -549,17 +550,17 @@ class PlotVariableEditorDialog(QDialog):
         self.update_button_states()
 
     def _adjust_fixed_column_widths(self):
-        """定宽列首帧自适应：col0/col3 按内容，col4/5 固定宽 84（D13）。
+        """定宽列首帧自适应：col0/col3 按内容，换算列默认宽 84（D13/D16）。
 
         首帧数据填充后执行一次（此时单元格控件已就位，宽度由表头 +
         复选框/摘要格实际内容决定，跨平台字体差异下不手工拍值）；
-        换算列例外——NoButtons 后按极值文本 sizeHint 会膨胀，固定窄宽。
+        换算列例外——未拖过（不在固定列）时固定窄宽，拖过的保留用户宽。
         """
         for col in _FIXED_MIN_WIDTHS:
             self._width_guard = True
             try:
-                if col in _TRANSFORM_COLS:
-                    # D13：换算列固定宽，不按极值文本 sizeHint 自适应
+                if col in _TRANSFORM_COLS and col not in self._user_fixed_cols:
+                    # D13/D16：未拖过的换算列不按极值文本 sizeHint 自适应
                     self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
                     continue
                 self.var_table.resizeColumnToContents(col)
@@ -574,26 +575,27 @@ class PlotVariableEditorDialog(QDialog):
     # C4 列宽引擎（D1+D10）
     # ------------------------------------------------------------------
     def _init_column_widths(self):
-        """初值：有存档用存档（含用户固定列），无存档用默认宽。"""
+        """初值：有存档用存档（含用户固定列），无存档用默认宽。
+
+        固定列集合先读出再套用（评审 P2-12）：固定列（含拖过的换算列，
+        D16）恢复存档宽；未固定换算列回默认 84（旧档 sizeHint 膨胀值不恢复）。
+        """
         from src.core.settings import AppSettings
 
         settings = AppSettings()
         widths = settings.get_plot_variable_editor_column_widths()
-        fixed = settings.get_plot_variable_editor_fixed_cols()
+        fixed = settings.get_plot_variable_editor_fixed_cols() or []
+        self._user_fixed_cols = {c for c in fixed if 0 <= c < _COL_COUNT}
         self._width_guard = True
         try:
             if widths is not None and len(widths) == _COL_COUNT:
                 for col, w in enumerate(widths):
-                    if col in _TRANSFORM_COLS:
+                    if col in _TRANSFORM_COLS and col not in self._user_fixed_cols:
                         # 评审 P0-1：旧档里被 sizeHint 撑大的 4/5 宽一律压回
-                        # 定宽，否则 _columns_sized=True 跳过后 F2 永不生效
+                        # 定宽；只有用户拖过（固定列）才恢复存档宽
                         self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
                         continue
                     self.var_table.setColumnWidth(col, max(w, self._col_min[col]))
-                if fixed is not None:
-                    self._user_fixed_cols = {
-                        c for c in fixed if 0 <= c < _COL_COUNT
-                    }
                 # 评审 P1-2：有存档时跳过首帧内容自适应，否则 _adjust_fixed_
                 # column_widths 会覆盖刚恢复的定宽列存档（D10 记忆失效）
                 self._columns_sized = True
@@ -653,17 +655,12 @@ class PlotVariableEditorDialog(QDialog):
         self._distribute_column_widths()
 
     def _on_section_resized(self, col: int, _old: int, new: int):
-        """用户拖拽 → 该列转固定（退出弹性分配）；夹最小宽。"""
+        """用户拖拽 → 该列转固定（退出弹性分配）；夹最小宽。
+
+        D16（反转 v1 P2-2）：换算列同样可拖，拖过即入固定列并落盘，
+        重开按存档宽恢复（不再压回 84）。
+        """
         if self._width_guard:
-            return
-        if col in _TRANSFORM_COLS:
-            # D13 评审 P2-2：换算列定宽不可拖——读档会压回 84，拖宽只在本
-            # 会话生效属"自相矛盾"；直接压回，不入固定列、不触发存盘。
-            self._width_guard = True
-            try:
-                self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
-            finally:
-                self._width_guard = False
             return
         if new < self._col_min[col]:
             self._width_guard = True
@@ -676,13 +673,20 @@ class PlotVariableEditorDialog(QDialog):
         self._width_save_timer.start()
 
     def _on_handle_double_clicked(self, col: int):
-        """双击分隔线：恢复弹性 + 内容自适应（D1）。换算列固定宽不可调。"""
+        """双击分隔线：普通列恢复弹性 + 内容自适应（D1）；换算列回默认 84。
+
+        换算列双击同样要落盘（评审 P1-5）：早退路径不存盘会让重开闪回
+        旧宽（D16）。
+        """
         if col in _TRANSFORM_COLS:
+            self._user_fixed_cols.discard(col)
             self._width_guard = True
             try:
                 self.var_table.setColumnWidth(col, _TRANSFORM_COL_WIDTH)
             finally:
                 self._width_guard = False
+            self._distribute_column_widths()
+            self._width_save_timer.start()
             return
         self._user_fixed_cols.discard(col)
         self._width_guard = True
