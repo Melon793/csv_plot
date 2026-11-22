@@ -576,7 +576,13 @@ class LegendTextBrowser(QTextBrowser):
         apply_curve_panel_picks(self._pw, var_name, picked)
 
     def _exec_curve_panel(self, var_name: str, global_pos: QPoint) -> None:
-        """薄委托：共享组件 curve_style_panel（C3）。"""
+        """薄委托：共享组件 curve_style_panel（C3）。
+
+        评审 P1-3：singleShot(0) 回环期间 legend 可能已销毁而 pw 仍活，
+        共享函数只守卫 pw，故委托内补自身存活检查（与抽离前同口径）。
+        """
+        if not widget_alive(self):
+            return
         exec_curve_panel(self._pw, var_name, global_pos)
 
 

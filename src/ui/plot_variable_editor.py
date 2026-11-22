@@ -133,6 +133,7 @@ class _StyleCell(QWidget):
         lay.addWidget(carat)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(28)
+        self._pressed = False
 
     def set_state(self, color: str, summary: str, enabled: bool = True):
         self.swatch.setStyleSheet(
@@ -145,14 +146,23 @@ class _StyleCell(QWidget):
             else "变量缺失，恢复后可改样式"
         )
 
-    def mouseReleaseEvent(self, event):
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and self.rect().contains(event.position().toPoint())
-            and self.isEnabled()
-        ):
-            self.clicked.emit(self.var_name)
+    def mousePressEvent(self, event):
+        # 评审 P2-4：press 记录 + release 落点双重判定，防框选/拖拽释放在格上误弹
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
             event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit = self._pressed and self.rect().contains(event.position().toPoint())
+            self._pressed = False
+            if hit and self.isEnabled():
+                self.clicked.emit(self.var_name)
+                event.accept()
+                return
+            event.ignore()
             return
         super().mouseReleaseEvent(event)
 
@@ -399,11 +409,8 @@ class PlotVariableEditorDialog(QDialog):
         # 连接信号
         self.var_table.itemSelectionChanged.connect(self.on_selection_changed)
         self.var_table.cellClicked.connect(self.on_cell_clicked)
-        # 右键菜单：与"排序 ▾"按钮共用同一组排序动作
-        self.var_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.var_table.customContextMenuRequested.connect(
-            self._show_table_context_menu
-        )
+        # 右键单槽在 setup_ui 前段已连接 _on_row_context_menu（重置组+排序组，
+        # 评审 P0-1：不得双连接否则先后弹两个菜单）
         # 不再需要itemChanged信号，因为使用QCheckBox控件
         # 拖拽添加等外部变化时刷新表格（必需，否则拖拽后表格不更新）
         # 性能优化（方案 A）：改走增量更新，仅增删变化行；复杂场景内部回退全量重建
@@ -558,6 +565,9 @@ class PlotVariableEditorDialog(QDialog):
                     self._user_fixed_cols = {
                         c for c in fixed if 0 <= c < _COL_COUNT
                     }
+                # 评审 P1-2：有存档时跳过首帧内容自适应，否则 _adjust_fixed_
+                # column_widths 会覆盖刚恢复的定宽列存档（D10 记忆失效）
+                self._columns_sized = True
             else:
                 for col, w in enumerate(_COL_DEFAULT_WIDTHS):
                     self.var_table.setColumnWidth(col, w)
@@ -903,14 +913,8 @@ class PlotVariableEditorDialog(QDialog):
                 action.setEnabled(self._last_sort_order is not None)
 
     def _show_table_context_menu(self, pos):
-        """表格右键菜单：就地构建排序动作组并按当前状态刷新可用态"""
-        menu = QMenu(self.var_table)
-        self._add_sort_actions(menu)
-        self._update_sort_menu_actions(menu)
-        menu.exec(self.var_table.viewport().mapToGlobal(pos))
-        # 带 parent 的 QMenu 归 C++ 父对象所有，exec 后须显式回收，
-        # 否则每次右键都会在 var_table 下累积一份菜单对象
-        menu.deleteLater()
+        """旧右键入口薄壳（撤入口不撤实现）：委托合并单槽 _on_row_context_menu。"""
+        self._on_row_context_menu(pos)
 
     def _table_order(self) -> list[str]:
         """按表格行序收集变量名（含失效占位行）"""
@@ -1047,7 +1051,8 @@ class PlotVariableEditorDialog(QDialog):
         for value in (getattr(ci, "factor", 1.0), getattr(ci, "offset", 0.0)):
             spin = QDoubleSpinBox()
             spin.setRange(-1e12, 1e12)
-            spin.setDecimals(3)
+            # 评审 P2-5：6 位小数，避免模板高精度 factor 回填被舍入、一触碰即改精度
+            spin.setDecimals(6)
             spin.setSingleStep(0.1)
             spin.setKeyboardTracking(False)
             with QSignalBlocker(spin):
@@ -1104,20 +1109,30 @@ class PlotVariableEditorDialog(QDialog):
         QTimer.singleShot(0, _show)
 
     def _on_row_context_menu(self, pos):
-        """行右键重置菜单（D8）：重置显示名/变换/全部，走共享入口。"""
+        """表格右键单槽（评审 P0-1 合并）：行上=重置组+排序组，空白处仅排序组。
+
+        重置组（D8）走共享入口；排序组复用 _add_sort_actions。一次 exec，
+        避免双连接导致先后弹两个菜单。
+        """
+        menu = QMenu(self.var_table)
         row = self.var_table.rowAt(pos.y())
-        if row < 0:
-            return
-        item = self.var_table.item(row, 1)
-        if item is None:
-            return
-        var_name = item.data(Qt.ItemDataRole.UserRole)
-        menu = QMenu(self)
-        act_name = menu.addAction("重置显示名")
-        act_xf = menu.addAction("重置变换（factor=1, offset=0）")
-        act_all = menu.addAction("重置该行全部")
+        var_name = None
+        if row >= 0:
+            item = self.var_table.item(row, 1)
+            if item is not None:
+                var_name = item.data(Qt.ItemDataRole.UserRole)
+        act_name = act_xf = act_all = None
+        if var_name:
+            act_name = menu.addAction("重置显示名")
+            act_xf = menu.addAction("重置变换（factor=1, offset=0）")
+            act_all = menu.addAction("重置该行全部")
+            menu.addSeparator()
+        self._add_sort_actions(menu)
+        self._update_sort_menu_actions(menu)
         chosen = menu.exec(self.var_table.viewport().mapToGlobal(pos))
         menu.deleteLater()
+        if var_name is None:
+            return
         mcm = self.plot_widget._multi_curve_manager
         if chosen is act_name:
             mcm.apply_curve_display_name(var_name, "")

@@ -46,6 +46,51 @@ def _var_at(dlg, row):
     return dlg.var_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
 
 
+class _FakeAction:
+    def __init__(self, text):
+        self.text = text
+        self._data = None
+        self.enabled = True
+        self.triggered = types.SimpleNamespace(connect=lambda fn: None)
+
+    def setData(self, v):
+        self._data = v
+
+    def data(self):
+        return self._data
+
+    def setEnabled(self, v):
+        self.enabled = bool(v)
+
+
+class _FakeMenu:
+    """右键单槽替身：记录 addAction 文本与 exec 次数（P0-1 回归）。"""
+
+    instances = []
+
+    def __init__(self, parent=None):
+        self._acts = []
+        self.exec_returns = None
+        _FakeMenu.instances.append(self)
+
+    def addAction(self, text):
+        act = _FakeAction(text)
+        self._acts.append(act)
+        return act
+
+    def addSeparator(self):
+        pass
+
+    def actions(self):
+        return self._acts
+
+    def exec(self, pos=None):
+        return self.exec_returns
+
+    def deleteLater(self):
+        pass
+
+
 class TestStructure:
     def test_six_columns_and_cell_types(self, editor_env):
         dlg, _pw = editor_env
@@ -190,25 +235,11 @@ class TestContextMenuReset:
         pw._multi_curve_manager.apply_curve_display_name(var, "扭矩A")
         pw._multi_curve_manager.apply_curve_transform(var, 2.0, -10.0)
 
-        captured = {}
-
-        class _FakeMenu:
-            def __init__(self, parent=None):
-                self._acts = []
-
-            def addAction(self, text):
-                act = types.SimpleNamespace(text=text)
-                self._acts.append(act)
-                return act
-
+        class _ResetMenu(_FakeMenu):
             def exec(self, pos=None):
-                captured["menu"] = self
                 return self._acts[2]  # 重置该行全部
 
-            def deleteLater(self):
-                pass
-
-        monkeypatch.setattr(ed_mod, "QMenu", _FakeMenu)
+        monkeypatch.setattr(ed_mod, "QMenu", _ResetMenu)
         dlg._on_row_context_menu(dlg.var_table.visualItemRect(
             dlg.var_table.item(0, 1)
         ).center())
@@ -253,12 +284,30 @@ class TestColumnWidthEngine:
         dlg, pw = editor_env
         dlg._on_section_resized(1, 210, 321)
         dlg.var_table.setColumnWidth(1, 321)
+        # 评审 P1-2 回归：定宽列（col3）存档也须恢复，不被首帧自适应覆盖
+        dlg._on_section_resized(3, 168, 200)
+        dlg.var_table.setColumnWidth(3, 200)
         dlg._save_column_widths()
         dlg2 = PlotVariableEditorDialog(pw)
         qapp.processEvents()
         assert dlg2.var_table.columnWidth(1) == 321
+        assert dlg2.var_table.columnWidth(3) == 200
         assert 1 in dlg2._user_fixed_cols
+        assert 3 in dlg2._user_fixed_cols
         dlg2.deleteLater()
+
+    def test_context_menu_single_merged(self, editor_env, monkeypatch):
+        """评审 P0-1 回归：行右键只 exec 一个菜单，含重置组+排序组。"""
+        dlg, pw = editor_env
+        _FakeMenu.instances.clear()
+        monkeypatch.setattr(ed_mod, "QMenu", _FakeMenu)
+        dlg._on_row_context_menu(dlg.var_table.visualItemRect(
+            dlg.var_table.item(0, 1)
+        ).center())
+        assert len(_FakeMenu.instances) == 1, "双连接会 exec 两个菜单"
+        texts = [a.text for a in _FakeMenu.instances[0]._acts]
+        assert any("重置显示名" in t for t in texts)
+        assert any("升序" in t for t in texts)
 
 
 class TestRetainedImpl:
