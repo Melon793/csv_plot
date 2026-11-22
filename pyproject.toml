@@ -36,10 +36,12 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 qt_api = "pyside6"
+# -n auto --dist loadfile：默认并行（串行 ~135s → ~33s）；调试或需要确定性
+#   顺序时用 -n 0 覆盖回串行
 # --timeout：把历史上的"永久挂起"（WaitSignal 死锁、模态弹窗）变成可诊断失败
 # --durations=20：常态暴露慢用例，防止本次优化被后续提交吃回
 #   （另见 tests/conftest.py 里的 >1s 点名护栏）
-addopts = "-ra --timeout=120 --timeout-method=thread --durations=20"
+addopts = "-ra -n auto --dist loadfile --timeout=120 --timeout-method=thread --durations=20"
 markers = [
     "unit: 纯逻辑单元测试（无 Qt 界面依赖，秒级完成）",
     "component: offscreen 控件级功能测试",

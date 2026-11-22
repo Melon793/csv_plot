@@ -8,18 +8,17 @@
 
 | 层 | 用例数 | 实测耗时（串行） | 状态 |
 |---|---|---|---|
-| unit（纯逻辑，无 Qt） | 860 | ~5.4s | 稳定运行 |
-| component（offscreen 控件级） | 742 | ~18.3s | 稳定运行 |
-| e2e（主窗口冒烟） | 146 | ~29.3s | 稳定运行 |
-| **全量** | **1748** | **~54.5s**（并行 `-n 4 --dist loadfile` **17.6s**；带 `--cov` **60.8s**） | `1748 passed` |
+| unit（纯逻辑，无 Qt） | 1188 | ~11.9s | 稳定运行 |
+| component（offscreen 控件级） | 1483 | ~47.6s | 稳定运行 |
+| e2e（主窗口冒烟） | 253 | ~74.0s | 稳定运行 |
+| **全量** | **2924** | **~135s**（默认并行 `-n auto --dist loadfile` **~33s**） | `2924 passed` |
 
-> 上表数字为 **2026-10-30 在 macOS arm64 / offscreen 实测**（`-q` 口径，串行）。
-> 相对 2026-09-22 的基线（1126 例 / 25.7s），用例数 **+622**：多标签页、统计窗口重构、
-> 失效曲线占位、数据层容错与 BLF 解码等模块落地；三层按比例增长（unit 588→860、
-> component 456→742、e2e 82→146），单例均值 6.3ms / 24.6ms / 200ms，无效率退化。
-> 更早的沿革仅作记录：2026-09-22 之前是 1127 例 / 73.5s（差异来自固化等待改造与并行化，
-> component 41.6s→11.5s、e2e 27.4s→11.1s，只改等待不删断言）；214 例 / ~4.2s 是
-> Phase 1 快照。**改数字时请重跑，别顺手上调。**
+> 上表数字为 **2026-11-22 在 macOS arm64（10 核）/ offscreen / Python 3.14.8 实测**（`-q` 口径，串行）。
+> 相对 2026-10-30 的 1748 例，用例数 **+1176**；单例均值 unit 10.0ms / component 32.1ms /
+> e2e 292ms。**改数字时请重跑，别顺手上调。**
+> 更早的沿革仅作记录：2026-09-22 是 1126 例 / 25.7s（多标签页、统计窗口重构、失效曲线
+> 占位、数据层容错与 BLF 解码等模块落地）；再往前 2026-09-22 之前是 1127 例 / 73.5s
+> （差异来自固化等待改造与并行化，只改等待不删断言）；214 例 / ~4.2s 是 Phase 1 快照。
 
 覆盖率现状（`--cov=src`，2026-10-30 实测）：
 
@@ -50,14 +49,13 @@ uv sync --group dev
 
 | 命令 | 用途 | 实测结果 |
 |---|---|---|
-| `uv run pytest -m unit` | 日常开发高频回归（秒级） | 860 passed / ~5.4s |
-| `uv run pytest -m "unit or component"` | 提交前自检 | 1602 passed / ~22.9s |
-| `uv run pytest` | CI 全量 | 1748 passed / ~54.5s |
-| `uv run pytest -m e2e` | e2e 冒烟（含真实主窗口） | 146 passed / ~29.3s |
-| `uv run pytest --cov=src --cov-report=term-missing` | 覆盖率（含未覆盖行号） | 总体 79% |
-| `uv run pytest -m component -k legend` | 精准过滤（marker + 关键字组合） | 49 passed / ~1.0s |
-| `uv run pytest -m "unit or component" -n 4 --dist loadfile` | 提交前自检（并行） | 1602 passed / ~8.6s |
-| `uv run pytest -n 4 --dist loadfile` | CI 全量（并行） | 1748 passed / ~17.6s |
+| `uv run pytest -m unit` | 日常开发高频回归（秒级） | 1188 passed / ~8.4s（`-n 0` 串行 11.9s） |
+| `uv run pytest -m "unit or component"` | 提交前自检 | 2671 passed / ~15.8s（串行合计 ~59.5s） |
+| `uv run pytest` | CI 全量（默认并行） | 2924 passed / ~33s（`-n 0` 串行 ~135s） |
+| `uv run pytest -m e2e` | e2e 冒烟（含真实主窗口） | 253 passed / ~19.1s（`-n 0` 串行 74.0s） |
+| `uv run pytest --cov=src --cov-report=term-missing` | 覆盖率（含未覆盖行号） | 总体 79%（2026-10-30 口径） |
+| `uv run pytest -m component -k legend -n 0` | 精准过滤（marker + 关键字；小筛选并行反而慢） | 153 passed / ~3.4s |
+| `uv run pytest -n 0` | 串行全量（定位/需要确定性顺序） | 2924 passed / ~135s |
 
 > 注：本机 `uv` 不在 PATH 时使用绝对路径 `~/.local/bin/uv`，或先将其加入 shell 配置。
 
@@ -65,22 +63,26 @@ uv sync --group dev
 
 `pytest-xdist` 与 `pytest-timeout` 已在 dev 组：`uv sync --group dev` 即可。
 
-**并行口径**（2026-10-30 实测：`unit or component` 串行 22.9s → `-n 4 --dist loadfile` 8.6s；
-全量串行 54.5s → 17.6s）。选型结论：
+**并行口径**（2026-11-22 实测：全量串行 135s → 默认 `-n auto --dist loadfile` 约 33s；
+unit 11.9s → 8.4s）。选型结论：
 
-- 用 `--dist loadfile`：同文件的用例落在同一 worker，避免"同文件内的用例互相踩环境"
-  （`-m unit -n auto` 实测 **无收益**——unit 只有 5.4s，worker 启动与 import 开销吃掉全部节省，
-  日常单跑 unit 直接用串行）；
-- e2e 并行整体稳定，但**仍有偶发挂起**：2026-10-30 的三次并行全量中有 1 次 4 个 worker
-  全部 0% CPU 卡住（陷阱 #10 的残余窗口，其中一个 worker 还被重启过），重跑 17.6s 通过。
-  撞到 `--timeout=120` 报出全线程栈时按该条排查并重跑，不要当成新回归；
+- `addopts` 默认带 `-n auto --dist loadfile`：同文件的用例落在同一 worker，避免
+  "同文件内的用例互相踩环境"；调试、需要确定性顺序或小范围过滤（如 `-k` 单关键词）
+  用 `-n 0` 覆盖回串行（worker 启动约 2s，小筛选并行反而慢）；
+- e2e 并行整体稳定，但**仍有偶发挂起**的历史记录：2026-10-30 的三次并行全量中有 1 次
+  4 个 worker 全部 0% CPU 卡住（陷阱 #10 的残余窗口，其中一个 worker 还被重启过），
+  重跑即恢复；2026-11-22 多轮并行全量（`-n4` / `-n auto`）均绿。撞到 `--timeout=120`
+  报出全线程栈时按该条排查并重跑，不要当成新回归；
 - **合成事件修饰键残留（2026-11-22 已修）**：`QTest` 带 Ctrl/Shift 的合成鼠标事件会写入
   应用级修饰键缓存且不 release；`QAbstractItemView.selectRow` 无事件对象时回退读
   `keyboardModifiers()`，残留 Shift 被当成扩选 → 选中为空（xdist 下固定几例随机失败，
   串行顺序恰好不触发）。`tests/conftest.py::pytest_runtest_setup` 每例前用一次 NoModifier
   合成点击复位；产品侧程序化整行选中统一走 `src/ui/table_selection.select_table_row`；
-- 本机 10 核（4 性能核）：`-n 4` 与 `-n auto` 的差别在 1s 内，选 `-n 4` 留出余量给
-  后台任务，也避免 10 个 worker 争用导致时序敏感用例抖动。
+- 本机 10 核（4 性能核）：日常直接用默认 `-n auto`；需要给后台任务留余量时再显式 `-n 4`
+  （更慢，不作默认）。另：同时跑两套全量（或与并行会话的 pytest 并发）会互相拖死，
+  一次只跑一套；
+- 3.14 + PySide6 6.12 的 **Windows 基线与 Nuitka 打包未验证**；下次 Windows 构建前
+  先在该环境跑一次 `uv sync && uv run pytest`。
 
 **两道护栏**（`pyproject.toml` 的 `addopts` + `tests/conftest.py`）：
 
@@ -316,7 +318,7 @@ fixture 用 monkeypatch 替换 QMessageBox 静态方法）。
 
 - ✅ 挂起护栏：`--timeout=120 --timeout-method=thread`（见 2.1，把静默卡死变成可诊断失败）；
 - ✅ 耗时护栏：`--durations=20` + `tests/conftest.py` 的 `>1s` 点名钩子；
-- ✅ 并行：`pytest-xdist` 全量 `-n 4 --dist loadfile`（见 2.1；`-m unit -n auto` 实测无收益，已否）；
+- ✅ 并行：`pytest-xdist` 默认 `-n auto --dist loadfile`（全量串行 135s → 约 33s；`-n 0` 可覆盖回串行）；
 - GitHub Actions 三平台矩阵（macOS / Windows / Linux，offscreen 模式无需 xvfb）；
 - 覆盖率基线护栏（**待落地**）：计划加 `--cov-fail-under=75` 防回退（2026-10-30 实测总体
   79%，若沿用原计划的 65 只剩 14 点余量、门槛偏松；先确认 CI 平台差异再定值）；
