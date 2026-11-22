@@ -224,6 +224,8 @@ class _StyleCell(QWidget):
     """样式摘要格：色块 + 摘要文字 + ▾，整格点击弹快捷面板（D9）。
 
     只负责视觉与命中；应用集中在面板 exec 返回后（共享组件红线）。
+    R4（D19）：不定高，填满单元格后控件按 AlignVCenter 垂直居中——
+    固定 28px 会溢出行高（约 30），item 内 rect 未居中使内容整体偏下。
     """
 
     clicked = Signal(str)
@@ -232,19 +234,21 @@ class _StyleCell(QWidget):
         super().__init__(parent)
         self.var_name = var_name
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setContentsMargins(4, 0, 4, 0)
         lay.setSpacing(6)
+        vcenter = Qt.AlignmentFlag.AlignVCenter
         self.swatch = QLabel(self)
         self.swatch.setFixedSize(24, 15)
         self.text = QLabel(self)
         self.text.setStyleSheet("color: #444;")
+        self.text.setAlignment(Qt.AlignmentFlag.AlignLeft | vcenter)
         carat = QLabel("▾", self)
         carat.setStyleSheet("color: #8a8f94;")
-        lay.addWidget(self.swatch)
-        lay.addWidget(self.text, 1)
-        lay.addWidget(carat)
+        carat.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.swatch, 0, vcenter)
+        lay.addWidget(self.text, 1, vcenter)
+        lay.addWidget(carat, 0, vcenter)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(28)
         self._pressed = False
 
     def set_state(self, color: str, summary: str, enabled: bool = True):
@@ -757,6 +761,21 @@ class PlotVariableEditorDialog(QDialog):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._distribute_column_widths()
+
+    def showEvent(self, event):
+        """首次显示后补一次列宽分布（R3 / 评审 P1-6）。
+
+        构造期视口尺寸与 _restore_geometry 恢复后的视口不一致，构造时分的
+        弹性列宽是旧尺寸；不补分布时用户第一次拖窗宽才触发比例分配 →
+        弹性列瞬间跳变。singleShot(0) 等布局落定再补一次（两参 + 存活守卫）。
+        """
+        super().showEvent(event)
+        self._distribute_column_widths()
+        QTimer.singleShot(0, self._safe_distribute)
+
+    def _safe_distribute(self):
+        if widget_alive(self):
+            self._distribute_column_widths()
 
     def _on_section_resized(self, col: int, _old: int, new: int):
         """用户拖拽 → 该列转固定（退出弹性分配）；夹最小宽。
