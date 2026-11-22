@@ -165,6 +165,10 @@ DRAW_MODE_ENUM_AS_STEP = True
 VAR_INFO_MAX_TABS = 50  # 单次提交的最大标签页数，超出截断并提示
 VAR_INFO_ENUM_DISPLAY_LIMIT = 200  # 枚举文本表在信息页最多展示条目数
 VAR_INFO_STATS_CACHE_MAX = 512  # 统计缓存上限（单条约150字节，共约77KB）
+# 变量区细边栏（D1）：折叠态左栏收成的竖条宽度，» 按钮＋竖排「变量」常驻，
+# 整条都是展开热区。折叠态 left_widget.setMinimumWidth 也用它 —— 内容页
+# minimumSizeHint（实测 222）会钳制 splitter.setSizes，显式最小宽才能落到 28
+VAR_PANE_RAIL_WIDTH = 28
 # 信息页「属性」列的最小宽度：该列可手动拖动（Interactive），下限用于
 # 防止用户拖到几乎为零后标签全部被省略号截断、又找不到拖回来的把手。
 # 注意它实际传给 QHeaderView.setMinimumSectionSize()，约束的是**所有列**

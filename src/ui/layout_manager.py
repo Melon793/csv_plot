@@ -11,11 +11,12 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from PySide6.QtCore import QTimer, QEvent, QSignalBlocker
+from PySide6.QtCore import QTimer, QEvent, QSignalBlocker, Qt
 from PySide6.QtWidgets import QApplication, QWidget, QMessageBox, QDialog
 
 from src.core.config import (
     UI_DEBOUNCE_DELAY_MS,
+    VAR_PANE_RAIL_WIDTH,
     compute_global_x_limits,
     widget_alive as _widget_alive,
 )
@@ -412,12 +413,25 @@ class LayoutManager(MainWindowBaseManager):
         self._unregister_global_event_filter()
 
     def _on_splitter_moved(self, pos, index):
-        self.mw.var_table_user_adjusted = True
-        self.mw._splitter_ready = True
+        mw = self.mw
+        if getattr(mw, "_var_pane_collapsed", False):
+            # 折叠期不写宽度记忆：28 不是用户期望的展开宽度，写进去会让
+            # var_table_default_width / 持久化宽度被 rail 宽度污染。
+            # 只有真鼠标拖动（左键按住）才算「折叠态拖手柄即展开」——
+            # toggle_plot_area 等程序化 setSizes 不带按键，不得触发自动展开
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                sizes = mw.main_splitter.sizes()
+                if sizes and sizes[0] > VAR_PANE_RAIL_WIDTH:
+                    # 用户拖出来的宽度优先于折叠时记住的宽度
+                    mw._var_pane_saved_width = sizes[0]
+                self.set_var_pane_collapsed(False, reason="handle_drag")
+            return
+        mw.var_table_user_adjusted = True
+        mw._splitter_ready = True
 
-        sizes = self.mw.main_splitter.sizes()
+        sizes = mw.main_splitter.sizes()
         if len(sizes) >= 1:
-            self.mw.var_table_default_width = sizes[0]
+            mw.var_table_default_width = sizes[0]
 
     def _ensure_splitter_ready(self):
         mw = self._mw_ref()
@@ -444,6 +458,7 @@ class LayoutManager(MainWindowBaseManager):
         mw._pending_splitter_adjustment = False
         if (
             mw.var_table_user_adjusted
+            or getattr(mw, "_var_pane_collapsed", False)
             or not getattr(mw, "_splitter_ready", False)
             or not hasattr(mw, "main_splitter")
         ):
@@ -505,8 +520,86 @@ class LayoutManager(MainWindowBaseManager):
         # 旧替身：直接消费 mw.plot_widgets（组件测试路径）
         sync_linked_x_ranges(mw)
 
+    # ------------------------------------------------------------------
+    # 变量区细边栏折叠（D1–D4）：«/»/Ctrl+B/手柄双击/拖手柄/Ctrl+F 六入口
+    # 全部收口到 set_var_pane_collapsed，播报文案收在 _announce_var_pane_state
+    # ------------------------------------------------------------------
+
+    def set_var_pane_collapsed(self, collapsed: bool, *, reason: str) -> None:
+        """变量区折叠/展开统一入口。
+
+        只动 splitter sizes 与左栏最小宽，不碰窗口几何/最大化/全屏。
+        折叠态必须 ``setMinimumWidth(28)``：内容页 minimumSizeHint（实测
+        222）会钳制 setSizes，显式最小宽才能让 28px 落地（探针 P-A）。
+        程序化 setSizes 一律 QSignalBlocker（与 _apply_fixed_splitter_width
+        先例同口径）。注：本 Qt 版本实测 setSizes 不发射 splitterMoved，
+        只有交互式拖动发射；blocker 是防版本/路径差异的保险，不是当前
+        行为的必要条件。
+
+        ``reason`` 标记入口（title_button/rail/shortcut/handle_double_click/
+        handle_drag/search_focus/restore），供日志与测试区分路径；播报规格
+        各入口一致。
+        """
+        mw = self.mw
+        collapsed = bool(collapsed)
+        if collapsed == getattr(mw, "_var_pane_collapsed", False):
+            return
+        if collapsed and not getattr(mw, "_plot_area_visible", True):
+            # 折叠×隐藏绘图区矩阵守卫：两区同时收起会把恢复入口全埋掉
+            # （隐藏绘图区按钮本身已撤入口）。生产不可达，测试路径可达。
+            mw._broadcast("绘图区已隐藏，先显示绘图区再折叠变量区", level="warn")
+            return
+
+        splitter = mw.main_splitter
+        sizes = splitter.sizes()
+        total = sum(sizes)
+        if collapsed:
+            if sizes and sizes[0] > VAR_PANE_RAIL_WIDTH:
+                mw._var_pane_saved_width = sizes[0]
+            mw._var_pane_collapsed = True
+            mw.left_widget.setMinimumWidth(VAR_PANE_RAIL_WIDTH)
+            mw._var_pane_stack.setCurrentIndex(1)
+            with QSignalBlocker(splitter):
+                splitter.setSizes(
+                    [VAR_PANE_RAIL_WIDTH, max(total - VAR_PANE_RAIL_WIDTH, 0)]
+                )
+        else:
+            width = max(
+                int(getattr(mw, "_var_pane_saved_width", mw.var_table_default_width)),
+                VAR_PANE_RAIL_WIDTH + 1,
+            )
+            mw._var_pane_collapsed = False
+            mw.left_widget.setMinimumWidth(0)
+            mw._var_pane_stack.setCurrentIndex(0)
+            with QSignalBlocker(splitter):
+                splitter.setSizes([width, max(total - width, 0)])
+        logger.info("[LAYOUT] 变量区%s (reason=%s)", "折叠" if collapsed else "展开", reason)
+        self._announce_var_pane_state(collapsed)
+
+    def toggle_var_pane(self, *, reason: str) -> None:
+        """双态切换（Ctrl+B / 手柄双击共用）。"""
+        self.set_var_pane_collapsed(
+            not getattr(self.mw, "_var_pane_collapsed", False), reason=reason
+        )
+
+    def _announce_var_pane_state(self, collapsed: bool) -> None:
+        """播报单函数：各入口同规格；首次折叠附带 Ctrl+O 副作用提示。"""
+        mw = self.mw
+        if collapsed:
+            text = "变量区已折叠（Ctrl+B 展开）"
+            if not getattr(mw, "_var_pane_collapse_announced", False):
+                text += "；导入文件可用 Ctrl+O"
+                mw._var_pane_collapse_announced = True
+        else:
+            text = "变量区已展开"
+        mw._broadcast(text)
+
     def toggle_plot_area(self, checked):
         if checked:
+            if getattr(self.mw, "_var_pane_collapsed", False):
+                # 矩阵守卫的另一半：变量区折叠着时隐藏绘图区，会先展开
+                # 变量区再藏绘图区，保证任何时刻至少一区可见可恢复
+                self.set_var_pane_collapsed(False, reason="plot_area_hide")
             # 记录窗口状态和 splitter 原始尺寸
             self.mw._was_maximized = self.mw.isMaximized()
             self.mw._was_fullscreen = self.mw.isFullScreen()
@@ -1084,6 +1177,14 @@ class LayoutManager(MainWindowBaseManager):
         if obj.window() is not mw:
             return False
         etype = event.type()
+        if (
+            etype == QEvent.Type.MouseButtonDblClick
+            and hasattr(mw, "main_splitter")
+            and obj is mw.main_splitter.handle(1)
+        ):
+            # D3：splitter 手柄双击切换变量区折叠态（app 级过滤器收到手柄事件）
+            self.toggle_var_pane(reason="handle_double_click")
+            return True
         if etype == QEvent.Type.DragEnter:
             if event.mimeData().hasUrls():
                 if self._is_supported_drop(event.mimeData()):

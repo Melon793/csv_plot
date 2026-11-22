@@ -1,0 +1,388 @@
+"""变量区细边栏折叠（C1，D1–D4）组件测试。
+
+覆盖统一入口 ``LayoutManager.set_var_pane_collapsed`` 的六条入口路径
+（« 按钮 / rail » 与整条热区 / Ctrl+B / 手柄双击 / 折叠态拖手柄 / Ctrl+F
+自动展开）、28px 落地护栏、宽度记忆、折叠×隐藏绘图区矩阵守卫、rail 卫生
+（不冒幽灵控件）与播报规格。
+
+用真实 MainWindow（offscreen）：splitter 钳制/最小宽/stacked 切页都是
+Qt 布局引擎行为，替身测不到。夹具模式沿用 tests/e2e/conftest 的
+``_build_main_window``（重置 sys.argv、缩小默认矩阵），settings 隔离到
+tmp_path，折叠态/宽度持久化不泄漏给其他用例。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
+from src.core.config import VAR_PANE_RAIL_WIDTH
+from tests.fixtures.waits import flush_deferred_deletes
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+LEFT = Qt.MouseButton.LeftButton
+
+COLLAPSED_MSG = "变量区已折叠（Ctrl+B 展开）"
+COLLAPSED_MSG_FIRST = COLLAPSED_MSG + "；导入文件可用 Ctrl+O"
+EXPANDED_MSG = "变量区已展开"
+
+
+@pytest.fixture()
+def rail_env(qapp, app_settings, monkeypatch, qtbot, tmp_path):
+    """真实 MainWindow + 隔离 AppSettings，返回 (mw, settings)。"""
+    import src.ui.main_window as main_window_mod
+
+    # 与 e2e _small_plot_matrix 同口径：1×1 矩阵省构造耗时
+    for name in (
+        "PLOT_ROW_MAX_DEFAULT",
+        "PLOT_COL_MAX_DEFAULT",
+        "PLOT_ROW_CURRENT_DEFAULT",
+        "PLOT_COL_CURRENT_DEFAULT",
+    ):
+        monkeypatch.setattr(main_window_mod, name, 1)
+
+    monkeypatch.setenv("CSV_PLOT_CONFIG_DIR", str(tmp_path / "config"))
+    from src.core.settings import AppSettings
+
+    AppSettings._reset_for_tests()
+    settings = AppSettings()
+
+    monkeypatch.setattr("sys.argv", ["csv_plot_rail_test"])
+    mw = main_window_mod.MainWindow()
+    qtbot.addWidget(mw)
+    mw.resize(1200, 800)
+    mw.show()
+    QApplication.processEvents()
+    yield mw, settings
+    try:
+        mw.close()
+    except RuntimeError:
+        pass  # 用例体内可能已自行关闭
+    QApplication.processEvents()
+    flush_deferred_deletes()
+    AppSettings._reset_for_tests()
+
+
+def _collapse(mw):
+    mw.layout_manager.set_var_pane_collapsed(True, reason="test")
+    QApplication.processEvents()
+
+
+def _expand(mw):
+    mw.layout_manager.set_var_pane_collapsed(False, reason="test")
+    QApplication.processEvents()
+
+
+def _handle(mw):
+    return mw.main_splitter.handle(1)
+
+
+def _drag_handle_to(mw, target: int):
+    """合成真实手柄拖动到目标左栏宽度。
+
+    实测本 Qt 版本 ``setSizes`` **不发射** splitterMoved（只有交互式拖动
+    发射），所以「用户拖过 splitter」必须走 press/move/release 全链路。
+    """
+    handle = _handle(mw)
+    cur = mw.main_splitter.sizes()[0]
+    press_pos = QPoint(handle.width() // 2, handle.height() // 2)
+    move_pos = press_pos + QPoint(target - cur, 0)
+    QTest.mousePress(handle, LEFT, Qt.KeyboardModifier.NoModifier, press_pos)
+    QTest.mouseMove(handle, move_pos)
+    QApplication.processEvents()
+    QTest.mouseRelease(handle, LEFT, Qt.KeyboardModifier.NoModifier, move_pos)
+    QApplication.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# 六入口同态同播报
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPaths:
+    def test_title_button_collapses_to_rail(self, rail_env, qtbot):
+        mw, _ = rail_env
+        qtbot.mouseClick(mw.var_collapse_btn, LEFT)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is True
+        assert mw.main_splitter.sizes()[0] == VAR_PANE_RAIL_WIDTH
+        assert mw._var_pane_stack.currentIndex() == 1
+        assert mw.var_pane_rail.isVisible()
+        assert mw._message_text == COLLAPSED_MSG_FIRST
+
+    def test_rail_button_expands_back_to_saved_width(self, rail_env, qtbot):
+        mw, _ = rail_env
+        width_before = mw.main_splitter.sizes()[0]
+        _collapse(mw)
+
+        qtbot.mouseClick(mw.var_pane_rail.expand_btn, LEFT)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is False
+        assert mw.main_splitter.sizes()[0] == width_before
+        assert mw._message_text == EXPANDED_MSG
+
+    def test_rail_body_is_click_hotzone(self, rail_env, qtbot):
+        """整条竖条可点：点在竖排文字下方的空白区也要能展开。"""
+        mw, _ = rail_env
+        _collapse(mw)
+        rail = mw.var_pane_rail
+        # 底部 stretch 区域（避开 » 按钮与文字标签）
+        pos = QPoint(rail.width() // 2, rail.height() - 8)
+        QTest.mouseClick(rail, LEFT, Qt.KeyboardModifier.NoModifier, pos)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is False
+        assert mw._message_text == EXPANDED_MSG
+
+    def test_ctrl_b_toggles_both_ways(self, rail_env, qtbot):
+        mw, _ = rail_env
+        qtbot.keyClick(mw, Qt.Key.Key_B, CTRL)
+        QApplication.processEvents()
+        assert mw._var_pane_collapsed is True
+        assert mw._message_text == COLLAPSED_MSG_FIRST
+
+        qtbot.keyClick(mw, Qt.Key.Key_B, CTRL)
+        QApplication.processEvents()
+        assert mw._var_pane_collapsed is False
+        assert mw._message_text == EXPANDED_MSG
+
+    def test_handle_double_click_toggles(self, rail_env):
+        mw, _ = rail_env
+        QTest.mouseDClick(_handle(mw), LEFT)
+        QApplication.processEvents()
+        assert mw._var_pane_collapsed is True
+        assert mw._message_text == COLLAPSED_MSG_FIRST
+
+        QTest.mouseDClick(_handle(mw), LEFT)
+        QApplication.processEvents()
+        assert mw._var_pane_collapsed is False
+        assert mw._message_text == EXPANDED_MSG
+
+    def test_ctrl_f_auto_expands_and_focuses_search(self, rail_env, qtbot):
+        mw, _ = rail_env
+        _collapse(mw)
+        mw.filter_input.clearFocus()
+
+        qtbot.keyClick(mw, Qt.Key.Key_F, CTRL)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is False
+        assert mw.filter_input.hasFocus()
+        assert mw._message_text == EXPANDED_MSG
+
+    def test_ctrl_f_when_expanded_only_focuses(self, rail_env, qtbot):
+        mw, _ = rail_env
+        mw.filter_input.clearFocus()
+        qtbot.keyClick(mw, Qt.Key.Key_F, CTRL)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is False
+        assert mw.filter_input.hasFocus()
+
+    def test_all_collapse_entries_share_announcement(self, rail_env, qtbot):
+        """« / Ctrl+B / 手柄双击三条折叠入口播报逐字一致。"""
+        mw, _ = rail_env
+        # 首次提示已消耗的场景：三条入口都报常规文案
+        mw._var_pane_collapse_announced = True
+        messages = []
+
+        qtbot.mouseClick(mw.var_collapse_btn, LEFT)
+        QApplication.processEvents()
+        messages.append(mw._message_text)
+        _expand(mw)
+
+        qtbot.keyClick(mw, Qt.Key.Key_B, CTRL)
+        QApplication.processEvents()
+        messages.append(mw._message_text)
+        _expand(mw)
+
+        QTest.mouseDClick(_handle(mw), LEFT)
+        QApplication.processEvents()
+        messages.append(mw._message_text)
+
+        assert messages == [COLLAPSED_MSG] * 3
+
+
+# ---------------------------------------------------------------------------
+# 几何护栏：28px 落地 / 宽度记忆 / 不动窗口几何 / 不污染宽度记忆
+# ---------------------------------------------------------------------------
+
+
+class TestGeometryGuards:
+    def test_28px_lands_and_min_width_restored(self, rail_env):
+        mw, _ = rail_env
+        _collapse(mw)
+        assert mw.main_splitter.sizes()[0] == VAR_PANE_RAIL_WIDTH
+        assert mw.left_widget.minimumWidth() == VAR_PANE_RAIL_WIDTH
+
+        _expand(mw)
+        assert mw.left_widget.minimumWidth() == 0
+        assert mw.main_splitter.sizes()[0] > VAR_PANE_RAIL_WIDTH
+
+    def test_window_geometry_untouched(self, rail_env):
+        mw, _ = rail_env
+        before = mw.geometry()
+        _collapse(mw)
+        assert mw.geometry() == before
+        _expand(mw)
+        assert mw.geometry() == before
+
+    def test_programmatic_toggle_does_not_pollute_width_memory(self, rail_env):
+        """统一入口的 setSizes 必须带 QSignalBlocker：不写 user_adjusted/default_width。"""
+        mw, _ = rail_env
+        default_width = mw.var_table_default_width
+        assert mw.var_table_user_adjusted is False
+
+        _collapse(mw)
+        _expand(mw)
+
+        assert mw.var_table_user_adjusted is False
+        assert mw.var_table_default_width == default_width
+
+    def test_user_dragged_width_wins_over_initial(self, rail_env):
+        """用户拖过 splitter 的宽度优先：折叠再展开回到拖动后的宽度。"""
+        mw, _ = rail_env
+        _drag_handle_to(mw, 350)
+        assert mw.var_table_user_adjusted is True
+        assert mw.var_table_default_width == 350
+
+        _collapse(mw)
+        _expand(mw)
+        assert mw.main_splitter.sizes()[0] == 350
+
+    def test_collapsed_handle_drag_expands_with_dragged_width(self, rail_env):
+        """折叠态拖手柄即展开，且拖出来的宽度成为新的展开宽度。
+
+        目标宽必须 ≥ 展开态 minimumSizeHint（实测本夹具 304）：低于它会被
+        splitter 钳回最小宽，那是 Qt 布局引擎的固有约束而非记忆失效。
+        """
+        mw, _ = rail_env
+        _collapse(mw)
+        target = max(400, mw.left_widget.minimumSizeHint().width() + 50)
+
+        _drag_handle_to(mw, target)
+
+        assert mw._var_pane_collapsed is False
+        assert mw.main_splitter.sizes()[0] == target
+        assert mw._var_pane_saved_width == target
+        assert mw._message_text == EXPANDED_MSG
+
+    def test_programmatic_setsizes_while_collapsed_no_auto_expand(self, rail_env):
+        """程序化改宽（setSizes 实测不发 splitterMoved）不得触发自动展开/污染记忆。"""
+        mw, _ = rail_env
+        _collapse(mw)
+        default_width = mw.var_table_default_width
+
+        mw.main_splitter.setSizes([400, 600])
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is True
+        assert mw.var_table_default_width == default_width
+        assert mw.var_table_user_adjusted is False
+
+    def test_fixed_width_adjuster_skipped_while_collapsed(self, rail_env):
+        """_apply_fixed_splitter_width 折叠态守卫：不得把 28 拉回默认宽。"""
+        mw, _ = rail_env
+        _collapse(mw)
+        mw._splitter_ready = True
+        mw.var_table_user_adjusted = False
+
+        mw.layout_manager._apply_fixed_splitter_width()
+        QApplication.processEvents()
+
+        assert mw.main_splitter.sizes()[0] == VAR_PANE_RAIL_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# 折叠 × 隐藏绘图区矩阵守卫（生产不可达、测试路径可达）
+# ---------------------------------------------------------------------------
+
+
+class TestMatrixGuard:
+    def test_collapse_rejected_while_plot_area_hidden(self, rail_env, qtbot):
+        mw, _ = rail_env
+        mw.toggle_plot_btn.setChecked(True)  # 隐藏绘图区（按钮已撤入口，toggled 仍在）
+        QApplication.processEvents()
+        assert mw._plot_area_visible is False
+
+        qtbot.mouseClick(mw.var_collapse_btn, LEFT)
+        QApplication.processEvents()
+
+        assert mw._var_pane_collapsed is False
+        assert "绘图区已隐藏" in mw._message_text
+        assert mw._message_level == "warn"
+        assert mw.main_splitter.sizes()[0] > VAR_PANE_RAIL_WIDTH
+
+    def test_hide_plot_while_collapsed_expands_var_pane_first(self, rail_env):
+        mw, _ = rail_env
+        _collapse(mw)
+
+        mw.toggle_plot_btn.setChecked(True)
+        QApplication.processEvents()
+
+        # 任何时刻至少一区可见可恢复：变量区先展开，绘图区才隐藏
+        assert mw._var_pane_collapsed is False
+        assert mw._plot_area_visible is False
+        assert mw.main_splitter.sizes()[0] > VAR_PANE_RAIL_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# rail 卫生与播报规格
+# ---------------------------------------------------------------------------
+
+
+class TestRailHygiene:
+    def test_splitter_child_count_unchanged(self, rail_env):
+        mw, _ = rail_env
+        assert mw.main_splitter.count() == 2
+        _collapse(mw)
+        assert mw.main_splitter.count() == 2
+
+    def test_rail_hidden_when_expanded(self, rail_env):
+        """stacked 非当前页必须隐藏：rail 不得以未布局子控件身份冒出来。"""
+        mw, _ = rail_env
+        assert mw.var_pane_rail.isHidden()
+        assert mw._var_pane_stack.currentIndex() == 0
+
+    def test_content_hidden_when_collapsed(self, rail_env):
+        mw, _ = rail_env
+        _collapse(mw)
+        assert mw._var_pane_stack.widget(0).isHidden()
+        assert mw.var_pane_rail.isVisible()
+        # 撤入口的隐藏绘图区按钮也不得冒头
+        assert mw.toggle_plot_btn.isHidden()
+
+    def test_first_collapse_hint_once_per_session(self, rail_env):
+        mw, _ = rail_env
+        _collapse(mw)
+        assert mw._message_text == COLLAPSED_MSG_FIRST
+        _expand(mw)
+        _collapse(mw)
+        assert mw._message_text == COLLAPSED_MSG
+
+    def test_collapse_tooltip_mentions_ctrl_o(self, rail_env):
+        mw, _ = rail_env
+        assert "Ctrl+O" in mw.var_collapse_btn.toolTip()
+        assert "Ctrl+B" in mw.var_collapse_btn.toolTip()
+        assert "Ctrl+B" in mw.var_pane_rail.toolTip()
+
+    def test_collapse_btn_does_not_inflate_window_min_width(self, rail_env):
+        """« 按钮不得顶大整窗最小宽（shelf 胶囊锚点出屏回归的根因护栏）。
+
+        隐藏按钮前后最小宽之差只允许是布局 spacing；若按钮贡献了自身宽度
+        （mac QPushButton minimumSizeHint ~80px / 上限 28px），差值 ≥ 28。
+        """
+        mw, _ = rail_env
+        with_btn = mw.minimumSizeHint().width()
+        mw.var_collapse_btn.hide()
+        without_btn = mw.minimumSizeHint().width()
+        mw.var_collapse_btn.show()
+        QApplication.processEvents()
+
+        assert with_btn - without_btn < VAR_PANE_RAIL_WIDTH
+        assert mw.var_collapse_btn.width() == VAR_PANE_RAIL_WIDTH

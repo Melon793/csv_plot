@@ -12,6 +12,7 @@ from src.core.config import (  # noqa: E402
     PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT,
     PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
     RATIO_RESET_PLOTS,
+    VAR_PANE_RAIL_WIDTH,
     widget_alive,
 )
 from src.core.settings import AppSettings  # noqa: E402
@@ -27,6 +28,7 @@ from src.ui.widgets.plot_tabs import (  # noqa: E402
     _SHELF_CAPSULE_ENTRY,
 )
 from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
+from src.ui.widgets.var_pane_rail import VarPaneRail  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal  # noqa: E402
@@ -42,7 +44,8 @@ from PySide6.QtGui import (  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QInputDialog,
-    QMessageBox, QSplitter, QMenu, QStatusBar, QFrame,
+    QMessageBox, QSplitter, QMenu, QStatusBar, QFrame, QStackedLayout,
+    QSizePolicy,
 )
 
 SCREEN_WIDTH_MARGIN = 0.3
@@ -72,6 +75,22 @@ class _ElideStatusBar(QStatusBar):
     若按默认行为，长文案会把 QMainWindow 的最小宽度顶起来，窗口在贴边宽度
     下会被突然拉宽。这里只裁掉宽度维度的最小值，高度维度保持原样，
     文本改由 MainWindow._status_elided 按可用宽度截断。
+    """
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+
+class _CompactTitleButton(QPushButton):
+    """标题行窄按钮：不参与窗口最小宽度（同 _ElideStatusBar 的裁宽度手法）。
+
+    mac 风格 QPushButton 的 minimumSizeHint 约 80px，「«」直接进标题行会
+    把左栏 minimumSizeHint 顶大、整窗最小宽跟着顶大（收窄窗口被钳、暂存区
+    胶囊锚点出屏）。实测只裁 minimumSizeHint 还不够：默认 Minimum 策略无
+    ShrinkFlag，qSmartMinSize 会改用 sizeHint —— 必须配合 Preferred 等带
+    ShrinkFlag 的策略（见创建处）才真正把最小宽贡献归零。
     """
 
     def minimumSizeHint(self):
@@ -1087,7 +1106,12 @@ class MainWindow(QMainWindow):
 
     def _init_left_panel(self):
         left_widget = QWidget(self.main_splitter)
-        left_layout = QVBoxLayout(left_widget)
+        # D1：内容页 / 细边栏页用 QStackedLayout 切换，splitter 子控件数不变
+        # （折叠只动 sizes，不碰窗口几何）。内容页承载原 QVBoxLayout 整体。
+        left_stack = QStackedLayout(left_widget)
+        left_stack.setContentsMargins(0, 0, 0, 0)
+        content = QWidget(left_widget)
+        left_layout = QVBoxLayout(content)
         left_layout.setContentsMargins(5, 0, 5, 0)
 
         title_layout = QHBoxLayout()
@@ -1100,6 +1124,21 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(left_layout_title)
 
         title_layout.addStretch(1)
+
+        # D1：折叠入口，放「分身/?」左侧。副作用提示进 tooltip：折叠后变量
+        # 搜索/拖变量进图不可用、导入按钮看不见，导入文件可用 Ctrl+O
+        self.var_collapse_btn = _CompactTitleButton("«", content)
+        # Preferred（带 ShrinkFlag）＋裁过的 minimumSizeHint → 最小宽贡献 0；
+        # 上限收到 rail 同宽：常态 28px，极限窄窗允许被压缩（Ctrl+B 与手柄
+        # 双击仍在，折叠入口不丢）
+        self.var_collapse_btn.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.var_collapse_btn.setMaximumWidth(VAR_PANE_RAIL_WIDTH)
+        self.var_collapse_btn.setToolTip(
+            "折叠变量区 (Ctrl+B)\n折叠后变量搜索/拖拽不可用；导入文件可用 Ctrl+O"
+        )
+        title_layout.addWidget(self.var_collapse_btn)
 
         self.clone_btn = QPushButton("分身", left_widget)
         self.clone_btn.setToolTip("启动独立实例")
@@ -1151,11 +1190,24 @@ class MainWindow(QMainWindow):
         # 照接（见 _connect_signals），但不进布局也不显示，将来安到别处只需
         # addWidget + setVisible(True)。刻意不"塞进布局再 hide"：整行即便高度
         # 归零，left_layout 那 2 px 间距仍会为它排一排，变量列表白少一行的位置。
-        self.toggle_plot_btn = QPushButton("隐藏绘图区", left_widget)
+        self.toggle_plot_btn = QPushButton("隐藏绘图区", content)
         self.toggle_plot_btn.setCheckable(True)
         self.toggle_plot_btn.setVisible(False)
         left_layout.setSpacing(2)
+        left_stack.addWidget(content)
+        # 细边栏页：QStackedLayout 自动隐藏非当前页，不会以未布局子控件
+        # 身份在 (0,0) 冒出来（同 curve_shelf_btn 的教训）
+        self.var_pane_rail = VarPaneRail(left_widget)
+        left_stack.addWidget(self.var_pane_rail)
+        left_stack.setCurrentIndex(0)
         self.left_widget = left_widget
+        self._var_pane_stack = left_stack
+        self._var_pane_collapsed = False
+        # 折叠时的宽度记忆：折叠瞬间取当前 sizes[0]，用户拖过 splitter 的
+        # 宽度自然优先（拖动会实时改 sizes）
+        self._var_pane_saved_width = self.var_table_default_width
+        # 首次折叠播报带副作用提示（会话内一次），之后的折叠只报常规文案
+        self._var_pane_collapse_announced = False
 
         self._plot_area_visible = True
         self._saved_geometry = None
@@ -1342,6 +1394,13 @@ class MainWindow(QMainWindow):
         self._page_mru_shortcut.activated.connect(self._toggle_mru_page)
         self._page_mru_back_shortcut = QShortcut(mru_back_seq, self)
         self._page_mru_back_shortcut.activated.connect(self._toggle_mru_page)
+
+        # D2/D4：变量区折叠双态切换 / 聚焦变量名搜索框（折叠态自动展开）。
+        # 窗口级绑定；Ctrl+F 与对话框域的 StandardKey.Find 不冲突（各属其窗）
+        self._var_pane_shortcut = QShortcut(QKeySequence("Ctrl+B"), self)
+        self._var_pane_shortcut.activated.connect(self._on_var_pane_shortcut)
+        self._var_search_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
+        self._var_search_shortcut.activated.connect(self._on_var_search_shortcut)
 
     # ------------------------------------------------------------------
     # 状态栏：常驻四块 —— 文件段 / x 轴段（可点开抽屉）/ 消息区 / 日志入口
@@ -1821,6 +1880,13 @@ class MainWindow(QMainWindow):
         # 信号连接（需要 Manager 已初始化）
         self.clone_btn.clicked.connect(self.layout_manager.spawn_clone_window)
         self.help_btn_small.clicked.connect(self.layout_manager.show_help)
+        # D1：«/» 两个入口都走统一 toggle（播报文案收在 layout_manager）
+        self.var_collapse_btn.clicked.connect(
+            lambda: self.layout_manager.set_var_pane_collapsed(True, reason="title_button")
+        )
+        self.var_pane_rail.expand_requested.connect(
+            lambda: self.layout_manager.set_var_pane_collapsed(False, reason="rail")
+        )
         # 按钮不显示，接线照旧：拖变量进图时 variable_actions 靠 setChecked(False)
         # 唤回绘图区，走的就是这一路 toggled
         self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
@@ -2278,6 +2344,16 @@ class MainWindow(QMainWindow):
         if not self.load_btn.isEnabled():
             return
         self.file_loader_manager.load_btn_click()
+
+    def _on_var_pane_shortcut(self):
+        """Ctrl+B：变量区折叠双态切换（D2），与 «/»/手柄双击同一入口。"""
+        self.layout_manager.toggle_var_pane(reason="shortcut")
+
+    def _on_var_search_shortcut(self):
+        """Ctrl+F：聚焦变量名搜索框；折叠态先自动展开（D4）。"""
+        if self._var_pane_collapsed:
+            self.layout_manager.set_var_pane_collapsed(False, reason="search_focus")
+        self.filter_input.setFocus()
 
     def _on_grid_layout_shortcut(self):
         """Ctrl+L 快捷键：修改图表布局
