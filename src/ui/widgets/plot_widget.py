@@ -1458,6 +1458,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if want_preset and getattr(ci, "line_preset", "auto") != want_preset:
             mcm.apply_curve_line_preset(name, want_preset)
 
+        # 编辑器强化轮 D3/D6：显示名/换算随快照落地（共享入口，同值 no-op；
+        # 批量窗口内入口自行抑制 emit/播报）
+        want_dn = getattr(style, "display_name", "") or ""
+        if want_dn != getattr(ci, "display_name", ""):
+            mcm.apply_curve_display_name(name, want_dn)
+        want_f = getattr(style, "factor", 1.0)
+        want_o = getattr(style, "offset", 0.0)
+        if (want_f, want_o) != (
+            getattr(ci, "factor", 1.0), getattr(ci, "offset", 0.0)
+        ):
+            mcm.apply_curve_transform(name, want_f, want_o)
+
         if getattr(style, "visible", True) is False:
             self._schedule_visibility_restore(name, False)
 

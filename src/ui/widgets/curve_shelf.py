@@ -87,6 +87,10 @@ class ShelfEntry:
     # 快照保真：出区落地后必须回写，不得被 apply 入口误钉成 'user'
     draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
     line_preset: str = LINE_PRESET_AUTO
+    # 编辑器强化轮 D3/D6：显示名/换算随暂存保真（出区落地回写）
+    display_name: str = ""
+    factor: float = 1.0
+    offset: float = 0.0
     origin_label: str = ""
     stale: bool = False
     #: 剪切入区的来源绘图（弱引用，不延长生命周期）；复制/变量列表入区为 None
@@ -124,6 +128,9 @@ class ShelfEntry:
                 ci, "draw_mode_source", DRAW_MODE_SOURCE_AUTO
             ),
             line_preset=getattr(ci, "line_preset", LINE_PRESET_AUTO),
+            display_name=getattr(ci, "display_name", "") or "",
+            factor=getattr(ci, "factor", 1.0),
+            offset=getattr(ci, "offset", 0.0),
             origin_label=origin_label,
             origin_plot_ref=ref,
         )

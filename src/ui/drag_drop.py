@@ -225,6 +225,10 @@ class CurveStyleSnapshot:
     symbol_policy: str = SYMBOL_POLICY_AUTO
     draw_mode_source: str = DRAW_MODE_SOURCE_AUTO
     line_preset: str = LINE_PRESET_AUTO
+    # 编辑器强化轮 D3/D6：显示名/换算随搬运保真（出区落地回写）
+    display_name: str = ""
+    factor: float = 1.0
+    offset: float = 0.0
 
     @classmethod
     def from_curve_info(cls, ci: Any) -> "CurveStyleSnapshot":
@@ -238,6 +242,9 @@ class CurveStyleSnapshot:
                 ci, "draw_mode_source", DRAW_MODE_SOURCE_AUTO
             ),
             line_preset=getattr(ci, "line_preset", LINE_PRESET_AUTO),
+            display_name=getattr(ci, "display_name", "") or "",
+            factor=getattr(ci, "factor", 1.0),
+            offset=getattr(ci, "offset", 0.0),
         )
 
 

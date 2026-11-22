@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 
-from src.core.curve_transform import NON_NUMERIC_FORMATS, project_y, reproject
+from src.core.curve_transform import (
+    NON_NUMERIC_FORMATS,
+    format_transform,
+    project_y,
+    reproject,
+)
 from src.core.data_types import CurveInfo, InvalidCurveRef
 
 
@@ -79,6 +84,21 @@ class TestReproject:
         ci = _ci([1.0, 2.0], factor=2.0, offset=10.0, y_format="enum")
         reproject(ci)
         np.testing.assert_allclose(ci.y_data, [1.0, 2.0])
+
+
+class TestFormatTransform:
+    def test_identity(self):
+        assert format_transform(1.0, 0.0) == "y"
+
+    def test_factor_only(self):
+        assert format_transform(2.0, 0.0) == "2·y"
+
+    def test_offset_only(self):
+        assert format_transform(1.0, -10.0) == "y − 10"
+        assert format_transform(1.0, 2.5) == "y + 2.5"
+
+    def test_combined(self):
+        assert format_transform(2.0, -10.0) == "2·y − 10"
 
 
 class TestDataclassFields:

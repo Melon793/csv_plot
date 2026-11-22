@@ -33,3 +33,13 @@ def project_y(
 def reproject(ci) -> None:
     """从 ci.y_raw 重投影写回 ci.y_data（改 factor/offset 后唯一入口）。"""
     ci.y_data = project_y(ci.y_raw, ci.factor, ci.offset, ci.y_format)
+
+
+def format_transform(factor: float, offset: float) -> str:
+    """换算公式播报/预览文案（兄弟路径共用，如 ``2·y − 10``）。"""
+    s = "y" if factor == 1.0 else f"{factor:g}·y"
+    if offset > 0:
+        s += f" + {offset:g}"
+    elif offset < 0:
+        s += f" − {-offset:g}"
+    return s

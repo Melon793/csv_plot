@@ -45,7 +45,12 @@ from src.core.data_types import (
     step_mode_for,
 )
 from src.core.logger import get_logger
-from src.core.curve_transform import project_y, reproject
+from src.core.curve_transform import (
+    NON_NUMERIC_FORMATS,
+    format_transform,
+    project_y,
+    reproject,
+)
 from src.ui.drag_drop import (
     ANCHOR_SCHEME,
     COLOR_SCHEME,
@@ -212,6 +217,14 @@ def hit_test_curve(pw: Any, scene_pos: QPointF) -> str | None:
     return best_name
 
 
+def curve_display_text(var_name: str, unit: str, display_name: str) -> str:
+    """Legend 显示名口径（D2）：自定义名非空整串替换（不追加单位），
+    空回落 ``var (unit)`` / ``var``。内部锚点/引用仍用 var_name。"""
+    if display_name:
+        return display_name
+    return f"{var_name} ({unit})" if unit else var_name
+
+
 class MultiCurveManager:
     """负责曲线绘图和样式管理（统一版）"""
 
@@ -289,7 +302,10 @@ class MultiCurveManager:
         for var_name, ci in pw.curves.items():
             color = ci.color
             unit = pw.units.get(var_name, "")
-            legend_text = html.escape(f"{var_name} ({unit})" if unit else var_name)
+            # D2：自定义名整串替换；空回落 var (unit)。锚点仍用内部名
+            legend_text = html.escape(
+                curve_display_text(var_name, unit, ci.display_name)
+            )
             encoded = quote(var_name, safe="")
 
             if ci.visible:
@@ -317,7 +333,9 @@ class MultiCurveManager:
         for var_name, ref in invalid_curves.items():
             unit = pw.units.get(var_name, "")
             legend_text = html.escape(
-                f"{var_name} ({unit})" if unit else var_name
+                curve_display_text(
+                    var_name, unit, getattr(ref, "display_name", "")
+                )
             )
             encoded = quote(var_name, safe="")
             legend_items.append(
@@ -1013,6 +1031,92 @@ class MultiCurveManager:
         # 批量窗口内抑制逐条 emit（与 draw_mode/symbol_policy 同口径）
         if not getattr(pw, "_batch_adding", False):
             pw.curves_changed.emit()
+        return True
+
+    def apply_curve_display_name(self, var_name: str, display_name: str) -> bool:
+        """设置单曲线自定义 Legend 显示名（编辑器/右键重置共用入口，D2）。
+
+        空串 = 恢复默认 ``var (unit)``；非空整串替换（不追加单位）。
+        失效占位同样支持（D6）。内部锚点仍用 var_name，改名不破坏引用。
+        播报文案与重置口径收口在本入口（兄弟路径 parity）。
+
+        Returns:
+            是否实际应用。变量/占位不存在或同值时返回 False。
+        """
+        pw = self.pw
+        ci = pw.curves.get(var_name)
+        target = ci if ci is not None else (
+            (getattr(pw, "invalid_curves", {}) or {}).get(var_name)
+        )
+        if target is None:
+            return False
+        name = str(display_name or "")
+        if target.display_name == name:
+            return False
+        target.display_name = name
+        if not getattr(pw, "_batch_adding", False):
+            pw.update_legend()
+            pw.curves_changed.emit()
+            show = getattr(pw.window(), "_show_status_message", None)
+            if callable(show):
+                if name:
+                    show(f"已修改 {var_name} 显示名：{name}")
+                else:
+                    show(f"已重置 {var_name} 显示名")
+        return True
+
+    def apply_curve_transform(self, var_name: str, factor: float, offset: float) -> bool:
+        """设置单曲线线性换算 y' = factor·y + offset（D3，共享入口）。
+
+        重投影只从 ``ci.y_raw`` 出发（防叠乘）；setData 后走改色同族刷新链
+        （UI 立即刷新含 Y 轴/统计 → 清游标项 → 节流清零 → 游标标签），
+        游标读数/标记统计跟随变换后值。枚举/日期/纯时间（enum/date/s）与
+        失效占位拒收；非有限数拒收；同值 no-op。
+
+        Returns:
+            是否实际应用。拒收/不存在/同值/setData 失败返回 False。
+        """
+        pw = self.pw
+        ci = pw.curves.get(var_name)
+        if ci is None or ci.curve is None:
+            return False
+        if ci.y_format in NON_NUMERIC_FORMATS:
+            return False
+        try:
+            f = float(factor)
+            o = float(offset)
+        except (TypeError, ValueError):
+            return False
+        if not (math.isfinite(f) and math.isfinite(o)):
+            return False
+        if ci.factor == f and ci.offset == o:
+            return False
+        ci.factor, ci.offset = f, o
+        reproject(ci)
+        try:
+            ci.curve.setData(ci.x_data, ci.y_data, stepMode=step_mode_for(ci.draw_mode))
+        except Exception:
+            logger.error(
+                "应用换算失败: var=%s, factor=%s, offset=%s",
+                var_name, f, o, exc_info=True,
+            )
+            return False
+        if not getattr(pw, "_batch_adding", False):
+            pw.curves_changed.emit()
+        if hasattr(pw, "_queue_ui_refresh"):
+            pw._queue_ui_refresh(immediate=True)
+        pw._clear_cursor_items()
+        if hasattr(pw, "_last_cursor_update_time"):
+            pw._last_cursor_update_time = 0
+        if pw.vline.isVisible():
+            pw.update_cursor_label()
+        if not getattr(pw, "_batch_adding", False):
+            show = getattr(pw.window(), "_show_status_message", None)
+            if callable(show):
+                if f == 1.0 and o == 0.0:
+                    show(f"已重置 {var_name} 换算")
+                else:
+                    show(f"已修改 {var_name} 换算：y' = {format_transform(f, o)}")
         return True
 
     def _on_legend_anchor_clicked(self, url):
