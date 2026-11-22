@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QPushButton
 from tests.fixtures.waits import settle
 
 from src.core.data_types import LINE_PRESET_DASH
-from src.ui.widgets.plot_ui_manager import _SegmentedControl
+from src.ui.widgets.curve_style_panel import _SegmentedControl
 
 
 def _y(n: int) -> np.ndarray:

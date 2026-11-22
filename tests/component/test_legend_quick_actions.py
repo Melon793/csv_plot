@@ -32,7 +32,8 @@ from PySide6.QtWidgets import (
 from src.core.data_types import DRAW_MODE_STEP_POST, SYMBOL_POLICY_OFF
 from src.ui.drag_drop import COLOR_SCHEME, parse_legend_anchor
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
-from src.ui.widgets.plot_ui_manager import PALETTE_COLUMNS, LegendTextBrowser
+from src.ui.widgets.curve_style_panel import PALETTE_COLUMNS
+from src.ui.widgets.plot_ui_manager import LegendTextBrowser
 from tests.fixtures.waits import pump, settle
 
 RED_NAME = QColor("red").name()  # "#ff0000"
@@ -273,6 +274,9 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
 
     import src.ui.widgets.plot_ui_manager as pum
     monkeypatch.setattr(pum, "QMenu", _FakeMenu)
+    # C3 抽离后面板 exec 走共享模块的 QMenu，替身须同步覆盖
+    import src.ui.widgets.curve_style_panel as csp
+    monkeypatch.setattr(csp, "QMenu", _FakeMenu)
     return menus
 
 
@@ -336,9 +340,10 @@ def _fake_palette_env(
         menu._acts.append(menu._more)
         return menu, menu._more
 
-    monkeypatch.setattr(
-        LegendTextBrowser, "_build_curve_panel_menu", _fake_build
-    )
+    # C3 抽离后 exec 走共享模块函数，替身须 patch 到该 seam
+    import src.ui.widgets.curve_style_panel as csp
+
+    monkeypatch.setattr(csp, "build_curve_panel_menu", _fake_build)
     return menus
 
 
@@ -478,7 +483,7 @@ def _panel_grid(panel):
 
 def _panel_segs(panel):
     """在快捷面板中按出现顺序收集 _SegmentedControl（绘制方式 / 数据点）。"""
-    from src.ui.widgets.plot_ui_manager import _SegmentedControl
+    from src.ui.widgets.curve_style_panel import _SegmentedControl
 
     return panel.findChildren(_SegmentedControl)
 
@@ -611,10 +616,12 @@ def test_t5d_real_exec_click_applies(plot_factory, monkeypatch):
     pw = plot_factory()
     assert pw.plot_variable("a")
     built = []
-    orig_build = LegendTextBrowser._build_curve_panel_menu
+    import src.ui.widgets.curve_style_panel as csp
 
-    def _build_and_click(self, var_name, picked, holder):
-        menu, act_more = orig_build(self, var_name, picked, holder)
+    orig_build = csp.build_curve_panel_menu
+
+    def _build_and_click(pw, var_name, picked, holder):
+        menu, act_more = orig_build(pw, var_name, picked, holder)
         built.append(menu)
 
         def _click_second():
@@ -630,9 +637,7 @@ def test_t5d_real_exec_click_applies(plot_factory, monkeypatch):
         QTimer.singleShot(0, _click_second)
         return menu, act_more
 
-    monkeypatch.setattr(
-        LegendTextBrowser, "_build_curve_panel_menu", _build_and_click
-    )
+    monkeypatch.setattr(csp, "build_curve_panel_menu", _build_and_click)
 
     pw.legend_label._exec_curve_panel("a", QPoint(20, 20))
 

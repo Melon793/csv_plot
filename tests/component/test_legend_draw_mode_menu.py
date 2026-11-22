@@ -24,7 +24,7 @@ from src.core.data_types import (
     SYMBOL_POLICY_AUTO,
     SYMBOL_POLICY_OFF,
 )
-from src.ui.widgets.plot_ui_manager import _SegmentedControl
+from src.ui.widgets.curve_style_panel import _SegmentedControl
 
 
 def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
@@ -97,6 +97,9 @@ def _fake_menu_env(monkeypatch, choose_text=None, before_return=None):
 
     import src.ui.widgets.plot_ui_manager as pum
     monkeypatch.setattr(pum, "QMenu", _FakeMenu)
+    # C3 抽离后面板 exec 走共享模块的 QMenu，替身须同步覆盖
+    import src.ui.widgets.curve_style_panel as csp
+    monkeypatch.setattr(csp, "QMenu", _FakeMenu)
     return menus
 
 
