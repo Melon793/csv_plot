@@ -15,8 +15,15 @@
 接管 —— 同一枚按钮在 macOS / Windows / Fusion 下尺寸一律 106x31、深浅 palette
 两态像素不变，而顶栏原生按钮三档各不相同（78x33 / 100x30 / 80x27）且跟着变，
 于是全应用只剩这两枚不跟随系统，成了第三套灰阶。现在它们都退回平台绘制。
-唯一保留自定义绘制的是「修改布局」那 15 枚网格方块：三态色是那扇对话框唯一的
-信息通道，原生布尔态表达不了"当前布局"与"将要切换"同框。
+
+**例外判据（2026-11-23 C10 成文）**：chrome 归平台（原生控件或当前 QStyle
+委托，共享基类见 ``widgets/chrome_button.py``）；品牌色只作内容（glyph/图标/
+面板 tint）；**仅当原生表达不了的信息通道才允许自绘 chrome**。据此保留的例外：
+「修改布局」15 枚网格方块的三态色（当前布局与将要切换同框，原生布尔态表达
+不了）；tab 条 ×/＋ 的扁平 glyph＋hover 灰圆底（IDE tab strip 语言，与原生
+bevel/autoRaise 冲突，D-g——例外覆盖字形＋hover 壳整体）；_ColorSwatch 选中环
+（当前色通道）；_StatusSegment（状态栏内容面，palette hover）。输入类 QSS
+（搜索框/抽屉输入框）在按钮 scope 之外，不属本判据管辖。
 """
 
 from __future__ import annotations

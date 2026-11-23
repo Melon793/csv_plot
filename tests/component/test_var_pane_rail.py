@@ -480,13 +480,20 @@ class TestAffordance:
         assert ":hover" in ss
 
     def test_expand_chip_is_accent_button(self, rail_env):
+        """C10a（D-e）新语义：原生壳＋ACCENT 矢量 glyph，取代 QSS 实色壳。
+
+        旧断言（QSS 含 ACCENT/border-radius）随 chrome 归平台更新，
+        计划 §5.1 披露；品牌蓝改在 glyph 内容色上断言。
+        """
         from src.ui import theme
+        from src.ui.widgets.chrome_button import ChromeButton
 
         mw, _ = rail_env
-        ss = mw.var_pane_rail.expand_btn.styleSheet()
-        assert theme.ACCENT in ss
-        assert "border-radius" in ss
-        assert mw.var_pane_rail.expand_btn.size() == QSize(24, 22)
+        chip = mw.var_pane_rail.expand_btn
+        assert isinstance(chip, ChromeButton)
+        assert not chip.styleSheet()
+        assert chip._glyph_color().name().upper() == theme.ACCENT.upper()
+        assert chip.size() == QSize(24, 22)
 
     def test_handle_is_grip_handle(self, rail_env):
         from src.ui.widgets.var_pane_rail import RailSplitter, _GripHandle

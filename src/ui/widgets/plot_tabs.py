@@ -12,7 +12,9 @@
 标签为 VSCode 扁平风：无圆角、激活页顶部 2px 强调线、标签相互贴合。关闭
 按钮与「＋」均为 QPainter 矢量自绘：QSS 无法控制原生关闭图标的尺寸与对齐
 （Windows 下贴右缘、竖直偏下），文本字形则随平台基线漂移；自绘后三平台
-观感一致且任意 DPI 清晰。
+观感一致且任意 DPI 清晰。**例外声明（D-g，C10）**：×/＋ 的扁平 glyph＋
+hover 灰圆底是 IDE tab strip 语言，与原生 bevel/autoRaise 冲突，故不迁
+ChromeButton——例外覆盖字形＋hover 壳整体，不只字形（判据见 theme.py）。
 
 「＋」的落位由 ``_TabsBar.tabLayoutChange`` 官方布局钩子驱动：插 / 删 /
 拖动 / **重命名**等一切布局变化都会重算位置（PySide6 未暴露信号版
