@@ -49,10 +49,26 @@ def _accent_pixels(pm) -> int:
     n = 0
     for y in range(img.height()):
         for x in range(img.width()):
-            c = QColor(img.pixel(x, y))
+            c = img.pixelColor(x, y)  # un-premultiply（pixel() 给预乘值）
             if c.alpha() > 0 and abs(c.red() - ACCENT.red()) < 40 \
                     and abs(c.green() - ACCENT.green()) < 40 \
                     and abs(c.blue() - ACCENT.blue()) < 40:
+                n += 1
+    return n
+
+
+def _blue_ink(img) -> int:
+    """渲染产物的品牌蓝墨迹：色相方向判据（b>r、b>g）。
+
+    grab 像素是「半透明字形×壳底」的不透明合成色，RGB≠ACCENT（细线
+    缩到 16px 全半透明时容差采样必漏，Win offscreen 实测）；灰壳/黑字形
+    合成无蓝色相方向，故色相判据跨平台稳。
+    """
+    n = 0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.alpha() > 0 and c.blue() - c.red() >= 25 and c.blue() - c.green() >= 10:
                 n += 1
     return n
 
@@ -155,7 +171,7 @@ def test_checked_render_selects_on_variant(fusion_style, qtbot):
         qtbot.addWidget(seg)
         seg.ensurePolished()
         for btn in seg.findChildren(QPushButton):
-            ink = _accent_pixels(btn.grab())
+            ink = _blue_ink(btn.grab().toImage())
             if btn.isChecked():
                 assert ink > 0, f"{btn.text()} checked 渲染未选 On 变体"
             else:
