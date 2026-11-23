@@ -34,6 +34,15 @@ dat/mdf/blf 同名通道加载时自动加 ``_G{gi}`` 后缀，后缀被原样�
 - from_dict 的顶层 plots 与 pages[0].plots 是独立对象、导出式构造共享
   对象（评审 MJ-5）：深拷贝后按对象身份去重遍历两份，同名同身份条目
   经 memo 共享解析结果，保证两份结构同步换名。
+
+残余风险（终审 M-1 披露，fail-closed 属新决策留用户拍板）：
+无 SI 指纹（真实 MDF3 主流）+ 单位矛盾 + 多候选 + 原名仍在时，D9 检出
+矛盾降级，但 L1 无指纹不命中、L2 多候选不猜（D4/D10）→ L3 保持原名，
+套用端见原名仍在照画——「检而不防」，与无引擎现状一致、不劣于现状。
+护栏测试 test_si_absent_swapped_original_still_present_residual 钉住。
+另：L3 保持原名不 claim，remap 目标撞另一模板字面名时 resolved 可出现
+重复名（终审 m-2，极罕见，apply 端重复名跳过兜底）；同名异身份分歧
+remap 按不同模板名计数（终审 m-3，符合 D5 规格，已有 warning）。
 """
 
 from __future__ import annotations
@@ -219,7 +228,7 @@ class _Resolver:
             return True
         return False
 
-    def _l1_candidates(self, name: str, identity: dict) -> list[str]:
+    def _l1_candidates(self, name: str, identity: dict, *, respect_claim: bool = True) -> list[str]:
         self._build_index()
         kind = identity["kind"]
         out = []
@@ -232,16 +241,16 @@ class _Resolver:
                 ok = _mdf_fingerprint_match(identity, current)
             else:
                 ok = _blf_fingerprint_match(identity, current)
-            if ok and self._claimed.get(cand) in (None, name):
+            if ok and (not respect_claim or self._claimed.get(cand) in (None, name)):
                 out.append(cand)
         return out
 
-    def _l2_candidates(self, key: str, name: str) -> list[str]:
+    def _l2_candidates(self, key: str, name: str, *, respect_claim: bool = True) -> list[str]:
         self._build_index()
         seen: dict[str, None] = {}
         for index in (self._by_original, self._by_qualified):
             for cand in index.get(key, []):
-                if self._claimed.get(cand) in (None, name):
+                if not respect_claim or self._claimed.get(cand) in (None, name):
                     seen.setdefault(cand, None)
         return list(seen)
 
@@ -255,29 +264,42 @@ class _Resolver:
         return result
 
     def _resolve_uncached(self, name: str, identity: dict | None) -> str:
+        conflict = False
         # L0：显示名恒等（+D9 校验）。同名被别的模板名占用时也走回退。
-        if name in self._current_set and self._claimed.get(name) in (None, name):
-            if identity is None:
-                self._claim(name, name)
-                return name
-            info = self._info(name)
-            if info is not None and _d9_consistent(identity, info):
-                self._claim(name, name)
-                return name
-            logger.info("L0 一致性校验未通过，降级重解析: %s", name)
+        if name in self._current_set:
+            if self._claimed.get(name) in (None, name):
+                if identity is None:
+                    self._claim(name, name)
+                    return name
+                info = self._info(name)
+                if info is not None and _d9_consistent(identity, info):
+                    self._claim(name, name)
+                    return name
+                logger.info("L0 一致性校验未通过，降级重解析: %s", name)
+            else:
+                conflict = True
         # L1：身份指纹唯一命中（D12）
         if identity is not None:
             cands = self._l1_candidates(name, identity)
             if len(cands) == 1:
                 self._claim(cands[0], name)
                 return cands[0]
+            if not cands and self._l1_candidates(name, identity, respect_claim=False):
+                conflict = True
         # L2：查找键唯一候选（D10）
         for key in (name, _SUFFIX_RE.sub("", name)):
             cands = self._l2_candidates(key, name)
             if len(cands) == 1:
                 self._claim(cands[0], name)
                 return cands[0]
+            if not cands and self._l2_candidates(key, name, respect_claim=False):
+                conflict = True
         # L3：保持原名（套用时因缺失降级为占位）
+        if conflict:
+            # 终审 m-1：§3.2 明文要求冲突退 L3 必须可观测
+            logger.warning(
+                "身份重映射冲突，退 L3（目标已被其他模板名占用）: %s", name
+            )
         return name
 
 

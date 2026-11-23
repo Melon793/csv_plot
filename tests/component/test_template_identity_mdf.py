@@ -107,6 +107,39 @@ def test_si_absent_swapped_multi_candidate_l3(tmp_path):
         lb.close()
 
 
+def test_si_absent_swapped_original_still_present_residual(tmp_path):
+    """终审 M-1 护栏（已披露残余风险，fail-closed 属新决策留用户拍板）：
+
+    无 SI + 组序对调 + 原名仍在 + 单位矛盾：D9 检出矛盾降级，但 L1 无
+    指纹不命中、L2 多候选不猜（D4/D10）→ L3 保持原名，套用端见原名
+    仍在照画 degC 那条——「检而不防」，与无引擎现状一致、不劣于现状。
+    本测试显式钉住该行为为残余风险，而非安全子例（Press_G2 不存在）。
+    """
+    a = write_mdf(
+        tmp_path / "syn_a.dat", version="4.10", n=10,
+        with_enum=False, with_string=False, with_dup_group=True,
+    )
+    b = write_mdf(
+        tmp_path / "syn_b.dat", version="4.10", n=10,
+        with_enum=False, with_string=False, with_dup_group=True,
+        dup_group_first=True,
+    )
+    la, lb = MDFLazyLoader(str(a)), MDFLazyLoader(str(b))
+    try:
+        cfg = _template_from(la, ["Press_G0"])
+        entry = cfg.pages[0].plots[0].curve_identities["Press_G0"]
+        assert entry["unit"] == "bar"
+        assert "device" not in entry  # 无 SI 指纹
+        resolved, remap = resolve_identities(cfg, lb)
+        # 残余风险行为：不改名、不告警播报（remap=0），原名仍在 → 照画
+        assert remap == {}
+        assert resolved.pages[0].plots[0].curves == ["Press_G0"]
+        assert lb.get_channel_info("Press_G0")["meta"].unit == "degC"
+    finally:
+        la.close()
+        lb.close()
+
+
 def test_old_doc_l0_residual_risk(mdf_pair):
     """D9 披露：旧档无身份条目，同名换内容不可检测，L0 维持现状。"""
     _la, lb = mdf_pair

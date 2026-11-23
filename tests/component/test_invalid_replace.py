@@ -10,7 +10,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pandas as pd
-import pytest
 from PySide6.QtCore import QPoint
 
 from src.core.data_types import DRAW_MODE_AUTO, InvalidCurveRef

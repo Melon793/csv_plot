@@ -364,6 +364,40 @@ class TestConflictAndStructure:
         assert remap == {"A_G0": "X_G7"}
         assert resolved.pages[0].plots[0].curves == ["X_G7", "B_G0"]
 
+    def test_conflict_logs_warning(self, caplog):
+        """终审 m-1：§3.2 明文要求冲突退 L3 必须 log warning。"""
+        import logging
+
+        cfg = session(PlotConfig(
+            curves=["A_G0", "B_G0"],
+            curve_identities={
+                "A_G0": mdf_identity("X", device="D"),
+                "B_G0": mdf_identity("X", device="D"),
+            },
+        ))
+        loader = FakeLoader({"X_G7": mdf_info("X", device="D")})
+        with caplog.at_level(logging.WARNING, logger="src.core.template_identity"):
+            resolve_identities(cfg, loader)
+        assert any(
+            "冲突" in r.message and "B_G0" in r.message
+            for r in caplog.records
+        ), f"冲突退 L3 必须有 warning: {[r.message for r in caplog.records]}"
+
+    def test_l0_claimed_by_other_logs_warning(self, caplog):
+        """终审 m-1：L0 同名被先前 remap 占用 → 回退失败也要 warning。"""
+        import logging
+
+        cfg = session(PlotConfig(
+            curves=["A_G0", "X"],
+            curve_identities={"A_G0": mdf_identity("X", device="D")},
+        ))
+        loader = FakeLoader({"X": mdf_info("X", device="D")})
+        with caplog.at_level(logging.WARNING, logger="src.core.template_identity"):
+            resolved, remap = resolve_identities(cfg, loader)
+        assert remap == {"A_G0": "X"}
+        assert resolved.pages[0].plots[0].curves == ["X", "X"]
+        assert any("冲突" in r.message and "X" in r.message for r in caplog.records)
+
     def test_same_name_two_plots_both_kept(self):
         """同一变量画在两个子图是正常资产，不得当冲突。"""
         cfg = session(
