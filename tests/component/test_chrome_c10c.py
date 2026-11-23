@@ -142,17 +142,22 @@ def test_all_groups_carry_dual_state_icons(qtbot, items, icon_fn):
 
 
 def test_preset_shell_pixels_match_native(fusion_style, qtbot):
-    """去 QSS 后段按钮＝同配置原生 QPushButton 逐像素（Fusion）。"""
+    """段按钮壳归平台：未选中＝原生 rest 逐像素；checked 壳/标签已归一到
+    rest＋ACCENT 图标（跨平台去强调色深底），参照用 rest＋On 图标对照。"""
     seg = _seg(qtbot)
     seg.ensurePolished()
     for btn in seg.findChildren(QPushButton):
         ref = QPushButton()
         ref.setAutoDefault(False)
         ref.setDefault(False)
-        ref.setIcon(btn.icon())
         ref.setText(btn.text())
         ref.setCheckable(True)
-        ref.setChecked(btn.isChecked())
+        ref.setChecked(False)  # 参照恒 rest：checked 不再画原生强调壳
+        if btn.isChecked():
+            on = btn.icon().pixmap(QSize(18, 18), QIcon.Mode.Normal, QIcon.State.On)
+            ref.setIcon(QIcon(on))
+        else:
+            ref.setIcon(btn.icon())
         ref.ensurePolished()
         ref.resize(btn.sizeHint())
         btn.resize(btn.sizeHint())

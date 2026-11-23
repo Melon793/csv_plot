@@ -372,8 +372,16 @@ class _SegmentButton(QPushButton):
         opt = QStyleOptionButton()
         self.initStyleOption(opt)
         painter = QPainter(self)
+        # 壳也按常态画：Windows 原生 checked 壳会填系统强调色（深底、
+        # 黑字难读），mac 菜单里 checked 壳却是白底——跨平台不一致。
+        # 清掉 On/Sunken 让 checked 壳＝各平台自己的 rest 壳（mac 圆白 /
+        # Win 方白），当前档改由「标题文字提醒＋ACCENT 图标」表达。
+        bevel = QStyleOptionButton(opt)
+        bevel.state &= ~(
+            QStyle.StateFlag.State_On | QStyle.StateFlag.State_Sunken
+        )
         style.drawControl(
-            QStyle.ControlElement.CE_PushButtonBevel, opt, painter, self
+            QStyle.ControlElement.CE_PushButtonBevel, bevel, painter, self
         )
         label = self.label_style_option(opt)
         label.rect = style.subElementRect(
