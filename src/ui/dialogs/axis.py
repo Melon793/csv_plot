@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
 )
 from src.core.config import DEFAULT_PADDING_VAL_X, DEFAULT_PADDING_VAL_Y
+from src.ui import theme
 
 
 class AxisDialog(QDialog):
@@ -28,6 +29,11 @@ class AxisDialog(QDialog):
         self.view_box = view_box
         self.axis_type = axis_type
         self.plot_widget = plot_widget
+        # D14：锁定时 X 档输入禁用+行内小注；入口保留（Y 档可用），
+        # 不撤入口。标志读 plot 级广播位，getattr 防替身缺属性
+        self._x_locked = axis_type == "X" and bool(
+            getattr(plot_widget, "_x_mouse_locked", False)
+        )
 
         # 创建输入字段
         self.min_input = QLineEdit(
@@ -43,6 +49,12 @@ class AxisDialog(QDialog):
         layout = QFormLayout()
         layout.addRow("最小值:", self.min_input)
         layout.addRow("最大值:", self.max_input)
+        if self._x_locked:
+            self.min_input.setEnabled(False)
+            self.max_input.setEnabled(False)
+            note = QLabel("X 轴可见范围已锁定")
+            note.setStyleSheet(theme.muted_text())
+            layout.addRow("", note)
         tick_label = QLabel("刻度数量:")
         layout.addRow(tick_label, self.tick_count_input)
         tick_label.setVisible(False)
@@ -66,6 +78,10 @@ class AxisDialog(QDialog):
         QTimer.singleShot(0, lambda: self.min_input.selectAll())
 
     def apply_changes(self):
+        if self._x_locked:
+            # D14：锁定 X 档不写范围（输入已禁用，确定=关闭，不改 X）
+            self.accept()
+            return
         try:
             min_val = float(self.min_input.text())
             max_val = float(self.max_input.text())

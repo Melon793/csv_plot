@@ -100,6 +100,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self.pinned_index_values = []
         self._is_updating_data = False  # 标志：正在更新数据，禁止某些操作
         self._is_being_destroyed = False  # 标志：对象正在被销毁
+        # X 轴锁定（MainWindow.set_x_axis_locked 广播 / 建图补种）：
+        # 滚轮 zoom_x、Shift 框选 release、右键菜单可见性都读它
+        self._x_mouse_locked = False
         # C++ 侧析构一开始就置位，覆盖所有不经过显式拆卸点的路径（如主窗口
         # 退出时的子对象析构）。必须用 lambda 连：连到绑定方法上时 PySide6 在
         # 包装器失效时会丢掉这条连接，实测不再回调。
@@ -1752,6 +1755,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         用户显式清空连带清占位（clear_invalid=True，§7），不留孤儿资产。
         """
         cleared = len(self.curves)  # 必须在清之前取
+        # D4（review M1）：用户主动清当前子图 → 自动解锁+播报。clear_plot_item
+        # 还被模板/reload 重建复用，但那些路径各自入口先解锁（此处 no-op）；
+        # 没清到曲线时数据域未变，冻结窗口仍有效，不解锁
+        if cleared:
+            unlock = getattr(self.window(), "set_x_axis_locked", None)
+            if unlock is not None:
+                unlock(False, reason="绘图已清除")
         self.clear_plot_item(clear_invalid=True)
         if self.plot_context:
             self.plot_context.announce_cleared("已清除绘图", cleared)
@@ -2139,8 +2149,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 y_min -= margin * dy
                 y_max += margin * dy
 
-                self.view_box.setXRange(x_min, x_max, padding=0)
-                self.view_box.setYRange(y_min, y_max, padding=0)
+                if getattr(self, "_x_mouse_locked", False):
+                    # D13：锁定时框选只写 Y（与右拖 Y 缩放同族）——框选是显式
+                    # 意图，Y 收益保留；X 不动，也不走 setXRange 旁路
+                    self.view_box.setYRange(y_min, y_max, padding=0)
+                else:
+                    self.view_box.setXRange(x_min, x_max, padding=0)
+                    self.view_box.setYRange(y_min, y_max, padding=0)
             event.accept()
         else:
             super().mouseReleaseEvent(event)

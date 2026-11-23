@@ -232,6 +232,13 @@ class PlotPage:
         # 关键：注入“本页”而不是“当前页”，页切走后 ctx 仍指向自己的兄弟集合
         plot_widget.plot_context = PlotContext(services)
 
+        # X 轴锁定补种：新建页/新补格子必须继承全局锁定态，否则新图成为
+        # 解锁旁路（与上面 factor/offset 补种同族；services 透传 MainWindow）
+        x_locked = bool(getattr(services, "_x_axis_locked", False))
+        plot_widget._x_mouse_locked = x_locked
+        if x_locked:
+            plot_widget.view_box.setMouseEnabled(x=False, y=True)
+
         cursor_enabled = services.cursor_btn.isChecked()
         if cursor_enabled and services.cursor_values_hidden:
             plot_widget.toggle_cursor(False, hide_values_only=True)

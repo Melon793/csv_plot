@@ -277,6 +277,8 @@ class AxisManager:
         （建链时子视图 X autoRange 为 True 则 ``linkView`` 不回调、切布局、框选之后）
         里没有 ``upp`` 可依，任何映射都只能给出任意值，同样按恒等处理。
         """
+        if getattr(self.pw, "_x_mouse_locked", False):
+            return  # X 轴锁定（D1）：滚轮 no-op，不降级成 Y 缩放
         vb = self.pw.view_box
         target = self._xlink_target(vb)
         left, right = target.viewRange()[0]

@@ -793,6 +793,16 @@ class FileLoaderManager(MainWindowBaseManager):
             # v5.12: 异常路径也要恢复 reload 按钮
             safe_qt_op(mw.reload_btn.setEnabled, True)
 
+        # D4（review m3/第二轮）：reload 成功收尾才解锁+播报。失败链也经
+        # _end_data_reload 到达此处（同步 finally/异步 _on_load_error/applied=False），
+        # 故不能用"到达即解锁"：只消费 _post_load_actions 在成功分支记下的
+        # 归属版本；版本单调递增，失败/初载/残留标记永远匹配不上
+        if getattr(self, "_x_lock_reload_success_version", -1) == pending_version:
+            self._x_lock_reload_success_version = -1
+            unlock = getattr(self.mw, "set_x_axis_locked", None)
+            if unlock is not None:
+                unlock(False, reason="数据已重载")
+
     def _refresh_curve_paint_path(self, widget):
         """v5.8 safety net：检测失效曲线并重建。
 
@@ -2277,6 +2287,11 @@ class FileLoaderManager(MainWindowBaseManager):
     def _post_load_actions(self, file_path: str, is_reload: bool = False):
         if self._window_going_away():
             return
+        # D4（review 第二轮 m3）：reload **成功**才记解锁归属版本——本函数只在
+        # 同步 status=True / 异步 applied=True 分支被排程，失败链不到这里。
+        # 收尾钩子按版本消费：失败/初载/早退残留都不会误解锁
+        if is_reload:
+            self._x_lock_reload_success_version = self.mw._data_version
         self.mw.loaded_path = file_path
         self._remember_last_open_dir(file_path)
 

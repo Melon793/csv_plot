@@ -79,6 +79,8 @@ class CustomViewBox(pg.ViewBox):
         if menu is None:
             return None
 
+        # 锁定标志一律 getattr 防 None（plot_widget 注入前为 None）
+        x_locked = getattr(self.plot_widget, "_x_mouse_locked", False)
         for act in menu.actions():
             if act.text() == "Mouse Mode":
                 act.setVisible(False)
@@ -88,6 +90,12 @@ class CustomViewBox(pg.ViewBox):
                     for subact in submenu.actions():
                         if subact.text() == "Transforms":
                             subact.setVisible(False)
+            elif act.text() in ("X axis", "View All"):
+                # B2：锁定时藏 X axis 子菜单与 View All —— 子菜单的 mouseCheck
+                # 经 xMouseToggled→setMouseEnabled 会静默解锁，View All 会
+                # 双轴 autoRange 重置 X；Y axis 保留。getMenu 每次右键都执行，
+                # per-open 同步可见性，解锁后自然恢复
+                act.setVisible(not x_locked)
 
         existing_texts = [act.text() for act in menu.actions()]
 
