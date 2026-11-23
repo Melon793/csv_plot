@@ -2,8 +2,9 @@
 
 值全部取自 ``src/ui/dialogs/layout_grid_selector.py`` 的既有实现 —— 那是本仓
 唯一一处成体系的视觉语言，作者认可它并要求其他界面与之对齐。抽到这里的目的是
-让抽屉不再自带一份颜色：全 app 的蓝色统一由 :data:`ACCENT` 派生（Windows 跟
-系统强调色，其它平台品牌蓝），散落字面量逐步收敛到这里的 token。
+让抽屉不再自带一份颜色：全 app 的蓝色统一由 :data:`ACCENT` 派生（**全平台
+固定品牌蓝**，2026-11-23 拍板 2A-iii 退休 Windows 系统强调色跟随），散落
+字面量逐步收敛到这里的 token。
 
 已知代价（选它而不是 ``palette()`` 自动跟随的理由）：这是一份**浅色主题**的
 写死色板，网格选择器今天也是这样。同一屏上出现两套灰阶比深色主题下不一致更
@@ -26,11 +27,12 @@ import sys
 from PySide6.QtGui import QColor
 
 # === 强调色（accent） ===
-# 全 app 只有一个蓝色源头：Windows 跟随系统强调色（DWM AccentColor），
-# 其余平台固定品牌蓝。启动时解析一次——改系统强调色后重启生效（不做
-# 运行中重刷，避免为 WM_SETTINGCHANGE 引入一整套重绘链路）。
-BRAND_BLUE = "#2F6FB4"        # mac / Linux：本仓既有视觉锚点（原 CHIP_SEL_BD）
-WINDOWS_FALLBACK = "#0078D4"  # Windows 读不到 AccentColor 时的系统默认蓝
+# 全 app 只有一个蓝色源头：全平台固定品牌蓝。历史曾 Windows 跟随系统强调色
+# （DWM AccentColor），真机证明系统强调色可以是深灰：实色芯片/手柄 hover 发黑、
+# 混白浅底发灰，与设计稿和 mac 不一致（2026-11-23 作者拍板 2A-iii 退休跟随）。
+# 解析链（_read_windows_accent / clamp_luminance）保留不接线，备个性化将来恢复。
+BRAND_BLUE = "#2F6FB4"        # 全平台视觉锚点（原 CHIP_SEL_BD）
+WINDOWS_FALLBACK = "#0078D4"  # 历史：Windows 读不到 AccentColor 时的系统默认蓝（已不接线）
 _MAX_ACCENT_LUM = 0.45        # 亮度上限：浅黄/浅粉等强调色压暗到线框可读
 
 
@@ -101,9 +103,12 @@ def _read_windows_accent() -> str | None:
 
 
 def resolve_accent() -> str:
-    """当前平台强调色：Windows 读系统强调色，其余平台品牌蓝。"""
-    if sys.platform == "win32":
-        return clamp_luminance(_read_windows_accent() or WINDOWS_FALLBACK)
+    """当前平台强调色：全平台固定品牌蓝（2A-iii）。
+
+    不再读 Windows DWM AccentColor：系统强调色可为深灰/浅黄等缺陷态，
+    跟随便产出与设计稿不一致的 UI（真机报障）。rail/tab 选中/按钮激活
+    同源于此，保证跨平台逐像素一致。
+    """
     return BRAND_BLUE
 
 

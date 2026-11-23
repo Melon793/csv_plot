@@ -1,7 +1,8 @@
-"""强调色解析与 token 派生：Windows 跟系统强调色，其余平台品牌蓝。
+"""强调色解析与 token 派生：全平台固定品牌蓝（2A-iii 退休系统色跟随）。
 
 这里锁的是「颜色语义」而不是观感：ABGR 解析、亮度钳制、tint 派生的
-关系与对比度下限；像素级观感交给真机截图验收。
+关系与对比度下限；像素级观感交给真机截图验收。解析链保留不接线，
+故 ABGR/钳制仍作 dormant 工具被锁。
 """
 
 import colorsys
@@ -64,16 +65,16 @@ def test_non_windows_uses_brand_blue(monkeypatch):
     assert theme.resolve_accent() == theme.BRAND_BLUE
 
 
-def test_windows_reads_accent_then_clamps(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(theme, "_read_windows_accent", lambda: "#FFD800")
-    assert theme.resolve_accent() == theme.clamp_luminance("#FFD800")
+def test_windows_no_longer_follows_system_accent(monkeypatch):
+    """2A-iii：跟随已退休——系统强调色深灰/浅黄/读不到，resolve 都返品牌蓝。
 
-
-def test_windows_falls_back_when_registry_unreadable(monkeypatch):
+    解析链保留不接线（撤入口不撤实现），monkeypatch 读取函数证明它不再
+    影响 resolve；rail/tab 选中/按钮激活同源，跨平台一致由此锁。
+    """
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(theme, "_read_windows_accent", lambda: None)
-    assert theme.resolve_accent() == theme.WINDOWS_FALLBACK
+    for fake in ("#333333", "#FFD800", None):
+        monkeypatch.setattr(theme, "_read_windows_accent", lambda v=fake: v)
+        assert theme.resolve_accent() == theme.BRAND_BLUE
 
 
 def test_chip_tokens_follow_accent():
