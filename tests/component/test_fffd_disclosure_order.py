@@ -24,7 +24,7 @@ class _MW:
         self.data = None
         self.plot_config_manager = types.SimpleNamespace(
             auto_save_manager=types.SimpleNamespace(
-                should_apply_auto_save=lambda vars: (True, "matched"),
+                should_apply_auto_save=lambda vars, loader=None: (True, "matched"),
                 load_auto_save=lambda: {"pages": []},
             ),
             apply_config=lambda mw, cfg: True,
@@ -72,7 +72,7 @@ def test_fffd_disclosure_still_fires_without_auto_restore(flm_env, monkeypatch):
     flm, mw = flm_env
     monkeypatch.setattr(
         mw.plot_config_manager.auto_save_manager,
-        "should_apply_auto_save", lambda vars: (False, "no config"),
+        "should_apply_auto_save", lambda vars, loader=None: (False, "no config"),
     )
     flm._post_load_actions("/tmp/demo.csv")
     texts = [t for t, _ in mw.broadcasts]

@@ -2312,7 +2312,9 @@ class FileLoaderManager(MainWindowBaseManager):
                     elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'var_names'):
                         current_vars = list(self.mw.loader.var_names)
 
-                    should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(current_vars)
+                    should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(
+                        current_vars, getattr(self.mw, "loader", None)
+                    )
                     if should_apply:
                         saved_config = (
                             self.mw.plot_config_manager.auto_save_manager.load_auto_save()
@@ -2348,11 +2350,18 @@ class FileLoaderManager(MainWindowBaseManager):
         写给日志看的英文，而 ``check_template_match`` 的分母与它的放行判据同源
         （都是配置里的变量数），屏上这个百分比就是刚才放行用的那一个。配置文件
         上面已经读过，这里不再读盘。
+
+        身份匹配 MN-4/D5：显式 resolve 后再算 ratio（与放行判据同口径），
+        重映射条数同规格播报。
         """
+        from src.core.template_identity import resolve_identities
+        config, remap = resolve_identities(config, getattr(self.mw, "loader", None))
         ratio, _matched, unmatched = (
             self.mw.plot_config_manager.check_template_match(config, current_vars)
         )
-        self.mw._announce_applied("已自动恢复上次布局", ratio, unmatched)
+        self.mw._announce_applied(
+            "已自动恢复上次布局", ratio, unmatched, remapped=len(remap)
+        )
 
     def _remember_last_open_dir(self, file_path: str):
         directory = os.path.dirname(file_path)

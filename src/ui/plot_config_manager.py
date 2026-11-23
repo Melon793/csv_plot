@@ -294,6 +294,15 @@ class PlotConfigManager(QObject):
     def apply_config(self, main_window, config: PlotSessionConfig) -> bool:
         """将配置应用到 MainWindow（模板 v2：逐页应用）。"""
         try:
+            # 身份匹配 D12：入口统一 resolve（幂等——调用方已 resolve 的
+            # config 再 resolve 全走 L0 恒等、remap 空）。后续逐曲线逻辑
+            # 零改动，消费 resolved config。模板文件不因套用改写（D6）。
+            from src.core.template_identity import resolve_identities
+            config, remap = resolve_identities(
+                config, getattr(main_window, "loader", None)
+            )
+            if remap:
+                logger.info("模板身份重映射 %d 条: %s", len(remap), remap)
             page_cfgs = config.normalized_pages()
             logger.info("开始应用模板配置")
             logger.info("  页数: %d", len(page_cfgs))
@@ -665,6 +674,12 @@ class PlotConfigManager(QObject):
             return False
 
         if check_match and current_vars is not None:
+            # 身份匹配 D12/MN-1：与 _check_and_apply_template 同口径，
+            # resolve 前置后再算匹配度（重映射计入 matched，D5）。
+            from src.core.template_identity import resolve_identities
+            config, _remap = resolve_identities(
+                config, getattr(main_window, "loader", None)
+            )
             ratio, matched, unmatched = self.check_template_match(
                 config, current_vars
             )

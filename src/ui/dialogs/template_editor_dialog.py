@@ -331,6 +331,27 @@ class TemplateEditorDialog(QDialog):
                         for fld in ("factor", "offset"):
                             if fld in entry:
                                 lines.append(f"            {fld}: {entry[fld]}")
+                # 身份匹配 D11：跨文件身份指纹必须随全文再生成携带——漏写
+                # 等于「编辑 → 保存」清空全部身份，后缀漂移重新失配（与上方
+                # invalid_curves/curve_settings 同类事故防线）。用户手改曲线名
+                # 产生的孤儿条目保留不删（引擎按精确键查，孤儿无害）。
+                identities = plot.get("curve_identities") or {}
+                if isinstance(identities, dict) and identities:
+                    lines.append("        # 跨文件身份指纹：后缀漂移时按此重映射")
+                    lines.append("        curve_identities:")
+                    for name, entry in identities.items():
+                        if not isinstance(entry, dict) or not entry:
+                            continue
+                        lines.append(f"          {cls._yaml_scalar(name)}:")
+                        for fld in (
+                            "original_name", "kind", "unit", "device", "ecu",
+                            "frame", "can_id", "extended", "bus_channel",
+                        ):
+                            if fld in entry:
+                                lines.append(
+                                    f"            {fld}: "
+                                    + cls._yaml_scalar(entry[fld])
+                                )
                 # P1-L：格子索引必须随全文再生成携带——漏写等于「编辑 → 保存」
                 # 抹掉空格子对位信息，套用时曲线整体前移错位（上轮 P1-10）
                 cell_index = plot.get("cell_index")

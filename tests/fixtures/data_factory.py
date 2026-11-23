@@ -171,6 +171,8 @@ def write_mdf(
     with_empty_group: bool = False,
     with_attribution: bool = False,
     with_time_named_data: bool = False,
+    press_si: bool = False,
+    dup_group_first: bool = False,
 ) -> Path:
     """写入合成 MDF 文件，返回 **asammdf 实际写出的路径**。
 
@@ -201,6 +203,13 @@ def write_mdf(
             ``'Channel inserted by Python Script'`` 的噪声源）
         with_time_named_data: 是否追加一个含**恰好名为** ``time`` 的数据通道的组。
             用于钉住 P1-7：名字启发式不得把这种数据通道当成主通道
+        press_si: 是否给两个 ``Press`` 组写**可区分**的 SI 源块
+            （主组 Dev1/ECU_A、重组 Dev2/ECU_B）。仅 v4 生效（v3 无 SI
+            块概念，asammdf 只会注入伪影源）；身份匹配 BL-1 的语义断言
+            夹具（单位 bar↔degC + 设备归属可区分）
+        dup_group_first: 是否把 ``Press`` 重组写到主组**之前**（组序对调
+            的第二份文件）。与 press_si 组合可构造「同名 Press_G0 仍在
+            但单位/归属互换」的漂移场景
 
     Returns:
         asammdf 实际写出的 Path
@@ -213,9 +222,16 @@ def write_mdf(
     mdf = MDF(version=version)
     t = np.arange(n, dtype=np.float64) * 0.1
 
+    _si_ok = press_si and version.startswith("4")
+    press_kwargs: dict = {}
+    if _si_ok:
+        press_kwargs["source"] = Source(
+            name="ECU_A", path="Dev1", comment="", source_type=1, bus_type=0
+        )
     signals = [
         Signal(
-            np.linspace(1.0, 5.0, n).astype(np.float32), t, unit="bar", name="Press"
+            np.linspace(1.0, 5.0, n).astype(np.float32), t, unit="bar", name="Press",
+            **press_kwargs,
         )
     ]
     if with_enum:
@@ -247,6 +263,25 @@ def write_mdf(
             )
         )
 
+    def _append_dup_group():
+        n2 = max(1, n // 2)
+        t2 = np.arange(n2, dtype=np.float64) * 0.2
+        dup_kwargs: dict = {}
+        if _si_ok:
+            dup_kwargs["source"] = Source(
+                name="ECU_B", path="Dev2", comment="", source_type=1, bus_type=0
+            )
+        mdf.append(
+            [Signal(np.arange(n2, dtype=np.float32), t2, unit="degC", name="Press",
+                    **dup_kwargs)],
+            acq_name="DupGroup",
+            comment="duplicate channel name group",
+            units={"Press": "degC"},
+        )
+
+    if with_dup_group and dup_group_first:
+        _append_dup_group()
+
     mdf.append(
         signals,
         acq_name="NormalGroup",
@@ -254,15 +289,8 @@ def write_mdf(
         units={"Press": "bar", "State": "st"},
     )
 
-    if with_dup_group:
-        n2 = max(1, n // 2)
-        t2 = np.arange(n2, dtype=np.float64) * 0.2
-        mdf.append(
-            [Signal(np.arange(n2, dtype=np.float32), t2, unit="degC", name="Press")],
-            acq_name="DupGroup",
-            comment="duplicate channel name group",
-            units={"Press": "degC"},
-        )
+    if with_dup_group and not dup_group_first:
+        _append_dup_group()
 
     if with_single_shot_group:
         t3 = np.arange(2, dtype=np.float64)

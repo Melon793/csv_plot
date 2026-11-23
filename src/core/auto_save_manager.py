@@ -98,14 +98,22 @@ class AutoSaveManager(QObject):
             logger.error("Failed to load auto-saved config: %s", e, exc_info=True)
         return None
 
-    def should_apply_auto_save(self, current_vars: list[str]) -> Tuple[bool, str]:
-        """判断是否应应用自动保存的配置"""
+    def should_apply_auto_save(self, current_vars: list[str], loader=None) -> Tuple[bool, str]:
+        """判断是否应应用自动保存的配置。
+
+        身份匹配 D12：loader 可选（缺省 None 保持旧调用方行为）；传入时
+        内部先 resolve 再算匹配度——后缀漂移的曲线经重映射计入 matched，
+        与模板套用同口径。CSV 无 get_channel_info → resolve 原样返回（D8）。
+        """
         if not self.is_auto_save_enabled():
             return False, "Auto-save is disabled"
 
         config = self.load_auto_save()
         if not config:
             return False, "No auto-saved config"
+
+        from src.core.template_identity import resolve_identities
+        config, _remap = resolve_identities(config, loader)
 
         config_vars = extract_variables_from_config(config)
         current_vars_set = set(current_vars)
