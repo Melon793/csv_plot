@@ -21,7 +21,6 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 
 from src.ui.main_window import MainWindow
-from src.ui.widgets.custom_viewbox import ZH_LOCK_X
 from src.ui.widgets.plot_container import PlotContainerWidget
 from src.ui.widgets.plot_page import PlotPage
 from tests.fixtures.waits import flush_deferred_deletes
@@ -195,8 +194,8 @@ def test_getmenu_locked_hides_x_axis_and_view_all(menu_vb):
     assert not _action(menu, "X axis").isVisible(), "X axis 子菜单会静默解锁（B2）"
     assert not _action(menu, "View All").isVisible(), "View All 会重置 X 范围"
     assert _action(menu, "Y axis").isVisible(), "Y axis 必须保留"
-    lock_act = _action(menu, ZH_LOCK_X)
-    assert lock_act.isCheckable() and lock_act.isChecked()
+    # 入口收口（main 拍板）：右键菜单不得有锁项（L2 只在抽屉）
+    assert not any(a.text() == "锁定X轴" for a in menu.actions())
 
 
 def test_getmenu_unlocked_restores_and_syncs_checked(menu_vb):
@@ -208,9 +207,7 @@ def test_getmenu_unlocked_restores_and_syncs_checked(menu_vb):
     menu = menu_vb.getMenu(_FakeMenuEvent())
     assert _action(menu, "X axis").isVisible()
     assert _action(menu, "View All").isVisible()
-    assert not _action(menu, ZH_LOCK_X).isChecked()
-    # 判重：两次 getMenu 不得插入第二份「锁定X轴」
-    assert sum(a.text() == ZH_LOCK_X for a in menu.actions()) == 1
+    assert not any(a.text() == "锁定X轴" for a in menu.actions())
 
 
 def test_getmenu_flag_none_is_treated_unlocked(menu_vb):
@@ -218,7 +215,6 @@ def test_getmenu_flag_none_is_treated_unlocked(menu_vb):
     menu_vb.plot_widget = None
     menu = menu_vb.getMenu(_FakeMenuEvent())
     assert _action(menu, "X axis").isVisible()
-    assert not _action(menu, ZH_LOCK_X).isChecked()
 
 
 # ---------- 广播：真实 set_x_axis_locked + 最小宿主替身 ----------
@@ -286,7 +282,7 @@ def test_auto_unlock_announcement_carries_reason(broadcast_host):
     host = broadcast_host
     MainWindow.set_x_axis_locked(host, True)
     MainWindow.set_x_axis_locked(host, False, reason="数据已重载")
-    assert host.announcements[-1] == "X 轴已自动解锁（数据已重载）"
+    assert host.announcements[-1] == "X 轴可见范围已自动解锁（数据已重载）"
     # 未锁定时的自动解锁调用是 no-op，不播报
     MainWindow.set_x_axis_locked(host, False, reason="数据已重载")
     assert len(host.announcements) == 2

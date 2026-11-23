@@ -21,8 +21,8 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from src.core.config import (
     BLF_DB_COLOR_ERROR,
+    DEFAULT_CURVE_COLOR,
     BLF_DB_COLOR_OK,
     BLF_DB_COLOR_WARN,
     BLF_DB_COL_WIDTHS,
@@ -507,8 +508,36 @@ class FileInfoDrawer(StatusDrawer):
             self._notify("已请求在文件管理器中显示该文件")
 
 
+def _lock_icon(locked: bool, color: str) -> QIcon:
+    """程序化开/闭锁图标（不引 emoji/外部资源）。与 dev 分支
+    x_range_navigator._lock_icon 同源画法，H2 合流时收编去重。"""
+    pix = QPixmap(12, 14)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = QColor(color)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(c)
+    p.drawRoundedRect(QRectF(1.5, 6, 9, 7), 1.5, 1.5)
+    pen = p.pen()
+    pen.setColor(c)
+    pen.setWidthF(1.6)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawArc(QRectF(3.5, 1.5, 5, 5), 0, 180 * 16)
+    p.drawLine(QPointF(3.5, 4), QPointF(3.5, 6))
+    if locked:
+        p.drawLine(QPointF(8.5, 4), QPointF(8.5, 6))
+    p.end()
+    return QIcon(pix)
+
+
 class XAxisDrawer(StatusDrawer):
-    """中段抽屉：x 轴时间基准（采样频率 / 系数 / 偏移）。
+    """中段抽屉：X 轴可见范围锁定状态行 + x 轴时间基准（采样频率 / 系数 / 偏移）。
+
+    顶部状态行是锁的唯一手动入口（L2 chip，立即生效）；表单是"预览→确认"
+    模型，两者用 hairline 分离。锁定态表单不禁用：应用时间修正按 D4 自动
+    解锁+播报（应用钮 tooltip 在锁态直说该后果）。
 
     采样频率是主输入：现场只知道"这台设备 100 Hz 采的"，不会去算 1/100，
     而顶部「时间修正」对话框只给系数与偏移，正是这一步要补的缺口。系数由频率
@@ -623,16 +652,41 @@ class XAxisDrawer(StatusDrawer):
 
         self.reset_btn = self._chip("恢复默认", "填回默认系数并立即应用（撤销本次修正）")
         self.reset_btn.clicked.connect(self._on_reset)
-        self.apply_btn = self._chip(
-            "应用",
-            "按上面的输入重算所有子图的横轴（焦点不在输入框里时，按 Enter 同效）",
-        )
+        self.apply_btn = self._chip("应用", self._APPLY_TIP)
         self.apply_btn.clicked.connect(self._on_apply)
+
+        # B 状态行（xlock-only 拍板）：锁 chip + 行内提示，与"预览→确认"
+        # 表单区用 hairline 分离；锁定立即生效，Esc 只收抽屉不回滚。
+        # 宽度维持 440：chip≈151 + hint≈240 + gap 8 = 399 ≤ 416 净宽
+        self.lock_chip = QPushButton(self)
+        self.lock_chip.setFixedHeight(28)
+        self.lock_chip.setToolTip("锁定/解锁 X 轴可见范围（立即生效）")
+        self.lock_chip.clicked.connect(self._on_lock_chip)
+        self.lock_hint = QLabel()
+        self.lock_hint.setStyleSheet(theme.muted_text())
+        self.lock_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        lock_row = QHBoxLayout()
+        lock_row.setContentsMargins(0, 0, 0, 0)
+        lock_row.setSpacing(8)
+        lock_row.addWidget(self.lock_chip)
+        lock_row.addWidget(self.lock_hint)
+        # 不加 stretch：Ignored 的 hint 自己吃余量（_footer 同套路）；
+        # 加 stretch 会把 Ignored hint 压到 0 宽（实测）
+        hair = QFrame()
+        hair.setFrameShape(QFrame.Shape.HLine)
+        hair.setLineWidth(0)
+        hair.setFixedHeight(1)
+        hair.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        hair.setStyleSheet(theme.separator_style())
 
         body = QWidget()
         outer = QVBoxLayout(body)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
+        outer.addLayout(lock_row)
+        outer.addWidget(hair)
         outer.addLayout(grid)
         outer.addWidget(
             self._footer(
@@ -642,6 +696,33 @@ class XAxisDrawer(StatusDrawer):
         )
         self.set_body(body)
         self._apply_authority()
+        # 抽屉懒创建：建时主窗口可能已锁定（先锁后开抽屉），补种锁态
+        mw = self._mw()
+        if mw is not None:
+            self.sync_lock_ui(bool(getattr(mw, "_x_axis_locked", False)))
+
+    #: 应用钮默认 tooltip（锁态换成"应用将解锁"披露，解锁还原）
+    _APPLY_TIP = "按上面的输入重算所有子图的横轴（焦点不在输入框里时，按 Enter 同效）"
+
+    def _on_lock_chip(self) -> None:
+        """L2 唯一手动入口：与自动解锁同一广播函数（同规格播报）。"""
+        mw = self._mw()
+        setter = getattr(mw, "set_x_axis_locked", None)
+        if setter is not None:
+            setter(not getattr(mw, "_x_axis_locked", False))
+
+    def sync_lock_ui(self, locked: bool) -> None:
+        """锁态 → chip 换形/hint/应用钮 tooltip。不用 checked 视觉
+        （mac 选中态白字压白底先例）：文字+图标换形，壳归平台。"""
+        self.lock_chip.setText("解锁X轴可见范围" if locked else "锁定X轴可见范围")
+        self.lock_chip.setIcon(_lock_icon(locked, DEFAULT_CURVE_COLOR if locked else "#4b5563"))
+        self.lock_hint.setText(
+            "已冻结 · 切页不跟随 · 改基准自动解锁" if locked
+            else "锁定后滚轮/拖动只调 Y"
+        )
+        self.apply_btn.setToolTip(
+            "应用将解锁 X 轴可见范围（时间基准改变）" if locked else self._APPLY_TIP
+        )
 
     def keyPressEvent(self, event) -> None:
         """Enter = 应用，与网格选择器同一套键盘模型（预览 → 确认，Esc 取消）。

@@ -958,17 +958,18 @@ class MainWindow(QMainWindow):
             vb = getattr(pw, "view_box", None)
             if vb is not None:
                 vb.setMouseEnabled(x=not locked, y=True)
-        # 导航尺（C5 接入）：锁定整尺置灰但锁钮保持可点（D6，解锁出口）
+        # L2：抽屉状态行同步（chip 换形/hint/应用钮 tooltip）；抽屉懒创建，
+        # 未开过就没有尺——建抽屉时由 _build 末尾补种锁态
         drawer = getattr(self, "_axis_drawer", None)
         if drawer is not None and widget_alive(drawer):
-            nav = getattr(drawer, "navigator", None)
-            if nav is not None:
-                nav.set_locked(locked)
+            sync = getattr(drawer, "sync_lock_ui", None)
+            if sync is not None:
+                sync(locked)
         btn = getattr(self, "auto_range_btn", None)
         if btn is not None:
             btn.setEnabled(not locked)
             btn.setToolTip(
-                "X 轴已锁定，自动缩放不可用（先解锁）"
+                "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
                 if locked
                 else "自动缩放XY轴 (Ctrl+Shift+Y)"
             )
@@ -980,10 +981,10 @@ class MainWindow(QMainWindow):
     def _x_lock_announce_text(locked: bool, reason: str = "") -> str:
         """锁定播报文案收一个函数（D12：L1/L2/L3 与自动解锁同规格）。"""
         if locked:
-            return "X 轴已锁定：滚轮缩放停用，拖动只调 Y"
+            return "X 轴可见范围已锁定：滚轮/拖动只调 Y"
         if reason:
-            return f"X 轴已自动解锁（{reason}）"
-        return "X 轴已解锁"
+            return f"X 轴可见范围已自动解锁（{reason}）"
+        return "X 轴可见范围已解锁"
 
     # ------------------------------------------------------------------
     # 曲线暂存区（跨页搬运，v1 非模态浮窗单例）
@@ -1632,9 +1633,6 @@ class MainWindow(QMainWindow):
         self._auto_range_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Y"), self.plot_widget)
         self._auto_range_shortcut.activated.connect(self._on_auto_range_shortcut)
 
-        # L1：X 轴锁定切换（与右键菜单 checkable 项同一 set_x_axis_locked）
-        self._x_lock_shortcut = QShortcut(QKeySequence("Ctrl+Shift+X"), self)
-        self._x_lock_shortcut.activated.connect(self._on_x_lock_shortcut)
 
         self._mark_region_shortcut = QShortcut(QKeySequence("Ctrl+T"), self.plot_widget)
         self._mark_region_shortcut.activated.connect(self._on_mark_region_shortcut)
@@ -2664,13 +2662,10 @@ class MainWindow(QMainWindow):
             return
         if self._x_axis_locked:
             # D2：与按钮置灰同守卫；按钮已禁用，这里是快捷键入口的提示
-            self._show_status_message("X 轴已锁定，自动缩放不可用（先解锁）")
+            self._show_status_message("X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）")
             return
         self.cursor_sync_manager.auto_range_all_plots()
 
-    def _on_x_lock_shortcut(self):
-        """Ctrl+Shift+X：切换 X 轴锁定（L1，与右键菜单同一广播函数）"""
-        self.set_x_axis_locked(not self._x_axis_locked)
 
     def _on_mark_region_shortcut(self):
         """Ctrl+T 快捷键：切换标记区域"""

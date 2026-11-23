@@ -73,29 +73,19 @@ def _drag(pw, start: QPoint, end: QPoint, button, modifiers=Qt.KeyboardModifier.
         QApplication.sendEvent(vp, ev)
 
 
-class _FakeMenuEvent:
-    def scenePos(self):
-        return QPointF(0.0, 0.0)
-
-
-def _menu_lock(pw):
-    menu = pw.view_box.getMenu(_FakeMenuEvent())
-    next(a for a in menu.actions() if a.text() == "锁定X轴").trigger()
-
-
-def test_menu_lock_wheel_noop_shortcut_unlock_restores(loaded_window, qtbot, qapp):
+def test_lock_wheel_noop_then_unlock_restores(loaded_window, qtbot, qapp):
     mw = loaded_window
     pw = _plot_ready(mw, qtbot, qapp)
     before = [list(a) for a in pw.view_box.viewRange()]
 
-    _menu_lock(pw)  # 入口 1：菜单
+    mw.set_x_axis_locked(True)
     assert mw._x_axis_locked is True
     _wheel(pw, 120)
     _wheel(pw, -120)
     qapp.processEvents()
     assert [list(a) for a in pw.view_box.viewRange()] == before, "D1：滚轮 no-op"
 
-    mw._on_x_lock_shortcut()  # 入口 2：快捷键解锁
+    mw.set_x_axis_locked(False)
     assert mw._x_axis_locked is False
     _wheel(pw, 120)
     qapp.processEvents()
@@ -103,10 +93,10 @@ def test_menu_lock_wheel_noop_shortcut_unlock_restores(loaded_window, qtbot, qap
     assert x[1] - x[0] < before[0][1] - before[0][0], "解锁后滚轮应恢复缩放"
 
 
-def test_shortcut_lock_left_drag_pans_y_only(loaded_window, qtbot, qapp):
+def test_locked_left_drag_pans_y_only(loaded_window, qtbot, qapp):
     mw = loaded_window
     pw = _plot_ready(mw, qtbot, qapp)
-    mw._on_x_lock_shortcut()
+    mw.set_x_axis_locked(True)
     _freeze_ranges(pw, qapp)
     x_before = list(pw.view_box.viewRange()[0])
     y_before = list(pw.view_box.viewRange()[1])
@@ -119,10 +109,10 @@ def test_shortcut_lock_left_drag_pans_y_only(loaded_window, qtbot, qapp):
     assert list(pw.view_box.viewRange()[1]) != y_before, "Y 平移必须保留"
 
 
-def test_shortcut_lock_box_zoom_y_only(loaded_window, qtbot, qapp):
+def test_locked_box_zoom_y_only(loaded_window, qtbot, qapp):
     mw = loaded_window
     pw = _plot_ready(mw, qtbot, qapp)
-    mw._on_x_lock_shortcut()
+    mw.set_x_axis_locked(True)
     x_before = list(pw.view_box.viewRange()[0])
 
     shift = Qt.KeyboardModifier.ShiftModifier
@@ -145,8 +135,8 @@ def test_shortcut_lock_box_zoom_y_only(loaded_window, qtbot, qapp):
 def test_unlock_restores_left_drag_x_pan(loaded_window, qtbot, qapp):
     mw = loaded_window
     pw = _plot_ready(mw, qtbot, qapp)
-    mw._on_x_lock_shortcut()
-    mw._on_x_lock_shortcut()  # 锁→解
+    mw.set_x_axis_locked(True)
+    mw.set_x_axis_locked(False)  # 锁→解
     assert mw._x_axis_locked is False
     x_before = list(pw.view_box.viewRange()[0])
 

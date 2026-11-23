@@ -33,16 +33,6 @@ def _plot(mw, name="speed"):
     return pw
 
 
-class _FakeMenuEvent:
-    def scenePos(self):
-        return QPointF(0.0, 0.0)
-
-
-def _menu_lock_action(pw):
-    menu = pw.view_box.getMenu(_FakeMenuEvent())
-    return next(a for a in menu.actions() if a.text() == "锁定X轴")
-
-
 def _add_page(mw, qtbot, var_name):
     page = mw.new_page()
     assert page is not None
@@ -57,33 +47,55 @@ def _wait_activation(mw, qtbot):
 
 # ---------- L1 两入口同规格 ----------
 
-def test_menu_and_shortcut_entries_same_spec(loaded_window, qapp):
+def test_drawer_chip_entry_same_spec(loaded_window, qapp):
+    """L2 抽屉 chip 是唯一手动入口：锁定/解锁同规格广播+段+按钮联动。"""
     mw = loaded_window
     pw = _plot(mw)
     qapp.processEvents()
+    mw._axis_segment.clicked.emit()
+    qapp.processEvents()
+    drawer = mw._axis_drawer
+    assert drawer is not None and drawer.isVisible()
+    chip = drawer.lock_chip
+    assert chip.text() == "锁定X轴可见范围"
 
-    # 入口 1：快捷键槽
-    mw._on_x_lock_shortcut()
+    chip.click()
     assert mw._x_axis_locked is True
     assert pw._x_mouse_locked is True
     assert mw._message_label.text() == MainWindow._x_lock_announce_text(True)
     assert mw._axis_segment.text().endswith("· 已锁定")
     assert not mw.auto_range_btn.isEnabled()
+    assert chip.text() == "解锁X轴可见范围"
+    assert "自动解锁" in drawer.lock_hint.text()
+    assert "应用将解锁" in drawer.apply_btn.toolTip()
 
-    # 入口 2：菜单 action（checked 已同步）→ 解锁
-    act = _menu_lock_action(pw)
-    assert act.isChecked()
-    act.trigger()
+    chip.click()
     assert mw._x_axis_locked is False
-    assert pw._x_mouse_locked is False
     assert mw._message_label.text() == MainWindow._x_lock_announce_text(False)
     assert "已锁定" not in mw._axis_segment.text()
     assert mw.auto_range_btn.isEnabled()
+    assert chip.text() == "锁定X轴可见范围"
 
-    # 菜单再锁 → 快捷键再解：两入口任意组合都走同一广播
-    _menu_lock_action(pw).trigger()
-    assert mw._x_axis_locked is True
-    mw._on_x_lock_shortcut()
+
+def test_drawer_locked_exit_and_esc_keeps_lock(loaded_window, qapp, qtbot):
+    """先锁后开抽屉：chip=解锁出口；Esc 只收抽屉不回滚锁定。"""
+    mw = loaded_window
+    _plot(mw)
+    qapp.processEvents()
+    mw.set_x_axis_locked(True)
+    mw._axis_segment.clicked.emit()
+    qapp.processEvents()
+    drawer = mw._axis_drawer
+    assert drawer.lock_chip.text() == "解锁X轴可见范围"
+
+    qtbot.keyClick(drawer, Qt.Key.Key_Escape)
+    qapp.processEvents()
+    assert not drawer.isVisible()
+    assert mw._x_axis_locked is True, "Esc 不得回滚立即生效的锁定"
+
+    mw._axis_segment.clicked.emit()
+    qapp.processEvents()
+    drawer.lock_chip.click()
     assert mw._x_axis_locked is False
 
 
@@ -105,7 +117,7 @@ def test_d2_auto_range_guarded_on_all_entries(loaded_window, qapp):
     mw._on_auto_range_shortcut()
     qapp.processEvents()
     assert list(pw.view_box.viewRange()[0]) == before
-    assert mw._message_label.text() == "X 轴已锁定，自动缩放不可用（先解锁）"
+    assert mw._message_label.text() == "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
 
     # auto_range_page 直调入口（防其它调用旁路）
     mw.cursor_sync_manager.auto_range_page()
@@ -205,7 +217,7 @@ def test_d4_reload_unlocks_and_announces(loaded_window, qtbot, qapp):
     qapp.processEvents()
 
     assert mw._x_axis_locked is False
-    assert "X 轴已自动解锁（数据已重载）" in seen
+    assert "X 轴可见范围已自动解锁（数据已重载）" in seen
     assert "已锁定" not in mw._axis_segment.text()
     pw = mw.plot_widgets[0].plot_widget
     assert pw._x_mouse_locked is False
@@ -221,7 +233,7 @@ def test_d4_time_correction_unlocks(loaded_window, qapp):
 
     assert mw.layout_manager.apply_time_correction(0.01, 0.0) is True
     assert mw._x_axis_locked is False
-    assert "X 轴已自动解锁（时间基准已改变）" in seen
+    assert "X 轴可见范围已自动解锁（时间基准已改变）" in seen
     assert "已锁定" not in mw._axis_segment.text()
 
 
@@ -248,7 +260,7 @@ def test_d4_template_apply_unlocks(loaded_window, qtbot, qapp):
     qapp.processEvents()
 
     assert mw._x_axis_locked is False
-    assert "X 轴已自动解锁（已应用模板）" in seen
+    assert "X 轴可见范围已自动解锁（已应用模板）" in seen
     assert "已锁定" not in mw._axis_segment.text()
 
 
@@ -266,7 +278,7 @@ def test_d4_clear_plot_unlocks(loaded_window, qapp):
 
     assert mw._x_axis_locked is False
     # 清除播报会覆盖消息区（同 D4 其它入口），用记录器钉解锁播报
-    assert "X 轴已自动解锁（绘图已清除）" in seen
+    assert "X 轴可见范围已自动解锁（绘图已清除）" in seen
     # 清空图再清一次：数据域未变，不解锁不播报
     mw.set_x_axis_locked(True)
     mw._message_label.setText("")
@@ -287,7 +299,7 @@ def test_d4_remove_last_variable_unlocks(loaded_window, qapp):
 
     assert not pw.curves
     assert mw._x_axis_locked is False
-    assert mw._message_label.text() == "X 轴已自动解锁（末变量已移除）"
+    assert mw._message_label.text() == "X 轴可见范围已自动解锁（末变量已移除）"
 
 
 def test_d4_reset_plot_unlocks(loaded_window, qapp):
@@ -300,7 +312,7 @@ def test_d4_reset_plot_unlocks(loaded_window, qapp):
     qapp.processEvents()
 
     assert mw._x_axis_locked is False
-    assert mw._message_label.text() == "X 轴已自动解锁（绘图已重置）"
+    assert mw._message_label.text() == "X 轴可见范围已自动解锁（绘图已重置）"
     # 未锁定时的 reset 不重复播报
     mw._message_label.setText("")
     pw.reset_plot(1, 50)
@@ -355,7 +367,7 @@ def test_m3_sync_parse_failure_keeps_lock(loaded_window, qtbot, qapp, monkeypatc
     qapp.processEvents()
 
     assert mw._x_axis_locked is True, "解析失败仍丢锁"
-    assert "X 轴已自动解锁（数据已重载）" not in seen
+    assert "X 轴可见范围已自动解锁（数据已重载）" not in seen
     assert mw.loader is not None, "旧数据应保留"
 
 

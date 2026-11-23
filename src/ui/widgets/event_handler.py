@@ -296,19 +296,6 @@ class EventHandler:
         if pw:
             pw.open_variable_editor()
 
-    def _on_vb_toggle_x_lock(self, pw):
-        """ViewBox 信号：L1 菜单切换 X 轴锁定。
-
-        跨层走 window()（先例：plot_widget.mouse_moved），不直接摸
-        MainWindow 类型；替身宿主缺方法时静默失效。切换方向以 pw 标志
-        为权威，菜单 checked 只是它的显示。
-        """
-        if not pw:
-            return
-        setter = getattr(pw.window(), "set_x_axis_locked", None)
-        if setter is not None:
-            setter(not getattr(pw, "_x_mouse_locked", False))
-
     def _connect_viewbox_signals(self):
         """连接 ViewBox 信号"""
         vb = self.pw.view_box
@@ -323,7 +310,6 @@ class EventHandler:
         vb.signals.request_set_all_row_height.connect(self._on_vb_set_all_row_height)
         vb.signals.request_copy_name.connect(self._on_vb_copy_name)
         vb.signals.request_variable_editor.connect(self._on_vb_var_editor)
-        vb.signals.request_toggle_x_lock.connect(self._on_vb_toggle_x_lock)
 
     def _cancel_ui_refresh(self, *types):
         """取消 UI 刷新"""

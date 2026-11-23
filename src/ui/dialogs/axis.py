@@ -52,7 +52,7 @@ class AxisDialog(QDialog):
         if self._x_locked:
             self.min_input.setEnabled(False)
             self.max_input.setEnabled(False)
-            note = QLabel("X 轴已锁定")
+            note = QLabel("X 轴可见范围已锁定")
             note.setStyleSheet(theme.muted_text())
             layout.addRow("", note)
         tick_label = QLabel("刻度数量:")
