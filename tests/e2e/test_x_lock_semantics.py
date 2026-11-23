@@ -200,6 +200,8 @@ def test_d4_reload_unlocks_and_announces(loaded_window, qtbot, qapp):
     mw.file_loader_manager.reload_data()
     qtbot.waitUntil(lambda: mw._data_version > version_before, timeout=5000)
     qtbot.waitUntil(lambda: not mw._is_loading_new_data, timeout=5000)
+    # 解锁在收尾钩子 _post_reload_ui_refresh（50ms 延迟），等它落地
+    qtbot.waitUntil(lambda: not mw._x_axis_locked, timeout=3000)
     qapp.processEvents()
 
     assert mw._x_axis_locked is False
@@ -250,6 +252,44 @@ def test_d4_template_apply_unlocks(loaded_window, qtbot, qapp):
     assert "已锁定" not in mw._axis_segment.text()
 
 
+def test_d4_clear_plot_unlocks(loaded_window, qapp):
+    """D4 真实用户入口（review M1）：清除绘图走 clear_current_plot，
+    不经 reset_plot——解锁必须挂在这条链上。"""
+    mw = loaded_window
+    pw = _plot(mw)
+    qapp.processEvents()
+    mw.set_x_axis_locked(True)
+    seen = _spy_broadcast(mw)
+
+    pw.clear_current_plot()
+    qapp.processEvents()
+
+    assert mw._x_axis_locked is False
+    # 清除播报会覆盖消息区（同 D4 其它入口），用记录器钉解锁播报
+    assert "X 轴已自动解锁（绘图已清除）" in seen
+    # 清空图再清一次：数据域未变，不解锁不播报
+    mw.set_x_axis_locked(True)
+    mw._message_label.setText("")
+    pw.clear_current_plot()
+    assert mw._x_axis_locked is True
+    assert mw._message_label.text() == ""
+
+
+def test_d4_remove_last_variable_unlocks(loaded_window, qapp):
+    """D4 真实用户入口（review M1）：移除末变量走 _post_remove_refresh 空分支。"""
+    mw = loaded_window
+    pw = _plot(mw)
+    qapp.processEvents()
+    mw.set_x_axis_locked(True)
+
+    assert pw.remove_variable_from_plot("speed") is True
+    qapp.processEvents()
+
+    assert not pw.curves
+    assert mw._x_axis_locked is False
+    assert mw._message_label.text() == "X 轴已自动解锁（末变量已移除）"
+
+
 def test_d4_reset_plot_unlocks(loaded_window, qapp):
     mw = loaded_window
     pw = _plot(mw)
@@ -265,3 +305,84 @@ def test_d4_reset_plot_unlocks(loaded_window, qapp):
     mw._message_label.setText("")
     pw.reset_plot(1, 50)
     assert mw._message_label.text() == ""
+
+
+def test_m1_template_failure_keeps_lock(main_window, qapp):
+    """review m1：模板不存在/无数据等失败分支不得丢锁。"""
+    mw = main_window
+    mw.set_x_axis_locked(True)
+    mw.apply_template("不存在的模板id")
+    assert mw._x_axis_locked is True
+
+
+def test_m2_same_value_time_correction_keeps_lock(loaded_window, qapp):
+    """review m2：抽屉原值点「应用」不构成基准改变，不解锁。
+    第二轮 m2：6 位小数频率量化往返（1/3 → 0.333333 Hz → 3.000003）也算同值。"""
+    mw = loaded_window
+    _plot(mw)
+    qapp.processEvents()
+    mw.set_x_axis_locked(True)
+
+    assert mw.layout_manager.apply_time_correction(1.0, 0.0) is True
+    assert mw._x_axis_locked is True, "同值应用不得解锁"
+
+    assert mw.layout_manager.apply_time_correction(3.0, 0.0) is True
+    assert mw._x_axis_locked is False
+    mw.set_x_axis_locked(True)
+    # factor=3 → 频率框 0.333333 Hz（6 位量化）→ 反推 3.000003：同值往返
+    assert mw.layout_manager.apply_time_correction(1 / 0.333333, 0.0) is True
+    assert mw._x_axis_locked is True, "量化往返误判基准改变"
+
+    assert mw.layout_manager.apply_time_correction(0.01, 0.0) is True
+    assert mw._x_axis_locked is False
+
+
+def test_m3_sync_parse_failure_keeps_lock(loaded_window, qtbot, qapp, monkeypatch):
+    """第二轮 m3：_begin_data_reload 之后的真失败（同步解析返 False）也经
+    _end_data_reload 到达收尾钩子——成功标记按版本归属，失败不得解锁。"""
+    mw = loaded_window
+    _plot(mw)
+    qtbot.waitUntil(lambda: not mw._is_loading_new_data, timeout=5000)
+    mw.set_x_axis_locked(True)
+    seen = _spy_broadcast(mw)
+
+    monkeypatch.setattr(
+        mw.file_loader_manager, "_load_sync", lambda *a, **k: False
+    )
+    mw.file_loader_manager.reload_data()
+    qtbot.waitUntil(lambda: not mw._is_loading_new_data, timeout=5000)
+    qtbot.wait(150)  # 覆盖收尾延迟链
+    qapp.processEvents()
+
+    assert mw._x_axis_locked is True, "解析失败仍丢锁"
+    assert "X 轴已自动解锁（数据已重载）" not in seen
+    assert mw.loader is not None, "旧数据应保留"
+
+
+def test_initial_load_tail_does_not_unlock(loaded_window, qtbot, qapp):
+    """初载与 reload 共用 _end_data_reload→_post_reload_ui_refresh 延迟链：
+    初载收尾不得解掉用户加载后立刻设的锁（并行偶发失败的根因回归）。"""
+    mw = loaded_window
+    _plot(mw)
+    mw.set_x_axis_locked(True)
+    qtbot.wait(150)  # 覆盖初载 50ms+0ms 延迟收尾链
+    qapp.processEvents()
+    assert mw._x_axis_locked is True, "初载收尾链静默解锁"
+
+
+def test_m3_reload_failure_keeps_lock(loaded_window, qtbot, qapp, monkeypatch):
+    """review m3：加载异常时锁保留（解锁已后移到收尾钩子）。"""
+    mw = loaded_window
+    _plot(mw)
+    qtbot.waitUntil(lambda: not mw._is_loading_new_data, timeout=5000)
+    mw.set_x_axis_locked(True)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("合成加载失败")
+
+    monkeypatch.setattr(mw.file_loader_manager, "_load_file", boom)
+    mw.file_loader_manager.reload_data()
+    qapp.processEvents()
+    qtbot.wait(80)
+
+    assert mw._x_axis_locked is True, "reload 失败不得丢锁"

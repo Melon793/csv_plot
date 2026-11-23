@@ -1755,6 +1755,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         用户显式清空连带清占位（clear_invalid=True，§7），不留孤儿资产。
         """
         cleared = len(self.curves)  # 必须在清之前取
+        # D4（review M1）：用户主动清当前子图 → 自动解锁+播报。clear_plot_item
+        # 还被模板/reload 重建复用，但那些路径各自入口先解锁（此处 no-op）；
+        # 没清到曲线时数据域未变，冻结窗口仍有效，不解锁
+        if cleared:
+            unlock = getattr(self.window(), "set_x_axis_locked", None)
+            if unlock is not None:
+                unlock(False, reason="绘图已清除")
         self.clear_plot_item(clear_invalid=True)
         if self.plot_context:
             self.plot_context.announce_cleared("已清除绘图", cleared)

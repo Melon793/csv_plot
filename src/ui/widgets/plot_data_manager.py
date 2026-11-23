@@ -974,6 +974,12 @@ class PlotDataManager:
         if pw.vline.isVisible():
             pw.update_cursor_label()
         if not pw.curves:
+            # D4（review M1）：移除末变量使本子图清空 → 自动解锁+播报
+            # （与 clear_current_plot 同族；批量移除共用此刷新链）
+            win = pw.window() if hasattr(pw, "window") else None
+            unlock = getattr(win, "set_x_axis_locked", None)
+            if unlock is not None:
+                unlock(False, reason="末变量已移除")
             pw.current_color_index = 0
             # 先重置 Y 轴范围（与 clear_plot_item 顺序一致：先 reset 再 clear）
             pw._reset_plot_limits()

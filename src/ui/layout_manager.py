@@ -1104,14 +1104,21 @@ class LayoutManager(MainWindowBaseManager):
         if not np.isfinite(new_factor) or new_factor <= 0:
             return False
 
-        # D4：时间基准即将改变，冻结的 X 数值失效 → 自动解锁+播报
-        # （顶部对话框与 x 轴抽屉共用此路，一处覆盖两入口）
-        unlock = getattr(self.mw, "set_x_axis_locked", None)
-        if unlock is not None:
-            unlock(False, reason="时间基准已改变")
-
         old_factor = self.mw.factor
         old_offset = self.mw.offset
+        # D4：时间基准即将改变，冻结的 X 数值失效 → 自动解锁+播报
+        # （顶部对话框与 x 轴抽屉共用此路，一处覆盖两入口）。
+        # 同值应用不解锁（review m2）：容差取 spinbox 6 位小数的量化往返误差
+        # （频率 0.333333 Hz 反推 factor=3.000003，rel≈1e-6；第二轮 m2），
+        # 精确相等会让抽屉原值点「应用」误判"基准改变"
+        same_base = (
+            math.isclose(new_factor, old_factor, rel_tol=1e-5, abs_tol=1e-12)
+            and math.isclose(new_offset, old_offset, rel_tol=1e-5, abs_tol=1e-6)
+        )
+        if not same_base:
+            unlock = getattr(self.mw, "set_x_axis_locked", None)
+            if unlock is not None:
+                unlock(False, reason="时间基准已改变")
         self.mw.factor = new_factor
         self.mw.offset = new_offset
         self.mw._is_time_correction_active = True

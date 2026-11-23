@@ -2468,8 +2468,6 @@ class MainWindow(QMainWindow):
         if not template:
             self._logger.error(f"模板不存在: {template_id}")
             return
-        # D4：模板应用会重建曲线/数据域，冻结的 X 数值失效 → 自动解锁+播报
-        self.set_x_axis_locked(False, reason="已应用模板")
         self._persist_last_template(template_id, template.metadata.name)
         self._check_and_apply_template(template, template_id, template.metadata.name)
 
@@ -2539,6 +2537,9 @@ class MainWindow(QMainWindow):
         if ratio >= RATIO_RESET_PLOTS:
             success = self.plot_config_manager.apply_config(self, config)
             if success:
+                # D4（review m1）：应用成功才解锁——无数据/加载中/模板损坏/
+                # 匹配度低等失败分支不得丢锁
+                self.set_x_axis_locked(False, reason="已应用模板")
                 self._logger.info(f"应用模板[{name}]成功，匹配度 {ratio:.0%}")
                 self._announce_applied(
                     f"已套用模板[{name}]", ratio, unmatched,
@@ -2601,6 +2602,8 @@ class MainWindow(QMainWindow):
             # 与正常套用路径同口径：apply_config 是 -> bool，内部整体包在 try 里，
             # 失败返回 False。不看返回值就播报，屏上会留一句 warn 级的假成功
             if self.plot_config_manager.apply_config(self, config):
+                # D4（review 第二轮 m1）：强制套用成功与正常套用同口径解锁
+                self.set_x_axis_locked(False, reason="已应用模板")
                 self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
                 self._announce_applied(
                     f"已强制套用模板[{name}]", ratio, unmatched,
