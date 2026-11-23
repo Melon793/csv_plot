@@ -113,15 +113,17 @@ class AutoSaveManager(QObject):
             return False, "No auto-saved config"
 
         from src.core.template_identity import resolve_identities
-        config, _remap = resolve_identities(config, loader)
+        config, _remap, demoted = resolve_identities(config, loader)
 
         config_vars = extract_variables_from_config(config)
         current_vars_set = set(current_vars)
 
-        if not config_vars:
+        if not config_vars and not demoted:
             # 纯占位配置也值得恢复：拒掉它会让「失效占位进 auto-save」在恢复侧
             # 落空——用户所有曲线失效后退出，下次加载数据只剩空布局。占位不带
             # 真实数据，恢复不会画错曲线，故不参与匹配率门槛（分母仍只算 curves）。
+            # M-1 方案乙：D9 矛盾降占位（demoted 非空）不走此捷径——demoted
+            # 计入失配，按 0.6 阈值判定（简报 §2 同口径）。
             if not _config_has_placeholders(config):
                 return False, "Auto-saved config has no variables"
             return True, "Auto-saved config has placeholders only, applying"
@@ -129,9 +131,10 @@ class AutoSaveManager(QObject):
         if not current_vars_set:
             return True, "No current variables, applying auto-saved config"
 
-        # 计算匹配度：分母为配置中的变量数（与模板匹配语义一致）
+        # 计算匹配度：分母为配置中的变量数（与模板匹配语义一致）；
+        # demoted 并入分母（降占位计入失配，ratio 不得虚高）
         matched = len(config_vars & current_vars_set)
-        total = len(config_vars)
+        total = len(config_vars | set(demoted))
         ratio = matched / total if total > 0 else 0.0
 
         if ratio >= self.MIN_MATCH_RATIO:

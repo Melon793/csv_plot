@@ -196,3 +196,142 @@ def test_reload_behavior_unchanged(mdf_window, qapp, qtbot, mdf_files):
 
     assert list(_pw(mw).curves) == ["Press_G0"]
     assert "自动重映射" not in mw._message_text
+
+
+# ---------------- M-1 方案乙：fail-closed 三播报路径 ----------------
+
+@pytest.fixture()
+def nosi_files(tmp_path):
+    """无 SI 双组对调夹具（真实 MDF3 主流态）+ Speed 对照通道。"""
+    a = write_mdf(
+        tmp_path / "syn_a.dat", version="4.10", n=10,
+        with_enum=False, with_string=False, with_dup_group=True,
+        with_time_named_data=True,
+    )
+    b = write_mdf(
+        tmp_path / "syn_b.dat", version="4.10", n=10,
+        with_enum=False, with_string=False, with_dup_group=True,
+        with_time_named_data=True, dup_group_first=True,
+    )
+    return a, b
+
+
+@pytest.fixture()
+def mdf_window_nosi(main_window, qapp, qtbot, dialog_stubs, nosi_files):
+    mw = main_window
+    asm = mw.plot_config_manager.auto_save_manager
+    asm.set_auto_save_enabled(False)
+    for f in (asm._auto_save_file, asm._auto_save_backup_file):
+        f.unlink(missing_ok=True)
+
+    def load(path):
+        old = mw.loader
+        dialog_stubs["open_file"] = (str(path), "MDF Files (*.mf4 *.mdf *.dat)")
+        qtbot.mouseClick(mw.load_btn, Qt.MouseButton.LeftButton)
+
+        def ready():
+            if dialog_stubs["critical"]:
+                raise RuntimeError(f"MDF 加载失败: {dialog_stubs['critical']}")
+            return (
+                mw.loader is not None
+                and mw.loader is not old
+                and isinstance(mw.loader, MDFLazyLoader)
+                and len(mw.loader.var_names) > 0
+                and not mw._is_loading_new_data
+                and len(mw.plot_widgets) > 0
+            )
+
+        qtbot.waitUntil(ready, timeout=TIMEOUT)
+        qapp.processEvents()
+
+    yield mw, load
+    asm.set_auto_save_enabled(False)
+    for f in (asm._auto_save_file, asm._auto_save_backup_file):
+        f.unlink(missing_ok=True)
+
+
+def _export_nosi_template(mw, curves):
+    for name in curves:
+        assert _pw(mw).plot_variable(name)
+    cfg = mw.plot_config_manager.export_current_config(mw)
+    assert "Press_G0" in cfg.pages[0].plots[0].curve_identities
+    return cfg.to_dict()
+
+
+def test_fail_closed_normal_path_announces(mdf_window_nosi, qapp, nosi_files):
+    """无 SI 单位矛盾降占位：ratio 不虚高（50%）+ 显式披露条数，warn。"""
+    mw, load = mdf_window_nosi
+    a, b = nosi_files
+    load(a)
+    cfg_dict = _export_nosi_template(mw, ["Press_G0", "Speed"])
+    load(b)
+    qapp.processEvents()
+
+    mw._check_and_apply_template(SimpleNamespace(config=cfg_dict), "tid00003", "身份模板")
+    qapp.processEvents()
+
+    assert mw._message_text == (
+        "已套用模板[身份模板] · 匹配 50%（1 个变量缺失）（1 条身份矛盾降占位）"
+    )
+    assert mw._message_level == "warn"
+    assert "Speed" in _pw(mw).curves
+    assert "Press_G0" not in _pw(mw).curves          # 不绘制
+    assert "Press_G0" in _pw(mw).invalid_curves      # 灰色占位
+
+
+def test_fail_closed_forced_path_announces(mdf_window_nosi, qapp, nosi_files, monkeypatch):
+    mw, load = mdf_window_nosi
+    a, b = nosi_files
+    load(a)
+    cfg_dict = _export_nosi_template(mw, ["Press_G0"])
+    load(b)
+    qapp.processEvents()
+
+    def fake_exec(box):
+        next(btn for btn in box.buttons() if btn.text() == "仍然加载").click()
+        return 1
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    mw._check_and_apply_template(SimpleNamespace(config=cfg_dict), "tid00004", "身份模板")
+    qapp.processEvents()
+
+    assert mw._message_text == (
+        "已强制套用模板[身份模板] · 匹配 0%（1 个变量缺失）（1 条身份矛盾降占位）"
+    )
+    assert mw._message_level == "warn"
+    assert "Press_G0" not in _pw(mw).curves
+    assert "Press_G0" in _pw(mw).invalid_curves
+
+
+def test_fail_closed_auto_restore_announces(mdf_window_nosi, qapp, nosi_files):
+    mw, load = mdf_window_nosi
+    a, b = nosi_files
+    load(a)
+    cfg_dict = _export_nosi_template(mw, ["Press_G0"])
+    load(b)
+    qapp.processEvents()
+
+    from src.core.plot_config import PlotSessionConfig
+    cfg = PlotSessionConfig.from_dict(cfg_dict)
+    mw.file_loader_manager._announce_auto_restore(cfg, list(mw.loader.var_names))
+    assert mw._message_text == (
+        "已自动恢复上次布局 · 匹配 0%（1 个变量缺失）（1 条身份矛盾降占位）"
+    )
+    assert mw._message_level == "warn"
+
+
+def test_fail_closed_auto_save_rejects(mdf_window_nosi, nosi_files):
+    """should_apply_auto_save 同口径：全降占位 → ratio 0 → 拒放。"""
+    mw, load = mdf_window_nosi
+    a, b = nosi_files
+    load(a)
+    cfg_dict = _export_nosi_template(mw, ["Press_G0"])
+    asm = mw.plot_config_manager.auto_save_manager
+    asm.set_auto_save_enabled(True)
+    from src.core.plot_config import PlotSessionConfig
+    asm.auto_save(PlotSessionConfig.from_dict(cfg_dict))
+    load(b)
+
+    should, reason = asm.should_apply_auto_save(list(mw.loader.var_names), mw.loader)
+    assert should is False
+    assert reason == "No matching variables"

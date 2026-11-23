@@ -19,15 +19,22 @@ dat/mdf/blf 同名通道加载时自动加 ``_G{gi}`` 后缀，后缀被原样�
   （限定基名，loader 构造，不做点号拆分）。任一键在索引中恰好 1 个候选
   即命中；多候选一律 L3。
 - **L3** 保持原名（套用时因变量缺失降级为占位）。
+- **D9 矛盾 fail-closed（M-1 方案乙，用户拍板）**：有身份条目、L0 名字命中
+  但一致性校验检出矛盾，且 L1/L2 无法唯一重映射时，该曲线在 resolved
+  config 中从 curves 移入 invalid_curves（灰色占位，不绘制），名字进
+  demoted 名单。**仅**此路径降占位：旧档无身份 L0、纯缺失 L3、冲突被
+  占用 L3 一律不改。demoted 由调用方并入失配口径（merge_demoted），
+  ratio 不得虚高，三播报路径同规格披露。
 
 契约：
 
 - ``check_template_match`` 签名与返回形状零改动（D12）；resolve 前置到
   各调用方，apply_config 入口再 resolve 一次（幂等：已 resolve 的 config
-  再 resolve 全走 L0 恒等，remap 为空）。
+  再 resolve 全走 L0 恒等，remap/demoted 均空——降占位后的名字在
+  invalid_curves 侧，不再触发 curves 降占位判定）。
 - 模板文件不因套用改写（D6）：产出深拷贝，原 config 不动。
-- loader 为 None / 无 get_channel_info（CSV/Excel）→ 原样返回、remap 空
-  （D8：CSV 路径不启用回退，行为与现状一致）。
+- loader 为 None / 无 get_channel_info（CSV/Excel）→ 原样返回、remap/
+  demoted 空（D8：CSV 路径不启用回退，行为与现状一致）。
 - 冲突守卫：两**不同**模板名映射同一当前名 → 先到先得（遍历序固定
   pages→plots→curves 列表序，MN-3），第二个退 L3 + log warning。
   同一模板名在多个子图重复出现是正常资产，共享同一解析结果。
@@ -35,12 +42,9 @@ dat/mdf/blf 同名通道加载时自动加 ``_G{gi}`` 后缀，后缀被原样�
   对象（评审 MJ-5）：深拷贝后按对象身份去重遍历两份，同名同身份条目
   经 memo 共享解析结果，保证两份结构同步换名。
 
-残余风险（终审 M-1 披露，fail-closed 属新决策留用户拍板）：
-无 SI 指纹（真实 MDF3 主流）+ 单位矛盾 + 多候选 + 原名仍在时，D9 检出
-矛盾降级，但 L1 无指纹不命中、L2 多候选不猜（D4/D10）→ L3 保持原名，
-套用端见原名仍在照画——「检而不防」，与无引擎现状一致、不劣于现状。
-护栏测试 test_si_absent_swapped_original_still_present_residual 钉住。
-另：L3 保持原名不 claim，remap 目标撞另一模板字面名时 resolved 可出现
+残余风险（披露）：
+旧档无身份条目时 L0 同名换内容不可检测（D9 无法校验，维持现状）；
+L3 保持原名不 claim，remap 目标撞另一模板字面名时 resolved 可出现
 重复名（终审 m-2，极罕见，apply 端重复名跳过兜底）；同名异身份分歧
 remap 按不同模板名计数（终审 m-3，符合 D5 规格，已有 warning）。
 """
@@ -254,27 +258,37 @@ class _Resolver:
                     seen.setdefault(cand, None)
         return list(seen)
 
-    def resolve_name(self, name: str, identity: dict | None) -> str:
-        """返回模板名对应的当前显示名；L3 时保持原名。"""
-        memo_key = (name, tuple(sorted(identity.items())) if identity else None)
-        if memo_key in self._memo:
-            return self._memo[memo_key]
-        result = self._resolve_uncached(name, identity)
-        self._memo[memo_key] = result
-        return result
+    def resolve_curve(self, name: str, identity: dict | None) -> tuple[str, bool]:
+        """curves 侧解析：返回 (当前显示名, 是否 D9 矛盾降占位)。
 
-    def _resolve_uncached(self, name: str, identity: dict | None) -> str:
+        降占位仅限「有身份条目 + L0 命中但 D9 矛盾 + L1/L2 无法唯一
+        重映射」路径（M-1 方案乙）；L2 唯一候选回选自身不算降占位。
+        """
+        memo_key = (name, tuple(sorted(identity.items())) if identity else None)
+        if memo_key not in self._memo:
+            self._memo[memo_key] = self._resolve_uncached(name, identity)
+        return self._memo[memo_key]
+
+    def resolve_name(self, name: str, identity: dict | None) -> str:
+        """invalid_curves 侧解析：只换名，不降占位（已是占位）。"""
+        return self.resolve_curve(name, identity)[0]
+
+    def _resolve_uncached(self, name: str, identity: dict | None) -> tuple[str, bool]:
         conflict = False
+        d9_failed = False
         # L0：显示名恒等（+D9 校验）。同名被别的模板名占用时也走回退。
         if name in self._current_set:
             if self._claimed.get(name) in (None, name):
                 if identity is None:
                     self._claim(name, name)
-                    return name
+                    return name, False
                 info = self._info(name)
                 if info is not None and _d9_consistent(identity, info):
                     self._claim(name, name)
-                    return name
+                    return name, False
+                if info is not None:
+                    d9_failed = True
+                # info 缺失（loader 异常态）无法校验 ≠ 检出矛盾，不降占位
                 logger.info("L0 一致性校验未通过，降级重解析: %s", name)
             else:
                 conflict = True
@@ -283,7 +297,7 @@ class _Resolver:
             cands = self._l1_candidates(name, identity)
             if len(cands) == 1:
                 self._claim(cands[0], name)
-                return cands[0]
+                return cands[0], False
             if not cands and self._l1_candidates(name, identity, respect_claim=False):
                 conflict = True
         # L2：查找键唯一候选（D10）
@@ -291,7 +305,7 @@ class _Resolver:
             cands = self._l2_candidates(key, name)
             if len(cands) == 1:
                 self._claim(cands[0], name)
-                return cands[0]
+                return cands[0], False
             if not cands and self._l2_candidates(key, name, respect_claim=False):
                 conflict = True
         # L3：保持原名（套用时因缺失降级为占位）
@@ -300,7 +314,11 @@ class _Resolver:
             logger.warning(
                 "身份重映射冲突，退 L3（目标已被其他模板名占用）: %s", name
             )
-        return name
+        if d9_failed:
+            # M-1 方案乙：D9 矛盾且无法唯一重映射 → 降占位不绘制。
+            # 冲突路径（d9_failed=False）与纯缺失路径不在此列。
+            logger.warning("身份矛盾且无法唯一重映射，降占位（fail-closed）: %s", name)
+        return name, d9_failed
 
 
 def _iter_unique_plots(config: PlotSessionConfig):
@@ -323,25 +341,29 @@ def _iter_unique_plots(config: PlotSessionConfig):
 
 def resolve_identities(
     config: PlotSessionConfig, loader
-) -> tuple[PlotSessionConfig, dict[str, str]]:
+) -> tuple[PlotSessionConfig, dict[str, str], list[str]]:
     """把模板配置里的旧显示名重映射到当前数据（纯函数，D6 深拷贝）。
 
-    返回 (resolved_config, remap)；remap 只记真实改名（旧名 != 新名）。
+    返回 (resolved_config, remap, demoted)：
+    - remap 只记真实改名（旧名 != 新名）；
+    - demoted 是 D9 矛盾 fail-closed 降占位的名字列表（去重、首现序），
+      这些名字已从 curves 移入 invalid_curves，调用方须并入失配口径
+      （merge_demoted）并在播报披露。
     loader 为 None / 无 get_channel_info / 无 var_names → 原样返回。
     """
     if loader is None:
-        return config, {}
+        return config, {}, []
     gci = getattr(loader, "get_channel_info", None)
     var_names = getattr(loader, "var_names", None)
     if not callable(gci) or var_names is None:
-        return config, {}
+        return config, {}, []
 
     resolver = _Resolver(gci, list(var_names))
     resolved = copy.deepcopy(config)
     remap: dict[str, str] = {}
+    demoted: list[str] = []
 
-    def _rename(name: str, identities: dict) -> str:
-        new = resolver.resolve_name(name, identities.get(name))
+    def _record_remap(name: str, new: str) -> None:
         if new != name:
             prev = remap.get(name)
             if prev is not None and prev != new:
@@ -350,32 +372,68 @@ def resolve_identities(
             else:
                 remap[name] = new
                 logger.info("身份重映射: %s → %s", name, new)
+
+    def _rename(name: str, identities: dict) -> str:
+        new = resolver.resolve_name(name, identities.get(name))
+        _record_remap(name, new)
         return new
 
     for plot in _iter_unique_plots(resolved):
         identities = plot.curve_identities or {}
         local: dict[str, str] = {}
         new_curves = []
+        demoted_here: list[str] = []
         for name in plot.curves:
-            new = _rename(name, identities)
+            new, dem = resolver.resolve_curve(name, identities.get(name))
+            _record_remap(name, new)
             if new != name:
                 local[name] = new
-            new_curves.append(new)
+            if dem:
+                if new in new_curves:
+                    # 罕见畸形：降占位名已被本格另一曲线解析占用——保留
+                    # 曲线侧（apply 端不变量：同名不得两侧共存）
+                    logger.warning("降占位名与已解析曲线重名，保留曲线: %s", new)
+                    new_curves.append(new)
+                    continue
+                demoted_here.append(new)
+                if new not in demoted:
+                    demoted.append(new)
+            else:
+                new_curves.append(new)
         new_invalid = []
         for name in plot.invalid_curves:
             new = _rename(name, identities)
             if new != name:
                 local[name] = new
             new_invalid.append(new)
+        for name in demoted_here:
+            if name not in new_invalid:
+                new_invalid.append(name)
         plot.curves = new_curves
         plot.invalid_curves = new_invalid
         if local:
             # 键同步只按本子图实际改名表：孤儿条目（用户手改曲线名留下的
             # 身份/设置键）保留不删（D11），引擎按精确键查，孤儿无害。
+            # 降占位不改名，身份/设置键原位保留（占位复活时带回）。
             plot.curve_settings = {
                 local.get(k, k): v for k, v in (plot.curve_settings or {}).items()
             }
             plot.curve_identities = {
                 local.get(k, k): v for k, v in identities.items()
             }
-    return resolved, remap
+    return resolved, remap, demoted
+
+
+def merge_demoted(
+    matched: set[str], unmatched: set[str], demoted: list[str]
+) -> tuple[float, set[str], set[str]]:
+    """demoted 并入失配口径（M-1 方案乙简报 §2，ratio 不得虚高）。
+
+    check_template_match 只数 curves，降占位后分母会缩；调用方用本助手
+    把 demoted 并入分母与缺失集合：返回 (ratio, matched, unmatched∪demoted)。
+    demoted 为空时与 check_template_match 原值逐字一致（零回归）。
+    """
+    d = set(demoted)
+    total = matched | unmatched | d
+    ratio = len(matched) / len(total) if total else 1.0
+    return ratio, matched, unmatched | d

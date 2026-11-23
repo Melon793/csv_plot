@@ -62,3 +62,65 @@ def test_none_loader_unchanged(asm):
     _save(asm, ["speed"])
     should, _ = asm.should_apply_auto_save(["speed"], None)
     assert should is True
+
+
+# ---------------- M-1 方案乙：demoted 计入失配（0.6 阈值同口径） ----------------
+
+
+def _loader_with(infos):
+    """infos: {显示名: (original_name, unit)}，无 SI 的 MDF 替身。"""
+    def gci(name):
+        on, unit = infos[name]
+        return {
+            "meta": SimpleNamespace(original_name=on, unit=unit),
+            "source": {"path": None, "name": None},
+        }
+
+    return SimpleNamespace(var_names=list(infos), get_channel_info=gci)
+
+
+def _save_with_identity(asm, curves, identities):
+    asm.auto_save(PlotSessionConfig(
+        plots=[PlotConfig(curves=list(curves), curve_identities=dict(identities))]
+    ))
+
+
+def test_all_demoted_rejects(asm):
+    """全降占位：ratio 0 → 拒放（不走纯占位捷径）。"""
+    _save_with_identity(
+        asm, ["Press_G0"], {"Press_G0": {"original_name": "Press", "kind": "mdf", "unit": "bar"}}
+    )
+    loader = _loader_with({"Press_G0": ("Press", "degC"), "Press_G1": ("Press", "bar")})
+    should, reason = asm.should_apply_auto_save(list(loader.var_names), loader)
+    assert should is False
+    assert reason == "No matching variables"
+
+
+def test_partial_demoted_below_threshold_rejects(asm):
+    """1/2 匹配（另一条降占位）→ 50% < 60% 拒放。"""
+    _save_with_identity(
+        asm, ["Press_G0", "Speed"],
+        {"Press_G0": {"original_name": "Press", "kind": "mdf", "unit": "bar"}},
+    )
+    loader = _loader_with({
+        "Press_G0": ("Press", "degC"), "Press_G1": ("Press", "bar"),
+        "Speed": ("Speed", "km/h"),
+    })
+    should, reason = asm.should_apply_auto_save(list(loader.var_names), loader)
+    assert should is False
+    assert "50%" in reason
+
+
+def test_partial_demoted_above_threshold_applies(asm):
+    """2/3 匹配（另一条降占位）→ 67% ≥ 60% 放行。"""
+    _save_with_identity(
+        asm, ["Press_G0", "Speed", "Rpm"],
+        {"Press_G0": {"original_name": "Press", "kind": "mdf", "unit": "bar"}},
+    )
+    loader = _loader_with({
+        "Press_G0": ("Press", "degC"), "Press_G1": ("Press", "bar"),
+        "Speed": ("Speed", "km/h"), "Rpm": ("Rpm", "rpm"),
+    })
+    should, reason = asm.should_apply_auto_save(list(loader.var_names), loader)
+    assert should is True
+    assert "67%" in reason

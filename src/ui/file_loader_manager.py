@@ -2352,15 +2352,19 @@ class FileLoaderManager(MainWindowBaseManager):
         上面已经读过，这里不再读盘。
 
         身份匹配 MN-4/D5：显式 resolve 后再算 ratio（与放行判据同口径），
-        重映射条数同规格播报。
+        重映射条数同规格播报；M-1 方案乙：降占位计入失配并披露。
         """
-        from src.core.template_identity import resolve_identities
-        config, remap = resolve_identities(config, getattr(self.mw, "loader", None))
+        from src.core.template_identity import merge_demoted, resolve_identities
+        config, remap, demoted = resolve_identities(
+            config, getattr(self.mw, "loader", None)
+        )
         ratio, _matched, unmatched = (
             self.mw.plot_config_manager.check_template_match(config, current_vars)
         )
+        ratio, _matched, unmatched = merge_demoted(_matched, unmatched, demoted)
         self.mw._announce_applied(
-            "已自动恢复上次布局", ratio, unmatched, remapped=len(remap)
+            "已自动恢复上次布局", ratio, unmatched,
+            remapped=len(remap), demoted=len(demoted),
         )
 
     def _remember_last_open_dir(self, file_path: str):

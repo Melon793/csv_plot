@@ -72,7 +72,7 @@ def test_remap_targets_correct_frame_and_factor(blf_pair):
     assert entry["can_id"] == CAN_FRAMES[0]["can_id"]
     assert entry["bus_channel"] == 0
 
-    resolved, remap = resolve_identities(cfg, lb)
+    resolved, remap, _demoted = resolve_identities(cfg, lb)
     assert remap == {"EngineData.EngineSpeed_G0": "EngineData.EngineSpeed_G1"}
     info = lb.get_channel_info("EngineData.EngineSpeed_G1")
     assert info["can"]["can_id"] == 0x1A0
@@ -86,7 +86,7 @@ def test_old_doc_qualified_multi_candidate_l3(blf_pair):
     cfg = PlotSessionConfig(
         pages=[PlotPageConfig(plots=[PlotConfig(curves=["EngineData.EngineSpeed_G0"])])]
     )
-    resolved, remap = resolve_identities(cfg, lb)
+    resolved, remap, _demoted = resolve_identities(cfg, lb)
     assert remap == {}
     assert resolved.pages[0].plots[0].curves == ["EngineData.EngineSpeed_G0"]
 
@@ -105,7 +105,7 @@ def test_old_doc_qualified_to_bare_unique(tmp_path):
         cfg = PlotSessionConfig(
             pages=[PlotPageConfig(plots=[PlotConfig(curves=["EngineData.EngineSpeed"])])]
         )
-        resolved, remap = resolve_identities(cfg, lb)
+        resolved, remap, _demoted = resolve_identities(cfg, lb)
         assert remap == {"EngineData.EngineSpeed": "EngineSpeed"}
         assert resolved.pages[0].plots[0].curves == ["EngineSpeed"]
     finally:
@@ -113,18 +113,22 @@ def test_old_doc_qualified_to_bare_unique(tmp_path):
         lb.close()
 
 
-def test_bus_renumber_subset_multi_candidate_l3(tmp_path):
-    """MN-6 风险披露：buses=(0,1)→(1,2) 全改号 → L1 四元组失配且 L2 多候选
-    → 落占位，走 B 手动替换。"""
+def test_bus_renumber_subset_multi_candidate_fail_closed(tmp_path):
+    """MN-6 风险场景 + M-1 方案乙：buses=(0,1)→(1,2) 全改号，_G0 同名仍在
+    但总线归属矛盾 → D9 检出、L1 四元组失配、L2 多候选 → 降占位不绘制
+    （方案甲时照画错总线数据，方案乙收口），走 C4 手动替换。"""
     blf_a, dbc = write_blf_pair(tmp_path, n=20, buses=(0, 1), basename="syn_a")
     msgs = make_blf_messages(T0, n=20, buses=(1, 2))
     blf_b = write_blf(tmp_path / "syn_b.blf", msgs)
     la, lb = _load(blf_a, dbc), _load(blf_b, dbc)
     try:
         cfg = _template_from(la, ["EngineData.EngineSpeed_G0"])
-        resolved, remap = resolve_identities(cfg, lb)
+        resolved, remap, demoted = resolve_identities(cfg, lb)
         assert remap == {}
-        assert resolved.pages[0].plots[0].curves == ["EngineData.EngineSpeed_G0"]
+        assert demoted == ["EngineData.EngineSpeed_G0"]
+        p = resolved.pages[0].plots[0]
+        assert p.curves == []
+        assert p.invalid_curves == ["EngineData.EngineSpeed_G0"]
     finally:
         la.close()
         lb.close()

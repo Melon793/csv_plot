@@ -59,7 +59,7 @@ def test_remap_targets_correct_unit_and_attribution(mdf_pair):
     assert entry["ecu"] == "ECU_A"
     assert entry["unit"] == "bar"
 
-    resolved, remap = resolve_identities(cfg, lb)
+    resolved, remap, _demoted = resolve_identities(cfg, lb)
     assert remap == {"Press_G0": "Press_G1"}
     assert resolved.pages[0].plots[0].curves == ["Press_G1"]
     info = lb.get_channel_info("Press_G1")
@@ -99,21 +99,21 @@ def test_si_absent_swapped_multi_candidate_l3(tmp_path):
     la, lb = MDFLazyLoader(str(a)), MDFLazyLoader(str(b))
     try:
         cfg = _template_from(la, ["Press_G2"])  # 两边都不存在的旧后缀
-        resolved, remap = resolve_identities(cfg, lb)
+        resolved, remap, demoted = resolve_identities(cfg, lb)
         assert remap == {}
+        assert demoted == []  # 纯缺失 L3 不走 fail-closed
         assert resolved.pages[0].plots[0].curves == ["Press_G2"]
     finally:
         la.close()
         lb.close()
 
 
-def test_si_absent_swapped_original_still_present_residual(tmp_path):
-    """终审 M-1 护栏（已披露残余风险，fail-closed 属新决策留用户拍板）：
+def test_si_absent_swapped_original_still_present_fail_closed(tmp_path):
+    """M-1 方案乙护栏（用户拍板 fail-closed，原方案甲残余风险已收口）：
 
-    无 SI + 组序对调 + 原名仍在 + 单位矛盾：D9 检出矛盾降级，但 L1 无
-    指纹不命中、L2 多候选不猜（D4/D10）→ L3 保持原名，套用端见原名
-    仍在照画 degC 那条——「检而不防」，与无引擎现状一致、不劣于现状。
-    本测试显式钉住该行为为残余风险，而非安全子例（Press_G2 不存在）。
+    无 SI + 组序对调 + 原名仍在 + 单位矛盾：D9 检出矛盾降级，L1 无
+    指纹不命中、L2 多候选不猜（D4/D10）→ **降占位不绘制**（curves 移入
+    invalid_curves），demoted 名单携带供调用方计入失配并播报披露。
     """
     a = write_mdf(
         tmp_path / "syn_a.dat", version="4.10", n=10,
@@ -130,10 +130,12 @@ def test_si_absent_swapped_original_still_present_residual(tmp_path):
         entry = cfg.pages[0].plots[0].curve_identities["Press_G0"]
         assert entry["unit"] == "bar"
         assert "device" not in entry  # 无 SI 指纹
-        resolved, remap = resolve_identities(cfg, lb)
-        # 残余风险行为：不改名、不告警播报（remap=0），原名仍在 → 照画
+        resolved, remap, demoted = resolve_identities(cfg, lb)
         assert remap == {}
-        assert resolved.pages[0].plots[0].curves == ["Press_G0"]
+        assert demoted == ["Press_G0"]
+        p = resolved.pages[0].plots[0]
+        assert p.curves == []                      # 不绘制
+        assert p.invalid_curves == ["Press_G0"]    # 灰色占位
         assert lb.get_channel_info("Press_G0")["meta"].unit == "degC"
     finally:
         la.close()
@@ -146,7 +148,7 @@ def test_old_doc_l0_residual_risk(mdf_pair):
     cfg = PlotSessionConfig(
         pages=[PlotPageConfig(plots=[PlotConfig(curves=["Press_G0"])])]
     )
-    resolved, remap = resolve_identities(cfg, lb)
+    resolved, remap, _demoted = resolve_identities(cfg, lb)
     assert remap == {}
     assert resolved.pages[0].plots[0].curves == ["Press_G0"]
 

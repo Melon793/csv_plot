@@ -2233,7 +2233,7 @@ class MainWindow(QMainWindow):
         self._persist_last_template(template_id, template.metadata.name)
         self._check_and_apply_template(template, template_id, template.metadata.name)
 
-    def _announce_applied(self, label: str, ratio: float, unmatched, remapped: int = 0) -> None:
+    def _announce_applied(self, label: str, ratio: float, unmatched, remapped: int = 0, demoted: int = 0) -> None:
         """套用一套通道映射之后的播报，三条路径共用（正常套用 / 强制套用 /
         加载后自动恢复）。
 
@@ -2242,15 +2242,18 @@ class MainWindow(QMainWindow):
         曲线，而它 5 秒就收走等于没说。
 
         身份匹配 D5：自动重映射 N>0 时同规格追加"（自动重映射 N 条）"；
-        逐条映射明细进 logger.info（引擎侧），不进播报正文。remapped=0
-        时文案与既有精确断言逐字一致。
+        M-1 方案乙：身份矛盾降占位 N>0 时追加"（N 条身份矛盾降占位）"并
+        按 warn。逐条明细进 logger.info/warning（引擎侧），不进播报正文。
+        remapped=demoted=0 时文案与既有精确断言逐字一致。
         """
         text = f"{label} · 匹配 {ratio:.0%}"
         if unmatched:
             text += f"（{len(unmatched)} 个变量缺失）"
         if remapped > 0:
             text += f"（自动重映射 {remapped} 条）"
-        if unmatched:
+        if demoted > 0:
+            text += f"（{demoted} 条身份矛盾降占位）"
+        if unmatched or demoted > 0:
             self._broadcast(text, level="warn")
         else:
             self._broadcast(text)
@@ -2284,19 +2287,22 @@ class MainWindow(QMainWindow):
             return
         current_vars = list(self.loader.var_names)
         # 身份匹配 D12：resolve 前置到调用方，check_template_match 签名
-        # 零改动；重映射计入 matched（D5）。apply_config 入口再 resolve
-        # 一次（幂等）。CSV 无 get_channel_info → 原样返回（D8）。
-        from src.core.template_identity import resolve_identities
-        config, remap = resolve_identities(config, self.loader)
+        # 零改动；重映射计入 matched（D5），降占位计入失配（M-1 方案乙）。
+        # apply_config 入口再 resolve 一次（幂等）。CSV 无 get_channel_info
+        # → 原样返回（D8）。
+        from src.core.template_identity import merge_demoted, resolve_identities
+        config, remap, demoted = resolve_identities(config, self.loader)
         ratio, matched, unmatched = self.plot_config_manager.check_template_match(
             config, current_vars
         )
+        ratio, matched, unmatched = merge_demoted(matched, unmatched, demoted)
         if ratio >= RATIO_RESET_PLOTS:
             success = self.plot_config_manager.apply_config(self, config)
             if success:
                 self._logger.info(f"应用模板[{name}]成功，匹配度 {ratio:.0%}")
                 self._announce_applied(
-                    f"已套用模板[{name}]", ratio, unmatched, remapped=len(remap)
+                    f"已套用模板[{name}]", ratio, unmatched,
+                    remapped=len(remap), demoted=len(demoted),
                 )
             else:
                 QMessageBox.warning(
@@ -2305,7 +2311,8 @@ class MainWindow(QMainWindow):
                 )
         else:
             self._show_match_low_dialog(
-                name, config, ratio, matched, unmatched, remapped=len(remap)
+                name, config, ratio, matched, unmatched,
+                remapped=len(remap), demoted=len(demoted),
             )
 
     def _quick_apply_template(self):
@@ -2326,7 +2333,7 @@ class MainWindow(QMainWindow):
             return
         self._check_and_apply_template(template, tid, name)
 
-    def _show_match_low_dialog(self, name: str, config, ratio: float, matched: set[str], unmatched: set[str], *, remapped: int = 0):
+    def _show_match_low_dialog(self, name: str, config, ratio: float, matched: set[str], unmatched: set[str], *, remapped: int = 0, demoted: int = 0):
         """匹配度过低时弹出详情对话框，允许强制执行"""
         matched_str = ", ".join(sorted(matched)) if matched else "无"
         unmatched_str = ", ".join(sorted(unmatched)) if unmatched else "无"
@@ -2356,7 +2363,8 @@ class MainWindow(QMainWindow):
             if self.plot_config_manager.apply_config(self, config):
                 self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")
                 self._announce_applied(
-                    f"已强制套用模板[{name}]", ratio, unmatched, remapped=remapped
+                    f"已强制套用模板[{name}]", ratio, unmatched,
+                    remapped=remapped, demoted=demoted,
                 )
             else:
                 QMessageBox.warning(
