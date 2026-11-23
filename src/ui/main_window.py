@@ -1889,6 +1889,64 @@ class MainWindow(QMainWindow):
         self._broadcast(f"正在加载数据，请稍候再{action}", level="warn")
         return True
 
+    def open_plot_arrange_dialog(self, plot_widget=None) -> None:
+        """打开「整理布局」对话框；确认后把排列置换应用到各页。
+
+        入口：子图右键菜单「整理布局…」（低频操作走右键）。
+        提交才动真实页面；取消 = 天然撤销。数据/曲线在对话框打开期间变化时
+        ``apply_arrangement`` 会拒绝并提示重开（快照失效守卫）。
+        """
+        if self.reject_when_loading("整理布局"):
+            return
+        # _is_loading_new_data 在曲线画完前仍持锁：此时打开对话框，加载后的
+        # 刷新回调会在 exec() 的嵌套事件循环里继续跑
+        if getattr(self, "_is_loading_new_data", False):
+            self._broadcast("正在加载数据，请稍候再整理布局", level="warn")
+            return
+        page = getattr(plot_widget, "page", None)
+        if page is None or page not in self.pages:
+            page = self.current_page
+        pages = [
+            candidate
+            for candidate in self.pages
+            if widget_alive(getattr(candidate, "widget", None))
+        ]
+        if page is None or not pages:
+            return
+
+        from PySide6.QtWidgets import QDialog
+
+        from src.ui.dialogs.plot_arrange_dialog import PlotArrangeDialog
+        from src.ui.widgets.plot_arrange_commit import apply_arrangement
+
+        dialog = PlotArrangeDialog(pages, current_page=page, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            summary = apply_arrangement(dialog.snapshot, dialog.result_state())
+        except ValueError:
+            _widget_logger.warning("[ARRANGE] 状态无效，放弃应用", exc_info=True)
+            self._broadcast("整理布局状态无效，请重新打开", level="warn")
+            return
+        except Exception:
+            _widget_logger.exception("[ARRANGE] 应用排列失败")
+            self._broadcast("整理布局失败，详见日志", level="warn")
+            return
+        if not widget_alive(self):
+            return
+        cross = summary.get("cross_page", 0)
+        hidden = summary.get("hidden", 0)
+        self._broadcast(
+            f"已整理布局：{summary.get('plots', 0)} 个图就位"
+            + (f"，跨页 {cross} 个" if cross else "")
+            + (f"，{hidden} 个存入隐藏区（当前不可见）" if hidden else ""),
+            level="info",
+        )
+        _widget_logger.info(
+            "[ARRANGE] 应用完成：pages=%s plots=%s cross_page=%s",
+            summary.get("pages"), summary.get("plots"), cross,
+        )
+
     def _update_title(self, file_path: str = ""):
         """标题只承载三件事：当前文件名、软件名、版本号。"""
         file_name = os.path.basename(file_path) if file_path else ""

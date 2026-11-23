@@ -21,6 +21,7 @@ ZH_HIDE_CURSOR_VALUE = "隐藏游标数值"
 ZH_COPY_NAME = "复制变量名"
 ZH_VAR_EDITOR = "绘图变量编辑器"
 ZH_ADJUST_HEIGHT = "调整高度"
+ZH_ARRANGE_LAYOUT = "整理布局…"
 ZH_RESET_ALL_HEIGHT = "全部重置为 100%"
 ZH_CLEAR_PLOT = "清除绘图"
 
@@ -52,6 +53,7 @@ class CustomViewBoxSignals(QObject):
     request_set_all_row_height = Signal(int)  # percentage
     request_copy_name = Signal(object)  # plot_widget
     request_variable_editor = Signal(object)  # plot_widget
+    request_arrange_layout = Signal(object)  # plot_widget
 
 
 class CustomViewBox(pg.ViewBox):
@@ -203,6 +205,14 @@ class CustomViewBox(pg.ViewBox):
                 lambda: self.signals.request_variable_editor.emit(self.plot_widget)
             )
             menu.addAction(editor_act)
+
+        # 整理布局（低频操作走右键菜单，入口分层）
+        if ZH_ARRANGE_LAYOUT not in existing_texts:
+            arrange_act = QAction(ZH_ARRANGE_LAYOUT, menu)
+            arrange_act.triggered.connect(
+                lambda: self.signals.request_arrange_layout.emit(self.plot_widget)
+            )
+            menu.addAction(arrange_act)
 
         actions_to_remove = []
         for action in menu.actions():
