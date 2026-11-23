@@ -105,6 +105,9 @@ class PlotPage:
         self.saved_x_range: tuple[float, float] | None = None
         #: 模板恢复后待对齐数据域（一次性，由 _post_activation 消费）
         self._range_dirty: bool = False
+        #: 复制页待消费的 X 范围（一次性）。独立于 saved_x_range：切页跟随会
+        #: 用“当前页范围”覆盖 saved_x_range，复制页不能依赖它传递源页范围。
+        self._copy_x_range: tuple[float, float] | None = None
 
     @property
     def grid_cols(self) -> int:
@@ -117,6 +120,20 @@ class PlotPage:
         if self._built_cols > 0:
             return self._built_cols
         return max(1, self.cols_max)
+
+    @property
+    def built_grid_size(self) -> tuple[int, int]:
+        """已建网格规模（rows, cols）。
+
+        不变量：``_built_rows/_built_cols == 0`` ⇔ 本页从未建过矩阵
+        （``build_matrix`` 收尾必写两字段，``clear_matrix`` 归零）。复制页
+        必须按这个规模建网格：可见行列可能小于已建网格（缩列只隐藏不销毁
+        容器），按可见行列建会让隐藏格的曲线错位或丢失。
+        """
+        return (
+            self._built_rows or self.rows_current,
+            self._built_cols or self.cols_current,
+        )
 
     # ------------------------------------------------------------------
     # 网格构建 / 拆除（从 LayoutManager 搬迁，顺序与原实现一致）
@@ -671,6 +688,27 @@ class PlotPage:
             return None
         self.saved_x_range = (x_min, x_max)
         return self.saved_x_range
+
+    def peek_master_x_range(self) -> tuple[float, float] | None:
+        """只读 master 的 X 范围，不写 ``saved_x_range``（复制页用）。
+
+        空页（从未建过矩阵）返回 None：新建 ViewBox 的默认范围 (0, 1)
+        不是有效数据窗口，按“无范围”处理，让新页走全局 X limits。
+        """
+        if not self.plot_widgets:
+            return None
+        view_box = self.master_viewbox()
+        if view_box is None:
+            return None
+        try:
+            x_min, x_max = view_box.viewRange()[0]
+            x_min, x_max = float(x_min), float(x_max)
+        except Exception:
+            logger.debug("[PAGE] peek_master_x_range 读取失败", exc_info=True)
+            return None
+        if not (math.isfinite(x_min) and math.isfinite(x_max)) or x_max <= x_min:
+            return None
+        return (x_min, x_max)
 
     def apply_x_range(self, x_min: float, x_max: float) -> bool:
         """把本页 master 搬到给定 X 范围，页内其余子图由 XLink 级联。
