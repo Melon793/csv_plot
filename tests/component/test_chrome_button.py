@@ -8,6 +8,8 @@ D-g 例外锁（×/＋ 保持 _FlatIconButton 扁平，不迁基类）。
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from PySide6.QtCore import QSize, Qt
@@ -219,6 +221,10 @@ def test_rail_chip_is_chrome_button(qapp):
     assert chip.toolTip() == "单击展开变量区 (Ctrl+B)"
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="WA_MacNormalSize/MiniSize 的互斥清位仅 macOS 生效；Windows 上两位可同时为真",
+)
 def test_mac_normal_size_attribute_on_consumers(qapp):
     """F4：基类置 WA_MacNormalSize 钉 Large 档壳高（QMacStyle 按 ContentsType
     猜档：CT_ToolButton 恒 Small→壳矮 4 逻辑 px）；四消费方全覆盖。

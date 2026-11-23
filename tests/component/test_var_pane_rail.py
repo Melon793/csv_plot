@@ -428,6 +428,8 @@ class TestRailHygiene:
 
         隐藏按钮前后最小宽之差只允许是布局 spacing；若按钮贡献了自身宽度
         （mac QPushButton minimumSizeHint ~80px / 上限 28px），差值 ≥ 28。
+        宽度只守 ≤ 上限：精确 28 是 mac 字体度量下的自然宽，Windows 实测 24
+        （2026-11-23 win10_env），自然宽更窄是合法平台差异。
         """
         mw, _ = rail_env
         with_btn = mw.minimumSizeHint().width()
@@ -437,7 +439,8 @@ class TestRailHygiene:
         QApplication.processEvents()
 
         assert with_btn - without_btn < VAR_PANE_RAIL_WIDTH
-        assert mw.var_collapse_btn.width() == VAR_PANE_RAIL_WIDTH
+        chip_width = mw.var_collapse_btn.width()
+        assert 0 < chip_width <= VAR_PANE_RAIL_WIDTH
 
     def test_help_btn_narrow_like_collapse(self, rail_env):
         """? 与 « 同口径窄化（作者反馈 Win 上 ? 偏宽）：28px 且不顶最小宽。"""
