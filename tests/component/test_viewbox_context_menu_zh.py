@@ -5,8 +5,11 @@
 2. 幂等性——`getMenu` 返回的是 pyqtgraph 缓存的同一个 QMenu，创建文案与
    「判重/移除」比对文案必须同源，否则每次右键都会重复插入一份。
 
-游标模式的显示文案改为中文后，`request_set_cursor_mode` 仍必须发英文
+游标选项的显示文案改为中文后，`request_set_cursor_mode` 仍必须发英文
 内部标识符（cursor_sync_manager / file_loader_manager 按它比对）。
+
+「隐藏/显示游标数值」与四个模式正交，已收进「游标选项」子菜单：
+它不加入互斥组、不显示勾选态，只随状态翻转文案，并与模式项用分隔线隔开。
 """
 
 import pytest
@@ -19,7 +22,7 @@ from src.ui.widgets.custom_viewbox import (
     ZH_AUTO_Y_IN_X,
     ZH_CLEAR_PLOT,
     ZH_COPY_NAME,
-    ZH_CURSOR_MODE,
+    ZH_CURSOR_MENU,
     ZH_CURSOR_MODE_LABELS,
     ZH_HIDE_CURSOR_VALUE,
     ZH_JUMP_TO_DATA,
@@ -82,8 +85,11 @@ def _top_texts(menu):
 
 def _submenu(menu, title):
     """按标题取子菜单（返回 QMenu 列表，用于断言数量）"""
-    return [a.menu() for a in menu.actions() if a.menu() is not None
-            and a.menu().title() == title]
+    return [
+        a.menu()
+        for a in menu.actions()
+        if a.menu() is not None and a.menu().title() == title
+    ]
 
 
 def test_menu_uses_chinese_labels(view_box):
@@ -94,7 +100,7 @@ def test_menu_uses_chinese_labels(view_box):
     for zh in (
         ZH_JUMP_TO_DATA,
         ZH_AUTO_Y_IN_X,
-        ZH_CURSOR_MODE,
+        ZH_CURSOR_MENU,
         ZH_COPY_NAME,
         ZH_VAR_EDITOR,
         ZH_ADJUST_HEIGHT,
@@ -102,13 +108,35 @@ def test_menu_uses_chinese_labels(view_box):
     ):
         assert zh in texts, f"缺少中文菜单项 {zh!r}，实际：{texts}"
 
-    # 动作项文案是当前状态的反面：cursor_values_hidden=False（数值可见）→ 提供「隐藏游标数值」
-    assert ZH_HIDE_CURSOR_VALUE in texts
+    # 数值开关已收进子菜单，顶层不得残留任何状态下的文案
+    assert ZH_HIDE_CURSOR_VALUE not in texts
     assert ZH_SHOW_CURSOR_VALUE not in texts
 
-    cursor_texts = [a.text() for a in _submenu(menu, ZH_CURSOR_MODE)[0].actions()]
+    cursor_actions = _submenu(menu, ZH_CURSOR_MENU)[0].actions()
+    cursor_texts = [a.text() for a in cursor_actions]
     for mode in ("1 free cursor", "1 anchored cursor", "2 anchored cursor", "off"):
         assert ZH_CURSOR_MODE_LABELS[mode] in cursor_texts
+
+    # 动作项文案是当前状态的反面：cursor_values_hidden=False（数值可见）→ 提供「隐藏游标数值」
+    assert ZH_HIDE_CURSOR_VALUE in cursor_texts
+    assert ZH_SHOW_CURSOR_VALUE not in cursor_texts
+
+    # 结构：四个模式项 → 分隔线 → 数值开关（开关不进互斥组的视觉证据）
+    assert [a.isSeparator() for a in cursor_actions] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
+    assert cursor_actions[-1].text() == ZH_HIDE_CURSOR_VALUE
+
+    # 互斥组只含四个模式项；数值开关不属于任何互斥组
+    mode_groups = {a.actionGroup() for a in cursor_actions[:4]}
+    assert len(mode_groups) == 1
+    assert cursor_actions[0].actionGroup().isExclusive() is True
+    assert cursor_actions[-1].actionGroup() is None, "数值开关不得加入互斥组"
 
     all_texts = texts + cursor_texts
     for legacy in LEGACY_ENGLISH_TEXTS:
@@ -137,22 +165,33 @@ def test_get_menu_is_idempotent(view_box):
         ZH_COPY_NAME,
         ZH_VAR_EDITOR,
         ZH_CLEAR_PLOT,
-        ZH_HIDE_CURSOR_VALUE,
     ):
         assert texts.count(zh) == 1, f"{zh!r} 出现 {texts.count(zh)} 次：菜单项重复插入"
 
-    assert len(_submenu(menu, ZH_CURSOR_MODE)) == 1
+    assert texts.count(ZH_CURSOR_MENU) == 1
+    assert ZH_HIDE_CURSOR_VALUE not in texts
+    assert len(_submenu(menu, ZH_CURSOR_MENU)) == 1
     assert len(_submenu(menu, ZH_ADJUST_HEIGHT)) == 1
 
+    cursor = _submenu(menu, ZH_CURSOR_MENU)[0]
+    value_texts = [
+        a.text()
+        for a in cursor.actions()
+        if a.text() in (ZH_SHOW_CURSOR_VALUE, ZH_HIDE_CURSOR_VALUE)
+    ]
+    assert value_texts == [ZH_HIDE_CURSOR_VALUE], f"数值开关重复插入：{value_texts}"
+
     adjust = _submenu(menu, ZH_ADJUST_HEIGHT)[0]
-    reset_texts = [a.text() for a in adjust.actions() if a.text() == ZH_RESET_ALL_HEIGHT]
+    reset_texts = [
+        a.text() for a in adjust.actions() if a.text() == ZH_RESET_ALL_HEIGHT
+    ]
     assert len(reset_texts) == 1
 
 
 def test_cursor_mode_signal_still_emits_internal_identifier(view_box):
     """点选中文化后的模式项，信号仍发英文标识符"""
     menu = view_box.getMenu(_FakeMenuEvent())
-    cursor_menu = _submenu(menu, ZH_CURSOR_MODE)[0]
+    cursor_menu = _submenu(menu, ZH_CURSOR_MENU)[0]
     by_label = {a.text(): a for a in cursor_menu.actions()}
 
     received = []
@@ -164,6 +203,49 @@ def test_cursor_mode_signal_still_emits_internal_identifier(view_box):
     by_label["关闭游标"].trigger()
 
     assert received == ["2 anchored cursor", "off"]
+
+
+def test_cursor_value_action_in_submenu_state_and_signals(view_box):
+    """数值开关：未开游标置灰；文案随隐藏态翻转；点击发对应信号"""
+    ctx = view_box.plot_widget.plot_context
+
+    # 数值信号的真实落点（EventHandler）会读 cursor_btn；替身补一个"未勾选"桩，
+    # 让信号穿过真实 EventHandler 落点（未勾选分支），不越界访问主窗口控件
+    class _CursorBtnStub:
+        def isChecked(self):
+            return False
+
+    ctx.cursor_btn = _CursorBtnStub()
+
+    # 光标关闭（fixture 默认态）：开关仍在子菜单内，但置灰
+    cursor_menu = _submenu(view_box.getMenu(_FakeMenuEvent()), ZH_CURSOR_MENU)[0]
+    hide_act = {a.text(): a for a in cursor_menu.actions()}[ZH_HIDE_CURSOR_VALUE]
+    assert hide_act.isEnabled() is False
+    assert hide_act.isCheckable() is False, "开关不得带勾选态，否则会被当成第 5 种模式"
+
+    shown, hidden = [], []
+    view_box.signals.request_show_cursor_value.connect(lambda pw: shown.append(pw))
+    view_box.signals.request_hide_cursor_value.connect(lambda pw: hidden.append(pw))
+
+    # 光标开启 + 数值已隐藏：文案翻转为「显示游标数值」，点击发 show 信号
+    ctx.is_cursor_enabled = lambda: True
+    ctx.cursor_values_hidden = True
+    cursor_menu = _submenu(view_box.getMenu(_FakeMenuEvent()), ZH_CURSOR_MENU)[0]
+    by_text = {a.text(): a for a in cursor_menu.actions() if not a.isSeparator()}
+    assert ZH_HIDE_CURSOR_VALUE not in by_text
+    show_act = by_text[ZH_SHOW_CURSOR_VALUE]
+    assert show_act.isEnabled() is True
+    show_act.trigger()
+    assert shown == [view_box.plot_widget]
+    assert hidden == []
+
+    # 回到数值可见态：同一位置换成「隐藏游标数值」，点击发 hide 信号
+    ctx.cursor_values_hidden = False
+    cursor_menu = _submenu(view_box.getMenu(_FakeMenuEvent()), ZH_CURSOR_MENU)[0]
+    by_text = {a.text(): a for a in cursor_menu.actions() if not a.isSeparator()}
+    by_text[ZH_HIDE_CURSOR_VALUE].trigger()
+    assert hidden == [view_box.plot_widget]
+    assert shown == [view_box.plot_widget]
 
 
 def _live_object_counts(menu):
@@ -181,7 +263,7 @@ def test_repeated_get_menu_does_not_accumulate_objects(view_box, qapp):
     """连续右键不累积 QObject：removeAction 之后必须真正销毁
 
     基线取第一轮 getMenu（此时 pyqtgraph 自身项与我们的自定义项都已建好），
-    再连点 5 次；游标模式子菜单与「调整高度」子菜单每轮都会重建，
+    再连点 5 次；游标选项子菜单与「调整高度」子菜单每轮都会重建，
     旧对象若只 remove 不 delete 就会一直挂在缓存菜单的 children 上。
     """
     menu = view_box.getMenu(_FakeMenuEvent())
@@ -195,4 +277,3 @@ def test_repeated_get_menu_does_not_accumulate_objects(view_box, qapp):
 
     assert _live_object_counts(menu) == baseline
     assert len(menu.actions()) == visible_baseline
-

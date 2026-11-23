@@ -15,7 +15,7 @@ import pyqtgraph as pg
 # 每次右键都重复插入一份（菜单项成对翻倍）。
 ZH_JUMP_TO_DATA = "跳转至变量数值表"
 ZH_AUTO_Y_IN_X = "按 X 范围调节 Y 轴"
-ZH_CURSOR_MODE = "游标模式"
+ZH_CURSOR_MENU = "游标选项"
 ZH_SHOW_CURSOR_VALUE = "显示游标数值"
 ZH_HIDE_CURSOR_VALUE = "隐藏游标数值"
 ZH_COPY_NAME = "复制变量名"
@@ -113,14 +113,14 @@ class CustomViewBox(pg.ViewBox):
         actions_to_remove = []
         for action in menu.actions():
             # "Pin Cursor" / "Free Cursor" 是 pyqtgraph 历史项名，保持英文原样
-            if action.text() in ["Pin Cursor", "Free Cursor", ZH_CURSOR_MODE]:
+            if action.text() in ["Pin Cursor", "Free Cursor", ZH_CURSOR_MENU]:
                 actions_to_remove.append(action)
         self._discard_actions(menu, actions_to_remove)
 
         cursor_enabled = self._get_cursor_enabled()
 
-        cursor_menu = QMenu(ZH_CURSOR_MODE, menu)
-        # 游标模式菜单始终可用
+        cursor_menu = QMenu(ZH_CURSOR_MENU, menu)
+        # 游标选项菜单始终可用
         cursor_menu.setEnabled(True)
         cursor_group = QActionGroup(cursor_menu)
         cursor_group.setExclusive(True)
@@ -156,6 +156,24 @@ class CustomViewBox(pg.ViewBox):
         cursor_group.addAction(off_act)
         cursor_menu.addAction(off_act)
 
+        # 数值开关与上面四个模式正交（任一已开启游标模式下都能单独隐藏数值）：
+        # 分隔线与互斥组分隔，且不加入 QActionGroup——加了勾选态会被误读成
+        # 第 5 种模式。文案随状态翻转，表示“点击后做什么”。
+        cursor_menu.addSeparator()
+        values_hidden = self._get_cursor_values_hidden()
+        if values_hidden:
+            cursor_value_act = QAction(ZH_SHOW_CURSOR_VALUE, cursor_menu)
+            cursor_value_act.triggered.connect(
+                lambda: self.signals.request_show_cursor_value.emit(self.plot_widget)
+            )
+        else:
+            cursor_value_act = QAction(ZH_HIDE_CURSOR_VALUE, cursor_menu)
+            cursor_value_act.triggered.connect(
+                lambda: self.signals.request_hide_cursor_value.emit(self.plot_widget)
+            )
+        cursor_value_act.setEnabled(cursor_enabled)
+        cursor_menu.addAction(cursor_value_act)
+
         if len(menu.actions()) >= 2:
             menu.insertMenu(
                 menu.actions()[2] if len(menu.actions()) > 2 else None,
@@ -163,33 +181,6 @@ class CustomViewBox(pg.ViewBox):
             )
         else:
             menu.addMenu(cursor_menu)
-
-        actions_to_remove = []
-        for action in menu.actions():
-            if action.text() in [ZH_SHOW_CURSOR_VALUE, ZH_HIDE_CURSOR_VALUE]:
-                actions_to_remove.append(action)
-        self._discard_actions(menu, actions_to_remove)
-
-        values_hidden = self._get_cursor_values_hidden()
-        if values_hidden:
-            cursor_value_act = QAction(ZH_SHOW_CURSOR_VALUE, menu)
-            cursor_value_act.triggered.connect(
-                lambda: self.signals.request_show_cursor_value.emit(self.plot_widget)
-            )
-        else:
-            cursor_value_act = QAction(ZH_HIDE_CURSOR_VALUE, menu)
-            cursor_value_act.triggered.connect(
-                lambda: self.signals.request_hide_cursor_value.emit(self.plot_widget)
-            )
-        cursor_value_act.setEnabled(cursor_enabled)
-
-        if len(menu.actions()) >= 3:
-            menu.insertAction(
-                menu.actions()[3] if len(menu.actions()) > 3 else None,
-                cursor_value_act,
-            )
-        else:
-            menu.addAction(cursor_value_act)
 
         copy_act = None
         for act in menu.actions():
