@@ -421,23 +421,29 @@ def test_tab_tooltip_without_provider_falls_through(tabs, qapp):
 
 
 # ----------------------------------------------------------------------
-# T2：页签右键菜单（重命名/关闭/关闭其他/关闭右侧）
+# T2：页签右键菜单（重命名/复制/关闭/关闭其他/关闭右侧）
 # ----------------------------------------------------------------------
 def test_context_menu_actions_emit_signals(tabs):
     _add_pages(tabs, 4)
     menu = tabs._build_tab_menu(1)
     assert [a.text() for a in menu.actions() if a.text()] == [
-        "重命名", "关闭", "关闭其他", "关闭右侧",
+        "重命名", "复制绘图页", "关闭", "关闭其他", "关闭右侧",
     ]
     got = []
     tabs.rename_page_requested.connect(lambda i: got.append(("rename", i)))
+    tabs.duplicate_page_requested.connect(
+        lambda i: got.append(("duplicate", i))
+    )
     tabs.close_page_requested.connect(lambda i: got.append(("close", i)))
     tabs.close_other_pages_requested.connect(lambda i: got.append(("others", i)))
     tabs.close_right_pages_requested.connect(lambda i: got.append(("right", i)))
     for action in menu.actions():
         if action.text():
             action.trigger()
-    assert got == [("rename", 1), ("close", 1), ("others", 1), ("right", 1)]
+    assert got == [
+        ("rename", 1), ("duplicate", 1), ("close", 1),
+        ("others", 1), ("right", 1),
+    ]
     menu.deleteLater()
 
 
