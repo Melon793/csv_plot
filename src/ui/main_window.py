@@ -1208,7 +1208,9 @@ class MainWindow(QMainWindow):
         left_stack.addWidget(content)
         # 细边栏页：QStackedLayout 自动隐藏非当前页，不会以未布局子控件
         # 身份在 (0,0) 冒出来（同 curve_shelf_btn 的教训）
-        self.var_pane_rail = VarPaneRail(left_widget)
+        self.var_pane_rail = VarPaneRail(
+            left_widget, chip_height=self.var_collapse_btn.sizeHint().height()
+        )
         left_stack.addWidget(self.var_pane_rail)
         left_stack.setCurrentIndex(0)
         self.left_widget = left_widget

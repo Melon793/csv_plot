@@ -127,7 +127,7 @@ def test_default_no_focus(qapp):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("size", [(24, 24), (52, 24)])  # F1 消费方几何
+@pytest.mark.parametrize("size", [(24, 24), (24, 32), (52, 24)])  # F1/F2 消费方几何
 @pytest.mark.parametrize("mode", ["rest", "hover", "down", "checked", "disabled"])
 def test_shell_pixels_match_native_pushbutton(fusion_style, size, mode):
     ref = QPushButton()

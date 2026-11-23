@@ -69,7 +69,7 @@ class VarPaneRail(QWidget):
 
     expand_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, chip_height: int | None = None):
         super().__init__(parent)
         self.setFixedWidth(VAR_PANE_RAIL_WIDTH)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -92,10 +92,17 @@ class VarPaneRail(QWidget):
         self.expand_btn = _RailExpandChip(self)
         self.expand_btn.setToolTip("单击展开变量区 (Ctrl+B)")
         self.expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        # F1：24×24＝mac Mini 档默认高＋WA_MacMiniSize → 圆角 aqua 与顶栏
-        # 同族（qmacstyle_mac.mm:356/:1826）；mac-only 属性，Win/Fusion 忽略
-        self.expand_btn.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
-        self.expand_btn.setFixedSize(24, 24)
+        self.expand_btn.setFixedWidth(24)
+        if chip_height is None:
+            # F1 默认（独立构造/测试口径）：24＝mac Mini 档默认高＋
+            # WA_MacMiniSize → 圆角 aqua（qmacstyle_mac.mm:356/:1826）
+            self.expand_btn.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
+            self.expand_btn.setFixedHeight(24)
+        else:
+            # F2：跟标题«同高（平台自然高，主窗口传入）。mac 自然高 32＝
+            # Large 档默认高→圆角无需尺寸属性；若仍置 Mini 则 32≠24 落方壳。
+            # Win/Fusion 自然高各自与«一致，跨平台逐像素同高。
+            self.expand_btn.setFixedHeight(int(chip_height))
         self.expand_btn.clicked.connect(self.expand_requested)
         layout.addWidget(self.expand_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 

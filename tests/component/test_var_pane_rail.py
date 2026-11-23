@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -493,7 +493,11 @@ class TestAffordance:
         assert isinstance(chip, ChromeButton)
         assert not chip.styleSheet()
         assert chip._glyph_color().name().upper() == theme.ACCENT.upper()
-        assert chip.size() == QSize(24, 24)  # F1 Mini 档（原 24×22）
+        # F2：芯片跟标题«同高（平台自然高），宽仍 24；不再置 Mini 属性
+        # （mac 自然高 32＝Large 档默认高→圆角；置 Mini 反而落方壳）
+        assert chip.width() == 24
+        assert chip.height() == mw.var_collapse_btn.sizeHint().height()
+        assert not chip.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
 
     def test_handle_is_grip_handle(self, rail_env):
         from src.ui.widgets.var_pane_rail import RailSplitter, _GripHandle
