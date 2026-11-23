@@ -536,35 +536,44 @@ def build_style_panel_widget(
          _line_preset_icon(value, accent))
         for value, label, full in _SEG_LINE_PRESET_ITEMS
     ]
+    current_labels = {
+        "draw_mode": DRAW_MODE_LABELS.get(draw_mode, draw_mode),
+        "symbol_policy": SYMBOL_POLICY_LABELS.get(symbol_policy, symbol_policy),
+        "line_preset": LINE_PRESET_LABELS.get(line_preset, line_preset),
+    }
     for title, items, cur, key in (
         (f"绘制方式{draw_group_suffix}", draw_items, draw_mode, "draw_mode"),
         ("数据点", symbol_items, symbol_policy, "symbol_policy"),
         ("样式", preset_items, line_preset, "line_preset"),
     ):
+        # 当前档文字提醒（2026-11-23 拍板）：分组标题后直接给出当前值，
+        # 深色正文、1x 可读，跨平台/深色模式自然成立；按钮上的 ACCENT
+        # 图标保留作次级线索。标题文本保持原样（含枚举后缀），值独立成
+        # QLabel，既有「样式/小注同行」断言不受影响。
+        cap_row = QWidget(host)
+        cap_lay = QHBoxLayout(cap_row)
+        cap_lay.setContentsMargins(0, 0, 0, 0)
+        cap_lay.setSpacing(0)
+        cap = QLabel(title, cap_row)
+        cap.setStyleSheet("color: palette(mid);")
+        cap_lay.addWidget(cap)
+        value = QLabel(f"：{current_labels[key]}", cap_row)
+        value.setStyleSheet("color: palette(window-text);")
+        cap_lay.addWidget(value)
         if key == "line_preset":
             # 性能已知限制行内注（2026-11-21 拍板 C）：非实线 pen 走
             # drawPath 描边，大数据量滚轮显著慢于实线；标题行右侧空白
             # 容纳小注，零新增高度。出处 docs/help.md 已知限制。
-            cap_row = QWidget(host)
-            cap_lay = QHBoxLayout(cap_row)
-            cap_lay.setContentsMargins(0, 0, 0, 0)
-            cap_lay.setSpacing(6)
-            cap = QLabel(title, cap_row)
-            cap.setStyleSheet("color: palette(mid);")
+            cap_lay.addSpacing(6)
             note = QLabel("(大数据量建议实线)", cap_row)
             if note.font().pointSizeF() > 0:
                 note_font = note.font()
                 note_font.setPointSizeF(note_font.pointSizeF() - 1)
                 note.setFont(note_font)
             note.setStyleSheet("color: palette(mid);")
-            cap_lay.addWidget(cap)
             cap_lay.addWidget(note)
-            cap_lay.addStretch(1)
-            vbox.addWidget(cap_row)
-        else:
-            cap = QLabel(title, host)
-            cap.setStyleSheet("color: palette(mid);")
-            vbox.addWidget(cap)
+        cap_lay.addStretch(1)
+        vbox.addWidget(cap_row)
         seg = _SegmentedControl(
             items, cur, lambda v, k=key: _pick(k, v), parent=host
         )

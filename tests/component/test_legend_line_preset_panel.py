@@ -90,8 +90,8 @@ def test_style_caption_has_inline_perf_note(preset_plot):
     pw = preset_plot
     panel = pw.legend_label._build_style_panel_widget("v", {}, [])
     labels = panel.findChildren(QLabel)
-    note = next((l for l in labels if l.text() == "(大数据量建议实线)"), None)
-    cap = next((l for l in labels if l.text() == "样式"), None)
+    note = next((lb for lb in labels if lb.text() == "(大数据量建议实线)"), None)
+    cap = next((lb for lb in labels if lb.text() == "样式"), None)
     assert note is not None and cap is not None
     panel.layout().activate()
     assert note.y() == cap.y()  # 同一行，零新增高度
@@ -99,4 +99,19 @@ def test_style_caption_has_inline_perf_note(preset_plot):
         assert note.font().pointSizeF() < cap.font().pointSizeF()
     row = note.parentWidget()
     assert row.sizeHint().width() <= panel.sizeHint().width()  # 不换行
+    panel.deleteLater()
+
+
+def test_caption_shows_current_value(preset_plot):
+    """当前档文字提醒（2026-11-23 拍板）：分组标题后直接给出当前值。
+
+    值独立成 QLabel（深色正文），标题文本保持原样，既有「样式/小注同行」
+    断言不受影响；按钮 ACCENT 图标保留作次级线索。
+    """
+    pw = preset_plot
+    panel = pw.legend_label._build_style_panel_widget("v", {}, [])
+    texts = [lb.text() for lb in panel.findChildren(QLabel)]
+    assert "：直线" in texts  # 绘制方式当前 auto
+    assert "：自动" in texts  # 数据点当前 auto
+    assert "：默认" in texts  # 样式当前 auto
     panel.deleteLater()
