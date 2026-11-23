@@ -99,9 +99,10 @@ def test_open_geometry_footer_and_height(drawer, qapp):
     qapp.processEvents()
     assert drawer.open_for(mw) is True
     assert drawer.width() == 440
-    assert drawer.lock_chip.height() == 28
-    # 高度增量口径：main 基线 Fusion 212 + 41 ≈ 253
-    assert 245 <= drawer.height() <= 270, drawer.height()
+    from PySide6.QtWidgets import QSizePolicy
+    assert drawer.lock_chip.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed
+    # 高度增量口径：main 基线 Fusion 212 + 原生钮高+13（Fusion ~24+13）
+    assert 240 <= drawer.height() <= 285, drawer.height()
     hint = next(lb for lb in drawer.findChildren(QLabel) if "Esc" in lb.text())
     assert hint.width() >= hint.sizeHint().width(), "页脚提示被裁"
     assert drawer.lock_hint.width() > 0

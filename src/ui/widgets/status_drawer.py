@@ -568,7 +568,12 @@ class XAxisDrawer(StatusDrawer):
     def open_for(self, mw) -> bool:
         """用当前的全局 factor/offset 起算并打开抽屉。"""
         self._load_from(mw.factor, mw.offset)
-        return self.open_above(mw.statusBar())
+        ok = self.open_above(mw.statusBar())
+        if ok:
+            # 原生钮高 show 后才定档：open_above 先量的 sizeHint 会差 1px
+            # 导致压栏 1px（真机/ offscreen 实测）；用既有 reposition 复贴
+            self.reposition()
+        return ok
 
     # -- 构建 ---------------------------------------------------------------
 
@@ -658,9 +663,12 @@ class XAxisDrawer(StatusDrawer):
         # B 状态行（xlock-only 拍板）：锁 chip + 行内提示，与"预览→确认"
         # 表单区用 hairline 分离；锁定立即生效，Esc 只收抽屉不回滚。
         # 宽度维持 440：chip≈151 + hint≈240 + gap 8 = 399 ≤ 416 净宽
-        self.lock_chip = QPushButton(self)
-        self.lock_chip.setFixedHeight(28)
-        self.lock_chip.setToolTip("锁定/解锁 X 轴可见范围（立即生效）")
+        # 用 _chip 工厂（与预设/页脚钮同类同框）：不钉高度——原生圆角档只认
+        # 默认高，setFixedHeight(28) 会顶出档变灰斜面方壳（真机报障）；
+        # Fixed/Fixed 策略防水平可拉伸被撑到半行宽（_chip docstring 先例）
+        self.lock_chip = self._chip(
+            "锁定X轴可见范围", "锁定/解锁 X 轴可见范围（立即生效）"
+        )
         self.lock_chip.clicked.connect(self._on_lock_chip)
         self.lock_hint = QLabel()
         self.lock_hint.setStyleSheet(theme.muted_text())
