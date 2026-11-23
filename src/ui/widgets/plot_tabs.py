@@ -887,6 +887,7 @@ class PlotTabsWidget(QTabWidget):
         new_page_requested: 点击标签尾部的「＋」。
         close_page_requested(int): 点标签关闭按钮或中键点击标签。
         rename_page_requested(int): 双击标签。
+        duplicate_page_requested(int): 右键菜单「复制绘图页」。
         close_other_pages_requested(int): 右键菜单「关闭其他」。
         close_right_pages_requested(int): 右键菜单「关闭右侧」。
         page_selected(int): 页目录下拉里点选某页。
@@ -898,6 +899,7 @@ class PlotTabsWidget(QTabWidget):
     new_page_requested = Signal()
     close_page_requested = Signal(int)
     rename_page_requested = Signal(int)
+    duplicate_page_requested = Signal(int)
     close_other_pages_requested = Signal(int)
     close_right_pages_requested = Signal(int)
     page_selected = Signal(int)
@@ -1239,12 +1241,20 @@ class PlotTabsWidget(QTabWidget):
                 return
 
     # ------------------------------------------------------------------
-    # 右键菜单（T2）：重命名 / 关闭 / 关闭其他 / 关闭右侧
+    # 右键菜单（T2）：重命名 / 复制 / 关闭 / 关闭其他 / 关闭右侧
     # ------------------------------------------------------------------
     def _build_tab_menu(self, index: int) -> QMenu:
         menu = QMenu(self)
+        # 置灰态需要 tooltip 说明原因（Qt6：QMenu 默认不显示 action tooltip）
+        menu.setToolTipsVisible(True)
         action = menu.addAction("重命名")
         action.triggered.connect(lambda: self.rename_page_requested.emit(index))
+        can_duplicate = self._can_add_page()
+        action = menu.addAction("复制绘图页")
+        action.setEnabled(can_duplicate)
+        if not can_duplicate:
+            action.setToolTip(f"已达上限（{MAX_PAGES} 页）")
+        action.triggered.connect(lambda: self.duplicate_page_requested.emit(index))
         menu.addSeparator()
         action = menu.addAction("关闭")
         action.triggered.connect(lambda: self.close_page_requested.emit(index))

@@ -491,7 +491,14 @@ class MainWindow(QMainWindow):
                 timer.stop()
         self._pending_crosshair_x = None
         self._mark_stats_dirty = False
+        pending = self._pending_activation
         self._pending_activation = None
+        if pending is not None:
+            # 被丢弃的激活不会再消费复制页的 _copy_x_range：就地清掉，
+            # 否则之后某次无关激活会把视图拉回复制时的旧范围
+            pending_page = pending[0]
+            if getattr(pending_page, "_copy_x_range", None) is not None:
+                pending_page._copy_x_range = None
 
     def _schedule_page_activation(self, page: PlotPage) -> None:
         """parented 单次定时器承载延迟激活（打包环境不用三参 singleShot）。"""
@@ -533,6 +540,13 @@ class MainWindow(QMainWindow):
             if getattr(page, "_range_dirty", False):
                 page._range_dirty = False
                 self._align_restored_page_range(page)
+            # 复制页遗留 X 范围：必须晚于 saved_x_range 跟随分支（否则会被
+            # 当前页范围覆盖）。放在 sync_cursor_scene 之前，标签随后按新
+            # 范围补刷（refresh_cursor_labels）。
+            copy_range = getattr(page, "_copy_x_range", None)
+            if copy_range is not None:
+                page._copy_x_range = None
+                page.apply_x_range(*copy_range)
             # 非脏页也要按全局游标状态对齐一次：视图跟随后旧 vline 可能落在
             # viewRange 外（指纹未变时内部直接跳过，见 PlotPage.sync_cursor_scene）
             page.sync_cursor_scene()
@@ -611,6 +625,138 @@ class MainWindow(QMainWindow):
         self.activate_page(page)
         self._broadcast(f"已新建「{page.title}」", "info")
         return page
+
+    def _on_duplicate_page_requested(self, index: int) -> None:
+        """右键「复制绘图页」：复制被右键的页（不一定是当前页）。"""
+        self.duplicate_page(self.page_at_tab(index))
+
+    def _duplicate_page_title(self, base: str) -> str:
+        """复制页标题：``<原标题> 副本``，重名追加 `` (N)``。
+
+        页标题是统计窗口分组键（StatRow.key 首段），必须唯一。
+        """
+        used = {p.title for p in self.pages}
+        candidate = f"{base} 副本"
+        if candidate not in used:
+            return candidate
+        n = 2
+        while f"{base} 副本 ({n})" in used:
+            n += 1
+        return f"{base} 副本 ({n})"
+
+    def duplicate_page(self, page: PlotPage | None) -> PlotPage | None:
+        """复制绘图页：布局/行高/曲线与占位/X 视图整体克隆到新页。
+
+        网格按源页“已建规模”建：缩列只隐藏不销毁容器，按可见行列建会让
+        隐藏格的曲线错位或丢失。曲线走 ``copy_curves_from`` 的非活动页
+        批量路径（scene=False），场景由切页 restore_scene 补建。
+        """
+        if page is None or page not in self.pages:
+            return None
+        if self.loader is None:
+            self._broadcast("请先导入数据文件后再复制绘图页", "warn")
+            return None
+        if len(self.pages) >= self.MAX_PLOT_PAGES:
+            self._broadcast(f"最多支持 {self.MAX_PLOT_PAGES} 个绘图页", "warn")
+            return None
+
+        src_index = self.page_index(page)
+        src_title = page.title
+        # 只读抓取；源页从未建矩阵时为空，交给新页的全局 X limits
+        src_x_range = page.peek_master_x_range()
+        built_rows, built_cols = page.built_grid_size
+
+        new_page: PlotPage | None = None
+        total_curves = 0
+        total_invalid = 0
+        total_failed = 0
+        try:
+            new_page = self._create_page(
+                parent=self.plot_tabs,
+                title=self._duplicate_page_title(src_title),
+                rows_max=page.rows_max,
+                cols_max=page.cols_max,
+                rows_current=page.rows_current,
+                cols_current=page.cols_current,
+                row_height_factors=dict(page.row_height_factors),
+                plot_widgets=[],
+                make_current=False,
+            )
+            # _create_page 会 append 到末尾：挪到源页右侧，保持 pages 与
+            # tab 同序（_on_tab_moved 之外 pages 顺序即 tab 顺序）
+            self.pages.remove(new_page)
+            self.pages.insert(src_index + 1, new_page)
+
+            new_page.widget.hide()     # 建矩阵前先隐藏，避免中间态被 paint
+            self.plot_tabs.blockSignals(True)
+            try:
+                self.plot_tabs.insertTab(
+                    src_index + 1, new_page.widget, new_page.title
+                )
+            finally:
+                self.plot_tabs.blockSignals(False)
+
+            new_page.ensure_matrix(built_rows, built_cols)
+            if len(new_page.plot_widgets) != len(page.plot_widgets):
+                # ensure_matrix 会按 rows_max/cols_max 夹取：规模不一致时
+                # zip 会静默截断丢曲线，宁可走回滚
+                raise RuntimeError(
+                    "复制页网格规模不一致: "
+                    f"{len(new_page.plot_widgets)} != {len(page.plot_widgets)}"
+                )
+            for src_container, dst_container in zip(
+                page.plot_widgets, new_page.plot_widgets
+            ):
+                src_pw = getattr(src_container, "plot_widget", None)
+                dst_pw = getattr(dst_container, "plot_widget", None)
+                if src_pw is None or dst_pw is None:
+                    continue
+                result = dst_pw.copy_curves_from(src_pw)
+                total_curves += len(result.added)
+                total_failed += len(result.failed)
+                total_invalid += len(
+                    getattr(src_pw, "invalid_curves", None) or {}
+                )
+
+            # 还原可见区（多余格隐藏；页内 XLink 与行高由既有入口处理）
+            new_page.apply_visibility(page.rows_current, page.cols_current)
+        except Exception:
+            _widget_logger.exception("[DUPLICATE] 复制绘图页失败，回滚新页")
+            if new_page is not None:
+                try:
+                    self.close_page(new_page, confirm=False)
+                except Exception:
+                    _widget_logger.exception("[DUPLICATE] 回滚新页失败")
+            self._broadcast("复制绘图页失败，已回滚", "warn")
+            return None
+
+        new_page._copy_x_range = src_x_range
+        self.activate_page(new_page)
+
+        # 逐格已抑制 minXRange 同步，这里统一一次；统计窗口按新页补行
+        cursor_sync = getattr(self, "cursor_sync_manager", None)
+        if cursor_sync is not None:
+            cursor_sync._sync_min_xrange()
+        refresh_stats = getattr(
+            getattr(self, "layout_manager", None),
+            "request_mark_stats_refresh",
+            None,
+        )
+        if callable(refresh_stats):
+            refresh_stats(immediate=True)
+
+        detail_parts: list[str] = []
+        if total_curves:
+            detail_parts.append(f"{total_curves} 条曲线")
+        if total_invalid:
+            detail_parts.append(f"{total_invalid} 项占位")
+        if total_failed:
+            detail_parts.append(f"{total_failed} 条失败")
+        detail = "，".join(detail_parts) if detail_parts else "空白布局"
+        self._broadcast(
+            f"已复制「{src_title}」→「{new_page.title}」（{detail}）", "info"
+        )
+        return new_page
 
     def _page_curve_count(self, page: PlotPage) -> int:
         """页内曲线总数（含无效曲线）；tooltip 与关页确认共用同一口径。"""
@@ -1349,6 +1495,9 @@ class MainWindow(QMainWindow):
         self.plot_tabs.new_page_requested.connect(self.new_page)
         self.plot_tabs.close_page_requested.connect(self._on_tab_close_requested)
         self.plot_tabs.rename_page_requested.connect(self._on_tab_rename_requested)
+        self.plot_tabs.duplicate_page_requested.connect(
+            self._on_duplicate_page_requested
+        )
         self.plot_tabs.close_other_pages_requested.connect(self._close_other_pages)
         self.plot_tabs.close_right_pages_requested.connect(self._close_right_pages)
         self.plot_tabs.set_tab_info_provider(self._tab_tooltip_text)

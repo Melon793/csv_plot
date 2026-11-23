@@ -421,23 +421,29 @@ def test_tab_tooltip_without_provider_falls_through(tabs, qapp):
 
 
 # ----------------------------------------------------------------------
-# T2：页签右键菜单（重命名/关闭/关闭其他/关闭右侧）
+# T2：页签右键菜单（重命名/复制/关闭/关闭其他/关闭右侧）
 # ----------------------------------------------------------------------
 def test_context_menu_actions_emit_signals(tabs):
     _add_pages(tabs, 4)
     menu = tabs._build_tab_menu(1)
     assert [a.text() for a in menu.actions() if a.text()] == [
-        "重命名", "关闭", "关闭其他", "关闭右侧",
+        "重命名", "复制绘图页", "关闭", "关闭其他", "关闭右侧",
     ]
     got = []
     tabs.rename_page_requested.connect(lambda i: got.append(("rename", i)))
+    tabs.duplicate_page_requested.connect(
+        lambda i: got.append(("duplicate", i))
+    )
     tabs.close_page_requested.connect(lambda i: got.append(("close", i)))
     tabs.close_other_pages_requested.connect(lambda i: got.append(("others", i)))
     tabs.close_right_pages_requested.connect(lambda i: got.append(("right", i)))
     for action in menu.actions():
         if action.text():
             action.trigger()
-    assert got == [("rename", 1), ("close", 1), ("others", 1), ("right", 1)]
+    assert got == [
+        ("rename", 1), ("duplicate", 1), ("close", 1),
+        ("others", 1), ("right", 1),
+    ]
     menu.deleteLater()
 
 
@@ -920,3 +926,28 @@ def test_hidden_tab_counts_single_pixel_boundary(tabs, qapp, monkeypatch):
     ]
     monkeypatch.setattr(bar, "tabRect", lambda index: rects[index])
     assert tabs._hidden_tab_counts() == (1, 1)
+
+
+# ----------------------------------------------------------------------
+# 复制绘图页：入口可用性与上限置灰
+# ----------------------------------------------------------------------
+def test_duplicate_menu_item_enabled_below_limit(tabs):
+    _add_pages(tabs, 2)
+    menu = tabs._build_tab_menu(0)
+    by_text = {a.text(): a for a in menu.actions() if a.text()}
+    assert by_text["复制绘图页"].isEnabled()
+    menu.deleteLater()
+
+
+def test_duplicate_menu_item_disabled_at_page_limit(tabs, monkeypatch):
+    import src.ui.widgets.plot_tabs as plot_tabs_module
+
+    # _can_add_page 读模块常量（main_window.MAX_PLOT_PAGES 是导入期求值）
+    monkeypatch.setattr(plot_tabs_module, "MAX_PAGES", 2)
+    _add_pages(tabs, 2)
+    menu = tabs._build_tab_menu(0)
+    by_text = {a.text(): a for a in menu.actions() if a.text()}
+    action = by_text["复制绘图页"]
+    assert not action.isEnabled()
+    assert "上限" in action.toolTip()
+    menu.deleteLater()
