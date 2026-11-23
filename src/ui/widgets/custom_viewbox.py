@@ -23,6 +23,7 @@ ZH_VAR_EDITOR = "绘图变量编辑器"
 ZH_ADJUST_HEIGHT = "调整高度"
 ZH_RESET_ALL_HEIGHT = "全部重置为 100%"
 ZH_CLEAR_PLOT = "清除绘图"
+ZH_LOCK_X = "锁定X轴"
 
 # 游标模式显示文案：键是跨模块内部标识符（cursor_sync_manager 的模式分发、
 # file_loader_manager 的重载恢复都按它比对），只改显示、绝不可改键值。
@@ -79,6 +80,8 @@ class CustomViewBox(pg.ViewBox):
         if menu is None:
             return None
 
+        # 锁定标志一律 getattr 防 None（plot_widget 注入前为 None）
+        x_locked = getattr(self.plot_widget, "_x_mouse_locked", False)
         for act in menu.actions():
             if act.text() == "Mouse Mode":
                 act.setVisible(False)
@@ -88,6 +91,12 @@ class CustomViewBox(pg.ViewBox):
                     for subact in submenu.actions():
                         if subact.text() == "Transforms":
                             subact.setVisible(False)
+            elif act.text() in ("X axis", "View All"):
+                # B2：锁定时藏 X axis 子菜单与 View All —— 子菜单的 mouseCheck
+                # 经 xMouseToggled→setMouseEnabled 会静默解锁，View All 会
+                # 双轴 autoRange 重置 X；Y axis 保留。getMenu 每次右键都执行，
+                # per-open 同步可见性，解锁后自然恢复
+                act.setVisible(not x_locked)
 
         existing_texts = [act.text() for act in menu.actions()]
 
@@ -261,6 +270,19 @@ class CustomViewBox(pg.ViewBox):
                 lambda: self.signals.request_clear_plot.emit(self.plot_widget)
             )
             menu.addAction(clear_act)
+
+        # L1 主入口：checkable「锁定X轴」。checked 每次右键按 pw 标志同步
+        # （setChecked 不发 triggered，不会误触发切换）；triggered 接线在 C2
+        lock_act = None
+        for act in menu.actions():
+            if act.text() == ZH_LOCK_X:
+                lock_act = act
+                break
+        if lock_act is None:
+            lock_act = QAction(ZH_LOCK_X, menu)
+            lock_act.setCheckable(True)
+            menu.addAction(lock_act)
+        lock_act.setChecked(bool(x_locked))
 
         return menu
 

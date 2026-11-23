@@ -9,6 +9,7 @@ from src.utils.platform_setup import setup_platform
 ico_path = setup_platform()
 
 from src.core.config import (  # noqa: E402
+    DEFAULT_CURVE_COLOR,
     PLOT_ROW_MAX_DEFAULT, PLOT_COL_MAX_DEFAULT,
     PLOT_ROW_CURRENT_DEFAULT, PLOT_COL_CURRENT_DEFAULT,
     RATIO_RESET_PLOTS,
@@ -931,6 +932,59 @@ class MainWindow(QMainWindow):
                     yield container
 
     # ------------------------------------------------------------------
+    # X 轴锁定（D1–D4）：唯一权威 + 单函数广播
+    # ------------------------------------------------------------------
+    def set_x_axis_locked(self, locked: bool, reason: str = "") -> None:
+        """锁定状态的唯一写入口：右键菜单 / 快捷键 / 尺锁钮 / 自动解锁都走这里。
+
+        广播面（§1）：全部页子图（含非当前页/隐藏页）的鼠标掩码与 plot 级
+        标志、导航尺 set_locked、自动缩放按钮、状态栏 x 轴段、状态栏播报。
+        新建子图的锁定继承由 plot_page._new_plot_container 补种。
+
+        ``reason`` 仅自动解锁（D4：数据域/时间基准改变，冻结数值失效）时
+        非空，供播报文案区分；同状态重复调用是 no-op —— reset_plot 类入口
+        逐子图触发，不得重复播报。
+        """
+        locked = bool(locked)
+        if locked == getattr(self, "_x_axis_locked", False):
+            return
+        self._x_axis_locked = locked
+        for container in self.iter_all_plot_widgets():
+            pw = getattr(container, "plot_widget", None)
+            if pw is None:
+                continue
+            pw._x_mouse_locked = locked
+            vb = getattr(pw, "view_box", None)
+            if vb is not None:
+                vb.setMouseEnabled(x=not locked, y=True)
+        # 导航尺（C5 接入）：锁定整尺置灰但锁钮保持可点（D6，解锁出口）
+        drawer = getattr(self, "_axis_drawer", None)
+        if drawer is not None and widget_alive(drawer):
+            nav = getattr(drawer, "navigator", None)
+            if nav is not None:
+                nav.set_locked(locked)
+        btn = getattr(self, "auto_range_btn", None)
+        if btn is not None:
+            btn.setEnabled(not locked)
+            btn.setToolTip(
+                "X 轴已锁定，自动缩放不可用（先解锁）"
+                if locked
+                else "自动缩放XY轴 (Ctrl+Shift+Y)"
+            )
+        if getattr(self, "_axis_segment", None) is not None:
+            self._update_axis_segment()
+        self._broadcast(self._x_lock_announce_text(locked, reason))
+
+    @staticmethod
+    def _x_lock_announce_text(locked: bool, reason: str = "") -> str:
+        """锁定播报文案收一个函数（D12：L1/L2/L3 与自动解锁同规格）。"""
+        if locked:
+            return "X 轴已锁定：滚轮缩放停用，拖动只调 Y"
+        if reason:
+            return f"X 轴已自动解锁（{reason}）"
+        return "X 轴已解锁"
+
+    # ------------------------------------------------------------------
     # 曲线暂存区（跨页搬运，v1 非模态浮窗单例）
     # ------------------------------------------------------------------
     def get_curve_shelf(self):
@@ -1123,6 +1177,9 @@ class MainWindow(QMainWindow):
         self._prev_page: PlotPage | None = None
         self._is_switching = False
         self._x_range_follow_enabled = True
+        #: X 轴锁定的唯一权威（D5：不持久化，重启默认解锁）。所有入口只调
+        #: set_x_axis_locked()；plot 级标志 pw._x_mouse_locked 由它广播/建图补种
+        self._x_axis_locked = False
         #: 延迟激活（parented 单次定时器；打包环境不用三参 singleShot）
         self._pending_activation: tuple[PlotPage, int] | None = None
         self._page_activation_timer = QTimer(self)
@@ -1671,6 +1728,10 @@ class MainWindow(QMainWindow):
         self._axis_segment = _StatusSegment("x轴：—", tip="点击设置 x 轴采样频率与偏移")
         self._axis_segment.clicked.connect(self._open_axis_drawer)
         self._axis_segment.hide()
+        #: 锁定态（L3）会把段文字染钴蓝加粗，解锁时还原这份默认色
+        self._axis_segment_default_color = self._axis_segment.palette().color(
+            QPalette.ColorRole.WindowText
+        )
 
         self._segment_separator = self._vline_separator()
         self._segment_separator.hide()
@@ -1969,10 +2030,33 @@ class MainWindow(QMainWindow):
             self._segment_separator.hide()
             return
 
-        self._axis_segment.setText(self._axis_segment_text(self.factor, self.offset))
+        text = self._axis_segment_text(self.factor, self.offset)
+        if getattr(self, "_x_axis_locked", False):
+            text += " · 已锁定"
+        self._axis_segment.setText(text)
+        self._apply_axis_segment_lock_style()
         self._segment_separator.show()
         self._axis_segment.show()
         self._apply_can_segment_fit()
+
+    def _apply_axis_segment_lock_style(self) -> None:
+        """L3：锁定时段文字钴蓝加粗，解锁还原默认色/字重。
+
+        色走 palette(WindowText)、字重走 QFont —— 与抽屉 manual_check 同一
+        套路：给 QLabel 上 QSS 会被 QStyleSheetStyle 接管、退出平台绘制。
+        钴蓝取曲线首色同源（DEFAULT_CURVE_COLOR），不是 theme.ACCENT。
+        """
+        seg = self._axis_segment
+        locked = getattr(self, "_x_axis_locked", False)
+        pal = seg.palette()
+        pal.setColor(
+            QPalette.ColorRole.WindowText,
+            QColor(DEFAULT_CURVE_COLOR) if locked else self._axis_segment_default_color,
+        )
+        seg.setPalette(pal)
+        font = seg.font()
+        font.setBold(locked)
+        seg.setFont(font)
 
     def _update_can_segment(self, text: str, tip: str = "") -> None:
         """CAN 段：文案与 tooltip 由 file_loader_manager 写（三态见 §6.3）。
