@@ -1038,6 +1038,13 @@ class PlotDataManager:
         """重置绘图"""
         pw = self.pw
 
+        # D4：清除绘图/移除末变量会重置数据域，冻结的 X 数值失效 →
+        # 自动解锁+播报。逐子图触发，set_x_axis_locked 同状态 no-op 不重复播报
+        win = pw.window() if hasattr(pw, "window") else None
+        unlock = getattr(win, "set_x_axis_locked", None)
+        if unlock is not None:
+            unlock(False, reason="绘图已重置")
+
         pw.plot_item.setLimits(xMin=None, xMax=None)
         pw.plot_item.setLimits(yMin=None, yMax=None)
 

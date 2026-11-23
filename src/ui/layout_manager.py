@@ -1104,6 +1104,12 @@ class LayoutManager(MainWindowBaseManager):
         if not np.isfinite(new_factor) or new_factor <= 0:
             return False
 
+        # D4：时间基准即将改变，冻结的 X 数值失效 → 自动解锁+播报
+        # （顶部对话框与 x 轴抽屉共用此路，一处覆盖两入口）
+        unlock = getattr(self.mw, "set_x_axis_locked", None)
+        if unlock is not None:
+            unlock(False, reason="时间基准已改变")
+
         old_factor = self.mw.factor
         old_offset = self.mw.offset
         self.mw.factor = new_factor

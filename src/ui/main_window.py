@@ -531,10 +531,11 @@ class MainWindow(QMainWindow):
                 # 激活时补一次全局 X limits（否则可无限缩放）
                 page.apply_global_x_limits()
             if page.saved_x_range and self._x_range_follow_enabled:
-                page.apply_x_range(*page.saved_x_range)
-                # 跟随只在切页那一刻生效一次；不清除的话，同页重激活
-                # （模板应用目标页=当前页 / 关最后一页回退）会把用户
-                # 之后的缩放拉回上次切页的旧范围。
+                if not self._x_axis_locked:
+                    page.apply_x_range(*page.saved_x_range)
+                # D3：锁定时跳过跨页跟随（各页保留各自冻结窗口）；跳过分支
+                # 同样消费 saved_x_range，否则解锁后同页重激活会写回陈旧
+                # 范围（评审 m1）。跟随只在切页那一刻生效一次。
                 page.saved_x_range = None
             # 模板恢复的对齐标志：跟随范围落地后，把视图对齐到恢复后的数据域
             # （模板不保存视角；置脏见 PlotConfigManager.apply_config）
@@ -1631,6 +1632,10 @@ class MainWindow(QMainWindow):
         self._auto_range_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Y"), self.plot_widget)
         self._auto_range_shortcut.activated.connect(self._on_auto_range_shortcut)
 
+        # L1：X 轴锁定切换（与右键菜单 checkable 项同一 set_x_axis_locked）
+        self._x_lock_shortcut = QShortcut(QKeySequence("Ctrl+Shift+X"), self)
+        self._x_lock_shortcut.activated.connect(self._on_x_lock_shortcut)
+
         self._mark_region_shortcut = QShortcut(QKeySequence("Ctrl+T"), self.plot_widget)
         self._mark_region_shortcut.activated.connect(self._on_mark_region_shortcut)
 
@@ -2463,6 +2468,8 @@ class MainWindow(QMainWindow):
         if not template:
             self._logger.error(f"模板不存在: {template_id}")
             return
+        # D4：模板应用会重建曲线/数据域，冻结的 X 数值失效 → 自动解锁+播报
+        self.set_x_axis_locked(False, reason="已应用模板")
         self._persist_last_template(template_id, template.metadata.name)
         self._check_and_apply_template(template, template_id, template.metadata.name)
 
@@ -2652,7 +2659,15 @@ class MainWindow(QMainWindow):
         """Ctrl+Shift+Y 快捷键：自动缩放XY轴"""
         if not self.plot_widgets:
             return
+        if self._x_axis_locked:
+            # D2：与按钮置灰同守卫；按钮已禁用，这里是快捷键入口的提示
+            self._show_status_message("X 轴已锁定，自动缩放不可用（先解锁）")
+            return
         self.cursor_sync_manager.auto_range_all_plots()
+
+    def _on_x_lock_shortcut(self):
+        """Ctrl+Shift+X：切换 X 轴锁定（L1，与右键菜单同一广播函数）"""
+        self.set_x_axis_locked(not self._x_axis_locked)
 
     def _on_mark_region_shortcut(self):
         """Ctrl+T 快捷键：切换标记区域"""

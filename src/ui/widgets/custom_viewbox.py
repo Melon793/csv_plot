@@ -53,6 +53,7 @@ class CustomViewBoxSignals(QObject):
     request_set_all_row_height = Signal(int)  # percentage
     request_copy_name = Signal(object)  # plot_widget
     request_variable_editor = Signal(object)  # plot_widget
+    request_toggle_x_lock = Signal(object)  # plot_widget（L1 菜单入口）
 
 
 class CustomViewBox(pg.ViewBox):
@@ -272,7 +273,8 @@ class CustomViewBox(pg.ViewBox):
             menu.addAction(clear_act)
 
         # L1 主入口：checkable「锁定X轴」。checked 每次右键按 pw 标志同步
-        # （setChecked 不发 triggered，不会误触发切换）；triggered 接线在 C2
+        # （setChecked 不发 triggered，不会误触发切换）；triggered 只在创建
+        # 时连一次（getMenu 返回缓存菜单，重复连会一次点击多次切换）
         lock_act = None
         for act in menu.actions():
             if act.text() == ZH_LOCK_X:
@@ -281,6 +283,9 @@ class CustomViewBox(pg.ViewBox):
         if lock_act is None:
             lock_act = QAction(ZH_LOCK_X, menu)
             lock_act.setCheckable(True)
+            lock_act.triggered.connect(
+                lambda: self.signals.request_toggle_x_lock.emit(self.plot_widget)
+            )
             menu.addAction(lock_act)
         lock_act.setChecked(bool(x_locked))
 

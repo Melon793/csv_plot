@@ -654,6 +654,12 @@ class CursorSyncManager(MainWindowBaseManager):
         """
         if not self.mw.loader or self.mw.loader.datalength == 0:
             return
+        if getattr(self.mw, "_x_axis_locked", False):
+            # D2 入口守卫：按钮/快捷键之外若有其它调用方也一并挡住；
+            # 程序化路径（announce=False，模板恢复）静默跳过
+            if announce:
+                self.mw._show_status_message("X 轴已锁定，自动缩放不可用（先解锁）")
+            return
 
         target = page if page is not None else getattr(self.mw, "current_page", None)
         if target is not None and hasattr(target, "cell_visible"):

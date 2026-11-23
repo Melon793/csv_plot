@@ -1095,6 +1095,11 @@ class FileLoaderManager(MainWindowBaseManager):
             QMessageBox.critical(self.mw, "错误", "文件不存在，无法重新加载")
             return
 
+        # D4：数据域即将改变，冻结的 X 数值失效 → 自动解锁+播报
+        unlock = getattr(self.mw, "set_x_axis_locked", None)
+        if unlock is not None:
+            unlock(False, reason="数据已重载")
+
         self._reload_in_progress = True
         self.mw.reload_btn.setEnabled(False)
 
