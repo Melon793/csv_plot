@@ -463,16 +463,23 @@ class TestRailHygiene:
         assert widgets[-3:] == [mw.clone_btn, mw.help_btn_small, mw.var_collapse_btn]
 
     def test_collapse_btn_same_glyph_family_as_rail_chip(self, rail_env):
-        """F3：« 与 rail » 同族矢量 ACCENT glyph＋同高（旧文本 glyph 灰小不一致）。"""
+        """F3＋2026-11-23：« 与 rail » 同族矢量＋同高；颜色随态＝展开黑/折叠蓝。"""
         from src.ui import theme
         from src.ui.widgets.chrome_button import ChromeButton
 
         mw, _ = rail_env
         btn = mw.var_collapse_btn
         assert isinstance(btn, ChromeButton)
-        assert btn._glyph_color().name().upper() == theme.ACCENT.upper()
+        # 展开态（« 可见）＝默认正文黑，不抢注意力
+        assert not mw._var_pane_collapsed
+        assert btn._glyph_color().name().upper() == theme.TEXT_PRIMARY.upper()
         assert btn.height() == mw.var_pane_rail.expand_btn.height()
         assert btn.testAttribute(Qt.WidgetAttribute.WA_MacNormalSize)  # F4
+        # 折叠态才用品牌蓝（与 rail » 同族）
+        mw.layout_manager.set_var_pane_collapsed(True, reason="test")
+        assert btn._glyph_color().name().upper() == theme.ACCENT.upper()
+        mw.layout_manager.set_var_pane_collapsed(False, reason="test")
+        assert btn._glyph_color().name().upper() == theme.TEXT_PRIMARY.upper()
 
 
 # ---------------------------------------------------------------------------

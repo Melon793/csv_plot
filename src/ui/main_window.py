@@ -105,8 +105,10 @@ class _CompactTitleButton(QPushButton):
 
 
 class _TitleCollapseChip(ChromeButton):
-    """标题行«（F3）：与 rail » 同族矢量 ACCENT 双 chevron＋平台自然高。
+    """标题行«（F3）：与 rail » 同族矢量双 chevron＋平台自然高。
 
+    颜色随态（2026-11-23 作者反馈）：展开态＝默认正文黑（不抢注意力），
+    折叠态才用品牌蓝（与 rail » 同族）。« 仅在展开态可见，故常态见黑。
     旧形态是原生文本 glyph（灰、小），与 rail » 的矢量蓝 glyph 不同族
     （真机报障）。最小宽贡献裁 0（同 _CompactTitleButton 手法）防顶大
     整窗最小宽；宽上限 rail 同宽由创建处 setMaximumWidth 收。
@@ -118,7 +120,10 @@ class _TitleCollapseChip(ChromeButton):
         return hint
 
     def _glyph_color(self):
-        return QColor(theme.ACCENT if self.isEnabled() else theme.TEXT_MUTED)
+        if not self.isEnabled():
+            return QColor(theme.TEXT_MUTED)
+        collapsed = getattr(self.window(), "_var_pane_collapsed", False)
+        return QColor(theme.ACCENT if collapsed else theme.TEXT_PRIMARY)
 
     def _draw_glyph(self, painter, color):
         center = QPointF(self.rect().center())
