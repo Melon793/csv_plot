@@ -494,11 +494,13 @@ class LegendTextBrowser(QTextBrowser):
             VariableInfoDialog.popup([var_name], parent=main_window)
 
     def _exec_invalid_menu(self, var_name: str, global_pos: QPoint) -> None:
-        """失效占位专用轻量菜单（§6.2）：删除占位 + 复制变量名。
+        """失效占位专用轻量菜单（§6.2）：删除占位 + 复制变量名 + 替换变量。
 
-        占位无曲线可切显隐/独占/看信息，故只给两项。删除是销毁用户资产，
-        须显式操作；删除后显式 emit curves_changed（对齐 §4.5 发射口径），
-        驱动编辑器/搜索栏增量刷新。动作在菜单关闭后执行（不进嵌套事件循环改状态）。
+        占位无曲线可切显隐/独占/看信息。删除是销毁用户资产，须显式操作；
+        删除后显式 emit curves_changed（对齐 §4.5 发射口径），驱动编辑器/
+        搜索栏增量刷新。动作在菜单关闭后执行（不进嵌套事件循环改状态）。
+        「替换变量…」（身份匹配 D1/D7）：跨文件后缀漂移落占位后的手动
+        兜底，执行序见 _replace_invalid_variable（D13）。
         """
         if not widget_alive(self) or not widget_alive(self._pw):
             return
@@ -508,6 +510,7 @@ class LegendTextBrowser(QTextBrowser):
         menu = QMenu(pw)
         act_remove = menu.addAction("删除占位")
         act_copy = menu.addAction("复制变量名")
+        act_replace = menu.addAction("替换变量…")
 
         chosen = menu.exec(global_pos)
         # 第 6 轮 E-1：exec 后释放（早退分支同样覆盖），与三个面板入口同口径
@@ -524,6 +527,85 @@ class LegendTextBrowser(QTextBrowser):
             del invalid[var_name]
             pw._update_header_for_curves()
             pw.curves_changed.emit()
+        elif chosen is act_replace:
+            self._replace_invalid_variable(var_name)
+
+    def _replace_invalid_variable(self, var_name: str) -> None:
+        """占位「替换变量…」执行序（身份匹配 D13，五步）：
+
+        ①新名已在本格 curves 或恰为另一占位 → 拒绝并播报，不删任何资产；
+        ②add_variable_to_plot 成功后才删旧占位（失败回滚不删）；
+        ③显示名/换算走 _apply_curve_settings 静默口径；
+        ④颜色经 preferred_color、可见性经 apply_curve_visibility 携带；
+        ⑤回执播报一条。新名恰为占位自身时走同名复活（add 内部原子消费
+        占位并带回全部偏好），不做手动搬运。
+        """
+        if not widget_alive(self) or not widget_alive(self._pw):
+            return
+        pw = self._pw
+        invalid = getattr(pw, "invalid_curves", None)
+        if not invalid or var_name not in invalid:
+            return
+        main_window = pw.window()
+        broadcast = getattr(main_window, "_broadcast", None)
+
+        def say(text: str, level: str = "info") -> None:
+            if callable(broadcast):
+                broadcast(text, level=level)
+
+        loader = getattr(main_window, "loader", None)
+        var_names = list(getattr(loader, "var_names", None) or [])
+        if not var_names:
+            say("尚未加载数据文件，无法替换占位", level="warn")
+            return
+
+        from src.ui.dialogs.variable_picker import VariablePickerDialog
+        new_name = VariablePickerDialog.pick(var_names, parent=pw)
+        if new_name is None:
+            return
+        # 对话框 exec 期间占位可能已复活/被删：执行前复查（:517-520 同款）
+        invalid = getattr(pw, "invalid_curves", None)
+        if not invalid or var_name not in invalid:
+            return
+        # D13①：判重 / 撞另一占位 → 拒绝，不删任何资产
+        if new_name in pw.curves:
+            say(f"变量 {new_name} 已在本格绘图中，替换取消", level="warn")
+            return
+        if new_name != var_name and new_name in invalid:
+            say(f"{new_name} 已是本格占位，替换取消", level="warn")
+            return
+
+        ref = invalid[var_name]
+        # D13②：先 add 后删；quiet 失败不弹模态框，占位原样保留
+        ok = pw.add_variable_to_plot(
+            new_name,
+            preferred_color=ref.color,
+            quiet=True,
+            show_duplicate_warning=False,
+            announce_step=False,
+        )
+        if not ok:
+            say(f"替换失败：{new_name} 不可绘制，占位保留", level="warn")
+            return
+        if new_name != var_name:
+            # D13③④：设置静默还原 + 可见性偏好携带（颜色已经 preferred_color）
+            entry: dict = {}
+            if ref.display_name:
+                entry["display_name"] = ref.display_name
+            if ref.factor != 1.0:
+                entry["factor"] = ref.factor
+            if ref.offset != 0.0:
+                entry["offset"] = ref.offset
+            if entry:
+                from src.ui.plot_config_manager import PlotConfigManager
+                PlotConfigManager._apply_curve_settings(pw, {new_name: entry})
+            if not ref.visible_preference:
+                pw._multi_curve_manager.apply_curve_visibility(new_name, False)
+            del invalid[var_name]
+        pw._update_header_for_curves()
+        pw.curves_changed.emit()
+        # D13⑤：回执一条
+        say(f"已替换占位 {var_name} → {new_name}")
 
     def _exec_middle_delete(self, var_name: str) -> None:
         """中键单击条目：删除曲线（或失效占位），状态栏播报回执。
