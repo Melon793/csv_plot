@@ -35,9 +35,17 @@ class PlotConfig:
     #: 旧版软件读新模板忽略未知键，往返零影响（沿用 invalid_curves 惯例）。
     #: 失效占位的设置一并存（按名为键），复活时带回。
     curve_settings: dict = field(default_factory=dict)
+    #: 模板身份匹配（方案 A，D2）：{曲线显示名: 身份条目}。身份条目记录
+    #: 跨文件稳定的通道指纹（original_name + kind + MDF device/ecu 或
+    #: BLF frame/can_id/extended/bus_channel），供套用端在后缀漂移时重映射。
+    #: 可选字段——仅非空才写键；旧档缺省读作空 dict，旧版软件读新模板
+    #: 忽略未知键，往返零影响（沿用 curve_settings 惯例）。
+    #: 披露：占位名导出时不在 loader，永远拿不到身份条目；占位跨文件
+    #: 回退只靠引擎的 L2 名字启发式（D10）。
+    curve_identities: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        """序列化为字典（invalid_curves/cell_index/cell_row/cell_col/curve_settings 仅有值才写，保持旧档兼容）"""
+        """序列化为字典（invalid_curves/cell_index/cell_row/cell_col/curve_settings/curve_identities 仅有值才写，保持旧档兼容）"""
         data = {"curves": self.curves}
         if self.invalid_curves:
             data["invalid_curves"] = list(self.invalid_curves)
@@ -49,6 +57,10 @@ class PlotConfig:
         if self.curve_settings:
             data["curve_settings"] = {
                 str(k): dict(v) for k, v in self.curve_settings.items()
+            }
+        if self.curve_identities:
+            data["curve_identities"] = {
+                str(k): dict(v) for k, v in self.curve_identities.items()
             }
         return data
 
@@ -96,6 +108,7 @@ class PlotConfig:
             cell_row=cell_row,
             cell_col=cell_col,
             curve_settings=parse_curve_settings(data.get("curve_settings")),
+            curve_identities=parse_curve_identities(data.get("curve_identities")),
         )
 
 
@@ -128,6 +141,65 @@ def parse_curve_settings(raw) -> dict:
                 entry[fld] = fv
         if entry:
             out[str(key)] = entry
+    return out
+
+
+def parse_curve_identities(raw) -> dict:
+    """curve_identities 容错解析（D2，照 parse_curve_settings 守卫口径）。
+
+    非 dict → 空；键 str 化（None 键丢弃）；条目非 dict 丢弃；
+    original_name 必须是非空 str，kind 必须是 'mdf'/'blf'，否则整条丢弃
+    （无 original_name 的身份既不能做 D9 校验也不能做 L1 比对）。
+    mdf：device/ecu 仅收非空 str（可缺省——真实 MDF3 常无 SI，L1 退 L2）；
+    blf：frame/can_id/extended/bus_channel 四元组必须齐全且类型合法
+    （int 拒收 bool，照 cell_index P2-44 口径），缺任一即整条丢弃——
+    半截指纹按 D12 无法全等比对，留着只会误导。未知键忽略。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for key, val in raw.items():
+        if key is None or not isinstance(val, dict):
+            continue
+        on = val.get("original_name")
+        kind = val.get("kind")
+        if not isinstance(on, str) or not on.strip():
+            continue
+        if kind not in ("mdf", "blf"):
+            continue
+        entry: dict = {"original_name": on, "kind": kind}
+        if kind == "mdf":
+            for fld in ("device", "ecu"):
+                v = val.get(fld)
+                if isinstance(v, str) and v.strip():
+                    entry[fld] = v
+        else:
+            frame = val.get("frame")
+            if not isinstance(frame, str) or not frame.strip():
+                continue
+            ext = val.get("extended")
+            if not isinstance(ext, bool):
+                continue
+            nums: dict = {}
+            valid = True
+            for fld in ("can_id", "bus_channel"):
+                v = val.get(fld)
+                if v is None or isinstance(v, bool):
+                    valid = False
+                    break
+                try:
+                    iv = int(v)
+                except (TypeError, ValueError):
+                    valid = False
+                    break
+                if iv < 0:
+                    valid = False
+                    break
+                nums[fld] = iv
+            if not valid:
+                continue
+            entry.update(frame=frame, extended=ext, **nums)
+        out[str(key)] = entry
     return out
 
 
