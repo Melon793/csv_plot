@@ -22,6 +22,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QStyle,
+    QStyleOptionButton,
+    QStyleOptionFocusRect,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -216,10 +219,12 @@ _SEG_LINE_PRESET_ITEMS = (
 _PANEL_VAR_NAME_MAX_WIDTH = 200
 
 # 分段控件壳归平台（C10c D-h）：不再带 QSS（原 _SEG_QSS 的 hover/checked
-# 壳规则被 QStyleSheetStyle 接管，三平台不一致）。当前档信息通道＝内容标记：
-# checked 时图标换 ACCENT 变体（QIcon Off/On 双态，style 按 State_On 自动
-# 选 On pixmap，mac/Fusion/vista 同口径），不依赖原生 checked 文字态
-# （mac 有白字压白底实测先例，tests/e2e/test_axis_drawer.py）。
+# 壳规则被 QStyleSheetStyle 接管，三平台不一致）。当前档信息通道：原生
+# checked 壳（bevel 语义不变）＋内容标记（ACCENT 图标变体）；但**标签不交给
+# 原生 checked 文字态**——mac CE_PushButtonLabel 在 State_On 时把 ButtonText
+# 刷白，而菜单弹层里 checked 的强调蓝底并不渲染（白字压白底，与
+# tests/e2e/test_axis_drawer.py 同族先例），故 checked 标签改由
+# _SegmentButton 接管绘制（见其 docstring）。
 
 
 def _icon_painter(pixmap: QPixmap, color: QColor | None = None) -> tuple[QPainter, QColor]:
@@ -327,6 +332,69 @@ def _line_preset_icon(preset: str, color: QColor | None = None) -> QPixmap:
     return pixmap
 
 
+class _SegmentButton(QPushButton):
+    """分段段按钮：checked 时只接管标签绘制，壳仍走原生 bevel。
+
+    mac QMacStyle 的 CE_PushButtonLabel 在「启用＋激活窗口＋State_On」时把
+    ButtonText 强制设成白色（qmacstyle_mac.mm CE_PushButtonLabel；紧随其后的
+    “改回黑字”分支显式排除 State_On），而菜单弹层里 checked 的强调蓝底并不
+    渲染 → 白字压白底，选项名整条消失（2026-11-23 真机复现）。
+
+    checked 态按常态色重画标签：State_On/State_Sunken 清掉（前者还会让
+    style 选 QIcon 的 On pixmap，故当前档的 ACCENT 图标由构造参数显式喂入），
+    DefaultButton 特征也清掉（同一白字分支的另一入口）；bevel 用原 option
+    照画，checked 壳语义与 autoExclusive 互斥均不变。未选中一律走父类，
+    与原生逐像素一致（Fusion 对照 diff=0）。
+    """
+
+    def __init__(self, text: str, accent_icon: QIcon, parent=None):
+        super().__init__(text, parent)
+        self._accent_icon = accent_icon
+
+    def label_style_option(self, opt: QStyleOptionButton) -> QStyleOptionButton:
+        """标签绘制用 option：常态文字色＋当前档 ACCENT 图标。"""
+        label = QStyleOptionButton(opt)
+        # mac：State_On（含 On+Sunken 组合）触发白字分支，清掉后才落到
+        # style 的“改回黑字”兜底；按住时标签文本按常态色=原生兜底同色。
+        label.state &= ~(
+            QStyle.StateFlag.State_On | QStyle.StateFlag.State_Sunken
+        )
+        # 防御：isDefault 也在白字分支里，分段段钮永不承担默认钮语义
+        label.features &= ~QStyleOptionButton.ButtonFeature.DefaultButton
+        label.icon = self._accent_icon
+        return label
+
+    def paintEvent(self, event):  # noqa: N802 - Qt 命名
+        if not self.isChecked():
+            super().paintEvent(event)
+            return
+        style = self.style()
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        painter = QPainter(self)
+        style.drawControl(
+            QStyle.ControlElement.CE_PushButtonBevel, opt, painter, self
+        )
+        label = self.label_style_option(opt)
+        label.rect = style.subElementRect(
+            QStyle.SubElement.SE_PushButtonContents, opt, self
+        )
+        style.drawControl(
+            QStyle.ControlElement.CE_PushButtonLabel, label, painter, self
+        )
+        if opt.state & QStyle.StateFlag.State_HasFocus:
+            focus = QStyleOptionFocusRect()
+            focus.initFrom(self)
+            focus.palette = label.palette
+            focus.rect = style.subElementRect(
+                QStyle.SubElement.SE_PushButtonFocusRect, opt, self
+            )
+            style.drawPrimitive(
+                QStyle.PrimitiveElement.PE_FrameFocusRect, focus, painter, self
+            )
+        painter.end()
+
+
 class _SegmentedControl(QWidget):
     """快捷面板内的横排分段单选控件（图标 + 短标签，壳归平台 C10c）。
 
@@ -337,8 +405,9 @@ class _SegmentedControl(QWidget):
     （嵌套事件循环内不改 scene 红线）。
 
     当前档＝内容标记（D-h）：图标 QIcon Off/On 双态（常态文字色 /
-    checked ACCENT 变体），style 按 State_On 自动选 On pixmap；
-    checked/autoExclusive 逻辑保留，视觉不依赖原生 checked 文字态。
+    checked ACCENT 变体）；checked/autoExclusive 逻辑保留。checked 时
+    标签由 _SegmentButton 按常态色自绘（mac 原生 checked 文字会刷白，
+    白字压白底），其余状态仍走原生绘制。
     """
 
     def __init__(self, items, current, on_pick, parent=None):
@@ -347,12 +416,11 @@ class _SegmentedControl(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         for value, label, full_label, icon, icon_accent in items:
-            btn = QPushButton(self)
+            btn = _SegmentButton(label, QIcon(icon_accent), self)
             qicon = QIcon()
             qicon.addPixmap(icon, QIcon.Mode.Normal, QIcon.State.Off)
             qicon.addPixmap(icon_accent, QIcon.Mode.Normal, QIcon.State.On)
             btn.setIcon(qicon)
-            btn.setText(label)
             btn.setToolTip(full_label)
             btn.setCheckable(True)
             btn.setAutoExclusive(True)

@@ -11,7 +11,13 @@ import pytest
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QImage, QPalette
-from PySide6.QtWidgets import QPushButton, QStyleFactory, QToolButton
+from PySide6.QtWidgets import (
+    QPushButton,
+    QStyle,
+    QStyleFactory,
+    QStyleOptionButton,
+    QToolButton,
+)
 
 from src.core.data_types import LINE_PRESET_AUTO
 from src.ui import theme
@@ -19,6 +25,7 @@ from src.ui.widgets.curve_style_panel import (
     _SEG_DRAW_ITEMS,
     _SEG_LINE_PRESET_ITEMS,
     _SEG_SYMBOL_ITEMS,
+    _SegmentButton,
     _SegmentedControl,
     _draw_mode_icon,
     _line_preset_icon,
@@ -176,6 +183,54 @@ def test_checked_render_selects_on_variant(fusion_style, qtbot):
                 assert ink > 0, f"{btn.text()} checked 渲染未选 On 变体"
             else:
                 assert ink == 0, f"{btn.text()} rest 渲染漏出 On 变体"
+
+
+# ---------------------------------------------------------------------------
+# 回归锁：checked 标签不走 mac 白字分支（2026-11-23 真机缺陷）
+# ---------------------------------------------------------------------------
+
+
+def test_checked_segment_label_ignores_state_on(qtbot):
+    """checked 段标签按常态色绘制（mac 原生会把选中文字刷白）。
+
+    mac QMacStyle CE_PushButtonLabel：Enabled+Active+State_On → ButtonText
+    强制白字；菜单弹层里 checked 壳又是白底 → 选项名整条消失。修复只接管
+    checked 的标签绘制：清 On/Sunken/DefaultButton，当前档 ACCENT 图标显式
+    喂入（清 On 后 style 不再自选 QIcon On pixmap）。
+    """
+    seg = _seg(qtbot)
+    buttons = seg.findChildren(QPushButton)
+    assert buttons and all(isinstance(b, _SegmentButton) for b in buttons)
+    checked = next(b for b in buttons if b.isChecked())
+
+    opt = QStyleOptionButton()
+    checked.initStyleOption(opt)
+    assert opt.state & QStyle.StateFlag.State_On  # 原生路径下会触发白字
+
+    for pressed in (False, True):
+        probe = QStyleOptionButton(opt)
+        if pressed:
+            probe.state |= QStyle.StateFlag.State_Sunken
+        label = checked.label_style_option(probe)
+        assert not label.state & QStyle.StateFlag.State_On
+        assert not label.state & QStyle.StateFlag.State_Sunken
+        assert not label.features & QStyleOptionButton.ButtonFeature.DefaultButton
+        assert not label.icon.isNull()  # 当前档标记不能静默退化
+        keep = probe.state & ~(
+            QStyle.StateFlag.State_On | QStyle.StateFlag.State_Sunken
+        )
+        assert label.state == keep  # 其余状态位原样保留
+
+
+def test_checked_segment_grab_smoke(fusion_style, qtbot):
+    """checked 自绘路径在 rest/pressed/focused 下都不崩、不留空图。"""
+    seg = _seg(qtbot)
+    checked = next(b for b in seg.findChildren(QPushButton) if b.isChecked())
+    checked.setFocus(Qt.FocusReason.OtherFocusReason)
+    for down in (False, True):
+        checked.setDown(down)
+        assert not checked.grab().isNull()
+    checked.setDown(False)
 
 
 # ---------------------------------------------------------------------------
