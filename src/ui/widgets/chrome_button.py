@@ -70,6 +70,10 @@ class ChromeButton(QToolButton):
     def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
         raise NotImplementedError
 
+    def _draw_content(self, painter: QPainter) -> None:
+        """内容层钩子：默认只画 glyph；胶囊等复合内容（字形＋计数）覆写。"""
+        self._draw_glyph(painter, self._glyph_color())
+
     def _build_style_option(self) -> QStyleOptionButton:
         """组壳 option：initFrom＋手工补 Raised/Sunken/On（契约见模块 docstring）。"""
         opt = QStyleOptionButton()
@@ -96,7 +100,7 @@ class ChromeButton(QToolButton):
                 QStyle.PrimitiveElement.PE_FrameFocusRect, focus_opt, painter, self
             )
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self._draw_glyph(painter, self._glyph_color())
+        self._draw_content(painter)
         painter.end()
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt 命名

@@ -15,6 +15,8 @@
 观感一致且任意 DPI 清晰。**例外声明（D-g，C10）**：×/＋ 的扁平 glyph＋
 hover 灰圆底是 IDE tab strip 语言，与原生 bevel/autoRaise 冲突，故不迁
 ChromeButton——例外覆盖字形＋hover 壳整体，不只字形（判据见 theme.py）。
+角位 ⌄/胶囊则迁 ChromeButton 原生壳（C10b D-f）：chrome 归平台，品牌蓝
+只作字形/计数内容。
 
 「＋」的落位由 ``_TabsBar.tabLayoutChange`` 官方布局钩子驱动：插 / 删 /
 拖动 / **重命名**等一切布局变化都会重算位置（PySide6 未暴露信号版
@@ -51,6 +53,7 @@ from PySide6.QtWidgets import (
 from src.core.config import widget_alive
 from src.ui.drag_drop import SHELF_MIME_FORMAT
 from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
+from src.ui.widgets.chrome_button import ChromeButton
 
 #: 绘图页数量上限（设计文档 §4.4；2026-11-20 由 8 提升到 16）
 MAX_PAGES = 16
@@ -119,10 +122,14 @@ QTabBar::tab:selected {{
 
 
 class _FlatIconButton(QToolButton):
-    """扁平图标按钮基类：hover 圆角灰底 + 自绘字形。
+    """扁平图标按钮基类：hover 圆角灰底 + 自绘字形（D-g 例外，仅 ×/＋）。
 
     不用 QIcon/QSS image：位图在 150% DPI 下模糊、qproperty-icon 无法随
     状态变色；直接在 paintEvent 里矢量绘制最稳。子类实现 ``_draw_glyph``。
+
+    例外判据（theme.py / C10）：扁平 glyph＋hover 灰圆底是 IDE tab strip
+    语言，与原生 bevel/autoRaise 冲突——例外覆盖字形＋hover 壳整体。
+    角位「切换/容器入口」（⌄、胶囊）已迁 ChromeButton 原生壳（C10b）。
     """
 
     _COLOR_NORMAL = "#8a8a8a"
@@ -132,14 +139,9 @@ class _FlatIconButton(QToolButton):
     _BG_PRESSED = QColor("#dcdcdc")
     _BG_RADIUS = 4
 
-    #: 方案 A：rest 态常驻容器（1px 边框＋白底圆角 chip），解「不像按钮」。
-    #: 仅角位「切换/容器入口」（▾、胶囊）启用；＋/× 等条内动作保持扁平。
+    #: 历史 chip 机制（C8b 白底圆角壳）已迁 ChromeButton；此位恒 False，
+    #: 保留供「＋/× 保持扁平」断言（test_plot_tabs_widget）零改动存活。
     _CHIP_REST = False
-    _CHIP_BG = QColor("#ffffff")
-    _CHIP_BORDER = QColor("#d0d0d0")
-    _CHIP_BORDER_HOVER = QColor("#bdbdbd")
-    _CHIP_BG_DISABLED = QColor("#fafafa")
-    _CHIP_BORDER_DISABLED = QColor("#e3e3e3")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -159,26 +161,10 @@ class _FlatIconButton(QToolButton):
     def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
         raise NotImplementedError
 
-    def _paint_chip_base(self, painter: QPainter) -> None:
-        """rest 常驻 chip：白底＋1px 边框；hover 灰底深边框；禁用浅灰。"""
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        if not self.isEnabled():
-            bg, border = self._CHIP_BG_DISABLED, self._CHIP_BORDER_DISABLED
-        elif self.underMouse():
-            bg = self._BG_PRESSED if self.isDown() else self._BG_HOVER
-            border = self._CHIP_BORDER_HOVER
-        else:
-            bg, border = self._CHIP_BG, self._CHIP_BORDER
-        painter.setPen(QPen(border, 1))
-        painter.setBrush(bg)
-        painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
-
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self._CHIP_REST:
-            self._paint_chip_base(painter)
-        elif self.isEnabled() and self.underMouse():
+        if self.isEnabled() and self.underMouse():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(self._BG_PRESSED if self.isDown() else self._BG_HOVER)
             painter.drawRoundedRect(
@@ -244,8 +230,12 @@ class _NewPageButton(_FlatIconButton):
         painter.drawLine(center + QPointF(-arm, 0), center + QPointF(arm, 0))
 
 
-class _ShelfCapsuleButton(_FlatIconButton):
-    """页签栏右端 52×20 chip 的曲线暂存区入口：字形 + 内联计数（方案 A）。
+class _ShelfCapsuleButton(ChromeButton):
+    """页签栏右端 52×20 胶囊的曲线暂存区入口：原生壳＋字形＋内联计数。
+
+    chrome 归平台（C10b D-f）：壳走 ChromeButton 的 QStyle 委托，
+    checked/hover/pressed/disabled 由 state 位免费；品牌蓝只作内容
+    （checked/drop-hot 时字形与计数切 ACCENT）。几何保 52×20（G1）。
 
     它同时是 **drop 落点**：浮窗关着时也必须能收拖拽（否则退回"先开窗才能
     拖"的鸡生蛋）。只发信号、不持有 shelf 引用（分层见模块 docstring），
@@ -261,7 +251,6 @@ class _ShelfCapsuleButton(_FlatIconButton):
     drop_requested = Signal(object)
     drag_hovered = Signal(bool)
 
-    _BG_RADIUS = 4
     _BADGE_MAX = 99
 
     def __init__(self, parent=None):
@@ -351,35 +340,16 @@ class _ShelfCapsuleButton(_FlatIconButton):
 
     # -- 绘制 ----------------------------------------------------------
     def _glyph_color(self) -> QColor:
-        if self.isChecked():
+        # checked/drop-hot＝内容标记：字形与计数切 ACCENT（壳保持平台态）
+        if self.isChecked() or self._drag_hot:
             return QColor(_ACCENT_COLOR)
         return super()._glyph_color()
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        if self.isChecked():
-            bg, border = QColor(DRAG_ACCENT_SOFT), QColor(_ACCENT_COLOR)
-        elif not self.isEnabled():
-            bg, border = self._CHIP_BG_DISABLED, self._CHIP_BORDER_DISABLED
-        elif self.underMouse():
-            bg = self._BG_PRESSED if self.isDown() else self._BG_HOVER
-            border = self._CHIP_BORDER_HOVER
-        else:
-            bg, border = self._CHIP_BG, self._CHIP_BORDER
-        painter.setPen(QPen(border, 1))
-        painter.setBrush(bg)
-        painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
+    def _draw_content(self, painter: QPainter) -> None:
+        """内容层：整组居中布局→字形→计数（壳由基类画，drop 高亮＝内容色）。"""
         self._layout_content(painter)
         self._draw_glyph(painter, self._glyph_color())
-        if self._drag_hot:
-            pen = QPen(QColor(_ACCENT_COLOR), 1.4)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(rect, self._BG_RADIUS, self._BG_RADIUS)
         self._draw_count(painter)
-        painter.end()
 
     def _layout_content(self, painter: QPainter) -> None:
         """「14px 字形盒＋4px＋计数实测宽」整组水平居中。
@@ -446,11 +416,10 @@ class _ShelfCapsuleButton(_FlatIconButton):
         )
 
 
-class _PageDirectoryButton(_FlatIconButton):
-    """角位「▾」页目录入口（T6）：全部页一屏全见的补充入口，横条照常工作。"""
+class _PageDirectoryButton(ChromeButton):
+    """角位「▾」页目录入口（T6）：原生壳＋矢量 chevron（C10b D-f）。"""
 
     _COLOR_NORMAL = "#5a5a5a"
-    _CHIP_REST = True
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -976,7 +945,8 @@ class PlotTabsWidget(QTabWidget):
         self._plus_slot = QWidget(self._corner_container)
         self._plus_slot.setFixedWidth(_PLUS_SLOT_WIDTH)
         corner_layout.addWidget(self._plus_slot)
-        # 页目录「▾」（T6）：停预留槽右侧、胶囊左侧，与＋/×同一套扁平语言
+        # 页目录「▾」（T6）：停预留槽右侧、胶囊左侧；原生壳（C10b），
+        # 与胶囊同一套 chrome 语言
         self._dir_btn = _PageDirectoryButton(self._corner_container)
         self._dir_btn.setVisible(False)
         self._dir_btn.installEventFilter(self)

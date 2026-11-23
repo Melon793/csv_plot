@@ -725,8 +725,11 @@ def test_overflow_indicator_visible_and_tracks_scroll(tabs, qapp, qtbot):
 def test_corner_chips_rest_container_and_plus_stays_flat(tabs, qapp):
     _add_pages(tabs, 3)
     qapp.processEvents()
-    assert tabs._dir_btn._CHIP_REST is True
-    assert hasattr(tabs.shelf_capsule, "_draw_count")   # 胶囊自绘 chip＋内联计数
+    # C10b（§5.2 披露）：_CHIP_REST 白 chip 壳断言更新为 ChromeButton 身份
+    from src.ui.widgets.chrome_button import ChromeButton
+
+    assert isinstance(tabs._dir_btn, ChromeButton)
+    assert hasattr(tabs.shelf_capsule, "_draw_count")   # 胶囊原生壳＋内联计数
     assert tabs.new_page_button._CHIP_REST is False
     assert tabs.shelf_capsule.width() == 52
     # rest / 计数 0 / 99+ / 打开态 / 禁用态 绘制均不崩
