@@ -1011,6 +1011,9 @@ class BLFLazyLoader:
                 "message_name": frame.name if frame else "",
                 "can_id_hex": f"0x{bucket.can_id:X}"
                 + ("（扩展帧）" if bucket.extended else ""),
+                # 身份匹配 C2（MJ-4）：原始 int ID，供模板身份指纹比对；
+                # 不解析上面的装饰串（additive，展示层仍用 can_id_hex）
+                "can_id": bucket.can_id,
                 "is_extended": bucket.extended,
                 "dlc": frame.dlc if frame is not None else (bucket.stride or 0),
                 # DBC 声明的是「最多多少字节」，桶的 stride 是「日志里实际观察到

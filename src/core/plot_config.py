@@ -168,6 +168,10 @@ def parse_curve_identities(raw) -> dict:
         if kind not in ("mdf", "blf"):
             continue
         entry: dict = {"original_name": on, "kind": kind}
+        # D9 一致性校验需要模板侧单位；"-" 是 loader 的无单位占位，视为空
+        unit = val.get("unit")
+        if isinstance(unit, str) and unit.strip() and unit.strip() != "-":
+            entry["unit"] = unit
         if kind == "mdf":
             for fld in ("device", "ecu"):
                 v = val.get(fld)

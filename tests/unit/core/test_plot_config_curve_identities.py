@@ -130,3 +130,29 @@ class TestGuards:
             {"curves": ["a"], "curve_identities": "garbage"}
         )
         assert cfg.curve_identities == {}
+
+
+class TestUnitField:
+    """D9 一致性校验需要模板侧单位（C2 增补）。"""
+
+    def test_unit_roundtrip(self):
+        entry = dict(MDF_ENTRY, unit="bar")
+        out = parse_curve_identities({"a": entry})
+        assert out == {"a": entry}
+
+    def test_dash_unit_dropped(self):
+        out = parse_curve_identities({"a": dict(MDF_ENTRY, unit="-")})
+        assert out == {"a": MDF_ENTRY}
+
+    def test_blank_unit_dropped(self):
+        out = parse_curve_identities({"a": dict(MDF_ENTRY, unit="  ")})
+        assert out == {"a": MDF_ENTRY}
+
+    def test_non_str_unit_dropped(self):
+        out = parse_curve_identities({"a": dict(MDF_ENTRY, unit=5)})
+        assert out == {"a": MDF_ENTRY}
+
+    def test_blf_unit_roundtrip(self):
+        entry = dict(BLF_ENTRY, unit="rpm")
+        out = parse_curve_identities({"a": entry})
+        assert out == {"a": entry}

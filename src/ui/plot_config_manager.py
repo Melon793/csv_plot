@@ -95,7 +95,44 @@ class PlotConfigManager(QObject):
         if mark_btn is not None and mark_btn.isChecked() and saved_range:
             config.saved_mark_range = [float(saved_range[0]), float(saved_range[1])]
 
+        # 身份匹配 C2（D2/§3.1）：组装完成后统一后处理采集身份。不动
+        # _export_page 签名（test_template_cell_stride 单参直调），天然
+        # 覆盖 legacy 替身分支；auto-save 共用本出口，自动携带。
+        self._collect_curve_identities(config, main_window)
+
         return config
+
+    @staticmethod
+    def _collect_curve_identities(config: PlotSessionConfig, main_window) -> None:
+        """按对象身份去重遍历全部 PlotConfig，逐曲线名采集跨文件身份。
+
+        守卫：无 loader / 无 get_channel_info（CSV/Excel，D8）→ 整体跳过；
+        单曲线 KeyError/AttributeError（占位名不在 loader、数据源已关闭）
+        → 跳过该曲线。占位永远拿不到身份（D2 披露），跨文件回退靠 L2。
+        实测 get_channel_info 零磁盘 I/O（~30μs/次），百条约 3ms。
+        """
+        from src.core.template_identity import identity_from_channel_info
+
+        loader = getattr(main_window, "loader", None)
+        gci = getattr(loader, "get_channel_info", None)
+        if not callable(gci):
+            return
+        seen: set[int] = set()
+        plots = list(config.plots) + [
+            p for page in config.pages for p in page.plots
+        ]
+        for plot in plots:
+            if id(plot) in seen:
+                continue
+            seen.add(id(plot))
+            for name in plot.curves:
+                try:
+                    info = gci(name)
+                except (KeyError, AttributeError):
+                    continue
+                entry = identity_from_channel_info(info)
+                if entry:
+                    plot.curve_identities[name] = entry
 
     @staticmethod
     def _export_page(page) -> PlotPageConfig:
