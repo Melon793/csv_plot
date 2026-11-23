@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from PySide6.QtCore import QByteArray, QMimeData, QPoint, Qt
+from PySide6.QtCore import QByteArray, QMimeData, QPoint, QSize, Qt
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStyle, QStyleFactory
 
@@ -79,6 +79,7 @@ def test_geometry_contracts_survive(tabs):
     assert cap.acceptDrops() is True
     d = tabs._dir_btn
     assert d.sizeHint() == d.minimumSizeHint()
+    assert d.sizeHint() == QSize(20, 20)  # G1 数值实断言（评审 r1 P2-4）
     assert d.width() == d.height() == 20
 
 
@@ -101,8 +102,10 @@ def test_capsule_checked_maps_state_on(tabs, qapp):
 
 
 def test_dir_button_rest_has_no_on(tabs):
-    tabs._dir_btn.grab()
-    assert not (tabs._dir_btn._last_paint_option.state & S.State_On)
+    d = tabs._dir_btn
+    assert not d.isCheckable()  # ⌄ 是动作钮非开关：State_On 无从置位（P2-4）
+    d.grab()
+    assert not (d._last_paint_option.state & S.State_On)
 
 
 # ---------------------------------------------------------------------------

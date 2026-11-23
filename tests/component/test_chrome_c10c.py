@@ -136,6 +136,32 @@ def test_preset_shell_pixels_match_native(fusion_style, qtbot):
         assert _img_diff(ref.grab().toImage(), btn.grab().toImage()) == 0
 
 
+def test_checked_render_selects_on_variant(fusion_style, qtbot):
+    """渲染选取回归锁（评审 r1 P1-1）：按钮自身 grab 必须经 State_On 选 On pixmap。
+
+    壳像素对照把同一 icon＋checked 复制给参照钮，选取链路若坏两边同退
+    Off 仍 diff=0（恒真）；这里直断渲染产物的品牌蓝墨迹：checked>0、rest=0。
+    """
+    for items, icon_fn in (
+        (_SEG_DRAW_ITEMS, _draw_mode_icon),
+        (_SEG_SYMBOL_ITEMS, _symbol_policy_icon),
+        (_SEG_LINE_PRESET_ITEMS, _line_preset_icon),
+    ):
+        tuples = [
+            (v, label, full, icon_fn(v), icon_fn(v, ACCENT))
+            for v, label, full in items
+        ]
+        seg = _SegmentedControl(tuples, items[0][0], lambda v: None)
+        qtbot.addWidget(seg)
+        seg.ensurePolished()
+        for btn in seg.findChildren(QPushButton):
+            ink = _accent_pixels(btn.grab())
+            if btn.isChecked():
+                assert ink > 0, f"{btn.text()} checked 渲染未选 On 变体"
+            else:
+                assert ink == 0, f"{btn.text()} rest 渲染漏出 On 变体"
+
+
 # ---------------------------------------------------------------------------
 # D-i：manual_check palette WindowText＋QFont pixelSize 12
 # ---------------------------------------------------------------------------
@@ -173,4 +199,34 @@ def test_can_db_binding_button_is_native_toolbutton(qapp, tmp_path):
     assert btn.menu() is not None
     assert "▾" not in btn.text()  # 箭头交给原生 popup 指示器
     assert btn.text() == "全部库（默认）"
+    dlg.deleteLater()
+
+
+def test_can_db_text_area_click_opens_menu(qapp, tmp_path):
+    """D-j 行为锁（评审 r1 P2-1）：文字区点击（clicked 语义）开菜单。
+
+    Qt 6.12 公有 showMenu 是阻塞嵌套事件循环（qtoolbutton.cpp:670）；
+    offscreen 无人关菜单，用 parented 安全阀在嵌套循环内 0ms hide 使其返回。
+    """
+    from PySide6.QtCore import QTimer
+
+    from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
+    from tests.fixtures.data_factory import write_dbc
+
+    dbc = write_dbc(tmp_path / "a.dbc")
+    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc)])
+    btn = dlg._binding_button(0)
+    btn.show()
+    qapp.processEvents()
+    menu = btn.menu()
+    opened = []
+    menu.aboutToShow.connect(lambda: opened.append(True))
+    valve = QTimer(menu)
+    valve.setSingleShot(True)
+    valve.timeout.connect(menu.hide)
+    valve.start(0)
+    btn.click()
+    assert opened == [True]
+    assert not menu.isVisible()
+    btn.close()
     dlg.deleteLater()

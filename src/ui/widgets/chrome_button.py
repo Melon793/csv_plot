@@ -45,6 +45,9 @@ class ChromeButton(QToolButton):
 
     几何由消费方自定（setFixedSize＋sizeHint 一致，角位 G1 口径）；
     本基类不预设尺寸。默认 NoFocus：点完后焦点留在原交互入口。
+    **内容一律走 ``_draw_glyph``/``_draw_content``**：paintEvent 完全取代
+    QToolButton 默认绘制，setText/setIcon/setArrowType 会被静默忽略；
+    勿 setMenu（菜单可经鼠标路径打开却无可见箭头）。
     """
 
     _COLOR_NORMAL = "#8a8a8a"

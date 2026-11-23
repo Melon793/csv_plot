@@ -340,7 +340,9 @@ class _ShelfCapsuleButton(ChromeButton):
 
     # -- 绘制 ----------------------------------------------------------
     def _glyph_color(self) -> QColor:
-        # checked/drop-hot＝内容标记：字形与计数切 ACCENT（壳保持平台态）
+        # checked/drop-hot＝内容标记：字形与计数切 ACCENT（壳保持平台态）。
+        # 优先级 checked/hot > disabled 沿袭 C8b 旧实现（评审 r1 P2-5 留痕）：
+        # 浮窗开着时加载新数据会到 disabled+checked 态，禁用壳上仍画品牌蓝。
         if self.isChecked() or self._drag_hot:
             return QColor(_ACCENT_COLOR)
         return super()._glyph_color()
