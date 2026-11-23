@@ -29,14 +29,19 @@ from src.ui.widgets.plot_tabs import (  # noqa: E402
 )
 from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
 from src.ui.widgets.var_pane_rail import RailSplitter, VarPaneRail  # noqa: E402
+from src.ui.widgets.chrome_button import (  # noqa: E402
+    ChromeButton,
+    native_push_height,
+)
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
     QColor,
     QIcon,
     QPainter,
     QPalette,
+    QPen,
     QAction,
     QShortcut,
     QKeySequence,
@@ -97,6 +102,37 @@ class _CompactTitleButton(QPushButton):
         hint = super().minimumSizeHint()
         hint.setWidth(0)
         return hint
+
+
+class _TitleCollapseChip(ChromeButton):
+    """标题行«（F3）：与 rail » 同族矢量 ACCENT 双 chevron＋平台自然高。
+
+    旧形态是原生文本 glyph（灰、小），与 rail » 的矢量蓝 glyph 不同族
+    （真机报障）。最小宽贡献裁 0（同 _CompactTitleButton 手法）防顶大
+    整窗最小宽；宽上限 rail 同宽由创建处 setMaximumWidth 收。
+    """
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def _glyph_color(self):
+        return QColor(theme.ACCENT if self.isEnabled() else theme.TEXT_MUTED)
+
+    def _draw_glyph(self, painter, color):
+        center = QPointF(self.rect().center())
+        pen = QPen(color, 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        for dx in (-2.5, 2.5):  # 双 chevron 镜像（«），与 rail » 同尺度
+            painter.drawLine(
+                center + QPointF(dx + 1.5, -4.0), center + QPointF(dx - 1.5, 0.0)
+            )
+            painter.drawLine(
+                center + QPointF(dx - 1.5, 0.0), center + QPointF(dx + 1.5, 4.0)
+            )
 
 
 class _StatusSegment(QLabel):
@@ -1125,9 +1161,12 @@ class MainWindow(QMainWindow):
 
         title_layout.addStretch(1)
 
-        # D1：折叠入口，放「分身/?」左侧。副作用提示进 tooltip：折叠后变量
-        # 搜索/拖变量进图不可用、导入按钮看不见，导入文件可用 Ctrl+O
-        self.var_collapse_btn = _CompactTitleButton("«", content)
+        # D1/D-a P1：折叠入口在标题行最右（? 之后，addWidget 见下）。
+        # F3：与 rail » 同族矢量 ACCENT glyph＋平台自然高（旧文本 glyph
+        # 灰小、与»蓝大不一致，真机报障）。副作用提示进 tooltip：折叠后
+        # 变量搜索/拖变量进图不可用、导入按钮看不见，导入文件可用 Ctrl+O
+        self.var_collapse_btn = _TitleCollapseChip(content)
+        self.var_collapse_btn.setFixedHeight(native_push_height())
         # Preferred（带 ShrinkFlag）＋裁过的 minimumSizeHint → 最小宽贡献 0；
         # 上限收到 rail 同宽：常态 28px，极限窄窗允许被压缩（Ctrl+B 与手柄
         # 双击仍在，折叠入口不丢）
@@ -1209,7 +1248,7 @@ class MainWindow(QMainWindow):
         # 细边栏页：QStackedLayout 自动隐藏非当前页，不会以未布局子控件
         # 身份在 (0,0) 冒出来（同 curve_shelf_btn 的教训）
         self.var_pane_rail = VarPaneRail(
-            left_widget, chip_height=self.var_collapse_btn.sizeHint().height()
+            left_widget, chip_height=native_push_height()
         )
         left_stack.addWidget(self.var_pane_rail)
         left_stack.setCurrentIndex(0)

@@ -33,11 +33,22 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
+    QPushButton,
     QStyle,
     QStyleOptionButton,
     QStyleOptionFocusRect,
     QToolButton,
 )
+
+
+def native_push_height() -> int:
+    """当前 style 的原生 push button 自然高（mac Large 32 / Win 23 / Fusion ~24）。
+
+    消费方以此定高：恰等于 mac 尺寸档默认高→圆角 aqua（qmacstyle_mac.mm:356
+    /:1826 判据），且与顶栏/标题原生钮逐像素同高（F2/F3）。须在
+    QApplication 存在后调用（构造期调用安全，收集期不调）。
+    """
+    return QPushButton().sizeHint().height()
 
 
 class ChromeButton(QToolButton):

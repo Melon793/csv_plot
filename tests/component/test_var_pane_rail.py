@@ -462,6 +462,17 @@ class TestRailHygiene:
         ]
         assert widgets[-3:] == [mw.clone_btn, mw.help_btn_small, mw.var_collapse_btn]
 
+    def test_collapse_btn_same_glyph_family_as_rail_chip(self, rail_env):
+        """F3：« 与 rail » 同族矢量 ACCENT glyph＋同高（旧文本 glyph 灰小不一致）。"""
+        from src.ui import theme
+        from src.ui.widgets.chrome_button import ChromeButton
+
+        mw, _ = rail_env
+        btn = mw.var_collapse_btn
+        assert isinstance(btn, ChromeButton)
+        assert btn._glyph_color().name().upper() == theme.ACCENT.upper()
+        assert btn.height() == mw.var_pane_rail.expand_btn.height()
+
 
 # ---------------------------------------------------------------------------
 # D-b A：静置 affordance 包（rail 条化 / » accent 小按钮 / 手柄 grip＋hover）
@@ -496,7 +507,7 @@ class TestAffordance:
         # F2：芯片跟标题«同高（平台自然高），宽仍 24；不再置 Mini 属性
         # （mac 自然高 32＝Large 档默认高→圆角；置 Mini 反而落方壳）
         assert chip.width() == 24
-        assert chip.height() == mw.var_collapse_btn.sizeHint().height()
+        assert chip.height() == mw.var_collapse_btn.height()
         assert not chip.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
 
     def test_handle_is_grip_handle(self, rail_env):

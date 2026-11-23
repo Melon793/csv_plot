@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from src.core.config import widget_alive
 from src.ui.drag_drop import SHELF_MIME_FORMAT
 from src.ui.drag_visuals import DRAG_ACCENT, DRAG_ACCENT_SOFT
-from src.ui.widgets.chrome_button import ChromeButton
+from src.ui.widgets.chrome_button import ChromeButton, native_push_height
 
 #: 绘图页数量上限（设计文档 §4.4；2026-11-20 由 8 提升到 16）
 MAX_PAGES = 16
@@ -263,12 +263,12 @@ class _ShelfCapsuleButton(ChromeButton):
         self.setObjectName("shelfCapsule")
         self.setCheckable(True)
         self.setAcceptDrops(True)
-        # F1：mac Mini 档（高 24＝档默认高）→ 圆角 aqua 与顶栏同族；
-        # mac-only 属性，Win/Fusion 忽略
-        self.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
+        # F3：高＝平台自然 push 高（与顶栏同高；F1 Mini 24 矮一档真机报障）；
+        # mac 自然高＝Large 档默认高→圆角无需尺寸属性
         # G1：角位布局只认 sizeHint，setFixedSize 与 sizeHint 必须一致；
         # 不一致会让胶囊溢出右缘被裁（setFixedSize 单独用实测裁 7px）。
-        self.setFixedSize(_SHELF_CAPSULE_SIZE)
+        self._chrome_size = QSize(_SHELF_CAPSULE_SIZE.width(), native_push_height())
+        self.setFixedSize(self._chrome_size)
         self._count = 0
         self._drag_hot = False
         self.clicked.connect(self._on_clicked)
@@ -278,10 +278,10 @@ class _ShelfCapsuleButton(ChromeButton):
 
     # -- 几何 ----------------------------------------------------------
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
-        return QSize(_SHELF_CAPSULE_SIZE)
+        return QSize(self._chrome_size)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
-        return QSize(_SHELF_CAPSULE_SIZE)
+        return QSize(self._chrome_size)
 
     # -- 对外状态 ------------------------------------------------------
     def set_count(self, count: int) -> None:
@@ -434,15 +434,16 @@ class _PageDirectoryButton(ChromeButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("pageDirectoryButton")
-        # F1：mac Mini 档同族圆角（见 _SHELF_CAPSULE_SIZE 注释）
-        self.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
-        self.setFixedSize(_DIR_BUTTON_SIZE)
+        # F3：高＝平台自然 push 高（与顶栏/«/rail 芯片同高）；mac 自然高＝
+        # Large 档默认高→圆角无需尺寸属性（F1 Mini 24 比顶栏矮，真机报障）
+        self._chrome_size = QSize(_DIR_BUTTON_SIZE.width(), native_push_height())
+        self.setFixedSize(self._chrome_size)
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
-        return QSize(_DIR_BUTTON_SIZE)
+        return QSize(self._chrome_size)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
-        return QSize(_DIR_BUTTON_SIZE)
+        return QSize(self._chrome_size)
 
     def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
         center = QPointF(self.rect().center())
