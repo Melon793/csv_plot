@@ -1,6 +1,6 @@
 """e2e：X 轴锁定 C2 边界语义（真实 MainWindow）。
 
-- L1 两入口（右键菜单 action / Ctrl+Shift+X 槽）同规格播报；
+- L2 抽屉 chip 唯一手动入口同规格播报（main 收口撤菜单/快捷键）；
 - D2：自动缩放按钮置灰 + 快捷键槽守卫 + auto_range_page 入口守卫；
 - D3：锁定切页各页保留冻结窗口，saved_x_range 跳过分支同样被消费，
   解锁后跟随恢复；

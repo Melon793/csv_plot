@@ -210,7 +210,9 @@ STATUS_DRAWER_EDGE_MARGIN = 8
 # 抽屉可用高度的下限：状态栏以上放不到这个高度就不弹（弹出来只能看到一两行、
 # 剩下的全靠滚动，不如不弹），改由调用方给一句可执行的提示。实测内容高：文件
 # 信息抽屉 7 行 = offscreen/Fusion 170 px、cocoa 真机 160 px；x 轴基准抽屉 5 行
-# （档位单独成行后）= Fusion 212 px、cocoa 206 px。140 是"再矮就没法看"的位置，
+# （档位单独成行后）= Fusion 212 px、cocoa 206 px；xlock-only 加锁状态行
+# +41px（行 28+hairline 1+spacing 12）→ Fusion ~253 / cocoa ~247（真机实测 256）。
+# 140 是"再矮就没法看"的位置，
 # 比两扇抽屉的自然高度都低一档
 STATUS_DRAWER_MIN_HEIGHT = 140
 # x 轴时间基准的系数范围（状态栏中段抽屉与顶部「时间修正」对话框**共用**）：

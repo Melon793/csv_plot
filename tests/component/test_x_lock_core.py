@@ -6,7 +6,7 @@
 - 兄弟子图（XLink 组）范围不变；
 - B1：Shift 框选 release 锁定时只写 Y、X 不动（D13）；
 - B2：getMenu 锁定态藏 "X axis" 子菜单与 "View All"，Y axis 保留，
-  checkable「锁定X轴」checked 随标志同步且判重不翻倍；
+  且菜单不得有任何锁项（main 收口：L2 只在抽屉）；
 - set_x_axis_locked 广播含非当前页、同状态 no-op、解锁逐图恢复、
   自动解锁带 reason 播报（真实方法 + 最小宿主替身，不复制实现）；
 - 新建子图继承锁定（plot_page 补种，含增量补格）。
@@ -195,7 +195,7 @@ def test_getmenu_locked_hides_x_axis_and_view_all(menu_vb):
     assert not _action(menu, "View All").isVisible(), "View All 会重置 X 范围"
     assert _action(menu, "Y axis").isVisible(), "Y axis 必须保留"
     # 入口收口（main 拍板）：右键菜单不得有锁项（L2 只在抽屉）
-    assert not any(a.text() == "锁定X轴" for a in menu.actions())
+    assert not any("锁定" in a.text() for a in menu.actions())
 
 
 def test_getmenu_unlocked_restores_and_syncs_checked(menu_vb):
@@ -207,7 +207,7 @@ def test_getmenu_unlocked_restores_and_syncs_checked(menu_vb):
     menu = menu_vb.getMenu(_FakeMenuEvent())
     assert _action(menu, "X axis").isVisible()
     assert _action(menu, "View All").isVisible()
-    assert not any(a.text() == "锁定X轴" for a in menu.actions())
+    assert not any("锁定" in a.text() for a in menu.actions())
 
 
 def test_getmenu_flag_none_is_treated_unlocked(menu_vb):

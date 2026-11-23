@@ -7,6 +7,7 @@
 
 import pytest
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QStatusBar, QWidget
 
 from src.core.config import STATUS_DRAWER_WIDTH_AXIS
@@ -67,7 +68,7 @@ def test_chip_swaps_without_checked_visual(drawer):
     assert "应用将解锁" in drawer.apply_btn.toolTip()
     drawer.sync_lock_ui(False)
     assert chip.text() == "锁定X轴可见范围"
-    assert "滚轮/拖动只调 Y" in drawer.lock_hint.text()
+    assert "滚轮停用" in drawer.lock_hint.text()
     assert "应用将解锁" not in drawer.apply_btn.toolTip()
 
 
@@ -104,3 +105,24 @@ def test_open_geometry_footer_and_height(drawer, qapp):
     hint = next(lb for lb in drawer.findChildren(QLabel) if "Esc" in lb.text())
     assert hint.width() >= hint.sizeHint().width(), "页脚提示被裁"
     assert drawer.lock_hint.width() > 0
+
+def test_enter_on_focused_chip_toggles_not_applies(drawer, qtbot, qapp):
+    """review M1：非 QDialog 里 QPushButton 不吃 Return，聚焦 chip 的回车曾
+    冒泡成「应用」（误改基准+连带 D4 解锁）；现在=切换锁定。"""
+    mw = drawer._fake_mw
+    drawer.show()
+    qapp.processEvents()
+    drawer.lock_chip.setFocus()
+    qapp.processEvents()
+    assert drawer.focusWidget() is drawer.lock_chip
+    before_factor = mw.factor
+
+    qtbot.keyClick(drawer.lock_chip, Qt.Key.Key_Return)
+    qapp.processEvents()
+    assert mw.calls == [(True, "")], "聚焦 chip 回车应切换锁定"
+    assert mw.factor == before_factor, "不得误应用时间修正"
+    assert drawer.lock_chip.text() == "解锁X轴可见范围"
+
+    qtbot.keyClick(drawer.lock_chip, Qt.Key.Key_Return)
+    qapp.processEvents()
+    assert mw.calls == [(True, ""), (False, "")]

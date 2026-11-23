@@ -718,7 +718,7 @@ class XAxisDrawer(StatusDrawer):
         self.lock_chip.setIcon(_lock_icon(locked, DEFAULT_CURVE_COLOR if locked else "#4b5563"))
         self.lock_hint.setText(
             "已冻结 · 切页不跟随 · 改基准自动解锁" if locked
-            else "锁定后滚轮/拖动只调 Y"
+            else "锁定后滚轮停用、拖动只调 Y"
         )
         self.apply_btn.setToolTip(
             "应用将解锁 X 轴可见范围（时间基准改变）" if locked else self._APPLY_TIP
@@ -734,6 +734,12 @@ class XAxisDrawer(StatusDrawer):
         都算应用"这种承诺。
         """
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            # review M1：非 QDialog 里 QPushButton autoDefault=False 不吃 Return，
+            # 聚焦 chip 的回车会冒泡到这里误应用时间修正（连带 D4 解锁）；
+            # 焦点在 chip 上时回车=切换锁定
+            if self.focusWidget() is self.lock_chip:
+                self.lock_chip.click()
+                return
             self._on_apply()
             return
         super().keyPressEvent(event)

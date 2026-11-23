@@ -936,7 +936,8 @@ class MainWindow(QMainWindow):
     # X 轴锁定（D1–D4）：唯一权威 + 单函数广播
     # ------------------------------------------------------------------
     def set_x_axis_locked(self, locked: bool, reason: str = "") -> None:
-        """锁定状态的唯一写入口：右键菜单 / 快捷键 / 尺锁钮 / 自动解锁都走这里。
+        """锁定状态的唯一写入口：抽屉锁 chip / 自动解锁都走这里（main 收口版
+        撤了右键菜单项与 Ctrl+Shift+X；dev/x-lock-range-nav 另有尺锁钮入口）。
 
         广播面（§1）：全部页子图（含非当前页/隐藏页）的鼠标掩码与 plot 级
         标志、导航尺 set_locked、自动缩放按钮、状态栏 x 轴段、状态栏播报。
@@ -981,7 +982,7 @@ class MainWindow(QMainWindow):
     def _x_lock_announce_text(locked: bool, reason: str = "") -> str:
         """锁定播报文案收一个函数（D12：L1/L2/L3 与自动解锁同规格）。"""
         if locked:
-            return "X 轴可见范围已锁定：滚轮/拖动只调 Y"
+            return "X 轴可见范围已锁定：滚轮缩放停用，拖动只调 Y"
         if reason:
             return f"X 轴可见范围已自动解锁（{reason}）"
         return "X 轴可见范围已解锁"
