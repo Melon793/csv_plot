@@ -26,6 +26,7 @@ from src.ui.drag_drop import (
     set_active_legend_drag,
 )
 from src.ui.widgets.curve_shelf import CurveShelfWidget, ShelfEntry
+from src.ui.widgets.chrome_button import native_push_height
 from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
 
 # 手工构造的 QDropEvent 不接管 mimeData 所有权，必须外部保活
@@ -116,7 +117,7 @@ def test_capsule_sizehint_matches_fixed_size(capsule_shelf):
     assert capsule is not None
     assert capsule.sizeHint() == capsule.minimumSizeHint()
     assert capsule.sizeHint().width() == capsule.width() == 52
-    assert capsule.sizeHint().height() == capsule.height() == 20
+    assert capsule.sizeHint().height() == capsule.height() == native_push_height()  # F3 自然高
     assert capsule.acceptDrops() is True
 
 

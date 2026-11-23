@@ -5,8 +5,9 @@
 而不是纪律问题 —— 这正是细边栏方案对「完全隐藏」的本质优势，折叠态才敢
 持久化（D12）。
 
-静置 affordance（拍板 D-b A）：rail 浅底＋右弱边框成"条"、» 为 accent 圆角
-小按钮、splitter 手柄中部三点 grip —— 静置即答"能点"。hover 反馈按交互
+静置 affordance（拍板 D-b A）：rail 浅底＋右弱边框成"条"、» 为原生壳＋
+ACCENT 矢量字形小按钮（C10a D-e：chrome 归平台、品牌色只作内容）、
+splitter 手柄中部三点 grip —— 静置即答"能点"。hover 反馈按交互
 类型分工（1E）：rail 是单击面，给浅底加深；手柄是拖拽面，**hover 保持
 main 原样**（光标↔＋tooltip），不变色不改宽 —— 改宽会重排 splitter 扣
 pane 宽，绘图区真实 resize 跳动（真机报障）。色值全复用 theme 既有 token
@@ -19,22 +20,48 @@ pane 宽，绘图区真实 resize 跳动（真机报障）。色值全复用 the
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QLabel,
     QSplitter,
     QSplitterHandle,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from src.core.config import VAR_PANE_RAIL_WIDTH
 from src.ui import theme
+from src.ui.widgets.chrome_button import ChromeButton
 
 #: grip 三点间距/半径：5px 手柄内唯一放得下的 glyph 尺度
 GRIP_DOT_STEP = 5.0
 GRIP_DOT_RADIUS = 1.0
+
+
+class _RailExpandChip(ChromeButton):
+    """rail » 芯片（D-e）：原生壳＋ACCENT 矢量双 chevron。
+
+    取代 QSS 实色壳（C8b 旧形态）：实色背景/圆角是 chrome，归平台；
+    品牌蓝只留在 » 字形上作内容。hover/pressed 反馈由壳的 state 位免费。
+    """
+
+    def _glyph_color(self) -> QColor:
+        # 内容色固定 ACCENT（状态交给壳）；禁用退次级灰
+        return QColor(theme.ACCENT if self.isEnabled() else theme.TEXT_MUTED)
+
+    def _draw_glyph(self, painter: QPainter, color: QColor) -> None:
+        center = QPointF(self.rect().center())
+        pen = QPen(color, 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        for dx in (-2.5, 2.5):  # 双 chevron：宽 3 高 8，整组水平居中
+            painter.drawLine(
+                center + QPointF(dx - 1.5, -4.0), center + QPointF(dx + 1.5, 0.0)
+            )
+            painter.drawLine(
+                center + QPointF(dx + 1.5, 0.0), center + QPointF(dx - 1.5, 4.0)
+            )
 
 
 class VarPaneRail(QWidget):
@@ -42,7 +69,7 @@ class VarPaneRail(QWidget):
 
     expand_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, chip_height: int | None = None):
         super().__init__(parent)
         self.setFixedWidth(VAR_PANE_RAIL_WIDTH)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -62,19 +89,20 @@ class VarPaneRail(QWidget):
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(6)
 
-        self.expand_btn = QToolButton(self)
-        self.expand_btn.setText("»")
+        self.expand_btn = _RailExpandChip(self)
         self.expand_btn.setToolTip("单击展开变量区 (Ctrl+B)")
         self.expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.expand_btn.setFixedSize(24, 22)
-        # accent 实色小按钮：静置即读作"按钮"而非残留文字
-        self.expand_btn.setStyleSheet(
-            f"QToolButton {{ background: {theme.ACCENT};"
-            f" color: {theme.on_accent_for(theme.ACCENT)};"
-            f" border: none; border-radius: 5px; }}"
-            f"QToolButton:hover {{ background:"
-            f" {theme.mix_hex(theme.ACCENT, '#000000', 0.12)}; }}"
-        )
+        self.expand_btn.setFixedWidth(24)
+        if chip_height is None:
+            # F1 默认（独立构造/测试口径）：24＝mac Mini 档默认高＋
+            # WA_MacMiniSize → 圆角 aqua（qmacstyle_mac.mm:356/:1826）
+            self.expand_btn.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
+            self.expand_btn.setFixedHeight(24)
+        else:
+            # F2：跟标题«同高（平台自然高，主窗口传入）。mac 自然高 32＝
+            # Large 档默认高→圆角无需尺寸属性；若仍置 Mini 则 32≠24 落方壳。
+            # Win/Fusion 自然高各自与«一致，跨平台逐像素同高。
+            self.expand_btn.setFixedHeight(int(chip_height))
         self.expand_btn.clicked.connect(self.expand_requested)
         layout.addWidget(self.expand_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 

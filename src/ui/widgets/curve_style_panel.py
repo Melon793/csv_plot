@@ -215,29 +215,19 @@ _SEG_LINE_PRESET_ITEMS = (
 # 面板标题行变量名最大宽度（超出 elide 截断，全文进 tooltip）
 _PANEL_VAR_NAME_MAX_WIDTH = 200
 
-# 分段控件按钮 QSS：中性描边 + 选中品牌蓝（与色板选中环同色系）
-_SEG_QSS = f"""
-    QPushButton {{
-        background: transparent;
-        border: 1px solid palette(mid);
-        border-radius: 4px;
-        padding: 2px 8px;
-    }}
-    QPushButton:hover {{
-        background: palette(midlight);
-    }}
-    QPushButton:checked {{
-        background: {theme.TINT_SOFT};
-        border-color: {theme.ACCENT};
-    }}
-"""
+# 分段控件壳归平台（C10c D-h）：不再带 QSS（原 _SEG_QSS 的 hover/checked
+# 壳规则被 QStyleSheetStyle 接管，三平台不一致）。当前档信息通道＝内容标记：
+# checked 时图标换 ACCENT 变体（QIcon Off/On 双态，style 按 State_On 自动
+# 选 On pixmap，mac/Fusion/vista 同口径），不依赖原生 checked 文字态
+# （mac 有白字压白底实测先例，tests/e2e/test_axis_drawer.py）。
 
 
-def _icon_painter(pixmap: QPixmap) -> tuple[QPainter, QColor]:
-    """在透明 pixmap 上初始化画笔（主题文字色、圆角端点），返回画笔与颜色。"""
+def _icon_painter(pixmap: QPixmap, color: QColor | None = None) -> tuple[QPainter, QColor]:
+    """在透明 pixmap 上初始化画笔（默认主题文字色，可传内容色变体）。"""
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QPalette().color(QPalette.ColorRole.WindowText)
+    if color is None:
+        color = QPalette().color(QPalette.ColorRole.WindowText)
     pen = QPen(color, 1.6)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -245,7 +235,7 @@ def _icon_painter(pixmap: QPixmap) -> tuple[QPainter, QColor]:
     return painter, color
 
 
-def _draw_mode_icon(mode: str) -> QPixmap:
+def _draw_mode_icon(mode: str, color: QColor | None = None) -> QPixmap:
     """绘制方式 18×18 线型示意图标：直线 / 阶梯后 / 阶梯前。
 
     阶梯图标以实心点标注采样点位置（后 = 跳变发生在采样点，点在拐角；
@@ -259,7 +249,7 @@ def _draw_mode_icon(mode: str) -> QPixmap:
     pixmap = QPixmap(round(18 * dpr), round(18 * dpr))
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(Qt.GlobalColor.transparent)
-    painter, color = _icon_painter(pixmap)
+    painter, color = _icon_painter(pixmap, color)
     if mode == DRAW_MODE_STEP_POST:
         painter.drawPolyline(
             [QPointF(2.5, 14.0), QPointF(9.0, 14.0),
@@ -282,7 +272,7 @@ def _draw_mode_icon(mode: str) -> QPixmap:
     return pixmap
 
 
-def _symbol_policy_icon(policy: str) -> QPixmap:
+def _symbol_policy_icon(policy: str, color: QColor | None = None) -> QPixmap:
     """数据点 18×18 图标：自动（半填充）/ 始终显示（实心）/ 始终隐藏（虚线空心）。"""
     dpr = 1.0
     screen = QApplication.primaryScreen()
@@ -291,7 +281,7 @@ def _symbol_policy_icon(policy: str) -> QPixmap:
     pixmap = QPixmap(round(18 * dpr), round(18 * dpr))
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(Qt.GlobalColor.transparent)
-    painter, color = _icon_painter(pixmap)
+    painter, color = _icon_painter(pixmap, color)
     rect = QRectF(3.0, 3.0, 12.0, 12.0)
     if policy == SYMBOL_POLICY_ON:
         painter.setPen(Qt.PenStyle.NoPen)
@@ -312,7 +302,7 @@ def _symbol_policy_icon(policy: str) -> QPixmap:
     return pixmap
 
 
-def _line_preset_icon(preset: str) -> QPixmap:
+def _line_preset_icon(preset: str, color: QColor | None = None) -> QPixmap:
     """样式预设 18×18 线段示意图标：用真实 QPen 宽度/线型画，所见即所得。"""
     dpr = 1.0
     screen = QApplication.primaryScreen()
@@ -321,7 +311,7 @@ def _line_preset_icon(preset: str) -> QPixmap:
     pixmap = QPixmap(round(18 * dpr), round(18 * dpr))
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(Qt.GlobalColor.transparent)
-    painter, color = _icon_painter(pixmap)
+    painter, color = _icon_painter(pixmap, color)
     if preset == LINE_PRESET_BOLD:
         pen = QPen(color, 4.0)
     elif preset == LINE_PRESET_DASH:
@@ -338,13 +328,17 @@ def _line_preset_icon(preset: str) -> QPixmap:
 
 
 class _SegmentedControl(QWidget):
-    """快捷面板内的横排分段单选控件（图标 + 短标签）。
+    """快捷面板内的横排分段单选控件（图标 + 短标签，壳归平台 C10c）。
 
     每组独立实例成容器：QPushButton 的 autoExclusive 互斥范围限定在
     同一 parent 的按钮间，两组（绘制方式 / 数据点）共存不串扰。段
     点击只回调 ``on_pick(value)``（由调用方决定记录 picked 与关闭
     菜单），不在此处改曲线状态——所有应用集中在菜单关闭后统一执行
     （嵌套事件循环内不改 scene 红线）。
+
+    当前档＝内容标记（D-h）：图标 QIcon Off/On 双态（常态文字色 /
+    checked ACCENT 变体），style 按 State_On 自动选 On pixmap；
+    checked/autoExclusive 逻辑保留，视觉不依赖原生 checked 文字态。
     """
 
     def __init__(self, items, current, on_pick, parent=None):
@@ -352,9 +346,12 @@ class _SegmentedControl(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        for value, label, full_label, icon in items:
+        for value, label, full_label, icon, icon_accent in items:
             btn = QPushButton(self)
-            btn.setIcon(QIcon(icon))
+            qicon = QIcon()
+            qicon.addPixmap(icon, QIcon.Mode.Normal, QIcon.State.Off)
+            qicon.addPixmap(icon_accent, QIcon.Mode.Normal, QIcon.State.On)
+            btn.setIcon(qicon)
             btn.setText(label)
             btn.setToolTip(full_label)
             btn.setCheckable(True)
@@ -363,7 +360,6 @@ class _SegmentedControl(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _checked=False, v=value: on_pick(v))
             layout.addWidget(btn)
-        self.setStyleSheet(_SEG_QSS)
 
 
 def build_style_panel_widget(
@@ -455,17 +451,21 @@ def build_style_panel_widget(
     sep.setFrameShape(QFrame.Shape.HLine)
     vbox.addWidget(sep)
 
-    # 两组分段控件（图标 + 短标签；每段 tooltip 给全称）
+    # 两组分段控件（图标 + 短标签；每段 tooltip 给全称）；
+    # 每段带 ACCENT 图标变体作 checked 内容标记（D-h）
+    accent = QColor(theme.ACCENT)
     draw_items = [
-        (value, label, full, _draw_mode_icon(value))
+        (value, label, full, _draw_mode_icon(value), _draw_mode_icon(value, accent))
         for value, label, full in _SEG_DRAW_ITEMS
     ]
     symbol_items = [
-        (value, label, full, _symbol_policy_icon(value))
+        (value, label, full, _symbol_policy_icon(value),
+         _symbol_policy_icon(value, accent))
         for value, label, full in _SEG_SYMBOL_ITEMS
     ]
     preset_items = [
-        (value, label, full, _line_preset_icon(value))
+        (value, label, full, _line_preset_icon(value),
+         _line_preset_icon(value, accent))
         for value, label, full in _SEG_LINE_PRESET_ITEMS
     ]
     for title, items, cur, key in (

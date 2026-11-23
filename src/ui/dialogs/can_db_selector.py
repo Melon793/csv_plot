@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -991,16 +992,22 @@ class CanDatabaseSelectorDialog(QDialog):
                 )
         return text
 
-    def _binding_button(self, channel: int) -> QPushButton:
+    def _binding_button(self, channel: int) -> QToolButton:
         pool = self._pool_paths()
         current = self._bindings.get(channel)
         if current is None:
             text = "全部库（默认）"
         else:
             text = "、".join(os.path.basename(p) for p in current)
-        btn = QPushButton(f"{text} ▾")
+        # 壳归平台（C10c D-j）：QToolButton popup 模式，原生壳＋文字自然
+        # 左置＋原生菜单箭头；取代 QPushButton text-align/padding QSS。
+        # 文字区点击也开菜单（MenuButtonPopup 默认只有箭头区开）。
+        btn = QToolButton()
+        btn.setText(text)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         btn.setToolTip("勾选只在该通道使用的库；全选 = 未绑定（用全局池）")
-        btn.setStyleSheet("text-align: left; padding: 2px 6px;")
+        btn.clicked.connect(btn.showMenu)
         menu = QMenu(btn)
         for path in pool:
             action = menu.addAction(os.path.basename(path))
