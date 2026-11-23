@@ -1,6 +1,6 @@
 """角位 ⌄/胶囊迁 ChromeButton（C10b D-f）组件测试。
 
-覆盖：身份与几何（52×20 / 20×20，G1 sizeHint=fixedSize）、checked 壳态
+覆盖：身份与几何（52×24 / 24×24，F1 Mini 档，G1 sizeHint=fixedSize）、checked 壳态
 （State_On spy）、drop 高亮＝内容色（字形/计数切 ACCENT，不再整面 paint bg）、
 drop 事件链零改动存活（setAcceptDrops/_set_drag_hot/_drag_hot/定向放行）、
 壳像素＝同矩形原生 QPushButton（Fusion offscreen）。
@@ -75,12 +75,30 @@ def test_geometry_contracts_survive(tabs):
     cap = tabs.shelf_capsule
     assert cap.sizeHint() == cap.minimumSizeHint()
     assert cap.sizeHint().width() == cap.width() == 52
-    assert cap.sizeHint().height() == cap.height() == 20
+    assert cap.sizeHint().height() == cap.height() == 24  # F1 Mini 档
     assert cap.acceptDrops() is True
     d = tabs._dir_btn
     assert d.sizeHint() == d.minimumSizeHint()
-    assert d.sizeHint() == QSize(20, 20)  # G1 数值实断言（评审 r1 P2-4）
-    assert d.width() == d.height() == 20
+    assert d.sizeHint() == QSize(24, 24)  # G1 数值实断言（F1 Mini 档）
+    assert d.width() == d.height() == 24
+    # F1 判据输入：mac Mini 档属性置位（Win/Fusion 忽略）
+    assert cap.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
+    assert d.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
+
+
+def test_mini_tier_and_active_state_spy(tabs, qapp):
+    """F1 判据输入锁：高＝mac Mini 档默认高 24（qmacstyle_mac.mm:356
+    pushButtonDefaultHeight{32,28,24}；:1826 高度不等档默认高→方 bezel）。
+    激活态 State_Active 进 option（setActiveWindow 强制 Qt 激活态）；
+    圆/方壳像素腿归真机抓屏（c10_mac_capture 激活态口径）。
+    """
+    for w in (tabs.shelf_capsule, tabs._dir_btn):
+        assert w.height() == 24
+        assert w.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
+    QApplication.setActiveWindow(tabs)
+    qapp.processEvents()
+    tabs.shelf_capsule.grab()
+    assert tabs.shelf_capsule._last_paint_option.state & S.State_Active
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +204,7 @@ def test_capsule_shell_matches_native(fusion_style, tabs, mode):
     ref = QPushButton()
     ref.setAutoDefault(False)
     ref.setDefault(False)
-    ref.setFixedSize(52, 20)
+    ref.setFixedSize(52, 24)
     for b in (cap, ref):
         b.ensurePolished()
         if mode == "checked":
@@ -201,7 +219,7 @@ def test_dir_shell_matches_native(fusion_style, tabs):
     ref = QPushButton()
     ref.setAutoDefault(False)
     ref.setDefault(False)
-    ref.setFixedSize(20, 20)
+    ref.setFixedSize(24, 24)
     for b in (d, ref):
         b.ensurePolished()
     assert _img_diff(ref.grab().toImage(), d.grab().toImage()) == 0

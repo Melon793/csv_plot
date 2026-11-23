@@ -80,12 +80,17 @@ _CORNER_RIGHT_MARGIN = 2
 #: 曲线暂存区入口回滚开关：False 时只保留 top_bar 旧按钮（MainWindow 同步读它）
 _SHELF_CAPSULE_ENTRY = True
 
-#: 角位胶囊尺寸（方案 A）：52×20 chip＝14px 字形＋4px 间距＋内联计数；
-#: 宽度写死（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）
-_SHELF_CAPSULE_SIZE = QSize(52, 20)
+#: 角位胶囊尺寸（方案 A＋F1）：52×24 chip＝14px 字形＋4px 间距＋内联计数；
+#: 宽度写死（G1/G4——角位只按 sizeHint 留位，且窄窗只剩 2px 余量）。
+#: 高 24＝mac Mini 档默认高（qmacstyle_mac.mm:356 pushButtonDefaultHeight
+#: {32,28,24}）：高度恰等于尺寸档默认高才画圆角 aqua，其余一律方 bezel
+#: （cocoaControlType :1826）——对齐 Mini 档＋WA_MacMiniSize 后与顶栏
+#: 原生钮同族圆角（F1，激活态实证）。Win/Fusion 忽略该属性。
+_SHELF_CAPSULE_SIZE = QSize(52, 24)
 
-#: 页目录按钮尺寸（T6）：角位变为 [＋槽 28][▾ 20][胶囊 52]；G1 口径 sizeHint=fixedSize
-_DIR_BUTTON_SIZE = QSize(20, 20)
+#: 页目录按钮尺寸（T6＋F1 Mini 档同族）：角位变为 [＋槽 28][▾ 24][胶囊 52]；
+#: G1 口径 sizeHint=fixedSize
+_DIR_BUTTON_SIZE = QSize(24, 24)
 
 #: 目录行高（含 footer 新建行）：固定值消除 Win/mac 字体度量差，列表节奏恒等
 _DIR_ROW_HEIGHT = 26
@@ -231,11 +236,11 @@ class _NewPageButton(_FlatIconButton):
 
 
 class _ShelfCapsuleButton(ChromeButton):
-    """页签栏右端 52×20 胶囊的曲线暂存区入口：原生壳＋字形＋内联计数。
+    """页签栏右端 52×24 胶囊的曲线暂存区入口：原生壳＋字形＋内联计数。
 
     chrome 归平台（C10b D-f）：壳走 ChromeButton 的 QStyle 委托，
     checked/hover/pressed/disabled 由 state 位免费；品牌蓝只作内容
-    （checked/drop-hot 时字形与计数切 ACCENT）。几何保 52×20（G1）。
+    （checked/drop-hot 时字形与计数切 ACCENT）。几何保 52×24（G1＋F1 Mini 档）。
 
     它同时是 **drop 落点**：浮窗关着时也必须能收拖拽（否则退回"先开窗才能
     拖"的鸡生蛋）。只发信号、不持有 shelf 引用（分层见模块 docstring），
@@ -258,6 +263,9 @@ class _ShelfCapsuleButton(ChromeButton):
         self.setObjectName("shelfCapsule")
         self.setCheckable(True)
         self.setAcceptDrops(True)
+        # F1：mac Mini 档（高 24＝档默认高）→ 圆角 aqua 与顶栏同族；
+        # mac-only 属性，Win/Fusion 忽略
+        self.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
         # G1：角位布局只认 sizeHint，setFixedSize 与 sizeHint 必须一致；
         # 不一致会让胶囊溢出右缘被裁（setFixedSize 单独用实测裁 7px）。
         self.setFixedSize(_SHELF_CAPSULE_SIZE)
@@ -426,6 +434,8 @@ class _PageDirectoryButton(ChromeButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("pageDirectoryButton")
+        # F1：mac Mini 档同族圆角（见 _SHELF_CAPSULE_SIZE 注释）
+        self.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
         self.setFixedSize(_DIR_BUTTON_SIZE)
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt 命名

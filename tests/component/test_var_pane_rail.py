@@ -493,7 +493,7 @@ class TestAffordance:
         assert isinstance(chip, ChromeButton)
         assert not chip.styleSheet()
         assert chip._glyph_color().name().upper() == theme.ACCENT.upper()
-        assert chip.size() == QSize(24, 22)
+        assert chip.size() == QSize(24, 24)  # F1 Mini 档（原 24×22）
 
     def test_handle_is_grip_handle(self, rail_env):
         from src.ui.widgets.var_pane_rail import RailSplitter, _GripHandle

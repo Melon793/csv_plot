@@ -93,7 +93,7 @@ def test_state_mapping_spy(qapp, mode, expect):
     不补则 mac 原生壳 rest/hover/disabled 空渲染（real-QPA 探针实测）。
     """
     btn = _ShellOnly()
-    btn.setFixedSize(52, 20)
+    btn.setFixedSize(52, 24)
     btn.ensurePolished()
     _apply_mode(btn, mode)
     btn.grab()
@@ -127,7 +127,7 @@ def test_default_no_focus(qapp):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("size", [(24, 22), (20, 20), (52, 20)])
+@pytest.mark.parametrize("size", [(24, 24), (52, 24)])  # F1 消费方几何
 @pytest.mark.parametrize("mode", ["rest", "hover", "down", "checked", "disabled"])
 def test_shell_pixels_match_native_pushbutton(fusion_style, size, mode):
     ref = QPushButton()
@@ -143,15 +143,15 @@ def test_shell_pixels_match_native_pushbutton(fusion_style, size, mode):
 
 
 def test_rail_chip_shell_matches_native(fusion_style, qapp):
-    """rail » 芯片壳＝24×22 原生 QPushButton 壳（glyph 置空后逐像素）。"""
+    """rail » 芯片壳＝24×24 原生 QPushButton 壳（glyph 置空后逐像素）。"""
     chip = _RailExpandChip()
-    chip.setFixedSize(24, 22)
+    chip.setFixedSize(24, 24)
     chip.ensurePolished()
     chip._draw_glyph = lambda painter, color: None  # 只对照壳
     ref = QPushButton()
     ref.setAutoDefault(False)
     ref.setDefault(False)
-    ref.setFixedSize(24, 22)
+    ref.setFixedSize(24, 24)
     ref.ensurePolished()
     assert _img_diff(ref.grab().toImage(), chip.grab().toImage()) == 0
 
@@ -163,7 +163,7 @@ def test_rail_chip_shell_matches_native(fusion_style, qapp):
 
 def test_glyph_hook_receives_state_colors(qapp):
     btn = _GlyphSpy()
-    btn.setFixedSize(24, 22)
+    btn.setFixedSize(24, 24)
     btn.ensurePolished()
     btn.grab()
     assert btn.glyph_colors[-1] == QColor(ChromeButton._COLOR_NORMAL)
@@ -179,7 +179,7 @@ def test_glyph_hook_receives_state_colors(qapp):
 def test_rail_chip_glyph_is_accent_content(qapp):
     """D-e：品牌蓝只作内容——glyph 恒 ACCENT（hover 不变色，状态交给壳）。"""
     chip = _RailExpandChip()
-    chip.setFixedSize(24, 22)
+    chip.setFixedSize(24, 24)
     chip.ensurePolished()
     assert chip._glyph_color() == QColor(theme.ACCENT)
     chip.setAttribute(Qt.WidgetAttribute.WA_UnderMouse, True)
@@ -214,6 +214,7 @@ def test_rail_chip_is_chrome_button(qapp):
     chip = rail.expand_btn
     assert isinstance(chip, ChromeButton)
     assert not chip.styleSheet(), "chrome 归平台，芯片不再带 QSS"
-    assert chip.size() == QSize(24, 22)
+    assert chip.size() == QSize(24, 24)  # F1 Mini 档
+    assert chip.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
     assert chip.toolTip() == "单击展开变量区 (Ctrl+B)"
     rail.deleteLater()

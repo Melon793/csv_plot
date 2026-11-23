@@ -116,7 +116,7 @@ def test_capsule_sizehint_matches_fixed_size(capsule_shelf):
     assert capsule is not None
     assert capsule.sizeHint() == capsule.minimumSizeHint()
     assert capsule.sizeHint().width() == capsule.width() == 52
-    assert capsule.sizeHint().height() == capsule.height() == 20
+    assert capsule.sizeHint().height() == capsule.height() == 24  # F1 Mini 档
     assert capsule.acceptDrops() is True
 
 

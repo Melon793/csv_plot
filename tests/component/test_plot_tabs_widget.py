@@ -557,8 +557,8 @@ def test_dir_button_gate_and_corner_width(tabs, qapp):
     tabs.set_new_page_enabled(True)
     qapp.processEvents()
     assert tabs._dir_btn.isVisible()
-    # [＋槽 28][▾ 20][胶囊 52][右缘 2]（方案 A）
-    assert tabs._corner_container.width() == 102
+    # [＋槽 28][▾ 24][胶囊 52][右缘 2]（方案 A＋F1 Mini 档；102→106 主会话裁定）
+    assert tabs._corner_container.width() == 106
 
 
 def test_dir_popup_lists_pages_and_selects(tabs, qtbot, qapp):

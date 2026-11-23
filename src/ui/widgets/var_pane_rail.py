@@ -92,7 +92,10 @@ class VarPaneRail(QWidget):
         self.expand_btn = _RailExpandChip(self)
         self.expand_btn.setToolTip("单击展开变量区 (Ctrl+B)")
         self.expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.expand_btn.setFixedSize(24, 22)
+        # F1：24×24＝mac Mini 档默认高＋WA_MacMiniSize → 圆角 aqua 与顶栏
+        # 同族（qmacstyle_mac.mm:356/:1826）；mac-only 属性，Win/Fusion 忽略
+        self.expand_btn.setAttribute(Qt.WidgetAttribute.WA_MacMiniSize, True)
+        self.expand_btn.setFixedSize(24, 24)
         self.expand_btn.clicked.connect(self.expand_requested)
         layout.addWidget(self.expand_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
