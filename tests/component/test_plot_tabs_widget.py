@@ -926,3 +926,28 @@ def test_hidden_tab_counts_single_pixel_boundary(tabs, qapp, monkeypatch):
     ]
     monkeypatch.setattr(bar, "tabRect", lambda index: rects[index])
     assert tabs._hidden_tab_counts() == (1, 1)
+
+
+# ----------------------------------------------------------------------
+# 复制绘图页：入口可用性与上限置灰
+# ----------------------------------------------------------------------
+def test_duplicate_menu_item_enabled_below_limit(tabs):
+    _add_pages(tabs, 2)
+    menu = tabs._build_tab_menu(0)
+    by_text = {a.text(): a for a in menu.actions() if a.text()}
+    assert by_text["复制绘图页"].isEnabled()
+    menu.deleteLater()
+
+
+def test_duplicate_menu_item_disabled_at_page_limit(tabs, monkeypatch):
+    import src.ui.widgets.plot_tabs as plot_tabs_module
+
+    # _can_add_page 读模块常量（main_window.MAX_PLOT_PAGES 是导入期求值）
+    monkeypatch.setattr(plot_tabs_module, "MAX_PAGES", 2)
+    _add_pages(tabs, 2)
+    menu = tabs._build_tab_menu(0)
+    by_text = {a.text(): a for a in menu.actions() if a.text()}
+    action = by_text["复制绘图页"]
+    assert not action.isEnabled()
+    assert "上限" in action.toolTip()
+    menu.deleteLater()
