@@ -44,6 +44,8 @@ dat/mdf/blf 同名通道加载时自动加 ``_G{gi}`` 后缀，后缀被原样�
 
 残余风险（披露）：
 旧档无身份条目时 L0 同名换内容不可检测（D9 无法校验，维持现状）；
+D9 矛盾后 L2 唯一候选（含兄弟候选被 claim 过滤后）回选自身仍照画——
+拍板排除项（解释 #1，唯一候选不猜的反面：唯一即信）；
 L3 保持原名不 claim，remap 目标撞另一模板字面名时 resolved 可出现
 重复名（终审 m-2，极罕见，apply 端重复名跳过兜底）；同名异身份分歧
 remap 按不同模板名计数（终审 m-3，符合 D5 规格，已有 warning）。
@@ -407,6 +409,10 @@ def resolve_identities(
                 local[name] = new
             new_invalid.append(new)
         for name in demoted_here:
+            if name in new_curves:
+                # 聚焦评审 m-1「先降后占」：后置曲线经全指纹验证合法占用
+                # 该名（降占位不 claim）→ 保留曲线侧，与 apply 端同口径
+                continue
             if name not in new_invalid:
                 new_invalid.append(name)
         plot.curves = new_curves
@@ -421,6 +427,10 @@ def resolve_identities(
             plot.curve_identities = {
                 local.get(k, k): v for k, v in identities.items()
             }
+    # 聚焦评审 m-1：跨子图收尾——已被任何子图 curves 绘制的名字不计降占位
+    # （口径准确：播报/失配分母不得把实际绘制的曲线计为降占位）
+    drawn = {n for plot in _iter_unique_plots(resolved) for n in plot.curves}
+    demoted = [n for n in demoted if n not in drawn]
     return resolved, remap, demoted
 
 

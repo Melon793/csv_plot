@@ -335,6 +335,48 @@ class TestFailClosed:
             assert p.curves == []
             assert p.invalid_curves == ["Press_G0"]
 
+    def test_demote_then_claimed_by_later_remap(self):
+        """聚焦评审 m-1「先降后占」：后置曲线经全指纹 L1 合法占用降占位名
+        → 保留曲线侧、invalid 不共存、demoted 口径撤销（不计数已绘制）。"""
+        cfg = session(PlotConfig(
+            curves=["Press_G0", "Old"],
+            curve_identities={
+                "Press_G0": mdf_identity("Press", "bar"),  # 无 SI，单位矛盾
+                "Old": mdf_identity("Press", "degC", "Dev1", "ECU_A"),  # 全 SI
+            },
+        ))
+        loader = FakeLoader({
+            "Press_G0": mdf_info("Press", "degC", "Dev1", "ECU_A"),
+            "Press_G1": mdf_info("Press", "bar", "Dev2", "ECU_B"),
+        })
+        resolved, remap, demoted = resolve_identities(cfg, loader)
+        assert remap == {"Old": "Press_G0"}
+        assert demoted == []  # 实际被绘制，不计降占位
+        p = resolved.pages[0].plots[0]
+        assert p.curves == ["Press_G0"]
+        assert p.invalid_curves == []
+        assert resolved.plots[0].curves == ["Press_G0"]
+        assert resolved.plots[0].invalid_curves == []
+
+    def test_demote_then_claimed_cross_plot(self):
+        """m-1 跨子图变体：plot1 降占位名被 plot2 合法 remap 绘制 →
+        plot1 占位保留（跨格同名允许），但全局 demoted 口径撤销。"""
+        cfg = session(
+            PlotConfig(curves=["Press_G0"],
+                       curve_identities={"Press_G0": mdf_identity("Press", "bar")}),
+            PlotConfig(curves=["Old"],
+                       curve_identities={"Old": mdf_identity("Press", "degC", "Dev1", "ECU_A")}),
+        )
+        loader = FakeLoader({
+            "Press_G0": mdf_info("Press", "degC", "Dev1", "ECU_A"),
+            "Press_G1": mdf_info("Press", "bar", "Dev2", "ECU_B"),
+        })
+        resolved, remap, demoted = resolve_identities(cfg, loader)
+        assert remap == {"Old": "Press_G0"}
+        assert demoted == []
+        assert resolved.pages[0].plots[0].invalid_curves == ["Press_G0"]
+        assert resolved.pages[0].plots[1].curves == ["Press_G0"]
+
 
 class TestMergeDemoted:
     def test_empty_demoted_identical(self):
