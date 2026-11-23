@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -563,7 +563,16 @@ class XAxisDrawer(StatusDrawer):
         self.factor_spin.valueChanged.connect(self._on_factor_edited)
 
         self.manual_check = QCheckBox("手写系数")
-        self.manual_check.setStyleSheet(theme.muted_text())
+        # 壳与文字层级归平台（C10c D-i）：去 muted_text QSS（color＋
+        # font-size:12px 会被 QStyleSheetStyle 接管），改 palette
+        # WindowText（Fusion 探针钉死的角色）＋ QFont pixelSize 12
+        # （去 QSS 不补字号会视觉/几何漂移，R8）。
+        manual_pal = self.manual_check.palette()
+        manual_pal.setColor(QPalette.ColorRole.WindowText, QColor(theme.TEXT_MUTED))
+        self.manual_check.setPalette(manual_pal)
+        manual_font = self.manual_check.font()
+        manual_font.setPixelSize(theme.F_MUTED_PX)
+        self.manual_check.setFont(manual_font)
         self.manual_check.setToolTip(
             "勾上后直接填每样本间隔（秒），频率框退成回显。\n"
             "默认按采样频率输入 —— 频率是 10 的幂，系数是小数，手打更容易错一位。"
