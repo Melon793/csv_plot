@@ -641,6 +641,10 @@ class LayoutManager(MainWindowBaseManager):
             with QSignalBlocker(splitter):
                 splitter.setSizes([width, max(total - width, 0)])
         logger.info("[LAYOUT] 变量区%s (reason=%s)", "折叠" if collapsed else "展开", reason)
+        # D-c：手柄双击语义随态翻转，tooltip 动词同步
+        mw.main_splitter.handle(1).setToolTip(
+            "双击展开变量区 / 拖动调整宽度" if collapsed else "双击折叠变量区 / 拖动调整宽度"
+        )
         # 启动恢复不消耗首次提示：构造期播报可能即刻被 CLI 加载消息覆盖，
         # 用户没看到 Ctrl+O 提示就把本会话额度空耗掉（评审 r1 P2-3）
         self._announce_var_pane_state(collapsed, with_first_hint=(reason != "restore"))

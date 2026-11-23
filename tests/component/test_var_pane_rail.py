@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -461,6 +461,86 @@ class TestRailHygiene:
             if title.itemAt(i).widget() is not None
         ]
         assert widgets[-3:] == [mw.clone_btn, mw.help_btn_small, mw.var_collapse_btn]
+
+
+# ---------------------------------------------------------------------------
+# D-b A：静置 affordance 包（rail 条化 / » accent 小按钮 / 手柄 grip＋hover）
+# ---------------------------------------------------------------------------
+
+
+class TestAffordance:
+    def test_rail_strip_tokens(self, rail_env):
+        """rail 静置浅底＋右弱边框，全复用 theme token（不新增颜色）。"""
+        from src.ui import theme
+
+        mw, _ = rail_env
+        ss = mw.var_pane_rail.styleSheet()
+        assert theme.TINT_SOFT in ss
+        assert theme.BORDER_SOFT in ss
+        assert ":hover" in ss
+
+    def test_expand_chip_is_accent_button(self, rail_env):
+        from src.ui import theme
+
+        mw, _ = rail_env
+        ss = mw.var_pane_rail.expand_btn.styleSheet()
+        assert theme.ACCENT in ss
+        assert "border-radius" in ss
+        assert mw.var_pane_rail.expand_btn.size() == QSize(24, 22)
+
+    def test_handle_is_grip_handle(self, rail_env):
+        from src.ui.widgets.var_pane_rail import RailSplitter, _GripHandle
+
+        mw, _ = rail_env
+        assert isinstance(mw.main_splitter, RailSplitter)
+        assert isinstance(_handle(mw), _GripHandle)
+
+    def test_handle_hover_grows_and_restores(self, rail_env):
+        """hover 加宽 5→7、离开复原；合成 Enter/Leave 直打 enterEvent/leaveEvent。"""
+        mw, _ = rail_env
+        assert mw.main_splitter.handleWidth() == 5
+        QApplication.sendEvent(_handle(mw), QEvent(QEvent.Type.Enter))
+        assert mw.main_splitter.handleWidth() == 7
+        QApplication.sendEvent(_handle(mw), QEvent(QEvent.Type.Leave))
+        assert mw.main_splitter.handleWidth() == 5
+
+    def test_handle_hover_skipped_while_dragging(self, rail_env, monkeypatch):
+        """拖拽期间（左键按住）hover 不改 handleWidth，避免重排干扰拖动。"""
+        mw, _ = rail_env
+        monkeypatch.setattr(
+            QApplication, "mouseButtons",
+            staticmethod(lambda: Qt.MouseButton.LeftButton),
+        )
+        QApplication.sendEvent(_handle(mw), QEvent(QEvent.Type.Enter))
+        assert mw.main_splitter.handleWidth() == 5
+
+    def test_handle_tooltip_verbs_follow_state(self, rail_env):
+        """D-c：手柄 tooltip 双击语义随折叠态翻转。"""
+        mw, _ = rail_env
+        assert "双击折叠变量区" in _handle(mw).toolTip()
+        _collapse(mw)
+        assert "双击展开变量区" in _handle(mw).toolTip()
+        _expand(mw)
+        assert "双击折叠变量区" in _handle(mw).toolTip()
+
+    def test_rail_tooltip_click_verb(self, rail_env):
+        mw, _ = rail_env
+        assert "单击展开变量区" in mw.var_pane_rail.toolTip()
+        assert "单击展开变量区" in mw.var_pane_rail.expand_btn.toolTip()
+
+    def test_rail_background_survives_parent_render(self, rail_env):
+        """WA_StyledBackground 根因回归：不置时 plain QWidget 子类的样式表
+        背景自 grab 有、经父级渲染路径被跳过（实测像素差）。"""
+        from src.ui import theme
+
+        mw, _ = rail_env
+        _collapse(mw)
+        for w in (mw.var_pane_rail, mw.var_pane_rail.expand_btn, _handle(mw)):
+            QApplication.sendEvent(w, QEvent(QEvent.Type.Leave))
+        QApplication.processEvents()
+        img = mw.left_widget.grab().toImage()
+        assert img.pixelColor(14, 100).name() == theme.TINT_SOFT.lower()
+        assert img.pixelColor(27, 100).name() == theme.BORDER_SOFT.lower()
 
 
 # ---------------------------------------------------------------------------

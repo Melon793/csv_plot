@@ -28,7 +28,7 @@ from src.ui.widgets.plot_tabs import (  # noqa: E402
     _SHELF_CAPSULE_ENTRY,
 )
 from src.ui.widgets.status_drawer import CanDbDrawer  # noqa: E402
-from src.ui.widgets.var_pane_rail import VarPaneRail  # noqa: E402
+from src.ui.widgets.var_pane_rail import RailSplitter, VarPaneRail  # noqa: E402
 from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal  # noqa: E402
@@ -44,7 +44,7 @@ from PySide6.QtGui import (  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QInputDialog,
-    QMessageBox, QSplitter, QMenu, QStatusBar, QFrame, QStackedLayout,
+    QMessageBox, QMenu, QStatusBar, QFrame, QStackedLayout,
     QSizePolicy,
 )
 
@@ -1093,7 +1093,7 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter = RailSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setHandleWidth(5)
         self.main_splitter.setChildrenCollapsible(False)
 
@@ -1330,6 +1330,8 @@ class MainWindow(QMainWindow):
 
         self.main_splitter.addWidget(self.left_widget)
         self.main_splitter.addWidget(self.plot_widget)
+        # D-c：手柄 tooltip 动词化（折叠态文案由 set_var_pane_collapsed 同步）
+        self.main_splitter.handle(1).setToolTip("双击折叠变量区 / 拖动调整宽度")
 
         self.main_splitter.setSizes([self.var_table_default_width, 800])
 

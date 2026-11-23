@@ -1,9 +1,14 @@
-"""变量区折叠态细边栏（D1）。
+"""变量区折叠态细边栏（D1）＋左缘可点 affordance（D-b A）。
 
 左栏折叠后剩下的 28px 竖条：» 按钮＋竖排「变量」二字常驻，**整条**都是
 展开热区（点击任意位置都发 ``expand_requested``）。恢复入口是界面的一部分
 而不是纪律问题 —— 这正是细边栏方案对「完全隐藏」的本质优势，折叠态才敢
 持久化（D12）。
+
+静置 affordance（拍板 D-b A）：rail 浅底＋右弱边框成"条"、» 为 accent 圆角
+小按钮、splitter 手柄中部三点 grip＋hover 加宽变 accent —— 静置即答
+"能点"，hover 层作交互确认。色值全复用 theme 既有 token（ACCENT /
+TINT_SOFT / BORDER_SOFT），不新增颜色。
 
 本体只发信号，折叠/展开的状态迁移统一走
 ``LayoutManager.set_var_pane_collapsed``，播报也收在那里。
@@ -11,10 +16,26 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QLabel, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QSplitter,
+    QSplitterHandle,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.core.config import VAR_PANE_RAIL_WIDTH
+from src.ui import theme
+
+#: hover 时手柄加宽的增量（5→7，VS Code sash 同口径）
+HANDLE_HOVER_GROW = 2
+#: grip 三点间距/半径：5px 手柄内唯一放得下的 glyph 尺度
+GRIP_DOT_STEP = 5.0
+GRIP_DOT_RADIUS = 1.0
 
 
 class VarPaneRail(QWidget):
@@ -26,7 +47,17 @@ class VarPaneRail(QWidget):
         super().__init__(parent)
         self.setFixedWidth(VAR_PANE_RAIL_WIDTH)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("展开变量区 (Ctrl+B)")
+        self.setToolTip("单击展开变量区 (Ctrl+B)")
+        # _plain QWidget 子类的样式表背景必须显式置 WA_StyledBackground：
+        # 不置时自 grab 有底、经父级渲染路径（grab/render）背景被跳过（实测）
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 静置"条"感：10% 浅底＋右弱边框；hover 加深一档作交互确认
+        self.setStyleSheet(
+            f"VarPaneRail {{ background: {theme.TINT_SOFT};"
+            f" border-right: 1px solid {theme.BORDER_SOFT}; }}"
+            f"VarPaneRail:hover {{ background:"
+            f" {theme.mix_hex(theme.ACCENT, '#FFFFFF', 0.8)}; }}"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 4)
@@ -34,9 +65,17 @@ class VarPaneRail(QWidget):
 
         self.expand_btn = QToolButton(self)
         self.expand_btn.setText("»")
-        self.expand_btn.setToolTip("展开变量区 (Ctrl+B)")
+        self.expand_btn.setToolTip("单击展开变量区 (Ctrl+B)")
         self.expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.expand_btn.setFixedWidth(VAR_PANE_RAIL_WIDTH - 4)
+        self.expand_btn.setFixedSize(24, 22)
+        # accent 实色小按钮：静置即读作"按钮"而非残留文字
+        self.expand_btn.setStyleSheet(
+            f"QToolButton {{ background: {theme.ACCENT};"
+            f" color: {theme.on_accent_for(theme.ACCENT)};"
+            f" border: none; border-radius: 5px; }}"
+            f"QToolButton:hover {{ background:"
+            f" {theme.mix_hex(theme.ACCENT, '#000000', 0.12)}; }}"
+        )
         self.expand_btn.clicked.connect(self.expand_requested)
         layout.addWidget(self.expand_btn, 0, Qt.AlignmentFlag.AlignHCenter)
 
@@ -46,6 +85,7 @@ class VarPaneRail(QWidget):
         self._title_label.setAlignment(
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
+        self._title_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._title_label, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
 
@@ -55,3 +95,66 @@ class VarPaneRail(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class _GripHandle(QSplitterHandle):
+    """splitter 手柄：中部三点 grip（静置）＋hover 加宽变 accent。
+
+    静置时灰线没有任何"我是控件"的信号（D-b 投诉根因）；grip 是
+    JetBrains 分界线同口径的静置 affordance。hover 加宽走
+    ``splitter.setHandleWidth``，拖拽期间（左键按住）跳过——handleWidth
+    变化会重排 splitter，干扰正在进行的拖动。
+    """
+
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self._hover = False
+        self._base_width = None
+
+    def paintEvent(self, event):
+        if self._hover:
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(theme.ACCENT))
+        else:
+            super().paintEvent(event)
+            painter = QPainter(self)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(
+            QColor("#FFFFFF") if self._hover else QColor(theme.BORDER_SOFT)
+        )
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        for dy in (-GRIP_DOT_STEP, 0.0, GRIP_DOT_STEP):
+            painter.drawEllipse(QPointF(cx, cy + dy), GRIP_DOT_RADIUS, GRIP_DOT_RADIUS)
+        painter.end()
+
+    def enterEvent(self, event):
+        self._hover = True
+        self._sync_hover_width()
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self._sync_hover_width()
+        self.update()
+        super().leaveEvent(event)
+
+    def _sync_hover_width(self):
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            return
+        splitter = self.splitter()
+        if splitter is None:
+            return
+        if self._hover:
+            self._base_width = splitter.handleWidth()
+            splitter.setHandleWidth(self._base_width + HANDLE_HOVER_GROW)
+        elif self._base_width is not None:
+            splitter.setHandleWidth(self._base_width)
+            self._base_width = None
+
+
+class RailSplitter(QSplitter):
+    """主 splitter：手柄换 _GripHandle（createHandle 虚函数覆写）。"""
+
+    def createHandle(self):
+        return _GripHandle(self.orientation(), self)
