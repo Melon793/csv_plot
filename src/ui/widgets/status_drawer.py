@@ -509,25 +509,36 @@ class FileInfoDrawer(StatusDrawer):
 
 
 def _lock_icon(locked: bool, color: str) -> QIcon:
-    """程序化开/闭锁图标（不引 emoji/外部资源）。与 dev 分支
-    x_range_navigator._lock_icon 同源画法，H2 合流时收编去重。"""
-    pix = QPixmap(12, 14)
+    """程序化开/闭锁图标（不引 emoji/外部资源）。V2 拍板画法：
+    14×16 逻辑、**按屏 DPR 渲染**（1x pixmap 上 2x 屏会糊成团，真机报障），
+    实心锁体+白锁孔（无锁孔读成"灯泡"，真机报障）+圆头锁钩。
+    与 dev 分支 x_range_navigator._lock_icon 同源，H2 合流时收编去重。"""
+    app = QApplication.instance()
+    screen = app.primaryScreen() if app is not None else None
+    dpr = screen.devicePixelRatio() if screen is not None else 1.0
+    pix = QPixmap(int(14 * dpr), int(16 * dpr))
+    pix.setDevicePixelRatio(dpr)
     pix.fill(Qt.GlobalColor.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     c = QColor(color)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(c)
-    p.drawRoundedRect(QRectF(1.5, 6, 9, 7), 1.5, 1.5)
     pen = p.pen()
     pen.setColor(c)
-    pen.setWidthF(1.6)
+    pen.setWidthF(1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawArc(QRectF(3.5, 1.5, 5, 5), 0, 180 * 16)
-    p.drawLine(QPointF(3.5, 4), QPointF(3.5, 6))
+    p.drawArc(QRectF(4.0, 1.5, 6.0, 6.0), 0, 180 * 16)
+    p.drawLine(QPointF(4.0, 4.5), QPointF(4.0, 7.0))
     if locked:
-        p.drawLine(QPointF(8.5, 4), QPointF(8.5, 6))
+        p.drawLine(QPointF(10.0, 4.5), QPointF(10.0, 7.0))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(c)
+    p.drawRoundedRect(QRectF(2.0, 7.0, 10.0, 8.0), 2, 2)
+    # 白锁孔：消除"实心块=灯泡"读法的关键一笔
+    p.setBrush(QColor("#ffffff"))
+    p.drawEllipse(QPointF(7, 10.3), 1.3, 1.3)
+    p.drawRect(QRectF(6.4, 10.8, 1.2, 2.6))
     p.end()
     return QIcon(pix)
 

@@ -127,3 +127,11 @@ def test_enter_on_focused_chip_toggles_not_applies(drawer, qtbot, qapp):
     qtbot.keyClick(drawer.lock_chip, Qt.Key.Key_Return)
     qapp.processEvents()
     assert mw.calls == [(True, ""), (False, "")]
+
+
+def test_lock_icon_is_dpr_crisp_with_keyhole(drawer):
+    """V2 拍板：图标按屏 DPR 渲染（1x pixmap 上 2x 屏糊成团=报障根因之一）。"""
+    pm = drawer.lock_chip.icon().pixmap(14, 16)
+    assert pm.devicePixelRatio() >= 1.0
+    assert pm.width() == int(14 * pm.devicePixelRatio())
+    assert pm.height() == int(16 * pm.devicePixelRatio())
