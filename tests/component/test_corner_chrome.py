@@ -163,7 +163,10 @@ def test_drag_enter_accepts_text_rejects_shelf_mime(tabs, qapp):
         QPoint(10, 10), Qt.DropAction.CopyAction, _MIME_TEXT,
         Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
     )
-    QApplication.sendEvent(cap, ev)
+    # 直调 handler（与下方 drop 用例同口径）：sendEvent 会经 QApplication::notify
+    # 把 QDragManager::currentTarget 指向胶囊；胶囊销毁后即悬垂，后续串行用例
+    # 首次经 notify 投 DragLeave 会在解引用悬垂指针时 SIGSEGV（见 :479 崩溃）
+    cap.dragEnterEvent(ev)
     assert ev.isAccepted()
     assert cap._drag_hot is True
     cap._set_drag_hot(False)
@@ -171,7 +174,7 @@ def test_drag_enter_accepts_text_rejects_shelf_mime(tabs, qapp):
         QPoint(10, 10), Qt.DropAction.CopyAction, _MIME_SHELF,
         Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
     )
-    QApplication.sendEvent(cap, ev2)
+    cap.dragEnterEvent(ev2)
     assert not ev2.isAccepted()
     assert cap._drag_hot is False
 
