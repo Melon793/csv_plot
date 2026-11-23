@@ -439,6 +439,29 @@ class TestRailHygiene:
         assert with_btn - without_btn < VAR_PANE_RAIL_WIDTH
         assert mw.var_collapse_btn.width() == VAR_PANE_RAIL_WIDTH
 
+    def test_help_btn_narrow_like_collapse(self, rail_env):
+        """? 与 « 同口径窄化（作者反馈 Win 上 ? 偏宽）：28px 且不顶最小宽。"""
+        mw, _ = rail_env
+        assert mw.help_btn_small.width() == VAR_PANE_RAIL_WIDTH
+        with_btn = mw.minimumSizeHint().width()
+        mw.help_btn_small.hide()
+        without_btn = mw.minimumSizeHint().width()
+        mw.help_btn_small.show()
+        QApplication.processEvents()
+        assert with_btn - without_btn < VAR_PANE_RAIL_WIDTH
+
+    def test_title_row_order_clone_help_collapse(self, rail_env):
+        """D-a P1：« 在标题行最右（? 之后），不夹在动作组中间。"""
+        mw, _ = rail_env
+        content = mw._var_pane_stack.widget(0)
+        title = content.layout().itemAt(0).layout()
+        widgets = [
+            title.itemAt(i).widget()
+            for i in range(title.count())
+            if title.itemAt(i).widget() is not None
+        ]
+        assert widgets[-3:] == [mw.clone_btn, mw.help_btn_small, mw.var_collapse_btn]
+
 
 # ---------------------------------------------------------------------------
 # D12：折叠态/宽度持久化与启动恢复（C1b）

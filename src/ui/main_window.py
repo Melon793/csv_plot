@@ -84,7 +84,7 @@ class _ElideStatusBar(QStatusBar):
 
 
 class _CompactTitleButton(QPushButton):
-    """标题行窄按钮：不参与窗口最小宽度（同 _ElideStatusBar 的裁宽度手法）。
+    """标题行窄按钮（«/?）：不参与窗口最小宽度（同 _ElideStatusBar 的裁宽度手法）。
 
     mac 风格 QPushButton 的 minimumSizeHint 约 80px，「«」直接进标题行会
     把左栏 minimumSizeHint 顶大、整窗最小宽跟着顶大（收窄窗口被钳、暂存区
@@ -1138,16 +1138,27 @@ class MainWindow(QMainWindow):
         self.var_collapse_btn.setToolTip(
             "折叠变量区 (Ctrl+B)\n折叠后变量搜索/拖拽不可用；导入文件可用 Ctrl+O"
         )
-        title_layout.addWidget(self.var_collapse_btn)
+        # addWidget 在 ? 之后（D-a P1：标题行最右），见下
 
         self.clone_btn = QPushButton("分身", left_widget)
         self.clone_btn.setToolTip("启动独立实例")
         title_layout.addWidget(self.clone_btn)
         self.clone_btn.setVisible(True)
 
-        self.help_btn_small = QPushButton("?", left_widget)
+        # ? 与 « 同口径窄化（作者反馈：Win 上 ? 也偏宽）：裁最小宽贡献＋
+        # 上限 rail 同宽，避免 mac/Win PushButton 最小宽顶大整窗最小宽
+        self.help_btn_small = _CompactTitleButton("?", left_widget)
+        self.help_btn_small.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.help_btn_small.setMaximumWidth(VAR_PANE_RAIL_WIDTH)
         self.help_btn_small.setToolTip("帮助文档")
         title_layout.addWidget(self.help_btn_small)
+
+        # D-a P1（拍板）：折叠入口放标题行**最右**（? 之后）——VS Code/
+        # JetBrains 同口径，视图控制贴着它操纵的 splitter 边界，不混进
+        # 「分身/?」动作组中间
+        title_layout.addWidget(self.var_collapse_btn)
 
         left_layout.addLayout(title_layout)
 
