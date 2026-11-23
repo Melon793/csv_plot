@@ -6,9 +6,11 @@
 持久化（D12）。
 
 静置 affordance（拍板 D-b A）：rail 浅底＋右弱边框成"条"、» 为 accent 圆角
-小按钮、splitter 手柄中部三点 grip＋hover 加宽变 accent —— 静置即答
-"能点"，hover 层作交互确认。色值全复用 theme 既有 token（ACCENT /
-TINT_SOFT / BORDER_SOFT），不新增颜色。
+小按钮、splitter 手柄中部三点 grip —— 静置即答"能点"。hover 反馈按交互
+类型分工（1E）：rail 是单击面，给浅底加深；手柄是拖拽面，**hover 保持
+main 原样**（光标↔＋tooltip），不变色不改宽 —— 改宽会重排 splitter 扣
+pane 宽，绘图区真实 resize 跳动（真机报障）。色值全复用 theme 既有 token
+（ACCENT / TINT_SOFT / BORDER_SOFT，全平台固定品牌蓝），不新增颜色。
 
 本体只发信号，折叠/展开的状态迁移统一走
 ``LayoutManager.set_var_pane_collapsed``，播报也收在那里。
@@ -19,7 +21,6 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
-    QApplication,
     QLabel,
     QSplitter,
     QSplitterHandle,
@@ -31,8 +32,6 @@ from PySide6.QtWidgets import (
 from src.core.config import VAR_PANE_RAIL_WIDTH
 from src.ui import theme
 
-#: hover 时手柄加宽的增量（5→7，VS Code sash 同口径）
-HANDLE_HOVER_GROW = 2
 #: grip 三点间距/半径：5px 手柄内唯一放得下的 glyph 尺度
 GRIP_DOT_STEP = 5.0
 GRIP_DOT_RADIUS = 1.0
@@ -98,59 +97,23 @@ class VarPaneRail(QWidget):
 
 
 class _GripHandle(QSplitterHandle):
-    """splitter 手柄：中部三点 grip（静置）＋hover 加宽变 accent。
+    """splitter 手柄：中部三点 grip（静置 affordance）。
 
     静置时灰线没有任何"我是控件"的信号（D-b 投诉根因）；grip 是
-    JetBrains 分界线同口径的静置 affordance。hover 加宽走
-    ``splitter.setHandleWidth``，拖拽期间（左键按住）跳过——handleWidth
-    变化会重排 splitter，干扰正在进行的拖动。
+    JetBrains 分界线同口径的静置 affordance。**hover 不做任何视觉/布局
+    变化**（1E，main 原样）：拖拽面的 hover 反馈由光标↔与 tooltip 承担，
+    变色/改宽都是冗余信号，改宽还会重排 splitter 引起绘图区跳动。
     """
 
-    def __init__(self, orientation, parent):
-        super().__init__(orientation, parent)
-        self._hover = False
-        self._base_width = None
-
     def paintEvent(self, event):
-        if self._hover:
-            painter = QPainter(self)
-            painter.fillRect(self.rect(), QColor(theme.ACCENT))
-        else:
-            super().paintEvent(event)
-            painter = QPainter(self)
+        super().paintEvent(event)
+        painter = QPainter(self)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(
-            QColor("#FFFFFF") if self._hover else QColor(theme.BORDER_SOFT)
-        )
+        painter.setBrush(QColor(theme.BORDER_SOFT))
         cx, cy = self.width() / 2.0, self.height() / 2.0
         for dy in (-GRIP_DOT_STEP, 0.0, GRIP_DOT_STEP):
             painter.drawEllipse(QPointF(cx, cy + dy), GRIP_DOT_RADIUS, GRIP_DOT_RADIUS)
         painter.end()
-
-    def enterEvent(self, event):
-        self._hover = True
-        self._sync_hover_width()
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self._hover = False
-        self._sync_hover_width()
-        self.update()
-        super().leaveEvent(event)
-
-    def _sync_hover_width(self):
-        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-            return
-        splitter = self.splitter()
-        if splitter is None:
-            return
-        if self._hover:
-            self._base_width = splitter.handleWidth()
-            splitter.setHandleWidth(self._base_width + HANDLE_HOVER_GROW)
-        elif self._base_width is not None:
-            splitter.setHandleWidth(self._base_width)
-            self._base_width = None
 
 
 class RailSplitter(QSplitter):

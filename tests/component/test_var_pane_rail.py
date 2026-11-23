@@ -495,24 +495,34 @@ class TestAffordance:
         assert isinstance(mw.main_splitter, RailSplitter)
         assert isinstance(_handle(mw), _GripHandle)
 
-    def test_handle_hover_grows_and_restores(self, rail_env):
-        """hover 加宽 5→7、离开复原；合成 Enter/Leave 直打 enterEvent/leaveEvent。"""
-        mw, _ = rail_env
-        assert mw.main_splitter.handleWidth() == 5
-        QApplication.sendEvent(_handle(mw), QEvent(QEvent.Type.Enter))
-        assert mw.main_splitter.handleWidth() == 7
-        QApplication.sendEvent(_handle(mw), QEvent(QEvent.Type.Leave))
-        assert mw.main_splitter.handleWidth() == 5
+    def test_handle_hover_no_layout_change(self, rail_env):
+        """1E：手柄 hover 回退 main 原样——不变色不改宽，绘图区零跳动。
 
-    def test_handle_hover_skipped_while_dragging(self, rail_env, monkeypatch):
-        """拖拽期间（左键按住）hover 不改 handleWidth，避免重排干扰拖动。"""
+        反馈分工：拖拽面靠光标↔＋tooltip＋静置 grip；单击面（rail）才给
+        视觉 hover。改宽会重排 splitter 扣 pane 宽 → 绘图区 resize 跳动。
+        """
         mw, _ = rail_env
-        monkeypatch.setattr(
-            QApplication, "mouseButtons",
-            staticmethod(lambda: Qt.MouseButton.LeftButton),
-        )
+        plot_w = mw.plot_widget.width()
+        dot_before = _handle(mw).grab().toImage().pixelColor(2, _handle(mw).height() // 2)
         QApplication.sendEvent(_handle(mw), QEvent(QEvent.Type.Enter))
+        QApplication.processEvents()
         assert mw.main_splitter.handleWidth() == 5
+        assert mw.plot_widget.width() == plot_w
+        dot_after = _handle(mw).grab().toImage().pixelColor(2, _handle(mw).height() // 2)
+        assert dot_after == dot_before
+        QApplication.sendEvent(_handle(mw), QEvent(QEvent.Type.Leave))
+        QApplication.processEvents()
+        assert mw.main_splitter.handleWidth() == 5
+        assert mw.plot_widget.width() == plot_w
+
+    def test_rail_blue_same_source_as_tab_selection(self, rail_env):
+        """作者诉求：rail 蓝与 tab 选中/按钮激活同源同值（跨平台一致）。"""
+        from src.ui import theme
+
+        assert theme.ACCENT == theme.BRAND_BLUE
+        assert theme.CHIP_SEL_BD == theme.ACCENT
+        assert theme.TINT_SOFT == theme.CHIP_CUR_BG
+        assert theme.BORDER_SOFT == theme.CHIP_CUR_BD
 
     def test_handle_tooltip_verbs_follow_state(self, rail_env):
         """D-c：手柄 tooltip 双击语义随折叠态翻转。"""
