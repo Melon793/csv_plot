@@ -472,6 +472,7 @@ class TestRailHygiene:
         assert isinstance(btn, ChromeButton)
         assert btn._glyph_color().name().upper() == theme.ACCENT.upper()
         assert btn.height() == mw.var_pane_rail.expand_btn.height()
+        assert btn.testAttribute(Qt.WidgetAttribute.WA_MacNormalSize)  # F4
 
 
 # ---------------------------------------------------------------------------

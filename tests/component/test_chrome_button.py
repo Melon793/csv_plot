@@ -217,4 +217,26 @@ def test_rail_chip_is_chrome_button(qapp):
     assert chip.size() == QSize(24, 24)  # F1 Mini 档
     assert chip.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
     assert chip.toolTip() == "单击展开变量区 (Ctrl+B)"
+
+
+def test_mac_normal_size_attribute_on_consumers(qapp):
+    """F4：基类置 WA_MacNormalSize 钉 Large 档壳高（QMacStyle 按 ContentsType
+    猜档：CT_ToolButton 恒 Small→壳矮 4 逻辑 px）；四消费方全覆盖。
+    F1 默认分支 Mini 优先级高于 Normal（探针 Normal+Mini==Mini-only），不误伤。
+    """
+    from src.ui.widgets.plot_tabs import _PageDirectoryButton, _ShelfCapsuleButton
+    from src.ui.widgets.var_pane_rail import VarPaneRail
+
+    # 自然高分支：Normal 钉 Large（mac 尺寸属性互斥，Normal-only）
+    rail = VarPaneRail(chip_height=32)
+    for w in (rail.expand_btn, _PageDirectoryButton(), _ShelfCapsuleButton()):
+        assert w.testAttribute(Qt.WidgetAttribute.WA_MacNormalSize)
+        assert not w.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
+    # F1 默认分支：Mini-only（setAttribute(Mini) 会清 Normal，Qt 互斥语义）；
+    # Mini 优先级本就高于 Normal，壳高回归锁见 f4_ink_capture mini-branch 腿
+    default_rail = VarPaneRail()  # 持引用：无父临时 rail 被 GC 会连带销毁芯片
+    default_chip = default_rail.expand_btn
+    assert default_chip.testAttribute(Qt.WidgetAttribute.WA_MacMiniSize)
+    assert not default_chip.testAttribute(Qt.WidgetAttribute.WA_MacNormalSize)
+    assert default_chip.size() == QSize(24, 24)
     rail.deleteLater()

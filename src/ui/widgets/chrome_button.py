@@ -69,6 +69,13 @@ class ChromeButton(QToolButton):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        # F4：mac size constrain 恒 Large 档。QMacStyle aquaSizeConstrain 无
+        # mac 尺寸属性时按 ContentsType 猜档（qt_aqua_guess_size Q_UNUSED(widg)）：
+        # CT_ToolButton 仅 Small 档有解→恒 Small 壳（比原生 QPushButton 矮 4
+        # 逻辑 px）；CT_PushButton 三档全知→恒 Large。置 Normal 钉死 Large 与
+        # 原生同壳高。mac-only 属性，Win/Fusion 忽略；Mini 属性优先级更高
+        # （F1 默认分支 24+Mini 不受误伤）。
+        self.setAttribute(Qt.WidgetAttribute.WA_MacNormalSize, True)
         #: 最近一次 paintEvent 的最终 QStyleOptionButton（测试 spy 钩子）
         self._last_paint_option: QStyleOptionButton | None = None
 
