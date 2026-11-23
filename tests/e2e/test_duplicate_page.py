@@ -49,6 +49,13 @@ def test_duplicate_page_copies_curves_styles_and_x_view(loaded_window, qtbot):
 
     new_page = mw.duplicate_page(src)
     assert new_page is not None
+    # visibility_now：隐藏态在 copy_curves_from 返回时已同步落地，不依赖
+    # 0ms 定时器（否则收尾的 Y/图例会先计入隐藏曲线）
+    dst_immediate = new_page.plot_widgets[0].plot_widget
+    dst_rpm = dst_immediate.curves["rpm"]
+    assert dst_rpm.visible is False
+    assert dst_rpm.curve is not None
+    assert dst_rpm.curve.isVisible() is False
     _wait_activation(mw, new_page, qtbot)
 
     assert mw.pages.index(new_page) == 1
@@ -191,3 +198,28 @@ def test_duplicate_failure_rolls_back_without_ghost_tab(
     assert len(mw.pages) == before_pages
     assert mw.plot_tabs.count() == before_tabs
     assert mw.current_page in mw.pages
+
+
+def test_duplicate_from_background_page_uses_tab_index_entry(
+    loaded_window, qtbot
+):
+    """右键入口按 tab 索引取页：源页是后台页也要复制它，而不是当前页。"""
+    mw = loaded_window
+    first = mw.pages[0]
+    first_pw = first.plot_widgets[0].plot_widget
+    assert first_pw.plot_variable("speed")
+
+    second = mw.new_page()
+    assert second is not None
+    qtbot.waitUntil(lambda: len(second.plot_widgets) > 0, timeout=3000)
+    _wait_activation(mw, second, qtbot)
+    assert mw.current_page is second
+
+    mw._on_duplicate_page_requested(0)  # tab 0（后台页）
+    qtbot.waitUntil(lambda: len(mw.pages) == 3, timeout=3000)
+    new_page = mw.pages[1]
+    assert new_page.title == "page 1 副本"
+    assert mw.pages[2] is second
+    _wait_activation(mw, new_page, qtbot)
+    assert list(new_page.plot_widgets[0].plot_widget.curves) == ["speed"]
+    assert list(first_pw.curves) == ["speed"]

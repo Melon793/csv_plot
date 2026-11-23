@@ -1421,17 +1421,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         invalid_src = dict(getattr(source, "invalid_curves", {}) or {})
         # 1) 占位先落地。源页 curves 与 invalid_curves 互斥，故下方 names
         #    不会命中刚建立的占位（不会触发 _consume_invalid_ref 复活）。
-        for name, ref in invalid_src.items():
-            if name in self.curves:
-                continue
-            self.demote_to_invalid(
-                name,
-                getattr(ref, "color", INVALID_CURVE_COLOR) or INVALID_CURVE_COLOR,
-                bool(getattr(ref, "visible_preference", True)),
-                display_name=getattr(ref, "display_name", "") or "",
-                factor=float(getattr(ref, "factor", 1.0)),
-                offset=float(getattr(ref, "offset", 0.0)),
-            )
+        #    包 _batch_adding 与隐藏页模板/reload 的既有纪律对齐（占位本身
+        #    不花 header/Y；这里只防被复用到非空目标格）。
+        prev_batch = getattr(self, "_batch_adding", False)
+        self._batch_adding = True
+        try:
+            for name, ref in invalid_src.items():
+                if name in self.curves:
+                    continue
+                self.demote_to_invalid(
+                    name,
+                    getattr(ref, "color", INVALID_CURVE_COLOR)
+                    or INVALID_CURVE_COLOR,
+                    bool(getattr(ref, "visible_preference", True)),
+                    display_name=getattr(ref, "display_name", "") or "",
+                    factor=float(getattr(ref, "factor", 1.0)),
+                    offset=float(getattr(ref, "offset", 0.0)),
+                )
+        finally:
+            self._batch_adding = prev_batch
 
         # 2) 曲线批量复制（保序）
         names = list(getattr(source, "curves", {}) or {})

@@ -125,11 +125,14 @@ class PlotPage:
     def built_grid_size(self) -> tuple[int, int]:
         """已建网格规模（rows, cols）。
 
-        不变量：``_built_rows/_built_cols == 0`` ⇔ 本页从未建过矩阵
-        （``build_matrix`` 收尾必写两字段，``clear_matrix`` 归零）。复制页
-        必须按这个规模建网格：可见行列可能小于已建网格（缩列只隐藏不销毁
-        容器），按可见行列建会让隐藏格的曲线错位或丢失。
+        复制页必须按这个规模建网格：可见行列可能小于已建网格（缩列只隐藏
+        不销毁容器），按可见行列建会让隐藏格的曲线错位或丢失。
+
+        空列表一律回落到当前可见行列：``MainWindow.plot_widgets`` 的 setter
+        会直接替换列表而不写 ``_built_*``，此时“未建矩阵”与“清空后”同值。
         """
+        if not self.plot_widgets:
+            return (self.rows_current, self.cols_current)
         return (
             self._built_rows or self.rows_current,
             self._built_cols or self.cols_current,

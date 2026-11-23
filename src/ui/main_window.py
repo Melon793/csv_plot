@@ -491,7 +491,14 @@ class MainWindow(QMainWindow):
                 timer.stop()
         self._pending_crosshair_x = None
         self._mark_stats_dirty = False
+        pending = self._pending_activation
         self._pending_activation = None
+        if pending is not None:
+            # 被丢弃的激活不会再消费复制页的 _copy_x_range：就地清掉，
+            # 否则之后某次无关激活会把视图拉回复制时的旧范围
+            pending_page = pending[0]
+            if getattr(pending_page, "_copy_x_range", None) is not None:
+                pending_page._copy_x_range = None
 
     def _schedule_page_activation(self, page: PlotPage) -> None:
         """parented 单次定时器承载延迟激活（打包环境不用三参 singleShot）。"""
@@ -661,6 +668,7 @@ class MainWindow(QMainWindow):
 
         new_page: PlotPage | None = None
         total_curves = 0
+        total_invalid = 0
         total_failed = 0
         try:
             new_page = self._create_page(
@@ -689,6 +697,13 @@ class MainWindow(QMainWindow):
                 self.plot_tabs.blockSignals(False)
 
             new_page.ensure_matrix(built_rows, built_cols)
+            if len(new_page.plot_widgets) != len(page.plot_widgets):
+                # ensure_matrix 会按 rows_max/cols_max 夹取：规模不一致时
+                # zip 会静默截断丢曲线，宁可走回滚
+                raise RuntimeError(
+                    "复制页网格规模不一致: "
+                    f"{len(new_page.plot_widgets)} != {len(page.plot_widgets)}"
+                )
             for src_container, dst_container in zip(
                 page.plot_widgets, new_page.plot_widgets
             ):
@@ -699,6 +714,9 @@ class MainWindow(QMainWindow):
                 result = dst_pw.copy_curves_from(src_pw)
                 total_curves += len(result.added)
                 total_failed += len(result.failed)
+                total_invalid += len(
+                    getattr(src_pw, "invalid_curves", None) or {}
+                )
 
             # 还原可见区（多余格隐藏；页内 XLink 与行高由既有入口处理）
             new_page.apply_visibility(page.rows_current, page.cols_current)
@@ -727,9 +745,14 @@ class MainWindow(QMainWindow):
         if callable(refresh_stats):
             refresh_stats(immediate=True)
 
-        detail = f"{total_curves} 条曲线" if total_curves else "空白布局"
+        detail_parts: list[str] = []
+        if total_curves:
+            detail_parts.append(f"{total_curves} 条曲线")
+        if total_invalid:
+            detail_parts.append(f"{total_invalid} 项占位")
         if total_failed:
-            detail += f"，{total_failed} 条失败"
+            detail_parts.append(f"{total_failed} 条失败")
+        detail = "，".join(detail_parts) if detail_parts else "空白布局"
         self._broadcast(
             f"已复制「{src_title}」→「{new_page.title}」（{detail}）", "info"
         )
