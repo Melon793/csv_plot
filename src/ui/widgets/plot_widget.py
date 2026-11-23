@@ -37,7 +37,7 @@ from src.ui.drag_visuals import (
 )
 from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
 from src.ui.transfer_broadcast import announce_selection, broadcast_transfer
-from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL)
+from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -1293,6 +1293,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         batch: bool | None = None,
         scene: bool = True,
         action_label: str = "移动",
+        visibility_now: bool = False,
+        sync_min_xrange: bool = True,
     ) -> TransferResult:
         """曲线搬运共享助手（legend list-of-1 / 暂存区 / P1 批量共用）。
 
@@ -1312,6 +1314,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 场景尾，收尾由 ``_finalize_batch_add(scene=False)`` 独占。
                 此时强制 batch=True，避免单条路径绕过收尾。
             action_label: 仅日志语义，保留调用语境
+            visibility_now: ``True`` 供整页复制：隐藏色就地落地（写
+                ``ci.visible`` + ``setVisible``），不排 0ms 定时器——保证
+                随后的 ``_finalize_batch_add`` 计算 Y/图例时已排除隐藏曲线
+            sync_min_xrange: 透传给 ``_finalize_batch_add``；整页复制传
+                ``False``，由调用方在所有格子完成后统一同步一次
 
         Returns:
             TransferResult（added / merged / skipped / failed）
@@ -1362,13 +1369,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     result.failed.append(name)
                     continue
                 result.added.append(name)
-                self._apply_transfer_style(name, style)
+                self._apply_transfer_style(
+                    name, style, visibility_now=visibility_now
+                )
 
             if batch and result.added:
                 # 唯一权威收尾：补偿批量模式跳过的 header/轴/vline/密度，
                 # 合并 emit（不逐条触发 legend/编辑器重建）。scene=False
                 # 时改走信号阻断 + 标脏，场景留到切页 restore_scene。
-                self._multi_curve_manager._finalize_batch_add(scene=scene)
+                self._multi_curve_manager._finalize_batch_add(
+                    scene=scene, sync_min_xrange=sync_min_xrange
+                )
         finally:
             if batch:
                 self._batch_adding = False
@@ -1392,6 +1403,62 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             "[TRANSFER] %s: requested=%s added=%s merged=%s skipped=%s failed=%s",
             action_label, result.requested, result.added, result.merged,
             result.skipped, result.failed,
+        )
+        return result
+
+    def copy_curves_from(
+        self, source: Any, *, action_label: str = "复制绘图页"
+    ) -> TransferResult:
+        """把 ``source`` 的曲线与占位按样式快照复制到本图。
+
+        调用前提：本图属于**非活动页**（``scene=False`` 的批量路径）。
+        顺序对齐 reload：先 demote 占位（让收尾的图例包含占位行）→ 再批量
+        画曲线（可见性就地落地、抑制逐格 minXRange 同步）→ 纯占位格补刷。
+
+        保真范围：颜色/可见性/绘制方式(+来源)/symbol 策略/线型预设/显示名/
+        线性换算；曲线名顺序按源 ``curves`` 插入序。
+        """
+        invalid_src = dict(getattr(source, "invalid_curves", {}) or {})
+        # 1) 占位先落地。源页 curves 与 invalid_curves 互斥，故下方 names
+        #    不会命中刚建立的占位（不会触发 _consume_invalid_ref 复活）。
+        for name, ref in invalid_src.items():
+            if name in self.curves:
+                continue
+            self.demote_to_invalid(
+                name,
+                getattr(ref, "color", INVALID_CURVE_COLOR) or INVALID_CURVE_COLOR,
+                bool(getattr(ref, "visible_preference", True)),
+                display_name=getattr(ref, "display_name", "") or "",
+                factor=float(getattr(ref, "factor", 1.0)),
+                offset=float(getattr(ref, "offset", 0.0)),
+            )
+
+        # 2) 曲线批量复制（保序）
+        names = list(getattr(source, "curves", {}) or {})
+        style_map = {
+            name: CurveStyleSnapshot.from_curve_info(source.curves[name])
+            for name in names
+        }
+        result = self._transfer_curves(
+            names,
+            style_map=style_map,
+            on_duplicate="skip",
+            quiet=True,
+            scene=False,
+            action_label=action_label,
+            visibility_now=True,
+            sync_min_xrange=False,
+        )
+
+        # 3) 纯占位格：transfer 无 added 时不 finalize/emit，这里补一次
+        if invalid_src and not result.added:
+            self._update_header_for_curves()
+            self.curves_changed.emit()
+
+        # 4) 颜色游标只增不减：复制页后续新加曲线的取色与源页同轨
+        self.current_color_index = max(
+            int(getattr(self, "current_color_index", 0)),
+            int(getattr(source, "current_color_index", 0)),
         )
         return result
 
@@ -1419,12 +1486,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         )
         return "merge" if reply == QMessageBox.StandardButton.Yes else "skip"
 
-    def _apply_transfer_style(self, name: str, style: Any) -> None:
+    def _apply_transfer_style(
+        self, name: str, style: Any, *, visibility_now: bool = False
+    ) -> None:
         """把快照样式落到目标曲线（颜色已由 preferred_color 通道传入）。
 
         Blocking 2：``apply_curve_draw_mode`` 会把 ``draw_mode_source`` 强制
         钉成 'user'，落完必须回写快照值，否则 'auto' 被误钉、改变 reload
         后行为；整批的 emit 合并由 ``_batch_adding`` 抑制 + 收尾统一 emit。
+        ``visibility_now=True`` 供整页复制：隐藏态就地落地，不排延迟定时器。
         """
         if style is None:
             return
@@ -1472,7 +1542,22 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             mcm.apply_curve_transform(name, want_f, want_o, allow_y_rescue=False)
 
         if getattr(style, "visible", True) is False:
-            self._schedule_visibility_restore(name, False)
+            if visibility_now:
+                # 整页复制：就地落地。_schedule_visibility_restore 是 0ms
+                # 定时器，会让随后的 _finalize_batch_add 把隐藏曲线计入 Y/图例
+                ci_now = self.curves.get(name)
+                if ci_now is not None:
+                    ci_now.visible = False
+                    curve_now = getattr(ci_now, "curve", None)
+                    if curve_now is not None:
+                        try:
+                            curve_now.setVisible(False)
+                        except Exception:
+                            logger.debug(
+                                "复制落地可见性失败: %s", name, exc_info=True
+                            )
+            else:
+                self._schedule_visibility_restore(name, False)
 
     def _plot_badge_label(self) -> str:
         """反算本图徽章「页N·图M」（播报用；不可用返回空串）。"""
