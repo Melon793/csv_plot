@@ -3,7 +3,7 @@
 - L2 抽屉 chip 唯一手动入口同规格播报（main 收口撤菜单/快捷键）；
 - D2：自动缩放按钮置灰 + 快捷键槽守卫 + auto_range_page 入口守卫；
 - D3：锁定切页各页保留冻结窗口，saved_x_range 跳过分支同样被消费，
-  解锁后跟随恢复；
+  解锁后跟随恢复；空页无窗口可冻结，激活时照常继承来源页范围；
 - D4：reload / 时间修正 / 模板应用 / reset_plot 四入口自动解锁+播报。
 
 交互流（滚轮/拖动/框选）在 test_x_lock_flow.py（C3）。
@@ -16,6 +16,7 @@ from PySide6.QtGui import QDropEvent
 
 from src.ui.drag_drop import build_var_mimedata
 from src.ui.main_window import MainWindow
+from tests.fixtures.waits import settle
 
 # README 陷阱 #2：QDropEvent 不持有 mimeData 所有权，模块级保活
 _keep_alive = []
@@ -181,6 +182,48 @@ def test_d3_locked_page_switch_keeps_frozen_ranges(loaded_window, qtbot, qapp):
     _wait_activation(mw, qtbot)
     qapp.processEvents()
     assert second_pw.view_box.viewRange()[0] == pytest.approx((5, 15), abs=1e-6)
+
+
+def test_d3_locked_empty_new_page_inherits_frozen_window(loaded_window, qtbot, qapp):
+    """锁定下新建页没有自己的窗口：激活即继承来源页，首绘不跳全域。
+
+    覆盖两个可观测阶段：激活时不得停在空 ViewBox 的 0~3 占位范围；
+    第一条曲线落下时不得被 autoRange 拉到全局数据域。
+    """
+    mw = loaded_window
+    first = mw.current_page
+    first_pw = _plot(mw)
+    qtbot.waitUntil(lambda: len(first_pw.curves) == 1, timeout=3000)
+    settle()  # 首绘排队刷新落地，避免随后重开 autoRange
+    first_pw.view_box.enableAutoRange(x=False, y=False)
+    assert first.apply_x_range(10, 20)
+    qapp.processEvents()
+
+    mw.set_x_axis_locked(True)
+    second = mw.new_page()
+    assert second is not None
+    qtbot.waitUntil(lambda: len(second.plot_widgets) > 0, timeout=3000)
+    _wait_activation(mw, qtbot)
+    qapp.processEvents()
+    second_pw = second.plot_widgets[0].plot_widget
+
+    # 阶段 1：空页继承窗口（而不是 0~3 占位），且 X autoRange 已关
+    assert second_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+    assert bool(second_pw.view_box.state["autoRange"][0]) is False
+
+    # 阶段 2：首绘不得把 X 拉到全局数据域
+    mime = build_var_mimedata(["rpm"])
+    _keep_alive.append(mime)
+    second_pw.dropEvent(QDropEvent(
+        QPointF(10.0, 10.0),
+        Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+        mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    ))
+    qtbot.waitUntil(lambda: len(second_pw.curves) == 1, timeout=3000)
+    qapp.processEvents()
+    assert second_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+    assert first_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+    assert mw._x_axis_locked is True
 
 
 # ---------- D4：四入口自动解锁 ----------
