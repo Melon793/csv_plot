@@ -906,6 +906,7 @@ def test_out_of_bounds_release_after_move_cancels(pages):
     outside = dlg.mapToGlobal(QPoint(-60, -60))
     dlg.drag_move(outside)
     assert dlg._drag["target"] is None
+    assert dlg._clamp_to(dlg._board, outside) == QPoint(0, 0)
     dlg.end_drag(outside)
 
     assert [list(page.cells) for page in dlg._state.pages] == before
@@ -1232,6 +1233,46 @@ def test_multi_select_to_tray_kicks_all(pages):
     dlg.end_drag(release)
     assert set(tray.chips) == set(tokens)
     assert set(board.icons) == {"p0:c1"}
+    anchor_anim = tray._anims.get("p0:c0")
+    assert anchor_anim is not None
+    start_tl, target, _duration = _settle_expect_chip(dlg, release, 0)
+    assert anchor_anim.startValue() == start_tl, "anchor chip 必须从松手点起飞"
+    assert anchor_anim.endValue() == target
+    dlg.deleteLater()
+
+
+def test_existing_chip_not_snapped_on_release(pages):
+    """释放刷新不得把既有 chip 瞬移到槽位（spawn_snap 只认新建）。"""
+    from tests.fixtures.waits import settle
+
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board, tray = dlg._board, dlg._tray_panel
+    dlg._selection = {"p0:c0"}
+    dlg._on_kick()
+    settle()
+    dlg._selection = {"p0:c1"}
+    dlg._on_kick()
+    settle()
+    from tests.fixtures.waits import wait_until
+
+    mover, other = "p0:c0", "p0:c1"
+    assert list(tray.chips) == [mover, other]
+    other_slot = tray._chip_target(1)
+    assert wait_until(lambda: tray.chips[other].pos() == other_slot)
+
+    chip = tray.chips[mover]
+    dlg.begin_drag(
+        mover, chip.mapToGlobal(chip.rect().center()), chip, from_tray=True
+    )
+    release = board.mapToGlobal(board.seat_rect(3).center())
+    dlg.drag_move(release)
+    dlg.end_drag(release)
+
+    anim = tray._anims.get(other)
+    assert anim is not None, "既有 chip 应 FLIP 到新槽位"
+    assert anim.startValue() == other_slot, "既有 chip 不得被瞬移"
+    assert anim.endValue() == tray._chip_target(0)
     dlg.deleteLater()
 
 

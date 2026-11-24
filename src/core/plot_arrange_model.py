@@ -225,8 +225,8 @@ def _move_rigid(page: PageState, ids: list[str], seat: int, a_seat: int,
     }
 
 
-def _rigid_eligible(page: PageState, src: list[int], ids: list[str],
-                    seat: int, a_seat: int | None,
+def _rigid_eligible(page: PageState, src: list[int], seat: int,
+                    a_seat: int | None,
                     bounds: tuple[int, int] | None) -> bool:
     if a_seat is None or bounds is None:
         return False
@@ -323,8 +323,9 @@ def move_within(
             "clamped": False,
             "moved": False,
         }
-    if _rigid_eligible(page, src_seats, ids, seat, a_seat, bounds):
-        return _move_rigid(page, ids, seat, a_seat, bounds)  # type: ignore[arg-type]
+    if a_seat is not None and _rigid_eligible(page, src_seats, seat, a_seat, bounds):
+        assert bounds is not None
+        return _move_rigid(page, ids, seat, a_seat, bounds)
     return _move_packed(page, src_seats, ids, seat, a_seat)
 
 

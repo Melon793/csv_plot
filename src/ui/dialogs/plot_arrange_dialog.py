@@ -497,7 +497,7 @@ class _IconBoard(QWidget):
             self._drop_anim(token)
             return
         icon.resize(rect.size())
-        target = rect.topLeft()
+        target = self._icon_target(icon.seat)
         anim = self._anims.get(token)
         if anim is not None and anim.endValue() == target:
             return
@@ -521,7 +521,7 @@ class _IconBoard(QWidget):
         if rect.isNull():
             return 0
         icon.resize(rect.size())
-        target = rect.topLeft()
+        target = self._icon_target(icon.seat)
         start_tl = QPoint(
             start_center.x() - rect.width() // 2,
             start_center.y() - rect.height() // 2,
@@ -1313,6 +1313,8 @@ class PlotArrangeDialog(QDialog):
             )
             if target[0] == "seat":
                 self._board.set_highlight(anchor_seat, reject=False)
+            else:
+                self._board.set_highlight(None)
             text = self._preview_status_text(target, info, len(self._drag["ids"]))
             if text:
                 self._status.setText(text)
