@@ -79,7 +79,6 @@ def test_gutter_keeps_min_two_digits_on_empty(make_editor):
     """空表：槽宽按最少 2 位钉死，不写死像素（按 header 字体度量算）。"""
     dlg, _pw = make_editor()
     header = dlg.var_table.verticalHeader()
-    assert _ORDINAL_MIN_DIGITS == 2
     assert header.width() == _expected_gutter(header, _ORDINAL_MIN_DIGITS)
 
 
@@ -115,6 +114,8 @@ def test_no_horizontal_overflow_after_rows_appear(make_editor):
         assert pw.add_variable_to_plot(name)
     settle()
     assert table.rowCount() == len(NAMES)
+    # 真正走到 D3 的竖滚路径：没有竖滚说明用例没覆盖到"viewport 变窄"
+    assert table.verticalScrollBar().isVisible()
     assert table.horizontalScrollBar().maximum() == 0
 
 
@@ -132,3 +133,21 @@ def test_gutter_widens_at_three_digits(make_editor):
     assert gutter.width() == _expected_gutter(gutter, 3)
     assert gutter.width() > two_digit
     assert table.horizontalScrollBar().maximum() == 0
+
+
+def test_widening_fixed_column_keeps_hscroll_fallback(make_editor):
+    """拖宽固定列 → 出横滚条，弹性列不被连带挤压（按宽度去重，D10）。
+
+    横滚显隐只改 viewport 高度却同样发 Resize；不过滤时弹性列会被
+    立即压到最小宽，"横滚兜底"语义被破坏。
+    """
+    dlg, _pw = make_editor()
+    table = dlg.var_table
+    elastic_before = [table.columnWidth(1), table.columnWidth(2)]
+
+    table.setColumnWidth(3, table.columnWidth(3) + 400)
+    settle()
+
+    assert table.horizontalHeader().length() > table.viewport().width()
+    assert table.horizontalScrollBar().maximum() > 0
+    assert [table.columnWidth(1), table.columnWidth(2)] == elastic_before

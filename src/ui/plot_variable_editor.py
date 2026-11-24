@@ -373,6 +373,10 @@ class PlotVariableEditorDialog(QDialog):
         self._col_min: dict[int, int] = {}
         # viewport 重分布的合并闸：一次布局变化只调度一次 singleShot
         self._redistribute_pending = False
+        # 最近一次分布时的 viewport 宽度：只有"宽度"变了才重分布。
+        # 横滚显隐只改高度（同样发 Resize），不能让拖宽固定列反过来挤压
+        # 弹性列（D10 的横滚兜底语义），故按宽度去重。
+        self._last_viewport_width = -1
 
         # 拖宽后 debounce 存盘（两参 singleShot 口径的 QTimer 实例版；
         # 随 self 销毁自动断开，避免主窗销毁时漏存）
@@ -908,6 +912,7 @@ class PlotVariableEditorDialog(QDialog):
         viewport_w = self.var_table.viewport().width()
         if viewport_w <= 0:
             return
+        self._last_viewport_width = viewport_w
         fixed_sum = sum(
             self.var_table.columnWidth(c)
             for c in range(_COL_COUNT)
@@ -955,18 +960,19 @@ class PlotVariableEditorDialog(QDialog):
             self._distribute_column_widths()
 
     def eventFilter(self, watched, event):
-        """viewport 变宽/变窄 → 重分布列宽（D3）。
+        """viewport 宽度变化 → 重分布列宽（D3）。
 
         覆盖两类不经过对话框 resizeEvent 的宽度变化：行号槽扩档、竖向
         滚动条出现/消失。延后一拍执行，等 Qt 布局落定再按稳定视口重算；
         否则 setColumnWidth 触发滚动条显隐会与本次计算打架。合并闸保证
         拖窗/批量插入时 singleShot 队列不膨胀。
+
+        按**宽度**去重：横滚显隐只改高度却同样发 Resize，不过滤时用户
+        把固定列拖宽会连带把弹性列挤到最小宽，破坏 D10 的横滚兜底语义。
         """
-        if (
-            event.type() == QEvent.Type.Resize
-            and watched is self.var_table.viewport()
-        ):
-            self._schedule_viewport_redistribute()
+        if event.type() == QEvent.Type.Resize and watched is self.var_table.viewport():
+            if self.var_table.viewport().width() != self._last_viewport_width:
+                self._schedule_viewport_redistribute()
         return super().eventFilter(watched, event)
 
     def changeEvent(self, event):
