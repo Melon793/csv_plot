@@ -267,11 +267,7 @@ def fetch_licenses(*, timeout: float = 30.0, verify_ssl: bool = True) -> dict:
 
 def check_only(expected: dict, *, timeout: float = 30.0,
                verify_ssl: bool = True) -> tuple[list[str], list[str]]:
-    """校验模式：只按 manifest 里锁定的 URL 下载/比对，不猜分支、不回写。
-
-    返回 ``(ok, bad)``。任何「文件存在但哈希不符」都必须判失败并删除，
-    让下次 ``--lock`` 重新取 —— 静默沿用被改动的夹具等于把真值交出去。
-    """
+    """只校验本地文件，返回 ``(ok, bad)``；不下载、不删除、不回写。"""
     ok: list[str] = []
     bad: list[str] = []
     for name, entry in sorted(expected.items()):
@@ -282,25 +278,8 @@ def check_only(expected: dict, *, timeout: float = 30.0,
             if got == want:
                 ok.append(name)
                 continue
-            print(f"  ✖ 哈希不符，删除待重取: {name} ({got[:12]}… != {want[:12]}…)")
-            path.unlink(missing_ok=True)
-        url = entry.get("url")
-        if not url:
-            bad.append(name)
-            continue
-        try:
-            data = _fetch(url, timeout=timeout, verify_ssl=verify_ssl)
-        except Exception as e:
-            print(f"  ! 下载失败 {name}: {type(e).__name__}: {e}")
-            bad.append(name)
-            continue
-        got = _sha256(data)
-        if got != want:
-            print(f"  ✖ 远端内容已变，拒绝写入: {name}")
-            bad.append(name)
-            continue
-        path.write_bytes(data)
-        ok.append(name)
+            print(f"  ✖ 哈希不符: {name} ({got[:12]}… != {want[:12]}…)")
+        bad.append(name)
     return ok, bad
 
 
@@ -341,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lock", action="store_true",
                         help="首次生成/刷新 manifest：下载后把实测 sha256 写回")
     parser.add_argument("--check", action="store_true",
-                        help="按既有 manifest 校验（不猜分支、不回写）")
+                        help="只校验本地已有文件，不联网、不写入")
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--skip-licenses", action="store_true")
     parser.add_argument(
@@ -354,30 +333,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.check and args.lock:
         parser.error("--check 与 --lock 互斥")
 
-    DEST.mkdir(parents=True, exist_ok=True)
+    if not args.check:
+        DEST.mkdir(parents=True, exist_ok=True)
     existing = _load_existing_manifest()
     verify_ssl = not args.insecure
     if args.insecure:
         print("⚠ --insecure：已跳过 TLS 证书校验，取回的内容不可视为已验证")
 
     licenses = existing.get("licenses") or {}
-    if not args.skip_licenses:
+    if not args.check and not args.skip_licenses:
         licenses = fetch_licenses(timeout=args.timeout, verify_ssl=verify_ssl) or licenses
 
-    if args.check and existing.get("files"):
-        ok, bad = check_only(existing["files"], timeout=args.timeout,
-                             verify_ssl=verify_ssl)
-        manifest = existing["files"]
-        mode = "check"
+    if args.check:
+        manifest = existing.get("files") or {}
+        ok, bad = check_only(manifest)
         print(f"校验：{len(ok)} 通过 / {len(bad)} 缺失或失败")
-    else:
-        manifest = build(timeout=args.timeout, verify_ssl=verify_ssl)
-        if not manifest:
-            print("✖ 一个文件都没取到（无网络？），manifest 保持原样")
-            return 1
-        mode = "lock" if args.lock else "fetch"
-        write_manifest(manifest, licenses)
-        print(f"已写入 {MANIFEST_PATH.relative_to(REPO_ROOT)}（{len(manifest)} 条）")
+        print(json.dumps({"mode": "check", "requested": len(manifest),
+                          "fetched": 0, "ok": ok, "bad": bad}, ensure_ascii=False))
+        return int(bool(bad) or not manifest)
+
+    manifest = build(timeout=args.timeout, verify_ssl=verify_ssl)
+    if not manifest:
+        print("✖ 一个文件都没取到（无网络？），manifest 保持原样")
+        return 1
+    mode = "lock" if args.lock else "fetch"
+    write_manifest(manifest, licenses)
+    print(f"已写入 {MANIFEST_PATH.relative_to(REPO_ROOT)}（{len(manifest)} 条）")
 
     write_report(manifest, licenses, mode=mode)
     return 0
