@@ -377,6 +377,7 @@ class PlotVariableEditorDialog(QDialog):
         # PySide6默认支持高DPI，通过样式表控制字体大小
 
         self.setup_ui()
+        self._refresh_identity()
         self.load_current_curves()
         # 几何恢复放在数据填充后：初始宽按实际列宽计算
         self._restore_geometry()
@@ -385,12 +386,12 @@ class PlotVariableEditorDialog(QDialog):
         """设置UI界面"""
         layout = QVBoxLayout()
 
-        # 标题
-        title_label = QLabel("绘图变量编辑器")
-        title_label.setStyleSheet(
-            "font-size: 16px; font-weight: bold; margin-bottom: 15px;"
-        )
-        layout.addWidget(title_label)
+        # 顶部身份行：窗口标题已给出名称，这里只回答「我是哪个页、哪个格子」。
+        # 12px 次要文字；解析不到时整行隐藏（不留占位、不写"未知绘图区"）。
+        self.identity_label = QLabel()
+        self.identity_label.setStyleSheet(theme.muted_text())
+        self.identity_label.setVisible(False)
+        layout.addWidget(self.identity_label)
 
         # ===== 内嵌搜索栏 =====
         # 数据源：从主窗口获取 var_names 与 data_validity；units 用 plot_widget.units（与现有 _add_variable_to_table 一致）
@@ -584,6 +585,72 @@ class PlotVariableEditorDialog(QDialog):
         # 性能优化（方案 A）：改走增量更新，仅增删变化行；复杂场景内部回退全量重建
         self.plot_widget.curves_changed.connect(self._on_curves_changed_incremental)
 
+    def _refresh_identity(self) -> None:
+        """刷新顶部身份行（无可用身份时整行隐藏，不写占位文字）。
+
+        tooltip 始终给全文：身份行没有省略号，超长页名会被布局硬裁，
+        悬停是唯一的完整出口（D6）。
+        """
+        text = self._plot_identity_text()
+        self.identity_label.setText(text)
+        self.identity_label.setToolTip(text)
+        self.identity_label.setVisible(bool(text))
+
+    def _plot_identity_text(self) -> str:
+        """本窗口所属「页名 · 位次」；无法解析时返回空串。
+
+        位次取 QGridLayout 的真实格位（行/列 1 起算），与屏幕上的格子一一
+        对应；按网格形状退化：1×1 只给页名，单行只给列，单列只给行，多行
+        多列才写全「第 m 行 第 n 列」（行/列之间只留一个空格，不加标点，
+        避免和页名后的「·」形成两级分隔符）。页名用 page.title，与页签同源，
+        重命名后自动跟随。
+
+        反查口径与 PlotWidget._plot_badge_label_for 的「页N·图M」一致，只是
+        这里用页名 + 行列而非序数。注意：本类自身是 Tool 顶层窗，
+        self.window() 返回自己，必须经 plot_widget.window() 取宿主（同
+        refresh_data_source 的说明）。
+        """
+        pw = self.plot_widget
+        page = getattr(pw, "page", None)
+        if pw is None or page is None:
+            return ""
+        try:
+            host = pw.window()
+            page_index_of = getattr(host, "page_index", None)
+            if not callable(page_index_of) or page_index_of(page) < 0:
+                return ""
+            layout = getattr(page, "plot_layout", None)
+            position = None
+            for container in getattr(page, "plot_widgets", ()):
+                if getattr(container, "plot_widget", None) is not pw:
+                    continue
+                index = layout.indexOf(container) if layout is not None else -1
+                if index >= 0:
+                    row, col, _row_span, _col_span = layout.getItemPosition(index)
+                    position = (
+                        row + 1,
+                        col + 1,
+                        layout.rowCount(),
+                        layout.columnCount(),
+                    )
+                break
+        except RuntimeError:
+            # plot/页 的 C++ 对象已销毁（子图关掉/重建）：静默隐藏
+            return ""
+        if position is None:
+            return ""
+        row, col, rows, cols = position
+        if rows <= 1 and cols <= 1:
+            place = ""
+        elif rows <= 1:
+            place = f"第 {col} 列"
+        elif cols <= 1:
+            place = f"第 {row} 行"
+        else:
+            place = f"第 {row} 行 第 {col} 列"
+        title = str(getattr(page, "title", "") or "").strip()
+        return " · ".join(part for part in (title, place) if part)
+
     def _focus_search_bar(self):
         """⌘F / Ctrl+F / Insert：焦点切到搜索栏并全选文本"""
         if self.search_bar is not None:
@@ -602,6 +669,9 @@ class PlotVariableEditorDialog(QDialog):
         存活检查：subplot 关闭/重建场景下 plot_widget 的 C++ 对象可能已销毁，
         此时静默跳过本实例，避免阻断其他实例的更新。
         """
+        # 身份行顺带校正（打开时已算过一次；这里兜住重载期间页名/页序变化，
+        # 且不依赖搜索栏是否建成）
+        self._refresh_identity()
         if self.search_bar is None:
             return
         pw = self.plot_widget
