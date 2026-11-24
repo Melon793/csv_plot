@@ -857,6 +857,79 @@ class TestRestoreIdentityRegressions:
         assert remap2 == {}
         assert demoted2 == []
 
+    @pytest.mark.parametrize("reverse", [False, True], ids=["a-first", "b-first"])
+    def test_r1_renamed_curve_does_not_release_literal_name_to_another_curve(self, reverse):
+        """整批真实曲线解析期间，改名旧名仍属全局预留，不得被后一曲线链式抢占。"""
+        a = PlotConfig(
+            curves=["A_G0"],
+            curve_identities={"A_G0": mdf_identity("A", device="Demo_A")},
+        )
+        b = PlotConfig(
+            curves=["B_G0"],
+            curve_identities={"B_G0": mdf_identity("B", device="Demo_B")},
+        )
+        pages = [
+            PlotPageConfig(title="a", plots=[a]),
+            PlotPageConfig(title="b", plots=[b]),
+        ]
+        if reverse:
+            pages.reverse()
+        cfg = PlotSessionConfig(pages=pages)
+        loader = FakeLoader({
+            "A_G0": mdf_info("B", device="Demo_B"),
+            "B_G0": mdf_info("C", device="Demo_C"),
+            "C_G0": mdf_info("A", device="Demo_A"),
+        })
+
+        resolved, remap, demoted = resolve_identities(cfg, loader)
+        by_title = {page.title: page.plots[0] for page in resolved.pages}
+
+        assert remap == {"A_G0": "C_G0"}
+        assert by_title["a"].curves == ["C_G0"]
+        assert by_title["b"].curves == []
+        assert by_title["b"].invalid_curves == ["B_G0"]
+        assert demoted == ["B_G0"]
+
+    def test_r3_shared_plot_object_is_resolved_once_without_metadata_loss(self, monkeypatch):
+        """权威页共享同一 Plot 对象时只解析一次，不能二次处理同一份元数据。"""
+        import src.core.template_identity as identity_module
+
+        resolved_names: list[str] = []
+        real_resolve = identity_module._Resolver.resolve_curve
+
+        def record_resolve(self, name, *args, **kwargs):
+            resolved_names.append(name)
+            return real_resolve(self, name, *args, **kwargs)
+
+        monkeypatch.setattr(identity_module._Resolver, "resolve_curve", record_resolve)
+        shared = PlotConfig(
+            curves=["Press_G0"],
+            curve_settings={"Press_G0": {"display_name": "压力", "factor": 2.0}},
+            curve_identities={
+                "Press_G0": mdf_identity("Press", "bar", "Dev1"),
+            },
+        )
+        cfg = PlotSessionConfig(pages=[
+            PlotPageConfig(title="first", plots=[shared]),
+            PlotPageConfig(title="second", plots=[shared]),
+        ])
+        loader = FakeLoader({"Press_G0": mdf_info("Press", "bar", "Dev1")})
+
+        resolved, remap, demoted = resolve_identities(cfg, loader)
+
+        assert remap == {}
+        assert demoted == []
+        assert resolved_names == ["Press_G0"]
+        for page in resolved.pages:
+            plot = page.plots[0]
+            assert plot.curves == ["Press_G0"]
+            assert plot.curve_settings == {
+                "Press_G0": {"display_name": "压力", "factor": 2.0},
+            }
+            assert plot.curve_identities == {
+                "Press_G0": mdf_identity("Press", "bar", "Dev1"),
+            }
+
     def test_r3_v2_pages_are_authoritative_and_sync_v1_fallback_view(self):
         """顶层 v1 回退视图与 pages 分歧时，不参与 remap/demoted/统计。"""
         from src.core.template_identity import merge_demoted

@@ -358,11 +358,14 @@ class _Resolver:
 
 
 def _iter_unique_plots(config: PlotSessionConfig):
-    """只遍历权威视图：v2 pages，v1 回退 plots。"""
-    for page in config.pages:
-        yield from page.plots
-    if not config.pages:
-        yield from config.plots
+    """只遍历权威视图：v2 pages，v1 回退 plots，并按对象身份去重。"""
+    seen: set[int] = set()
+    pages = config.pages if config.pages else [None]
+    for page in pages:
+        for plot in page.plots if page is not None else config.plots:
+            if id(plot) not in seen:
+                seen.add(id(plot))
+                yield plot
 
 
 def _rename_metadata(values, local: dict[str, str]):
@@ -423,7 +426,7 @@ def resolve_identity_snapshot(config: PlotSessionConfig, loader) -> ResolvedIden
             _record_remap(name, new)
             if new != name:
                 local[name] = new
-            if dem or new != name:
+            if dem:
                 resolver.release(name)
             if new in new_curves:
                 logger.warning("单格重复 resolved name，跳过曲线: %s", new)
@@ -434,6 +437,12 @@ def resolve_identity_snapshot(config: PlotSessionConfig, loader) -> ResolvedIden
             else:
                 new_curves.append(new)
         curve_results[id(plot)] = (new_curves, demoted_here, local)
+
+    for plot in plots:
+        _new_curves, demoted_here, local = curve_results[id(plot)]
+        for name, new in local.items():
+            if name != new and name not in demoted_here:
+                resolver.release(name)
 
     for plot in plots:
         identities = plot.curve_identities or {}
