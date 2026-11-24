@@ -70,6 +70,19 @@ CHIP_W = 150
 CHIP_H = 42
 CHIP_GAP = 7
 TRAY_PAD = 10
+# 松手收拢：按 topLeft 距离定时；3px 内视为已落位（避免 2→3px 时 0→70ms 跳变）
+SETTLE_SPEED_PX_PER_MS = 2.0
+SETTLE_MIN_MS = 70
+SETTLE_MAX_MS = 260
+SETTLE_SNAP_PX = 3.0
+
+
+def _settle_ms(dist: float) -> int:
+    if dist <= SETTLE_SNAP_PX:
+        return 0
+    return int(
+        min(SETTLE_MAX_MS, max(SETTLE_MIN_MS, dist / SETTLE_SPEED_PX_PER_MS))
+    )
 
 _ACCENT = "#1658DB"
 _ACCENT_SOFT = "#E8EFFC"
@@ -417,8 +430,18 @@ class _IconBoard(QWidget):
             painter.drawRect(self._rubber_rect)
 
     # ---- icon 生命周期 ----
+    def _icon_rect(self, seat: int) -> QRect:
+        """icon 的真实落位矩形（格位内缩 3px），落位/收拢同源。"""
+        rect = self.seat_rect(seat)
+        if rect.isNull():
+            return QRect()
+        return rect.adjusted(3, 3, -3, -3)
+
+    def _icon_target(self, seat: int) -> QPoint:
+        return self._icon_rect(seat).topLeft()
+
     def sync(self, page: PageState, selection: set[str], exclude: set[str] = frozenset(),
-             animate: bool = True) -> None:
+             animate: bool = True, spawn_snap: bool = False) -> None:
         self._page_override = page
         displayed = {seat for _row, _col, seat in self._display_seats()}
         needed = {
@@ -436,33 +459,45 @@ class _IconBoard(QWidget):
             if token is None or token in exclude:
                 continue
             icon = self.icons.get(token)
-            if icon is None:
+            is_new = icon is None
+            if is_new:
                 names = self._dialog.token_names(token)
                 icon = _PlotIcon(token, names, seat, self._dialog)
                 self.icons[token] = icon
                 icon.show()
             icon.set_seat(seat)
             icon.set_selected(token in selection)
-            target = self.seat_rect(seat).adjusted(3, 3, -3, -3).topLeft()
-            self._place(icon, token, target, animate)
+            if spawn_snap and is_new:
+                # 本轮新建的 widget 直接出生在目标位，不从 (0,0) 起飞；
+                # 既有 widget 一律走正常动画，不能被顺手瞬移
+                rect = self._icon_rect(seat)
+                self._drop_anim(token)
+                if rect.isNull():
+                    icon.hide()
+                else:
+                    icon.resize(rect.size())
+                    icon.move(rect.topLeft())
+                continue
+            self._place(icon, token, animate)
         self.update()
 
     def _page(self):  # type: ignore[override]
         override = getattr(self, "_page_override", None)
         return override if override is not None else self._dialog.current_page_state()
 
-    def _place(self, icon: _PlotIcon, token: str, target: QPoint, animate: bool) -> None:
+    def _place(self, icon: _PlotIcon, token: str, animate: bool) -> None:
         """落位：终点未变不动画；跨目标从当前 pos retarget；旧动画显式销毁。
 
         旧实现每次 move 都新建 QPropertyAnimation 且只 stop 不 deleteLater，
         一次拖拽会累积上百个 QObject（评审确认的泄漏），这里统一清掉。
         """
-        rect = self.seat_rect(icon.seat)
+        rect = self._icon_rect(icon.seat)
         if rect.isNull():
             icon.hide()
             self._drop_anim(token)
             return
-        icon.resize(rect.adjusted(3, 3, -3, -3).size())
+        icon.resize(rect.size())
+        target = rect.topLeft()
         anim = self._anims.get(token)
         if anim is not None and anim.endValue() == target:
             return
@@ -471,13 +506,51 @@ class _IconBoard(QWidget):
             icon.move(target)
             return
         self._drop_anim(token)
-        anim = QPropertyAnimation(icon, b"pos", self)
-        anim.setDuration(ANIM_MS)
+        self._run_anim(token, icon, icon.pos(), target, ANIM_MS)
+
+    def settle_token(self, token: str, start_center: QPoint) -> int:
+        """松手收拢：从松手点（容器坐标、已夹取）按距离收拢到最终格。
+
+        起点与终点统一在 topLeft 空间比较，避免中心→topLeft 混算偏半格。
+        返回动画时长（0 = 距离≈0 直接落位）。
+        """
+        icon = self.icons.get(token)
+        if icon is None:
+            return 0
+        rect = self._icon_rect(icon.seat)
+        if rect.isNull():
+            return 0
+        icon.resize(rect.size())
+        target = rect.topLeft()
+        start_tl = QPoint(
+            start_center.x() - rect.width() // 2,
+            start_center.y() - rect.height() // 2,
+        )
+        duration = _settle_ms(math.hypot(target.x() - start_tl.x(),
+                                         target.y() - start_tl.y()))
+        self._drop_anim(token)
+        if duration == 0:
+            icon.move(target)
+            return 0
+        self._run_anim(token, icon, start_tl, target, duration)
+        return duration
+
+    def _run_anim(self, token: str, widget: QWidget, start: QPoint,
+                  end: QPoint, duration: int) -> None:
+        anim = QPropertyAnimation(widget, b"pos", self)
+        anim.setDuration(duration)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.setStartValue(icon.pos())
-        anim.setEndValue(target)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.finished.connect(lambda t=token, a=anim: self._on_anim_finished(t, a))
         anim.start()
         self._anims[token] = anim
+
+    def _on_anim_finished(self, token: str, anim: QPropertyAnimation) -> None:
+        if self._anims.get(token) is not anim:
+            return
+        self._anims.pop(token, None)
+        anim.deleteLater()
 
     def _drop_anim(self, token: str) -> None:
         anim = self._anims.pop(token, None)
@@ -497,14 +570,16 @@ class _IconBoard(QWidget):
         self._dialog._last_preview_sig = None
         page = self._page()
         for token, icon in self.icons.items():
+            # 几何一变即掉动画：继续播会把 icon 停在旧格位上
+            self._drop_anim(token)
             seat = icon.seat
             if 0 <= seat < page.rows * page.cols:
-                rect = self.seat_rect(seat)
+                rect = self._icon_rect(seat)
                 if rect.isNull():
                     icon.hide()
                     continue
                 icon.show()
-                icon.setGeometry(rect.adjusted(3, 3, -3, -3))
+                icon.setGeometry(rect)
         self._dialog.replay_drag_preview()
 
     # ---- 框选 ----
@@ -566,8 +641,56 @@ class _TrayPanel(QWidget):
             anim.stop()
             anim.deleteLater()
 
+    def _on_anim_finished(self, token: str, anim: QPropertyAnimation) -> None:
+        if self._anims.get(token) is not anim:
+            return
+        self._anims.pop(token, None)
+        anim.deleteLater()
+
+    def _run_anim(self, token: str, widget: QWidget, start: QPoint,
+                  end: QPoint, duration: int) -> None:
+        anim = QPropertyAnimation(widget, b"pos", self)
+        anim.setDuration(duration)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.finished.connect(lambda t=token, a=anim: self._on_anim_finished(t, a))
+        anim.start()
+        self._anims[token] = anim
+
+    def _chip_target(self, index: int) -> QPoint:
+        """第 index 个 chip 的槽位 topLeft（按当前宽度换行）。"""
+        inner = max(1, self.width() - 2 * TRAY_PAD)
+        cols = max(1, (inner + CHIP_GAP) // (CHIP_W + CHIP_GAP))
+        row, col = divmod(index, cols)
+        return QPoint(
+            TRAY_PAD + col * (CHIP_W + CHIP_GAP),
+            TRAY_PAD + row * (CHIP_H + CHIP_GAP),
+        )
+
+    def settle_token(self, token: str, start_center: QPoint) -> int:
+        """松手收拢：chip 从松手点（容器坐标、已夹取）按距离滑入槽位。"""
+        chip = self.chips.get(token)
+        if chip is None:
+            return 0
+        target = self._chip_target(list(self.chips).index(token))
+        chip.resize(CHIP_W, CHIP_H)
+        start_tl = QPoint(
+            start_center.x() - CHIP_W // 2,
+            start_center.y() - CHIP_H // 2,
+        )
+        duration = _settle_ms(math.hypot(target.x() - start_tl.x(),
+                                         target.y() - start_tl.y()))
+        self._drop_anim(token)
+        if duration == 0:
+            chip.move(target)
+            return 0
+        self._run_anim(token, chip, start_tl, target, duration)
+        return duration
+
     def sync(self, state: ArrangeState, exclude: set[str] = frozenset(),
-             animate: bool = True) -> None:
+             animate: bool = True, spawn_snap: bool = False) -> None:
+        new_tokens: set[str] = set()
         for token in list(self.chips):
             if token not in state.tray and token not in exclude:
                 chip = self.chips.pop(token)
@@ -581,21 +704,24 @@ class _TrayPanel(QWidget):
                 chip = _TrayChip(token, self._dialog.token_names(token), self._dialog)
                 self.chips[token] = chip
                 chip.show()
-        self._arrange(animate, exclude)
+                new_tokens.add(token)
+        self._arrange(
+            animate, exclude, snap=new_tokens if spawn_snap else frozenset()
+        )
 
-    def _arrange(self, animate: bool, exclude: set[str] = frozenset()) -> None:
-        inner = max(1, self.width() - 2 * TRAY_PAD)
-        cols = max(1, (inner + CHIP_GAP) // (CHIP_W + CHIP_GAP))
+    def _arrange(self, animate: bool, exclude: set[str] = frozenset(),
+                 snap: set[str] = frozenset()) -> None:
         for index, token in enumerate(self.chips):
             if token in exclude:  # 拖拽源保持原位（与棋盘侧一致）
                 continue
             chip = self.chips[token]
-            row, col = divmod(index, cols)
-            target = QPoint(
-                TRAY_PAD + col * (CHIP_W + CHIP_GAP),
-                TRAY_PAD + row * (CHIP_H + CHIP_GAP),
-            )
+            target = self._chip_target(index)
             chip.resize(CHIP_W, CHIP_H)
+            if token in snap:
+                # 本轮新建的 chip 直接出生在槽位，不从 (0,0) 起飞
+                self._drop_anim(token)
+                chip.move(target)
+                continue
             anim = self._anims.get(token)
             if anim is not None and anim.endValue() == target:
                 continue
@@ -604,20 +730,21 @@ class _TrayPanel(QWidget):
                 chip.move(target)
                 continue
             self._drop_anim(token)
-            anim = QPropertyAnimation(chip, b"pos", self)
-            anim.setDuration(ANIM_MS)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            anim.setStartValue(chip.pos())
-            anim.setEndValue(target)
-            anim.start()
-            self._anims[token] = anim
+            self._run_anim(token, chip, chip.pos(), target, ANIM_MS)
         if self._frozen:
             return
-        rows = max(1, math.ceil(len(self.chips) / cols)) if self.chips else 1
+        rows = (
+            max(1, math.ceil(len(self.chips) / self._chip_cols()))
+            if self.chips else 1
+        )
         wanted = TRAY_PAD * 2 + rows * CHIP_H + (rows - 1) * CHIP_GAP + 16
         if self.minimumHeight() != wanted:
             self.setMinimumHeight(wanted)
             self.updateGeometry()
+
+    def _chip_cols(self) -> int:
+        inner = max(1, self.width() - 2 * TRAY_PAD)
+        return max(1, (inner + CHIP_GAP) // (CHIP_W + CHIP_GAP))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -719,7 +846,7 @@ class PlotArrangeDialog(QDialog):
         buttons.addWidget(self._btn_reset)
         buttons.addStretch(1)
         self._btn_cancel = QPushButton("取消", self)
-        self._btn_cancel.clicked.connect(self.reject)
+        self._btn_cancel.clicked.connect(self._on_cancel_clicked)
         self._btn_ok = QPushButton("确定", self)
         self._btn_ok.setDefault(True)
         self._btn_ok.clicked.connect(self._on_accept)
@@ -763,6 +890,8 @@ class PlotArrangeDialog(QDialog):
         扩可见区会补建新格（矩阵只增不减），行优先下标因此漂移；token id
         与格位解耦，这里按真实 (row, col) 重铺 cells，不丢托盘与选择。
         """
+        if self._drag is not None:
+            return
         snapshot_page = self._snapshot.pages[self._page_index]
         opener = getattr(
             getattr(self.parent(), "layout_manager", None),
@@ -835,6 +964,13 @@ class PlotArrangeDialog(QDialog):
         return page.rows > page.vis_rows or page.cols > page.vis_cols
 
     def _on_show_hidden_toggled(self, checked: bool) -> None:
+        if self._drag is not None:
+            # 拖拽期不切展示区：回滚复选框，不写 setting、不刷新
+            box = self._show_hidden_box
+            box.blockSignals(True)
+            box.setChecked(not checked)
+            box.blockSignals(False)
+            return
         try:
             from src.core.settings import AppSettings
 
@@ -849,11 +985,19 @@ class PlotArrangeDialog(QDialog):
     # ------------------------------------------------------------------
     # 渲染
     # ------------------------------------------------------------------
-    def _refresh(self, animate: bool = True) -> None:
+    def display_bounds(self) -> tuple[int, int]:
+        """当前展示区行列：显示隐藏区开=整网格，关=可见矩形。"""
+        return self._board._display_bounds()
+
+    def _refresh(self, animate: bool = True, spawn_snap: bool = False) -> None:
         self._last_preview_sig = None
         page = self.current_page_state()
-        self._board.sync(page, self._selection, animate=animate)
-        self._tray_panel.sync(self._state, animate=animate)
+        self._board.sync(
+            page, self._selection, animate=animate, spawn_snap=spawn_snap
+        )
+        self._tray_panel.sync(
+            self._state, animate=animate, spawn_snap=spawn_snap
+        )
         self._refresh_buttons()
         self._refresh_tab_texts()
         self._refresh_caption()
@@ -923,6 +1067,8 @@ class PlotArrangeDialog(QDialog):
     def _on_tab_changed(self, index: int) -> None:
         if not (0 <= index < len(self._state.pages)):
             return
+        # 必须在改 _page_index 之前取消：预览/收拢是按旧页格位算的
+        self._cancel_drag()
         self._page_index = index
         self._selection.clear()
         self._anchor = None
@@ -986,6 +1132,11 @@ class PlotArrangeDialog(QDialog):
             ids = [t for t in ordered_ids(self.current_page_state())
                    if t in self._selection]
         top_left = widget.mapToGlobal(QPoint(0, 0))
+        # 先掉该 token 的旧动画，避免暗化 icon 在浮影背后继续滑
+        if from_tray:
+            self._tray_panel._drop_anim(token)
+        else:
+            self._board._drop_anim(token)
         # 原位 icon 变暗留在格子里（拖拽源提示），跟手的是独立浮影；
         # 不搬本体可避免"原图卡在标题/边界上"的观感问题
         dim = QGraphicsOpacityEffect(widget)
@@ -998,6 +1149,8 @@ class PlotArrangeDialog(QDialog):
         self._tray_panel.set_frozen(True)  # 拖拽期冻结托盘高度，避免几何反馈环
         self._drag = {
             "ids": ids,
+            "anchor": token,
+            "bounds": self.display_bounds(),
             "from": "tray" if from_tray else "grid",
             "widget": widget,
             "ghost": ghost,
@@ -1122,9 +1275,11 @@ class PlotArrangeDialog(QDialog):
         if preview is not None and ok:
             self._board.sync(
                 preview.pages[self._page_index], self._selection,
-                exclude=exclude, animate=True,
+                exclude=exclude, animate=True, spawn_snap=True,
             )
-            self._tray_panel.sync(preview, exclude=exclude, animate=True)
+            self._tray_panel.sync(
+                preview, exclude=exclude, animate=True, spawn_snap=True
+            )
             if target[0] == "seat":
                 self._board.set_highlight(target[1], reject=False)
             if info.get("swapped"):
@@ -1173,6 +1328,7 @@ class PlotArrangeDialog(QDialog):
             return
         ghost = drag.get("ghost")
         if ghost is not None:
+            ghost.hide()
             ghost.deleteLater()
         widget = drag.get("widget")
         if widget is not None:
@@ -1191,30 +1347,68 @@ class PlotArrangeDialog(QDialog):
         # 硬不变量：落位目标 = 最后展示的预览目标（不重算，避免"预览要落位、
         # 松手却落空/换目标"）
         target = drag.get("target")
+        anchor = drag.get("anchor")
+        token = getattr(drag.get("widget"), "token", None)
         self._drag = None
         self._last_preview_sig = None
         preview, ok, _info = self._preview_with(drag, target)
         widget = drag["widget"]
         ghost = drag.get("ghost")
         if ghost is not None:
+            ghost.hide()
             ghost.deleteLater()
         widget.setGraphicsEffect(None)
+        # 删源 widget 前先掉动画，统一用 widget.token（多选时 ids[0] 未必是被按下的）
+        if token is not None:
+            if drag["from"] == "tray":
+                self._tray_panel._drop_anim(token)
+            else:
+                self._board._drop_anim(token)
         if ok and preview is not None:
             self._state = preview
             self._selection = {
                 t for t in self._selection if t in ordered_ids(self.current_page_state())
             }
-        self._board.set_highlight(None)
-        if drag["from"] == "grid" and ok and target and target[0] == "tray":
+        if drag["from"] == "grid":
+            if ok and target and target[0] == "tray" and token is not None:
+                widget.hide()
+                self._board.icons.pop(token, None)
+                widget.deleteLater()
+        elif ok and token is not None:
+            widget.hide()
+            self._tray_panel.chips.pop(token, None)
             widget.deleteLater()
-            self._board.icons.pop(drag["ids"][0], None)
-        elif drag["from"] == "tray" and ok:
-            widget.deleteLater()
-            self._tray_panel.chips.pop(drag["ids"][0], None)
         # 其余情况原位 icon 保留，下一轮 sync 会滑到落点/滑回原位
+        self._board.set_highlight(None)
         self._board._page_override = None
         self._tray_panel.set_frozen(False)
-        self._refresh(animate=True)
+        self._refresh(animate=True, spawn_snap=True)
+        # 两段式：先让托盘高度/棋盘尺寸落地，再按最终格位收拢
+        self.layout().activate()
+        self._tray_panel._arrange(True)
+        self.layout().activate()
+        # 只有「有预览且落位成功」才收拢；托盘→托盘、死区、出界都不收拢
+        if ok and preview is not None and anchor:
+            self._settle_anchor(anchor, global_pos)
+
+    @staticmethod
+    def _clamp_to(container: QWidget, global_pos: QPoint) -> QPoint:
+        """把松手点映射到容器坐标并夹到容器矩形内。"""
+        pos = container.mapFromGlobal(global_pos)
+        rect = container.rect()
+        return QPoint(
+            min(max(pos.x(), rect.left()), max(rect.left(), rect.right())),
+            min(max(pos.y(), rect.top()), max(rect.top(), rect.bottom())),
+        )
+
+    def _settle_anchor(self, token: str, release_global: QPoint) -> None:
+        """只收拢 anchor 一张：棋盘侧/托盘侧按最终容器分别起动画。"""
+        if token in self._board.icons:
+            self._board.settle_token(token, self._clamp_to(self._board, release_global))
+        elif token in self._tray_panel.chips:
+            self._tray_panel.settle_token(
+                token, self._clamp_to(self._tray_panel, release_global)
+            )
 
     def _preview_with(self, drag: dict, target):
         """end_drag 用：drag 已从 self._drag 摘下，直接按参数算。"""
@@ -1229,6 +1423,8 @@ class PlotArrangeDialog(QDialog):
     # 按钮
     # ------------------------------------------------------------------
     def _on_kick(self) -> None:
+        if self._drag is not None:
+            return
         if not self._selection:
             return
         moved = kick_to_tray(self._state, self._page_index, list(self._selection))
@@ -1238,6 +1434,8 @@ class PlotArrangeDialog(QDialog):
         self._refresh(animate=True)
 
     def _on_backfill(self) -> None:
+        if self._drag is not None:
+            return
         placed = backfill(self._state, self._page_index)
         self._status.setText(
             f"已回填 {placed} 个到「{self.current_page_state().title}」末尾空位"
@@ -1246,6 +1444,8 @@ class PlotArrangeDialog(QDialog):
         self._refresh(animate=True)
 
     def _on_reset(self) -> None:
+        if self._drag is not None:
+            return
         self._state = clone_state(self._initial)
         self._selection.clear()
         self._anchor = None
@@ -1253,6 +1453,8 @@ class PlotArrangeDialog(QDialog):
         self._refresh(animate=True)
 
     def _on_accept(self) -> None:
+        if self._drag is not None:
+            return
         if not can_commit(self._state):
             return
         if not self._structure_ok():
@@ -1267,6 +1469,13 @@ class PlotArrangeDialog(QDialog):
             )
             return
         self.accept()
+
+    def _on_cancel_clicked(self) -> None:
+        """拖拽中只取消拖拽（不关窗、不改状态）；否则正常取消。"""
+        if self._drag is not None:
+            self._cancel_drag()
+            return
+        self.reject()
 
     # ------------------------------------------------------------------
     # 键盘
