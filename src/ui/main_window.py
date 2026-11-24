@@ -531,11 +531,13 @@ class MainWindow(QMainWindow):
                 # 激活时补一次全局 X limits（否则可无限缩放）
                 page.apply_global_x_limits()
             if page.saved_x_range and self._x_range_follow_enabled:
-                if not self._x_axis_locked:
+                # D3：锁定冻结「有内容」的页（各页保留各自冻结窗口）；空页
+                # 没有自己的窗口可保留，照常继承 —— 否则新建页停在空
+                # ViewBox 的占位范围，首绘即被 autoRange 拉到全局数据域。
+                # 跳过分支同样消费 saved_x_range，否则解锁后同页重激活会
+                # 写回陈旧范围（评审 m1）。跟随只在切页那一刻生效一次。
+                if not self._x_axis_locked or not page.has_plot_content():
                     page.apply_x_range(*page.saved_x_range)
-                # D3：锁定时跳过跨页跟随（各页保留各自冻结窗口）；跳过分支
-                # 同样消费 saved_x_range，否则解锁后同页重激活会写回陈旧
-                # 范围（评审 m1）。跟随只在切页那一刻生效一次。
                 page.saved_x_range = None
             # 模板恢复的对齐标志：跟随范围落地后，把视图对齐到恢复后的数据域
             # （模板不保存视角；置脏见 PlotConfigManager.apply_config）
@@ -941,7 +943,9 @@ class MainWindow(QMainWindow):
 
         广播面（§1）：全部页子图（含非当前页/隐藏页）的鼠标掩码与 plot 级
         标志、导航尺 set_locked、自动缩放按钮、状态栏 x 轴段、状态栏播报。
-        新建子图的锁定继承由 plot_page._new_plot_container 补种。
+        新建子图的锁定继承由 plot_page._new_plot_container 补种；锁定态的
+        跨页跟随只跳过「有内容」的页（D3），空页激活时照常继承来源页窗口，
+        否则新页会停在空 ViewBox 的占位范围。
 
         ``reason`` 仅自动解锁（D4：数据域/时间基准改变，冻结数值失效）时
         非空，供播报文案区分；同状态重复调用是 no-op —— reset_plot 类入口
