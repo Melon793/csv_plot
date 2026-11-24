@@ -225,6 +225,16 @@ def test_d3_locked_empty_new_page_inherits_frozen_window(loaded_window, qtbot, q
     assert first_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
     assert mw._x_axis_locked is True
 
+    # 有内容后转冻结：改来源页窗口再切回，新页不得再跟随
+    assert first.apply_x_range(5, 15)
+    mw.activate_page(first)
+    _wait_activation(mw, qtbot)
+    mw.activate_page(second)
+    _wait_activation(mw, qtbot)
+    qapp.processEvents()
+    assert first_pw.view_box.viewRange()[0] == pytest.approx((5, 15), abs=1e-6)
+    assert second_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+
 
 # ---------- D4：四入口自动解锁 ----------
 # 播报断言用记录器：动作自身的收尾播报（加载反馈/已应用基准/匹配率）会

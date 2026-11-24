@@ -180,8 +180,9 @@ class PlotPage:
         """本页是否有可绘制内容（真实曲线或失效占位）。
 
         锁定切页时区分「有窗口可冻结的页」与「从未绘过图的空页」：后者
-        没有自己的窗口，应照常继承来源页范围。口径与
-        ``MainWindow._page_curve_count`` 一致。
+        没有自己的窗口，应照常继承来源页范围。占位页按有内容处理——它
+        曾经有过绘图窗口，不该被其它页覆盖（计入口径与
+        ``MainWindow._page_curve_count`` 同族；本方法额外过滤已销毁子图）。
         """
         for plot_widget in self.iter_plot_widgets():
             if getattr(plot_widget, "curves", None):
