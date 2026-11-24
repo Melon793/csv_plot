@@ -1064,10 +1064,14 @@ class FileLoaderManager(MainWindowBaseManager):
             self._reload_in_progress = False
             safe_qt_op(mw.reload_btn.setEnabled, True)
 
-    def set_button_status(self, status: bool):
+    def set_button_status(
+        self, status: bool, *, asset_actions: bool | None = None
+    ):
         if status is not None:
-            # 零行也保留资产清理入口；尚未加载数据时维持原禁用闸门。
-            asset_actions_enabled = self._has_valid_loader
+            # 零行成功加载时分析动作禁用，但清图/暂存仍须可用。
+            asset_actions_enabled = (
+                status if asset_actions is None else asset_actions
+            )
             self.mw.clear_all_plots_btn.setEnabled(asset_actions_enabled)
             self.mw.auto_range_btn.setEnabled(status)
             self.mw.auto_y_btn.setEnabled(status)
@@ -1930,7 +1934,10 @@ class FileLoaderManager(MainWindowBaseManager):
         finally:
             self._end_data_reload()
             if applied:
-                self.set_button_status(self._has_valid_data)
+                self.set_button_status(
+                    getattr(new_loader, "datalength", 0) > 0,
+                    asset_actions=True,
+                )
             else:
                 # 应用失败按「当前是否还有有效数据」恢复，并收掉忙等光标/秒表
                 self._finish_load_failure(is_reload=is_reload)
@@ -2310,7 +2317,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 elapsed_s=elapsed_s,
             )
             has_valid_data = self._has_valid_data
-            self.set_button_status(has_valid_data)
+            self.set_button_status(has_valid_data, asset_actions=True)
             if not has_valid_data:
                 self.mw._broadcast(
                     "数据文件为 0 行，没有有效数据；分析操作暂不可用，"
