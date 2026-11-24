@@ -562,6 +562,18 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     import pandas as pd
 
     try:
+        integer_source = values
+        if isinstance(values, pd.Series):
+            integer_source = values.to_numpy()
+        elif not isinstance(values, np.ndarray):
+            integer_source = np.asarray(values)
+        if getattr(getattr(integer_source, "dtype", None), "kind", None) in "iu":
+            if integer_source.size:
+                integer_abs_max = max(
+                    abs(int(integer_source.min())), abs(int(integer_source.max()))
+                )
+                if integer_abs_max > 2**53:
+                    return False, float(integer_abs_max)
         if isinstance(values, np.ndarray):
             # 快速路径：已经是 numpy 数组，避免冗余 float64 拷贝
             if values.dtype == np.float32:

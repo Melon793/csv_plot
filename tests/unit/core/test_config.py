@@ -205,3 +205,15 @@ class TestFloat32PrecisionGuard:
         """已经是 float32 的数组不存在进一步损失，快速路径保持原样。"""
         arr = np.asarray([1_767_225_600.123], dtype=np.float32)
         assert _evaluate_float32_safety(arr)[0] is True
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            np.asarray([2**62, 2**62 + 1], dtype=np.int64),
+            pd.Series([2**62, 2**62 + 1], dtype=np.int64),
+            [2**62, 2**62 + 1],
+        ],
+    )
+    def test_integers_beyond_float64_exact_range_are_refused(self, values):
+        is_safe, _ = _evaluate_float32_safety(values)
+        assert is_safe is False
