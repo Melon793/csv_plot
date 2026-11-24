@@ -90,7 +90,7 @@ done
 #
 # 注意：bash 里反引号续行（行尾 \）之间**不能**插注释行 —— 注释会吃掉续行并把
 # 后面的参数当独立命令执行，所以下面这一串参数必须保持连续。
-nuitka --standalone \
+$PYTHON -m nuitka --standalone \
     --output-filename="$NAME" \
     --enable-plugin=pyside6 \
     --enable-plugin=numpy \

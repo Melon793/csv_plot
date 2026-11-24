@@ -29,7 +29,7 @@ echo "Generating build info..."
 $PYTHON scripts/generate_build_info.py
 echo
 
-pyinstaller --noconfirm --clean "$SPEC"
+$PYTHON -m PyInstaller --noconfirm --clean "$SPEC"
 
 if [ $? -eq 0 ]; then
     echo

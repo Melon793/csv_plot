@@ -31,7 +31,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo.
 
-pyinstaller --noconfirm --clean "%SPEC%"
+!PYTHON! -m PyInstaller --noconfirm --clean "%SPEC%"
 
 rem 构建结束后清理自动生成的构建信息文件，避免陈旧数据污染开发环境
 if exist "src\_build_info.py" del /q "src\_build_info.py"
