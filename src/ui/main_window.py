@@ -212,6 +212,17 @@ class MainWindow(QMainWindow):
     APP_DISPLAY_NAME = "CSV Plot"
     #: 绘图页数量上限（与 PlotTabsWidget 的「＋」闸门同源）
     MAX_PLOT_PAGES = MAX_PAGES
+    #: 动作 → 按钮属性：按钮启用态与快捷键必须从这里取同一份业务判据。
+    _ACTION_BUTTONS = {
+        "clear_plots": "clear_all_plots_btn",
+        "auto_range": "auto_range_btn",
+        "auto_y": "auto_y_btn",
+        "cursor": "cursor_btn",
+        "mark_region": "mark_region_btn",
+        "grid_layout": "grid_layout_btn",
+        "curve_shelf": "curve_shelf_btn",
+    }
+    _ASSET_ACTIONS = frozenset({"clear_plots", "curve_shelf"})
     # 加载期间右区文案的秒表步进，只用于"还在干活吗"，不表示百分比
     LOAD_ELAPSED_TICK_MS = 1000
 
@@ -965,6 +976,60 @@ class MainWindow(QMainWindow):
                     yield container
 
     # ------------------------------------------------------------------
+    # 动作闸门：按钮启用态与快捷键共用，避免入口之间状态分叉
+    # ------------------------------------------------------------------
+    def _action_block_reason(self, action: str) -> str | None:
+        """返回动作不可执行的原因；``None`` 表示放行。"""
+        if action not in self._ACTION_BUTTONS:
+            return "unknown_action"
+        # 同步加载没有后台线程，必须同时看 UI 的加载反馈态。
+        if getattr(self, "_status_busy", False) or self.is_data_loading():
+            return "loading"
+        available = (
+            self._asset_actions_available
+            if action in self._ASSET_ACTIONS
+            else self._analysis_actions_available
+        )
+        if not available:
+            return "no_data"
+        if action == "auto_range" and self._x_axis_locked:
+            return "x_locked"
+        return None
+
+    def can_execute(self, action: str) -> bool:
+        """按钮与快捷键共用的唯一动作能力判断。"""
+        return self._action_block_reason(action) is None
+
+    def sync_action_buttons(self) -> None:
+        """把统一闸门同步到按钮和暂存区胶囊。"""
+        for action, button_name in self._ACTION_BUTTONS.items():
+            btn = getattr(self, button_name, None)
+            if btn is not None:
+                btn.setEnabled(self.can_execute(action))
+        auto_range_btn = getattr(self, "auto_range_btn", None)
+        if auto_range_btn is not None:
+            auto_range_btn.setToolTip(
+                "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
+                if self._x_axis_locked
+                else "自动缩放XY轴 (Ctrl+Shift+Y)"
+            )
+        set_shelf_enabled = getattr(
+            getattr(self, "plot_tabs", None), "set_shelf_enabled", None
+        )
+        if callable(set_shelf_enabled):
+            set_shelf_enabled(self.can_execute("curve_shelf"))
+
+    def set_action_availability(
+        self, analysis: bool, *, asset_actions: bool | None = None
+    ) -> None:
+        """加载器提交数据可用性；所有按钮与快捷键随此同步刷新。"""
+        self._analysis_actions_available = bool(analysis)
+        self._asset_actions_available = bool(
+            analysis if asset_actions is None else asset_actions
+        )
+        self.sync_action_buttons()
+
+    # ------------------------------------------------------------------
     # X 轴锁定（D1–D4）：唯一权威 + 单函数广播
     # ------------------------------------------------------------------
     def set_x_axis_locked(self, locked: bool, reason: str = "") -> None:
@@ -1000,14 +1065,10 @@ class MainWindow(QMainWindow):
             sync = getattr(drawer, "sync_lock_ui", None)
             if sync is not None:
                 sync(locked)
-        btn = getattr(self, "auto_range_btn", None)
-        if btn is not None:
-            btn.setEnabled(not locked)
-            btn.setToolTip(
-                "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
-                if locked
-                else "自动缩放XY轴 (Ctrl+Shift+Y)"
-            )
+        # 最小宿主替身沿用既有 getattr 兼容语义；真实窗口始终同步按钮。
+        sync_actions = getattr(self, "sync_action_buttons", None)
+        if callable(sync_actions):
+            sync_actions()
         if getattr(self, "_axis_segment", None) is not None:
             self._update_axis_segment()
         self._broadcast(self._x_lock_announce_text(locked, reason))
@@ -1140,8 +1201,7 @@ class MainWindow(QMainWindow):
         闸门与 GUI 入口同口径：未加载数据时按钮 disabled，快捷键同步忽略，
         避免绕过 set_button_status 打开空窗（与 Ctrl+L 的守卫一致）。
         """
-        btn = getattr(self, "curve_shelf_btn", None)
-        if btn is None or not btn.isEnabled():
+        if not self.can_execute("curve_shelf"):
             return
         dialog = self.curve_shelf_if_open()
         visible = bool(
@@ -1327,6 +1387,9 @@ class MainWindow(QMainWindow):
         self.data = None
         self.data_validity = None
         self._is_loading_new_data = False
+        #: 动作闸门的输入由 FileLoaderManager.set_button_status 提交。
+        self._analysis_actions_available = False
+        self._asset_actions_available = False
         # file_loader_manager._restore_cursor_state_after_reload 等延迟回调靠它
         # 判断主窗口是否已在退出：缺这行时 getattr(..., False) 恒假，守卫空转
         self._is_being_destroyed = False
@@ -2205,6 +2268,7 @@ class MainWindow(QMainWindow):
 
     def begin_load_feedback(self, file_path: str):
         self._status_busy = True
+        self.sync_action_buttons()
         self._loading_path = file_path
         self._load_elapsed_started = time.monotonic()
         self._message_hide_timer.stop()
@@ -2227,6 +2291,7 @@ class MainWindow(QMainWindow):
 
     def end_load_feedback(self, hint: str = "", level: str = "info"):
         self._status_busy = False
+        self.sync_action_buttons()
         self._load_elapsed_timer.stop()
         self._set_busy_cursor(False)
         if hint:
@@ -2750,31 +2815,30 @@ class MainWindow(QMainWindow):
 
     def _on_cursor_shortcut(self):
         """Ctrl+R 快捷键：切换光标显示状态"""
-        if not self.plot_widgets:
+        if not self.can_execute("cursor"):
             return
         new_state = not self.cursor_btn.isChecked()
         self.cursor_sync_manager.toggle_cursor_all(new_state)
 
     def _on_auto_y_shortcut(self):
         """Ctrl+Y 快捷键：自动调节Y轴范围"""
-        if not self.plot_widgets:
+        if not self.can_execute("auto_y"):
             return
         self.cursor_sync_manager.auto_y_in_x_range()
 
     def _on_auto_range_shortcut(self):
         """Ctrl+Shift+Y 快捷键：自动缩放XY轴"""
-        if not self.plot_widgets:
-            return
-        if self._x_axis_locked:
-            # D2：与按钮置灰同守卫；按钮已禁用，这里是快捷键入口的提示
-            self._show_status_message("X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）")
+        if not self.can_execute("auto_range"):
+            if self._action_block_reason("auto_range") == "x_locked":
+                self._show_status_message(
+                    "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
+                )
             return
         self.cursor_sync_manager.auto_range_all_plots()
 
-
     def _on_mark_region_shortcut(self):
         """Ctrl+T 快捷键：切换标记区域"""
-        if not self.plot_widgets:
+        if not self.can_execute("mark_region"):
             return
         new_state = not self.mark_region_btn.isChecked()
         self.layout_manager.toggle_mark_region(new_state)
@@ -2796,13 +2860,8 @@ class MainWindow(QMainWindow):
         self.filter_input.setFocus()
 
     def _on_grid_layout_shortcut(self):
-        """Ctrl+L 快捷键：调整行列
-
-        守卫条件直接复用 grid_layout_btn.isEnabled()，确保快捷键与
-        GUI 按钮激活状态完全一致（未加载数据等场景下按钮被 disabled，
-        快捷键同步忽略），避免绕过 set_button_status 的状态控制。
-        """
-        if not self.grid_layout_btn.isEnabled():
+        """Ctrl+L 快捷键：调整行列，与按钮共用动作闸门。"""
+        if not self.can_execute("grid_layout"):
             return
         self.layout_manager.open_layout_dialog()
 
