@@ -296,6 +296,18 @@ class EventHandler:
         if pw:
             pw.open_variable_editor()
 
+    def _on_vb_arrange_layout(self, pw):
+        """ViewBox 信号：打开「重排子图」对话框。
+
+        经宿主窗口暴露的统一入口打开；独立顶层/替身环境没有该入口时静默跳过。
+        """
+        if not pw:
+            return
+        host = pw.window()
+        opener = getattr(host, "open_plot_arrange_dialog", None)
+        if opener is not None:
+            opener(pw)
+
     def _connect_viewbox_signals(self):
         """连接 ViewBox 信号"""
         vb = self.pw.view_box
@@ -310,6 +322,7 @@ class EventHandler:
         vb.signals.request_set_all_row_height.connect(self._on_vb_set_all_row_height)
         vb.signals.request_copy_name.connect(self._on_vb_copy_name)
         vb.signals.request_variable_editor.connect(self._on_vb_var_editor)
+        vb.signals.request_arrange_layout.connect(self._on_vb_arrange_layout)
 
     def _cancel_ui_refresh(self, *types):
         """取消 UI 刷新"""

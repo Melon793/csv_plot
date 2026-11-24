@@ -66,6 +66,9 @@ class ConfigKey(StrEnum):
     # 常驻保证折叠态有物理恢复入口，才敢恢复折叠态（方案 A 对 B 的本质优势）。
     VAR_PANE_COLLAPSED = "var_pane/collapsed"
     VAR_PANE_WIDTH = "var_pane/width"
+    # 整理布局对话框「显示隐藏区」开关：跨会话记忆；首次打开默认收起
+    # （正向标签 + 默认关：勾选才展开隐藏行列，收纳是低频操作）
+    ARRANGE_SHOW_HIDDEN = "arrange/show_hidden"
 
 
 class AppSettings:
@@ -570,6 +573,27 @@ class AppSettings:
 
     def set_var_pane_collapsed(self, collapsed: bool) -> None:
         self._settings.setValue(ConfigKey.VAR_PANE_COLLAPSED, bool(collapsed))
+        self._settings.sync()
+
+    def get_arrange_show_hidden(self) -> bool:
+        """整理布局「显示隐藏区」开关；无存档时默认 False（收起）。
+
+        防御口径同 var_pane_collapsed：只认 bool 或 "true"/"false" 字面量，
+        其余脏值回退默认，不用 type=bool（非空串一律 True）。
+        """
+        raw = self._settings.value(ConfigKey.ARRANGE_SHOW_HIDDEN)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            text = raw.strip().lower()
+            if text == "true":
+                return True
+            if text == "false":
+                return False
+        return False
+
+    def set_arrange_show_hidden(self, enabled: bool) -> None:
+        self._settings.setValue(ConfigKey.ARRANGE_SHOW_HIDDEN, bool(enabled))
         self._settings.sync()
 
     def get_var_pane_width(self) -> int | None:
