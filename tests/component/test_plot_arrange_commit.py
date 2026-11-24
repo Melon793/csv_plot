@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from src.ui.widgets.plot_arrange_commit import (
+    _row_heights_from_measurement,
     apply_arrangement,
     build_state,
     snapshot_pages,
@@ -32,6 +33,9 @@ class _FakeLayoutManager:
 class _FakeCursorSync:
     def collect_global_x_range(self):
         return (0.0, 1.0)
+
+    def _sync_min_xrange(self):
+        pass
 
 
 class _FakeServices:
@@ -130,6 +134,48 @@ def test_snapshot_uses_layout_positions_not_list_order(pages):
     assert snapshot.tokens[token] is container
     assert snapshot.seat_of_token[token] == (2, 0)
     assert state.pages[0].rows == 3
+
+
+def test_hidden_row_height_estimates_follow_factors():
+    """隐藏行按本行行高因子估算（同口径换算），不再一律取可见中位数。"""
+    heights = _row_heights_from_measurement(
+        [200.0, 400.0, 200.0, 0.0, 0.0], [50, 100, 50, 25, 100]
+    )
+    assert heights == [200.0, 400.0, 200.0, 100.0, 400.0]
+
+    # 页面未布局（全 0）：退回百分比作相对权重
+    assert _row_heights_from_measurement(
+        [0.0, 0.0, 0.0], [50, 100, 200]
+    ) == [50.0, 100.0, 200.0]
+
+
+def test_snapshot_measured_hidden_rows_keep_factor_ratio(pages):
+    """真实布局下：隐藏行估算与可见行同口径（25% 行 = 100% 行的 1/4）。"""
+    from tests.fixtures.waits import settle
+
+    page_a, _page_b, _page_c = pages
+    page = PlotPage(
+        parent=None, title="页1", rows_max=5, cols_max=3,
+        rows_current=3, cols_current=1,
+    )
+    page.services = _FakeServices()
+    page.build_matrix(5, 3)
+    page.apply_visibility(3, 1)
+    for row, pct in {0: 50, 1: 100, 2: 50, 3: 25, 4: 100}.items():
+        page.set_row_height(row, pct)
+    page.widget.resize(900, 800)
+    page.widget.show()
+    settle()
+
+    snapshot = snapshot_pages([page])
+    heights = snapshot.row_heights[0]
+    unit = heights[1] / 100  # 100% 行
+    assert unit > 0
+    assert abs(heights[3] / unit - 25) < 5
+    assert abs(heights[4] / unit - 100) < 5
+
+    page.dispose()
+    flush_deferred_deletes()
 
 
 def test_snapshot_carries_row_height_percentages(pages):

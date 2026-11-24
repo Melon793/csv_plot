@@ -62,16 +62,33 @@ def page_row_pcts(page, rows: int) -> list[int]:
     return [int(factors.get(row, 100)) for row in range(rows)]
 
 
-def _fill_sizes(sizes: list[float], weights: list[float]) -> list[float]:
-    """格位尺寸兜底：未布局（全 0）时用权重；隐藏格（0）取可见中位数。
+def _row_heights_from_measurement(
+    measured: list[float], pcts: list[int]
+) -> list[float]:
+    """行高换算：可见行用实测高度，隐藏行按本行行高因子估算。
 
-    隐藏格与可见格同尺寸——对话框以操作便利为先，不做"缩水"布局。
+    隐藏行在真实页面里 stretch=0、高度为 0，无法测量；早先版本用可见行
+    中位数兜底，导致隐藏行忽略自己的 row_height_factors（25% 行和 100%
+    行一样高）。这里用可见行的"每 100% 对应多少像素"（比值中位数，抗最小
+    高度干扰）乘以本行因子，勾选前后与标题行百分比自洽。
     """
-    known = [value for value in sizes if value > 0]
-    if not known:
-        return [float(weight) if weight > 0 else 1.0 for weight in weights]
-    median = sorted(known)[len(known) // 2]
-    return [value if value > 0 else median for value in sizes]
+    ratios = [
+        height / pct
+        for height, pct in zip(measured, pcts)
+        if height > 0 and pct > 0
+    ]
+    if not ratios:
+        # 页面尚未布局（全 0）：直接用百分比作相对权重
+        return [float(pct) if pct > 0 else 1.0 for pct in pcts]
+    ratios.sort()
+    unit = ratios[len(ratios) // 2]
+    result: list[float] = []
+    for height, pct in zip(measured, pcts):
+        if height > 0:
+            result.append(height)
+        else:
+            result.append(max(1.0, unit * (pct if pct > 0 else 100)))
+    return result
 
 
 def page_layout_metrics(page) -> dict | None:
@@ -127,7 +144,7 @@ def page_layout_metrics(page) -> dict | None:
         "rows": rows,
         "cols": cols,
         "pcts": pcts,
-        "row_heights": _fill_sizes(heights, [float(p) for p in pcts]),
+        "row_heights": _row_heights_from_measurement(heights, pcts),
         "vis_rows": vis_rows,
         "vis_cols": vis_cols,
     }
@@ -156,7 +173,7 @@ def snapshot_pages(pages: list) -> ArrangeSnapshot:
             built.append(False)
             pcts = page_row_pcts(page, rows)
             row_pcts.append(pcts)
-            row_heights.append(_fill_sizes([0.0] * rows, [float(p) for p in pcts]))
+            row_heights.append(_row_heights_from_measurement([0.0] * rows, pcts))
             continue
         dims.append((metrics["rows"], metrics["cols"]))
         built.append(True)
