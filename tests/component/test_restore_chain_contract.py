@@ -323,7 +323,31 @@ def test_zero_row_load_disables_data_actions_but_keeps_asset_cleanup(
     ]
     assert len(empty_feedback) == 1, host.broadcasts
     assert empty_feedback[0][1] in ("info", "warn", "error")
-    assert host.broadcasts[-1][0].startswith("已推断修复 2 处单位乱码")
+    assert len(host.broadcasts) == 1, "空态与乱码披露必须合并为最终一条播报"
+    assert "0 行" in host.broadcasts[0][0]
+    assert "已有曲线与占位保持不变" in host.broadcasts[0][0]
+    assert "已推断修复 2 处单位乱码" in host.broadcasts[0][0]
+    assert host.broadcasts[0][1] == "warn"
+
+
+def test_auto_restore_page_reconcile_failure_is_broadcast_once(
+    post_load_env, monkeypatch
+):
+    flm, host = post_load_env
+    manager = PlotConfigManager()
+    manager._auto_save_manager = host.auto_save
+    host.plot_config_manager = manager
+    monkeypatch.setattr(
+        manager, "_reconcile_pages",
+        lambda _mw, _count: (1, "模板需要 2 页，最多支持 1 页"),
+    )
+
+    flm._post_load_actions("demo.csv")
+
+    failures = [item for item in host.broadcasts if item[1] in ("warn", "error")]
+    assert len(failures) == 1, host.broadcasts
+    assert "自动恢复失败" in failures[0][0]
+    assert host.applied == []
 
 
 # ---------------------------------------------------------------------------

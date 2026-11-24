@@ -2311,6 +2311,7 @@ class FileLoaderManager(MainWindowBaseManager):
         )
         self.mw.end_load_feedback()
         recovery_failure = None
+        empty_feedback = None
         # 评审 NB1：前段 UI 收尾与自动恢复同包异常隔离，保「D1 披露必达」
         try:
             self.mw.update_file_status(
@@ -2322,10 +2323,10 @@ class FileLoaderManager(MainWindowBaseManager):
             has_valid_data = self._has_valid_data
             self.set_button_status(has_valid_data, asset_actions=True)
             if not has_valid_data:
-                self.mw._broadcast(
+                empty_feedback = (
                     "数据文件为 0 行，没有有效数据；分析操作暂不可用，"
                     "已有曲线与占位保持不变。",
-                    level="warn",
+                    "warn",
                 )
 
             # 自动恢复只消费 replots_after_loading 的显式结果；隐藏资产同样计入 restored。
@@ -2382,13 +2383,16 @@ class FileLoaderManager(MainWindowBaseManager):
             f"已推断修复 {fffd_fixes} 处单位乱码（°C，源文件导出时已丢失°字符）"
             if fffd_fixes else ""
         )
-        if recovery_failure is not None:
-            message, level = recovery_failure
-            if disclosure:
-                message = f"{message}；{disclosure}"
-            self.mw._broadcast(message, level=level)
-        elif disclosure:
-            self.mw._broadcast(disclosure, level="warn")
+        messages = [
+            message for message in (
+                recovery_failure[0] if recovery_failure else "",
+                empty_feedback[0] if empty_feedback else "",
+                disclosure,
+            ) if message
+        ]
+        if messages:
+            level = "error" if recovery_failure and recovery_failure[1] == "error" else "warn"
+            self.mw._broadcast("；".join(messages), level=level)
 
     def _announce_auto_restore(
         self, config, current_vars, *, identity_snapshot=None

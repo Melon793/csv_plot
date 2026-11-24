@@ -332,9 +332,6 @@ class PlotConfigManager(QObject):
             )
             if failure_reason is not None:
                 logger.warning("模板页数核对失败: %s", failure_reason)
-                broadcast = getattr(main_window, "_broadcast", None)
-                if callable(broadcast):
-                    broadcast(f"模板恢复失败：{failure_reason}", level="warn")
                 return False
             pages = list(getattr(main_window, "pages", []) or [])
             if not pages:
