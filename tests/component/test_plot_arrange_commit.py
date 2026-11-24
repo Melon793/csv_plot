@@ -124,10 +124,11 @@ def test_snapshot_uses_layout_positions_not_list_order(pages):
     page_a.plot_layout.addWidget(container, 2, 0)
     snapshot = snapshot_pages([page_a])
     state = build_state(snapshot)
-    token = "p0:4"  # 2 列网格下 (row=2, col=0) → seat 4
-    assert token in snapshot.tokens
+    # token id 与格位解耦（按容器编号，不随行列漂移）
+    token = state.pages[0].cells[4]  # 2 列网格下 (row=2, col=0) → seat 4
+    assert token is not None
+    assert snapshot.tokens[token] is container
     assert snapshot.seat_of_token[token] == (2, 0)
-    assert state.pages[0].cells[4] == token
     assert state.pages[0].rows == 3
 
 
@@ -290,6 +291,39 @@ def test_prepare_failure_leaves_pages_untouched(pages, monkeypatch):
     assert [
         c.plot_widget.view_box.linkedView(0) for c in page_a.plot_widgets + page_b.plot_widgets
     ] == before_links
+
+
+def test_model_growth_builds_extra_cells_on_apply(pages):
+    """对话框扩可见区后：提交把矩阵长大、可见行列与 stretch 一并落地。"""
+    page_a, _page_b, _page_c = pages
+    snapshot = snapshot_pages([page_a])
+    state = build_state(snapshot)
+    ps = state.pages[0]
+    old_positions = {
+        token: divmod(seat, ps.cols)
+        for seat, token in enumerate(ps.cells)
+        if token
+    }
+
+    ps.rows, ps.cols = 3, 3
+    ps.vis_rows, ps.vis_cols = 3, 3
+    ps.cells = [None] * 9
+    for token, (row, col) in old_positions.items():
+        ps.cells[row * 3 + col] = token
+
+    apply_arrangement(snapshot, state)
+
+    assert (page_a._built_rows, page_a._built_cols) == (3, 3)
+    assert (page_a.rows_current, page_a.cols_current) == (3, 3)
+    assert len(page_a.plot_widgets) == 9
+    for container in page_a.plot_widgets:
+        assert container.isHidden() is False
+    for token, (row, col) in old_positions.items():
+        assert page_a.plot_widgets[row * 3 + col] is snapshot.tokens[token]
+    # 曲线一条不少
+    assert sum(
+        1 for c in page_a.plot_widgets if getattr(c.plot_widget, "curves", {})
+    ) == len(old_positions)
 
 
 def test_stale_snapshot_is_rejected(pages):

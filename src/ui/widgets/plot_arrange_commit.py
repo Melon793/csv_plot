@@ -74,12 +74,71 @@ def _fill_sizes(sizes: list[float], weights: list[float]) -> list[float]:
     return [value if value > 0 else median for value in sizes]
 
 
+def page_layout_metrics(page) -> dict | None:
+    """测量一页真实矩阵：格位坐标、行列数、各行相对高度；未建页返回 None。
+
+    ``positions`` 为 ``[(row, col, container)]``，取自 QGridLayout 的
+    ``getItemPosition``，与 plot_widgets 列表顺序解耦。
+    """
+    layout = getattr(page, "plot_layout", None)
+    widgets = list(getattr(page, "plot_widgets", []) or [])
+    if layout is None or not widgets:
+        return None
+    positions: list[tuple[int, int, object]] = []
+    seen_widgets: set[int] = set()
+    max_row = 0
+    max_col = 0
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        widget = item.widget() if item is not None else None
+        if widget is None:
+            continue
+        row, col, _row_span, _col_span = layout.getItemPosition(index)
+        positions.append((row, col, widget))
+        seen_widgets.add(id(widget))
+        max_row = max(max_row, row)
+        max_col = max(max_col, col)
+    # 未进布局的容器（理论不应存在）退回列表下标，保证不丢图
+    for seat, container in enumerate(widgets):
+        if id(container) in seen_widgets:
+            continue
+        row, col = divmod(seat, max_col + 1)
+        positions.append((row, col, container))
+        max_row = max(max_row, row)
+    rows = max(1, max_row + 1)
+    cols = max(1, max_col + 1)
+    pcts = page_row_pcts(page, rows)
+    vis_rows = min(rows, max(1, int(getattr(page, "rows_current", rows))))
+    vis_cols = min(cols, max(1, int(getattr(page, "cols_current", cols))))
+    # 行高按可见格的真实 rect 取（隐藏格 geometry 可能是陈旧值，不可信），
+    # 隐藏行取可见中位数兜底；列宽在对话框里统一等分
+    heights = [0.0] * rows
+    for row, col, container in positions:
+        if row >= vis_rows or col >= vis_cols:
+            continue
+        try:
+            rect = container.geometry()
+        except RuntimeError:
+            continue
+        if rect.height() > 0:
+            heights[row] = max(heights[row], float(rect.height()))
+    return {
+        "positions": positions,
+        "rows": rows,
+        "cols": cols,
+        "pcts": pcts,
+        "row_heights": _fill_sizes(heights, [float(p) for p in pcts]),
+        "vis_rows": vis_rows,
+        "vis_cols": vis_cols,
+    }
+
+
 def snapshot_pages(pages: list) -> ArrangeSnapshot:
     """为对话框拍快照。
 
-    格位以 ``QGridLayout`` 的**真实坐标**为准（``getItemPosition``），不假设
-    ``plot_widgets`` 列表下标等于行优先格位；只有带曲线（或失效占位）的
-    容器是 token。空位、隐藏行列与行高都原样带进对话框。
+    token id 按容器编号（``p{页}:c{序}``）**与格位解耦**：整理过程中扩可见区
+    只会重排格位，不需要给 token 改名。只有带曲线（或失效占位）的容器是
+    token；空位、隐藏行列与行高都原样带进对话框。
     """
     tokens: dict[str, object] = {}
     names: dict[str, list[str]] = {}
@@ -89,9 +148,8 @@ def snapshot_pages(pages: list) -> ArrangeSnapshot:
     seat_of_token: dict[str, tuple[int, int]] = {}
     row_heights: list[list[float]] = []
     for page_index, page in enumerate(pages):
-        layout = getattr(page, "plot_layout", None)
-        widgets = list(getattr(page, "plot_widgets", []) or [])
-        if layout is None or not widgets:
+        metrics = page_layout_metrics(page)
+        if metrics is None:
             rows = max(1, int(getattr(page, "rows_current", 1)))
             cols = max(1, int(getattr(page, "cols_current", 1)))
             dims.append((rows, cols))
@@ -100,54 +158,15 @@ def snapshot_pages(pages: list) -> ArrangeSnapshot:
             row_pcts.append(pcts)
             row_heights.append(_fill_sizes([0.0] * rows, [float(p) for p in pcts]))
             continue
-        # 真实格位：遍历布局项取 (row, col)，与列表顺序解耦
-        positions: list[tuple[int, int, object]] = []
-        seen_widgets: set[int] = set()
-        max_row = 0
-        max_col = 0
-        for index in range(layout.count()):
-            item = layout.itemAt(index)
-            widget = item.widget() if item is not None else None
-            if widget is None:
-                continue
-            row, col, _row_span, _col_span = layout.getItemPosition(index)
-            positions.append((row, col, widget))
-            seen_widgets.add(id(widget))
-            max_row = max(max_row, row)
-            max_col = max(max_col, col)
-        # 未进布局的容器（理论不应存在）退回列表下标，保证不丢图
-        for seat, container in enumerate(widgets):
-            if id(container) in seen_widgets:
-                continue
-            row, col = divmod(seat, max_col + 1)
-            positions.append((row, col, container))
-            max_row = max(max_row, row)
-        rows = max(1, max_row + 1)
-        cols = max(1, max_col + 1)
-        dims.append((rows, cols))
+        dims.append((metrics["rows"], metrics["cols"]))
         built.append(True)
-        pcts = page_row_pcts(page, rows)
-        row_pcts.append(pcts)
-        # 行高按可见格的真实 rect 取（隐藏格 geometry 可能是陈旧值，不可信），
-        # 隐藏行取可见中位数兜底；列宽在对话框里统一等分
-        vis_rows = min(rows, max(1, int(getattr(page, "rows_current", rows))))
-        vis_cols = min(cols, max(1, int(getattr(page, "cols_current", cols))))
-        heights = [0.0] * rows
-        for row, col, container in positions:
-            if row >= vis_rows or col >= vis_cols:
-                continue
-            try:
-                rect = container.geometry()
-            except RuntimeError:
-                continue
-            if rect.height() > 0:
-                heights[row] = max(heights[row], float(rect.height()))
-        row_heights.append(_fill_sizes(heights, [float(p) for p in pcts]))
-        for row, col, container in positions:
+        row_pcts.append(metrics["pcts"])
+        row_heights.append(metrics["row_heights"])
+        for number, (row, col, container) in enumerate(metrics["positions"]):
             curve_names = _container_names(container)
             if not curve_names:
                 continue
-            token = f"p{page_index}:{row * cols + col}"
+            token = f"p{page_index}:c{number}"
             tokens[token] = container
             names[token] = curve_names
             seat_of_token[token] = (row, col)
@@ -189,10 +208,15 @@ def validate_state(snapshot: ArrangeSnapshot, state: ArrangeState) -> bool:
         return False
     seen: set[str] = set()
     for page_index, page_state in enumerate(state.pages):
-        rows, cols = snapshot.dims[page_index]
-        if (page_state.rows, page_state.cols) != (rows, cols):
+        base_rows, base_cols = snapshot.dims[page_index]
+        # 对话框内可扩可见行列（矩阵只增不减）：允许比快照大，不允许小
+        if page_state.rows < base_rows or page_state.cols < base_cols:
             return False
-        if len(page_state.cells) != rows * cols:
+        if len(page_state.cells) != page_state.rows * page_state.cols:
+            return False
+        if not (1 <= page_state.vis_rows <= page_state.rows):
+            return False
+        if not (1 <= page_state.vis_cols <= page_state.cols):
             return False
         for token in page_state.cells:
             if token is None:
@@ -322,13 +346,15 @@ def apply_arrangement(snapshot: ArrangeSnapshot, state: ArrangeState) -> dict:
     cross_page = 0
     hidden_placed = 0
     for page_index, page in enumerate(pages):
-        rows, cols = snapshot.dims[page_index]
+        page_state = state.pages[page_index]
+        rows, cols = page_state.rows, page_state.cols
+        vis_rows, vis_cols = page_state.vis_rows, page_state.vis_cols
         if not snapshot.built[page_index]:
             _initialize_built_page(page, rows, cols)
         services = getattr(page, "services", None)
         pool = pools[page_index]
         new_list: list = []
-        for seat, token in enumerate(state.pages[page_index].cells):
+        for seat, token in enumerate(page_state.cells):
             row, col = divmod(seat, cols)
             if token is not None:
                 container = snapshot.tokens[token]
@@ -346,9 +372,7 @@ def apply_arrangement(snapshot: ArrangeSnapshot, state: ArrangeState) -> dict:
             # 可见性必须按页面的可见矩形重套：从可见格搬进隐藏格（或跨页
             # 搬入隐藏格）的容器若仍 visible，QGridLayout 会按最小尺寸把
             # 隐藏行列撑开——表现为"拖完多出一行/一列"
-            visible = (
-                row < int(page.rows_current) and col < int(page.cols_current)
-            )
+            visible = row < vis_rows and col < vis_cols
             try:
                 container.setVisible(visible)
             except RuntimeError:
@@ -357,6 +381,16 @@ def apply_arrangement(snapshot: ArrangeSnapshot, state: ArrangeState) -> dict:
                 hidden_placed += 1
         leftovers.extend(pool)
         page.plot_widgets = new_list
+        # 落地后把矩阵/可见行列写回页面，并重算行列 stretch（隐藏行列归零）
+        page._built_rows = int(rows)
+        page._built_cols = int(cols)
+        page.rows_current = int(vis_rows)
+        page.cols_current = int(vis_cols)
+        page._apply_grid_stretches(rows, cols)
+        try:
+            page.adjust_stretch_and_range(vis_rows, vis_cols)
+        except Exception:
+            logger.debug("[ARRANGE] 重算 stretch 失败", exc_info=True)
 
     # 4) 删除多余空容器（曲线容器不会进入 leftovers）
     for container in leftovers:
@@ -380,10 +414,6 @@ def apply_arrangement(snapshot: ArrangeSnapshot, state: ArrangeState) -> dict:
             page.refresh_curve_styles()
         except Exception:
             logger.debug("[ARRANGE] 补刷曲线样式失败", exc_info=True)
-        try:
-            page.restore_mark_regions()
-        except Exception:
-            logger.debug("[ARRANGE] 重建 mark region 失败", exc_info=True)
         services = getattr(page, "services", None)
         layout_manager = getattr(services, "layout_manager", None)
         if layout_manager is not None:
