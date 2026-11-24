@@ -11,6 +11,7 @@ from src.core.plot_config import (
     PlotSessionConfig,
     TemplateNameConflictError,
     TemplateNotFoundError,
+    TemplateStorageError,
     TemplateValidationError,
 )
 from src.core.template_manager import TemplateManager
@@ -51,6 +52,28 @@ class TestSaveTemplate:
         )
         assert updated.metadata.description == "d2"
         assert len(manager.get_all_templates()) == 1
+
+    def test_failed_rename_keeps_cached_and_disk_template_unchanged(
+        self, manager, monkeypatch
+    ):
+        tpl = manager.save_template(_make_config(["a"]), "Old")
+        cached = manager.get_template(tpl.metadata.id)
+        assert cached is not None
+        original_config = cached.config.copy()
+
+        def fail_replace(*_args):
+            raise OSError("synthetic replace failure")
+
+        monkeypatch.setattr("src.core.storage.os.replace", fail_replace)
+        with pytest.raises(TemplateStorageError):
+            manager.save_template(
+                _make_config(["b"]), "New", template_id=tpl.metadata.id
+            )
+        assert manager.get_template(tpl.metadata.id).metadata.name == "Old"
+        assert manager.get_template(tpl.metadata.id).config == original_config
+        assert not manager.exists("New")
+        manager._storage.scan_directory()
+        assert manager.get_template(tpl.metadata.id).metadata.name == "Old"
 
     def test_update_missing_id_raises(self, manager):
         with pytest.raises(TemplateNotFoundError):

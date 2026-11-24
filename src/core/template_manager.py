@@ -103,14 +103,15 @@ class TemplateManager(QObject):
             existing = self._storage.read_template(template_id)
             if not existing:
                 raise TemplateNotFoundError(f"Template {template_id} not found")
-            existing.metadata.name = name
-            existing.metadata.description = description
-            existing.metadata.updated_at = now_iso_monotonic()
-            existing.config = config.to_dict()
-            self._storage.write_template(existing)
+            updated = copy.deepcopy(existing)
+            updated.metadata.name = name
+            updated.metadata.description = description
+            updated.metadata.updated_at = now_iso_monotonic()
+            updated.config = config.to_dict()
+            self._storage.write_template(updated)
             self.template_updated.emit(template_id)
             self.template_list_changed.emit()
-            return existing
+            return updated
         else:
             # 创建新模板
             new_id = self._generate_template_id()

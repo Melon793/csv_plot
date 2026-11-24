@@ -79,6 +79,20 @@ class TestTemplateStorage:
         assert storage.read_template("id00001") is None
         assert not (tmp_path / "templates" / "demo.yaml").exists()
 
+    def test_delete_uses_recorded_filename_after_cached_name_changed(self, storage):
+        tpl = _make_template(name="Old")
+        storage.write_template(tpl)
+        storage.read_template("id00001").metadata.name = "New"
+        assert storage.delete_template("id00001") is True
+        assert not (storage._storage_path / "Old.yaml").exists()
+        assert storage._find_file_by_id("id00001") is None
+
+    def test_delete_missing_file_raises(self, storage):
+        storage.write_template(_make_template())
+        (storage._storage_path / "demo.yaml").unlink()
+        with pytest.raises(TemplateStorageError):
+            storage.delete_template("id00001")
+
     def test_rename_removes_old_file(self, storage, tmp_path):
         tpl = _make_template(name="old_name")
         storage.write_template(tpl)

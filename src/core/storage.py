@@ -191,13 +191,12 @@ class TemplateStorage(QObject):
     def delete_template(self, template_id: str) -> bool:
         """删除模板文件"""
         try:
-            if template_id in self._cache:
-                name = self._cache[template_id].metadata.name
-                file = self._storage_path / (self._make_filename(name) + ".yaml")
-            else:
-                file = self._find_file_by_id(template_id)
-            if file and file.exists():
-                file.unlink()
+            file = self._find_file_by_id(template_id)
+            if file is None or not file.exists():
+                raise TemplateStorageError(
+                    f"Template file not found for {template_id}"
+                )
+            file.unlink()
             if template_id in self._cache:
                 del self._cache[template_id]
             self._id_to_filename.pop(template_id, None)
