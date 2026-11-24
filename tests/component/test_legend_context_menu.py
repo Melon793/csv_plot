@@ -465,8 +465,8 @@ class _FakeEditorDialog:
         self.actions = []
         _FakeEditorDialog.instances.append(self)
 
-    def show(self):
-        self.actions.append("show")
+    def show_initial(self):
+        self.actions.append("show_initial")
 
     def raise_(self):
         self.actions.append("raise")
@@ -490,7 +490,7 @@ def test_t12_open_variable_editor_from_menu(plot_factory, monkeypatch):
     dlg = _FakeEditorDialog.instances[0]
     assert dlg.plot_widget is pw
     assert dlg.parent is pw.window()
-    assert dlg.actions == ["show", "raise", "activateWindow"]
+    assert dlg.actions == ["show_initial"]
 
 
 # ---------- T13 三路入口同源：均汇聚到 open_variable_editor ----------

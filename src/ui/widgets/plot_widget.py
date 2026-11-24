@@ -1859,9 +1859,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         信号断连见 PlotVariableEditorDialog.closeEvent）。
         """
         dialog = PlotVariableEditorDialog(self, self.window())
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        dialog.show_initial()
         return dialog
 
     # ---------------- 双击轴弹出对话框 ----------------

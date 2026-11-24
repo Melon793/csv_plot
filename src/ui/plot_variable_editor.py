@@ -395,7 +395,6 @@ class PlotVariableEditorDialog(QDialog):
         self.load_current_curves()
         # 几何恢复放在数据填充后：初始宽按实际列宽计算
         self._restore_geometry()
-        self._prepare_initial_layout()
 
     def setup_ui(self):
         """设置UI界面"""
@@ -951,6 +950,27 @@ class PlotVariableEditorDialog(QDialog):
             return
         self._sync_ordinal_gutter()
         self._distribute_column_widths()
+
+    def show_initial(self):
+        """显示并等到首帧布局稳定，供生产打开入口使用。
+
+        隐藏状态下 QAbstractScrollArea 尚不计算竖滚条占位，show 后视口才
+        收窄并触发第二次列宽分配。短暂停用绘制，让这段几何变化发生在首帧
+        之前；事件泵排除用户输入，完成后同步分布并恢复绘制。
+        """
+        self._prepare_initial_layout()
+        if not widget_alive(self):
+            return
+        self.setUpdatesEnabled(False)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        if not widget_alive(self):
+            return
+        if self.isVisible():
+            self._safe_distribute()
+        self.setUpdatesEnabled(True)
 
     def showEvent(self, event):
         """首次显示后补一次列宽分布（R3 / 评审 P1-6）。

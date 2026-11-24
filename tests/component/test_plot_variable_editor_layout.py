@@ -74,17 +74,16 @@ def first_frame_editor_factory(plot_factory, qapp, app_settings):
         host.data_validity = {}
         for name in names:
             assert pw.add_variable_to_plot(name)
-        dlg = PlotVariableEditorDialog(pw)
-        dlg.resize(900, 600)
-        created.append(dlg)
-        return dlg, pw
+        created.append(pw)
+        return pw
 
     yield _make
-    for dlg in created:
-        dlg._width_save_timer.stop()
-        if dlg.isVisible():
-            dlg.close()
-        dlg.deleteLater()
+    for pw in created:
+        for dlg in pw.window().findChildren(PlotVariableEditorDialog):
+            dlg._width_save_timer.stop()
+            if dlg.isVisible():
+                dlg.close()
+            dlg.deleteLater()
     flush_deferred_deletes()
     for key in (
         ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY,
@@ -194,17 +193,27 @@ class TestShowDistribution:
 class TestFirstFrameLayout:
     @pytest.mark.parametrize("row_count", [2, 30])
     def test_first_visible_paint_keeps_column_edges(
-        self, first_frame_editor_factory, qapp, row_count
+        self, first_frame_editor_factory, qapp, monkeypatch, row_count
     ):
         """原生首帧起列边界不再变化；offscreen 无法复现滚动条样式时序。"""
         if qapp.platformName() in {"offscreen", "minimal"}:
             pytest.skip("首帧滚动条样式时序需要在原生平台验证")
 
-        dlg, _pw = first_frame_editor_factory(row_count)
-        recorder = _FirstFramePaintRecorder(dlg)
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        pw = first_frame_editor_factory(row_count)
+        recorders = []
+        original_prepare = PlotVariableEditorDialog._prepare_initial_layout
+
+        def prepare_and_record(dialog):
+            original_prepare(dialog)
+            recorders.append(_FirstFramePaintRecorder(dialog))
+
+        # 走唯一生产入口，并在 show 前安装观察器；helper 漏调用也会直接失败。
+        monkeypatch.setattr(
+            PlotVariableEditorDialog,
+            "_prepare_initial_layout",
+            prepare_and_record,
+        )
+        dlg = pw.open_variable_editor()
         settle()
         pump(100)
         settle()
@@ -213,6 +222,9 @@ class TestFirstFrameLayout:
         assert table.rowCount() == row_count
         assert table.verticalScrollBar().isVisible() is (row_count == 30)
         assert table.horizontalScrollBar().maximum() == 0
+        assert dlg.updatesEnabled(), "首帧落定后必须恢复绘制"
+        assert len(recorders) == 1, "生产入口未在 show 前执行初始布局落定"
+        recorder = recorders[0]
         assert recorder.samples, "没有捕获到可见 Paint"
         assert any(item[0] == "viewport" for item in recorder.details), (
             "未捕获 viewport 的真实 Paint"
