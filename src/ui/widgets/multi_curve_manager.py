@@ -595,15 +595,26 @@ class MultiCurveManager:
         pw = self.pw
         old_ci = None
         old_curve = None
+        old_was_in_scene = False
+        old_removed = False
 
         def restore_old_curve():
-            current = pw.curves.get(var_name)
-            if old_ci is None or current is old_ci:
+            if old_ci is None:
                 return
-            if current is not None and current.curve is not None:
-                if current.curve.scene() is not None:
-                    pw.plot_item.removeItem(current.curve)
-            pw.curves[var_name] = old_ci
+            current = pw.curves.get(var_name)
+            if current is not old_ci:
+                if current is not None and current.curve is not None:
+                    if current.curve.scene() is not None:
+                        pw.plot_item.removeItem(current.curve)
+                pw.curves[var_name] = old_ci
+            if (
+                old_removed
+                and old_was_in_scene
+                and old_curve is not None
+                and old_curve.scene() is None
+            ):
+                old_curve.setParentItem(pw.plot_item.vb.childGroup)
+                pw.plot_item.addItem(old_curve)
 
         try:
             if var_name in pw.curves:
@@ -635,7 +646,12 @@ class MultiCurveManager:
                 pinned_factor = ci.factor
                 pinned_offset = ci.offset
                 pinned_transform = pinned_factor != 1.0 or pinned_offset != 0.0
-                success = pw.add_variable_to_plot(
+                # 先移除旧项，避免重建期信号观察到同名双曲线；失败由上方回填。
+                if old_curve is not None and old_curve.scene() is not None:
+                    old_was_in_scene = True
+                    old_removed = True
+                    pw.plot_item.removeItem(old_curve)
+                success = self.add_variable_to_plot(
                     var_name,
                     skip_existence_check=True,
                     preferred_color=ci.color,
@@ -710,17 +726,12 @@ class MultiCurveManager:
                     not pinned_visible or pinned_policy or pinned_preset or pinned_mode
                     or pinned_transform or pinned_display_name
                 ):
-                    # 评审 B-1/NB-1：add 内部已用瞬态 visible=True/auto 投影建过
-                    # legend 并 emit curves_changed；全部恢复（含 draw_mode）完成后
-                    # 再刷一次对齐，否则安全网路径（无其它 legend 重建）图例显示 ■、
-                    # 编辑器勾选「可见」/策略 auto，与真实态脱节（点击反向显隐）。
+                    # 评审 B-1/NB-1：全部恢复（含 draw_mode）完成后再刷一次
+                    # legend 与 curves_changed，避免订阅者看到瞬态 auto/可见态。
                     # 刷新殿后：避免 legend 异常连带跳过 mode 恢复（NB-3）。
                     if not getattr(pw, "_batch_adding", False):
                         self.update_legend()
                         pw.curves_changed.emit()
-                if success and var_name in pw.curves:
-                    if old_curve is not None and old_curve.scene() is not None:
-                        pw.plot_item.removeItem(old_curve)
         except Exception:
             restore_old_curve()
             logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)

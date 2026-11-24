@@ -170,8 +170,7 @@ def test_recreate_keeps_hidden_visible(plot_factory, qapp):
 
 
 def test_recreate_emits_curves_changed_after_restore(plot_factory, qapp):
-    """评审 B-1/NB-5：恢复后补发 curves_changed，且最后一次事件必须观察到
-    恢复后的值（钉时序，防「两次 emit 都在恢复前」的错误实现）。"""
+    """评审 B-1/NB-5：只在恢复后发一次 curves_changed，且观察到恢复值。"""
     pw = _make_pw(plot_factory)
     pw.curves["a"].symbol_policy = SYMBOL_POLICY_ON
     _invalidate(pw)
@@ -180,8 +179,50 @@ def test_recreate_emits_curves_changed_after_restore(plot_factory, qapp):
         lambda: events.append(pw.curves["a"].symbol_policy)
     )
     pw._multi_curve_manager._recreate_curve("a")
-    assert len(events) >= 2, f"add 一次 + 恢复后补发一次，实际={len(events)}"
-    assert events[-1] == SYMBOL_POLICY_ON, f"最后一次 emit 须观察到恢复值：{events}"
+    assert events == [SYMBOL_POLICY_ON], f"唯一 emit 须观察到恢复值：{events}"
+
+
+def test_recreate_signal_observes_single_scene_item(plot_factory, qapp):
+    pw = _make_pw(plot_factory)
+    pw.curves["a"].symbol_policy = SYMBOL_POLICY_ON
+    pw._batch_adding = False
+    scene_counts = []
+    pw.curves_changed.connect(
+        lambda: scene_counts.append(
+            sum(
+                callable(getattr(item, "name", None)) and item.name() == "a"
+                for item in pw.plot_item.scene().items()
+            )
+        )
+    )
+
+    pw._multi_curve_manager._recreate_curve("a")
+
+    assert scene_counts == [1]
+
+
+def test_recreate_signal_failure_restores_old_scene_item(
+    plot_factory, qapp, monkeypatch
+):
+    pw = _make_pw(plot_factory)
+    old_ci = pw.curves["a"]
+    old_curve = old_ci.curve
+    old_ci.symbol_policy = SYMBOL_POLICY_ON
+    new_curve = None
+
+    class FailingSignal:
+        def emit(self):
+            nonlocal new_curve
+            new_curve = pw.curves["a"].curve
+            raise RuntimeError("signal failed")
+
+    monkeypatch.setattr(pw, "curves_changed", FailingSignal())
+    pw._multi_curve_manager._recreate_curve("a")
+
+    assert new_curve is not None and new_curve is not old_curve
+    assert pw.curves["a"] is old_ci
+    assert old_curve in pw.plot_item.scene().items()
+    assert new_curve not in pw.plot_item.scene().items()
 
 
 def test_recreate_mode_only_also_refreshes_projection(plot_factory, qapp):
