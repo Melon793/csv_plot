@@ -1078,6 +1078,37 @@ class LegendTextBrowser(QTextBrowser):
         return f"页{page_index + 1}·图{plot_index + 1}"
 
 
+# 光标线抓取带在视觉笔宽之外的两侧外扩量（逻辑像素）。
+# pyqtgraph 的命中矩形只由笔宽推导（InfiniteLine._computeBoundingRect：
+# 半宽 = max(pen宽, hoverPen宽)/2 + 1），4px 笔宽只有 ±3px，拖动光标极易
+# 点空变成平移视图。外扩 2px 后命中带 ±5px（共 10px），绘制线宽仍是 4px。
+CURSOR_HIT_PAD_PX = 2
+
+
+class GrabPaddedInfiniteLine(pg.InfiniteLine):
+    """只扩命中区、不改绘制的 InfiniteLine。
+
+    pyqtgraph 没有开放命中宽度参数，其 boundingRect 的垂直方向外扩量固定为
+    max(pen宽, hoverPen宽)/2 + 1。这里在 boundingRect 上额外外扩
+    ``hit_pad_px``，shape() 默认跟随 boundingRect（QGraphicsItem 默认实现），
+    而 paint() 仍用 currentPen 绘制，红线粗细与悬停变红的手感都不变。
+
+    局部坐标下 InfiniteLine 恒沿 x 轴绘制（painter 里做旋转），垂直方向为
+    局部 y，故只需在 y 方向外扩；_computeBoundingRect 的 px 换算口径与这里保持
+    一致（pixelVectors 的 perpendicular 分量 = 1 个像素对应的局部长度）。
+    """
+
+    hit_pad_px = CURSOR_HIT_PAD_PX
+
+    def boundingRect(self):
+        rect = super().boundingRect()
+        _, ortho = self.pixelVectors(direction=pg.Point(1, 0))
+        pad = 0.0 if ortho is None else abs(ortho.y()) * self.hit_pad_px
+        if pad <= 0:
+            return rect
+        return rect.adjusted(0, -pad, 0, pad)
+
+
 class PlotUIManager(BasePlotManager):
     """负责 UI 初始化和刷新协调的管理器"""
 
@@ -1433,12 +1464,12 @@ class PlotUIManager(BasePlotManager):
         from PySide6.QtCore import QTimer
         import pyqtgraph as _pg
 
-        pw.vline = _pg.InfiniteLine(
+        pw.vline = GrabPaddedInfiniteLine(
             angle=90,
             movable=False,
             pen=_pg.mkPen((255, 0, 0, 100), width=4),
         )
-        pw.vline2 = _pg.InfiniteLine(
+        pw.vline2 = GrabPaddedInfiniteLine(
             angle=90,
             movable=False,
             pen=_pg.mkPen((255, 0, 0, 100), width=4),
