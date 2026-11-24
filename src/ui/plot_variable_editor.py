@@ -5,6 +5,7 @@ import math
 import re
 import sys
 from PySide6.QtCore import (
+    QEvent,
     QItemSelectionModel,
     QRegularExpression,
     Qt,
@@ -97,6 +98,11 @@ _TRANSFORM_COL_WIDTH = 84
 # 38px 给出 25px 框高（描边内 23px），文字上下各约 4px 且框本身不再低于自身的
 # 23px 自然高度。代价：600px 高的窗口可见整行从 11 行降到 9 行（viewport 345px）。
 _ROW_HEIGHT = 38
+
+# 行号槽（D1）：空表也占位，避免首行出现时 viewport 抖动 + 尘埃横滚条。
+# 最少 2 位（1 行时不至于只给 6px 窘槽），行数跨到 3/4 位数时扩档。
+_ORDINAL_MIN_DIGITS = 2
+_ORDINAL_GUTTER_PAD = 8
 
 # 列宽存盘 debounce：主窗销毁不走 closeEvent，拖宽后延迟落盘兜底（评审 P1-6）
 _COLUMN_SAVE_DELAY_MS = 400
@@ -365,6 +371,8 @@ class PlotVariableEditorDialog(QDialog):
         self._width_guard = False
         self._user_fixed_cols: set[int] = set()
         self._col_min: dict[int, int] = {}
+        # viewport 重分布的合并闸：一次布局变化只调度一次 singleShot
+        self._redistribute_pending = False
 
         # 拖宽后 debounce 存盘（两参 singleShot 口径的 QTimer 实例版；
         # 随 self 销毁自动断开，避免主窗销毁时漏存）
@@ -499,6 +507,14 @@ class PlotVariableEditorDialog(QDialog):
         for col, minimum in _ELASTIC_MIN.items():
             self._col_min[col] = max(self._col_min[col], minimum)
         self._init_column_widths()
+        # 行号槽常驻（D1）：空/满两态列位一致；行数变化时按位数重新钉宽。
+        # 单一钩子覆盖全部行数变动点（load_current_curves 的清空、两处
+        # insertRow、两处 removeRow、clear_all 的清空），无需逐处插桩。
+        self._sync_ordinal_gutter()
+        self.var_table.model().rowsInserted.connect(self._on_table_rows_changed)
+        self.var_table.model().rowsRemoved.connect(self._on_table_rows_changed)
+        # viewport 变窄（行号槽扩档 / 竖滚出现）即刻重分布（D3）
+        self.var_table.viewport().installEventFilter(self)
         header.sectionResized.connect(self._on_section_resized)
         header.sectionHandleDoubleClicked.connect(self._on_handle_double_clicked)
         # 行右键重置菜单（D8）
@@ -838,6 +854,50 @@ class PlotVariableEditorDialog(QDialog):
     def _active_elastic(self) -> list[int]:
         return [c for c in _ELASTIC_COLS if c not in self._user_fixed_cols]
 
+    # ------------------------------------------------------------------
+    # 行号槽（D1）：常驻宽度 + viewport 变化重分布（D3）
+    # ------------------------------------------------------------------
+    def _sync_ordinal_gutter(self):
+        """按当前行数的位数钉行号槽宽（最少 2 位）。
+
+        不钉宽时行号头在 0 行时为 0px、有行后才有 14px：空表打开后再加
+        曲线会让 viewport 变窄，列位右移并挤出 14px 尘埃横滚条（实测
+        hmax=13）。钉成常驻槽后空/满两态列位一致；行数跨位（≥100 条）
+        时扩一档，宽度变化经 viewport 重分布吸收。
+
+        量测必须用 header 自己的字体：竖表头与表格的 QSS font-size 不是
+        同一套（实测两端字号不同），用 var_table.fontMetrics() 会算偏、
+        裁掉末位数字。
+        """
+        if not widget_alive(self):
+            return
+        header = self.var_table.verticalHeader()
+        digits = max(
+            _ORDINAL_MIN_DIGITS,
+            len(str(max(1, self.var_table.rowCount()))),
+        )
+        width = (
+            header.fontMetrics().horizontalAdvance("9" * digits)
+            + _ORDINAL_GUTTER_PAD
+        )
+        if header.width() != width:
+            header.setFixedWidth(width)
+
+    def _on_table_rows_changed(self, *_args):
+        """rowsInserted / rowsRemoved：行数变了就重钉槽宽（幂等，仅跨位时生效）。"""
+        self._sync_ordinal_gutter()
+
+    def _schedule_viewport_redistribute(self):
+        """viewport 尺寸变化的合并调度：一次布局只跑一次，避免拖窗时刷爆。"""
+        if self._redistribute_pending:
+            return
+        self._redistribute_pending = True
+        QTimer.singleShot(0, self._run_scheduled_redistribute)
+
+    def _run_scheduled_redistribute(self):
+        self._redistribute_pending = False
+        self._safe_distribute()
+
     def _distribute_column_widths(self):
         """窗口余量按默认比例分给双弹性列；缩到最小宽后横滚兜底。"""
         if self._width_guard:
@@ -881,12 +941,46 @@ class PlotVariableEditorDialog(QDialog):
         弹性列瞬间跳变。singleShot(0) 等布局落定再补一次（两参 + 存活守卫）。
         """
         super().showEvent(event)
+        # 行号槽补钉一次：QSS 的 font-size 在 polish 后才落到表头上，
+        # 构造期按未 polish 的字体算会宽 2px（实测 24 vs 22），首行出现时
+        # 再重钉就会跳一下。
+        self._sync_ordinal_gutter()
         self._distribute_column_widths()
         QTimer.singleShot(0, self._safe_distribute)
 
     def _safe_distribute(self):
         if widget_alive(self):
+            # 字体/DPR 变更后槽宽可能已过期；重分布前先重钉（幂等）
+            self._sync_ordinal_gutter()
             self._distribute_column_widths()
+
+    def eventFilter(self, watched, event):
+        """viewport 变宽/变窄 → 重分布列宽（D3）。
+
+        覆盖两类不经过对话框 resizeEvent 的宽度变化：行号槽扩档、竖向
+        滚动条出现/消失。延后一拍执行，等 Qt 布局落定再按稳定视口重算；
+        否则 setColumnWidth 触发滚动条显隐会与本次计算打架。合并闸保证
+        拖窗/批量插入时 singleShot 队列不膨胀。
+        """
+        if (
+            event.type() == QEvent.Type.Resize
+            and watched is self.var_table.viewport()
+        ):
+            self._schedule_viewport_redistribute()
+        return super().eventFilter(watched, event)
+
+    def changeEvent(self, event):
+        """主题字体变更后重钉槽宽（评审 P1-6）。
+
+        槽宽按 header 字体度量，字体变了不重钉会与绘制差 1~2px。构造期
+        早于 var_table 建成的 changeEvent 用 getattr 守卫跳过。
+        """
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.FontChange
+            and getattr(self, "var_table", None) is not None
+        ):
+            self._sync_ordinal_gutter()
 
     def _on_section_resized(self, col: int, _old: int, new: int):
         """用户拖拽 → 该列转固定（退出弹性分配）；夹最小宽。
