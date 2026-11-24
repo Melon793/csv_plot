@@ -1057,19 +1057,27 @@ class LayoutManager(MainWindowBaseManager):
         # （切页链路 restore_mark_regions → request_mark_stats_refresh(immediate)）
         window.update_stats(entries, active_page=active_page)
 
-    def open_layout_dialog(self):
+    def open_layout_dialog(self, page=None, parent=None):
+        """调整可见行列；``page`` 为空时作用于当前页（顶栏入口的口径）。
+
+        整理布局对话框内部也会复用本入口（传目标页与自身作为 parent），
+        初值与落地都不再依赖 MainWindow 的「当前页」代理属性。
+        """
         if self.mw.reject_when_loading("修改布局"):
             return
+        target = page if page is not None else getattr(self.mw, "current_page", None)
+        if target is None:
+            return
         dlg = LayoutGridSelector(
-            max_rows=self.mw._plot_row_max_default,
-            max_cols=self.mw._plot_col_max_default,
-            cur_rows=self.mw._plot_row_current,
-            cur_cols=self.mw._plot_col_current,
-            parent=self.mw,
+            max_rows=target.rows_max,
+            max_cols=target.cols_max,
+            cur_rows=target.rows_current,
+            cur_cols=target.cols_current,
+            parent=parent if parent is not None else self.mw,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             r, c = dlg.values()
-            self.set_plots_visible(r, c)
+            self.set_plots_visible(r, c, page=target)
             if hasattr(self.mw, 'plot_config_manager'):
                 self.mw.plot_config_manager.save_auto_save(self.mw)
         dlg.deleteLater()

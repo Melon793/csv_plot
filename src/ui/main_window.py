@@ -2156,7 +2156,9 @@ class MainWindow(QMainWindow):
         # 按钮不显示，接线照旧：拖变量进图时 variable_actions 靠 setChecked(False)
         # 唤回绘图区，走的就是这一路 toggled
         self.toggle_plot_btn.toggled.connect(self.layout_manager.toggle_plot_area)
-        self.grid_layout_btn.clicked.connect(self.layout_manager.open_layout_dialog)
+        self.grid_layout_btn.clicked.connect(
+            lambda: self.layout_manager.open_layout_dialog()
+        )
         self.curve_shelf_btn.toggled.connect(self.toggle_curve_shelf)
         self._grid_layout_shortcut = QShortcut(QKeySequence("Ctrl+L"), self.plot_widget)
         self._grid_layout_shortcut.activated.connect(self._on_grid_layout_shortcut)
