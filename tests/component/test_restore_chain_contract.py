@@ -238,7 +238,7 @@ def test_corrupt_primary_auto_save_falls_back_to_backup(tmp_path):
     assert loaded.normalized_pages()[0].plots[0].curves == ["a"]
 
 
-def test_corrupt_primary_and_backup_warn_once_and_keep_fffd_last(
+def test_corrupt_primary_and_backup_warn_once_and_merge_fffd_disclosure(
     post_load_env, monkeypatch, tmp_path
 ):
     flm, host = post_load_env
@@ -259,7 +259,8 @@ def test_corrupt_primary_and_backup_warn_once_and_keep_fffd_last(
     assert len(failures) == 1, host.broadcasts
     assert "自动恢复" in failures[0][0]
     assert host.applied == []
-    assert host.broadcasts[-1][0].startswith("已推断修复 2 处单位乱码")
+    assert host.broadcasts[-1][0] == failures[0][0]
+    assert "已推断修复 2 处单位乱码" in host.broadcasts[-1][0]
     assert host.broadcasts[-1][1] == "warn"
 
 

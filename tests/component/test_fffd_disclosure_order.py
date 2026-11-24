@@ -118,11 +118,25 @@ def test_disclosure_survives_auto_restore_exception(flm_env, monkeypatch):
     )
     flm._post_load_actions("/tmp/demo.csv")
     texts = [t for t, _ in mw.broadcasts]
-    assert texts and texts[-1].startswith("已推断修复"), f"实际={texts}"
+    assert texts and "已推断修复 3 处单位乱码" in texts[-1], f"实际={texts}"
+    assert texts[-1].startswith("自动恢复失败"), f"实际={texts}"
+
+
+def test_replot_failure_keeps_error_level_when_merging_disclosure(flm_env):
+    flm, mw = flm_env
+    flm._last_replot_result = "failed"
+
+    flm._post_load_actions("demo.csv")
+
+    assert len(mw.broadcasts) == 1
+    text, level = mw.broadcasts[0]
+    assert text.startswith("曲线恢复失败")
+    assert "已推断修复 3 处单位乱码" in text
+    assert level == "error"
 
 
 @pytest.mark.parametrize("stage", ["load", "apply_false", "apply_raise"])
-def test_restore_failure_warns_once_and_fffd_stays_last(flm_env, monkeypatch, stage):
+def test_restore_failure_warns_once_and_merges_fffd_disclosure(flm_env, monkeypatch, stage):
     """R6：读档/套用失败仅日志不够；一次 warn/error 后仍须披露 FFFD。"""
     flm, mw = flm_env
     manager = mw.plot_config_manager
@@ -151,5 +165,7 @@ def test_restore_failure_warns_once_and_fffd_stays_last(flm_env, monkeypatch, st
     ]
     assert len(failures) == 1, f"失败必须只播报一次，实际={mw.broadcasts}"
     assert "自动恢复" in failures[0][0], failures[0]
-    assert mw.broadcasts[-1][0].startswith("已推断修复 3 处单位乱码")
+    assert mw.broadcasts[-1][0] == failures[0][0]
+    assert mw.broadcasts[-1][0].startswith("自动恢复失败")
+    assert "已推断修复 3 处单位乱码" in mw.broadcasts[-1][0]
     assert mw.broadcasts[-1][1] == "warn"

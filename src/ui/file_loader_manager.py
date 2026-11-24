@@ -2308,6 +2308,7 @@ class FileLoaderManager(MainWindowBaseManager):
             0.0, time.perf_counter() - getattr(self, "_load_started_at", time.perf_counter())
         )
         self.mw.end_load_feedback()
+        recovery_failure = None
         # 评审 NB1：前段 UI 收尾与自动恢复同包异常隔离，保「D1 披露必达」
         try:
             self.mw.update_file_status(
@@ -2331,8 +2332,8 @@ class FileLoaderManager(MainWindowBaseManager):
                 if replot_result == "restored":
                     logger.info("replots_after_loading 已恢复资产，跳过自动恢复")
                 elif replot_result == "failed":
-                    self.mw._broadcast(
-                        "曲线恢复失败，已停止自动套用布局", level="error"
+                    recovery_failure = (
+                        "曲线恢复失败，已停止自动套用布局", "error"
                     )
                 elif replot_result == "empty":
                     current_vars = []
@@ -2346,8 +2347,8 @@ class FileLoaderManager(MainWindowBaseManager):
                         current_vars, getattr(self.mw, "loader", None)
                     )
                     if decision.failed:
-                        self.mw._broadcast(
-                            "自动恢复失败：无法读取可用配置", level="warn"
+                        recovery_failure = (
+                            "自动恢复失败：无法读取可用配置", "warn"
                         )
                     elif decision.should:
                         success = manager.apply_config(
@@ -2363,27 +2364,29 @@ class FileLoaderManager(MainWindowBaseManager):
                                 identity_snapshot=decision.identity_snapshot,
                             )
                         else:
-                            self.mw._broadcast(
-                                "自动恢复失败：布局套用未完成", level="warn"
+                            recovery_failure = (
+                                "自动恢复失败：布局套用未完成", "warn"
                             )
                     else:
                         logger.info("不应用自动保存: %s", decision.reason)
         except Exception:
             logger.warning("加载收尾/自动恢复阶段异常（不影响 D1 披露）", exc_info=True)
-            self.mw._broadcast(
-                "自动恢复失败：加载收尾未完成", level="warn"
-            )
+            recovery_failure = ("自动恢复失败：加载收尾未完成", "warn")
 
         # D1 披露：源头乱码修复必须让用户知情（所有加载路径都汇到这里）。
-        # 第 6 轮 P1-B：必须放在自动恢复播报**之后**——同一回调内两次
-        # setText 之间没有事件循环迭代，先播的披露会被「自动恢复…」顶掉，
-        # 推断性数据改写（°C）在最常见路径（重开上次画过的文件）静默化。
+        # 同一回调的播报会互相顶掉，失败与披露合并为一条，级别取失败。
         fffd_fixes = getattr(self.mw.loader, "fffd_unit_fixes", 0) or 0
-        if fffd_fixes:
-            self.mw._broadcast(
-                f"已推断修复 {fffd_fixes} 处单位乱码（°C，源文件导出时已丢失°字符）",
-                level="warn",
-            )
+        disclosure = (
+            f"已推断修复 {fffd_fixes} 处单位乱码（°C，源文件导出时已丢失°字符）"
+            if fffd_fixes else ""
+        )
+        if recovery_failure is not None:
+            message, level = recovery_failure
+            if disclosure:
+                message = f"{message}；{disclosure}"
+            self.mw._broadcast(message, level=level)
+        elif disclosure:
+            self.mw._broadcast(disclosure, level="warn")
 
     def _announce_auto_restore(
         self, config, current_vars, *, identity_snapshot=None
