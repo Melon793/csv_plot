@@ -1108,3 +1108,192 @@ def test_resize_during_drag_keeps_preview_consistent(pages):
                 icon.pos() == target
             )
     dlg.deleteLater()
+
+
+# --------------------------------------------------------------------------
+# Q1b：多选连续块刚性平移（散选回退重排）
+# --------------------------------------------------------------------------
+def _begin_multi_drag(dlg, pressed, tokens):
+    dlg._selection = set(tokens)
+    icon = dlg._board.icons[pressed]
+    dlg.begin_drag(
+        pressed, icon.mapToGlobal(icon.rect().center()), icon, from_tray=False
+    )
+    return icon
+
+
+def test_rigid_vertical_block_preview_highlights_anchor_final_seat(pages):
+    """连续竖块右移：高亮=anchor 最终格；确认后列不变、上下序不变。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    tokens = ("p0:c0", "p0:c2")   # 左列上下两格（4 连通）
+    _begin_multi_drag(dlg, "p0:c0", tokens)
+    r1 = board.seat_rect(1)
+    release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    dlg.drag_move(release)
+
+    assert board._highlight == 1
+    assert "整块平移" in dlg._status.text()
+
+    dlg.end_drag(release)
+    cells = dlg.result_state().pages[0].cells
+    assert cells[1] == "p0:c0" and cells[3] == "p0:c2"
+    assert cells[0] == "p0:c1"        # 被顶替图回到空出的源格
+    assert cells[2] is None
+    anim = board._anims["p0:c0"]
+    start_tl, target, _duration = _settle_expect_icon(dlg, release, 1)
+    assert anim.startValue() == start_tl
+    assert anim.endValue() == target
+    dlg.deleteLater()
+
+
+def test_rigid_clamped_status_and_anchor_on_edge(pages):
+    """贴边：状态含「已贴边」，高亮/收拢都在边界格。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    tokens = ("p0:c0", "p0:c2")
+    _begin_multi_drag(dlg, "p0:c0", tokens)
+    release = board.mapToGlobal(board.seat_rect(3).center())
+    dlg.drag_move(release)
+
+    assert board._highlight == 1, "两行块下移贴底：anchor 应停在 row0 col1"
+    assert "已贴边" in dlg._status.text()
+
+    dlg.end_drag(release)
+    assert dlg.result_state().pages[0].cells[1] == "p0:c0"
+    anim = board._anims["p0:c0"]
+    assert anim.endValue() == board._icon_target(1)
+    dlg.deleteLater()
+
+
+def test_rigid_no_displacement_status_and_settle_back_to_source(pages):
+    """贴边且无位移：状态「已到边界，无法继续移动」，卡片从松手点收回源格。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    tokens = ("p0:c0", "p0:c2")   # 满高竖块
+    _begin_multi_drag(dlg, "p0:c0", tokens)
+    r2 = board.seat_rect(2)
+    release = board.mapToGlobal(QPoint(r2.left() + 12, r2.top() + 12))
+    dlg.drag_move(release)
+
+    assert board._highlight == 0
+    assert "已到边界，无法继续移动" in dlg._status.text()
+
+    dlg.end_drag(release)
+    anim = board._anims.get("p0:c0")
+    assert anim is not None
+    start_tl, target, _duration = _settle_expect_icon(dlg, release, 0)
+    assert anim.startValue() == start_tl
+    assert anim.endValue() == target
+    assert anim.startValue() != anim.endValue()
+    assert dlg.result_state().pages[0].cells[0] == "p0:c0"
+    dlg.deleteLater()
+
+
+def test_scatter_multi_select_packs_and_anchor_settles(pages):
+    """散选（对角）：状态「整块重排」，只有 anchor 从松手点起飞，同伴 FLIP。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    tokens = ("p0:c1", "p0:c2")   # seat1/seat2：索引相邻但非 4 连通
+    _begin_multi_drag(dlg, "p0:c1", tokens)
+    release = board.mapToGlobal(board.seat_rect(3).center())
+    dlg.drag_move(release)
+
+    assert "整块重排" in dlg._status.text()
+    assert board._highlight == 2      # anchor 落入重排后的连续段首格
+
+    dlg.end_drag(release)
+    cells = dlg.result_state().pages[0].cells
+    assert cells[2] == "p0:c1" and cells[3] == "p0:c2"
+    anchor_anim = board._anims["p0:c1"]
+    start_tl, target, _duration = _settle_expect_icon(dlg, release, 2)
+    assert anchor_anim.startValue() == start_tl
+    assert anchor_anim.endValue() == target
+    companion = board._anims.get("p0:c2")
+    assert companion is None or companion.duration() == 180
+    dlg.deleteLater()
+
+
+def test_multi_select_to_tray_kicks_all(pages):
+    """多选拖入等候区：整体踢出、状态文案带数量。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board, tray = dlg._board, dlg._tray_panel
+    tokens = ("p0:c0", "p0:c2")
+    _begin_multi_drag(dlg, "p0:c0", tokens)
+    release = tray.mapToGlobal(QPoint(tray.width() // 2, tray.height() // 2))
+    dlg.drag_move(release)
+    assert "移入等候区（2 个）" in dlg._status.text()
+
+    dlg.end_drag(release)
+    assert set(tray.chips) == set(tokens)
+    assert set(board.icons) == {"p0:c1"}
+    dlg.deleteLater()
+
+
+def test_single_select_keeps_swap_and_place_copy(pages):
+    """单选回归：文案仍是「交换 / 安放」。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    _begin_drag(dlg, "p0:c0")
+    dlg.drag_move(board.mapToGlobal(board.seat_rect(1).center()))
+    assert "交换" in dlg._status.text()
+    dead = dlg.mapToGlobal(QPoint(-60, -60))
+    dlg.drag_move(dead)
+    dlg.end_drag(dead)
+
+    _begin_drag(dlg, "p0:c0")
+    dlg.drag_move(board.mapToGlobal(board.seat_rect(3).center()))
+    assert "安放" in dlg._status.text()
+    dlg.end_drag(board.mapToGlobal(board.seat_rect(3).center()))
+    dlg.deleteLater()
+
+
+def test_existing_widgets_not_snapped_on_release(pages):
+    """释放刷新不得把既有 widget 瞬移到槽位（spawn_snap 只认新建）。
+
+    不手动改棋盘尺寸：保证释放时几何不变，既有动画不会被 resize 掉。
+    """
+    from tests.fixtures.waits import settle
+
+    page_a, page_b = pages
+    dlg = PlotArrangeDialog([page_a, page_b], current_page=page_a)
+    dlg.resize(1200, 900)
+    dlg.show()
+    settle()
+    board = dlg._board
+    before_pos = board.icons["p0:c1"].pos()
+    _begin_drag(dlg, "p0:c0")
+    release = board.mapToGlobal(board.seat_rect(1).center())
+    dlg.drag_move(release)
+    dlg.end_drag(release)
+
+    anim = board._anims.get("p0:c1")
+    target = board._icon_target(0)   # 交换后被顶图回到 seat0
+    assert anim is not None
+    assert anim.startValue() == before_pos, "既有图应从原位 FLIP，而非被瞬移"
+    assert anim.endValue() == target
+    dlg.deleteLater()
+
+
+def test_rigid_anchor_settle_matches_highlight_endpoint(pages):
+    """收拢终点与高亮同源（带 3px 内缩）。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    _begin_multi_drag(dlg, "p0:c0", ("p0:c0", "p0:c2"))
+    r1 = board.seat_rect(1)
+    release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    dlg.drag_move(release)
+    assert board._highlight == 1
+    dlg.end_drag(release)
+
+    anim = board._anims["p0:c0"]
+    expected = board.seat_rect(1).adjusted(3, 3, -3, -3).topLeft()
+    assert anim.endValue() == expected
+    dlg.deleteLater()

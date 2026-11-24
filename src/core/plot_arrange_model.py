@@ -131,22 +131,127 @@ def zone_seats(page: PageState, seat: int) -> list[int]:
     return visible if seat_visible(page, seat) else hidden
 
 
-def move_within(
-    state: ArrangeState, page_index: int, ids: list[str], seat: int
-) -> dict:
-    """页内块交换：块占目标格位段，目标段原图（除块自身）回源格位段。
+def _is_4_connected(seats: list[int], stride: int) -> bool:
+    """选中格是否 4 邻接连通（上下左右；不跨行回绕）。单格视为连通。"""
+    if not seats:
+        return False
+    targets = set(seats)
+    seen = {seats[0]}
+    stack = [seats[0]]
+    while stack:
+        seat = stack.pop()
+        row, col = divmod(seat, stride)
+        for nrow, ncol in ((row - 1, col), (row + 1, col),
+                           (row, col - 1), (row, col + 1)):
+            if nrow < 0 or ncol < 0 or ncol >= stride:
+                continue
+            neighbor = nrow * stride + ncol
+            if neighbor in targets and neighbor not in seen:
+                seen.add(neighbor)
+                stack.append(neighbor)
+    return len(seen) == len(targets)
+
+
+def _anchor_source_seat(page: PageState, ids: list[str],
+                        anchor: str | None) -> int | None:
+    """anchor token → 源格位；取不到或不属于选择集时返回 None。"""
+    if anchor is None or anchor not in ids:
+        return None
+    try:
+        return page.cells.index(anchor)
+    except ValueError:
+        return None
+
+
+def _move_rigid(page: PageState, ids: list[str], seat: int, a_seat: int,
+                bounds: tuple[int, int]) -> dict:
+    """连续块刚性平移：整块按 Δ=(落点格−anchor 源格) 平移，内部相对位置不变。
+
+    索引步长一律 ``page.cols``；bounds 只用于资格判断与夹取（展示区外不越界）。
+    被顶替图优先落到对应源格，重叠时退回剩余空出的源格；块最后写回、只读
+    ``before``，故不丢图、不重图。
+    """
+    stride = page.cols
+    rows, cols = bounds
+    src = sorted(
+        i for i, cell in enumerate(page.cells) if cell is not None and cell in ids
+    )
+    before = list(page.cells)
+    src_rows = [s // stride for s in src]
+    src_cols = [s % stride for s in src]
+    raw_dr = seat // stride - a_seat // stride
+    raw_dc = seat % stride - a_seat % stride
+    dr = min(max(raw_dr, -min(src_rows)), rows - 1 - max(src_rows))
+    dc = min(max(raw_dc, -min(src_cols)), cols - 1 - max(src_cols))
+    clamped = dr != raw_dr or dc != raw_dc
+    delta = dr * stride + dc
+    anchor_seat = a_seat + delta
+    moved = anchor_seat != a_seat
+    targets = sorted(s + delta for s in src)
+    target_set = set(targets)
+    src_set = set(src)
+    displaced = [
+        (t, before[t])
+        for t in targets
+        if before[t] is not None and before[t] not in ids
+    ]
+    free = sorted(src_set - target_set)
+    next_cells = list(before)
+    unmapped: list[str] = []
+    filled: set[int] = set()
+    for target, token in displaced:
+        src_seat = target - delta
+        if src_seat in free and src_seat not in filled:
+            next_cells[src_seat] = token
+            filled.add(src_seat)
+        else:
+            unmapped.append(token)
+    remaining = [s for s in free if s not in filled]
+    for token, slot in zip(unmapped, remaining):
+        next_cells[slot] = token
+    for slot in remaining[len(unmapped):]:
+        next_cells[slot] = None
+    for source in src:
+        next_cells[source + delta] = before[source]
+    page.cells = next_cells
+    return {
+        "ok": True,
+        "reason": "",
+        "swapped": [token for _target, token in displaced],
+        "anchor_seat": anchor_seat,
+        "mode": "rigid",
+        "clamped": clamped,
+        "moved": moved,
+    }
+
+
+def _rigid_eligible(page: PageState, src: list[int], ids: list[str],
+                    seat: int, a_seat: int | None,
+                    bounds: tuple[int, int] | None) -> bool:
+    if a_seat is None or bounds is None:
+        return False
+    rows, cols = bounds
+    if not (0 <= seat < page.rows * page.cols):
+        return False
+    seat_row, seat_col = divmod(seat, page.cols)
+    if seat_row >= rows or seat_col >= cols:
+        return False
+    for source in src:
+        row, col = divmod(source, page.cols)
+        if row >= rows or col >= cols:
+            return False
+    return _is_4_connected(src, page.cols)
+
+
+def _move_packed(page: PageState, src_seats: list[int], ids: list[str],
+                 seat: int, a_seat: int | None) -> dict:
+    """页内块重排：块占目标格位段，目标段原图（除块自身）回源格位段。
 
     目标段按**目标所在区的阅读序**取连续格位（可见区/隐藏区互不越界）；
     块比目标区还大时退回整网格行优先连续段。源/目标重叠也不丢图不重图，
-    多余源格变空位。
+    多余源格变空位。``src_seats`` 是**格位序**（不是 ordered_ids 序）。
     """
-    page = state.pages[page_index]
     total = page.rows * page.cols
-    src_seats = [
-        i for i, cell in enumerate(page.cells) if cell is not None and cell in ids
-    ]
-    if not src_seats:
-        return {"ok": False, "reason": "empty", "swapped": []}
     before = list(page.cells)
     block = [before[i] for i in src_seats]
     block_size = len(block)
@@ -175,7 +280,52 @@ def move_within(
     for offset, tgt_seat in enumerate(tgt_seats):
         next_cells[tgt_seat] = block[offset]
     page.cells = next_cells
-    return {"ok": True, "reason": "", "swapped": displaced}
+    anchor_seat = None
+    if a_seat is not None and a_seat in src_seats:
+        anchor_seat = tgt_seats[src_seats.index(a_seat)]
+    return {
+        "ok": True,
+        "reason": "",
+        "swapped": displaced,
+        "anchor_seat": anchor_seat,
+        "mode": "packed",
+        "clamped": False,
+        "moved": anchor_seat is not None and anchor_seat != a_seat,
+    }
+
+
+def move_within(
+    state: ArrangeState,
+    page_index: int,
+    ids: list[str],
+    seat: int,
+    anchor: str | None = None,
+    bounds: tuple[int, int] | None = None,
+) -> dict:
+    """页内落位：连续块刚性平移，散选/无 anchor 回退现有重排打包。
+
+    ``anchor`` 是被按下的 plot token（不是 Shift 范围锚点）；``bounds`` 是
+    拖拽开始时锁定的展示区行列。token→seat 取不到、源/目标越出展示区或
+    选中格非 4 邻接连通时回退打包。
+    """
+    page = state.pages[page_index]
+    src_seats = [
+        i for i, cell in enumerate(page.cells) if cell is not None and cell in ids
+    ]
+    a_seat = _anchor_source_seat(page, ids, anchor)
+    if not src_seats:
+        return {
+            "ok": False,
+            "reason": "empty",
+            "swapped": [],
+            "anchor_seat": None,
+            "mode": "packed",
+            "clamped": False,
+            "moved": False,
+        }
+    if _rigid_eligible(page, src_seats, ids, seat, a_seat, bounds):
+        return _move_rigid(page, ids, seat, a_seat, bounds)  # type: ignore[arg-type]
+    return _move_packed(page, src_seats, ids, seat, a_seat)
 
 
 def backfill(state: ArrangeState, page_index: int) -> int:

@@ -199,3 +199,251 @@ def test_clone_state_is_deep():
     assert kicked == 1
     assert "a" in state.pages[0].cells  # 原状态未被污染
     assert copied.pages[0].cells != state.pages[0].cells
+
+# --------------------------------------------------------------------------
+# Q1b：连续块刚性平移（anchor + bounds 才启用；散选回退打包）
+# --------------------------------------------------------------------------
+def _state(page: PageState) -> ArrangeState:
+    return ArrangeState([page], [])
+
+
+def test_rigid_vertical_block_moves_right_keeping_rows():
+    page = PageState("页", rows=3, cols=2, vis_rows=3, vis_cols=2,
+                     cells=["a", None, "b", None, "c", None])
+    result = move_within(_state(page), 0, ["a", "b", "c"], 1,
+                         anchor="a", bounds=(3, 2))
+    assert result["ok"] is True
+    assert result["mode"] == "rigid"
+    assert page.cells == [None, "a", None, "b", None, "c"]
+    assert result["anchor_seat"] == 1
+    assert result["clamped"] is False
+    assert result["moved"] is True
+
+
+def test_rigid_anchor_in_middle_lands_on_target():
+    page = PageState("页", rows=3, cols=2, vis_rows=3, vis_cols=2,
+                     cells=["a", None, "b", None, "c", None])
+    result = move_within(_state(page), 0, ["a", "b", "c"], 3,
+                         anchor="b", bounds=(3, 2))
+    assert result["mode"] == "rigid"
+    assert result["anchor_seat"] == 3
+    assert page.cells[1] == "a" and page.cells[3] == "b" and page.cells[5] == "c"
+
+
+def test_rigid_clamps_at_edge_and_highlights_edge_seat():
+    page = PageState("页", rows=3, cols=2, vis_rows=3, vis_cols=2,
+                     cells=["a", None, "b", None, "c", None])
+    result = move_within(_state(page), 0, ["a", "b", "c"], 3,
+                         anchor="a", bounds=(3, 2))
+    assert result["mode"] == "rigid"
+    assert result["clamped"] is True
+    assert result["moved"] is True
+    assert result["anchor_seat"] == 1   # row0 col1（贴边后停在这里）
+    assert page.cells[1] == "a" and page.cells[3] == "b" and page.cells[5] == "c"
+
+
+def test_rigid_no_displacement_when_already_at_edge():
+    page = PageState("页", rows=3, cols=2, vis_rows=3, vis_cols=2,
+                     cells=["a", None, "b", None, "c", None])
+    before = list(page.cells)
+    result = move_within(_state(page), 0, ["a", "b", "c"], 4,
+                         anchor="a", bounds=(3, 2))
+    assert result["mode"] == "rigid"
+    assert result["clamped"] is True
+    assert result["moved"] is False
+    assert result["anchor_seat"] == 0
+    assert page.cells == before
+
+
+def test_rigid_horizontal_block_moves_whole_row():
+    page = PageState("页", rows=2, cols=3, vis_rows=2, vis_cols=3,
+                     cells=["a", "b", "c", None, None, None])
+    result = move_within(_state(page), 0, ["a", "b", "c"], 3,
+                         anchor="a", bounds=(2, 3))
+    assert result["mode"] == "rigid"
+    assert page.cells[3:] == ["a", "b", "c"]
+    assert page.cells[:3] == [None, None, None]
+
+
+def test_rigid_full_rect_moves():
+    page = PageState("页", rows=3, cols=3, vis_rows=3, vis_cols=3,
+                     cells=["a", "b", None, "c", "d", None, None, None, None])
+    result = move_within(_state(page), 0, ["a", "b", "c", "d"], 4,
+                         anchor="a", bounds=(3, 3))
+    assert result["mode"] == "rigid"
+    assert page.cells[4] == "a" and page.cells[5] == "b"
+    assert page.cells[7] == "c" and page.cells[8] == "d"
+    assert sorted(c for c in page.cells if c) == ["a", "b", "c", "d"]
+
+
+def test_rigid_l_shape_keeps_shape():
+    page = PageState("页", rows=3, cols=3, vis_rows=3, vis_cols=3,
+                     cells=["a", "b", None, "c", None, None, None, None, None])
+    result = move_within(_state(page), 0, ["a", "b", "c"], 4,
+                         anchor="a", bounds=(3, 3))
+    assert result["mode"] == "rigid"
+    assert page.cells[4] == "a" and page.cells[5] == "b" and page.cells[7] == "c"
+
+
+def test_rigid_ring_is_4_connected():
+    page = PageState(
+        "页", rows=3, cols=4, vis_rows=3, vis_cols=4,
+        cells=["a", "b", "c", None, "d", None, "e", None,
+               "f", "g", "h", None],
+    )
+    result = move_within(_state(page), 0, list("abcdefgh"), 3,
+                         anchor="a", bounds=(3, 4))
+    assert result["mode"] == "rigid"
+    assert result["clamped"] is True
+    assert result["anchor_seat"] == 1
+    assert {c for c in page.cells if c} == set("abcdefgh")
+
+
+def test_scatter_falls_back_to_packed():
+    page = PageState("页", rows=3, cols=3, vis_rows=3, vis_cols=3,
+                     cells=["a", None, None, None, None, None, None, None, "b"])
+    result = move_within(_state(page), 0, ["a", "b"], 4,
+                         anchor="a", bounds=(3, 3))
+    assert result["mode"] == "packed"
+    assert page.cells[4] == "a" and page.cells[5] == "b"
+    assert {c for c in page.cells if c} == {"a", "b"}
+
+
+def test_diagonal_pair_falls_back_to_packed():
+    page = PageState("页", rows=3, cols=3, vis_rows=3, vis_cols=3,
+                     cells=["a", None, None, None, "b", None, None, None, None])
+    result = move_within(_state(page), 0, ["a", "b"], 5,
+                         anchor="a", bounds=(3, 3))
+    assert result["mode"] == "packed"
+
+
+def test_index_adjacent_but_not_4_connected_falls_back():
+    page = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                     cells=[None, "a", "b", None])
+    result = move_within(_state(page), 0, ["a", "b"], 0,
+                         anchor="a", bounds=(2, 2))
+    assert result["mode"] == "packed"
+
+
+def test_hidden_source_with_visible_bounds_falls_back():
+    page = PageState("页", rows=3, cols=3, vis_rows=2, vis_cols=2,
+                     cells=[None, None, "a", "x", "y", None, None, None, None])
+    result = move_within(_state(page), 0, ["a"], 0,
+                         anchor="a", bounds=(2, 2))
+    assert result["mode"] == "packed"
+    assert page.cells[1] is None and page.cells[3] == "x" and page.cells[4] == "y"
+
+
+def test_full_bounds_allows_rigid_across_virtual_boundary():
+    page = PageState("页", rows=3, cols=3, vis_rows=2, vis_cols=2,
+                     cells=[None, None, None, "a", None, None, "b", None, None])
+    result = move_within(_state(page), 0, ["a", "b"], 4,
+                         anchor="a", bounds=(3, 3))
+    assert result["mode"] == "rigid"
+    assert page.cells[4] == "a" and page.cells[7] == "b"
+
+
+def test_rigid_overlap_down_puts_displaced_in_freed_source():
+    page = PageState("页", rows=3, cols=2, vis_rows=3, vis_cols=2,
+                     cells=["a", None, "b", None, "x", None])
+    result = move_within(_state(page), 0, ["a", "b"], 4,
+                         anchor="a", bounds=(3, 2))
+    assert result["mode"] == "rigid"
+    assert page.cells[0] == "x"      # 被顶图回到空出的源格
+    assert page.cells[2] == "a" and page.cells[4] == "b"
+    assert result["swapped"] == ["x"]
+
+
+def test_rigid_mixed_holes_keeps_row_alignment():
+    page = PageState("页", rows=3, cols=3, vis_rows=3, vis_cols=3,
+                     cells=["a", "b", None, "d", "e", None, None, None, None])
+    result = move_within(_state(page), 0, ["a", "b", "d", "e"], 5,
+                         anchor="a", bounds=(3, 3))
+    assert result["mode"] == "rigid"
+    assert page.cells[4] == "a" and page.cells[5] == "b"
+    assert page.cells[7] == "d" and page.cells[8] == "e"
+    assert page.cells[0] is None and page.cells[3] is None
+
+
+def test_rigid_displaced_multiset_no_loss_no_duplicate():
+    page = PageState("页", rows=3, cols=3, vis_rows=3, vis_cols=3,
+                     cells=["a", "b", "c", "x", "y", "z", None, None, None])
+    result = move_within(_state(page), 0, ["a", "b", "c"], 3,
+                         anchor="a", bounds=(3, 3))
+    assert result["mode"] == "rigid"
+    assert result["swapped"] == ["x", "y", "z"]
+    assert page.cells[:3] == ["x", "y", "z"]
+    assert page.cells[3:6] == ["a", "b", "c"]
+    tokens = [c for c in page.cells if c]
+    assert sorted(tokens) == sorted(["a", "b", "c", "x", "y", "z"])
+
+
+def test_rigid_multi_displaced_fill_order():
+    page = PageState("页", rows=2, cols=3, vis_rows=2, vis_cols=3,
+                     cells=["a", "b", "x", "d", "e", "y"])
+    result = move_within(_state(page), 0, ["a", "b", "d", "e"], 1,
+                         anchor="a", bounds=(2, 3))
+    assert result["mode"] == "rigid"
+    assert result["swapped"] == ["x", "y"]
+    assert page.cells[0] == "x" and page.cells[3] == "y"
+    assert page.cells[1] == "a" and page.cells[2] == "b"
+    assert page.cells[4] == "d" and page.cells[5] == "e"
+
+
+def test_single_anchor_matches_legacy_packed_result():
+    for target in (0, 4):
+        page_new = PageState("页", rows=2, cols=3, vis_rows=2, vis_cols=2,
+                             cells=["h", "i", None, "j", "k", "l"])
+        page_old = PageState("页", rows=2, cols=3, vis_rows=2, vis_cols=2,
+                             cells=["h", "i", None, "j", "k", "l"])
+        new = move_within(_state(page_new), 0, ["h"], target,
+                          anchor="h", bounds=(2, 2))
+        old = move_within(_state(page_old), 0, ["h"], target)
+        assert new["mode"] == "rigid"
+        assert page_new.cells == page_old.cells
+        assert new["swapped"] == old["swapped"]
+
+
+def test_legacy_call_without_anchor_stays_packed():
+    page = PageState("页", rows=3, cols=2, vis_rows=3, vis_cols=2,
+                     cells=["a", None, "b", None, "c", None])
+    result = move_within(_state(page), 0, ["a", "b", "c"], 1)
+    assert result["mode"] == "packed"
+    assert {"anchor_seat", "mode", "clamped", "moved"} <= set(result)
+
+
+def test_invalid_anchor_falls_back_without_raising():
+    page = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                     cells=["a", "b", None, None])
+    result = move_within(_state(page), 0, ["a", "b"], 2,
+                         anchor="missing", bounds=(2, 2))
+    assert result["ok"] is True
+    assert result["mode"] == "packed"
+    assert result["anchor_seat"] is None
+
+    page2 = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                      cells=["a", "b", None, None])
+    result2 = move_within(_state(page2), 0, ["a"], 2,
+                          anchor="b", bounds=(2, 2))
+    assert result2["mode"] == "packed"
+    assert result2["anchor_seat"] is None
+
+
+def test_stride_uses_page_cols_not_visible_cols():
+    page = PageState("页", rows=3, cols=3, vis_rows=2, vis_cols=2,
+                     cells=["a", None, None, "b", None, None, None, None, None])
+    result = move_within(_state(page), 0, ["a", "b"], 1,
+                         anchor="a", bounds=(2, 2))
+    assert result["mode"] == "rigid"
+    assert result["anchor_seat"] == 1
+    assert page.cells[1] == "a" and page.cells[4] == "b"
+    assert page.cells[2] is None and page.cells[5] is None
+
+
+def test_hidden_target_with_visible_bounds_falls_back():
+    page = PageState("页", rows=3, cols=3, vis_rows=2, vis_cols=2,
+                     cells=["a", None, None, None, None, None, None, None, None])
+    result = move_within(_state(page), 0, ["a"], 2,   # seat2 在隐藏列
+                         anchor="a", bounds=(2, 2))
+    assert result["mode"] == "packed"
+    assert page.cells[0] is None and page.cells[2] == "a"

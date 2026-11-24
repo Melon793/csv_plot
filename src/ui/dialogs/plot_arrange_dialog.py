@@ -1230,14 +1230,33 @@ class PlotArrangeDialog(QDialog):
         state = clone_state(self._state)
         if target[0] == "seat":
             if self._drag["from"] == "grid":
-                result = move_within(state, self._page_index, ids, target[1])
-                return state, result["ok"], {"swapped": result.get("swapped", [])}
+                result = move_within(
+                    state, self._page_index, ids, target[1],
+                    anchor=self._drag.get("anchor"),
+                    bounds=self._drag.get("bounds"),
+                )
+                return state, result["ok"], {
+                    "swapped": result.get("swapped", []),
+                    "anchor_seat": result.get("anchor_seat"),
+                    "mode": result.get("mode"),
+                    "clamped": bool(result.get("clamped")),
+                    "moved": bool(result.get("moved")),
+                }
             result = insert_from_tray(state, self._page_index, ids, target[1])
             return state, result["ok"], {"displaced": result.get("displaced", [])}
         if target[0] == "tray" and self._drag["from"] == "grid":
             kick_to_tray(state, self._page_index, ids)
             return state, True, {"kicked": len(ids)}
         return None, False, {}
+
+    @staticmethod
+    def _anchor_final_seat(page: PageState, anchor: str | None) -> int | None:
+        if not anchor:
+            return None
+        try:
+            return page.cells.index(anchor)
+        except ValueError:
+            return None
 
     def _preview_signature(self, target, preview, ok: bool):
         """预览视觉指纹：排列 + 托盘顺序 + 模式；高亮/状态栏不参与。"""
@@ -1264,7 +1283,19 @@ class PlotArrangeDialog(QDialog):
         self._drag["target"] = target
         preview, ok, info = self._preview(target)
         exclude = set(self._drag["ids"])
-        highlight_seat = target[1] if target and target[0] == "seat" else None
+        anchor_seat = None
+        if preview is not None and ok and target and target[0] == "seat":
+            # 高亮永远跟 anchor 的最终格；取不到时在 preview 里定位，仍取不到就不高亮
+            anchor_seat = info.get("anchor_seat")
+            if anchor_seat is None:
+                anchor_seat = self._anchor_final_seat(
+                    preview.pages[self._page_index], self._drag.get("anchor")
+                )
+            highlight_seat = anchor_seat
+        elif target and target[0] == "seat":
+            highlight_seat = target[1]
+        else:
+            highlight_seat = None
         reject = bool(target) and not ok
         signature = self._preview_signature(target, preview, ok)
         if signature == self._last_preview_sig:
@@ -1281,32 +1312,48 @@ class PlotArrangeDialog(QDialog):
                 preview, exclude=exclude, animate=True, spawn_snap=True
             )
             if target[0] == "seat":
-                self._board.set_highlight(target[1], reject=False)
-            if info.get("swapped"):
-                self._status.setText(
-                    f"交换：目标格原图将移去源格（{len(info['swapped'])} 个），其余图不动"
-                )
-            elif info.get("displaced"):
-                self._status.setText(
-                    f"顶替：目标格原图将移入等候区（{len(info['displaced'])} 个）"
-                )
-            elif target[0] == "seat":
-                self._status.setText(
-                    "安放：源格将变为空位，其余图不动"
-                    if self._drag["from"] == "grid" else "安放到空位"
-                )
-            elif info.get("kicked"):
-                self._status.setText(f"移入等候区（{info['kicked']} 个）")
+                self._board.set_highlight(anchor_seat, reject=False)
+            text = self._preview_status_text(target, info, len(self._drag["ids"]))
+            if text:
+                self._status.setText(text)
         else:
             self._board.sync(
                 self.current_page_state(), self._selection,
                 exclude=exclude, animate=True,
             )
             self._tray_panel.sync(self._state, exclude=exclude, animate=True)
-            self._board.set_highlight(
-                target[1] if target and target[0] == "seat" else None,
-                reject=bool(target),
+            self._board.set_highlight(highlight_seat, reject=reject)
+
+    def _preview_status_text(self, target, info: dict, count: int) -> str | None:
+        """拖动预览期状态文案（松手后会被通用提示覆盖）。"""
+        if count > 1 and target and target[0] == "seat":
+            if info.get("mode") == "rigid":
+                text = "整块平移：保持相对位置"
+                if info.get("clamped"):
+                    text += (
+                        "（已到边界，无法继续移动）"
+                        if not info.get("moved") else "（已贴边）"
+                    )
+            else:
+                text = "整块重排：按阅读序落入连续格位"
+            swapped = info.get("swapped") or []
+            if swapped:
+                text += f"；目标格原图移去源格（{len(swapped)} 个）"
+            return text
+        if info.get("swapped"):
+            return (
+                f"交换：目标格原图将移去源格（{len(info['swapped'])} 个），其余图不动"
             )
+        if info.get("displaced"):
+            return f"顶替：目标格原图将移入等候区（{len(info['displaced'])} 个）"
+        if target and target[0] == "seat":
+            return (
+                "安放：源格将变为空位，其余图不动"
+                if self._drag["from"] == "grid" else "安放到空位"
+            )
+        if info.get("kicked"):
+            return f"移入等候区（{info['kicked']} 个）"
+        return None
 
     def replay_drag_preview(self) -> None:
         """棋盘几何变化后（拖拽中缩放窗口）按最后指针位置重放预览。"""
