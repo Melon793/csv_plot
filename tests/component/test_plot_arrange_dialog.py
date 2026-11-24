@@ -645,6 +645,15 @@ def _settle_expect_chip(dlg, release, index):
                           size=size)
 
 
+def _gap_release(board, seat):
+    """目标格左缘外 3px 的格缝点：仍吸附到该格，但不算"已在格内"。
+
+    不能用 -5：距左右邻格都是 5，seat_at 的 `<` 会吸到邻格。
+    """
+    rect = board.seat_rect(seat)
+    return board.mapToGlobal(QPoint(rect.left() - 3, rect.center().y()))
+
+
 def test_settle_starts_from_release_point_between_cells(pages):
     """单选格→格：松手点两格之间 → anchor 从松手点起飞，终点=最终格。"""
     page_a, page_b = pages
@@ -653,8 +662,7 @@ def test_settle_starts_from_release_point_between_cells(pages):
     token = "p0:c0"
     _begin_drag(dlg, token)
 
-    r1 = board.seat_rect(1)
-    release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    release = _gap_release(board, 1)
     dlg.drag_move(release)
     assert dlg._drag["target"] == ("seat", 1)
     dlg.end_drag(release)
@@ -700,8 +708,7 @@ def test_tray_to_grid_new_icon_settles_from_release(pages):
     dlg.begin_drag(
         token, chip.mapToGlobal(chip.rect().center()), chip, from_tray=True
     )
-    r3 = board.seat_rect(3)
-    release = board.mapToGlobal(QPoint(r3.left() + 12, r3.top() + 12))
+    release = _gap_release(board, 3)
     dlg.drag_move(release)
     assert dlg._drag["target"] == ("seat", 3)
     dlg.end_drag(release)
@@ -823,9 +830,7 @@ def test_tray_to_grid_shrinking_tray_settles_to_final_icon_target(qapp):
     dlg.begin_drag(
         token, chip.mapToGlobal(chip.rect().center()), chip, from_tray=True
     )
-    seat_rect = board.seat_rect(empty)
-    release = board.mapToGlobal(QPoint(seat_rect.left() + 12,
-                                       seat_rect.top() + 12))
+    release = _gap_release(board, empty)
     dlg.drag_move(release)
     assert dlg._drag["target"] == ("seat", empty)
     dlg.end_drag(release)
@@ -922,8 +927,7 @@ def test_resize_during_settle_drops_animation(pages):
     board = dlg._board
     token = "p0:c0"
     _begin_drag(dlg, token)
-    r1 = board.seat_rect(1)
-    release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    release = _gap_release(board, 1)
     dlg.drag_move(release)
     dlg.end_drag(release)
     assert token in board._anims
@@ -990,8 +994,7 @@ def test_begin_drag_during_settle_drops_old_animation(pages):
     board = dlg._board
     token = "p0:c0"
     _begin_drag(dlg, token)
-    r1 = board.seat_rect(1)
-    first_release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    first_release = _gap_release(board, 1)
     dlg.drag_move(first_release)
     dlg.end_drag(first_release)
     old_anim = board._anims.get(token)
@@ -1001,8 +1004,7 @@ def test_begin_drag_during_settle_drops_old_animation(pages):
     dlg.begin_drag(token, icon.mapToGlobal(icon.rect().center()), icon,
                    from_tray=False)
     assert board._anims.get(token) is not old_anim
-    r3 = board.seat_rect(3)
-    second_release = board.mapToGlobal(QPoint(r3.left() + 12, r3.top() + 12))
+    second_release = _gap_release(board, 3)
     dlg.drag_move(second_release)
     dlg.end_drag(second_release)
 
@@ -1043,8 +1045,7 @@ def test_no_animation_leak_after_settle(pages):
     dlg = _open_dialog_for_drag(page_a, page_b)
     board, tray = dlg._board, dlg._tray_panel
     _begin_drag(dlg, "p0:c0")
-    r1 = board.seat_rect(1)
-    release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    release = _gap_release(board, 1)
     dlg.drag_move(release)
     dlg.end_drag(release)
 
@@ -1130,8 +1131,7 @@ def test_rigid_vertical_block_preview_highlights_anchor_final_seat(pages):
     board = dlg._board
     tokens = ("p0:c0", "p0:c2")   # 左列上下两格（4 连通）
     _begin_multi_drag(dlg, "p0:c0", tokens)
-    r1 = board.seat_rect(1)
-    release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    release = _gap_release(board, 1)
     dlg.drag_move(release)
 
     assert board._highlight == 1
@@ -1328,8 +1328,7 @@ def test_rigid_anchor_settle_matches_highlight_endpoint(pages):
     dlg = _open_dialog_for_drag(page_a, page_b)
     board = dlg._board
     _begin_multi_drag(dlg, "p0:c0", ("p0:c0", "p0:c2"))
-    r1 = board.seat_rect(1)
-    release = board.mapToGlobal(QPoint(r1.left() + 10, r1.top() + 10))
+    release = _gap_release(board, 1)
     dlg.drag_move(release)
     assert board._highlight == 1
     dlg.end_drag(release)
@@ -1337,4 +1336,117 @@ def test_rigid_anchor_settle_matches_highlight_endpoint(pages):
     anim = board._anims["p0:c0"]
     expected = board.seat_rect(1).adjusted(3, 3, -3, -3).topLeft()
     assert anim.endValue() == expected
+    dlg.deleteLater()
+
+
+# --------------------------------------------------------------------------
+# Q1c：松手点已在目标格内时直落（不再飞入）
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("corner", ["tl", "tr", "bl", "br"])
+def test_release_inside_target_corner_lands_directly(pages, corner):
+    """松手点落在目标格四角内 → 直接对齐，不建收拢动画。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    token = "p0:c0"
+    _begin_drag(dlg, token)
+    r3 = board.seat_rect(3)
+    x = r3.left() + 2 if corner[1] == "l" else r3.right() - 2
+    y = r3.top() + 2 if corner[0] == "t" else r3.bottom() - 2
+    release = board.mapToGlobal(QPoint(x, y))
+    dlg.drag_move(release)
+    assert dlg._drag["target"] == ("seat", 3)
+    dlg.end_drag(release)
+
+    assert token not in board._anims, "格内松手不应再建收拢动画"
+    assert board.icons[token].pos() == board._icon_target(3)
+    dlg.deleteLater()
+
+
+def test_release_outside_container_with_last_target_still_settles(pages):
+    """拖出容器松手（最后 target 仍有效）→ 从夹取点收拢，不误判直落。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    token = "p0:c0"
+    _begin_drag(dlg, token)
+    seat1_center = board.mapToGlobal(board.seat_rect(1).center())
+    dlg.drag_move(seat1_center)
+    assert dlg._drag["target"] == ("seat", 1)
+
+    outside = dlg.mapToGlobal(QPoint(-60, -60))
+    dlg.end_drag(outside)  # 未再 drag_move：沿用最后预览 target
+
+    assert dlg.result_state().pages[0].cells[1] == token
+    anim = board._anims.get(token)
+    assert anim is not None, "出界松手仍应有收拢动画"
+    start_tl, target, _duration = _settle_expect_icon(dlg, outside, 1)
+    assert anim.startValue() == start_tl
+    assert anim.endValue() == target
+    dlg.deleteLater()
+
+
+def test_tray_to_grid_inside_target_lands_directly(pages):
+    """托盘→格：松手点在目标格内 → 直落。"""
+    from tests.fixtures.waits import settle
+
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board, tray = dlg._board, dlg._tray_panel
+    token = "p0:c0"
+    dlg._selection = {token}
+    dlg._on_kick()
+    settle()
+    chip = tray.chips[token]
+    dlg.begin_drag(
+        token, chip.mapToGlobal(chip.rect().center()), chip, from_tray=True
+    )
+    r3 = board.seat_rect(3)
+    release = board.mapToGlobal(QPoint(r3.left() + 2, r3.bottom() - 2))
+    dlg.drag_move(release)
+    assert dlg._drag["target"] == ("seat", 3)
+    dlg.end_drag(release)
+
+    assert token in board.icons
+    assert token not in board._anims
+    assert board.icons[token].pos() == board._icon_target(3)
+    dlg.deleteLater()
+
+
+def test_grid_to_tray_inside_anchor_slot_lands_directly(pages):
+    """格→托盘：松手点已在 anchor chip 槽位内 → 直落。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    tray = dlg._tray_panel
+    token = "p0:c0"
+    _begin_drag(dlg, token)
+    slot = tray._chip_target(0)
+    release = tray.mapToGlobal(slot + QPoint(75, 21))  # CHIP_W/2, CHIP_H/2
+    dlg.drag_move(release)
+    assert dlg._drag["target"] == ("tray", None)
+    dlg.end_drag(release)
+
+    assert token in tray.chips
+    assert token not in tray._anims
+    assert tray.chips[token].pos() == slot
+    dlg.deleteLater()
+
+
+def test_multi_inside_snaps_anchor_and_flips_companions(pages):
+    """多选：anchor 在目标格内直落；同伴仍从源格 FLIP。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    _begin_multi_drag(dlg, "p0:c0", ("p0:c0", "p0:c2"))
+    r1 = board.seat_rect(1)
+    release = board.mapToGlobal(QPoint(r1.left() + 2, r1.bottom() - 2))
+    dlg.drag_move(release)
+    assert dlg._drag["target"] == ("seat", 1)
+    dlg.end_drag(release)
+
+    assert "p0:c0" not in board._anims, "anchor 在格内应直落"
+    assert board.icons["p0:c0"].pos() == board._icon_target(1)
+    companion = board._anims.get("p0:c2")
+    assert companion is not None, "同伴没有被鼠标带走，仍应 FLIP"
+    assert companion.endValue() == board._icon_target(3)
     dlg.deleteLater()

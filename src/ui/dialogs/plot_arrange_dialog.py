@@ -84,6 +84,20 @@ def _settle_ms(dist: float) -> int:
         min(SETTLE_MAX_MS, max(SETTLE_MIN_MS, dist / SETTLE_SPEED_PX_PER_MS))
     )
 
+
+def _inside_target(container: QWidget, raw_center: QPoint | None,
+                   target_rect: QRect) -> bool:
+    """松手点（未夹取）是否已落在目标格/槽位内。
+
+    用整格 +1px 容差，松在格边 1–2px 内也算"已落格"；raw 必须先在容器内，
+    避免拖出容器后夹到边缘恰好落进某格被误判为直落。
+    """
+    if raw_center is None or target_rect.isNull():
+        return False
+    if not container.rect().contains(raw_center):
+        return False
+    return target_rect.adjusted(-1, -1, 1, 1).contains(raw_center)
+
 _ACCENT = "#1658DB"
 _ACCENT_SOFT = "#E8EFFC"
 _LINE = "#d9dfe8"
@@ -508,11 +522,14 @@ class _IconBoard(QWidget):
         self._drop_anim(token)
         self._run_anim(token, icon, icon.pos(), target, ANIM_MS)
 
-    def settle_token(self, token: str, start_center: QPoint) -> int:
+    def settle_token(self, token: str, start_center: QPoint,
+                     raw_center: QPoint | None = None) -> int:
         """松手收拢：从松手点（容器坐标、已夹取）按距离收拢到最终格。
 
+        松手点已在目标格内（raw + 整格 +1px）→ 直接对齐，不再做位移动画；
+        格外（格缝/半路/拖出后再回）→ 从夹取后的松手点按距离收拢。
         起点与终点统一在 topLeft 空间比较，避免中心→topLeft 混算偏半格。
-        返回动画时长（0 = 距离≈0 直接落位）。
+        返回动画时长（0 = 直接落位）。
         """
         icon = self.icons.get(token)
         if icon is None:
@@ -522,6 +539,12 @@ class _IconBoard(QWidget):
             return 0
         icon.resize(rect.size())
         target = self._icon_target(icon.seat)
+        if _inside_target(self, raw_center, self.seat_rect(icon.seat)):
+            # 已经落在目标格内：先掉 _refresh 里 _place 建的临时动画，
+            # 否则旧动画下一 tick 会把 pos 写回。
+            self._drop_anim(token)
+            icon.move(target)
+            return 0
         start_tl = QPoint(
             start_center.x() - rect.width() // 2,
             start_center.y() - rect.height() // 2,
@@ -668,13 +691,21 @@ class _TrayPanel(QWidget):
             TRAY_PAD + row * (CHIP_H + CHIP_GAP),
         )
 
-    def settle_token(self, token: str, start_center: QPoint) -> int:
-        """松手收拢：chip 从松手点（容器坐标、已夹取）按距离滑入槽位。"""
+    def settle_token(self, token: str, start_center: QPoint,
+                     raw_center: QPoint | None = None) -> int:
+        """松手收拢：chip 从松手点（容器坐标、已夹取）按距离滑入槽位。
+
+        松手点已在 anchor 自己的槽位内 → 直接对齐，不做位移动画。
+        """
         chip = self.chips.get(token)
         if chip is None:
             return 0
         target = self._chip_target(list(self.chips).index(token))
         chip.resize(CHIP_W, CHIP_H)
+        if _inside_target(self, raw_center, QRect(target, chip.size())):
+            self._drop_anim(token)
+            chip.move(target)
+            return 0
         start_tl = QPoint(
             start_center.x() - CHIP_W // 2,
             start_center.y() - CHIP_H // 2,
@@ -1451,12 +1482,21 @@ class PlotArrangeDialog(QDialog):
         )
 
     def _settle_anchor(self, token: str, release_global: QPoint) -> None:
-        """只收拢 anchor 一张：棋盘侧/托盘侧按最终容器分别起动画。"""
+        """只收拢 anchor 一张：棋盘侧/托盘侧按最终容器分别起动画。
+
+        raw 点用于判断“松手是否已在目标格内”（直落），clamped 点用作动画起点。
+        """
         if token in self._board.icons:
-            self._board.settle_token(token, self._clamp_to(self._board, release_global))
+            self._board.settle_token(
+                token,
+                self._clamp_to(self._board, release_global),
+                raw_center=self._board.mapFromGlobal(release_global),
+            )
         elif token in self._tray_panel.chips:
             self._tray_panel.settle_token(
-                token, self._clamp_to(self._tray_panel, release_global)
+                token,
+                self._clamp_to(self._tray_panel, release_global),
+                raw_center=self._tray_panel.mapFromGlobal(release_global),
             )
 
     def _preview_with(self, drag: dict, target):
