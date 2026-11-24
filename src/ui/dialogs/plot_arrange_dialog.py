@@ -294,6 +294,8 @@ class _IconBoard(QWidget):
         self._anims: dict[str, QPropertyAnimation] = {}
         self._highlight: int | None = None
         self._highlight_reject = False
+        #: 多选块的目标格集合（含 anchor）；单格时退化为 {_highlight}
+        self._highlight_seats: frozenset[int] = frozenset()
         self._rubber_start: QPoint | None = None
         self._rubber_rect: QRect | None = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -430,14 +432,21 @@ class _IconBoard(QWidget):
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
                     "隐",
                 )
-        if self._highlight is not None:
-            rect = self.seat_rect(self._highlight)
-            if not rect.isNull():
-                rect = rect.adjusted(-1, -1, 0, 0)
-                color = "#c0392b" if self._highlight_reject else _ACCENT
-                painter.setPen(QPen(QColor(color), 2.2))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(rect, 8, 8)
+        seats = self._highlight_seats
+        if not seats and self._highlight is not None:
+            # 兼容只设了主格的旧调用；正常路径由 set_highlight 归一化
+            seats = frozenset({self._highlight})
+        if seats:
+            color = "#c0392b" if self._highlight_reject else _ACCENT
+            painter.setPen(QPen(QColor(color), 2.2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for seat in sorted(seats):
+                rect = self.seat_rect(seat)
+                if rect.isNull():
+                    continue
+                painter.drawRoundedRect(
+                    rect.adjusted(-1, -1, 0, 0), 8, 8
+                )
         if self._rubber_rect is not None:
             painter.setPen(QPen(QColor(_ACCENT), 1))
             painter.setBrush(QColor(22, 88, 219, 26))
@@ -581,11 +590,30 @@ class _IconBoard(QWidget):
             anim.stop()
             anim.deleteLater()
 
-    def set_highlight(self, seat: int | None, reject: bool = False) -> None:
-        if self._highlight == seat and self._highlight_reject == reject:
+    def set_highlight(self, seat: int | None, reject: bool = False,
+                      seats: tuple[int, ...] | set[int] | None = None) -> None:
+        """设置瞄准外框：``seat`` 为主格，``seats`` 为整组目标格。
+
+        - 有效：画整组目标格，并把主格归一化进集合；
+        - 无效（reject）：强制只画主格，用红色；
+        - 两者都为空：清空。
+        """
+        wanted = set(seats or ())
+        if seat is not None:
+            if reject:
+                wanted = {seat}
+            else:
+                wanted.add(seat)
+        wanted_frozen = frozenset(wanted)
+        if (
+            self._highlight == seat
+            and self._highlight_reject == reject
+            and self._highlight_seats == wanted_frozen
+        ):
             return
         self._highlight = seat
         self._highlight_reject = reject
+        self._highlight_seats = wanted_frozen
         self.update()
 
     def resizeEvent(self, event):
@@ -1268,6 +1296,7 @@ class PlotArrangeDialog(QDialog):
                 )
                 return state, result["ok"], {
                     "swapped": result.get("swapped", []),
+                    "target_seats": result.get("target_seats", []),
                     "anchor_seat": result.get("anchor_seat"),
                     "mode": result.get("mode"),
                     "clamped": bool(result.get("clamped")),
@@ -1315,23 +1344,31 @@ class PlotArrangeDialog(QDialog):
         preview, ok, info = self._preview(target)
         exclude = set(self._drag["ids"])
         anchor_seat = None
+        highlight_seats: tuple[int, ...] = ()
         if preview is not None and ok and target and target[0] == "seat":
-            # 高亮永远跟 anchor 的最终格；取不到时在 preview 里定位，仍取不到就不高亮
+            # 主格跟 anchor 最终格；整组目标格来自模型（多选块），
+            # 托盘拖拽恒单张，没有 target_seats 时退回主格
             anchor_seat = info.get("anchor_seat")
             if anchor_seat is None:
                 anchor_seat = self._anchor_final_seat(
                     preview.pages[self._page_index], self._drag.get("anchor")
                 )
             highlight_seat = anchor_seat
+            highlight_seats = tuple(info.get("target_seats") or ())
+            if not highlight_seats and anchor_seat is not None:
+                highlight_seats = (anchor_seat,)
         elif target and target[0] == "seat":
             highlight_seat = target[1]
+            highlight_seats = (target[1],)
         else:
             highlight_seat = None
         reject = bool(target) and not ok
         signature = self._preview_signature(target, preview, ok)
         if signature == self._last_preview_sig:
             # 视觉不变：只同步高亮，不重排、不重启动画（防抽动核心）
-            self._board.set_highlight(highlight_seat, reject=reject)
+            self._board.set_highlight(
+                highlight_seat, reject=reject, seats=highlight_seats
+            )
             return
         self._last_preview_sig = signature
         if preview is not None and ok:
@@ -1343,7 +1380,9 @@ class PlotArrangeDialog(QDialog):
                 preview, exclude=exclude, animate=True, spawn_snap=True
             )
             if target[0] == "seat":
-                self._board.set_highlight(anchor_seat, reject=False)
+                self._board.set_highlight(
+                    anchor_seat, reject=False, seats=highlight_seats
+                )
             else:
                 self._board.set_highlight(None)
             text = self._preview_status_text(target, info, len(self._drag["ids"]))
@@ -1355,7 +1394,9 @@ class PlotArrangeDialog(QDialog):
                 exclude=exclude, animate=True,
             )
             self._tray_panel.sync(self._state, exclude=exclude, animate=True)
-            self._board.set_highlight(highlight_seat, reject=reject)
+            self._board.set_highlight(
+                highlight_seat, reject=reject, seats=highlight_seats
+            )
 
     def _preview_status_text(self, target, info: dict, count: int) -> str | None:
         """拖动预览期状态文案（松手后会被通用提示覆盖）。"""

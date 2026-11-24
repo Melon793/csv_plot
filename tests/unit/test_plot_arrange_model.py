@@ -409,7 +409,7 @@ def test_legacy_call_without_anchor_stays_packed():
                      cells=["a", None, "b", None, "c", None])
     result = move_within(_state(page), 0, ["a", "b", "c"], 1)
     assert result["mode"] == "packed"
-    assert {"anchor_seat", "mode", "clamped", "moved"} <= set(result)
+    assert {"target_seats", "anchor_seat", "mode", "clamped", "moved"} <= set(result)
 
 
 def test_invalid_anchor_falls_back_without_raising():
@@ -420,6 +420,7 @@ def test_invalid_anchor_falls_back_without_raising():
     assert result["ok"] is True
     assert result["mode"] == "packed"
     assert result["anchor_seat"] is None
+    assert result["target_seats"] == [2, 3], "非法 anchor 回退 packed，仍有目标段"
 
     page2 = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
                       cells=["a", "b", None, None])
@@ -427,6 +428,7 @@ def test_invalid_anchor_falls_back_without_raising():
                           anchor="b", bounds=(2, 2))
     assert result2["mode"] == "packed"
     assert result2["anchor_seat"] is None
+    assert result2["target_seats"] == [2]
 
 
 def test_stride_uses_page_cols_not_visible_cols():
@@ -447,3 +449,66 @@ def test_hidden_target_with_visible_bounds_falls_back():
                          anchor="a", bounds=(2, 2))
     assert result["mode"] == "packed"
     assert page.cells[0] is None and page.cells[2] == "a"
+    assert result["target_seats"] == [2]
+
+
+def test_target_seats_rigid_horizontal_block():
+    page = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                     cells=["a", "b", "c", "d"])
+    result = move_within(_state(page), 0, ["c", "d"], 1,
+                         anchor="d", bounds=(2, 2))
+    assert result["mode"] == "rigid"
+    assert result["target_seats"] == [0, 1]
+    assert result["anchor_seat"] == 1
+    assert result["anchor_seat"] in result["target_seats"]
+
+
+def test_target_seats_follow_block_not_pressed_cell():
+    page = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                     cells=["a", "b", "c", "d"])
+    result = move_within(_state(page), 0, ["c", "d"], 1,
+                         anchor="c", bounds=(2, 2))
+    assert result["target_seats"] == [0, 1]
+    assert result["anchor_seat"] == 0
+    assert result["anchor_seat"] in result["target_seats"]
+
+
+def test_target_seats_clamped_and_no_move():
+    page = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                     cells=["a", None, "c", None])
+    result = move_within(_state(page), 0, ["a", "c"], 2,
+                         anchor="a", bounds=(2, 2))
+    assert result["mode"] == "rigid"
+    assert result["clamped"] is True
+    assert result["moved"] is False
+    assert result["target_seats"] == [0, 2]
+    assert result["anchor_seat"] == 0
+    assert result["anchor_seat"] in result["target_seats"]
+
+
+def test_target_seats_packed_scatter():
+    page = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                     cells=["a", "b", "c", None])
+    result = move_within(_state(page), 0, ["b", "c"], 3,
+                         anchor="b", bounds=(2, 2))
+    assert result["mode"] == "packed"
+    assert result["target_seats"] == [2, 3]
+    assert result["anchor_seat"] == 2
+    assert result["anchor_seat"] in result["target_seats"]
+
+
+def test_target_seats_single_and_empty():
+    page = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                     cells=["a", None, None, None])
+    result = move_within(_state(page), 0, ["a"], 3,
+                         anchor="a", bounds=(2, 2))
+    assert result["target_seats"] == [3]
+    assert result["anchor_seat"] == 3
+    assert result["anchor_seat"] in result["target_seats"]
+
+    page2 = PageState("页", rows=2, cols=2, vis_rows=2, vis_cols=2,
+                      cells=["a", None, None, None])
+    result2 = move_within(_state(page2), 0, ["missing"], 0,
+                          anchor="missing", bounds=(2, 2))
+    assert result2["ok"] is False
+    assert result2["target_seats"] == []

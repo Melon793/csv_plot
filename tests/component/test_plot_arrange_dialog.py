@@ -313,6 +313,7 @@ def test_gap_sweep_does_not_jitter(pages, monkeypatch):
         dlg.drag_move(board.mapToGlobal(QPoint(stable_x, y)))
     assert len(created) == stable_from, "同目标仍反复新建动画"
     assert board._highlight == 1
+    assert board._highlight_seats == frozenset({1})
 
     dlg.end_drag(board.mapToGlobal(QPoint(board.width() - 2, board.height() - 2)))
     dlg.deleteLater()
@@ -354,6 +355,8 @@ def test_visible_only_blank_area_is_dead_zone(pages):
     dead = board.mapToGlobal(QPoint(board.width() - 2, board.height() // 2))
     dlg.drag_move(dead)
     assert dlg._drag["target"] is None
+    assert board._highlight is None
+    assert board._highlight_seats == frozenset()
     assert [list(page.cells) for page in dlg._state.pages] == before
     dlg.end_drag(dead)
     dlg.deleteLater()
@@ -421,6 +424,7 @@ def test_escape_cancels_active_drag(pages):
     assert [list(page.cells) for page in dlg._state.pages] == before
     assert dlg._tray_panel._frozen is False
     assert board._highlight is None
+    assert board._highlight_seats == frozenset()
     dlg.deleteLater()
 
 
@@ -892,7 +896,9 @@ def test_multi_select_kick_uses_pressed_token(pages):
     )
     release = tray.mapToGlobal(QPoint(tray.width() // 2, tray.height() // 2))
     dlg.drag_move(release)
+    assert board._highlight_seats == frozenset(), "拖到托盘时棋盘目标组应清空"
     dlg.end_drag(release)
+    assert board._highlight_seats == frozenset()
 
     assert dlg._structure_ok()
     assert set(tray.chips) == set(ids)
@@ -1135,6 +1141,7 @@ def test_rigid_vertical_block_preview_highlights_anchor_final_seat(pages):
     dlg.drag_move(release)
 
     assert board._highlight == 1
+    assert board._highlight_seats == frozenset({1, 3})
     assert "整块平移" in dlg._status.text()
 
     dlg.end_drag(release)
@@ -1160,6 +1167,7 @@ def test_rigid_clamped_status_and_anchor_on_edge(pages):
     dlg.drag_move(release)
 
     assert board._highlight == 1, "两行块下移贴底：anchor 应停在 row0 col1"
+    assert board._highlight_seats == frozenset({1, 3})
     assert "已贴边" in dlg._status.text()
 
     dlg.end_drag(release)
@@ -1181,6 +1189,7 @@ def test_rigid_no_displacement_status_and_settle_back_to_source(pages):
     dlg.drag_move(release)
 
     assert board._highlight == 0
+    assert board._highlight_seats == frozenset({0, 2})
     assert "已到边界，无法继续移动" in dlg._status.text()
 
     dlg.end_drag(release)
@@ -1206,6 +1215,7 @@ def test_scatter_multi_select_packs_and_anchor_settles(pages):
 
     assert "整块重排" in dlg._status.text()
     assert board._highlight == 2      # anchor 落入重排后的连续段首格
+    assert board._highlight_seats == frozenset({2, 3})
 
     dlg.end_drag(release)
     cells = dlg.result_state().pages[0].cells
@@ -1331,6 +1341,7 @@ def test_rigid_anchor_settle_matches_highlight_endpoint(pages):
     release = _gap_release(board, 1)
     dlg.drag_move(release)
     assert board._highlight == 1
+    assert board._highlight_seats == frozenset({1, 3})
     dlg.end_drag(release)
 
     anim = board._anims["p0:c0"]
@@ -1405,6 +1416,8 @@ def test_tray_to_grid_inside_target_lands_directly(pages):
     release = board.mapToGlobal(QPoint(r3.left() + 2, r3.bottom() - 2))
     dlg.drag_move(release)
     assert dlg._drag["target"] == ("seat", 3)
+    assert board._highlight == 3
+    assert board._highlight_seats == frozenset({3})
     dlg.end_drag(release)
 
     assert token in board.icons
@@ -1449,4 +1462,85 @@ def test_multi_inside_snaps_anchor_and_flips_companions(pages):
     companion = board._anims.get("p0:c2")
     assert companion is not None, "同伴没有被鼠标带走，仍应 FLIP"
     assert companion.endValue() == board._icon_target(3)
+    dlg.deleteLater()
+
+
+# --------------------------------------------------------------------------
+# Q1d：多选块预览高亮覆盖整组目标格
+# --------------------------------------------------------------------------
+def _open_four_plot_dialog():
+    """2×2 四图页：用于复现 2-1/2-2 横选。"""
+    from tests.fixtures.waits import settle
+
+    page = PlotPage(
+        parent=None, title="页1", rows_max=4, cols_max=3,
+        rows_current=2, cols_current=2,
+    )
+    page.services = _FakeServices()
+    page.build_matrix(2, 2)
+    for index, name in enumerate(("a", "b", "c", "d")):
+        _set_curves(page.plot_widgets[index], [name])
+    dlg = PlotArrangeDialog([page], current_page=page)
+    dlg.resize(1200, 900)
+    dlg.show()
+    settle()
+    return dlg, page
+
+
+def test_multi_horizontal_block_highlights_all_target_seats(qapp):
+    """2-1/2-2 横选上移：1-1/1-2 整组都有瞄准框，不只 anchor 格。"""
+    dlg, page = _open_four_plot_dialog()
+    board = dlg._board
+    cells = dlg.result_state().pages[0].cells
+    left, right = cells[2], cells[3]
+    assert left and right
+    _begin_multi_drag(dlg, right, (left, right))
+
+    release = board.mapToGlobal(board.seat_rect(1).center())
+    dlg.drag_move(release)
+    assert dlg._drag["target"] == ("seat", 1)
+    assert board._highlight == 1
+    assert board._highlight_seats == frozenset({0, 1})
+    assert board._highlight in board._highlight_seats
+
+    # 同点连喂：高亮集合稳定，不抖
+    dlg.drag_move(release)
+    assert board._highlight_seats == frozenset({0, 1})
+
+    dlg.deleteLater()
+    page.dispose()
+    flush_deferred_deletes()
+
+
+def test_multi_pressed_left_highlights_same_block_seats(qapp):
+    """按块内非第一张：整组目标格不变，只换主格。"""
+    dlg, page = _open_four_plot_dialog()
+    board = dlg._board
+    cells = dlg.result_state().pages[0].cells
+    left, right = cells[2], cells[3]
+    _begin_multi_drag(dlg, left, (left, right))
+
+    release = board.mapToGlobal(board.seat_rect(0).center())
+    dlg.drag_move(release)
+    assert board._highlight == 0
+    assert board._highlight_seats == frozenset({0, 1})
+
+    dlg.deleteLater()
+    page.dispose()
+    flush_deferred_deletes()
+
+
+def test_set_highlight_reject_forces_single_and_clears(pages):
+    """reject 只画主格；清空时两组状态一起清。"""
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    board = dlg._board
+    board.set_highlight(1, reject=True, seats=(0, 1, 2))
+    assert board._highlight == 1
+    assert board._highlight_reject is True
+    assert board._highlight_seats == frozenset({1})
+
+    board.set_highlight(None)
+    assert board._highlight is None
+    assert board._highlight_seats == frozenset()
     dlg.deleteLater()
