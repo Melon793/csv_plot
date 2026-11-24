@@ -229,19 +229,33 @@ class PlotConfigManager(QObject):
                                 "模板还原换算失败: var=%s", name, exc_info=True
                             )
 
-    def _reconcile_pages(self, main_window, page_count: int) -> None:
-        """让页数量与模板一致：复用已有页、多的删、少的建（§6.5）。"""
+    def _reconcile_pages(
+        self, main_window, page_count: int
+    ) -> tuple[int, str | None]:
+        """让页数量与模板一致，返回实际页数及失败原因。"""
         if not hasattr(main_window, "pages"):
-            return
+            return 0, None
+
+        needs_new_page = len(main_window.pages) < page_count
+        if needs_new_page and main_window.loader is None:
+            return len(main_window.pages), "未加载数据，无法新建模板中的绘图页"
+        if needs_new_page:
+            max_pages = getattr(main_window, "MAX_PLOT_PAGES", None)
+            if max_pages is not None and page_count > max_pages:
+                return (
+                    len(main_window.pages),
+                    f"模板需要 {page_count} 页，最多支持 {max_pages} 页",
+                )
+
         while len(main_window.pages) > page_count:
+            previous_count = len(main_window.pages)
             main_window.close_page(main_window.pages[-1], confirm=False)
+            if len(main_window.pages) >= previous_count:
+                return len(main_window.pages), "关闭多余绘图页失败"
         while len(main_window.pages) < page_count:
-            if main_window.loader is None:
-                logger.warning("未加载数据，无法新建模板中的绘图页")
-                return
             if main_window.new_page() is None:
-                logger.warning("新建绘图页失败，模板页数将被截断")
-                return
+                return len(main_window.pages), "新建绘图页失败"
+        return len(main_window.pages), None
 
     def _apply_page_title(self, main_window, page, title: str) -> None:
         if not title:
@@ -313,11 +327,25 @@ class PlotConfigManager(QObject):
             logger.info("  页数: %d", len(page_cfgs))
             logger.info("  时间因子: %s, 偏移: %s", config.time_factor, config.time_offset)
 
-            self._reconcile_pages(main_window, len(page_cfgs))
+            actual_pages, failure_reason = self._reconcile_pages(
+                main_window, len(page_cfgs)
+            )
+            if failure_reason is not None:
+                logger.warning("模板页数核对失败: %s", failure_reason)
+                broadcast = getattr(main_window, "_broadcast", None)
+                if callable(broadcast):
+                    broadcast(f"模板恢复失败：{failure_reason}", level="warn")
+                return False
             pages = list(getattr(main_window, "pages", []) or [])
             if not pages:
                 # 旧式替身：保留单页路径
                 return self._apply_single_page_config(main_window, config)
+            if actual_pages != len(page_cfgs):
+                logger.warning(
+                    "模板页数核对失败: 实际 %d 页，配置 %d 页",
+                    actual_pages, len(page_cfgs),
+                )
+                return False
 
             current = getattr(main_window, "current_page", None)
             applied_count = 0
