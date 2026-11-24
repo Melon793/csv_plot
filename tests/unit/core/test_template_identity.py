@@ -790,6 +790,73 @@ class TestRestoreIdentityRegressions:
         assert remap == {"Press_G2": "Press_G1"}
         assert demoted == []
 
+    @pytest.mark.parametrize(
+        "placeholder_first", [True, False], ids=["placeholder-first", "curve-first"]
+    )
+    def test_r2_identified_placeholder_does_not_reserve_real_name(self, placeholder_first):
+        """带身份占位也不能阻挡真实曲线抢占唯一通道。"""
+        placeholder = PlotPageConfig(
+            title="placeholder",
+            plots=[PlotConfig(
+                curves=[], invalid_curves=["Press_G0"],
+                curve_identities={"Press_G0": mdf_identity("Press", "bar")},
+            )],
+        )
+        real = PlotPageConfig(
+            title="real",
+            plots=[PlotConfig(curves=["Press_G2"])],
+        )
+        pages = [placeholder, real] if placeholder_first else [real, placeholder]
+        cfg = PlotSessionConfig(pages=pages)
+        loader = FakeLoader({"Press_G0": mdf_info("Press", "bar")})
+
+        resolved, remap, demoted = resolve_identities(cfg, loader)
+        again, remap2, demoted2 = resolve_identities(resolved, loader)
+        by_title = {page.title: page.plots[0] for page in resolved.pages}
+
+        assert by_title["real"].curves == ["Press_G0"]
+        assert by_title["real"].invalid_curves == []
+        assert by_title["placeholder"].curves == []
+        assert by_title["placeholder"].invalid_curves == ["Press_G0"]
+        assert remap == {"Press_G2": "Press_G0"}
+        assert demoted == []
+        assert again.to_dict() == resolved.to_dict()
+        assert remap2 == {}
+        assert demoted2 == []
+
+    def test_r1_renamed_source_metadata_overrides_target_orphan(self):
+        """Old→X 时源设置/身份胜出，目标键上的孤儿元数据不得污染结果。"""
+        cfg = session(PlotConfig(
+            curves=["Old"],
+            curve_settings={
+                "Old": {"display_name": "源显示名", "factor": 2.0},
+                "X": {"display_name": "孤儿显示名", "factor": 9.0},
+            },
+            curve_identities={
+                "Old": mdf_identity("Signal", device="Demo", ecu="ECU01"),
+                "X": mdf_identity("Other", device="Demo", ecu="ECU01"),
+            },
+        ))
+        loader = FakeLoader({
+            "X": mdf_info("Signal", device="Demo", ecu="ECU01"),
+        })
+
+        resolved, remap, demoted = resolve_identities(cfg, loader)
+        again, remap2, demoted2 = resolve_identities(resolved, loader)
+        plot = resolved.pages[0].plots[0]
+
+        assert plot.curves == ["X"]
+        assert plot.invalid_curves == []
+        assert plot.curve_settings == {"X": {"display_name": "源显示名", "factor": 2.0}}
+        assert plot.curve_identities == {
+            "X": mdf_identity("Signal", device="Demo", ecu="ECU01"),
+        }
+        assert remap == {"Old": "X"}
+        assert demoted == []
+        assert again.to_dict() == resolved.to_dict()
+        assert remap2 == {}
+        assert demoted2 == []
+
     def test_r3_v2_pages_are_authoritative_and_sync_v1_fallback_view(self):
         """顶层 v1 回退视图与 pages 分歧时，不参与 remap/demoted/统计。"""
         from src.core.template_identity import merge_demoted

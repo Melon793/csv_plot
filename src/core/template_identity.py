@@ -275,27 +275,34 @@ class _Resolver:
                     seen.setdefault(cand, None)
         return list(seen)
 
-    def resolve_curve(self, name: str, identity: dict | None) -> tuple[str, bool]:
+    def resolve_curve(
+        self, name: str, identity: dict | None, blocked_names: set[str] | None = None
+    ) -> tuple[str, bool]:
         """curves 侧解析：返回 (当前显示名, 是否 D9 矛盾降占位)。
 
         降占位仅限「有身份条目 + L0 命中但 D9 矛盾 + L1/L2 无法唯一
         重映射」路径（M-1 方案乙）；L2 唯一候选回选自身不算降占位。
         """
-        memo_key = (name, tuple(sorted(identity.items())) if identity else None)
+        blocked = frozenset(blocked_names or ())
+        memo_key = (
+            name, tuple(sorted(identity.items())) if identity else None, blocked,
+        )
         if memo_key not in self._memo:
-            self._memo[memo_key] = self._resolve_uncached(name, identity)
+            self._memo[memo_key] = self._resolve_uncached(name, identity, blocked)
         return self._memo[memo_key]
 
     def resolve_name(self, name: str, identity: dict | None) -> str:
         """invalid_curves 侧解析：只换名，不降占位（已是占位）。"""
         return self.resolve_curve(name, identity)[0]
 
-    def _resolve_uncached(self, name: str, identity: dict | None) -> tuple[str, bool]:
+    def _resolve_uncached(
+        self, name: str, identity: dict | None, blocked: frozenset[str]
+    ) -> tuple[str, bool]:
         conflict = False
         d9_failed = False
         # L0：显示名恒等（+D9 校验）。同名被别的模板名占用时也走回退。
         if name in self._current_set:
-            if self._claimed.get(name) in (None, name):
+            if name not in blocked and self._claimed.get(name) in (None, name):
                 if identity is None:
                     self._claim(name, name)
                     return name, False
@@ -311,19 +318,31 @@ class _Resolver:
                 conflict = True
         # L1：身份指纹唯一命中（D12）
         if identity is not None:
-            cands = self._l1_candidates(name, identity)
+            cands = [
+                cand for cand in self._l1_candidates(name, identity)
+                if cand not in blocked
+            ]
             if len(cands) == 1:
                 self._claim(cands[0], name)
                 return cands[0], False
-            if not cands and self._l1_candidates(name, identity, respect_claim=False):
+            if not cands and any(
+                cand not in blocked
+                for cand in self._l1_candidates(name, identity, respect_claim=False)
+            ):
                 conflict = True
         # L2：查找键唯一候选（D10）
         for key in (name, _SUFFIX_RE.sub("", name)):
-            cands = self._l2_candidates(key, name)
+            cands = [
+                cand for cand in self._l2_candidates(key, name)
+                if cand not in blocked
+            ]
             if len(cands) == 1:
                 self._claim(cands[0], name)
                 return cands[0], False
-            if not cands and self._l2_candidates(key, name, respect_claim=False):
+            if not cands and any(
+                cand not in blocked
+                for cand in self._l2_candidates(key, name, respect_claim=False)
+            ):
                 conflict = True
         # L3：保持原名（套用时因缺失降级为占位）
         if conflict:
@@ -349,14 +368,16 @@ def _iter_unique_plots(config: PlotSessionConfig):
 def _rename_metadata(values, local: dict[str, str]):
     if not local:
         return values
-    renamed = {}
-    for key, value in (values or {}).items():
-        target = local.get(key, key)
-        if target == key or key not in local:
-            renamed[key] = value
-    for key, value in (values or {}).items():
-        if key in local:
-            renamed.setdefault(local[key], value)
+    values = values or {}
+    targets = set(local.values())
+    renamed = {
+        key: value
+        for key, value in values.items()
+        if key not in local and key not in targets
+    }
+    for key, target in local.items():
+        if key in values:
+            renamed[target] = values[key]
     return renamed
 
 
@@ -379,9 +400,6 @@ def resolve_identity_snapshot(config: PlotSessionConfig, loader) -> ResolvedIden
         identities = plot.curve_identities or {}
         for name in plot.curves:
             resolver.reserve(name)
-        for name in plot.invalid_curves:
-            if identities.get(name):
-                resolver.reserve(name)
 
     def _record_remap(name: str, new: str) -> None:
         if new != name:
@@ -399,7 +417,9 @@ def resolve_identity_snapshot(config: PlotSessionConfig, loader) -> ResolvedIden
         new_curves: list[str] = []
         demoted_here: list[str] = []
         for name in plot.curves:
-            new, dem = resolver.resolve_curve(name, identities.get(name))
+            new, dem = resolver.resolve_curve(
+                name, identities.get(name), set(plot.invalid_curves)
+            )
             _record_remap(name, new)
             if new != name:
                 local[name] = new
