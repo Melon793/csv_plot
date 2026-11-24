@@ -9,18 +9,20 @@ R5（D20）：行高钉在 _ROW_HEIGHT，行内输入框高度由行高决定（
 1 − 2×item padding），太矮会把 QLineEdit 压扁到字体行高上下只剩 1px。
 """
 
+import time
 import types
 
 import pandas as pd
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel
 
 import src.ui.plot_variable_editor as ed_mod
 from src.core.settings import ConfigKey
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
-from tests.fixtures.waits import settle
+from tests.fixtures.data_factory import make_timeseries
+from tests.fixtures.waits import flush_deferred_deletes, pump, settle
 
 NAMES = ["a", "b"]
 
@@ -48,6 +50,81 @@ def editor_env(plot_factory, qapp, app_settings):
     app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS, "")
     app_settings.set_value(ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY, "")
     app_settings.sync()
+
+
+@pytest.fixture()
+def first_frame_editor_factory(plot_factory, qapp, app_settings):
+    """构造前完成曲线加载；返回后到 show 前不主动排空事件。"""
+    created = []
+    for key in (
+        ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY,
+        ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS,
+        ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS,
+    ):
+        app_settings.set_value(key, "")
+
+    def _make(row_count: int):
+        _x, values = make_timeseries(10)
+        names = [f"DemoVar{i:02d}" for i in range(row_count)]
+        df = pd.DataFrame({name: values + i for i, name in enumerate(names)})
+        pw = plot_factory(df)
+        host = pw.window()
+        host.resize(1400, 900)
+        host.loader = types.SimpleNamespace(var_names=names, units={})
+        host.data_validity = {}
+        for name in names:
+            assert pw.add_variable_to_plot(name)
+        dlg = PlotVariableEditorDialog(pw)
+        dlg.resize(900, 600)
+        created.append(dlg)
+        return dlg, pw
+
+    yield _make
+    for dlg in created:
+        dlg._width_save_timer.stop()
+        if dlg.isVisible():
+            dlg.close()
+        dlg.deleteLater()
+    flush_deferred_deletes()
+    for key in (
+        ConfigKey.PLOT_VARIABLE_EDITOR_GEOMETRY,
+        ConfigKey.PLOT_VARIABLE_EDITOR_COLUMN_WIDTHS,
+        ConfigKey.PLOT_VARIABLE_EDITOR_FIXED_COLS,
+    ):
+        app_settings.set_value(key, "")
+    app_settings.sync()
+
+
+class _FirstFramePaintRecorder(QObject):
+    """只观察可见 Paint，不吞事件、不改布局。"""
+
+    def __init__(self, dlg):
+        super().__init__(dlg)
+        self.dlg = dlg
+        self.samples: list[tuple[int, ...]] = []
+        self.details: list[tuple] = []
+        dlg.installEventFilter(self)
+        dlg.var_table.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Paint and self.dlg.isVisible():
+            table = self.dlg.var_table
+            header = table.horizontalHeader()
+            edges = tuple(
+                header.sectionViewportPosition(col) for col in range(ed_mod._COL_COUNT)
+            )
+            self.samples.append(edges)
+            self.details.append(
+                (
+                    "viewport" if watched is table.viewport() else "dialog",
+                    edges,
+                    table.viewport().width(),
+                    table.verticalScrollBar().isVisible(),
+                    table.horizontalScrollBar().maximum(),
+                    time.monotonic(),
+                )
+            )
+        return False
 
 
 def _elastic_total(dlg) -> int:
@@ -112,6 +189,35 @@ class TestShowDistribution:
         finally:
             dlg2.close()
             dlg2.deleteLater()
+
+
+class TestFirstFrameLayout:
+    @pytest.mark.parametrize("row_count", [2, 30])
+    def test_first_visible_paint_keeps_column_edges(
+        self, first_frame_editor_factory, qapp, row_count
+    ):
+        """原生首帧起列边界不再变化；offscreen 无法复现滚动条样式时序。"""
+        if qapp.platformName() in {"offscreen", "minimal"}:
+            pytest.skip("首帧滚动条样式时序需要在原生平台验证")
+
+        dlg, _pw = first_frame_editor_factory(row_count)
+        recorder = _FirstFramePaintRecorder(dlg)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        settle()
+        pump(100)
+        settle()
+
+        table = dlg.var_table
+        assert table.rowCount() == row_count
+        assert table.verticalScrollBar().isVisible() is (row_count == 30)
+        assert table.horizontalScrollBar().maximum() == 0
+        assert recorder.samples, "没有捕获到可见 Paint"
+        assert any(item[0] == "viewport" for item in recorder.details), (
+            "未捕获 viewport 的真实 Paint"
+        )
+        assert len(set(recorder.samples)) == 1, recorder.details
 
 
 class TestBottomBarSingleRow:
