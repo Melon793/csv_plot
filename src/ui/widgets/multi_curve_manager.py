@@ -593,9 +593,22 @@ class MultiCurveManager:
     def _recreate_curve(self, var_name: str):
         """重新创建失效的曲线"""
         pw = self.pw
+        old_ci = None
+        old_curve = None
+
+        def restore_old_curve():
+            current = pw.curves.get(var_name)
+            if old_ci is None or current is old_ci:
+                return
+            if current is not None and current.curve is not None:
+                if current.curve.scene() is not None:
+                    pw.plot_item.removeItem(current.curve)
+            pw.curves[var_name] = old_ci
+
         try:
             if var_name in pw.curves:
                 ci = pw.curves[var_name]
+                old_ci, old_curve = ci, ci.curve
                 # 保留用户钉住的绘制方式（source=='user' 时记录；
                 # 'auto' 来源让重建按元数据重新判定，与 reload 同构）
                 pinned_mode = (
@@ -627,8 +640,11 @@ class MultiCurveManager:
                     skip_existence_check=True,
                     preferred_color=ci.color,
                     announce_step=False,
+                    quiet=True,
                 )
                 if success and var_name in pw.curves:
+                    if old_curve is not None and old_curve.scene() is not None:
+                        pw.plot_item.removeItem(old_curve)
                     new_ci = pw.curves[var_name]
                     new_ci.display_name = pinned_display_name
                     if pinned_transform:
@@ -676,6 +692,8 @@ class MultiCurveManager:
                                 "重建恢复换算后 Y 范围重算失败: %s",
                                 var_name, exc_info=True,
                             )
+                elif old_ci is not None:
+                    restore_old_curve()
                 if success and pinned_mode and var_name in pw.curves:
                     new_ci = pw.curves[var_name]
                     new_ci.draw_mode = pinned_mode
@@ -703,6 +721,7 @@ class MultiCurveManager:
                         self.update_legend()
                         pw.curves_changed.emit()
         except Exception:
+            restore_old_curve()
             logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)
 
     def _collect_visible_curve_arrays(self, key: str) -> list:

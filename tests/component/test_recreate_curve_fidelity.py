@@ -35,6 +35,54 @@ def _invalidate(pw, name="a"):
         pw.plot_item.removeItem(ci.curve)
 
 
+def test_recreate_removes_old_scene_item(plot_factory, qapp):
+    """旧项仍在场景时也必须重建，且删除新项后不得留下旧曲线。"""
+    pw = _make_pw(plot_factory)
+    old_ci = pw.curves["a"]
+    old_curve = old_ci.curve
+    pw._multi_curve_manager._recreate_curve("a")
+    new_ci = pw.curves["a"]
+    assert new_ci is not old_ci
+    assert new_ci.curve is not old_curve
+    assert old_curve not in pw.plot_item.scene().items()
+    assert sum(
+        callable(getattr(item, "name", None)) and item.name() == "a"
+        for item in pw.plot_item.scene().items()
+    ) == 1
+    assert pw.remove_variable_from_plot("a") is True
+    assert "a" not in pw.curves
+    assert not any(
+        callable(getattr(item, "name", None)) and item.name() == "a"
+        for item in pw.plot_item.scene().items()
+    )
+
+
+def test_recreate_failure_restores_old_curve(plot_factory, qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    pw = _make_pw(plot_factory)
+    old_ci = pw.curves["a"]
+    old_curve = old_ci.curve
+    new_curve = None
+
+    def fail_after_replace():
+        nonlocal new_curve
+        new_curve = pw.curves["a"].curve
+        assert new_curve is not old_curve
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(
+        pw._multi_curve_manager, "_update_header_for_curves", fail_after_replace
+    )
+    monkeypatch.setattr(
+        QMessageBox, "critical", staticmethod(lambda *args, **kwargs: None)
+    )
+    pw._multi_curve_manager._recreate_curve("a")
+    assert pw.curves["a"] is old_ci
+    assert old_curve in pw.plot_item.scene().items()
+    assert new_curve not in pw.plot_item.scene().items()
+
+
 def test_recreate_keeps_pinned_symbol_policy(plot_factory, qapp):
     pw = _make_pw(plot_factory)
     old_ci = pw.curves["a"]
