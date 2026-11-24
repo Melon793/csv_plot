@@ -226,3 +226,96 @@ def test_single_variable_batch_false_keeps_first_curve_emit_behavior(plot_factor
 
     assert result.added == ["a"]
     assert count["n"] == 1
+
+
+def test_second_batch_add_exception_moves_only_successful_asset(plot_factory, monkeypatch):
+    """第二批异常：每条资产只留一侧，删源/移条目回调匹配实际搬运边界。"""
+    source = plot_factory()
+    dst = plot_factory()
+    assert source.plot_variable("a") and source.plot_variable("b")
+    assert dst.plot_variable("c")
+    removed_source: list[str] = []
+    removed_entries: list[str] = []
+
+    def remove_source(names):
+        removed_source.extend(names)
+        for name in names:
+            assert source.remove_variable_from_plot(name)
+
+    real_plot = dst.plot_variable
+    calls = {"n": 0}
+
+    def flaky_plot(name, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("second batch add failed")
+        return real_plot(name, *args, **kwargs)
+
+    monkeypatch.setattr(dst, "plot_variable", flaky_plot)
+
+    with pytest.raises(RuntimeError, match="second batch add failed"):
+        dst._transfer_curves(
+            ["a", "b"],
+            on_duplicate="skip",
+            remove_source_cb=remove_source,
+            remove_entries_cb=removed_entries.extend,
+            quiet=True,
+            scene=False,
+        )
+
+    assert "c" in dst.curves
+    assert "b" not in dst.curves
+    transferred = [
+        name for name in ("a", "b")
+        if name in dst.curves and name not in source.curves
+    ]
+    assert removed_source == transferred
+    assert removed_entries == transferred
+    assert set(source.curves).isdisjoint(dst.curves)
+    assert {"a", "b", "c"} <= set(source.curves) | set(dst.curves)
+    assert dst._batch_adding is False
+    assert dst._is_updating_data is False
+
+
+def test_finalize_exception_moves_all_added_assets_once(plot_factory, monkeypatch):
+    """finalize 异常：资产可回滚或保留，但不得丢失、重复或错发回调。"""
+    source = plot_factory()
+    dst = plot_factory()
+    assert source.plot_variable("a") and source.plot_variable("b")
+    assert dst.plot_variable("c")
+    removed_source: list[str] = []
+    removed_entries: list[str] = []
+
+    def remove_source(names):
+        removed_source.extend(names)
+        for name in names:
+            assert source.remove_variable_from_plot(name)
+
+    def fail_finalize(*args, **kwargs):
+        raise RuntimeError("finalize failed")
+
+    monkeypatch.setattr(
+        dst._multi_curve_manager, "_finalize_batch_add", fail_finalize
+    )
+
+    with pytest.raises(RuntimeError, match="finalize failed"):
+        dst._transfer_curves(
+            ["a", "b"],
+            on_duplicate="skip",
+            remove_source_cb=remove_source,
+            remove_entries_cb=removed_entries.extend,
+            quiet=True,
+            scene=False,
+        )
+
+    assert "c" in dst.curves
+    transferred = [
+        name for name in ("a", "b")
+        if name in dst.curves and name not in source.curves
+    ]
+    assert removed_source == transferred
+    assert removed_entries == transferred
+    assert set(source.curves).isdisjoint(dst.curves)
+    assert {"a", "b", "c"} <= set(source.curves) | set(dst.curves)
+    assert dst._batch_adding is False
+    assert dst._is_updating_data is False

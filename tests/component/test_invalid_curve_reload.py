@@ -20,6 +20,7 @@ import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QMessageBox, QPushButton, QWidget
 
+from src.core.data_types import SYMBOL_POLICY_OFF, SYMBOL_POLICY_ON
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.table_dialog import DataTableDialog
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
@@ -127,6 +128,16 @@ class Container:
         return False
 
 
+class HiddenContainer(Container):
+    """隐藏页/隐藏格容器：isHidden 与 isVisible 必须同时为真。"""
+
+    def isVisible(self):
+        return False
+
+    def isHidden(self):
+        return True
+
+
 @pytest.fixture(autouse=True)
 def _no_data_table_dialog(monkeypatch):
     monkeypatch.setattr(DataTableDialog, "_instance", None)
@@ -179,7 +190,7 @@ def env(qapp):
         loader.set_data(new_df, validity)
         for c in host.plot_widgets:
             c.plot_widget.data = new_df
-        manager.replots_after_loading()
+        return manager.replots_after_loading()
 
     yield host, manager, pw, loader, reload_with
 
@@ -359,3 +370,103 @@ def test_prepare_failure_demotes_to_placeholder_no_modal(env, modal_records):
     assert pw.invalid_curves["b"].visible_preference is False
     _assert_disjoint(pw)
     assert not modal_records, f"reload 重建中途不得弹模态框: {modal_records}"
+
+
+# ---------- R5：symbol_policy 跨 reload 保真（活动页 + 隐藏页） ----------
+
+
+@pytest.mark.parametrize("policy", [SYMBOL_POLICY_ON, SYMBOL_POLICY_OFF])
+@pytest.mark.parametrize("hidden", [False, True], ids=["active-page", "hidden-page"])
+def test_reload_preserves_explicit_symbol_policy(env, policy, hidden):
+    """显式 on/off 不得回落 auto；隐藏页只重建数据层，同样必须保真。"""
+    host, manager, pw, loader, reload_with = env
+    target = pw
+    if hidden:
+        df0 = loader.df
+        ctx2 = FakeCtx(host, loader)
+        pw2 = DraggableGraphicsLayoutWidget({}, df0)
+        pw2.plot_context = ctx2
+        pw2.setParent(host)
+        pw2.resize(700, 260)
+        hidden_page = object()
+        active_page = object()
+        pw2.page = hidden_page
+        host.current_page = active_page
+        host.plot_widgets.append(HiddenContainer(pw2))
+        ctx2.plot_widgets = list(host.plot_widgets)
+        target = pw2
+    else:
+        pw2 = None
+
+    try:
+        assert target.plot_variable("a")
+        assert target._multi_curve_manager.apply_curve_symbol_policy("a", policy)
+        assert target.curves["a"].symbol_policy == policy
+
+        result = reload_with({"a": list(np.arange(N, dtype=float))})
+
+        assert target.curves["a"].symbol_policy == policy
+        assert result == "restored"
+        _assert_disjoint(target)
+    finally:
+        if pw2 is not None:
+            pw2._is_being_destroyed = True
+            pw2.deleteLater()
+
+
+# ---------- R4/R10：reload 显式结果与零行资产保留 ----------
+
+
+def test_replots_reports_restored_for_real_curves(env):
+    _host, _manager, pw, _loader, reload_with = env
+    assert pw.plot_variable("a")
+
+    result = reload_with({"a": list(np.arange(N, dtype=float))})
+
+    assert result == "restored"
+    assert set(pw.curves) == {"a"}
+
+
+def test_replots_reports_empty_without_assets(env):
+    _host, _manager, pw, _loader, reload_with = env
+
+    result = reload_with({"a": list(np.arange(N, dtype=float))})
+
+    assert result == "empty"
+    assert not pw.curves and not pw.invalid_curves
+
+
+def test_zero_row_success_keeps_old_curve_and_placeholder_assets(env):
+    """零行是成功加载的 empty 结果：不得清掉上一轮曲线/占位资产。"""
+    _host, _manager, pw, _loader, reload_with = env
+    assert pw.plot_variable("a")
+    assert pw.add_variable_to_plot("b")
+    reload_with({"a": list(np.arange(N, dtype=float))})
+    assert "b" in pw.invalid_curves
+    old_curve = pw.curves["a"]
+    old_placeholder = pw.invalid_curves["b"]
+
+    result = reload_with({"a": []})
+
+    assert pw.curves["a"] is old_curve
+    assert pw.invalid_curves["b"] is old_placeholder
+    _assert_disjoint(pw)
+    assert result == "empty"
+
+
+def test_replots_reports_failed_and_resets_update_flags(env, monkeypatch):
+    host, manager, pw, loader, _reload_with = env
+    assert pw.plot_variable("a")
+
+    def boom():
+        raise RuntimeError("clear failed")
+
+    monkeypatch.setattr(pw, "_safe_clear_plot_items", boom)
+    new_df = _df({"a": list(np.arange(N, dtype=float))})
+    loader.set_data(new_df)
+    pw.data = new_df
+
+    assert manager.replots_after_loading() == "failed"
+    assert pw._is_updating_data is False
+    assert pw._batch_adding is False
+    assert host.isUpdatesEnabled() is True

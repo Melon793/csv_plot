@@ -46,6 +46,7 @@ def flm_env(monkeypatch):
 
     mw = _MW()
     flm = FileLoaderManager(mw)
+    flm._last_replot_result = "empty"
     monkeypatch.setattr(flm, "_window_going_away", lambda: False)
     monkeypatch.setattr(flm, "_remember_last_open_dir", lambda p: None)
     monkeypatch.setattr(flm, "set_button_status", lambda *a, **k: None)
@@ -112,3 +113,37 @@ def test_disclosure_survives_auto_restore_exception(flm_env, monkeypatch):
     flm._post_load_actions("/tmp/demo.csv")
     texts = [t for t, _ in mw.broadcasts]
     assert texts and texts[-1].startswith("已推断修复"), f"实际={texts}"
+
+
+@pytest.mark.parametrize("stage", ["load", "apply_false", "apply_raise"])
+def test_restore_failure_warns_once_and_fffd_stays_last(flm_env, monkeypatch, stage):
+    """R6：读档/套用失败仅日志不够；一次 warn/error 后仍须披露 FFFD。"""
+    flm, mw = flm_env
+    manager = mw.plot_config_manager
+
+    if stage == "load":
+        def fail_load(*args, **kwargs):
+            raise OSError("synthetic auto-save read failure")
+
+        monkeypatch.setattr(
+            manager.auto_save_manager, "should_apply_auto_save", fail_load
+        )
+    elif stage == "apply_false":
+        monkeypatch.setattr(manager, "apply_config", lambda mw, cfg: False)
+    else:
+        def fail_apply(mw, cfg):
+            raise RuntimeError("synthetic auto-save apply failure")
+
+        monkeypatch.setattr(manager, "apply_config", fail_apply)
+
+    flm._post_load_actions("demo.csv")
+
+    failures = [
+        (text, level)
+        for text, level in mw.broadcasts
+        if level in ("warn", "error") and not text.startswith("已推断修复")
+    ]
+    assert len(failures) == 1, f"失败必须只播报一次，实际={mw.broadcasts}"
+    assert "自动恢复" in failures[0][0], failures[0]
+    assert mw.broadcasts[-1][0].startswith("已推断修复 3 处单位乱码")
+    assert mw.broadcasts[-1][1] == "warn"

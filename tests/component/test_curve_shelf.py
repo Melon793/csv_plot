@@ -52,10 +52,12 @@ class ShelfHost(QWidget):
     def __init__(self):
         super().__init__()
         self.messages: list[str] = []
+        self.message_levels: list[str] = []
         self.loading = False
 
-    def _show_status_message(self, message: str) -> None:
+    def _show_status_message(self, message: str, level: str = "info") -> None:
         self.messages.append(message)
+        self.message_levels.append(level)
 
     def is_data_loading(self) -> bool:
         return self.loading
@@ -263,6 +265,53 @@ def test_entry_survives_source_plot_destruction(shelf, qapp):
     assert entry.stale is False
 
 
+def test_delayed_source_delete_failure_keeps_one_copy_and_warns(shelf, qapp):
+    """延迟删源失败必须消除两侧重复；源仍在时保留唯一资产并明确 warn。"""
+    widget, host = shelf
+    source = QWidget()
+    source.curves = {
+        "a": SimpleNamespace(
+            color="#101010",
+            visible=True,
+            draw_mode="auto",
+            symbol_policy="auto",
+            draw_mode_source="auto",
+            display_name="合成曲线",
+            factor=2.0,
+            offset=3.0,
+        )
+    }
+    attempted: list[str] = []
+
+    def fail_remove(name):
+        attempted.append(name)
+        raise OSError("synthetic delete failure")
+
+    source.remove_variable_from_plot = fail_remove
+    entry = ShelfEntry.from_curve_info(
+        "a", source.curves["a"], origin_label="页1·图1", origin_plot=source
+    )
+    widget.add_entry(entry)
+    widget._schedule_source_remove(source, ["a"])
+
+    qapp.processEvents()
+
+    assert attempted == ["a"]
+    source_has = "a" in source.curves
+    shelf_has = widget.entry_for_name("a") is not None
+    assert source_has != shelf_has, "删源失败后不得在源绘图和暂存区各留一份"
+    assert source_has or shelf_has, "唯一资产不能丢失"
+    assert any(
+        "a" in message and ("失败" in message or "无法" in message)
+        for message in host.messages
+    ), host.messages
+    assert any(
+        level in ("warn", "error")
+        for message, level in zip(host.messages, host.message_levels)
+        if "a" in message and ("失败" in message or "无法" in message)
+    ), list(zip(host.messages, host.message_levels))
+
+
 def test_duplicate_cut_from_another_plot_updates_origin(shelf, plot_factory, qapp):
     """同名二次剪入必须换来源：否则退回旧图且播报看起来完全正常。"""
     widget, host = shelf
@@ -383,6 +432,49 @@ def test_duplicate_name_updates_in_place(shelf):
     _drop_into_shelf(widget, build_var_mimedata(["c"]))
     assert widget.count() == 1
     assert any("已更新 1 条同名暂存" in m for m in host.messages)
+
+
+def test_duplicate_snapshot_refreshes_metadata_without_replacing_entry(shelf, plot_factory):
+    """R8：同名重入刷新显示名/换算，key、来源和其他样式必须留在原条目。"""
+    widget, _host = shelf
+    source = plot_factory()
+    assert source.plot_variable("a")
+    source._multi_curve_manager.apply_curve_color("a", "#123456")
+    source._multi_curve_manager.apply_curve_draw_mode("a", DRAW_MODE_STEP_PRE)
+    source._multi_curve_manager.apply_curve_symbol_policy("a", SYMBOL_POLICY_ON)
+    source._multi_curve_manager.toggle_curve_visibility_by_name("a")
+    source.curves["a"].display_name = "旧显示名"
+    source.curves["a"].factor = 2.0
+    source.curves["a"].offset = 3.0
+    source.page = FakePage(0, [FakeContainer(source)])
+
+    first = ShelfEntry.from_curve_info(
+        "a", source.curves["a"], origin_label="页1·图1", origin_plot=source
+    )
+    assert widget.add_entry(first) == "added"
+
+    source.curves["a"].display_name = "新显示名"
+    source.curves["a"].factor = 4.0
+    source.curves["a"].offset = 5.0
+    second = ShelfEntry.from_curve_info(
+        "a", source.curves["a"], origin_label="页1·图1", origin_plot=source
+    )
+    assert second.key != first.key
+    assert widget.add_entry(second) == "updated"
+
+    stored = widget.entry_for_name("a")
+    assert stored is first
+    assert widget.count() == 1
+    assert stored.key == first.key
+    assert stored.origin_plot() is source
+    assert stored.origin_label == "页1·图1"
+    assert stored.color == "#123456"
+    assert stored.visible is False
+    assert stored.draw_mode == DRAW_MODE_STEP_PRE
+    assert stored.symbol_policy == SYMBOL_POLICY_ON
+    assert stored.display_name == "新显示名"
+    assert stored.factor == 4.0
+    assert stored.offset == 5.0
 
 
 def test_intake_rejected_while_loading(shelf):

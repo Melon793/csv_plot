@@ -37,6 +37,26 @@ class TestSaveLoadRoundtrip:
         assert loaded is not None
         assert loaded.plots[0].curves == ["v1"]
 
+    @pytest.mark.parametrize(
+        "corrupt_payload",
+        ["pages: [broken", "- not-a-config-mapping"],
+        ids=["invalid-yaml", "invalid-config-shape"],
+    )
+    def test_r6_backup_fallback_when_main_exists_but_corrupt(
+        self, auto_save, corrupt_payload
+    ):
+        """R6：主文件存在但 YAML/配置损坏时，也必须尝试可用 backup。"""
+        auto_save.auto_save(_make_config(["v1"]))
+        auto_save.auto_save(_make_config(["v2"]))  # backup 保留 v1
+        auto_save._auto_save_file.write_text(corrupt_payload, encoding="utf-8")
+        assert auto_save._auto_save_file.exists()
+        assert auto_save._auto_save_backup_file.exists()
+
+        loaded = auto_save.load_auto_save()
+
+        assert loaded is not None
+        assert loaded.plots[0].curves == ["v1"]
+
 
 class TestShouldApply:
     def test_disabled_rejects(self, auto_save, app_settings):

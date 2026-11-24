@@ -1,4 +1,6 @@
-"""PlotConfig.curve_identities 序列化/容错（模板身份匹配 C1 / D2）。"""
+"""PlotConfig.curve_identities 序列化/容错（模板身份匹配 C1 / D2 / R9）。"""
+
+import pytest
 
 from src.core.plot_config import (
     PlotConfig,
@@ -117,6 +119,63 @@ class TestGuards:
     def test_blf_numeric_string_coerced(self):
         out = parse_curve_identities({"a": dict(BLF_ENTRY, can_id="416")})
         assert out["a"]["can_id"] == 416
+
+    @pytest.mark.parametrize(
+        ("field", "value", "extended"),
+        [
+            ("can_id", 416.9, False),
+            ("bus_channel", 1.9, False),
+            ("can_id", True, False),
+            ("bus_channel", False, False),
+            ("can_id", -1, False),
+            ("bus_channel", -1, False),
+            ("can_id", 0x800, False),
+            ("can_id", 0x20000000, True),
+        ],
+        ids=[
+            "fractional-can-id",
+            "fractional-bus-channel",
+            "bool-can-id",
+            "bool-bus-channel",
+            "negative-can-id",
+            "negative-bus-channel",
+            "standard-can-id-overflow",
+            "extended-can-id-overflow",
+        ],
+    )
+    def test_r9_blf_invalid_integer_fields_rejected(self, field, value, extended):
+        """R9：非整数值、bool、负值和 CAN ID 越界必须整条拒收，不得静默取整。"""
+        entry = dict(BLF_ENTRY, extended=extended)
+        entry[field] = value
+        assert parse_curve_identities({"a": entry}) == {}
+
+    @pytest.mark.parametrize("field", ["can_id", "bus_channel"])
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+    def test_r9_blf_infinity_rejected_without_raising(self, field, value):
+        """R9：int(inf) 的 OverflowError 不得逃出容错解析入口。"""
+        entry = dict(BLF_ENTRY)
+        entry[field] = value
+        assert parse_curve_identities({"a": entry}) == {}
+
+    @pytest.mark.parametrize(
+        ("field", "value", "expected"),
+        [
+            ("can_id", "416", 416),
+            ("can_id", "2047", 0x7FF),
+            ("can_id", "536870911", 0x1FFFFFFF),
+            ("bus_channel", "2", 2),
+        ],
+    )
+    def test_r9_blf_integer_strings_and_boundaries_accepted(
+        self, field, value, expected
+    ):
+        entry = dict(
+            BLF_ENTRY,
+            extended=(expected == 0x1FFFFFFF),
+        )
+        entry[field] = value
+        parsed = parse_curve_identities({"a": entry})
+        assert parsed["a"][field] == expected
 
     def test_unknown_keys_ignored(self):
         out = parse_curve_identities({"a": dict(MDF_ENTRY, acq_name="NormalGroup", color="red")})
