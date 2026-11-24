@@ -1066,8 +1066,9 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def set_button_status(self, status: bool):
         if status is not None:
-            # 清图与暂存区是资产清理入口，零行数据也必须可用。
-            self.mw.clear_all_plots_btn.setEnabled(True)
+            # 零行也保留资产清理入口；尚未加载数据时维持原禁用闸门。
+            asset_actions_enabled = self._has_valid_loader
+            self.mw.clear_all_plots_btn.setEnabled(asset_actions_enabled)
             self.mw.auto_range_btn.setEnabled(status)
             self.mw.auto_y_btn.setEnabled(status)
             self.mw.cursor_btn.setEnabled(status)
@@ -1076,14 +1077,14 @@ class FileLoaderManager(MainWindowBaseManager):
             # 暂存区浮窗按钮同走加载闸门（FakeMainWindow 等替身无此按钮）
             shelf_btn = getattr(self.mw, "curve_shelf_btn", None)
             if shelf_btn is not None:
-                shelf_btn.setEnabled(True)
+                shelf_btn.setEnabled(asset_actions_enabled)
             # 页签角位胶囊同闸门（D-A7）：这里是**唯一**闸门来源，替身宿主
             # 可能没有 plot_tabs / 胶囊关闭时 set_shelf_enabled 不存在
             set_shelf_enabled = getattr(
                 getattr(self.mw, "plot_tabs", None), "set_shelf_enabled", None
             )
             if callable(set_shelf_enabled):
-                set_shelf_enabled(True)
+                set_shelf_enabled(asset_actions_enabled)
 
     def reload_data(self):
         # v5.12: 互斥锁 —— 防止快速连续 reload 导致并发冲突
