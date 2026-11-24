@@ -245,6 +245,9 @@ class CurveShelfWidget(QListWidget):
                 "symbol_policy",
                 "draw_mode_source",
                 "line_preset",
+                "display_name",
+                "factor",
+                "offset",
                 "origin_label",
                 # 来源引用必须跟随最近一次入区：剪入 A 后又从 B 剪入同名
                 # 变量时，退回目标必须是 B（漏掉会静默退错图）
