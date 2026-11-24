@@ -59,7 +59,6 @@ class TestSaveLoadRoundtrip:
 
     def test_write_failure_returns_false_and_cleans_tmp(self, auto_save, monkeypatch):
         auto_save.auto_save(_make_config(["a"]))
-        tmp_file = auto_save._auto_save_file.with_suffix(".yaml.tmp")
 
         def fail_replace(*_args):
             raise OSError("synthetic replace failure")
@@ -67,8 +66,45 @@ class TestSaveLoadRoundtrip:
         monkeypatch.setattr("src.core.auto_save_manager.os.replace", fail_replace)
 
         assert auto_save.auto_save(_make_config(["b"])) is False
-        assert not tmp_file.exists()
+        assert not list(auto_save._storage_path.glob("*.tmp"))
         assert auto_save.load_auto_save().plots[0].curves == ["a"]
+
+    def test_concurrent_saves_keep_primary_and_backup_readable(self, auto_save, monkeypatch):
+        import threading
+        import yaml
+
+        auto_save.auto_save(_make_config(["old"]))
+        barrier = threading.Barrier(2)
+        real_dump = yaml.dump
+
+        def synchronized_dump(*args, **kwargs):
+            barrier.wait(timeout=5)
+            return real_dump(*args, **kwargs)
+
+        monkeypatch.setattr("src.core.auto_save_manager.yaml.dump", synchronized_dump)
+        results = []
+
+        def save(tag):
+            cfg = _make_config([f"{tag}-{i}" for i in range(6000)])
+            results.append(auto_save.auto_save(cfg))
+
+        threads = [threading.Thread(target=save, args=(tag,)) for tag in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert results == [True, True]
+        for path in (auto_save._auto_save_file, auto_save._auto_save_backup_file):
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            curves = data["plots"][0]["curves"]
+            assert len(curves) in (1, 6000)
+            if len(curves) == 1:
+                assert curves == ["old"]
+            else:
+                assert curves[0] in {"a-0", "b-0"}
+                assert curves == [f"{curves[0][0]}-{i}" for i in range(6000)]
+        assert auto_save.load_auto_save() is not None
+        assert not list(auto_save._storage_path.glob("*.tmp"))
 
     def test_prepare_reuses_one_read_and_identity_snapshot(
         self, auto_save, app_settings, monkeypatch

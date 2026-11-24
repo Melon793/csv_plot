@@ -1,6 +1,7 @@
 """自动保存管理器 - 处理数据加载时的配置恢复"""
 
 from __future__ import annotations
+import tempfile
 import os
 import shutil
 import yaml
@@ -71,25 +72,37 @@ class AutoSaveManager(QObject):
 
     def auto_save(self, config: PlotSessionConfig) -> bool:
         """自动保存当前配置，返回是否写入成功。"""
-        tmp_file = None
+        tmp_files: list[Path] = []
         try:
-            tmp_file = self._auto_save_file.with_suffix(".yaml.tmp")
-            with open(tmp_file, "w", encoding="utf-8") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self._storage_path,
+                prefix=".auto-save-", suffix=".tmp", delete=False,
+            ) as f:
+                tmp_file = Path(f.name)
+                tmp_files.append(tmp_file)
                 yaml.dump(config.to_dict(), f, default_flow_style=False, allow_unicode=True, indent=2)
 
-            # 用 copy2 备份主文件（主文件始终保留，避免 rename 造成的"主文件不存在"窗口），
-            # 再原子替换主文件；即使中途崩溃，主文件与备份至少有一个可用
+            # 主档和备份都先写私有临时文件，避免并发保存交错覆盖同一 inode。
             if self._auto_save_file.exists():
-                shutil.copy2(self._auto_save_file, self._auto_save_backup_file)
+                with tempfile.NamedTemporaryFile(
+                    dir=self._storage_path, prefix=".auto-save-backup-",
+                    suffix=".tmp", delete=False,
+                ) as backup_tmp:
+                    backup_file = Path(backup_tmp.name)
+                tmp_files.append(backup_file)
+                shutil.copy2(self._auto_save_file, backup_file)
+                os.replace(backup_file, self._auto_save_backup_file)
+                tmp_files.remove(backup_file)
 
             os.replace(tmp_file, self._auto_save_file)
+            tmp_files.remove(tmp_file)
             logger.debug("Auto-saved config successfully")
             return True
         except Exception as e:
             logger.error("Failed to auto-save config: %s", e, exc_info=True)
-            if tmp_file is not None and tmp_file.exists():
+            for tmp_file in tmp_files:
                 try:
-                    tmp_file.unlink()
+                    tmp_file.unlink(missing_ok=True)
                 except OSError:
                     logger.debug("清理临时自动保存文件失败", exc_info=True)
             return False
