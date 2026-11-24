@@ -344,6 +344,35 @@ class PlotConfigManager(QObject):
                 )
                 return False
 
+            for page, page_config in zip(pages, page_cfgs):
+                rows = min(
+                    max(1, int(page_config.layout_rows)),
+                    max(1, getattr(page, "rows_max", page.rows_current)),
+                )
+                cols = min(
+                    max(1, int(page_config.layout_cols)),
+                    max(1, getattr(page, "cols_max", page.cols_current)),
+                )
+                stride = max(page.grid_cols, cols)
+                valid_targets = 0
+                for index, plot_config in enumerate(page_config.plots):
+                    if (
+                        plot_config.cell_row is not None
+                        and plot_config.cell_col is not None
+                    ):
+                        row, col = plot_config.cell_row, plot_config.cell_col
+                        valid = 0 <= row < rows and 0 <= col < cols and col < stride
+                    else:
+                        cell = plot_config.cell_index
+                        if cell is None:
+                            cell = index
+                        row, col = divmod(cell, stride)
+                        valid = cell >= 0 and row < rows and col < cols
+                    valid_targets += int(valid)
+                if page_config.plots and not valid_targets:
+                    logger.warning("模板页面 %s 的所有目标格均越界，取消套用", page_config.title)
+                    return False
+
             current = getattr(main_window, "current_page", None)
             applied_count = 0
             total_plots = 0

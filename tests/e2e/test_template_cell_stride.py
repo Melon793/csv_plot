@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
 from src.core.plot_config import PlotConfig, PlotPageConfig, PlotSessionConfig
 from src.ui.plot_config_manager import PlotConfigManager
 
@@ -136,6 +138,40 @@ def test_non_dict_plots_and_null_curves_do_not_escape_slot(loaded_window, monkey
     # 但必须正常返回布尔而非抛 TypeError
     result = mw.plot_config_manager.apply_template(mw, "bad3")
     assert isinstance(result, bool)
+
+
+@pytest.mark.parametrize(
+    "plot_config",
+    [
+        PlotConfig(curves=["speed"], cell_index=99),
+        PlotConfig(curves=["speed"], cell_index=-1),
+        PlotConfig(curves=["speed"], cell_row=0, cell_col=3),
+    ],
+)
+def test_all_targets_out_of_bounds_keeps_old_plot(
+    loaded_window, monkeypatch, plot_config
+):
+    mw = loaded_window
+    page = mw.current_page
+    page.rows_max = 4
+    page.cols_max = 4
+    page.ensure_matrix(2, 2)
+    widget = page.plot_widgets[0].plot_widget
+    assert widget.plot_variable("speed") is True
+    clears = []
+    original_clear = widget.clear_plot_item
+
+    def record_clear(*args, **kwargs):
+        clears.append(True)
+        return original_clear(*args, **kwargs)
+
+    monkeypatch.setattr(widget, "clear_plot_item", record_clear)
+    session = PlotSessionConfig(pages=[PlotPageConfig(
+        layout_rows=1, layout_cols=1, plots=[plot_config],
+    )])
+    assert mw.plot_config_manager.apply_config(mw, session) is False
+    assert not clears, "全越界必须在清场前失败"
+    assert "speed" in widget.curves
 
 
 def test_col_beyond_target_capacity_is_skipped_not_wrapped(loaded_window, qtbot):
