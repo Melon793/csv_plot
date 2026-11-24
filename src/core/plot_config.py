@@ -358,19 +358,39 @@ class PlotSessionConfig:
             if isinstance(p, dict)
         ]
         mark_range = data.get("saved_mark_range")
+        if mark_range is not None:
+            if not isinstance(mark_range, list) or len(mark_range) != 2:
+                raise ValueError("saved_mark_range must contain exactly two numbers")
+            try:
+                mark_range = [float(value) for value in mark_range]
+            except (TypeError, ValueError) as exc:
+                raise ValueError("saved_mark_range must contain numbers") from exc
+            if not all(math.isfinite(value) for value in mark_range) or not (
+                mark_range[0] < mark_range[1]
+            ):
+                raise ValueError("saved_mark_range must be finite and increasing")
+        time_factor = data.get("time_factor", 1.0)
+        time_offset = data.get("time_offset", 0.0)
+        try:
+            time_factor = float(time_factor)
+            time_offset = float(time_offset)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("time_factor and time_offset must be numbers") from exc
+        if not math.isfinite(time_factor) or not math.isfinite(time_offset):
+            raise ValueError("time_factor and time_offset must be finite")
         return cls(
             created_at=data.get("created_at", ""),
             # 复审 BL-3：v1 顶层 layout 与页级同口径 int 收口——非法即抛
             # ValueError 落入入口 except，不得留到 try 外的 normalized_pages
             layout_rows=int(data.get("layout_rows", 1) or 1),
             layout_cols=int(data.get("layout_cols", 1) or 1),
-            time_factor=data.get("time_factor", 1.0),
-            time_offset=data.get("time_offset", 0.0),
+            time_factor=time_factor,
+            time_offset=time_offset,
             plots=plots,
             pages=pages,
             active_page=int(data.get("active_page", 0) or 0),
             cursor_mode=data.get("cursor_mode"),
-            saved_mark_range=list(mark_range) if isinstance(mark_range, list) else None,
+            saved_mark_range=mark_range,
         )
 
 

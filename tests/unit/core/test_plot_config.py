@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.core.plot_config import (
     PlotConfig,
     PlotPageConfig,
@@ -171,6 +173,29 @@ class TestPlotSessionConfigV2:
         }
         page = PlotSessionConfig.from_dict(data).normalized_pages()[0]
         assert page.row_height_factors == {0: 100, 1: 60}
+
+    @pytest.mark.parametrize(
+        "value",
+        [[1.0], [1.0, 2.0, 3.0], ["bad", 2.0], [float("nan"), 2.0],
+         [float("inf"), 2.0], [2.0, 1.0], [1.0, 1.0]],
+    )
+    def test_invalid_mark_range_rejected_at_load(self, value):
+        with pytest.raises(ValueError):
+            PlotSessionConfig.from_dict({"saved_mark_range": value})
+
+    @pytest.mark.parametrize("key", ["time_factor", "time_offset"])
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), "bad"])
+    def test_invalid_time_basis_rejected_at_load(self, key, value):
+        with pytest.raises(ValueError):
+            PlotSessionConfig.from_dict({key: value})
+
+    def test_valid_mark_range_and_time_basis_roundtrip(self):
+        cfg = PlotSessionConfig.from_dict({
+            "saved_mark_range": [1, 2.5], "time_factor": 2, "time_offset": -3,
+        })
+        assert cfg.saved_mark_range == [1.0, 2.5]
+        assert cfg.time_factor == 2.0
+        assert cfg.time_offset == -3.0
 
     def test_optional_view_state_absent_stays_none(self):
         restored = PlotSessionConfig.from_dict({"pages": [{"plots": []}]})
