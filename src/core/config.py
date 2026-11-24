@@ -637,7 +637,16 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     if not finite_mask.any():
         return False, None
 
-    abs_max = float(np.max(np.abs(arr[finite_mask])))
+    finite_values = arr[finite_mask]
+    abs_max = float(np.max(np.abs(finite_values)))
     if abs_max > FLOAT32_REPRESENTABLE_MAX or has_large_object_integer:
         return False, abs_max
-    return _float32_spacing_preserves_resolution(arr[finite_mask], abs_max), abs_max
+    large_ints = finite_values[
+        (np.abs(finite_values) > FLOAT32_EXACT_INTEGER_MAX)
+        & (finite_values == np.trunc(finite_values))
+    ]
+    if large_ints.size and not np.array_equal(
+        large_ints, large_ints.astype(np.float32).astype(np.float64)
+    ):
+        return False, abs_max
+    return _float32_spacing_preserves_resolution(finite_values, abs_max), abs_max

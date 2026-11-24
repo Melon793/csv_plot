@@ -246,3 +246,17 @@ class TestFloat32PrecisionGuard:
         is_safe, abs_max = _evaluate_float32_safety(values)
         assert is_safe is True
         assert abs_max == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("large_integer", [16_777_217.0, float(2**53 - 1)])
+    def test_sparse_large_integer_mixed_with_float_requires_exact_representation(
+        self, large_integer
+    ):
+        for values in ([large_integer, 1.5], pd.Series([large_integer, 1.5])):
+            assert _evaluate_float32_safety(values)[0] is False
+
+    @pytest.mark.parametrize("large_integer", [16_777_216.0, float(2**53)])
+    def test_exact_sparse_large_integer_mixed_with_float_remains_safe(
+        self, large_integer
+    ):
+        for values in ([large_integer, 1.5], pd.Series([large_integer, 1.5])):
+            assert _evaluate_float32_safety(values)[0] is True
