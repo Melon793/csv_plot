@@ -1068,6 +1068,11 @@ class FileLoaderManager(MainWindowBaseManager):
         self, status: bool, *, asset_actions: bool | None = None
     ):
         if status is not None:
+            # 真实 MainWindow 由统一闸门驱动按钮；轻量测试替身保留原路径。
+            set_availability = getattr(self.mw, "set_action_availability", None)
+            if callable(set_availability):
+                set_availability(status, asset_actions=asset_actions)
+                return
             # 零行成功加载时分析动作禁用，但清图/暂存仍须可用。
             asset_actions_enabled = (
                 status if asset_actions is None else asset_actions

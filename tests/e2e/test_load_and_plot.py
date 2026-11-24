@@ -189,3 +189,276 @@ def test_ctrl_y_auto_y_after_plot(loaded_window, qapp, qtbot):
     qapp.processEvents()
 
     assert bool(pw.view_box.state["autoRange"][1]) is True
+
+
+# ---------- R01：按钮与快捷键共用动作闸门 ----------
+
+_SHORTCUT_CASES = (
+    pytest.param(
+        "cursor", "cursor_btn", "cursor_sync_manager", "toggle_cursor_all",
+        Qt.Key_R, Qt.KeyboardModifier.ControlModifier, id="ctrl-r",
+    ),
+    pytest.param(
+        "auto_y", "auto_y_btn", "cursor_sync_manager", "auto_y_in_x_range",
+        Qt.Key_Y, Qt.KeyboardModifier.ControlModifier, id="ctrl-y",
+    ),
+    pytest.param(
+        "auto_range", "auto_range_btn", "cursor_sync_manager", "auto_range_all_plots",
+        Qt.Key_Y,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        id="ctrl-shift-y",
+    ),
+    pytest.param(
+        "mark_region", "mark_region_btn", "layout_manager", "toggle_mark_region",
+        Qt.Key_T, Qt.KeyboardModifier.ControlModifier, id="ctrl-t",
+    ),
+)
+
+
+@pytest.fixture()
+def mark_stats_singleton_cleanup(qapp):
+    from src.ui.mark_stats import MarkStatsWindow
+
+    yield
+    window = MarkStatsWindow._instance
+    MarkStatsWindow._instance = None
+    if window is not None:
+        try:
+            window.hide()
+            window.deleteLater()
+        except RuntimeError:
+            pass
+        qapp.processEvents()
+
+
+def _plot_speed(mw, qapp):
+    pw = mw.plot_widgets[0].plot_widget
+    mime = build_var_mimedata(["speed"])
+    _keep_alive.append(mime)
+    pw.dropEvent(QDropEvent(
+        QPointF(50.0, 50.0),
+        Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+        mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    ))
+    qapp.processEvents()
+    return pw
+
+
+def _press_shortcut(mw, qtbot, qapp, key, modifiers):
+    from PySide6.QtTest import QTest
+
+    mw.activateWindow()
+    qapp.processEvents()
+    QTest.keyClick(mw, key, modifiers)
+    qapp.processEvents()
+
+
+def _spy_action(mw, monkeypatch, manager_name, method_name):
+    calls = []
+    original = getattr(getattr(mw, manager_name), method_name)
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(getattr(mw, manager_name), method_name, spy)
+    return calls
+
+
+def _plot_action_state(mw):
+    pw = mw.plot_widgets[0].plot_widget
+    return {
+        "cursor_checked": mw.cursor_btn.isChecked(),
+        "mark_checked": mw.mark_region_btn.isChecked(),
+        "saved_mark_range": mw.saved_mark_range,
+        "has_mark_region": pw.mark_region is not None,
+        "has_stats_window": getattr(mw, "mark_stats_window", None) is not None,
+        "view_range": tuple(tuple(axis) for axis in pw.view_box.viewRange()),
+        "auto_range": tuple(pw.view_box.state["autoRange"]),
+    }
+
+
+@pytest.mark.parametrize(
+    "action,button_name,manager_name,method_name,key,modifiers",
+    _SHORTCUT_CASES,
+)
+def test_shortcuts_respect_disabled_buttons_without_data(
+    loaded_window, qtbot, qapp, monkeypatch, mark_stats_singleton_cleanup,
+    action, button_name, manager_name, method_name, key, modifiers,
+):
+    """无数据但已有子图：按钮与快捷键都不得进入动作，也不得留下假成功。"""
+    mw = loaded_window
+    _plot_speed(mw, qapp)
+    old_loader = mw.loader
+    mw.loader = None
+    mw.file_loader_manager.set_button_status(False)
+    btn = getattr(mw, button_name)
+    assert not btn.isEnabled()
+    calls = _spy_action(mw, monkeypatch, manager_name, method_name)
+    before = _plot_action_state(mw)
+    mw._message_label.setText("保持现状")
+
+    try:
+        btn.click()  # disabled 按钮的 click() 也不会发 clicked
+        _press_shortcut(mw, qtbot, qapp, key, modifiers)
+        assert calls == [], f"{action} 绕过了禁用按钮"
+        assert _plot_action_state(mw) == before
+        assert mw._message_label.text() == "保持现状"
+    finally:
+        mw.loader = old_loader
+        mw.file_loader_manager.set_button_status(True)
+
+
+@pytest.mark.parametrize(
+    "action,button_name,manager_name,method_name,key,modifiers",
+    _SHORTCUT_CASES,
+)
+def test_shortcuts_respect_disabled_buttons_while_loading(
+    loaded_window, qtbot, qapp, monkeypatch, mark_stats_singleton_cleanup,
+    action, button_name, manager_name, method_name, key, modifiers,
+):
+    """加载中即使旧 loader/子图仍在，四个动作也必须一致拦截。"""
+    mw = loaded_window
+    _plot_speed(mw, qapp)
+    mw.begin_load_feedback("Demo.csv")
+    mw.file_loader_manager.set_button_status(False)
+    btn = getattr(mw, button_name)
+    assert not btn.isEnabled()
+    calls = _spy_action(mw, monkeypatch, manager_name, method_name)
+    before = _plot_action_state(mw)
+    mw._message_label.setText("保持现状")
+    try:
+        btn.click()
+        _press_shortcut(mw, qtbot, qapp, key, modifiers)
+        assert calls == [], f"加载中 {action} 绕过了禁用按钮"
+        assert _plot_action_state(mw) == before
+        assert mw._message_label.text() == "保持现状"
+    finally:
+        mw.end_load_feedback()
+        mw.file_loader_manager.set_button_status(True)
+
+
+def test_loading_feedback_immediately_syncs_action_buttons(loaded_window):
+    """加载反馈先于 set_button_status(False)：按钮不能短暂留在可用态。"""
+    mw = loaded_window
+    mw.begin_load_feedback("Demo.csv")
+    try:
+        for button_name in (
+            "cursor_btn", "auto_y_btn", "auto_range_btn", "mark_region_btn",
+        ):
+            assert not getattr(mw, button_name).isEnabled(), button_name
+    finally:
+        mw.end_load_feedback()
+        mw.file_loader_manager.set_button_status(True)
+
+
+@pytest.mark.parametrize(
+    "action,button_name,manager_name,method_name,key,modifiers",
+    _SHORTCUT_CASES,
+)
+def test_shortcuts_execute_when_data_action_is_available(
+    loaded_window, qtbot, qapp, monkeypatch, mark_stats_singleton_cleanup,
+    action, button_name, manager_name, method_name, key, modifiers,
+):
+    """有数据时保留快捷键效率，并确实产生对应业务效果。"""
+    mw = loaded_window
+    pw = _plot_speed(mw, qapp)
+    btn = getattr(mw, button_name)
+    assert btn.isEnabled()
+    calls = _spy_action(mw, monkeypatch, manager_name, method_name)
+    if action == "auto_y":
+        pw.view_box.setYRange(100.0, 200.0, padding=0)
+    elif action == "auto_range":
+        pw.view_box.setXRange(10.0, 40.0, padding=0)
+    qapp.processEvents()
+    before_x = tuple(pw.view_box.viewRange()[0])
+
+    _press_shortcut(mw, qtbot, qapp, key, modifiers)
+
+    assert len(calls) == 1, f"{action} 有数据时应执行一次"
+    if action == "cursor":
+        assert mw.cursor_btn.isChecked()
+    elif action == "auto_y":
+        assert bool(pw.view_box.state["autoRange"][1]) is True
+        assert mw._message_label.text() == "已按当前 x 范围调节各子图 Y 轴"
+    elif action == "auto_range":
+        assert tuple(pw.view_box.viewRange()[0]) != before_x
+        assert mw._message_label.text() == "已按全部可见曲线自动缩放 XY 轴"
+    else:
+        assert mw.mark_region_btn.isChecked()
+        assert mw.saved_mark_range is not None
+        assert pw.mark_region is not None
+        assert getattr(mw, "mark_stats_window", None) is not None
+
+
+def test_x_lock_blocks_only_x_changing_actions(
+    loaded_window, qtbot, qapp, monkeypatch,
+):
+    """X 锁禁用 XY 自动缩放；仅调 Y 仍可用，且不得改动冻结的 X 范围。"""
+    mw = loaded_window
+    pw = _plot_speed(mw, qapp)
+    pw.view_box.setXRange(10.0, 40.0, padding=0)
+    before_x = tuple(pw.view_box.viewRange()[0])
+    range_calls = _spy_action(
+        mw, monkeypatch, "cursor_sync_manager", "auto_range_all_plots"
+    )
+    y_calls = _spy_action(
+        mw, monkeypatch, "cursor_sync_manager", "auto_y_in_x_range"
+    )
+
+    mw.set_x_axis_locked(True)
+    assert not mw.auto_range_btn.isEnabled()
+    assert mw.auto_y_btn.isEnabled()
+    mw.auto_range_btn.click()
+    _press_shortcut(
+        mw, qtbot, qapp, Qt.Key_Y,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
+    assert range_calls == []
+    assert tuple(pw.view_box.viewRange()[0]) == before_x
+    assert mw._message_label.text() == "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
+
+    _press_shortcut(mw, qtbot, qapp, Qt.Key_Y, Qt.KeyboardModifier.ControlModifier)
+    assert len(y_calls) == 1
+    assert tuple(pw.view_box.viewRange()[0]) == before_x
+
+    mw.set_x_axis_locked(False)
+    assert mw.auto_range_btn.isEnabled()
+    _press_shortcut(
+        mw, qtbot, qapp, Qt.Key_Y,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
+    assert len(range_calls) == 1
+    assert tuple(pw.view_box.viewRange()[0]) != before_x
+
+
+def test_x_lock_transition_does_not_reenable_actions_without_data(main_window):
+    """无数据时解锁只改锁态，不得点亮自动缩放。"""
+    mw = main_window
+    mw.set_x_axis_locked(True)
+    assert not mw.auto_range_btn.isEnabled()
+    mw.set_x_axis_locked(False)
+    assert not mw.auto_range_btn.isEnabled()
+
+
+def test_x_lock_survives_loading_button_sync(loaded_window):
+    """加载反馈的按钮刷新不得覆盖锁态；数据恢复后 XY 缩放仍禁用。"""
+    mw = loaded_window
+    mw.set_x_axis_locked(True)
+    mw.begin_load_feedback("Demo.csv")
+    mw.end_load_feedback()
+    mw.file_loader_manager.set_button_status(True)
+    assert not mw.auto_range_btn.isEnabled()
+    assert mw.auto_y_btn.isEnabled()
+
+
+def test_zero_row_asset_actions_do_not_enable_analysis_shortcuts(loaded_window):
+    """零行数据只放行清图/暂存，不得顺带点亮四个分析动作。"""
+    mw = loaded_window
+    mw.file_loader_manager.set_button_status(False, asset_actions=True)
+    assert mw.clear_all_plots_btn.isEnabled()
+    assert mw.curve_shelf_btn.isEnabled()
+    for button_name in (
+        "cursor_btn", "auto_y_btn", "auto_range_btn", "mark_region_btn",
+    ):
+        assert not getattr(mw, button_name).isEnabled(), button_name
