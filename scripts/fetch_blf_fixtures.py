@@ -206,15 +206,29 @@ def _load_existing_manifest() -> dict:
 
 
 def build(specs=_RAW_SPECS, *, timeout: float = 30.0,
-          verify_ssl: bool = True) -> dict:
-    """下载全部夹具并生成 manifest 条目。"""
+          verify_ssl: bool = True, locked: dict | None = None) -> dict:
+    """按锁定清单下载并校验；``locked`` 为空时供 ``--lock`` 发现并重锁。"""
     urls_map = {name: _candidate_urls(repo, rel) for name, repo, rel, _, _ in specs}
     meta_map = {name: (repo, rel, lic, purpose)
                 for name, repo, rel, lic, purpose in specs}
 
     def download(entry: tuple[str, str, str, str, str]):
         name = entry[0]
-        got = _fetch_first(urls_map[name], timeout=timeout, verify_ssl=verify_ssl)
+        if locked is not None:
+            expected = locked.get(name) or {}
+            url = expected.get("url")
+            if not url:
+                return None
+            try:
+                data = _fetch(url, timeout=timeout, verify_ssl=verify_ssl)
+            except Exception:
+                return None
+            if _sha256(data) != str(expected.get("sha256") or ""):
+                print(f"  ✖ 锁定哈希不符，拒绝写入: {name}")
+                return None
+            got = (url, data)
+        else:
+            got = _fetch_first(urls_map[name], timeout=timeout, verify_ssl=verify_ssl)
         if got is None:
             return None
         url, data = got
@@ -340,6 +354,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.insecure:
         print("⚠ --insecure：已跳过 TLS 证书校验，取回的内容不可视为已验证")
 
+    if not args.check and not args.lock and not existing.get("files"):
+        print("✖ 尚无锁定 manifest；首次获取请显式使用 --lock")
+        return 1
+
     licenses = existing.get("licenses") or {}
     if not args.check and not args.skip_licenses:
         licenses = fetch_licenses(timeout=args.timeout, verify_ssl=verify_ssl) or licenses
@@ -352,16 +370,18 @@ def main(argv: list[str] | None = None) -> int:
                           "fetched": 0, "ok": ok, "bad": bad}, ensure_ascii=False))
         return int(bool(bad) or not manifest)
 
-    manifest = build(timeout=args.timeout, verify_ssl=verify_ssl)
+    locked = None if args.lock else existing["files"]
+    manifest = build(timeout=args.timeout, verify_ssl=verify_ssl, locked=locked)
     if not manifest:
         print("✖ 一个文件都没取到（无网络？），manifest 保持原样")
         return 1
     mode = "lock" if args.lock else "fetch"
-    write_manifest(manifest, licenses)
-    print(f"已写入 {MANIFEST_PATH.relative_to(REPO_ROOT)}（{len(manifest)} 条）")
+    if args.lock and len(manifest) == len(_RAW_SPECS):
+        write_manifest(manifest, licenses)
+        print(f"已写入 {MANIFEST_PATH.relative_to(REPO_ROOT)}（{len(manifest)} 条）")
 
     write_report(manifest, licenses, mode=mode)
-    return 0
+    return int(len(manifest) != len(_RAW_SPECS))
 
 
 if __name__ == "__main__":

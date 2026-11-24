@@ -23,9 +23,14 @@ def _setup_manifest(tmp_path: Path, monkeypatch, names: tuple[str, ...]) -> dict
         (name, "Demo/source", name, "MIT", "test fixture") for name in names
     )
     monkeypatch.setattr(fixtures, "DEST", dest)
+    monkeypatch.setattr(fixtures, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(fixtures, "MANIFEST_PATH", manifest_path)
     monkeypatch.setattr(fixtures, "LICENSE_DIR", dest / "licenses")
     monkeypatch.setattr(fixtures, "_RAW_SPECS", specs)
+    real_build = fixtures.build
+    monkeypatch.setattr(
+        fixtures, "build", lambda **kwargs: real_build(specs, **kwargs)
+    )
     return payload
 
 
@@ -106,3 +111,129 @@ def test_check_without_manifest_fails_without_creating_files(tmp_path, monkeypat
 
     assert fixtures.main(["--check"]) != 0
     assert not dest.exists()
+
+
+def test_default_rejects_changed_locked_content(tmp_path, monkeypatch):
+    payload = _setup_manifest(tmp_path, monkeypatch, ("a.blf",))
+    local = fixtures.DEST / "a.blf"
+    local.write_bytes(b"locked:a.blf")
+    before = fixtures.MANIFEST_PATH.read_bytes()
+    calls: list[str] = []
+
+    def changed(url, **kwargs):
+        calls.append(url)
+        return b"changed"
+
+    def forbidden_candidates(*args, **kwargs):
+        raise AssertionError("default fetch must use the locked URL")
+
+    monkeypatch.setattr(fixtures, "_fetch", changed)
+    monkeypatch.setattr(fixtures, "_fetch_first", forbidden_candidates)
+
+    result = fixtures.main(["--skip-licenses"])
+
+    assert result != 0
+    assert calls == ["https://example.invalid/a.blf"]
+    assert fixtures.MANIFEST_PATH.read_bytes() == before
+    assert json.loads(before) == payload
+    assert local.read_bytes() == b"locked:a.blf"
+
+
+def test_default_partial_failure_keeps_manifest_and_fails(tmp_path, monkeypatch):
+    _setup_manifest(tmp_path, monkeypatch, ("good.blf", "bad.blf"))
+    before = fixtures.MANIFEST_PATH.read_bytes()
+    calls: list[str] = []
+
+    def fetch(url, **kwargs):
+        calls.append(url)
+        if url.endswith("bad.blf"):
+            raise OSError("offline")
+        return b"locked:good.blf"
+
+    def forbidden_candidates(*args, **kwargs):
+        raise AssertionError("default fetch must use locked URLs")
+
+    monkeypatch.setattr(fixtures, "_fetch", fetch)
+    monkeypatch.setattr(fixtures, "_fetch_first", forbidden_candidates)
+
+    result = fixtures.main(["--skip-licenses"])
+
+    assert result != 0
+    assert sorted(calls) == [
+        "https://example.invalid/bad.blf",
+        "https://example.invalid/good.blf",
+    ]
+    assert fixtures.MANIFEST_PATH.read_bytes() == before
+    assert (fixtures.DEST / "good.blf").read_bytes() == b"locked:good.blf"
+    assert not (fixtures.DEST / "bad.blf").exists()
+
+
+def test_default_success_keeps_locked_manifest(tmp_path, monkeypatch):
+    _setup_manifest(tmp_path, monkeypatch, ("a.blf",))
+    before = fixtures.MANIFEST_PATH.read_bytes()
+    calls: list[str] = []
+
+    def fetch(url, **kwargs):
+        calls.append(url)
+        return b"locked:a.blf"
+
+    def forbidden_candidates(*args, **kwargs):
+        raise AssertionError("default fetch must use the locked URL")
+
+    monkeypatch.setattr(fixtures, "_fetch", fetch)
+    monkeypatch.setattr(fixtures, "_fetch_first", forbidden_candidates)
+
+    assert fixtures.main(["--skip-licenses"]) == 0
+    assert calls == ["https://example.invalid/a.blf"]
+    assert fixtures.MANIFEST_PATH.read_bytes() == before
+    assert (fixtures.DEST / "a.blf").read_bytes() == b"locked:a.blf"
+
+
+def test_default_without_manifest_requires_explicit_lock(tmp_path, monkeypatch):
+    dest = tmp_path / "bus_data"
+    dest.mkdir()
+    monkeypatch.setattr(fixtures, "DEST", dest)
+    monkeypatch.setattr(fixtures, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(fixtures, "MANIFEST_PATH", dest / "manifest.json")
+    monkeypatch.setattr(fixtures, "LICENSE_DIR", dest / "licenses")
+    monkeypatch.setattr(
+        fixtures, "_RAW_SPECS",
+        (("a.blf", "Demo/source", "a.blf", "MIT", "test"),),
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("missing lock must fail before network or writes")
+
+    monkeypatch.setattr(fixtures, "fetch_licenses", forbidden)
+    monkeypatch.setattr(fixtures, "build", forbidden)
+
+    assert fixtures.main([]) != 0
+    assert not fixtures.MANIFEST_PATH.exists()
+
+
+def test_explicit_lock_partial_failure_keeps_manifest(tmp_path, monkeypatch):
+    _setup_manifest(tmp_path, monkeypatch, ("good.blf", "bad.blf"))
+    before = fixtures.MANIFEST_PATH.read_bytes()
+    monkeypatch.setattr(
+        fixtures, "_fetch_first",
+        lambda urls, **kwargs: (
+            None if urls[0].endswith("bad.blf")
+            else (urls[0], b"locked:good.blf")
+        ),
+    )
+
+    assert fixtures.main(["--lock", "--skip-licenses"]) != 0
+    assert fixtures.MANIFEST_PATH.read_bytes() == before
+
+
+def test_explicit_lock_can_refresh_manifest(tmp_path, monkeypatch):
+    _setup_manifest(tmp_path, monkeypatch, ("a.blf",))
+    monkeypatch.setattr(
+        fixtures, "_fetch_first",
+        lambda *args, **kwargs: ("https://example.invalid/new/a.blf", b"new-content"),
+    )
+
+    assert fixtures.main(["--lock", "--skip-licenses"]) == 0
+    entry = json.loads(fixtures.MANIFEST_PATH.read_text())["files"]["a.blf"]
+    assert entry["url"] == "https://example.invalid/new/a.blf"
+    assert entry["sha256"] == fixtures._sha256(b"new-content")
