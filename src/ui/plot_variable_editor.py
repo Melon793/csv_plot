@@ -346,6 +346,19 @@ def natural_sort_key(name: str) -> list:
     return key
 
 
+def _visible_grid_dim(page, attr: str, fallback: int) -> int:
+    """读页面的可见行列数（rows_current / cols_current），不可用时回退。
+
+    替身页、独立 widget 或字段被写坏（非数值/≤0）时返回 ``fallback``
+    （调用方传已建网格的行列数），保证身份行不因这类页面构造失败。
+    """
+    try:
+        value = int(getattr(page, attr, 0) or 0)
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
 class PlotVariableEditorDialog(QDialog):
     """
     绘图变量编辑器对话框类
@@ -622,10 +635,16 @@ class PlotVariableEditorDialog(QDialog):
         """本窗口所属「页名 · 位次」；无法解析时返回空串。
 
         位次取 QGridLayout 的真实格位（行/列 1 起算），与屏幕上的格子一一
-        对应；按网格形状退化：1×1 只给页名，单行只给列，单列只给行，多行
-        多列才写全「第 m 行 第 n 列」（行/列之间只留一个空格，不加标点，
+        对应；按**可见**网格形状退化：1×1 只给页名，单行只给列，单列只给行，
+        多行多列才写全「第 m 行 第 n 列」（行/列之间只留一个空格，不加标点，
         避免和页名后的「·」形成两级分隔符）。页名用 page.title，与页签同源，
         重命名后自动跟随。
+
+        退化必须用可见行列而不是 layout.rowCount()/columnCount()：缩行列只把
+        容器 setVisible(False) 不销毁（plot_page.apply_visibility），已建
+        3×2 + 可见 3×1 会多印一个「第 1 列」。目标格本身被隐藏时（编辑器开着
+        改布局再重载可达）按已建网格写全并标注隐藏，避免印出超出可见范围的
+        位次；替身页/独立 widget 没有可见行列时回退已建网格。
 
         反查口径与 PlotWidget._plot_badge_label_for 的「页N·图M」一致，只是
         这里用页名 + 行列而非序数。注意：本类自身是 Tool 顶层窗，
@@ -649,11 +668,20 @@ class PlotVariableEditorDialog(QDialog):
                 index = layout.indexOf(container) if layout is not None else -1
                 if index >= 0:
                     row, col, _row_span, _col_span = layout.getItemPosition(index)
+                    built_rows, built_cols = layout.rowCount(), layout.columnCount()
+                    rows_visible = _visible_grid_dim(
+                        page, "rows_current", built_rows
+                    )
+                    cols_visible = _visible_grid_dim(
+                        page, "cols_current", built_cols
+                    )
+                    hidden = row >= rows_visible or col >= cols_visible
                     position = (
                         row + 1,
                         col + 1,
-                        layout.rowCount(),
-                        layout.columnCount(),
+                        built_rows if hidden else rows_visible,
+                        built_cols if hidden else cols_visible,
+                        hidden,
                     )
                 break
         except RuntimeError:
@@ -661,7 +689,7 @@ class PlotVariableEditorDialog(QDialog):
             return ""
         if position is None:
             return ""
-        row, col, rows, cols = position
+        row, col, rows, cols, hidden = position
         if rows <= 1 and cols <= 1:
             place = ""
         elif rows <= 1:
@@ -671,7 +699,10 @@ class PlotVariableEditorDialog(QDialog):
         else:
             place = f"第 {row} 行 第 {col} 列"
         title = str(getattr(page, "title", "") or "").strip()
-        return " · ".join(part for part in (title, place) if part)
+        text = " · ".join(part for part in (title, place) if part)
+        if hidden and place:
+            text += "（当前被布局隐藏）"
+        return text
 
     def _focus_search_bar(self):
         """⌘F / Ctrl+F / Insert：焦点切到搜索栏并全选文本"""
