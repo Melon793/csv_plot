@@ -212,6 +212,8 @@ def test_v1_template_still_applies_as_single_page(loaded_window, qtbot):
         expected_density
     )
     assert mw._global_max_density == pytest.approx(expected_density)
+    # 收敛回单页后 × 必须置灰（程序化 close_page 也走 tabRemoved 同步）
+    assert not mw.plot_tabs.close_button(0).isEnabled()
 
 
 @pytest.mark.full_matrix

@@ -58,6 +58,10 @@ from src.ui.widgets.chrome_button import ChromeButton, native_push_height
 #: 绘图页数量上限（设计文档 §4.4；2026-11-20 由 8 提升到 16）
 MAX_PAGES = 16
 
+#: 仅剩一页时的关闭说明（× / 右键 / 页目录行共用一份文案）。
+#: 至少保留一页是硬不变量：交互侧不关页，只指向「清除绘图」这条重来路径。
+LAST_PAGE_CLOSE_HINT = "仅剩一页，无法关闭；如需重来请用「清除绘图」"
+
 #: 「＋」预留槽宽度：页签放不下时停到暂存区胶囊左侧，避免压住最后一个页签的关闭按钮
 _PLUS_SLOT_WIDTH = 28
 
@@ -191,7 +195,8 @@ class _CloseTabButton(_FlatIconButton):
     """自绘关闭按钮：18×18 内画 10px 细「×」。
 
     字形颜色随所在页是否激活微调（VSCode 行为）。点击经所属
-    PlotTabsWidget 直发 ``close_page_requested``。
+    PlotTabsWidget 直发 ``close_page_requested``；仅剩一页时由
+    ``_sync_close_buttons`` 置灰（禁用色 + 无 hover 底），点击不发射。
     """
 
     _PEN_WIDTH = 1.4
@@ -465,7 +470,8 @@ class _DirectoryRow(QWidget):
     """页目录单行：激活●＋页名＋布局角标＋hover 才现的 ×。"""
 
     def __init__(self, popup: "_PageDirectoryPopup", index: int,
-                 title: str, badge: str, current: bool):
+                 title: str, badge: str, current: bool,
+                 closable: bool = True):
         super().__init__(popup._rows_host)
         self._popup = popup
         self._index = index
@@ -509,7 +515,10 @@ class _DirectoryRow(QWidget):
             lay.addWidget(badge_label)
         self._close = _CloseTabButton(self)
         self._close.setFixedSize(16, 16)
-        self._close.setToolTip("关闭绘图页")
+        self._close.setEnabled(closable)
+        self._close.setToolTip(
+            "关闭绘图页" if closable else LAST_PAGE_CLOSE_HINT
+        )
         self._close.setVisible(False)
         self._close.clicked.connect(
             lambda _checked=False: popup._on_close(self._index)
@@ -716,7 +725,10 @@ class _PageDirectoryPopup(QWidget):
                 widget.deleteLater()
         for index, (title, badge, current) in enumerate(entries):
             self._rows_layout.addWidget(
-                _DirectoryRow(self, index, title, badge, current)
+                _DirectoryRow(
+                    self, index, title, badge, current,
+                    closable=not self._owner._close_blocked(),
+                )
             )
         self._new_row.setEnabled(self._owner.new_page_enabled())
         self._rows_host.adjustSize()
@@ -1222,6 +1234,31 @@ class PlotTabsWidget(QTabWidget):
     # ------------------------------------------------------------------
     # 自绘关闭按钮：逐页挂载，替换 Qt 原生关闭图标
     # ------------------------------------------------------------------
+    def _close_blocked(self) -> bool:
+        """单页不提供关闭：× / 右键 / 页目录行共用这一判据。
+
+        判据取可见页签数而非 ``MainWindow.pages``：控件不认识页模型，
+        且置灰态必须与用户看到的页签数一致（死控件页残留 tab 的失配
+        边界见 MainWindow._on_tab_close_requested 注释）。
+        """
+        return self.count() <= 1
+
+    def _sync_close_buttons(self) -> None:
+        """按页数同步每枚 × 的可用态与 tooltip。
+
+        置灰而不是隐藏：保留几何与说明锚点；禁用态字形走
+        ``_FlatIconButton._glyph_color`` 的 ``_COLOR_DISABLED``，hover
+        灰底被 ``paintEvent`` 的 ``isEnabled()`` 守卫挡掉。
+        """
+        bar = self.tabBar()
+        closable = not self._close_blocked()
+        tip = "关闭绘图页" if closable else LAST_PAGE_CLOSE_HINT
+        for index in range(bar.count()):
+            button = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+            if button is not None:
+                button.setEnabled(closable)
+                button.setToolTip(tip)
+
     def _attach_close_button(self, index: int) -> None:
         bar = self.tabBar()
         button = _CloseTabButton(bar)
@@ -1257,6 +1294,9 @@ class PlotTabsWidget(QTabWidget):
         action.triggered.connect(lambda: self.duplicate_page_requested.emit(index))
         menu.addSeparator()
         action = menu.addAction("关闭")
+        action.setEnabled(not self._close_blocked())
+        if self._close_blocked():
+            action.setToolTip(LAST_PAGE_CLOSE_HINT)
         action.triggered.connect(lambda: self.close_page_requested.emit(index))
         action = menu.addAction("关闭其他")
         action.setEnabled(self.count() > 1)
@@ -1324,11 +1364,13 @@ class PlotTabsWidget(QTabWidget):
     def tabInserted(self, index: int) -> None:  # noqa: N802 - Qt 命名
         super().tabInserted(index)
         self._attach_close_button(index)
+        self._sync_close_buttons()
         self._sync_new_page_button()
         self._place_new_page_button()
 
     def tabRemoved(self, index: int) -> None:  # noqa: N802 - Qt 命名
         super().tabRemoved(index)
+        self._sync_close_buttons()
         self._sync_new_page_button()
         self._place_new_page_button()
 

@@ -198,6 +198,8 @@ def test_duplicate_failure_rolls_back_without_ghost_tab(
     assert len(mw.pages) == before_pages
     assert mw.plot_tabs.count() == before_tabs
     assert mw.current_page in mw.pages
+    # 回滚销毁了新页 → 回到单页，× 必须重新置灰（tabRemoved 同步）
+    assert not mw.plot_tabs.close_button(0).isEnabled()
 
 
 def test_duplicate_from_background_page_uses_tab_index_entry(

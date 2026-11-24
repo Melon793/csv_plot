@@ -24,6 +24,7 @@ from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 from src.ui.widgets.plot_page import PlotPage  # noqa: E402
 from src.ui.widgets.plot_tabs import (  # noqa: E402
+    LAST_PAGE_CLOSE_HINT,
     MAX_PAGES,
     PlotTabsWidget,
     _SHELF_CAPSULE_ENTRY,
@@ -771,16 +772,24 @@ class MainWindow(QMainWindow):
         )
 
     def _tab_tooltip_text(self, index: int) -> str:
-        """页签 hover 全名出口：截断后仍可辨识页（T1）。hover 时实时求值。"""
+        """页签 hover 全名出口：截断后仍可辨识页（T1）。hover 时实时求值。
+
+        单页时追加关闭说明：Qt 禁用控件默认不弹自身 tooltip，× 置灰后
+        这句是用户在原地唯一的解释入口（另有右键菜单 tooltip 与中键播报）。
+        """
         page = self.page_at_tab(index)
         if page is None:
             return ""
-        return (
+        count = self.plot_tabs.count()
+        text = (
             f"{page.title}\n"
-            f"第 {index + 1}/{self.plot_tabs.count()} 页 · "
+            f"第 {index + 1}/{count} 页 · "
             f"{page.rows_current}×{page.cols_current} 布局 · "
             f"{self._page_curve_count(page)} 条曲线"
         )
+        if count == 1:
+            text += f"\n{LAST_PAGE_CLOSE_HINT}"
+        return text
 
     def _page_directory_entries(self) -> list[tuple[str, str, bool]]:
         """页目录数据（T6）：固定页序＋布局角标＋激活标记，打开时实时求值。"""
@@ -794,7 +803,24 @@ class MainWindow(QMainWindow):
         ]
 
     def _on_tab_close_requested(self, index: int) -> None:
-        self.close_page(self.page_at_tab(index))
+        """UI 关闭入口（×/中键/右键/页目录行）的统一闸门。
+
+        单页不关页：``close_page`` 的单页清空语义只留给程序化路径
+        （模板套用 / 复制回滚），交互侧改为置灰 + 播报，避免
+        「点 × 以为在关页，实际清空曲线」。
+
+        判据取可见页签数（与 PlotTabsWidget._close_blocked 同口径），
+        而不是 ``len(self.pages)``：死控件页残留 tab 时
+        （``close_page`` 的死控件分支只摘 pages 不摘 tab）按 tab 数判
+        才不会出现「× 亮着却说仅剩一页」的自相矛盾。
+        """
+        page = self.page_at_tab(index)
+        if page is None:
+            return
+        if self.plot_tabs.count() <= 1:
+            self._broadcast(LAST_PAGE_CLOSE_HINT, "warn")
+            return
+        self.close_page(page)
 
     def _close_other_pages(self, index: int) -> None:
         self._batch_close_pages([p for i, p in enumerate(self.pages) if i != index])
@@ -827,6 +853,10 @@ class MainWindow(QMainWindow):
 
     def close_page(self, page: PlotPage | None, *, confirm: bool = True) -> None:
         """关闭页；最后一页保留，只清空内容（§5.4）。
+
+        交互入口必须经 ``_on_tab_close_requested``（单页在那里被拦截并
+        播报）：本方法的单页清空分支只服务模板套用 / 复制回滚 / 测试等
+        程序化路径，不得由控件直连——否则会复现「点 × 静默清空曲线」。
 
         ``confirm=False`` 供模板套用等程序化路径使用：事务化重建时不能再弹
         「仍有曲线，确定关闭？」。

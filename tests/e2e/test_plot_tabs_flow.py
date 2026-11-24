@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QInputDialog, QMessageBox, QToolButton
 
-from src.ui.widgets.plot_tabs import MAX_PAGES
+from src.ui.widgets.plot_tabs import LAST_PAGE_CLOSE_HINT, MAX_PAGES
 
 
 def _plus_button(mw) -> QToolButton:
@@ -143,6 +143,62 @@ def test_closing_last_page_clears_instead_of_removing(loaded_window):
     # 容器保留，只是曲线被清空
     assert page.plot_widgets
     assert all(not c.plot_widget.curves for c in page.plot_widgets)
+
+
+def test_single_page_middle_click_blocked_and_hinted(loaded_window, qtbot):
+    """单页中键不关页也不清空：只播报原因（× 已置灰，中键是唯一活入口）。"""
+    from PySide6.QtCore import Qt
+
+    mw = loaded_window
+    page = mw.current_page
+    pw = page.master_container().plot_widget
+    assert pw.plot_variable("speed")
+    assert not mw.plot_tabs.close_button(0).isEnabled()
+
+    rect = mw.plot_tabs.tabBar().tabRect(0)
+    qtbot.mouseClick(
+        mw.plot_tabs.tabBar(), Qt.MouseButton.MiddleButton, pos=rect.center()
+    )
+
+    assert mw._message_text == LAST_PAGE_CLOSE_HINT
+    assert mw.pages == [page]
+    assert mw.plot_tabs.count() == 1
+    assert page.master_container().plot_widget.curves   # 未被清空
+    # 页签 hover 是禁用 × 之外唯一在原地可触达的说明
+    assert LAST_PAGE_CLOSE_HINT in mw._tab_tooltip_text(0)
+
+
+def test_close_button_reenabled_after_second_page_closed(loaded_window, qtbot):
+    """× 的置灰随页数同步：加页解禁，关回单页再次置灰。"""
+    mw = loaded_window
+    assert not mw.plot_tabs.close_button(0).isEnabled()
+
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    assert mw.plot_tabs.close_button(0).isEnabled()
+    assert mw.plot_tabs.close_button(1).isEnabled()
+    assert LAST_PAGE_CLOSE_HINT not in mw._tab_tooltip_text(0)
+
+    mw.close_page(second, confirm=False)
+    assert mw.plot_tabs.count() == 1
+    assert not mw.plot_tabs.close_button(0).isEnabled()
+    assert LAST_PAGE_CLOSE_HINT in mw._tab_tooltip_text(0)
+
+
+def test_single_page_clear_button_still_works(loaded_window, qtbot):
+    """替代路径可用：× 置灰后，单页重来仍能靠顶部「清除绘图」完成。"""
+    from PySide6.QtCore import Qt
+
+    mw = loaded_window
+    page = mw.current_page
+    assert page.master_container().plot_widget.plot_variable("speed")
+    assert not mw.plot_tabs.close_button(0).isEnabled()
+
+    qtbot.mouseClick(mw.clear_all_plots_btn, Qt.MouseButton.LeftButton)
+
+    assert mw.pages == [page]
+    assert all(not c.plot_widget.curves for c in page.plot_widgets)
+    assert "已清除全部绘图" in mw._message_text
 
 
 def test_close_page_with_only_placeholder_still_confirms(

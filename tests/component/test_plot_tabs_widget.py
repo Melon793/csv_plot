@@ -13,7 +13,11 @@ from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel, QToolButton
 
-from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
+from src.ui.widgets.plot_tabs import (
+    LAST_PAGE_CLOSE_HINT,
+    MAX_PAGES,
+    PlotTabsWidget,
+)
 
 
 @pytest.fixture()
@@ -104,7 +108,7 @@ def test_custom_close_button_click_emits_request(tabs, qtbot):
     assert received == [1]
 
 
-def test_custom_close_button_follows_tab_move(tabs, qtbot):
+def test_close_button_follows_tab_move(tabs, qtbot):
     """拖动重排后按钮随页移动，点击仍关闭正确的页（索引实时反查）。"""
     _add_pages(tabs, 3)
     received = []
@@ -114,6 +118,29 @@ def test_custom_close_button_follows_tab_move(tabs, qtbot):
     assert tabs.close_button(2) is moved_button
     qtbot.mouseClick(tabs.close_button(2), Qt.MouseButton.LeftButton)
     assert received == [2]
+
+
+def test_close_button_disabled_with_single_page(tabs, qtbot):
+    """仅剩一页时 × 置灰（至少保留一页）：点击不发射、字形切禁用色。"""
+    _add_pages(tabs, 1)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    button = tabs.close_button(0)
+    assert button is not None
+    assert not button.isEnabled()
+    assert button.toolTip() == LAST_PAGE_CLOSE_HINT
+    assert button._glyph_color().name() == "#b5b5b5"
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert received == []
+
+    # 出现第二页：两枚 × 一起解禁，文案回到常态
+    _add_pages(tabs, 1)
+    assert tabs.count() == 2
+    assert tabs.close_button(0).isEnabled()
+    assert tabs.close_button(1).isEnabled()
+    assert tabs.close_button(0).toolTip() == "关闭绘图页"
+    qtbot.mouseClick(tabs.close_button(1), Qt.MouseButton.LeftButton)
+    assert received == [1]
 
 
 def test_middle_click_closes_tab(tabs, qtbot):
@@ -469,6 +496,24 @@ def test_context_menu_batch_items_disabled_at_edges(tabs):
     menu.deleteLater()
 
 
+def test_context_menu_close_disabled_with_single_page(tabs):
+    """单页时右键「关闭」置灰并给出原因（与「关闭其他」同口径）。"""
+    _add_pages(tabs, 1)
+    menu = tabs._build_tab_menu(0)
+    by_text = {a.text(): a for a in menu.actions() if a.text()}
+    assert not by_text["关闭"].isEnabled()
+    assert by_text["关闭"].toolTip() == LAST_PAGE_CLOSE_HINT
+    menu.deleteLater()
+
+    _add_pages(tabs, 1)
+    menu = tabs._build_tab_menu(0)
+    by_text = {a.text(): a for a in menu.actions() if a.text()}
+    assert by_text["关闭"].isEnabled()
+    # QAction 未设 tooltip 时 toolTip() 回退为 action 文本
+    assert by_text["关闭"].toolTip() == "关闭"
+    menu.deleteLater()
+
+
 # ----------------------------------------------------------------------
 # T4：滚轮横向滚动（不切页）＋ 页签宽度恢复 main 自然宽（T8 已回退）
 # ----------------------------------------------------------------------
@@ -615,6 +660,23 @@ def test_dir_popup_row_close_and_footer_new(tabs, qtbot, qapp):
     qtbot.mouseClick(popup._new_row, Qt.MouseButton.LeftButton)
     assert created == [True]
     assert not popup.isVisible()
+
+
+def test_dir_popup_row_close_disabled_with_single_page(tabs, qtbot, qapp):
+    """单页时页目录行 × 同步置灰（同一关闭动作的所有兄弟入口同口径）。"""
+    _add_pages(tabs, 1)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    row = _dir_rows(popup)[0]
+    assert not row._close.isEnabled()
+    assert row._close.toolTip() == LAST_PAGE_CLOSE_HINT
+    popup.hide()
+
+    _add_pages(tabs, 1)
+    popup = _open_dir_popup(tabs, qtbot, qapp)
+    row = _dir_rows(popup)[0]
+    assert row._close.isEnabled()
+    assert row._close.toolTip() == "关闭绘图页"
+    popup.hide()
 
 
 def test_dir_popup_esc_closes(tabs, qtbot, qapp):
