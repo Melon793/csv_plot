@@ -291,16 +291,19 @@ class PlotConfigManager(QObject):
         finally:
             plot_widget._suppress_pin_update = previous
 
-    def apply_config(self, main_window, config: PlotSessionConfig) -> bool:
+    def apply_config(
+        self, main_window, config: PlotSessionConfig, *, identity_snapshot=None
+    ) -> bool:
         """将配置应用到 MainWindow（模板 v2：逐页应用）。"""
         try:
-            # 身份匹配 D12：入口统一 resolve（幂等——调用方已 resolve 的
-            # config 再 resolve 全走 L0 恒等、remap 空）。后续逐曲线逻辑
-            # 零改动，消费 resolved config。模板文件不因套用改写（D6）。
-            from src.core.template_identity import resolve_identities
-            config, remap, demoted = resolve_identities(
+            from src.core.template_identity import resolve_identity_snapshot
+
+            snapshot = identity_snapshot or resolve_identity_snapshot(
                 config, getattr(main_window, "loader", None)
             )
+            config = snapshot.config
+            remap = snapshot.remap
+            demoted = snapshot.demoted
             if remap:
                 logger.info("模板身份重映射 %d 条: %s", len(remap), remap)
             if demoted:
@@ -675,14 +678,18 @@ class PlotConfigManager(QObject):
             logger.error("模板[%s]配置解析失败: %s", template_id, exc)
             return False
 
+        from src.core.template_identity import (
+            merge_demoted,
+            resolve_identity_snapshot,
+        )
+
+        snapshot = resolve_identity_snapshot(config, getattr(main_window, "loader", None))
+        config = snapshot.config
+        demoted = snapshot.demoted
         if check_match and current_vars is not None:
             # 身份匹配 D12/MN-1：与 _check_and_apply_template 同口径，
             # resolve 前置后再算匹配度（重映射计入 matched，D5；
             # 降占位计入失配，M-1 方案乙）。
-            from src.core.template_identity import merge_demoted, resolve_identities
-            config, _remap, demoted = resolve_identities(
-                config, getattr(main_window, "loader", None)
-            )
             ratio, matched, unmatched = self.check_template_match(
                 config, current_vars
             )
@@ -697,7 +704,9 @@ class PlotConfigManager(QObject):
         logger.info("模板名称: %s", template.metadata.name)
         logger.info("模板描述: %s", template.metadata.description or "无")
 
-        result = self.apply_config(main_window, config)
+        result = self.apply_config(
+            main_window, config, identity_snapshot=snapshot
+        )
 
         if result:
             logger.info("✅ 模板加载成功")

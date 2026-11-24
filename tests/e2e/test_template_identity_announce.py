@@ -78,7 +78,9 @@ def _export_template_dict(mw):
     return cfg.to_dict()
 
 
-def test_normal_apply_announces_remap(mdf_window, qapp, mdf_files):
+def test_normal_apply_announces_remap(
+    mdf_window, qapp, mdf_files, monkeypatch
+):
     mw, load = mdf_window
     a, b = mdf_files
     load(a)
@@ -86,9 +88,20 @@ def test_normal_apply_announces_remap(mdf_window, qapp, mdf_files):
     load(b)
     qapp.processEvents()
 
+    import src.core.template_identity as identity_engine
+
+    real_resolve = identity_engine.resolve_identity_snapshot
+    calls = []
+
+    def counted_resolve(config, loader):
+        calls.append(config)
+        return real_resolve(config, loader)
+
+    monkeypatch.setattr(identity_engine, "resolve_identity_snapshot", counted_resolve)
     mw._check_and_apply_template(SimpleNamespace(config=cfg_dict), "tid00001", "身份模板")
     qapp.processEvents()
 
+    assert len(calls) == 1, "匹配、套用和播报必须复用同一 resolved 快照"
     assert mw._message_text == "已套用模板[身份模板] · 匹配 100%（自动重映射 1 条）"
     assert mw._message_level == "info"
     assert "Press_G1" in _pw(mw).curves

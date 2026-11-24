@@ -619,7 +619,7 @@ class TestConflictAndStructure:
             resolved, remap, _demoted = resolve_identities(cfg, loader)
         assert remap == {}
         assert resolved.pages[0].plots[0].curves == ["A_G0", "X"]
-        assert any("冲突" in r.message and "X" in r.message for r in caplog.records)
+        assert any("冲突" in r.message and "A_G0" in r.message for r in caplog.records)
 
     def test_same_name_two_plots_both_kept(self):
         """同一变量画在两个子图是正常资产，不得当冲突。"""
@@ -732,17 +732,16 @@ class TestRestoreIdentityRegressions:
             "X": mdf_info("Signal", device="Demo", ecu="ECU01"),
         })
 
-    def test_r1_rename_collision_keeps_real_x_unique_with_its_metadata(self):
-        """Old→X 碰撞不得产生单格重名，也不得用 Old 的设置/身份覆盖 X。"""
+    def test_r1_rename_collision_fails_closed_without_metadata_leak(self):
+        """Old→X 碰撞不得串元数据；X 身份矛盾按 D9 降占位。"""
         cfg, loader = self._rename_collision()
         resolved, remap, demoted = resolve_identities(cfg, loader)
         plot = resolved.pages[0].plots[0]
 
-        assert plot.curves == ["Old", "X"]
-        assert len(plot.curves) == len(set(plot.curves))
-        assert plot.invalid_curves == []
+        assert plot.curves == ["Old"]
+        assert plot.invalid_curves == ["X"]
         assert remap == {}
-        assert demoted == []
+        assert demoted == ["X"]
         assert plot.curve_settings == {
             "Old": {"display_name": "旧显示名", "factor": 2.0},
             "X": {"display_name": "X显示名", "factor": 3.0},
