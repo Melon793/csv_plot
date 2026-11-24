@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QDragEnterEvent, QFontMetrics
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from src.ui.drag_drop import build_var_mimedata
 from src.ui.drag_visuals import INDICATOR_FONT_PX, INDICATOR_INSET
@@ -38,17 +40,31 @@ def _plots(first, second):
     return first.plot_widgets[0].plot_widget, second.plot_widgets[0].plot_widget
 
 
+@pytest.mark.parametrize(
+    ("var_names", "expected_text"),
+    [
+        (["rpm"], "释放以替换当前子图"),
+        ([], "空载荷，释放不会更改当前子图"),
+    ],
+)
 def test_shift_hover_shows_current_subplot_scope_before_release(
-    loaded_window, monkeypatch, qapp
+    loaded_window, monkeypatch, qapp, var_names, expected_text
 ):
-    """真实覆盖层在释放前可见且完整显示「当前子图」，不是执行后播报。"""
+    """真实覆盖层在释放前可见，120ms 修饰键轮询也不得丢失范围说明。"""
     mw = loaded_window
-    pw = mw.current_page.plot_widgets[0].plot_widget
+    container = mw.current_page.plot_widgets[0]
+    pw = container.plot_widget
     assert pw.plot_variable("speed")
     old_ci = pw.curves["speed"]
     # offscreen 没有真实鼠标位置；只屏蔽光标几何守卫，保留真实覆盖层绘制链。
     monkeypatch.setattr(pw, "_should_hide_drag_indicator", lambda _host: False)
-    mime = build_var_mimedata(["rpm"])
+    monkeypatch.setattr(mw, "_active_drag_container", container)
+    monkeypatch.setattr(
+        QApplication,
+        "queryKeyboardModifiers",
+        staticmethod(lambda: Qt.KeyboardModifier.ShiftModifier),
+    )
+    mime = build_var_mimedata(var_names)
     event = QDragEnterEvent(
         QPoint(20, 20),
         Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
@@ -60,10 +76,10 @@ def test_shift_hover_shows_current_subplot_scope_before_release(
     pw.dragEnterEvent(event)
     qapp.processEvents()
 
-    overlay = mw.current_page.plot_widgets[0]._indicator
+    overlay = container._indicator
     assert event.isAccepted()
     assert overlay.isVisible()
-    assert overlay._text == "释放以替换当前子图"
+    assert overlay._text == expected_text
     font = overlay.font()
     font.setPixelSize(INDICATOR_FONT_PX)
     font.setBold(True)
@@ -84,6 +100,11 @@ def test_shift_hover_shows_current_subplot_scope_before_release(
         == overlay._text
     )
     assert pw.curves["speed"] is old_ci, "释放前不能改动曲线"
+
+    # 直接执行真实 120ms 守卫，避免 offscreen/后台定时器时序造成假通过。
+    pw._enforce_drag_indicator_visibility()
+    qapp.processEvents()
+    assert overlay._text == expected_text
     pw.dragLeaveEvent(event)
 
 

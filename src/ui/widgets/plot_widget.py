@@ -598,8 +598,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         else:
             # 变量列表来源：轮询 Shift（添加/替换切换）
             shift_pressed = bool(mods & Qt.KeyboardModifier.ShiftModifier)
-            action = "替换" if shift_pressed else "添加"
-            desired_text = self._build_indicator_text(var_names, action, already)
+            desired_text = self._build_variable_drag_indicator_text(
+                var_names, replace=shift_pressed, already=already
+            )
 
         if desired_text != getattr(self, '_drag_indicator_last_text', '_unset'):
             self._drag_indicator_last_text = desired_text
@@ -970,6 +971,18 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return f"变量已存在，释放以{action}" if action in ("替换", "移动") else "变量已存在"
         return f"释放以{action}"
 
+    def _build_variable_drag_indicator_text(
+        self, var_names: list[str], *, replace: bool, already: bool
+    ) -> str:
+        """变量列表来源的 hover/修饰键轮询共用文案，避免轮询丢失范围说明。"""
+        action = "替换" if replace else "添加"
+        text = self._build_indicator_text(var_names, action, already)
+        if replace:
+            if not var_names:
+                return "空载荷，释放不会更改当前子图"
+            return text.replace("释放以替换", "释放以替换当前子图")
+        return text
+
     def _build_skip_indicator_text(self, var_names: list[str], action: str) -> str:
         """判重策略为 skip 的拖入指示文案（暂存区 / P1 批量 legend）。"""
         existing = [name for name in var_names if name in self.curves]
@@ -1020,15 +1033,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         else:
             # 变量列表来源：Shift=替换，否则=添加
             shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-            action = "替换" if shift_pressed else "添加"
-            text_override = self._build_indicator_text(var_names, action, already)
-            if shift_pressed:
-                if not var_names:
-                    text_override = "空载荷，释放不会更改当前子图"
-                else:
-                    text_override = text_override.replace(
-                        "释放以替换", "释放以替换当前子图"
-                    )
+            text_override = self._build_variable_drag_indicator_text(
+                var_names, replace=shift_pressed, already=already
+            )
 
         self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
         if mime.hasFormat(SHELF_MIME_FORMAT) or mime.hasFormat(LEGEND_MIME_FORMAT):

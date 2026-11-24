@@ -33,15 +33,29 @@ def _demo_data():
     return df
 
 
+def _array_snapshot(array):
+    array = np.asarray(array)
+    return array.dtype.str, array.shape, array.tobytes()
+
+
 def _curve_snapshot(pw):
     return [
         (
             name,
             ci,
+            ci.curve,
+            ci.curve.isVisible(),
             ci.color,
-            ci.curve.opts["pen"],
-            (np.asarray(ci.y_data).dtype.str, np.asarray(ci.y_data).shape, np.asarray(ci.y_data).tobytes()),
+            ci.line_preset,
+            ci.display_name,
+            ci.factor,
+            ci.offset,
+            ci.draw_mode,
+            ci.symbol_policy,
             ci.visible,
+            _array_snapshot(ci.x_data),
+            _array_snapshot(ci.y_data),
+            _array_snapshot(ci.y_raw),
         )
         for name, ci in pw.curves.items()
     ]
@@ -173,6 +187,16 @@ def test_shift_drop_all_invalid_preserves_current_subplot(
     assert pw.plot_variable("speed")
     assert pw.plot_variable("rpm")
     assert pw.plot_variable("flag")
+    manager = pw._multi_curve_manager
+    assert manager.apply_curve_line_preset("speed", "dash")
+    assert manager.apply_curve_display_name("speed", "Demo speed")
+    assert manager.apply_curve_transform("rpm", 2.0, -1.0, allow_y_rescue=False)
+    manager.toggle_curve_visibility_by_name("flag")
+    assert pw.curves["flag"].visible is False
+    pw.demote_to_invalid(
+        "ghost_var", "#123456", False,
+        display_name="Demo ghost", factor=3.0, offset=2.0,
+    )
     before = _curve_snapshot(pw)
     invalid_before = dict(pw.invalid_curves)
     clear_calls = []
