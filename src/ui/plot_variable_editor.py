@@ -373,6 +373,10 @@ class PlotVariableEditorDialog(QDialog):
         self.setModal(False)
         self.setAcceptDrops(True)
 
+        # closeEvent 与 QDialog 默认关闭链触发的 done() 可能先后收口；
+        # 两个入口都调用 _teardown，用一次性守卫保证信号只断一次。
+        self._teardown_done = False
+
         # 最近一次排序前的行序快照（单层，供"撤销上次排序"回退）
         self._last_sort_order: list[str] | None = None
 
@@ -1789,6 +1793,9 @@ class PlotVariableEditorDialog(QDialog):
         编辑器是主窗下的非模态 Tool，确定/取消只 hide 不销毁；若不断连，
         隐藏实例会对每次改色/显隐/换算的 emit 继续做表格增量刷新。
         """
+        if self._teardown_done:
+            return
+        self._teardown_done = True
         try:
             self.plot_widget.curves_changed.disconnect(
                 self._on_curves_changed_incremental
