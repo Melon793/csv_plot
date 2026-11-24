@@ -1,4 +1,4 @@
-"""整理布局对话框 —— 像整理手机桌面一样重排子图（设计稿 v4）。
+"""重排子图对话框 —— 像整理手机桌面一样拖动格位（设计稿 v4）。
 
 交互口径（D8，已拍板）：
 - 拖拽落位 = 交换/安放，只动源/目标格；多选整块 = 块交换；
@@ -786,11 +786,11 @@ class _TrayPanel(QWidget):
 
 
 class PlotArrangeDialog(QDialog):
-    """整理布局对话框。点「确定」后由调用方读取 state 并应用置换。"""
+    """重排子图对话框。点「确定」后由调用方读取 state 并应用置换。"""
 
     def __init__(self, pages: list, *, current_page=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("整理子图")
+        self.setWindowTitle("重排子图")
         self.resize(980, 700)
 
         self._snapshot: ArrangeSnapshot = snapshot_pages(pages)
@@ -829,7 +829,7 @@ class PlotArrangeDialog(QDialog):
         tab_row.setContentsMargins(0, 0, 0, 0)
         tab_row.addWidget(self._tabs)
         tab_row.addStretch(1)
-        self._adjust_layout_btn = QPushButton("子图行列…", self)
+        self._adjust_layout_btn = QPushButton("调整行列", self)
         self._adjust_layout_btn.setToolTip(
             "设置本页可见行列；立即生效，不随「取消」回退"
         )
@@ -916,7 +916,7 @@ class PlotArrangeDialog(QDialog):
             return []
 
     def _on_adjust_visible_layout(self) -> None:
-        """复用「子图行列…」入口调整本页可见行列，并重映射对话框格位。
+        """复用「调整行列」入口调整本页可见行列，并重映射对话框格位。
 
         扩可见区会补建新格（矩阵只增不减），行优先下标因此漂移；token id
         与格位解耦，这里按真实 (row, col) 重铺 cells，不丢托盘与选择。
@@ -930,7 +930,7 @@ class PlotArrangeDialog(QDialog):
             None,
         )
         if opener is None:
-            self._status.setText("当前环境不支持调整子图行列")
+            self._status.setText("当前环境不支持调整行列")
             return
         before = (
             self._state.pages[self._page_index].rows,
@@ -1548,12 +1548,12 @@ class PlotArrangeDialog(QDialog):
             return
         if not self._structure_ok():
             QMessageBox.information(
-                self, "整理子图", "内部状态异常（图数不一致），请先「重置」再试。"
+                self, "重排子图", "内部状态异常（图数不一致），请先「重置」再试。"
             )
             return
         if not validate_state(self._snapshot, self._state):
             QMessageBox.information(
-                self, "整理子图",
+                self, "重排子图",
                 "数据或曲线在整理过程中发生了变化，请关闭后重新打开。",
             )
             return

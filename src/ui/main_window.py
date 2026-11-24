@@ -1465,7 +1465,7 @@ class MainWindow(QMainWindow):
         self.mark_region_btn.setCheckable(True)
         self.mark_region_btn.setToolTip("切换标记区域 (Ctrl+T)")
 
-        self.grid_layout_btn = QPushButton("子图行列…", self.plot_widget)
+        self.grid_layout_btn = QPushButton("调整行列", self.plot_widget)
         self.grid_layout_btn.setToolTip("设置本页可见行列，不改动已有图 (Ctrl+L)")
 
         # 曲线暂存区：入口已迁到页签栏右端 36×20 胶囊（方案 A）；
@@ -1890,18 +1890,18 @@ class MainWindow(QMainWindow):
         return True
 
     def open_plot_arrange_dialog(self, plot_widget=None) -> None:
-        """打开「整理子图」对话框；确认后把排列置换应用到各页。
+        """打开「重排子图」对话框；确认后把排列置换应用到各页。
 
-        入口：子图右键菜单「整理子图…」（低频操作走右键）。
+        入口：子图右键菜单「重排子图」（低频操作走右键）。
         提交才动真实页面；取消 = 天然撤销。数据/曲线在对话框打开期间变化时
         ``apply_arrangement`` 会拒绝并提示重开（快照失效守卫）。
         """
-        if self.reject_when_loading("整理子图"):
+        if self.reject_when_loading("重排子图"):
             return
         # _is_loading_new_data 在曲线画完前仍持锁：此时打开对话框，加载后的
         # 刷新回调会在 exec() 的嵌套事件循环里继续跑
         if getattr(self, "_is_loading_new_data", False):
-            self._broadcast("正在加载数据，请稍候再整理子图", level="warn")
+            self._broadcast("正在加载数据，请稍候再重排子图", level="warn")
             return
         page = getattr(plot_widget, "page", None)
         if page is None or page not in self.pages:
@@ -1926,18 +1926,18 @@ class MainWindow(QMainWindow):
             summary = apply_arrangement(dialog.snapshot, dialog.result_state())
         except ValueError:
             _widget_logger.warning("[ARRANGE] 状态无效，放弃应用", exc_info=True)
-            self._broadcast("整理子图状态无效，请重新打开", level="warn")
+            self._broadcast("重排子图状态无效，请重新打开", level="warn")
             return
         except Exception:
             _widget_logger.exception("[ARRANGE] 应用排列失败")
-            self._broadcast("整理子图失败，详见日志", level="warn")
+            self._broadcast("重排子图失败，详见日志", level="warn")
             return
         if not widget_alive(self):
             return
         cross = summary.get("cross_page", 0)
         hidden = summary.get("hidden", 0)
         self._broadcast(
-            f"已整理子图：{summary.get('plots', 0)} 个图就位"
+            f"已重排子图：{summary.get('plots', 0)} 个图就位"
             + (f"，跨页 {cross} 个" if cross else "")
             + (f"，{hidden} 个存入隐藏区（当前不可见）" if hidden else ""),
             level="info",
@@ -2654,7 +2654,7 @@ class MainWindow(QMainWindow):
         self.filter_input.setFocus()
 
     def _on_grid_layout_shortcut(self):
-        """Ctrl+L 快捷键：调整子图行列
+        """Ctrl+L 快捷键：调整行列
 
         守卫条件直接复用 grid_layout_btn.isEnabled()，确保快捷键与
         GUI 按钮激活状态完全一致（未加载数据等场景下按钮被 disabled，

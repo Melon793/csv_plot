@@ -1060,10 +1060,10 @@ class LayoutManager(MainWindowBaseManager):
     def open_layout_dialog(self, page=None, parent=None):
         """调整可见行列；``page`` 为空时作用于当前页（顶栏入口的口径）。
 
-        整理布局对话框内部也会复用本入口（传目标页与自身作为 parent），
+        重排子图对话框内部也会复用本入口（传目标页与自身作为 parent），
         初值与落地都不再依赖 MainWindow 的「当前页」代理属性。
         """
-        if self.mw.reject_when_loading("子图行列"):
+        if self.mw.reject_when_loading("调整行列"):
             return
         target = page if page is not None else getattr(self.mw, "current_page", None)
         if target is None:

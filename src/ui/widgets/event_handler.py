@@ -297,7 +297,7 @@ class EventHandler:
             pw.open_variable_editor()
 
     def _on_vb_arrange_layout(self, pw):
-        """ViewBox 信号：打开「整理布局」对话框。
+        """ViewBox 信号：打开「重排子图」对话框。
 
         经宿主窗口暴露的统一入口打开；独立顶层/替身环境没有该入口时静默跳过。
         """

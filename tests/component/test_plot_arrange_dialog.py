@@ -237,7 +237,7 @@ def test_accept_with_valid_state(dialog):
 
 
 def test_viewbox_arrange_signal_reaches_host(plot_factory):
-    """右键「整理子图…」→ ViewBox 信号 → 宿主窗口统一入口。"""
+    """右键「重排子图」→ ViewBox 信号 → 宿主窗口统一入口。"""
     from PySide6.QtWidgets import QWidget
 
     calls: list = []
@@ -535,7 +535,7 @@ def test_main_window_entry_guards_and_apply(qapp, monkeypatch):
     plot_widget = type("PW", (), {"page": mw.page})()
     MainWindow.open_plot_arrange_dialog(mw, plot_widget)
     assert len(FakeDialog.constructed) == 1
-    assert any("已整理子图" in m and "跨页 1 个" in m for m, _ in mw.messages)
+    assert any("已重排子图" in m and "跨页 1 个" in m for m, _ in mw.messages)
 
     FakeDialog.constructed.clear()
     mw._is_loading_new_data = True

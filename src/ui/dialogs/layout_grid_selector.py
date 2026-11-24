@@ -194,7 +194,7 @@ class LayoutGridSelector(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("子图行列")
+        self.setWindowTitle("调整行列")
 
         # 默认形参是 config.PLOT_ROW_MAX_DEFAULT / PLOT_COL_MAX_DEFAULT 的副本
         # （本文件只依赖 theme，不引 config，避免对话框反向依赖核心配置）。
