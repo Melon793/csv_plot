@@ -271,6 +271,8 @@ def test_second_batch_add_exception_moves_only_successful_asset(plot_factory, mo
     ]
     assert removed_source == transferred
     assert removed_entries == transferred
+    assert set(source.curves) == {"a", "b"}
+    assert set(dst.curves) == {"c"}
     assert set(source.curves).isdisjoint(dst.curves)
     assert {"a", "b", "c"} <= set(source.curves) | set(dst.curves)
     assert dst._batch_adding is False
@@ -315,6 +317,8 @@ def test_finalize_exception_moves_all_added_assets_once(plot_factory, monkeypatc
     ]
     assert removed_source == transferred
     assert removed_entries == transferred
+    assert set(source.curves) == {"a", "b"}
+    assert set(dst.curves) == {"c"}
     assert set(source.curves).isdisjoint(dst.curves)
     assert {"a", "b", "c"} <= set(source.curves) | set(dst.curves)
     assert dst._batch_adding is False

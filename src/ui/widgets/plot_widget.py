@@ -1383,6 +1383,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self._multi_curve_manager._finalize_batch_add(
                     scene=scene, sync_min_xrange=sync_min_xrange
                 )
+        except Exception:
+            if result.added:
+                try:
+                    removed = self.remove_variables_from_plot(list(result.added))
+                    if removed:
+                        self.curves_changed.emit()
+                except Exception:
+                    logger.exception("曲线搬运失败后回滚目标资产失败")
+            raise
         finally:
             if batch:
                 self._batch_adding = False

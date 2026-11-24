@@ -265,7 +265,12 @@ def test_entry_survives_source_plot_destruction(shelf, qapp):
     assert entry.stale is False
 
 
-def test_delayed_source_delete_failure_keeps_one_copy_and_warns(shelf, qapp):
+@pytest.mark.parametrize(
+    "failure_mode", ["oserror", "runtime-error", "return-false"]
+)
+def test_delayed_source_delete_failure_keeps_one_copy_and_warns(
+    shelf, qapp, failure_mode
+):
     """延迟删源失败必须消除两侧重复；源仍在时保留唯一资产并明确 warn。"""
     widget, host = shelf
     source = QWidget()
@@ -285,7 +290,11 @@ def test_delayed_source_delete_failure_keeps_one_copy_and_warns(shelf, qapp):
 
     def fail_remove(name):
         attempted.append(name)
-        raise OSError("synthetic delete failure")
+        if failure_mode == "oserror":
+            raise OSError("synthetic delete failure")
+        if failure_mode == "runtime-error":
+            raise RuntimeError("synthetic live-source delete failure")
+        return False
 
     source.remove_variable_from_plot = fail_remove
     entry = ShelfEntry.from_curve_info(
