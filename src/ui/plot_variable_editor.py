@@ -6,6 +6,7 @@ import re
 import sys
 from PySide6.QtCore import (
     QEvent,
+    QEventLoop,
     QItemSelectionModel,
     QRegularExpression,
     Qt,
@@ -22,6 +23,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QDialog,
     QVBoxLayout,
@@ -393,6 +395,7 @@ class PlotVariableEditorDialog(QDialog):
         self.load_current_curves()
         # 几何恢复放在数据填充后：初始宽按实际列宽计算
         self._restore_geometry()
+        self._prepare_initial_layout()
 
     def setup_ui(self):
         """设置UI界面"""
@@ -938,9 +941,22 @@ class PlotVariableEditorDialog(QDialog):
         super().resizeEvent(event)
         self._distribute_column_widths()
 
+    def _prepare_initial_layout(self):
+        """首次显示前落定样式与布局，避免首帧后再收窄弹性列。"""
+        self.ensurePolished()
+        self.layout().activate()
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        # 事件泵仍可能处理外部信号/销毁事件，之后先确认对象存活。
+        if not widget_alive(self):
+            return
+        self._sync_ordinal_gutter()
+        self._distribute_column_widths()
+
     def showEvent(self, event):
         """首次显示后补一次列宽分布（R3 / 评审 P1-6）。
 
+        _prepare_initial_layout 已在 show 前落定首帧样式/布局；这里保留
+        显示后修正，兜底后续字体、主题或平台延迟送达的尺寸变化。
         构造期视口尺寸与 _restore_geometry 恢复后的视口不一致，构造时分的
         弹性列宽是旧尺寸；不补分布时用户第一次拖窗宽才触发比例分配 →
         弹性列瞬间跳变。singleShot(0) 等布局落定再补一次（两参 + 存活守卫）。
