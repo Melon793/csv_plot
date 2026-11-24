@@ -33,6 +33,7 @@ from src.core.data_types import (
     CurveInfo,
     DRAW_MODE_AUTO,
     InvalidCurveRef,
+    SYMBOL_POLICY_AUTO,
     decide_draw_mode,
     step_mode_for,
 )
@@ -809,6 +810,7 @@ class PlotDataManager:
         self, var_name: str, color: str, visible_preference: bool = True,
         *, display_name: str | None = None,
         factor: float | None = None, offset: float | None = None,
+        symbol_policy: str | None = None,
     ) -> None:
         """把不可绘制的变量降级为失效占位（reload / 模板应用调用）。
 
@@ -836,6 +838,10 @@ class PlotDataManager:
             factor = old_ci.factor if old_ci is not None else 1.0
         if offset is None:
             offset = old_ci.offset if old_ci is not None else 0.0
+        if symbol_policy is None:
+            symbol_policy = (
+                old_ci.symbol_policy if old_ci is not None else SYMBOL_POLICY_AUTO
+            )
         if var_name in pw.curves:
             # 非 reload 场景（模板应用）可能曲线仍在：先轻量移除
             self._remove_single_curve_light(var_name)
@@ -846,6 +852,7 @@ class PlotDataManager:
             display_name=display_name,
             factor=factor,
             offset=offset,
+            symbol_policy=symbol_policy,
         )
         # F4：删曲线后按剩余可见集合收缩 Y limits（模板 scene 混有 demote
         # 的格子；reload/隐藏页在批量窗口内由收尾统一重算，此处跳过）

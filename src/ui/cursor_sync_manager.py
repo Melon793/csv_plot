@@ -13,7 +13,12 @@ from src.core.config import (
     is_grouped_loader,
     compute_global_x_limits,
 )
-from src.core.data_types import DRAW_MODE_SOURCE_USER, LINE_PRESET_AUTO, step_mode_for
+from src.core.data_types import (
+    DRAW_MODE_SOURCE_USER,
+    LINE_PRESET_AUTO,
+    SYMBOL_POLICY_AUTO,
+    step_mode_for,
+)
 from src.core.curve_transform import reproject
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
@@ -706,13 +711,19 @@ class CursorSyncManager(MainWindowBaseManager):
             widget.auto_y_in_x_range()
         self.mw._show_status_message("已按当前 x 范围调节各子图 Y 轴")
 
-    def replots_after_loading(self, skip_pin_reset: bool = False):
+    def replots_after_loading(self, skip_pin_reset: bool = False) -> str:
         # 防止 QGraphicsView 在 items 清空/重建期间处理 paint 事件导致
         # use-after-free 崩溃 (EXC_BAD_ACCESS / SIGSEGV)
         self.mw.setUpdatesEnabled(False)
         # 数据换了：每页曲线都要重建（§5.5 / §7.2 #2）。非活动页只重建数据层，
         # cursor/region 场景 item 由 _scene_dirty 延迟到切页。
         containers = self._iter_all_containers()
+        had_assets = any(
+            widget.curves or getattr(widget, "invalid_curves", None)
+            for widget in (container.plot_widget for container in containers)
+        )
+        total_rebuilt = 0
+        total_invalid = 0
         for container in containers:
             container.plot_widget._is_updating_data = True
             if hasattr(container.plot_widget, "_cancel_ui_refresh"):
@@ -720,7 +731,7 @@ class CursorSyncManager(MainWindowBaseManager):
 
         try:
             if self.mw.loader.datalength == 0:
-                return
+                return "restored" if had_assets else "empty"
 
             # v5.11: reload 场景下跳过 pin 状态重置，因为 _restore_cursor_state_after_reload
             # 已经恢复了正确的 cursor_mode 和 pinned_x_values
@@ -755,9 +766,6 @@ class CursorSyncManager(MainWindowBaseManager):
                 skip_var_restore = True
 
             # reload 完成状态栏汇总（§5.6）：取代旧的模态「更新通知」
-            total_rebuilt = 0
-            total_invalid = 0
-
             if not skip_var_restore:
                 self.mw.value_cache = OrderedDict()
                 # 与 value_cache 成对失效：两者在 plot_data_manager 中是
@@ -813,6 +821,7 @@ class CursorSyncManager(MainWindowBaseManager):
                         var_name: {
                             "color": ci.color,
                             "visible": ci.visible,
+                            "symbol_policy": getattr(ci, "symbol_policy", SYMBOL_POLICY_AUTO),
                             "draw_mode": (
                                 ci.draw_mode
                                 if getattr(ci, "draw_mode_source", "auto")
@@ -871,6 +880,9 @@ class CursorSyncManager(MainWindowBaseManager):
                                     display_name=state.get("display_name", ""),
                                     factor=state.get("factor", 1.0),
                                     offset=state.get("offset", 0.0),
+                                    symbol_policy=state.get(
+                                        "symbol_policy", SYMBOL_POLICY_AUTO
+                                    ),
                                 )
                                 logger.debug(
                                     "[RELOAD] Plot[%d] 变量 %s 失效，降级为占位",
@@ -911,6 +923,9 @@ class CursorSyncManager(MainWindowBaseManager):
                                     pinned_preset = state.get("line_preset")
                                     if pinned_preset:
                                         widget.curves[var_name].line_preset = pinned_preset
+                                    widget.curves[var_name].symbol_policy = state.get(
+                                        "symbol_policy", SYMBOL_POLICY_AUTO
+                                    )
                                     # 编辑器强化轮 D3/D6：恢复显示名/换算。
                                     # 重投影从 y_raw 出发 + 无条件 setData（不依赖
                                     # pinned_mode 分支）；循环内不逐条 emit
@@ -954,6 +969,9 @@ class CursorSyncManager(MainWindowBaseManager):
                                     display_name=state.get("display_name", ""),
                                     factor=state.get("factor", 1.0),
                                     offset=state.get("offset", 0.0),
+                                    symbol_policy=state.get(
+                                        "symbol_policy", SYMBOL_POLICY_AUTO
+                                    ),
                                 )
                                 logger.debug(
                                     "[RELOAD] Plot[%d] 变量 %s 重建失败，降级为占位",
@@ -1026,10 +1044,15 @@ class CursorSyncManager(MainWindowBaseManager):
                 curr_min, curr_max = first_plot.view_box.viewRange()[0]
                 first_plot.view_box.setXRange(curr_min, curr_max, padding=0)
 
+        except Exception:
+            logger.exception("[RELOAD] 曲线重建失败")
+            return "failed"
         finally:
             self.mw.setUpdatesEnabled(True)
             for container in containers:
-                container.plot_widget._is_updating_data = False
+                widget = container.plot_widget
+                widget._is_updating_data = False
+                widget._batch_adding = False
 
             for container in containers:
                 widget = container.plot_widget
@@ -1049,4 +1072,6 @@ class CursorSyncManager(MainWindowBaseManager):
                     f"已重建 {total_rebuilt} 条曲线，"
                     f"{total_invalid} 条失效保留为占位"
                 )
+
+        return "restored" if had_assets else "empty"
 

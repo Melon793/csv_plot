@@ -171,7 +171,7 @@ class BlfFlowManager(FileLoaderManager):
         )
         self._update_can_db_ui()
 
-    def set_button_status(self, status: bool):
+    def set_button_status(self, status: bool, asset_actions: bool = False):
         self.events.append(("buttons", status))
 
     def _post_load_actions(self, file_path: str, is_reload: bool = False):

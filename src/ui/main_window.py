@@ -2617,18 +2617,21 @@ class MainWindow(QMainWindow):
             )
             return
         current_vars = list(self.loader.var_names)
-        # 身份匹配 D12：resolve 前置到调用方，check_template_match 签名
-        # 零改动；重映射计入 matched（D5），降占位计入失配（M-1 方案乙）。
-        # apply_config 入口再 resolve 一次（幂等）。CSV 无 get_channel_info
-        # → 原样返回（D8）。
-        from src.core.template_identity import merge_demoted, resolve_identities
-        config, remap, demoted = resolve_identities(config, self.loader)
+        # 身份匹配 D12：resolve 前置到调用方，匹配、套用与播报共享同一快照。
+        # CSV 无 get_channel_info → 原样返回（D8）。
+        from src.core.template_identity import merge_demoted, resolve_identity_snapshot
+        snapshot = resolve_identity_snapshot(config, self.loader)
+        config = snapshot.config
+        remap = snapshot.remap
+        demoted = snapshot.demoted
         ratio, matched, unmatched = self.plot_config_manager.check_template_match(
             config, current_vars
         )
         ratio, matched, unmatched = merge_demoted(matched, unmatched, demoted)
         if ratio >= RATIO_RESET_PLOTS:
-            success = self.plot_config_manager.apply_config(self, config)
+            success = self.plot_config_manager.apply_config(
+                self, config, identity_snapshot=snapshot
+            )
             if success:
                 # D4（review m1）：应用成功才解锁——无数据/加载中/模板损坏/
                 # 匹配度低等失败分支不得丢锁
@@ -2647,6 +2650,7 @@ class MainWindow(QMainWindow):
             self._show_match_low_dialog(
                 name, config, ratio, matched, unmatched,
                 remapped=len(remap), demoted=len(demoted),
+                identity_snapshot=snapshot,
             )
 
     def _quick_apply_template(self):
@@ -2667,7 +2671,11 @@ class MainWindow(QMainWindow):
             return
         self._check_and_apply_template(template, tid, name)
 
-    def _show_match_low_dialog(self, name: str, config, ratio: float, matched: set[str], unmatched: set[str], *, remapped: int = 0, demoted: int = 0):
+    def _show_match_low_dialog(
+        self, name: str, config, ratio: float, matched: set[str],
+        unmatched: set[str], *, remapped: int = 0, demoted: int = 0,
+        identity_snapshot=None,
+    ):
         """匹配度过低时弹出详情对话框，允许强制执行"""
         matched_str = ", ".join(sorted(matched)) if matched else "无"
         unmatched_str = ", ".join(sorted(unmatched)) if unmatched else "无"
@@ -2694,7 +2702,9 @@ class MainWindow(QMainWindow):
             self._persist_last_template(self._last_template_id, name)
             # 与正常套用路径同口径：apply_config 是 -> bool，内部整体包在 try 里，
             # 失败返回 False。不看返回值就播报，屏上会留一句 warn 级的假成功
-            if self.plot_config_manager.apply_config(self, config):
+            if self.plot_config_manager.apply_config(
+                self, config, identity_snapshot=identity_snapshot
+            ):
                 # D4（review 第二轮 m1）：强制套用成功与正常套用同口径解锁
                 self.set_x_axis_locked(False, reason="已应用模板")
                 self._logger.info(f"强制应用模板[{name}]，匹配度 {ratio:.0%}")

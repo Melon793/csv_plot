@@ -1383,6 +1383,15 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 self._multi_curve_manager._finalize_batch_add(
                     scene=scene, sync_min_xrange=sync_min_xrange
                 )
+        except Exception:
+            if result.added:
+                try:
+                    removed = self.remove_variables_from_plot(list(result.added))
+                    if removed:
+                        self.curves_changed.emit()
+                except Exception:
+                    logger.exception("曲线搬运失败后回滚目标资产失败")
+            raise
         finally:
             if batch:
                 self._batch_adding = False
@@ -1440,6 +1449,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                     display_name=getattr(ref, "display_name", "") or "",
                     factor=float(getattr(ref, "factor", 1.0)),
                     offset=float(getattr(ref, "offset", 0.0)),
+                    symbol_policy=getattr(ref, "symbol_policy", SYMBOL_POLICY_AUTO),
                 )
         finally:
             self._batch_adding = prev_batch
@@ -1738,11 +1748,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self, var_name: str, color: str, visible_preference: bool = True,
         *, display_name: str | None = None,
         factor: float | None = None, offset: float | None = None,
+        symbol_policy: str | None = None,
     ) -> None:
         """把不可绘制的变量降级为失效占位 → 委托到 PlotDataManager（不 emit）"""
         self._plot_data_manager.demote_to_invalid(
             var_name, color, visible_preference,
             display_name=display_name, factor=factor, offset=offset,
+            symbol_policy=symbol_policy,
         )
 
     def clear_current_plot(self) -> None:

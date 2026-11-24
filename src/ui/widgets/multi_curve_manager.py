@@ -1434,6 +1434,10 @@ class MultiCurveManager:
                         _dn = revive_ref.display_name if revive_ref is not None else ""
                         _f = revive_ref.factor if revive_ref is not None else 1.0
                         _o = revive_ref.offset if revive_ref is not None else 0.0
+                        _sp = (
+                            getattr(revive_ref, "symbol_policy", SYMBOL_POLICY_AUTO)
+                            if revive_ref is not None else SYMBOL_POLICY_AUTO
+                        )
                         y_plot = project_y(y_contiguous, _f, _o, y_format or '')
                         pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
                         # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
@@ -1462,6 +1466,7 @@ class MultiCurveManager:
                             y_format=y_format or '',
                             visible=initial_visible,
                             draw_mode=initial_mode,
+                            symbol_policy=_sp,
                         )
                         if not initial_visible and curve is not None:
                             try:
@@ -1566,6 +1571,10 @@ class MultiCurveManager:
             _dn = revive_ref.display_name if revive_ref is not None else ""
             _f = revive_ref.factor if revive_ref is not None else 1.0
             _o = revive_ref.offset if revive_ref is not None else 0.0
+            _sp = (
+                getattr(revive_ref, "symbol_policy", SYMBOL_POLICY_AUTO)
+                if revive_ref is not None else SYMBOL_POLICY_AUTO
+            )
             y_plot = project_y(y_values, _f, _o, y_format or '')
             pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
             # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
@@ -1596,6 +1605,7 @@ class MultiCurveManager:
                 y_format=y_format or '',
                 visible=initial_visible,
                 draw_mode=initial_mode,
+                symbol_policy=_sp,
             )
             if not initial_visible and curve is not None:
                 try:

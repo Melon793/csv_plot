@@ -264,6 +264,51 @@ def test_export_apply_keeps_curve_in_its_cell_when_first_cell_empty(
     assert not page.plot_widgets[0].plot_widget.curves, "曲线被错位到第 1 格"
 
 
+def _two_page_restore_config() -> PlotSessionConfig:
+    """R7 合成模板：与现状页数/曲线均不同，便于识别静默截断和清场。"""
+    config = PlotSessionConfig(time_factor=2.0, time_offset=3.0, active_page=0)
+    for index in (1, 2):
+        config.pages.append(
+            PlotPageConfig(
+                title=f"restored page {index}",
+                layout_rows=1,
+                layout_cols=1,
+                plots=[PlotConfig(curves=["rpm"], cell_index=0)],
+            )
+        )
+    return config
+
+
+@pytest.mark.parametrize("failure_kind", ["over-limit", "new-page-failure"])
+def test_r7_apply_config_reports_page_creation_failure_without_clearing_old_plot(
+    loaded_window, monkeypatch, failure_kind
+):
+    """R7：超页数上限或 new_page 失败必须返回 False，不得截断后假成功。"""
+    mw = loaded_window
+    first = mw.current_page
+    first_pw = first.plot_widgets[0].plot_widget
+    assert first_pw.plot_variable("speed")
+    assert set(first_pw.curves) == {"speed"}
+    original_title = first.title
+    original_factor = mw.factor
+    original_offset = mw.offset
+
+    if failure_kind == "over-limit":
+        monkeypatch.setattr(mw, "MAX_PLOT_PAGES", 1)
+    else:
+        monkeypatch.setattr(mw, "new_page", lambda: None)
+
+    result = mw.plot_config_manager.apply_config(mw, _two_page_restore_config())
+
+    assert result is False
+    assert mw.pages == [first]
+    assert mw.current_page is first
+    assert first.title == original_title
+    assert set(first_pw.curves) == {"speed"}, "失败路径不得提前清掉旧图资产"
+    assert mw.factor == pytest.approx(original_factor)
+    assert mw.offset == pytest.approx(original_offset)
+
+
 def test_template_reset_to_default_factor_recomputes_existing_pages(
     loaded_window, qtbot
 ):

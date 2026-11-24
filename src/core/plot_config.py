@@ -152,8 +152,9 @@ def parse_curve_identities(raw) -> dict:
     （无 original_name 的身份既不能做 D9 校验也不能做 L1 比对）。
     mdf：device/ecu 仅收非空 str（可缺省——真实 MDF3 常无 SI，L1 退 L2）；
     blf：frame/can_id/extended/bus_channel 四元组必须齐全且类型合法
-    （int 拒收 bool，照 cell_index P2-44 口径），缺任一即整条丢弃——
-    半截指纹按 D12 无法全等比对，留着只会误导。未知键忽略。
+    （int 拒收 bool，照 cell_index P2-44 口径），数值不得截断或越界，
+    缺任一即整条丢弃——半截指纹按 D12 无法全等比对，留着只会误导。
+    未知键忽略。
     """
     if not isinstance(raw, dict):
         return {}
@@ -191,12 +192,23 @@ def parse_curve_identities(raw) -> dict:
                 if v is None or isinstance(v, bool):
                     valid = False
                     break
-                try:
+                if isinstance(v, str):
+                    try:
+                        iv = int(v)
+                    except ValueError:
+                        valid = False
+                        break
+                elif isinstance(v, int):
+                    iv = v
+                elif isinstance(v, float) and math.isfinite(v) and v.is_integer():
                     iv = int(v)
-                except (TypeError, ValueError):
+                else:
                     valid = False
                     break
                 if iv < 0:
+                    valid = False
+                    break
+                if fld == "can_id" and iv > (0x1FFFFFFF if ext else 0x7FF):
                     valid = False
                     break
                 nums[fld] = iv

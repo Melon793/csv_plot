@@ -713,7 +713,7 @@ def test_forced_apply_success_still_announces(
     config, ratio, matched, unmatched = _low_match_args()
     applied = []
 
-    def fake_apply(_mw, cfg):
+    def fake_apply(_mw, cfg, **_kwargs):
         applied.append(cfg)
         return True
 

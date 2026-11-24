@@ -229,19 +229,33 @@ class PlotConfigManager(QObject):
                                 "模板还原换算失败: var=%s", name, exc_info=True
                             )
 
-    def _reconcile_pages(self, main_window, page_count: int) -> None:
-        """让页数量与模板一致：复用已有页、多的删、少的建（§6.5）。"""
+    def _reconcile_pages(
+        self, main_window, page_count: int
+    ) -> tuple[int, str | None]:
+        """让页数量与模板一致，返回实际页数及失败原因。"""
         if not hasattr(main_window, "pages"):
-            return
+            return 0, None
+
+        needs_new_page = len(main_window.pages) < page_count
+        if needs_new_page and main_window.loader is None:
+            return len(main_window.pages), "未加载数据，无法新建模板中的绘图页"
+        if needs_new_page:
+            max_pages = getattr(main_window, "MAX_PLOT_PAGES", None)
+            if max_pages is not None and page_count > max_pages:
+                return (
+                    len(main_window.pages),
+                    f"模板需要 {page_count} 页，最多支持 {max_pages} 页",
+                )
+
         while len(main_window.pages) > page_count:
+            previous_count = len(main_window.pages)
             main_window.close_page(main_window.pages[-1], confirm=False)
+            if len(main_window.pages) >= previous_count:
+                return len(main_window.pages), "关闭多余绘图页失败"
         while len(main_window.pages) < page_count:
-            if main_window.loader is None:
-                logger.warning("未加载数据，无法新建模板中的绘图页")
-                return
             if main_window.new_page() is None:
-                logger.warning("新建绘图页失败，模板页数将被截断")
-                return
+                return len(main_window.pages), "新建绘图页失败"
+        return len(main_window.pages), None
 
     def _apply_page_title(self, main_window, page, title: str) -> None:
         if not title:
@@ -291,16 +305,19 @@ class PlotConfigManager(QObject):
         finally:
             plot_widget._suppress_pin_update = previous
 
-    def apply_config(self, main_window, config: PlotSessionConfig) -> bool:
+    def apply_config(
+        self, main_window, config: PlotSessionConfig, *, identity_snapshot=None
+    ) -> bool:
         """将配置应用到 MainWindow（模板 v2：逐页应用）。"""
         try:
-            # 身份匹配 D12：入口统一 resolve（幂等——调用方已 resolve 的
-            # config 再 resolve 全走 L0 恒等、remap 空）。后续逐曲线逻辑
-            # 零改动，消费 resolved config。模板文件不因套用改写（D6）。
-            from src.core.template_identity import resolve_identities
-            config, remap, demoted = resolve_identities(
+            from src.core.template_identity import resolve_identity_snapshot
+
+            snapshot = identity_snapshot or resolve_identity_snapshot(
                 config, getattr(main_window, "loader", None)
             )
+            config = snapshot.config
+            remap = snapshot.remap
+            demoted = snapshot.demoted
             if remap:
                 logger.info("模板身份重映射 %d 条: %s", len(remap), remap)
             if demoted:
@@ -310,11 +327,22 @@ class PlotConfigManager(QObject):
             logger.info("  页数: %d", len(page_cfgs))
             logger.info("  时间因子: %s, 偏移: %s", config.time_factor, config.time_offset)
 
-            self._reconcile_pages(main_window, len(page_cfgs))
+            actual_pages, failure_reason = self._reconcile_pages(
+                main_window, len(page_cfgs)
+            )
+            if failure_reason is not None:
+                logger.warning("模板页数核对失败: %s", failure_reason)
+                return False
             pages = list(getattr(main_window, "pages", []) or [])
             if not pages:
                 # 旧式替身：保留单页路径
                 return self._apply_single_page_config(main_window, config)
+            if actual_pages != len(page_cfgs):
+                logger.warning(
+                    "模板页数核对失败: 实际 %d 页，配置 %d 页",
+                    actual_pages, len(page_cfgs),
+                )
+                return False
 
             current = getattr(main_window, "current_page", None)
             applied_count = 0
@@ -675,14 +703,18 @@ class PlotConfigManager(QObject):
             logger.error("模板[%s]配置解析失败: %s", template_id, exc)
             return False
 
+        from src.core.template_identity import (
+            merge_demoted,
+            resolve_identity_snapshot,
+        )
+
+        snapshot = resolve_identity_snapshot(config, getattr(main_window, "loader", None))
+        config = snapshot.config
+        demoted = snapshot.demoted
         if check_match and current_vars is not None:
             # 身份匹配 D12/MN-1：与 _check_and_apply_template 同口径，
             # resolve 前置后再算匹配度（重映射计入 matched，D5；
             # 降占位计入失配，M-1 方案乙）。
-            from src.core.template_identity import merge_demoted, resolve_identities
-            config, _remap, demoted = resolve_identities(
-                config, getattr(main_window, "loader", None)
-            )
             ratio, matched, unmatched = self.check_template_match(
                 config, current_vars
             )
@@ -697,7 +729,9 @@ class PlotConfigManager(QObject):
         logger.info("模板名称: %s", template.metadata.name)
         logger.info("模板描述: %s", template.metadata.description or "无")
 
-        result = self.apply_config(main_window, config)
+        result = self.apply_config(
+            main_window, config, identity_snapshot=snapshot
+        )
 
         if result:
             logger.info("✅ 模板加载成功")
@@ -723,4 +757,7 @@ class PlotConfigManager(QObject):
         if not self._auto_save_manager.is_auto_save_enabled():
             return
         config = self.export_current_config(main_window)
-        self._auto_save_manager.auto_save(config)
+        if not self._auto_save_manager.auto_save(config):
+            main_window._broadcast(
+                "自动恢复配置保存失败，当前布局未能写入", level="error"
+            )

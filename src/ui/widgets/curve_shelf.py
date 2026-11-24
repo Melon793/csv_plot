@@ -245,6 +245,9 @@ class CurveShelfWidget(QListWidget):
                 "symbol_policy",
                 "draw_mode_source",
                 "line_preset",
+                "display_name",
+                "factor",
+                "offset",
                 "origin_label",
                 # 来源引用必须跟随最近一次入区：剪入 A 后又从 B 剪入同名
                 # 变量时，退回目标必须是 B（漏掉会静默退错图）
@@ -543,14 +546,49 @@ class CurveShelfWidget(QListWidget):
 
         def _make_remove(src: Any, var: str):
             def _remove():
+                if not widget_alive(self):
+                    return
+                source_remains = False
                 try:
-                    src.remove_variable_from_plot(var)
+                    removed = src.remove_variable_from_plot(var)
+                    source_remains = (
+                        removed is False
+                        and widget_alive(src)
+                        and var in getattr(src, "curves", {})
+                    )
                 except RuntimeError:
-                    logger.debug("暂存区入区：源绘图已销毁，跳过删除")
+                    source_remains = (
+                        widget_alive(src)
+                        and var in getattr(src, "curves", {})
+                    )
+                    if source_remains:
+                        logger.warning(
+                            "暂存区入区：源曲线删除失败 %s", var, exc_info=True
+                        )
+                    else:
+                        logger.debug("暂存区入区：源绘图已销毁，跳过删除")
                 except Exception:
-                    logger.debug(
+                    source_remains = (
+                        widget_alive(src)
+                        and var in getattr(src, "curves", {})
+                    )
+                    logger.warning(
                         "暂存区入区：源曲线删除失败 %s", var, exc_info=True
                     )
+                if not source_remains:
+                    return
+
+                entry = self.entry_for_name(var)
+                if entry is not None:
+                    self.remove_entries([entry.key])
+                message = (
+                    f"曲线 {var} 删除失败，已保留原图曲线并移除暂存快照"
+                )
+                show = getattr(self._host_window(), "_show_status_message", None)
+                if callable(show):
+                    show(message, level="warn")
+                else:
+                    logger.warning(message)
 
             return _remove
 

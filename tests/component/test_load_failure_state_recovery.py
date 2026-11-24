@@ -71,6 +71,7 @@ class _FakeHost(QWidget):
         super().__init__()
         self.load_btn = QPushButton(self)
         self.reload_btn = QPushButton(self)
+        self.curve_shelf_btn = QPushButton(self)
         for name in _STATUS_BUTTONS:
             setattr(self, name, QPushButton(name, self))
         self.loader = None
@@ -278,6 +279,51 @@ class TestFailureKeepsLoadedData:
         assert [t for t, _ in dialogs["critical"]] == ["内存不足"]
         assert old.closed is True
         assert mw.loader is None
+
+
+class TestZeroRowSuccessRestoresAssetActions:
+    def test_sync_zero_row_success_keeps_cleanup_and_shelf_enabled(
+        self, host, csv_file, monkeypatch
+    ):
+        mw, mgr = host
+        monkeypatch.setattr(
+            "src.ui.file_loader_manager.FastDataLoader.auto_detect",
+            staticmethod(lambda path: _fake_fmt()),
+        )
+
+        def load_empty(*args, **kwargs):
+            mw.loader = _FakeLoader(datalength=0)
+            return True
+
+        monkeypatch.setattr(mgr, "_load_sync", load_empty)
+        monkeypatch.setattr(mgr, "_post_load_actions", lambda *a, **k: None)
+
+        mgr._load_file(str(csv_file))
+
+        assert mw.clear_all_plots_btn.isEnabled() is True
+        assert mw.curve_shelf_btn.isEnabled() is True
+        for name in _STATUS_BUTTONS[1:]:
+            assert getattr(mw, name).isEnabled() is False, name
+
+    def test_async_zero_row_success_keeps_cleanup_and_shelf_enabled(
+        self, host, monkeypatch
+    ):
+        mw, mgr = host
+        new_loader = _FakeLoader(datalength=0)
+        mw._progress = SimpleNamespace(close=lambda: None)
+        mgr._begin_data_reload()
+        mgr.set_button_status(False)
+        monkeypatch.setattr(
+            mgr, "_swap_loader", lambda loader, is_reload=False: setattr(mw, "loader", loader)
+        )
+        monkeypatch.setattr(mgr, "_post_load_actions", lambda *a, **k: None)
+
+        mgr._on_load_done(new_loader, "demo.csv")
+
+        assert mw.clear_all_plots_btn.isEnabled() is True
+        assert mw.curve_shelf_btn.isEnabled() is True
+        for name in _STATUS_BUTTONS[1:]:
+            assert getattr(mw, name).isEnabled() is False, name
 
 
 class TestAsyncFailureRestoresUiState:
