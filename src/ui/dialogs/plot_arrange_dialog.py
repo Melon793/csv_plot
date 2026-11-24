@@ -276,7 +276,7 @@ class _IconBoard(QWidget):
     def _display_bounds(self) -> tuple[int, int]:
         """当前展示行列：整版 or 仅可见区（勾选开关时）。"""
         page = self._page()
-        if self._dialog.visible_only():
+        if not self._dialog.show_hidden():
             return (
                 min(page.vis_rows, page.rows),
                 min(page.vis_cols, page.cols),
@@ -671,12 +671,23 @@ class PlotArrangeDialog(QDialog):
         tab_row.setContentsMargins(0, 0, 0, 0)
         tab_row.addWidget(self._tabs)
         tab_row.addStretch(1)
-        self._visible_only_box = QCheckBox("只显示可见区", self)
-        self._visible_only_box.setToolTip(
-            "勾选后隐藏区不展示、也不参与拖动；隐藏区的图保持原状"
+        self._adjust_layout_btn = QPushButton("调整可见布局…", self)
+        self._adjust_layout_btn.setToolTip(
+            "调整本页可见行列（与顶栏「修改布局」同一对话框，立即生效）"
         )
-        self._visible_only_box.toggled.connect(self._on_visible_only_toggled)
-        tab_row.addWidget(self._visible_only_box)
+        self._adjust_layout_btn.clicked.connect(self._on_adjust_visible_layout)
+        tab_row.addWidget(self._adjust_layout_btn)
+        self._show_hidden_box = QCheckBox("显示隐藏区", self)
+        self._show_hidden_box.setToolTip(
+            "勾选后在网格中展示隐藏行列，可拖入收纳；隐藏区里的图始终保留。"
+            "「已建=可见」的页没有隐藏区，勾选对它无变化"
+        )
+        # 先按存档置位再连信号：置位发生在 board/tray 创建之前，不能触发刷新
+        from src.core.settings import AppSettings
+
+        self._show_hidden_box.setChecked(AppSettings().get_arrange_show_hidden())
+        self._show_hidden_box.toggled.connect(self._on_show_hidden_toggled)
+        tab_row.addWidget(self._show_hidden_box)
         root.addLayout(tab_row)
         # 连接必须放在 setCurrentIndex 之后：首个渲染时 board/tray 尚未创建
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -746,11 +757,90 @@ class PlotArrangeDialog(QDialog):
         except IndexError:
             return []
 
-    def visible_only(self) -> bool:
-        box = getattr(self, "_visible_only_box", None)
+    def _on_adjust_visible_layout(self) -> None:
+        """复用原「修改布局」入口调整本页可见行列，并重映射对话框格位。
+
+        扩可见区会补建新格（矩阵只增不减），行优先下标因此漂移；token id
+        与格位解耦，这里按真实 (row, col) 重铺 cells，不丢托盘与选择。
+        """
+        snapshot_page = self._snapshot.pages[self._page_index]
+        opener = getattr(
+            getattr(self.parent(), "layout_manager", None),
+            "open_layout_dialog",
+            None,
+        )
+        if opener is None:
+            self._status.setText("当前环境不支持调整可见布局")
+            return
+        before = (
+            self._state.pages[self._page_index].rows,
+            self._state.pages[self._page_index].cols,
+            self._state.pages[self._page_index].vis_rows,
+            self._state.pages[self._page_index].vis_cols,
+        )
+        opener(page=snapshot_page, parent=self)
+        self._resync_page_after_visibility(self._page_index)
+        after_page = self._state.pages[self._page_index]
+        if (
+            before
+            == (after_page.rows, after_page.cols,
+                after_page.vis_rows, after_page.vis_cols)
+        ):
+            return
+        self._status.setText(
+            f"可见布局已更新：可见 {after_page.vis_rows}×{after_page.vis_cols}"
+            f" · 已建 {after_page.rows}×{after_page.cols}"
+        )
+
+    def _resync_page_after_visibility(self, page_index: int) -> None:
+        """按真实矩阵重测该页：格位重映射、快照 dims/行高/可见区同步。"""
+        from src.ui.widgets.plot_arrange_commit import page_layout_metrics
+
+        real_page = self._snapshot.pages[page_index]
+        metrics = page_layout_metrics(real_page)
+        if metrics is None:
+            return
+        state_page = self._state.pages[page_index]
+        old_cols = state_page.cols
+        positions: dict[str, tuple[int, int]] = {}
+        for seat, token in enumerate(state_page.cells):
+            if token:
+                positions[token] = divmod(seat, old_cols)
+        rows, cols = metrics["rows"], metrics["cols"]
+        cells: list[str | None] = [None] * (rows * cols)
+        for token, (row, col) in positions.items():
+            if row < rows and col < cols:
+                cells[row * cols + col] = token
+        state_page.rows = rows
+        state_page.cols = cols
+        state_page.cells = cells
+        state_page.vis_rows = metrics["vis_rows"]
+        state_page.vis_cols = metrics["vis_cols"]
+        self._snapshot.dims[page_index] = (rows, cols)
+        self._snapshot.built[page_index] = True
+        self._snapshot.row_pcts[page_index] = metrics["pcts"]
+        self._snapshot.row_heights[page_index] = metrics["row_heights"]
+        for token, (row, col) in positions.items():
+            self._snapshot.seat_of_token[token] = (row, col)
+        self._board._page_override = None
+        self._refresh(animate=False)
+
+    def show_hidden(self) -> bool:
+        box = getattr(self, "_show_hidden_box", None)
         return bool(box is not None and box.isChecked())
 
-    def _on_visible_only_toggled(self, _checked: bool) -> None:
+    @staticmethod
+    def page_has_hidden(page) -> bool:
+        """该页是否存在隐藏区（已建矩阵大于当前可见矩形）。"""
+        return page.rows > page.vis_rows or page.cols > page.vis_cols
+
+    def _on_show_hidden_toggled(self, checked: bool) -> None:
+        try:
+            from src.core.settings import AppSettings
+
+            AppSettings().set_arrange_show_hidden(bool(checked))
+        except Exception:
+            logger.debug("[ARRANGE] 记忆「显示隐藏区」失败", exc_info=True)
         self._board._page_override = None
         self._board.set_highlight(None)
         self._last_preview_sig = None
@@ -774,7 +864,12 @@ class PlotArrangeDialog(QDialog):
         shown = "/".join(f"{pct}%" for pct in pcts)
         if len(pcts) > 8:
             shown = "/".join(f"{pct}%" for pct in pcts[:8]) + "…"
-        mode = " · 仅显示可见区（隐藏区的图保持原状）" if self.visible_only() else ""
+        if not self.page_has_hidden(page):
+            mode = " · 本页无隐藏区（已建=可见）"
+        elif self.show_hidden():
+            mode = " · 显示隐藏区（可拖入收纳）"
+        else:
+            mode = " · 隐藏区已收起（勾选「显示隐藏区」可收纳）"
         self._caption.setText(
             f"「{page.title}」可见 {page.vis_rows}×{page.vis_cols}"
             f" · 已建 {page.rows}×{page.cols}"
@@ -807,7 +902,14 @@ class PlotArrangeDialog(QDialog):
             self._status.setText("内部状态异常（图数不一致），请先「重置」")
         elif ok:
             self._btn_ok.setToolTip("")
-            self._status.setText("拖动=交换/安放 · 拖入等候区暂存 · 隐藏区可收纳 · 点「确定」应用")
+            hidden_hint = (
+                "隐藏区可收纳"
+                if self.show_hidden()
+                else "勾选「显示隐藏区」可收纳"
+            )
+            self._status.setText(
+                f"拖动=交换/安放 · 拖入等候区暂存 · {hidden_hint} · 点「确定」应用"
+            )
         else:
             self._btn_ok.setToolTip("等候区还有图未安置")
             self._status.setText(
@@ -993,7 +1095,7 @@ class PlotArrangeDialog(QDialog):
         page = preview.pages[self._page_index]
         return (
             self._page_index,
-            self.visible_only(),
+            self.show_hidden(),
             tuple(self._drag["ids"]),
             target,
             tuple(page.cells),

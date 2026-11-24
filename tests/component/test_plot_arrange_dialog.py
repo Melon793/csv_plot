@@ -30,6 +30,9 @@ class _FakeCursorSync:
     def collect_global_x_range(self):
         return (0.0, 1.0)
 
+    def _sync_min_xrange(self):
+        pass
+
 
 class _FakeServices:
     def __init__(self):
@@ -184,8 +187,9 @@ def test_board_mirrors_row_heights(pages):
     dlg.deleteLater()
 
 
-def test_visible_only_toggle_hides_hidden_cells(pages):
-    """勾选「只显示可见区」后，隐藏格不展示、也不可作落点。"""
+def test_show_hidden_toggle_reveals_hidden_cells(pages, app_settings):
+    """「显示隐藏区」：默认收起；勾选后隐藏行展示、可作落点。"""
+    app_settings.set_arrange_show_hidden(False)
     page_a, page_b = pages
     _set_curves(page_a.plot_widgets[2], ["hidden_sig"])
     page_a.rows_current = 1
@@ -194,17 +198,37 @@ def test_visible_only_toggle_hides_hidden_cells(pages):
     page_a.plot_widgets[3].setVisible(False)
 
     dlg = PlotArrangeDialog([page_a, page_b], current_page=page_a)
-    assert len(dlg._board.icons) == 3          # 含隐藏行的图
-    assert dlg._board.seat_rect(2).isNull() is False
-
-    dlg._visible_only_box.setChecked(True)
-    assert len(dlg._board.icons) == 2          # 隐藏行不再展示
+    assert dlg._show_hidden_box.isChecked() is False
+    assert len(dlg._board.icons) == 2          # 默认收起：隐藏行不展示
     assert dlg._board.seat_rect(2).isNull() is True
-    assert "仅显示可见区" in dlg._caption.text()
+    assert "隐藏区已收起" in dlg._caption.text()
 
-    dlg._visible_only_box.setChecked(False)
-    assert len(dlg._board.icons) == 3          # 关掉开关原样恢复
+    dlg._show_hidden_box.setChecked(True)
+    assert len(dlg._board.icons) == 3          # 展开后隐藏行与隐藏图都回来
+    assert dlg._board.seat_rect(2).isNull() is False
+    assert "显示隐藏区" in dlg._caption.text()
+
+    dlg._show_hidden_box.setChecked(False)
+    assert len(dlg._board.icons) == 2
     dlg.deleteLater()
+
+
+def test_show_hidden_default_off_and_persisted(pages, app_settings):
+    """无存档默认收起；用户勾选后下一轮打开沿用选择。"""
+    from src.core.settings import ConfigKey
+
+    app_settings._settings.remove(ConfigKey.ARRANGE_SHOW_HIDDEN.value)
+    app_settings._settings.sync()
+
+    page_a, page_b = pages
+    dlg = _open_dialog_for_drag(page_a, page_b)
+    assert dlg._show_hidden_box.isChecked() is False
+    dlg._show_hidden_box.setChecked(True)       # 用户偏好：展开
+    dlg.deleteLater()
+
+    dlg2 = _open_dialog_for_drag(page_a, page_b)
+    assert dlg2._show_hidden_box.isChecked() is True
+    dlg2.deleteLater()
 
 
 def test_accept_with_valid_state(dialog):
@@ -267,7 +291,7 @@ def test_gap_sweep_does_not_jitter(pages, monkeypatch):
 
     page_a, page_b = pages
     dlg = _open_dialog_for_drag(page_a, page_b)
-    token = "p0:0"
+    token = "p0:c0"
     _begin_drag(dlg, token)
     board = dlg._board
     r0, r1 = board.seat_rect(0), board.seat_rect(1)
@@ -304,7 +328,7 @@ def test_tray_gap_belongs_to_tray(pages):
     assert tray_top > board_bottom, "布局前提：托盘应在棋盘下方"
     mid = QPoint(dlg.width() // 2, tray_top - 2)
 
-    _begin_drag(dlg, "p0:0")
+    _begin_drag(dlg, "p0:c0")
     dlg.drag_move(dlg.mapToGlobal(mid))
     assert dlg._drag["target"] == ("tray", None)
     dlg.end_drag(dlg.mapToGlobal(mid))
@@ -322,10 +346,10 @@ def test_visible_only_blank_area_is_dead_zone(pages):
     page_a.plot_widgets[3].setVisible(False)
 
     dlg = _open_dialog_for_drag(page_a, page_b)
-    dlg._visible_only_box.setChecked(True)
+    dlg._show_hidden_box.setChecked(False)
     settle()
     before = [list(page.cells) for page in dlg._state.pages]
-    _begin_drag(dlg, "p0:0")
+    _begin_drag(dlg, "p0:c0")
     board = dlg._board
     dead = board.mapToGlobal(QPoint(board.width() - 2, board.height() // 2))
     dlg.drag_move(dead)
@@ -335,6 +359,47 @@ def test_visible_only_blank_area_is_dead_zone(pages):
     dlg.deleteLater()
 
 
+def test_adjust_visible_layout_grows_and_remaps(pages):
+    """对话框内扩可见区：矩阵长大、token 按 (row,col) 重映射、托盘/图标不丢。"""
+    from PySide6.QtWidgets import QWidget
+
+    from tests.fixtures.waits import settle
+
+    page_a, page_b = pages
+    _set_curves(page_a.plot_widgets[3], ["d"])  # 四个格全有图
+
+    class _FakeLayoutManager:
+        def open_layout_dialog(self, page=None, parent=None):
+            page.apply_visibility(3, 3)  # 2x2 -> 3x3（补建新格）
+
+    host = QWidget()
+    host.layout_manager = _FakeLayoutManager()
+    dlg = PlotArrangeDialog([page_a, page_b], current_page=page_a, parent=host)
+    dlg.resize(1000, 800)
+    dlg.show()
+    settle()
+
+    state_page = dlg.result_state().pages[0]
+    old_positions = {
+        token: divmod(seat, state_page.cols)
+        for seat, token in enumerate(state_page.cells)
+        if token
+    }
+    assert (state_page.rows, state_page.cols) == (2, 2)
+
+    dlg._adjust_layout_btn.click()
+
+    state_page = dlg.result_state().pages[0]
+    assert (state_page.rows, state_page.cols) == (3, 3)
+    assert (state_page.vis_rows, state_page.vis_cols) == (3, 3)
+    for token, (row, col) in old_positions.items():
+        assert state_page.cells[row * 3 + col] == token, "扩列后 token 未按真实行列重映射"
+    assert len(dlg._board.icons) == 4
+    assert "可见 3×3" in dlg._status.text() or "已建 3×3" in dlg._status.text()
+    dlg.deleteLater()
+    host.deleteLater()
+
+
 def test_escape_cancels_active_drag(pages):
     """拖拽中按 Esc：撤销预览、解冻托盘、状态零改动。"""
     from PySide6.QtCore import QEvent
@@ -342,7 +407,7 @@ def test_escape_cancels_active_drag(pages):
 
     page_a, page_b = pages
     dlg = _open_dialog_for_drag(page_a, page_b)
-    _begin_drag(dlg, "p0:0")
+    _begin_drag(dlg, "p0:c0")
     board = dlg._board
     dlg.drag_move(board.mapToGlobal(board.seat_rect(1).center()))
     before = [list(page.cells) for page in dlg._state.pages]
@@ -366,7 +431,7 @@ def test_drop_uses_last_preview_target(pages):
 
     # 场景 a：最后预览是 seat1，指针随后移出对话框 → 仍落 seat1
     dlg = _open_dialog_for_drag(page_a, page_b)
-    token = "p0:0"
+    token = "p0:c0"
     _begin_drag(dlg, token)
     board = dlg._board
     dlg.drag_move(board.mapToGlobal(board.seat_rect(1).center()))
@@ -396,7 +461,7 @@ def test_no_animation_object_leak_after_drag(pages):
 
     page_a, page_b = pages
     dlg = _open_dialog_for_drag(page_a, page_b)
-    _begin_drag(dlg, "p0:0")
+    _begin_drag(dlg, "p0:c0")
     board = dlg._board
     for i in range(60):
         seat = (i // 2) % 3
@@ -478,3 +543,61 @@ def test_main_window_entry_guards_and_apply(qapp, monkeypatch):
     assert not FakeDialog.constructed
     assert any("正在加载数据" in m for m, _ in mw.messages)
     mw.deleteLater()
+
+
+def test_show_hidden_applies_per_tab_and_explains_no_hidden_page(
+    qapp, app_settings
+):
+    """开关对所有 tab 一致生效；「已建=可见」的页直接提示无隐藏区。"""
+    from tests.fixtures.waits import settle
+
+    app_settings.set_arrange_show_hidden(False)
+
+    page_a = PlotPage(
+        parent=None, title="页1", rows_max=4, cols_max=3,
+        rows_current=2, cols_current=2,
+    )
+    page_a.services = _FakeServices()
+    page_a.build_matrix(2, 2)
+    _set_curves(page_a.plot_widgets[0], ["a"])
+    page_a.rows_current = 1  # 第二行隐藏
+    page_a.plot_layout.setRowStretch(1, 0)
+    page_a.plot_widgets[2].setVisible(False)
+    page_a.plot_widgets[3].setVisible(False)
+
+    page_c = PlotPage(
+        parent=None, title="页2", rows_max=4, cols_max=3,
+        rows_current=1, cols_current=2,
+    )
+    page_c.services = _FakeServices()
+    page_c.build_matrix(1, 2)  # 已建=可见：没有隐藏区
+    _set_curves(page_c.plot_widgets[0], ["c"])
+
+    dlg = PlotArrangeDialog([page_a, page_c], current_page=page_a)
+    dlg.resize(1000, 800)
+    dlg.show()
+    settle()
+
+    board = dlg._board
+    assert board._display_bounds() == (1, 2)          # 页1 默认收起隐藏行
+    assert "隐藏区已收起" in dlg._caption.text()
+
+    dlg._tabs.setCurrentIndex(1)
+    settle()
+    assert board._display_bounds() == (1, 2)
+    assert "本页无隐藏区" in dlg._caption.text()      # 页2 无隐藏区，直说
+
+    dlg._show_hidden_box.setChecked(True)             # 全局开关：对所有页一致
+    settle()
+    assert board._display_bounds() == (1, 2)          # 页2 没有可展开的隐藏区
+    assert "本页无隐藏区" in dlg._caption.text()
+
+    dlg._tabs.setCurrentIndex(0)
+    settle()
+    assert board._display_bounds() == (2, 2)          # 页1 隐藏行展开
+    assert "显示隐藏区" in dlg._caption.text()
+
+    dlg.deleteLater()
+    page_a.dispose()
+    page_c.dispose()
+    flush_deferred_deletes()
