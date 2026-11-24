@@ -419,6 +419,53 @@ def test_reload_preserves_explicit_symbol_policy(env, policy, hidden):
 # ---------- R4/R10：reload 显式结果与零行资产保留 ----------
 
 
+@pytest.mark.parametrize("policy", [SYMBOL_POLICY_ON, SYMBOL_POLICY_OFF])
+def test_reload_placeholder_roundtrip_preserves_symbol_policy(env, policy):
+    """曲线失效降占位、再次 reload 复活后，显式 symbol 策略仍保真。"""
+    _host, _manager, pw, _loader, reload_with = env
+    assert pw.plot_variable("a")
+    assert pw.add_variable_to_plot("b")
+    assert pw._multi_curve_manager.apply_curve_symbol_policy("b", policy)
+
+    assert reload_with({"a": list(np.arange(N, dtype=float))}) == "restored"
+    assert "b" in pw.invalid_curves
+    assert pw.invalid_curves["b"].symbol_policy == policy
+
+    assert reload_with({
+        "a": list(np.arange(N, dtype=float)),
+        "b": list(np.sin(np.arange(N) / 5.0)),
+    }) == "restored"
+    assert "b" in pw.curves
+    assert pw.curves["b"].symbol_policy == policy
+    _assert_disjoint(pw)
+
+
+@pytest.mark.parametrize("policy", [SYMBOL_POLICY_ON, SYMBOL_POLICY_OFF])
+@pytest.mark.parametrize("mode", ["single", "batch"], ids=["single-add", "batch-add"])
+def test_manual_placeholder_revival_preserves_symbol_policy(env, policy, mode):
+    """手动单条/批量添加同名变量，也须恢复占位中的显式策略。"""
+    _host, _manager, pw, loader, reload_with = env
+    assert pw.plot_variable("a")
+    assert pw.add_variable_to_plot("b")
+    assert pw._multi_curve_manager.apply_curve_symbol_policy("b", policy)
+    assert reload_with({"a": list(np.arange(N, dtype=float))}) == "restored"
+    assert pw.invalid_curves["b"].symbol_policy == policy
+
+    loader.set_data(_df({
+        "a": list(np.arange(N, dtype=float)),
+        "b": list(np.sin(np.arange(N) / 5.0)),
+    }))
+    pw.data = loader.df
+    if mode == "single":
+        assert pw.plot_variable("b")
+    else:
+        pw._multi_curve_manager.add_variables_to_plot(["b"])
+
+    assert "b" in pw.curves
+    assert pw.curves["b"].symbol_policy == policy
+    _assert_disjoint(pw)
+
+
 def test_replots_reports_restored_for_real_curves(env):
     _host, _manager, pw, _loader, reload_with = env
     assert pw.plot_variable("a")

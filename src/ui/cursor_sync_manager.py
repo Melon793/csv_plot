@@ -880,6 +880,9 @@ class CursorSyncManager(MainWindowBaseManager):
                                     display_name=state.get("display_name", ""),
                                     factor=state.get("factor", 1.0),
                                     offset=state.get("offset", 0.0),
+                                    symbol_policy=state.get(
+                                        "symbol_policy", SYMBOL_POLICY_AUTO
+                                    ),
                                 )
                                 logger.debug(
                                     "[RELOAD] Plot[%d] 变量 %s 失效，降级为占位",
@@ -966,6 +969,9 @@ class CursorSyncManager(MainWindowBaseManager):
                                     display_name=state.get("display_name", ""),
                                     factor=state.get("factor", 1.0),
                                     offset=state.get("offset", 0.0),
+                                    symbol_policy=state.get(
+                                        "symbol_policy", SYMBOL_POLICY_AUTO
+                                    ),
                                 )
                                 logger.debug(
                                     "[RELOAD] Plot[%d] 变量 %s 重建失败，降级为占位",

@@ -304,6 +304,7 @@ class InvalidCurveRef:
     display_name: str = ""
     factor: float = 1.0
     offset: float = 0.0
+    symbol_policy: str = SYMBOL_POLICY_AUTO
 
 
 @dataclass
