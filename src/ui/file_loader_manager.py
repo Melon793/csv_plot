@@ -1344,7 +1344,9 @@ class FileLoaderManager(MainWindowBaseManager):
                 finally:
                     self._end_data_reload()
                 if status:
-                    self.set_button_status(self._has_valid_data)
+                    self.set_button_status(
+                        self._has_valid_data, asset_actions=True
+                    )
                     self.mw.load_btn.setEnabled(True)
                     # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
                     self._schedule_delayed(
@@ -2596,7 +2598,9 @@ class FileLoaderManager(MainWindowBaseManager):
         finally:
             self._end_data_reload()
             if applied:
-                self.set_button_status(self._has_valid_data)
+                self.set_button_status(
+                    self._has_valid_data, asset_actions=True
+                )
             else:
                 # 应用失败时按「当前是否还有有效数据」恢复，并收掉忙等光标/秒表；
                 # 无条件 set_button_status(True) 会在没有数据时点亮必然再报错的入口
