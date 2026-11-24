@@ -632,7 +632,7 @@ class PlotArrangeDialog(QDialog):
 
     def __init__(self, pages: list, *, current_page=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("整理布局")
+        self.setWindowTitle("整理子图")
         self.resize(980, 700)
 
         self._snapshot: ArrangeSnapshot = snapshot_pages(pages)
@@ -671,9 +671,9 @@ class PlotArrangeDialog(QDialog):
         tab_row.setContentsMargins(0, 0, 0, 0)
         tab_row.addWidget(self._tabs)
         tab_row.addStretch(1)
-        self._adjust_layout_btn = QPushButton("调整可见布局…", self)
+        self._adjust_layout_btn = QPushButton("子图行列…", self)
         self._adjust_layout_btn.setToolTip(
-            "调整本页可见行列（与顶栏「修改布局」同一对话框，立即生效）"
+            "设置本页可见行列；立即生效，不随「取消」回退"
         )
         self._adjust_layout_btn.clicked.connect(self._on_adjust_visible_layout)
         tab_row.addWidget(self._adjust_layout_btn)
@@ -758,7 +758,7 @@ class PlotArrangeDialog(QDialog):
             return []
 
     def _on_adjust_visible_layout(self) -> None:
-        """复用原「修改布局」入口调整本页可见行列，并重映射对话框格位。
+        """复用「子图行列…」入口调整本页可见行列，并重映射对话框格位。
 
         扩可见区会补建新格（矩阵只增不减），行优先下标因此漂移；token id
         与格位解耦，这里按真实 (row, col) 重铺 cells，不丢托盘与选择。
@@ -770,7 +770,7 @@ class PlotArrangeDialog(QDialog):
             None,
         )
         if opener is None:
-            self._status.setText("当前环境不支持调整可见布局")
+            self._status.setText("当前环境不支持调整子图行列")
             return
         before = (
             self._state.pages[self._page_index].rows,
@@ -1257,12 +1257,12 @@ class PlotArrangeDialog(QDialog):
             return
         if not self._structure_ok():
             QMessageBox.information(
-                self, "整理布局", "内部状态异常（图数不一致），请先「重置」再试。"
+                self, "整理子图", "内部状态异常（图数不一致），请先「重置」再试。"
             )
             return
         if not validate_state(self._snapshot, self._state):
             QMessageBox.information(
-                self, "整理布局",
+                self, "整理子图",
                 "数据或曲线在整理过程中发生了变化，请关闭后重新打开。",
             )
             return

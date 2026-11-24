@@ -21,7 +21,7 @@ ZH_HIDE_CURSOR_VALUE = "隐藏游标数值"
 ZH_COPY_NAME = "复制变量名"
 ZH_VAR_EDITOR = "绘图变量编辑器"
 ZH_ADJUST_HEIGHT = "调整高度"
-ZH_ARRANGE_LAYOUT = "整理布局…"
+ZH_ARRANGE_LAYOUT = "整理子图…"
 ZH_RESET_ALL_HEIGHT = "全部重置为 100%"
 ZH_CLEAR_PLOT = "清除绘图"
 
@@ -206,7 +206,7 @@ class CustomViewBox(pg.ViewBox):
             )
             menu.addAction(editor_act)
 
-        # 整理布局（低频操作走右键菜单，入口分层）
+        # 整理子图（低频操作走右键菜单，入口分层）
         if ZH_ARRANGE_LAYOUT not in existing_texts:
             arrange_act = QAction(ZH_ARRANGE_LAYOUT, menu)
             arrange_act.triggered.connect(

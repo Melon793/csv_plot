@@ -90,7 +90,7 @@ def add_variables_to_blank_plot(var_names, main_window, msg_parent=None) -> bool
         _warn(
             msg_parent,
             "提示",
-            "当前页已无空白绘图区，请先修改布局或新建页后再添加。",
+            "当前页已无空白绘图区，请先调整子图行列或新建页后再添加。",
         )
         return False
 

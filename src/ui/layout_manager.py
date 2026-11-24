@@ -1063,7 +1063,7 @@ class LayoutManager(MainWindowBaseManager):
         整理布局对话框内部也会复用本入口（传目标页与自身作为 parent），
         初值与落地都不再依赖 MainWindow 的「当前页」代理属性。
         """
-        if self.mw.reject_when_loading("修改布局"):
+        if self.mw.reject_when_loading("子图行列"):
             return
         target = page if page is not None else getattr(self.mw, "current_page", None)
         if target is None:
