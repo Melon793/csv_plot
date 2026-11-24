@@ -171,6 +171,12 @@ class TestFloat32PrecisionGuard:
         values = np.asarray([1.0] * 200 + [16777217.0], dtype=np.float64)
         assert _evaluate_float32_safety(values)[0] is False
 
+    def test_unsampled_close_values_are_refused(self):
+        values = np.arange(5000, dtype=np.float64) * 400.0
+        values[1] = 1_000_000_000.0
+        values[3] = 1_000_000_000.125
+        assert _evaluate_float32_safety(values)[0] is False
+
     def test_small_magnitude_decimal_data_still_downcasts(self):
         """常见工程量（0.1 网格、量级几百）必须照旧允许，别把内存收益一并砍掉。"""
         values = [10.0 + i * 0.1 for i in range(1200)]

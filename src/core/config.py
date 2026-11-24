@@ -395,8 +395,7 @@ FLOAT32_REPRESENTABLE_MAX = 3.4028234663852886e+38
 # 数值仍在范围内、不报错，但用户看到的读数已经错位。故下转换前还要确认
 # 舍入间距不吃掉数据自身的分辨率。
 FLOAT32_EXACT_INTEGER_MAX = float(2 ** 24)  # float32 能连续精确表示的整数上限
-FLOAT32_RESOLUTION_SAMPLE_ROWS = 4096  # 估计最小非零间隔的采样上限
-FLOAT32_ULP_GUARD_MARGIN = 4.0  # 要求 ulp 至少比观测到的最小间隔小 4 倍
+FLOAT32_ULP_GUARD_MARGIN = 4.0  # 要求 ulp 至少比全列最小间隔小 4 倍
 
 # —— CSV 读入分阶段计时（日志前缀 [PERF]）——
 # 单阶段耗时超过该阈值就落 WARNING。现场出现过「251 行的小文件读失败用了 17 秒」，
@@ -497,8 +496,8 @@ def compute_global_x_limits(
     return (min_x, max_x, limits_xMin, limits_xMax)
 
 
-def _estimate_min_positive_gap(values) -> "float | None":
-    """采样估计该列相邻不同取值之间的最小正间距（= 数据自身的分辨率）。
+def _min_positive_gap(values) -> "float | None":
+    """计算全列不同取值之间的最小正间距（= 数据自身的分辨率）。
 
     返回 ``None`` 表示列里只有一个取值（常量列）—— 没有「间距」可言，
     此时只要该值本身能精确表示就可以下转换。
@@ -509,24 +508,16 @@ def _estimate_min_positive_gap(values) -> "float | None":
     arr = arr[np.isfinite(arr)]
     if arr.size == 0:
         return None
-    if arr.size > FLOAT32_RESOLUTION_SAMPLE_ROWS:
-        stride = int(np.ceil(arr.size / FLOAT32_RESOLUTION_SAMPLE_ROWS))
-        arr = arr[::stride]
     uniq = np.unique(arr)
     if uniq.size < 2:
         return None
-    positive = np.diff(uniq)
-    positive = positive[positive > 0]
-    if positive.size == 0:
-        return None
-    return float(positive.min())
+    return float(np.diff(uniq).min())
 
 
 def _float32_spacing_preserves_resolution(arr, abs_max: float) -> bool:
     """float32 在该量级上的间距，是否不吃掉数据自身的分辨率。
 
-    判据：``ulp(abs_max) * FLOAT32_ULP_GUARD_MARGIN <= 最小正间距``。
-    采样估计的间距可能偏大（漏掉真正更近的一对值），所以留 4 倍余量。
+    判据：``ulp(abs_max) * FLOAT32_ULP_GUARD_MARGIN <= 全列最小正间距``。
     常量列没有间距可言，改为要求该值在 float32 下**逐位精确**。
     """
     import numpy as np
@@ -537,7 +528,7 @@ def _float32_spacing_preserves_resolution(arr, abs_max: float) -> bool:
     if not np.isfinite(ulp) or ulp <= 0:
         return False
 
-    gap = _estimate_min_positive_gap(arr)
+    gap = _min_positive_gap(arr)
     if gap is None:
         finite = arr[np.isfinite(arr)]
         if finite.size == 0:

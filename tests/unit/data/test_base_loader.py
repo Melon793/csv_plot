@@ -182,6 +182,19 @@ class TestDowncastPrecisionGuard:
         assert col.dtype == np.float64, "该列被下转换就会静默改变读数，必须保持 float64"
         assert np.unique(col.to_numpy()).size == 500
 
+    def test_unsampled_close_values_stay_float64(self):
+        values = np.arange(5000, dtype=np.float64) * 400.0
+        values[1] = 1_000_000_000.0
+        values[3] = 1_000_000_000.125
+        loader = _make_loader(pd.DataFrame({"v": values}))
+
+        loader._postprocess_columns(downcast=True)
+
+        col = loader._df["v"]
+        assert col.dtype == np.float64
+        assert col.iloc[1] == 1_000_000_000.0
+        assert col.iloc[3] == 1_000_000_000.125
+
     def test_ordinary_engineering_column_still_downcasts(self):
         values = [10.0 + i * 0.1 for i in range(5000)]
         loader = _make_loader(pd.DataFrame({"speed": values}))
