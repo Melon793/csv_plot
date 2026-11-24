@@ -285,8 +285,11 @@ def check_only(expected: dict, *, timeout: float = 30.0,
     ok: list[str] = []
     bad: list[str] = []
     for name, entry in sorted(expected.items()):
+        if not isinstance(entry, dict) or not entry.get("sha256"):
+            bad.append(name)
+            continue
         path = DEST / name
-        want = str(entry.get("sha256") or "")
+        want = str(entry["sha256"])
         if path.is_file():
             got = _sha256(path.read_bytes())
             if got == want:
@@ -363,12 +366,15 @@ def main(argv: list[str] | None = None) -> int:
         licenses = fetch_licenses(timeout=args.timeout, verify_ssl=verify_ssl) or licenses
 
     if args.check:
-        manifest = existing.get("files") or {}
+        files = existing.get("files")
+        manifest = files if isinstance(files, dict) else {}
+        required = {name for name, _, _, _, _ in _RAW_SPECS}
         ok, bad = check_only(manifest)
+        bad = sorted(set(bad) | (required - manifest.keys()))
         print(f"校验：{len(ok)} 通过 / {len(bad)} 缺失或失败")
-        print(json.dumps({"mode": "check", "requested": len(manifest),
+        print(json.dumps({"mode": "check", "requested": len(required),
                           "fetched": 0, "ok": ok, "bad": bad}, ensure_ascii=False))
-        return int(bool(bad) or not manifest)
+        return int(bool(bad) or not required)
 
     locked = None if args.lock else existing["files"]
     manifest = build(timeout=args.timeout, verify_ssl=verify_ssl, locked=locked)

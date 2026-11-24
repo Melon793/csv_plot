@@ -76,6 +76,50 @@ def test_check_is_local_read_only_and_reports_bad_files(tmp_path, monkeypatch, c
     assert report["bad"] == ["drift.blf", "missing.blf"]
 
 
+def test_check_rejects_incomplete_manifest(tmp_path, monkeypatch, capsys):
+    _setup_manifest(tmp_path, monkeypatch, ("good.blf",))
+    (fixtures.DEST / "good.blf").write_bytes(b"locked:good.blf")
+    monkeypatch.setattr(
+        fixtures, "_RAW_SPECS",
+        fixtures._RAW_SPECS + (("missing.blf", "Demo/source", "missing.blf", "MIT", "test"),),
+    )
+
+    assert fixtures.main(["--check"]) != 0
+    output = capsys.readouterr().out
+    report = json.loads(output[output.index("{"):])
+    assert report["requested"] == 2
+    assert report["ok"] == ["good.blf"]
+    assert report["bad"] == ["missing.blf"]
+
+
+def test_check_rejects_malformed_entries(tmp_path, monkeypatch, capsys):
+    payload = _setup_manifest(tmp_path, monkeypatch, ("good.blf",))
+    (fixtures.DEST / "good.blf").write_bytes(b"locked:good.blf")
+    payload["files"]["broken.blf"] = None
+    payload["files"]["empty-hash.blf"] = {"sha256": ""}
+    fixtures.MANIFEST_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert fixtures.main(["--check"]) != 0
+    output = capsys.readouterr().out
+    report = json.loads(output[output.index("{"):])
+    assert report["ok"] == ["good.blf"]
+    assert report["bad"] == ["broken.blf", "empty-hash.blf"]
+
+
+def test_check_rejects_non_mapping_manifest(tmp_path, monkeypatch, capsys):
+    _setup_manifest(tmp_path, monkeypatch, ("good.blf",))
+    fixtures.MANIFEST_PATH.write_text(
+        json.dumps({"files": ["broken"], "licenses": {}}), encoding="utf-8"
+    )
+
+    assert fixtures.main(["--check"]) != 0
+    output = capsys.readouterr().out
+    report = json.loads(output[output.index("{"):])
+    assert report["requested"] == 1
+    assert report["ok"] == []
+    assert report["bad"] == ["good.blf"]
+
+
 def test_check_success_is_read_only(tmp_path, monkeypatch, capsys):
     _setup_manifest(tmp_path, monkeypatch, ("good.blf",))
     (fixtures.DEST / "good.blf").write_bytes(b"locked:good.blf")
