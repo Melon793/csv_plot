@@ -57,6 +57,52 @@ class TestSaveLoadRoundtrip:
         assert loaded is not None
         assert loaded.plots[0].curves == ["v1"]
 
+    def test_write_failure_returns_false_and_cleans_tmp(self, auto_save, monkeypatch):
+        auto_save.auto_save(_make_config(["a"]))
+        tmp_file = auto_save._auto_save_file.with_suffix(".yaml.tmp")
+
+        def fail_replace(*_args):
+            raise OSError("synthetic replace failure")
+
+        monkeypatch.setattr("src.core.auto_save_manager.os.replace", fail_replace)
+
+        assert auto_save.auto_save(_make_config(["b"])) is False
+        assert not tmp_file.exists()
+        assert auto_save.load_auto_save().plots[0].curves == ["a"]
+
+    def test_prepare_reuses_one_read_and_identity_snapshot(
+        self, auto_save, app_settings, monkeypatch
+    ):
+        app_settings.set_auto_save_enabled(True)
+        config = _make_config(["a", "b"])
+        loads: list[PlotSessionConfig] = []
+
+        def load_once():
+            loads.append(config)
+            return config
+
+        monkeypatch.setattr(auto_save, "load_auto_save", load_once)
+
+        decision = auto_save.prepare_auto_save(["a", "b"])
+
+        assert loads == [config]
+        assert decision.config is config
+        assert decision.identity_snapshot.config is config
+        assert decision.should is True
+
+    def test_prepare_marks_existing_unreadable_files_as_failed(
+        self, auto_save, app_settings
+    ):
+        app_settings.set_auto_save_enabled(True)
+        auto_save._auto_save_file.write_text("pages: [broken", encoding="utf-8")
+        auto_save._auto_save_backup_file.write_text("pages: [broken", encoding="utf-8")
+
+        decision = auto_save.prepare_auto_save(["a"])
+
+        assert decision.should is False
+        assert decision.failed is True
+        assert decision.config is None
+
 
 class TestShouldApply:
     def test_disabled_rejects(self, auto_save, app_settings):

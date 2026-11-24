@@ -29,12 +29,18 @@ class _Button:
 class _AutoSaveStub:
     def __init__(self):
         self.config = PlotSessionConfig(plots=[PlotConfig(curves=["a"])])
-        self.should_calls: list[tuple[list[str], object]] = []
+        self.prepare_calls: list[tuple[list[str], object]] = []
         self.load_calls = 0
 
-    def should_apply_auto_save(self, current_vars, loader=None):
-        self.should_calls.append((list(current_vars), loader))
-        return True, "matched"
+    def prepare_auto_save(self, current_vars, loader=None):
+        self.prepare_calls.append((list(current_vars), loader))
+        return SimpleNamespace(
+            should=True,
+            reason="matched",
+            config=self.config,
+            identity_snapshot=None,
+            failed=False,
+        )
 
     def load_auto_save(self):
         self.load_calls += 1
@@ -68,7 +74,7 @@ class _PostLoadHost:
         ):
             setattr(self, name, _Button())
 
-    def _apply_config(self, mw, config):
+    def _apply_config(self, mw, config, **_kwargs):
         assert mw is self
         self.applied.append(config)
         return True
@@ -90,7 +96,7 @@ def post_load_env(monkeypatch):
     flm._last_replot_result = "empty"
     monkeypatch.setattr(flm, "_window_going_away", lambda: False)
     monkeypatch.setattr(flm, "_remember_last_open_dir", lambda path: None)
-    monkeypatch.setattr(flm, "_announce_auto_restore", lambda cfg, vars: None)
+    monkeypatch.setattr(flm, "_announce_auto_restore", lambda cfg, vars, **kwargs: None)
     return flm, host
 
 
@@ -115,7 +121,7 @@ def test_post_load_uses_explicit_restored_status_without_inspecting_assets(
     flm._post_load_actions("demo.csv")
 
     assert inspections == [], "restored 状态必须直接短路 auto-save 判据"
-    assert host.auto_save.should_calls == []
+    assert host.auto_save.prepare_calls == []
     assert host.auto_save.load_calls == 0
     assert host.applied == []
 
@@ -142,7 +148,7 @@ def test_restored_placeholder_or_hidden_assets_skip_auto_save(
 
     flm._post_load_actions("demo.csv")
 
-    assert host.auto_save.should_calls == []
+    assert host.auto_save.prepare_calls == []
     assert host.auto_save.load_calls == 0
     assert host.applied == []
 
@@ -158,6 +164,8 @@ def test_apply_loader_records_explicit_replot_result(qapp, monkeypatch, status):
                 var_names=["a"],
                 units={},
                 time_channels_info={},
+                time_column_name=None,
+                time_axis_label="Index",
                 df_validity={"a": 1},
                 df=object(),
                 datalength=3,
@@ -255,6 +263,25 @@ def test_corrupt_primary_and_backup_warn_once_and_keep_fffd_last(
     assert host.broadcasts[-1][1] == "warn"
 
 
+def test_auto_save_write_failure_is_broadcast_once(post_load_env):
+    flm, host = post_load_env
+    config = PlotSessionConfig(plots=[PlotConfig(curves=["a"])])
+    auto_save = SimpleNamespace(
+        is_auto_save_enabled=lambda: True,
+        auto_save=lambda _config: False,
+    )
+    manager = SimpleNamespace(
+        _auto_save_manager=auto_save,
+        export_current_config=lambda _mw: config,
+    )
+
+    PlotConfigManager.save_auto_save(manager, host)
+
+    assert host.broadcasts == [
+        ("自动恢复配置保存失败，当前布局未能写入", "error")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # R10：零行成功加载的按钮与空态契约
 # ---------------------------------------------------------------------------
@@ -266,7 +293,12 @@ def test_zero_row_load_disables_data_actions_but_keeps_asset_cleanup(
     flm, host = post_load_env
     host.loader.datalength = 0
     monkeypatch.setattr(
-        host.auto_save, "should_apply_auto_save", lambda *args, **kwargs: (False, "empty")
+        host.auto_save,
+        "prepare_auto_save",
+        lambda *args, **kwargs: SimpleNamespace(
+            should=False, reason="empty", config=None,
+            identity_snapshot=None, failed=False,
+        ),
     )
 
     flm._post_load_actions("demo.csv")

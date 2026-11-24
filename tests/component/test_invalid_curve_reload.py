@@ -112,6 +112,8 @@ class FakeMainWindow(QWidget):
         self._global_max_density = 0.0
         self.cursor_sync_manager = None
         self.status_messages: list[str] = []
+        self.mark_stats_window = None
+        self.mark_region_btn = QPushButton()
 
     def _show_status_message(self, message: str):
         self.status_messages.append(message)
@@ -437,7 +439,7 @@ def test_replots_reports_empty_without_assets(env):
 
 
 def test_zero_row_success_keeps_old_curve_and_placeholder_assets(env):
-    """零行是成功加载的 empty 结果：不得清掉上一轮曲线/占位资产。"""
+    """零行保留旧资产，并按显式 restored 结果阻止二次整体套用。"""
     _host, _manager, pw, _loader, reload_with = env
     assert pw.plot_variable("a")
     assert pw.add_variable_to_plot("b")
@@ -451,7 +453,7 @@ def test_zero_row_success_keeps_old_curve_and_placeholder_assets(env):
     assert pw.curves["a"] is old_curve
     assert pw.invalid_curves["b"] is old_placeholder
     _assert_disjoint(pw)
-    assert result == "empty"
+    assert result == "restored"
 
 
 def test_replots_reports_failed_and_resets_update_flags(env, monkeypatch):
@@ -469,4 +471,4 @@ def test_replots_reports_failed_and_resets_update_flags(env, monkeypatch):
     assert manager.replots_after_loading() == "failed"
     assert pw._is_updating_data is False
     assert pw._batch_adding is False
-    assert host.isUpdatesEnabled() is True
+    assert host.updatesEnabled() is True

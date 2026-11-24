@@ -24,10 +24,15 @@ class _MW:
         self.data = None
         self.plot_config_manager = types.SimpleNamespace(
             auto_save_manager=types.SimpleNamespace(
-                should_apply_auto_save=lambda vars, loader=None: (True, "matched"),
-                load_auto_save=lambda: {"pages": []},
+                prepare_auto_save=lambda vars, loader=None: types.SimpleNamespace(
+                    should=True,
+                    reason="matched",
+                    config={"pages": []},
+                    identity_snapshot=None,
+                    failed=False,
+                ),
             ),
-            apply_config=lambda mw, cfg: True,
+            apply_config=lambda mw, cfg, **kwargs: True,
         )
 
     def _broadcast(self, text, level="info"):
@@ -53,7 +58,7 @@ def flm_env(monkeypatch):
     monkeypatch.setattr(flm, "_iter_all_containers", lambda: [])
     monkeypatch.setattr(
         flm, "_announce_auto_restore",
-        lambda cfg, vars: mw._broadcast("自动恢复配置 · 匹配 100%"),
+        lambda cfg, vars, **kwargs: mw._broadcast("自动恢复配置 · 匹配 100%"),
     )
     return flm, mw
 
@@ -73,7 +78,11 @@ def test_fffd_disclosure_still_fires_without_auto_restore(flm_env, monkeypatch):
     flm, mw = flm_env
     monkeypatch.setattr(
         mw.plot_config_manager.auto_save_manager,
-        "should_apply_auto_save", lambda vars, loader=None: (False, "no config"),
+        "prepare_auto_save",
+        lambda vars, loader=None: types.SimpleNamespace(
+            should=False, reason="no config", config=None,
+            identity_snapshot=None, failed=False,
+        ),
     )
     flm._post_load_actions("/tmp/demo.csv")
     texts = [t for t, _ in mw.broadcasts]
@@ -87,15 +96,10 @@ def test_no_fffd_no_disclosure(flm_env):
     assert not any("已推断修复" in t for t, _ in mw.broadcasts)
 
 
-def test_disclosure_fires_when_curves_already_restored(flm_env, monkeypatch):
-    """评审 N5：replots 已恢复曲线（any_curve_restored=True）→ 无自动恢复
-    播报，披露仍必须发出。"""
+def test_disclosure_fires_when_assets_already_restored(flm_env):
+    """replots 已恢复资产 → 无自动恢复播报，披露仍必须发出。"""
     flm, mw = flm_env
-    container = types.SimpleNamespace(
-        isHidden=lambda: False,
-        plot_widget=types.SimpleNamespace(curves={"a": object()}),
-    )
-    monkeypatch.setattr(flm, "_iter_all_containers", lambda: [container])
+    flm._last_replot_result = "restored"
     flm._post_load_actions("/tmp/demo.csv")
     texts = [t for t, _ in mw.broadcasts]
     assert not any("自动恢复" in t for t in texts)
@@ -107,9 +111,11 @@ def test_disclosure_survives_auto_restore_exception(flm_env, monkeypatch):
     flm, mw = flm_env
 
     def boom():
-        raise RuntimeError("container deleted")
+        raise RuntimeError("auto-save manager deleted")
 
-    monkeypatch.setattr(flm, "_iter_all_containers", boom)
+    monkeypatch.setattr(
+        mw.plot_config_manager.auto_save_manager, "prepare_auto_save", boom
+    )
     flm._post_load_actions("/tmp/demo.csv")
     texts = [t for t, _ in mw.broadcasts]
     assert texts and texts[-1].startswith("已推断修复"), f"实际={texts}"
@@ -126,12 +132,12 @@ def test_restore_failure_warns_once_and_fffd_stays_last(flm_env, monkeypatch, st
             raise OSError("synthetic auto-save read failure")
 
         monkeypatch.setattr(
-            manager.auto_save_manager, "should_apply_auto_save", fail_load
+            manager.auto_save_manager, "prepare_auto_save", fail_load
         )
     elif stage == "apply_false":
-        monkeypatch.setattr(manager, "apply_config", lambda mw, cfg: False)
+        monkeypatch.setattr(manager, "apply_config", lambda mw, cfg, **kwargs: False)
     else:
-        def fail_apply(mw, cfg):
+        def fail_apply(mw, cfg, **kwargs):
             raise RuntimeError("synthetic auto-save apply failure")
 
         monkeypatch.setattr(manager, "apply_config", fail_apply)

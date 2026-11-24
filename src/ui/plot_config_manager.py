@@ -732,4 +732,7 @@ class PlotConfigManager(QObject):
         if not self._auto_save_manager.is_auto_save_enabled():
             return
         config = self.export_current_config(main_window)
-        self._auto_save_manager.auto_save(config)
+        if not self._auto_save_manager.auto_save(config):
+            main_window._broadcast(
+                "自动恢复配置保存失败，当前布局未能写入", level="error"
+            )

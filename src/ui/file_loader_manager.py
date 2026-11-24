@@ -80,6 +80,8 @@ SUPPORTED_EXTENSIONS = (
 class FileLoaderManager(MainWindowBaseManager):
     """负责文件加载相关功能"""
 
+    _last_replot_result = "empty"
+
     @property
     def _has_valid_loader(self) -> bool:
         return hasattr(self.mw, "loader") and self.mw.loader is not None
@@ -1064,9 +1066,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def set_button_status(self, status: bool):
         if status is not None:
-            # 「时间修正」按钮已撤，入口换成状态栏中段的 x 轴抽屉（抽屉自己按
-            # loader/加载中状态把关），这里不再列它
-            self.mw.clear_all_plots_btn.setEnabled(status)
+            # 清图与暂存区是资产清理入口，零行数据也必须可用。
+            self.mw.clear_all_plots_btn.setEnabled(True)
             self.mw.auto_range_btn.setEnabled(status)
             self.mw.auto_y_btn.setEnabled(status)
             self.mw.cursor_btn.setEnabled(status)
@@ -1075,14 +1076,14 @@ class FileLoaderManager(MainWindowBaseManager):
             # 暂存区浮窗按钮同走加载闸门（FakeMainWindow 等替身无此按钮）
             shelf_btn = getattr(self.mw, "curve_shelf_btn", None)
             if shelf_btn is not None:
-                shelf_btn.setEnabled(status)
+                shelf_btn.setEnabled(True)
             # 页签角位胶囊同闸门（D-A7）：这里是**唯一**闸门来源，替身宿主
             # 可能没有 plot_tabs / 胶囊关闭时 set_shelf_enabled 不存在
             set_shelf_enabled = getattr(
                 getattr(self.mw, "plot_tabs", None), "set_shelf_enabled", None
             )
             if callable(set_shelf_enabled):
-                set_shelf_enabled(status)
+                set_shelf_enabled(True)
 
     def reload_data(self):
         # v5.12: 互斥锁 —— 防止快速连续 reload 导致并发冲突
@@ -1338,7 +1339,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 finally:
                     self._end_data_reload()
                 if status:
-                    self.set_button_status(True)
+                    self.set_button_status(self._has_valid_data)
                     self.mw.load_btn.setEnabled(True)
                     # 延迟到下一个事件循环，确保 paint 事件先处理，避免 UI 半成品白屏
                     self._schedule_delayed(
@@ -1928,7 +1929,7 @@ class FileLoaderManager(MainWindowBaseManager):
         finally:
             self._end_data_reload()
             if applied:
-                self.set_button_status(True)
+                self.set_button_status(self._has_valid_data)
             else:
                 # 应用失败按「当前是否还有有效数据」恢复，并收掉忙等光标/秒表
                 self._finish_load_failure(is_reload=is_reload)
@@ -2307,45 +2308,63 @@ class FileLoaderManager(MainWindowBaseManager):
                 channel_count=len(self.mw.var_names or []),
                 elapsed_s=elapsed_s,
             )
-            self.set_button_status(True)
-
-            # 自动恢复：replots_after_loading 优先，auto-save 仅作降级兜底。
-            # 评审 N4：整块异常隔离——容器销毁竞态等 RuntimeError 不得跳过
-            # 下方的 D1 披露（移位前披露先发出，移位后必须保「披露必达」）。
-            if hasattr(self.mw, 'plot_config_manager'):
-                any_curve_restored = any(
-                    not container.isHidden() and bool(container.plot_widget.curves)
-                    for container in self._iter_all_containers()
+            has_valid_data = self._has_valid_data
+            self.set_button_status(has_valid_data)
+            if not has_valid_data:
+                self.mw._broadcast(
+                    "数据文件为 0 行，没有有效数据；分析操作暂不可用，"
+                    "已有曲线与占位保持不变。",
+                    level="warn",
                 )
 
-                if any_curve_restored:
-                    logger.info("replots_after_loading 已恢复曲线，跳过自动恢复")
-                else:
+            # 自动恢复只消费 replots_after_loading 的显式结果；隐藏资产同样计入 restored。
+            if has_valid_data and hasattr(self.mw, "plot_config_manager"):
+                replot_result = self._last_replot_result
+                if replot_result == "restored":
+                    logger.info("replots_after_loading 已恢复资产，跳过自动恢复")
+                elif replot_result == "failed":
+                    self.mw._broadcast(
+                        "曲线恢复失败，已停止自动套用布局", level="error"
+                    )
+                elif replot_result == "empty":
                     current_vars = []
-                    if hasattr(self.mw, 'data') and self.mw.data is not None:
+                    if hasattr(self.mw, "data") and self.mw.data is not None:
                         current_vars = list(self.mw.data.columns)
-                    elif hasattr(self.mw, 'loader') and hasattr(self.mw.loader, 'var_names'):
+                    elif hasattr(self.mw, "loader") and hasattr(self.mw.loader, "var_names"):
                         current_vars = list(self.mw.loader.var_names)
 
-                    should_apply, reason = self.mw.plot_config_manager.auto_save_manager.should_apply_auto_save(
+                    manager = self.mw.plot_config_manager
+                    decision = manager.auto_save_manager.prepare_auto_save(
                         current_vars, getattr(self.mw, "loader", None)
                     )
-                    if should_apply:
-                        saved_config = (
-                            self.mw.plot_config_manager.auto_save_manager.load_auto_save()
+                    if decision.failed:
+                        self.mw._broadcast(
+                            "自动恢复失败：无法读取可用配置", level="warn"
                         )
-                        success = self.mw.plot_config_manager.apply_config(
-                            self.mw, saved_config
+                    elif decision.should:
+                        success = manager.apply_config(
+                            self.mw,
+                            decision.config,
+                            identity_snapshot=decision.identity_snapshot,
                         )
                         if success:
-                            logger.info("自动恢复配置成功: %s", reason)
-                            self._announce_auto_restore(saved_config, current_vars)
+                            logger.info("自动恢复配置成功: %s", decision.reason)
+                            self._announce_auto_restore(
+                                decision.config,
+                                current_vars,
+                                identity_snapshot=decision.identity_snapshot,
+                            )
                         else:
-                            logger.warning("自动恢复配置失败")
+                            self.mw._broadcast(
+                                "自动恢复失败：布局套用未完成", level="warn"
+                            )
                     else:
-                        logger.info("不应用自动保存: %s", reason)
+                        logger.info("不应用自动保存: %s", decision.reason)
         except Exception:
             logger.warning("加载收尾/自动恢复阶段异常（不影响 D1 披露）", exc_info=True)
+            self.mw._broadcast(
+                "自动恢复失败：加载收尾未完成", level="warn"
+            )
 
         # D1 披露：源头乱码修复必须让用户知情（所有加载路径都汇到这里）。
         # 第 6 轮 P1-B：必须放在自动恢复播报**之后**——同一回调内两次
@@ -2358,28 +2377,32 @@ class FileLoaderManager(MainWindowBaseManager):
                 level="warn",
             )
 
-    def _announce_auto_restore(self, config, current_vars) -> None:
+    def _announce_auto_restore(
+        self, config, current_vars, *, identity_snapshot=None
+    ) -> None:
         """自动恢复也是套用了一套通道映射，文案交给 ``mw._announce_applied``。
 
-        比率在这里现算而不是取 ``should_apply_auto_save`` 的 reason：那个串是
-        写给日志看的英文，而 ``check_template_match`` 的分母与它的放行判据同源
-        （都是配置里的变量数），屏上这个百分比就是刚才放行用的那一个。配置文件
-        上面已经读过，这里不再读盘。
-
-        身份匹配 MN-4/D5：显式 resolve 后再算 ratio（与放行判据同口径），
-        重映射条数同规格播报；M-1 方案乙：降占位计入失配并披露。
+        比率在这里现算而不是取放行判据的英文 reason；配置上面已经读过，
+        这里不再读盘。身份匹配统计与套用复用同一快照。
         """
-        from src.core.template_identity import merge_demoted, resolve_identities
-        config, remap, demoted = resolve_identities(
+        from src.core.template_identity import (
+            merge_demoted,
+            resolve_identity_snapshot,
+        )
+
+        snapshot = identity_snapshot or resolve_identity_snapshot(
             config, getattr(self.mw, "loader", None)
         )
-        ratio, _matched, unmatched = (
+        config = snapshot.config
+        ratio, matched, unmatched = (
             self.mw.plot_config_manager.check_template_match(config, current_vars)
         )
-        ratio, _matched, unmatched = merge_demoted(_matched, unmatched, demoted)
+        ratio, _matched, unmatched = merge_demoted(
+            matched, unmatched, snapshot.demoted
+        )
         self.mw._announce_applied(
             "已自动恢复上次布局", ratio, unmatched,
-            remapped=len(remap), demoted=len(demoted),
+            remapped=len(snapshot.remap), demoted=len(snapshot.demoted),
         )
 
     def _remember_last_open_dir(self, file_path: str):
@@ -2562,7 +2585,7 @@ class FileLoaderManager(MainWindowBaseManager):
         finally:
             self._end_data_reload()
             if applied:
-                self.set_button_status(True)
+                self.set_button_status(self._has_valid_data)
             else:
                 # 应用失败时按「当前是否还有有效数据」恢复，并收掉忙等光标/秒表；
                 # 无条件 set_button_status(True) 会在没有数据时点亮必然再报错的入口
@@ -2611,10 +2634,10 @@ class FileLoaderManager(MainWindowBaseManager):
         if self.mw.placeholder_label.parent():
             self.mw.placeholder_label.setParent(None)
 
-        # 有数据后才允许新建绘图页（决策 D-D）
+        # 有有效数据后才允许新建绘图页（决策 D-D）
         plot_tabs = getattr(self.mw, "plot_tabs", None)
         if plot_tabs is not None:
-            plot_tabs.set_new_page_enabled(True)
+            plot_tabs.set_new_page_enabled(self._has_valid_data)
 
         if not self.mw.plot_widgets:
             self.mw.layout_manager.create_subplots_matrix(
@@ -2639,7 +2662,15 @@ class FileLoaderManager(MainWindowBaseManager):
         self._update_can_db_ui()
 
         # v5.11: reload 场景下跳过 pin 状态重置，保留 _restore_cursor_state_after_reload 恢复的 cursor 状态
-        self.mw.cursor_sync_manager.replots_after_loading(skip_pin_reset=is_reload)
+        try:
+            self._last_replot_result = (
+                self.mw.cursor_sync_manager.replots_after_loading(
+                    skip_pin_reset=is_reload
+                )
+            )
+        except Exception:
+            self._last_replot_result = "failed"
+            raise
 
         # 曲线暂存区 revalidate 必须挂调用方：replots_after_loading 自身
         # 在 datalength==0 时早退（cursor_sync_manager），挂在方法内会漏掉
