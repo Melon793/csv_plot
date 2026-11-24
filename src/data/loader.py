@@ -15,7 +15,6 @@ from src.core.config import (
     UNIT_KEYWORD_RATIO_THRESHOLD,
     VALID_NUMERIC_RATIO_THRESHOLD,
     CSV_PERF_LOG_THRESHOLD_S,
-    _evaluate_float32_safety,
 )
 from src.core.gc_guard import no_autogc
 from src.core.data_types import FormatInfo, AutoDetectError
@@ -910,8 +909,7 @@ class FastDataLoader(BaseDataLoader):
                     else:
                         # 不是时间格式，按数值处理
                         if pd.api.types.is_numeric_dtype(s):
-                            is_safe, _ = _evaluate_float32_safety(s)
-                            dtype_map[col] = "float32" if is_safe else "float64"
+                            dtype_map[col] = "float64"
                         else:
                             dtype_map[col] = "category"
                 else:
@@ -919,8 +917,8 @@ class FastDataLoader(BaseDataLoader):
             else:
                 # 非时间列，直接判断数值类型
                 if pd.api.types.is_numeric_dtype(s):
-                    is_safe, _ = _evaluate_float32_safety(s)
-                    dtype_map[col] = "float32" if is_safe else "float64"
+                    # 采样不能替整列承诺精度；完整读取后再由安全护栏决定下转。
+                    dtype_map[col] = "float64"
                 else:
                     dtype_map[col] = "category"
 

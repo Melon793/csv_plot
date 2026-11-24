@@ -143,6 +143,30 @@ class TestFastDataLoaderLoad:
         assert loader.df["speed"].iloc[0] == pytest.approx(10.0)
         assert loader.df["speed"].iloc[-1] == pytest.approx(19.5)
 
+    @pytest.mark.parametrize("downcast", [False, True])
+    def test_sample_dtype_does_not_truncate_late_large_values(self, tmp_path, downcast):
+        rows = [[1.0] for _ in range(200)] + [[16777217.0]]
+        f = write_csv(
+            tmp_path / "late_large.csv", header=["x"], units=None, rows=rows
+        )
+        loader = FastDataLoader(
+            str(f), has_unit=False, sep=",", max_rows_infer=200,
+            downcast_float=downcast, allow_gc=False,
+        )
+        assert float(loader.df["x"].iloc[-1]) == 16777217.0
+        assert loader.df_validity["x"] == 1
+
+    def test_sample_dtype_does_not_overflow_late_large_values(self, tmp_path):
+        rows = [[1.0] for _ in range(200)] + [[1e100]]
+        f = write_csv(
+            tmp_path / "late_overflow.csv", header=["x"], units=None, rows=rows
+        )
+        loader = FastDataLoader(
+            str(f), has_unit=False, sep=",", max_rows_infer=200, allow_gc=False
+        )
+        assert loader.df["x"].iloc[-1] == 1e100
+        assert loader.df["x"].dtype == np.float64
+
     def test_na_values_parsed(self, tmp_path):
         rows = [[0.0, 10.5], [0.1, "N/A"], [0.2, 12.5]]
         f = write_csv(

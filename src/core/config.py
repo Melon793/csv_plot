@@ -595,8 +595,18 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
                     return False, abs_max
                 # 整数型取值（kind 是 f 但值都是整数）量级超过 float32 的连续
                 # 整数上限时同样会被抹平，统一交给间距判据
+                # 大整数即使间距很大，单个值也可能落在 float32 两个可表示值之间。
+                finite_values = values[finite_mask]
+                large_ints = finite_values[
+                    (np.abs(finite_values) > FLOAT32_EXACT_INTEGER_MAX)
+                    & (finite_values == np.trunc(finite_values))
+                ]
+                if large_ints.size and not np.array_equal(
+                    large_ints, large_ints.astype(np.float32).astype(np.float64)
+                ):
+                    return False, abs_max
                 return (
-                    _float32_spacing_preserves_resolution(values[finite_mask], abs_max),
+                    _float32_spacing_preserves_resolution(finite_values, abs_max),
                     abs_max,
                 )
             else:
