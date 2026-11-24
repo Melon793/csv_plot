@@ -562,18 +562,21 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
     import pandas as pd
 
     try:
+        if not isinstance(values, (np.ndarray, pd.Series, list, tuple)):
+            values = tuple(values)
         integer_source = values
-        if isinstance(values, pd.Series):
-            integer_source = values.to_numpy()
-        elif not isinstance(values, np.ndarray):
-            integer_source = np.asarray(values)
-        if getattr(getattr(integer_source, "dtype", None), "kind", None) in "iu":
+        source_kind = getattr(getattr(integer_source, "dtype", None), "kind", "")
+        if source_kind and source_kind in "iu":
             if integer_source.size:
                 integer_abs_max = max(
                     abs(int(integer_source.min())), abs(int(integer_source.max()))
                 )
                 if integer_abs_max > 2**53:
                     return False, float(integer_abs_max)
+        has_large_object_integer = source_kind in ("", "O") and any(
+            isinstance(value, (int, np.integer)) and abs(int(value)) > 2**53
+            for value in integer_source
+        )
         if isinstance(values, np.ndarray):
             # 快速路径：已经是 numpy 数组，避免冗余 float64 拷贝
             if values.dtype == np.float32:
@@ -635,6 +638,6 @@ def _evaluate_float32_safety(values: Any) -> tuple[bool, float | None]:
         return False, None
 
     abs_max = float(np.max(np.abs(arr[finite_mask])))
-    if abs_max > FLOAT32_REPRESENTABLE_MAX:
+    if abs_max > FLOAT32_REPRESENTABLE_MAX or has_large_object_integer:
         return False, abs_max
     return _float32_spacing_preserves_resolution(arr[finite_mask], abs_max), abs_max

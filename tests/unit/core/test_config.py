@@ -217,3 +217,32 @@ class TestFloat32PrecisionGuard:
     def test_integers_beyond_float64_exact_range_are_refused(self, values):
         is_safe, _ = _evaluate_float32_safety(values)
         assert is_safe is False
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            pd.Series([2**53 + 1, pd.NA], dtype="Int64"),
+            pd.Series([2**53 + 1, pd.NA], dtype="UInt64"),
+            pd.Series([2**53 + 1, None], dtype=object),
+            np.asarray([2**53 + 1, None], dtype=object),
+            [2**53 + 1, None],
+            [2**53 + 1, 1.5],
+            (value for value in [2**53 + 1, None]),
+        ],
+    )
+    def test_nullable_object_integers_beyond_float64_range_are_refused(self, values):
+        is_safe, _ = _evaluate_float32_safety(values)
+        assert is_safe is False
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            pd.Series([1, pd.NA], dtype="Int64"),
+            pd.Series([1, None], dtype=object),
+            [1, None],
+        ],
+    )
+    def test_small_nullable_object_integers_remain_safe(self, values):
+        is_safe, abs_max = _evaluate_float32_safety(values)
+        assert is_safe is True
+        assert abs_max == pytest.approx(1.0)
