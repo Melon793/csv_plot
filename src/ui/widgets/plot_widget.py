@@ -1022,6 +1022,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
             action = "替换" if shift_pressed else "添加"
             text_override = self._build_indicator_text(var_names, action, already)
+            if shift_pressed:
+                if not var_names:
+                    text_override = "空载荷，释放不会更改当前子图"
+                else:
+                    text_override = text_override.replace(
+                        "释放以替换", "释放以替换当前子图"
+                    )
 
         self._notify_drag_indicator(var_names, hide=False, indicator_text=text_override)
         if mime.hasFormat(SHELF_MIME_FORMAT) or mime.hasFormat(LEGEND_MIME_FORMAT):
@@ -1052,7 +1059,25 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             event.ignore()
             return
         mime = event.mimeData()
-        var_names = parse_var_names_from_mimedata(mime)
+        try:
+            var_names = parse_var_names_from_mimedata(mime)
+        except Exception:
+            logger.warning("解析拖入变量失败", exc_info=True)
+            shift_pressed = bool(
+                event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier
+            )
+            QMessageBox.information(
+                self,
+                "提示",
+                "拖入数据解析失败，"
+                + (
+                    "当前子图未更改。"
+                    if shift_pressed
+                    else "未添加变量。"
+                ),
+            )
+            event.ignore()
+            return
 
         if mime.hasFormat(SHELF_MIME_FORMAT):
             # 暂存区来源（带 text/plain 兼容层）必须先于 else 判定（Blocking 4），
@@ -1063,10 +1088,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         else:
             shift_pressed = bool(event.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
             if shift_pressed:
-                # Shift + 拖入 = 替换：先清空（连带清占位，§7），再走对应绘制路径
-                self.clear_plot_item(clear_invalid=True)
+                # 先校验并备好可添加曲线，全部失败时原图完全不动。
+                if not self.replace_variables_in_plot(var_names):
+                    event.ignore()
+                    return
             # 普通拖入 = 添加（统一路径：plot_variable 内部自动判断首绘/追加）
-            if len(var_names) > 1:
+            elif len(var_names) > 1:
                 self.add_variables_to_plot(var_names)
             elif len(var_names) == 1:
                 self.plot_variable(var_names[0])
@@ -1675,6 +1702,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             if cur_count != prev_count:
                 self.curves_changed.emit()
 
+    def replace_variables_in_plot(self, var_names: list[str]) -> bool:
+        """Shift 拖入专用：校验通过后才清空并替换当前子图。"""
+        success = self._multi_curve_manager.replace_variables_in_plot(var_names)
+        if success:
+            # 单变量替换也走批量提交，必须显式通知编辑器/搜索栏刷新。
+            self.curves_changed.emit()
+        return success
+
     def _validate_plot_data(self, var_name: str) -> tuple[bool, str]:
         """验证绘图数据的有效性 → 委托到 PlotDataManager"""
         return self._plot_data_manager._validate_plot_data(var_name)
@@ -1762,7 +1797,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
         与 clear_plot_item 的分工：只有"用户主动清当前子图"才走这里；模板应用
         （plot_config_manager）、Shift 拖入替换、重载重建仍直接调
-        clear_plot_item，那些路径各有自己的说法，不该被这句播报认领。
+        clear_plot_item 或替换助手，那些路径各有自己的说法，不该被这句播报认领。
         标记统计刷新仍由各调用点自理（本函数只管清 + 播报）。
         用户显式清空连带清占位（clear_invalid=True，§7），不留孤儿资产。
         """
@@ -1776,7 +1811,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 unlock(False, reason="绘图已清除")
         self.clear_plot_item(clear_invalid=True)
         if self.plot_context:
-            self.plot_context.announce_cleared("已清除绘图", cleared)
+            self.plot_context.announce_cleared("已清除当前子图", cleared)
 
     def remove_variable_from_plot(self, var_name: str, *, emit_changed: bool = True) -> bool:
         """从 plot 移除单个变量 → 委托到 PlotDataManager"""

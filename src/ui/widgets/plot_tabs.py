@@ -59,8 +59,8 @@ from src.ui.widgets.chrome_button import ChromeButton, native_push_height
 MAX_PAGES = 16
 
 #: 仅剩一页时的关闭说明（× / 右键 / 页目录行共用一份文案）。
-#: 至少保留一页是硬不变量：交互侧不关页，只指向「清除绘图」这条重来路径。
-LAST_PAGE_CLOSE_HINT = "仅剩一页，无法关闭；如需重来请用「清除绘图」"
+#: 至少保留一页是硬不变量：交互侧不关页，只指向「清空全部页」这条重来路径。
+LAST_PAGE_CLOSE_HINT = "仅剩一页，无法关闭；如需重来请用「清空全部页」"
 
 #: 「＋」预留槽宽度：页签放不下时停到暂存区胶囊左侧，避免压住最后一个页签的关闭按钮
 _PLUS_SLOT_WIDTH = 28

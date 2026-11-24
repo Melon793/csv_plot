@@ -6,6 +6,7 @@ from collections import OrderedDict
 
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtGui import QCursor
+from PySide6.QtWidgets import QMessageBox
 
 from src.core.config import (
     MIN_INDEX_LENGTH,
@@ -516,10 +517,33 @@ class CursorSyncManager(MainWindowBaseManager):
                 continue
             widget.reset_pin_state()
 
+    def request_clear_all_plots(self) -> bool:
+        """顶部用户入口：先明确全部页范围并确认，默认否/取消。"""
+        if self.mw.reject_when_loading("清空全部页"):
+            return False
+        containers = self._iter_all_containers()
+        pages = list(getattr(self.mw, "pages", []) or [])
+        page_ids = {id(getattr(c.plot_widget, "page", None)) for c in containers}
+        page_count = len(pages) or len(page_ids) or 1
+        curve_count = sum(len(c.plot_widget.curves) for c in containers)
+        reply = QMessageBox.question(
+            self.mw,
+            "清空全部页",
+            f"将清空全部 {page_count} 页中的 {curve_count} 条曲线（包括当前页和隐藏页）。\n"
+            "此操作无法撤销，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+        self.clear_all_plots()
+        return True
+
     def clear_all_plots(self):
+        """程序化全局清空，不弹确认框（重选库/关末页/模板与测试路径）。"""
         if self.mw.reject_when_loading("清除绘图"):
             return
-        # 跨页口径（P1-E）：按钮播报「已清除全部绘图」、CAN 数据库重选调用点
+        # 跨页口径（P1-E）：顶部按钮播报「已清除全部页」、CAN 数据库重选调用点
         # 注释「一律清除」，都要求清所有页——只清当前页会让隐藏页旧曲线在
         # 随后的 _apply_loader(is_reload=True) 里按同名静默重绑到新数据。
         # 与 reset_plots_after_loading 同模式：隐藏页清数据层后置脏，
@@ -538,7 +562,7 @@ class CursorSyncManager(MainWindowBaseManager):
         self.mw._enum_text_maps = {}
         self.mw.saved_mark_range = None
         self.mw.layout_manager.request_mark_stats_refresh(immediate=True)
-        self.mw._announce_cleared_plots("已清除全部绘图", cleared)
+        self.mw._announce_cleared_plots("已清除全部页", cleared)
 
     def collect_global_x_range(
         self, curves_filter: str = "visible"
