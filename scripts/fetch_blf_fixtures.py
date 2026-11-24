@@ -199,7 +199,8 @@ def _fetch_first(urls: list[str], *, timeout: float,
 def _load_existing_manifest() -> dict:
     if MANIFEST_PATH.is_file():
         try:
-            return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+            payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
         except (json.JSONDecodeError, OSError) as e:
             print(f"manifest 读取失败，按空表处理: {e}")
     return {}

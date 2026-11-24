@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts import fetch_blf_fixtures as fixtures
 
 
@@ -111,6 +113,21 @@ def test_check_rejects_non_mapping_manifest(tmp_path, monkeypatch, capsys):
     fixtures.MANIFEST_PATH.write_text(
         json.dumps({"files": ["broken"], "licenses": {}}), encoding="utf-8"
     )
+
+    assert fixtures.main(["--check"]) != 0
+    output = capsys.readouterr().out
+    report = json.loads(output[output.index("{"):])
+    assert report["requested"] == 1
+    assert report["ok"] == []
+    assert report["bad"] == ["good.blf"]
+
+
+@pytest.mark.parametrize("payload", [[], None])
+def test_check_rejects_non_mapping_top_level(
+    tmp_path, monkeypatch, capsys, payload
+):
+    _setup_manifest(tmp_path, monkeypatch, ("good.blf",))
+    fixtures.MANIFEST_PATH.write_text(json.dumps(payload), encoding="utf-8")
 
     assert fixtures.main(["--check"]) != 0
     output = capsys.readouterr().out
