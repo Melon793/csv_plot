@@ -643,8 +643,6 @@ class MultiCurveManager:
                     quiet=True,
                 )
                 if success and var_name in pw.curves:
-                    if old_curve is not None and old_curve.scene() is not None:
-                        pw.plot_item.removeItem(old_curve)
                     new_ci = pw.curves[var_name]
                     new_ci.display_name = pinned_display_name
                     if pinned_transform:
@@ -720,6 +718,9 @@ class MultiCurveManager:
                     if not getattr(pw, "_batch_adding", False):
                         self.update_legend()
                         pw.curves_changed.emit()
+                if success and var_name in pw.curves:
+                    if old_curve is not None and old_curve.scene() is not None:
+                        pw.plot_item.removeItem(old_curve)
         except Exception:
             restore_old_curve()
             logger.warning("重建曲线 '%s' 失败", var_name, exc_info=True)

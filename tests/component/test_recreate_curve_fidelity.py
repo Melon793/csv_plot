@@ -83,6 +83,63 @@ def test_recreate_failure_restores_old_curve(plot_factory, qapp, monkeypatch):
     assert new_curve not in pw.plot_item.scene().items()
 
 
+def test_recreate_late_reproject_failure_keeps_old_scene_item(
+    plot_factory, qapp, monkeypatch
+):
+    pw = _make_pw(plot_factory)
+    old_ci = pw.curves["a"]
+    old_curve = old_ci.curve
+    old_ci.factor = 2.0
+    old_ci.offset = 1.0
+    new_curve = None
+
+    def fail_reproject(ci):
+        nonlocal new_curve
+        new_curve = ci.curve
+        assert ci is not old_ci
+        raise RuntimeError("late reproject failed")
+
+    monkeypatch.setattr(
+        "src.ui.widgets.multi_curve_manager.reproject", fail_reproject
+    )
+    pw._multi_curve_manager._recreate_curve("a")
+
+    assert pw.curves["a"] is old_ci
+    assert old_curve in pw.plot_item.scene().items()
+    assert new_curve not in pw.plot_item.scene().items()
+
+
+def test_recreate_late_refresh_failure_keeps_old_scene_item(
+    plot_factory, qapp, monkeypatch
+):
+    pw = _make_pw(plot_factory)
+    old_ci = pw.curves["a"]
+    old_curve = old_ci.curve
+    old_ci.symbol_policy = SYMBOL_POLICY_ON
+    pw._batch_adding = False
+    new_curve = None
+    refresh_calls = 0
+    original_refresh = pw._multi_curve_manager.update_legend
+
+    def fail_refresh():
+        nonlocal new_curve, refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            original_refresh()
+            return
+        new_curve = pw.curves["a"].curve
+        assert pw.curves["a"] is not old_ci
+        raise RuntimeError("late refresh failed")
+
+    monkeypatch.setattr(pw._multi_curve_manager, "update_legend", fail_refresh)
+    pw._multi_curve_manager._recreate_curve("a")
+
+    assert refresh_calls == 2, "故障注入必须命中重建收尾刷新路径"
+    assert pw.curves["a"] is old_ci
+    assert old_curve in pw.plot_item.scene().items()
+    assert new_curve not in pw.plot_item.scene().items()
+
+
 def test_recreate_keeps_pinned_symbol_policy(plot_factory, qapp):
     pw = _make_pw(plot_factory)
     old_ci = pw.curves["a"]
