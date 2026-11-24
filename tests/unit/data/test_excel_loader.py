@@ -82,6 +82,19 @@ class TestExcelLoad:
         assert loader.datalength == 2
         assert loader.units["a"] == "-"
 
+    def test_openpyxl_sample_dtype_preserves_late_large_value(self, tmp_path, monkeypatch):
+        rows = [[float(i)] for i in range(100)] + [[16777217.0]]
+        f = _write_xlsx(tmp_path / "late_large.xlsx", ["x"], None, rows)
+        monkeypatch.setattr(
+            ExcelDataLoader, "_read_with_calamine",
+            lambda self: (_ for _ in ()).throw(ImportError("force openpyxl")),
+        )
+        loader = ExcelDataLoader(
+            str(f), sheet_name=0, desc_rows=0, has_unit=False, downcast_float=False
+        )
+        assert float(loader.df["x"].iloc[-1]) == 16777217.0
+        assert loader.df["x"].dtype == "float64"
+
     def test_validity_and_data_values(self, simple_xlsx):
         loader = ExcelDataLoader(
             str(simple_xlsx), sheet_name=0, desc_rows=0, has_unit=True

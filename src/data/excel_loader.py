@@ -401,7 +401,7 @@ class ExcelDataLoader(BaseDataLoader):
             )
             return self._read_rows_streaming(data_start)
 
-        from src.core.config import FLOAT32_REPRESENTABLE_MAX
+        # 采样只识别类别，数值列统一先保 float64，完整读取后再决定是否下转。
 
         # —— 阶段 1：前 100 行做列类型探测
         sample_size = min(100, total_rows)
@@ -416,7 +416,7 @@ class ExcelDataLoader(BaseDataLoader):
         for c in range(num_cols):
             col_sample = [row[c] for row in sample_rows if c < len(row) and row[c] is not None]
             if not col_sample:
-                col_dtypes.append("float32")
+                col_dtypes.append("float64")
                 continue
 
             # 检查是否为纯 time 列（Excel 纯时间单元格）
@@ -437,21 +437,15 @@ class ExcelDataLoader(BaseDataLoader):
 
             # 判断是否为纯数值列
             numeric_count = 0
-            max_abs = 0.0
             for val in col_sample:
                 try:
-                    v = float(val)
-                    abs_v = abs(v)
-                    if abs_v > max_abs:
-                        max_abs = abs_v
+                    float(val)
                     numeric_count += 1
                 except (ValueError, TypeError):
                     break
 
             if numeric_count == len(col_sample):
-                col_dtypes.append(
-                    "float32" if max_abs <= FLOAT32_REPRESENTABLE_MAX else "float64"
-                )
+                col_dtypes.append("float64")
             else:
                 col_dtypes.append("object")
 
