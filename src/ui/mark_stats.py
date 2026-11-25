@@ -523,6 +523,7 @@ class MarkStatsWindow(QDialog):
         self._plot_count = 0
         self._empty_plots = 0
         self._active_page: str | None = None
+        self._notice = ""  # 一次性回执：下一次状态栏刷新时清除
 
         settings = AppSettings()
         self._column_keys = settings.get_mark_stats_columns(
@@ -938,6 +939,7 @@ class MarkStatsWindow(QDialog):
 
         AppSettings().set_mark_stats_columns(self._column_keys)  # 即写即 sync
         self._save_header_state()
+        self._update_status_bar()  # 列配置变化也属于“下一次刷新”，清掉旧回执
 
     # ------------------------------------------------------------------
     # 状态栏与导出（§5.7）
@@ -963,7 +965,9 @@ class MarkStatsWindow(QDialog):
         ]
         return max(values) if values else None
 
-    def _update_status_bar(self):
+    def _update_status_bar(self, *, keep_notice: bool = False):
+        if not keep_notice:
+            self._notice = ""
         parts = [
             f"{len(self._pages)} 页 · {self._plot_count} 子图 · "
             f"{self.proxy.rowCount()} 条曲线"
@@ -979,6 +983,8 @@ class MarkStatsWindow(QDialog):
             )
         if self._empty_plots:
             parts.append(f"{self._empty_plots} 个空子图未统计")
+        if self._notice:
+            parts.insert(0, self._notice)  # 提示在前：窗口窄时先被看到
         self.status_label.setText(" · ".join(parts))
 
     def _visible_columns(self) -> list[int]:
@@ -1017,7 +1023,18 @@ class MarkStatsWindow(QDialog):
         return "\n".join(lines)
 
     def _copy_csv(self):
+        rows = self.proxy.rowCount()
+        if rows == 0:
+            # 空表不覆盖用户剪贴板（与 variable_info_dialog._on_copy_all 同口径）
+            self._notice = "没有可复制的数据"
+            self._update_status_bar(keep_notice=True)
+            return
+        cols = self._visible_columns()
         QApplication.clipboard().setText(self._export_text(as_csv=True))
+        self._notice = (
+            f"已复制 {rows} 行 × {len(cols)} 列（制表符分隔，可粘贴到 Excel）"
+        )
+        self._update_status_bar(keep_notice=True)
 
     # 注：「复制 Markdown」按钮已按需求从界面移除（见 _build_ui 状态栏），
     # 本方法与 _export_text(as_csv=False) 的导出实现一并保留，
