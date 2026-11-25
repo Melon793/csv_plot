@@ -11,7 +11,7 @@ import pytest
 
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QLabel, QToolButton
+from PySide6.QtWidgets import QApplication, QLabel, QToolButton
 
 from src.ui.widgets.plot_tabs import (
     LAST_PAGE_CLOSE_HINT,
@@ -152,6 +152,97 @@ def test_middle_click_closes_tab(tabs, qtbot):
         tabs.tabBar(), Qt.MouseButton.MiddleButton, pos=center
     )
     assert received == [1]
+
+
+def test_middle_press_on_tab_release_on_other_tab_closes_nothing(tabs, qtbot):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=bar.tabRect(0).center())
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=bar.tabRect(2).center())
+
+    assert received == []
+
+
+def test_middle_click_with_long_same_tab_drag_closes_nothing(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+    press_pos = bar.tabRect(0).topLeft() + QPoint(4, bar.tabRect(0).height() // 2)
+    release_pos = press_pos + QPoint(QApplication.startDragDistance() + 5, 0)
+    assert bar.tabAt(release_pos) == 0
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=press_pos)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=release_pos)
+
+    assert received == []
+
+
+def test_middle_click_with_small_jitter_still_closes(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+    press_pos = bar.tabRect(0).topLeft() + QPoint(4, bar.tabRect(0).height() // 2)
+    release_pos = press_pos + QPoint(QApplication.startDragDistance() - 3, 0)
+    assert bar.tabAt(release_pos) == 0
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=press_pos)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=release_pos)
+
+    assert received == [0]
+
+
+def test_middle_release_without_press_closes_nothing(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+
+    QTest.mouseRelease(
+        tabs.tabBar(),
+        Qt.MouseButton.MiddleButton,
+        pos=tabs.tabBar().tabRect(0).center(),
+    )
+
+    assert received == []
+
+
+def test_middle_double_click_closes_once_without_rename(tabs, qapp):
+    _add_pages(tabs, 3)
+    closed, renamed = [], []
+
+    def close_synchronously(index):
+        closed.append(index)
+        tabs.removeTab(index)
+
+    tabs.close_page_requested.connect(close_synchronously)
+    tabs.rename_page_requested.connect(renamed.append)
+    bar = tabs.tabBar()
+    pos = bar.tabRect(0).center()
+
+    QTest.mouseClick(bar, Qt.MouseButton.MiddleButton, pos=pos)
+    QTest.mouseDClick(bar, Qt.MouseButton.MiddleButton, pos=pos)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=pos)
+
+    assert closed == [0]
+    assert renamed == []
+
+
+def test_tab_layout_change_invalidates_middle_press(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+    pos = bar.tabRect(0).center()
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=pos)
+    tabs.removeTab(0)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=pos)
+
+    assert received == []
 
 
 def test_double_click_requests_rename(tabs, qtbot):
