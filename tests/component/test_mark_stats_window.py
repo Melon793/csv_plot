@@ -902,3 +902,15 @@ class TestCopyToClipboard:
         stats_window.copy_csv_btn.click()
         assert stats_window.status_label.text().startswith("没有可复制的数据")
         assert clipboard_sentinel.text() == "__sentinel__"
+
+    def test_column_config_change_clears_notice(
+        self, stats_window, clipboard_sentinel
+    ):
+        stats_window.update_stats([("p", 0, [_entry()])])
+        stats_window.copy_csv_btn.click()
+        assert "已复制" in stats_window.status_label.text()
+
+        stats_window._apply_column_keys(
+            [k for k in stats_window.model.column_keys() if k != "slope"]
+        )
+        assert "已复制" not in stats_window.status_label.text()
