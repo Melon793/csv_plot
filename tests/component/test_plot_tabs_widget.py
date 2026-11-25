@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel, QToolButton
 
@@ -710,9 +711,16 @@ def test_dir_popup_long_current_name_stays_inside(tabs, qtbot, qapp):
 def test_dir_popup_background_is_white_not_gray(tabs, qtbot, qapp):
     _add_pages(tabs, 2)
     popup = _open_dir_popup(tabs, qtbot, qapp)
+    # 圆角白底画在内层卡片上：透明顶层窗只负责窗口形状，自身不画 QSS 背景
+    assert popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     assert "background: #ffffff" in popup.styleSheet()
-    assert "QScrollArea { background: transparent" in popup.styleSheet()
-    assert not popup._scroll.viewport().autoFillBackground()
+    assert popup._card.objectName() == "pageDirectoryCard"
+    # 透明窗里 QSS 透明底会被当作"擦除该矩形"，滚动区必须自己刷不透明白
+    viewport = popup._scroll.viewport()
+    assert viewport.autoFillBackground()
+    white = QColor("#ffffff")
+    for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Base):
+        assert viewport.palette().color(role) == white
     assert not popup._rows_host.autoFillBackground()
     popup.hide()
 
@@ -882,7 +890,7 @@ def test_dir_popup_height_exact_no_dead_zone(tabs, qtbot, qapp):
     _add_pages(tabs, 1)
     popup = _open_dir_popup(tabs, qtbot, qapp)
     assert popup.height() == 26 + 9 + 26 + 10
-    sep = popup.layout().itemAt(1).widget()
+    sep = popup._card.layout().itemAt(1).widget()
     assert sep.height() == 9
     assert popup.width() >= 200, "单页 popup 不得窄到截断页名"
     popup.hide()

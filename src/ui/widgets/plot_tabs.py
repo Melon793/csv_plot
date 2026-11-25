@@ -38,6 +38,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, S
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -670,35 +671,48 @@ class _PageDirectoryPopup(QWidget):
         )
         self._owner = owner
         self.setObjectName("pageDirectoryPopup")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        # 不画圆角：本浮层是不透明顶层窗口，QSS 圆角只改描边路径，窗口四角仍
-        # 按矩形刷白（同一现象见 theme.py 的 QToolTip 注释）。改透明窗承载圆角
-        # 需真机验证阴影与文字渲染，先在 dev 分支试，main 暂用直角。
+        # 顶层 Popup 不透明时，QSS 圆角只改描边路径，窗口四角仍按矩形刷白，
+        # 系统阴影也沿方形窗口走（同一现象见 theme.py 的 QToolTip 注释）。开
+        # 透明底后窗口形状跟随实际绘制；但 Qt 6.7/macOS 上透明顶层窗不画自身
+        # 的 QSS 背景（文字照常），圆角白底必须落在内层卡片上。实测真机抓屏：
+        # 四角透出背后内容、系统阴影随圆角。
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(
-            "#pageDirectoryPopup { background: #ffffff;"
-            " border: 1px solid #d5dbe3; }"
-            "#pageDirectoryPopup QScrollArea { background: transparent; border: none; }"
+            "#pageDirectoryCard { background: #ffffff;"
+            " border: 1px solid #d5dbe3; border-radius: 6px; }"
         )
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(5, 5, 5, 5)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        self._scroll = QScrollArea(self)
+        self._card = QFrame(self)
+        self._card.setObjectName("pageDirectoryCard")
+        outer.addWidget(self._card)
+        body = QVBoxLayout(self._card)
+        body.setContentsMargins(5, 5, 5, 5)
+        body.setSpacing(0)
+        self._scroll = QScrollArea(self._card)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        # viewport/rows 容器默认灰底会盖住白色 popup 底（观感发灰），统一透明；
-        # setWidget 会重置 autoFillBackground，故 rows_host 的透明在其后设置
-        self._scroll.viewport().setAutoFillBackground(False)
+        # 透明窗里给子控件写 QSS 透明底（含白色底）会被 Qt 当成"擦除该矩形"，
+        # 卡片中间会露出背后画面（真机抓屏实测）。滚动区改为调色板刷不透明白，
+        # 与卡片同色，视觉无差且不再挖洞。
+        white = QPalette()
+        white.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
+        white.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        self._scroll.setPalette(white)
+        self._scroll.viewport().setAutoFillBackground(True)
+        self._scroll.viewport().setPalette(white)
         self._rows_host = QWidget()
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(0)
         self._scroll.setWidget(self._rows_host)
         self._rows_host.setAutoFillBackground(False)
-        outer.addWidget(self._scroll)
-        sep_wrap = QWidget(self)
+        body.addWidget(self._scroll)
+        sep_wrap = QWidget(self._card)
         sep_lay = QHBoxLayout(sep_wrap)
         sep_lay.setContentsMargins(8, 4, 8, 4)
         sep_lay.setSpacing(0)
@@ -706,10 +720,10 @@ class _PageDirectoryPopup(QWidget):
         sep.setFixedHeight(1)
         sep.setStyleSheet("background: #eceff3;")
         sep_lay.addWidget(sep)
-        outer.addWidget(sep_wrap)
-        self._new_row = _DirectoryNewRow(self)
+        body.addWidget(sep_wrap)
+        self._new_row = _DirectoryNewRow(self._card)
         self._new_row.clicked.connect(self._on_new)
-        outer.addWidget(self._new_row)
+        body.addWidget(self._new_row)
 
     def open_for(self, anchor: QWidget) -> None:
         provider = self._owner._page_list_provider
