@@ -1,9 +1,10 @@
-"""CustomViewBox 右键菜单中文文案 component 测试（offscreen）。
+"""CustomViewBox 右键菜单结构测试（offscreen）。
 
-覆盖两件事：
-1. 我们自己添加的菜单项全部为中文（pyqtgraph 默认项按设计保持英文）；
-2. 幂等性——`getMenu` 返回的是 pyqtgraph 缓存的同一个 QMenu，创建文案与
-   「判重/移除」比对文案必须同源，否则每次右键都会重复插入一份。
+菜单完全自建（不再继承 pyqtgraph 的 ViewBoxMenu）：
+- 顶层顺序固定：按 X 调节 Y / 游标 → 数据三项 → 布局两项 → 导出 → 清除；
+- pyqtgraph 的 View All / X/Y axis / Plot Options / Mouse Mode 不再出现；
+- 导出改为复用 Scene 原生动作（scene.showExportDialog 能力保留）；
+- 缓存同一个 QMenu、每次右键清空重排，反复右键不累积对象。
 
 游标选项的显示文案改为中文后，`request_set_cursor_mode` 仍必须发英文
 内部标识符（cursor_sync_manager / file_loader_manager 按它比对）。
@@ -19,11 +20,13 @@ from PySide6.QtCore import QPointF
 from tests.fixtures.waits import flush_deferred_deletes
 from src.ui.widgets.custom_viewbox import (
     ZH_ADJUST_HEIGHT,
+    ZH_ARRANGE_LAYOUT,
     ZH_AUTO_Y_IN_X,
     ZH_CLEAR_PLOT,
     ZH_COPY_NAME,
     ZH_CURSOR_MENU,
     ZH_CURSOR_MODE_LABELS,
+    ZH_EXPORT,
     ZH_HIDE_CURSOR_VALUE,
     ZH_JUMP_TO_DATA,
     ZH_RESET_ALL_HEIGHT,
@@ -51,10 +54,11 @@ LEGACY_ENGLISH_TEXTS = [
 
 
 class _FakeMenuEvent:
-    """只提供 getMenu 用到的 scenePos() 的伪事件"""
+    """只提供 getMenu / addParentContextMenus 用到的字段"""
 
-    def __init__(self, x=0.0, y=0.0):
+    def __init__(self, x=0.0, y=0.0, accepted_item=None):
         self._pos = QPointF(x, y)
+        self.acceptedItem = accepted_item
 
     def scenePos(self):
         return self._pos
@@ -143,14 +147,75 @@ def test_menu_uses_chinese_labels(view_box):
         assert legacy not in all_texts, f"英文残留文案 {legacy!r} 未替换干净"
 
 
-def test_pyqtgraph_default_items_untouched(view_box):
-    """pyqtgraph 默认项按设计保持英文，且原有的按英文隐藏逻辑仍生效"""
+def test_pyqtgraph_default_items_removed(view_box):
+    """原生项全部退出菜单；导出保留为 Scene 动作并汉化"""
     menu = view_box.getMenu(_FakeMenuEvent())
-    actions = {a.text(): a for a in menu.actions()}
+    actions = {a.text(): a for a in menu.actions() if not a.isSeparator()}
 
-    assert "View All" in actions
-    assert "Mouse Mode" in actions
-    assert actions["Mouse Mode"].isVisible() is False
+    for native in ("View All", "X axis", "Y axis", "Mouse Mode", "Plot Options"):
+        assert native not in actions, f"原生菜单项 {native!r} 未移除"
+    assert "Export..." not in actions
+    assert ZH_EXPORT in actions
+
+    scene = view_box.scene()
+    assert scene.contextMenu == [], "原生导出项仍会被 Scene 自动追加"
+    assert scene._csv_plot_export_action is actions[ZH_EXPORT]
+
+    # 停用的只是 PlotItem 菜单入口，ctrlMenu 本身原样保留
+    plot_item = view_box.plot_widget.plot_item
+    assert plot_item.menuEnabled() is False
+    assert plot_item.ctrlMenu is not None
+
+
+def test_export_action_keeps_native_chain(view_box):
+    """导出项仍走 Scene.showExportDialog；真实追加链路不会重复塞原生项"""
+    vb = view_box
+    ev = _FakeMenuEvent(accepted_item=vb)
+    menu = vb.getMenu(ev)
+    scene = vb.scene()
+
+    class _FakeDialog:
+        def __init__(self):
+            self.shown = []
+
+        def show(self, item):
+            self.shown.append(item)
+
+    fake = _FakeDialog()
+    scene.exportDialog = fake
+    try:
+        # 复现 ViewBox.mouseClickEvent → addParentContextMenus 的真实顺序
+        scene.addParentContextMenus(vb, menu, ev)
+        texts = [a.text() for a in menu.actions()]
+        assert texts.count(ZH_EXPORT) == 1, "导出项被重复追加"
+        assert "Plot Options" not in texts
+
+        next(a for a in menu.actions() if a.text() == ZH_EXPORT).trigger()
+        assert fake.shown == [vb]
+    finally:
+        scene.exportDialog = None
+
+
+def test_top_level_order_is_fixed(view_box):
+    """顶层顺序固定：视图 → 数据 → 布局 → 导出 → 清除"""
+    menu = view_box.getMenu(_FakeMenuEvent())
+    texts = [a.text() for a in menu.actions()]
+
+    assert texts == [
+        ZH_AUTO_Y_IN_X,
+        ZH_CURSOR_MENU,
+        "",
+        ZH_JUMP_TO_DATA,
+        ZH_COPY_NAME,
+        ZH_VAR_EDITOR,
+        "",
+        ZH_ADJUST_HEIGHT,
+        ZH_ARRANGE_LAYOUT,
+        "",
+        ZH_EXPORT,
+        "",
+        ZH_CLEAR_PLOT,
+    ]
 
 
 def test_get_menu_is_idempotent(view_box):

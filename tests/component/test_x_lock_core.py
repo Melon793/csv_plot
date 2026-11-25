@@ -5,8 +5,8 @@
 - 鼠标掩码 == [False, True]，Y 平移/缩放能力保留；
 - 兄弟子图（XLink 组）范围不变；
 - B1：Shift 框选 release 锁定时只写 Y、X 不动（D13）；
-- B2：getMenu 锁定态藏 "X axis" 子菜单与 "View All"，Y axis 保留，
-  且菜单不得有任何锁项（main 收口：L2 只在抽屉）；
+- B2（菜单部分已随菜单自建退场）：右键菜单不含 X/Y axis、View All
+  等原生项，锁定前后都不提供会静默解锁的入口（L2 只在抽屉）；
 - set_x_axis_locked 广播含非当前页、同状态 no-op、解锁逐图恢复、
   自动解锁带 reason 播报（真实方法 + 最小宿主替身，不复制实现）；
 - 新建子图继承锁定（plot_page 补种，含增量补格）。
@@ -168,7 +168,7 @@ def test_locked_box_zoom_writes_y_only(locked_plot, qapp):
     assert vb.viewRange()[1][1] == pytest.approx(expected_y[1], rel=1e-6)
 
 
-# ---------- B2：getMenu 锁定态可见性 + L1 checked 同步 ----------
+# ---------- B2：菜单不再提供会静默解锁的入口 ----------
 
 @pytest.fixture()
 def menu_vb(plot_factory):
@@ -183,38 +183,17 @@ def menu_vb(plot_factory):
     return pw.view_box
 
 
-def _action(menu, text):
-    return next(a for a in menu.actions() if a.text() == text)
+def test_getmenu_has_no_unlock_entry_in_any_lock_state(menu_vb):
+    """菜单自建后不再有 X axis/View All 入口，锁定与否都不会被菜单静默解锁。"""
+    for locked in (True, False, None):
+        menu_vb.plot_widget._x_mouse_locked = locked
+        menu = menu_vb.getMenu(_FakeMenuEvent())
+        texts = [a.text() for a in menu.actions()]
 
-
-def test_getmenu_locked_hides_x_axis_and_view_all(menu_vb):
-    menu_vb.plot_widget._x_mouse_locked = True
-    menu = menu_vb.getMenu(_FakeMenuEvent())
-
-    assert not _action(menu, "X axis").isVisible(), "X axis 子菜单会静默解锁（B2）"
-    assert not _action(menu, "View All").isVisible(), "View All 会重置 X 范围"
-    assert _action(menu, "Y axis").isVisible(), "Y axis 必须保留"
-    # 入口收口（main 拍板）：右键菜单不得有锁项（L2 只在抽屉）
-    assert not any("锁定" in a.text() for a in menu.actions())
-
-
-def test_getmenu_unlocked_restores_and_syncs_checked(menu_vb):
-    menu_vb.plot_widget._x_mouse_locked = True
-    menu = menu_vb.getMenu(_FakeMenuEvent())
-    assert not _action(menu, "X axis").isVisible()
-
-    menu_vb.plot_widget._x_mouse_locked = False
-    menu = menu_vb.getMenu(_FakeMenuEvent())
-    assert _action(menu, "X axis").isVisible()
-    assert _action(menu, "View All").isVisible()
-    assert not any("锁定" in a.text() for a in menu.actions())
-
-
-def test_getmenu_flag_none_is_treated_unlocked(menu_vb):
-    """plot_widget 注入前标志为 None：getattr 防 None，按未锁定处理。"""
-    menu_vb.plot_widget = None
-    menu = menu_vb.getMenu(_FakeMenuEvent())
-    assert _action(menu, "X axis").isVisible()
+        for native in ("X axis", "Y axis", "View All", "Plot Options", "Mouse Mode"):
+            assert native not in texts, f"锁定={locked} 时仍有原生项 {native!r}"
+        # 入口收口（main 拍板）：右键菜单不得有锁项（L2 只在抽屉）
+        assert not any("锁定" in text for text in texts)
 
 
 # ---------- 广播：真实 set_x_axis_locked + 最小宿主替身 ----------

@@ -223,7 +223,7 @@ def test_wobble_but_ends_past_line_still_zooms(scan_plot, monkeypatch):
 
 
 def test_short_drag_opens_real_menu(scan_plot, qapp):
-    """不放桩走真实 raiseContextMenu：MouseDragEvent 也能正常弹出缓存菜单。
+    """不放桩走真实 raiseContextMenu：MouseDragEvent 也能正常弹出自建菜单。
 
     上面的误触用例只数了一次回调；这条证明 getMenu(MouseDragEvent) /
     addParentContextMenus / popup 整条真实链路可用（offscreen 下 popup 不阻塞）。
@@ -236,8 +236,8 @@ def test_short_drag_opens_real_menu(scan_plot, qapp):
     _drag(vb, start, end)
     qapp.processEvents()
 
-    assert vb.menu.isVisible()
-    vb.menu.hide()
+    assert vb._context_menu is not None and vb._context_menu.isVisible()
+    vb._context_menu.hide()
     qapp.processEvents()
     assert vb.viewRange()[0] == pytest.approx([0, 100], abs=1e-9)
 
