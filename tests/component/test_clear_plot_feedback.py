@@ -80,10 +80,16 @@ def test_middle_double_click_announces_cleared_count(plot_factory, qapp):
     pw = plot_factory()
     assert pw.plot_variable("a")
     assert pw.plot_variable("b")
+    old_items = {ci.curve for ci in pw.curves.values()}
 
     _middle_double_click(pw, qapp)
 
     assert list(pw.curves) == []
+    assert all(item.scene() is None for item in old_items)
+    assert all(item not in pw.plot_item.items for item in old_items)
+    assert all(item not in pw.plot_item.dataItems for item in old_items)
+    assert all(item not in pw.plot_item.curves for item in old_items)
+    assert all(item not in pw.view_box.addedItems for item in old_items)
     assert pw.plot_context.cleared_announces == [("已清除当前子图", 2)]
 
 

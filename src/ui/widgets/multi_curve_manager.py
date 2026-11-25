@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import html
 import math
+from copy import deepcopy
 from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
 
@@ -1572,17 +1573,116 @@ class MultiCurveManager:
         else:
             self.pw.plot_variable(names[0])
 
+    def _snapshot_plot_replacement(self) -> dict[str, Any]:
+        """保存 Shift 替换前的本地资产；不是通用撤销栈。"""
+        pw = self.pw
+        scene = pw.plot_item.scene() if pw.plot_item is not None else None
+        return {
+            "curves": dict(pw.curves),
+            "invalid": dict(getattr(pw, "invalid_curves", {}) or {}),
+            "view_state": deepcopy(pw.view_box.state),
+            "color_index": pw.current_color_index,
+            "legend_selection": set(
+                getattr(pw, "_legend_selection", set()) or set()
+            ),
+            "legend_sel_anchor": getattr(pw, "_legend_sel_anchor", None),
+            # plot_item.plot 若在写入 curves 前抛错，可能留下孤儿场景项。
+            "scene_plot_items": (
+                {item for item in scene.items() if isinstance(item, pg.PlotDataItem)}
+                if scene is not None else set()
+            ),
+        }
+
+    def _restore_plot_replacement(self, state: dict[str, Any]) -> bool:
+        """恢复替换前曲线/占位/视野；返回核心资产是否完整恢复。"""
+        pw = self.pw
+        old_curves: dict[str, CurveInfo] = state["curves"]
+        try:
+            scene = pw.plot_item.scene() if pw.plot_item is not None else None
+            if scene is not None:
+                for item in list(scene.items()):
+                    if (
+                        isinstance(item, pg.PlotDataItem)
+                        and item not in state["scene_plot_items"]
+                    ):
+                        if item in pw.plot_item.items:
+                            pw.plot_item.removeItem(item)
+                        else:
+                            scene.removeItem(item)
+                            item.setParentItem(None)
+            for ci in list(pw.curves.values()):
+                curve = ci.curve
+                if curve is not None and curve.scene() is not None:
+                    pw.plot_item.removeItem(curve)
+
+            # 保留字典对象本身，避免持有旧引用的订阅者看到替换后的新容器。
+            pw.curves.clear()
+            pw.curves.update(old_curves)
+            pw.invalid_curves.clear()
+            pw.invalid_curves.update(state["invalid"])
+            pw.current_color_index = state["color_index"]
+            # 清空占位会清掉图例选择；先恢复真相源，再由下方刷新重放高亮。
+            selection = getattr(pw, "_legend_selection", None)
+            if selection is not None:
+                selection.clear()
+                selection.update(state["legend_selection"])
+            pw._legend_sel_anchor = state["legend_sel_anchor"]
+
+            for ci in old_curves.values():
+                curve = ci.curve
+                if curve is None:
+                    continue
+                curve.setData(
+                    ci.x_data, ci.y_data, stepMode=step_mode_for(ci.draw_mode)
+                )
+                if curve.scene() is None:
+                    if curve in pw.plot_item.items:
+                        pw.plot_item.removeItem(curve)
+                    curve.setParentItem(pw.plot_item.vb.childGroup)
+                    pw.plot_item.addItem(curve)
+                curve.setVisible(ci.visible)
+        except Exception:
+            logger.exception("Shift 替换失败后恢复旧曲线资产失败")
+            return False
+
+        # 核心资产已恢复；刷新失败只记录，不再把异常抛回 dropEvent。
+        refresh_ok = True
+        try:
+            pw.view_box.setState(state["view_state"])
+            x_width = pw.view_box.viewRange()[0][1] - pw.view_box.viewRange()[0][0]
+            for name, ci in old_curves.items():
+                pw._apply_curve_style(name, resolve_symbol_show(ci, x_width))
+            self._update_header_for_curves()
+            self._update_axes_for_multi_curve(allow_y_expand=False)
+            pw._cursor_manager._update_vline_bounds_from_data()
+            pw._axis_manager._recalc_max_point_density()
+        except Exception:
+            refresh_ok = False
+            logger.exception("Shift 替换失败后恢复旧图刷新未完成")
+
+        # 上面的轴/游标刷新可能改动视野；即使刷新中断也独立兜底还原视野。
+        view_restored = True
+        try:
+            pw.view_box.setState(state["view_state"])
+            if pw.vline.isVisible():
+                pw.update_cursor_label()
+        except Exception:
+            view_restored = False
+            logger.exception("Shift 替换失败后恢复旧图视野未完成")
+        return refresh_ok and view_restored
+
     def replace_variables_in_plot(self, var_names: list[str]) -> bool:
         """Shift 拖入：先校验并备好至少一条曲线，再替换当前子图。
 
         有效项（包括与旧曲线同名项）按拖入顺序绘制；无效项跳过并汇总反馈。
-        空载荷或全部失败时不清空、不重置坐标，也不发出成功播报。
+        空载荷或全部失败时不清空、不重置坐标，也不发出成功播报。清空或提交
+        异常时恢复替换前资产并返回 False，不把半成品当作成功替换。
         """
-        names = [
+        names = list(dict.fromkeys(
             name.strip()
             for name in (var_names or [])
             if isinstance(name, str) and name.strip()
-        ]
+        ))
         if not names:
             QMessageBox.information(
                 self.pw, "替换结果", "拖入载荷为空，当前子图未更改。"
@@ -1596,9 +1696,29 @@ class MultiCurveManager:
             self._add_prepared_variables([], invalid_vars, [], replacement=True)
             return False
 
-        self.pw.clear_plot_item(clear_invalid=True)
-        self._add_prepared_variables(variables_data, invalid_vars, [], replacement=True)
-        return bool(self.pw.curves)
+        state = self._snapshot_plot_replacement()
+        try:
+            self.pw.clear_plot_item(clear_invalid=True, strict=True)
+            self._add_prepared_variables(
+                variables_data, invalid_vars, [], replacement=True
+            )
+        except Exception:
+            logger.exception("Shift 替换当前子图失败")
+            restored = self._restore_plot_replacement(state)
+            self.pw.curves_changed.emit()
+            QMessageBox.information(
+                self.pw,
+                "替换失败",
+                "替换失败：当前子图未完成替换，"
+                + (
+                    "已恢复替换前的曲线、占位和视野。"
+                    if restored
+                    else "旧曲线已尝试恢复，但部分曲线、占位或视野状态未完成，"
+                         "请重新加载数据。"
+                ),
+            )
+            return False
+        return list(self.pw.curves) == [item[0] for item in variables_data]
 
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,

@@ -781,13 +781,16 @@ class PlotDataManager:
                     pw.plot_context.request_mark_stats_refresh()
             pw._suppress_pin_update = False
 
-    def _safe_clear_plot_items(self):
-        """安全地清理所有plot items"""
+    def _safe_clear_plot_items(self, *, strict: bool = False):
+        """安全地清理所有 plot items；strict 模式不得吞掉逐项清理异常。"""
         pw = self.pw
         if not hasattr(pw, "plot_item") or pw.plot_item is None:
             return
 
-        safe_qt_op(lambda: self._clear_items_from_scene(pw.plot_item))
+        if strict:
+            self._clear_items_from_scene(pw.plot_item, strict=True)
+        else:
+            safe_qt_op(lambda: self._clear_items_from_scene(pw.plot_item))
 
     # ========================================================================
     # 失效占位（方案 B2）：demote / 复活
@@ -870,20 +873,46 @@ class PlotDataManager:
             var_name, color, visible_preference,
         )
 
-    def _clear_items_from_scene(self, plot_item):
-        """从场景中逐个清理 plot item"""
+    def _plot_item_candidates(self, plot_item):
+        """场景与 PlotItem/ViewBox 注册表的并集，包含已离场景的孤儿项。"""
+        scene = plot_item.scene()
+        registries = (
+            plot_item.items,
+            plot_item.dataItems,
+            plot_item.curves,
+            getattr(plot_item.vb, "addedItems", ()),
+        )
+        candidates = list(plot_item.items)
+        for registry in registries[1:]:
+            candidates.extend(registry)
+        if scene is not None:
+            candidates.extend(scene.items())
+        return list(dict.fromkeys(candidates))
+
+    def _clear_items_from_scene(self, plot_item, *, strict: bool = False):
+        """清理场景与注册表中的 plot item；strict 模式将异常交给事务回滚。"""
         current_scene = plot_item.scene()
-        if current_scene is None:
-            return
+        for item in self._plot_item_candidates(plot_item):
+            if strict:
+                self._clear_single_item(item, current_scene, plot_item)
+            else:
+                safe_qt_op(
+                    lambda: self._clear_single_item(item, current_scene, plot_item)
+                )
 
-        all_items = current_scene.items()
-        for item in all_items:
-            safe_qt_op(lambda: self._clear_single_item(item, current_scene))
-
-    def _clear_single_item(self, item, current_scene):
+    def _clear_single_item(self, item, current_scene, plot_item):
         """清理单个 plot item"""
         item_scene = item.scene()
-        if item_scene != current_scene:
+        registries = (
+            plot_item.items,
+            plot_item.dataItems,
+            plot_item.curves,
+            getattr(plot_item.vb, "addedItems", ()),
+        )
+        registered = any(item in registry for registry in registries)
+        if item_scene is not None and item_scene is not current_scene:
+            return
+        if item_scene is None and not registered:
             return
         should_remove = False
         if hasattr(item, "getData") and hasattr(item, "opts"):
@@ -898,19 +927,58 @@ class PlotDataManager:
                 except Exception:
                     logger.debug("清理 plot item.clear() 异常", exc_info=True)
         if should_remove:
-            current_scene.removeItem(item)
+            # 必须走 PlotItem.removeItem：仅 scene.removeItem 会遗留
+            # items/dataItems/curves 与 ViewBox.addedItems 注册表。
+            if item in plot_item.items:
+                plot_item.removeItem(item)
+            elif registered:
+                # 兼容已从 items 掉队、却仍卡在其余注册表的损坏状态。
+                plot_item.vb.removeItem(item)
+                for registry in registries:
+                    if item in registry:
+                        registry.remove(item)
+                plot_item.updateDecimation()
+                plot_item.updateParamList()
+            elif item_scene is current_scene:
+                current_scene.removeItem(item)
 
-    def _clear_plot_data(self, clear_invalid: bool = False):
+    def _clear_plot_data(self, clear_invalid: bool = False, *, strict: bool = False):
         """清除绘图数据（统一版：仅操作 curves 字典）
 
         ``clear_invalid`` 为 True 时连带清 ``invalid_curves`` 占位（用户显式
         清空 / 模板完整还原）；缺省 False 保留占位（reload 跨清空存活）。
+        ``strict=True`` 供 Shift 替换使用：清空失败必须向上抛，禁止吞掉异常
+        后把新曲线叠到未清干净的旧图上；调用方负责恢复替换前快照。
         """
         pw = self.pw
         try:
             cleared_count = len(pw.curves)
+            previous_plot_items = (
+                {
+                    item for item in self._plot_item_candidates(pw.plot_item)
+                    if isinstance(item, pg.PlotDataItem)
+                }
+                if pw.plot_item is not None else set()
+            )
             pw._clear_cursor_items(hide_only=False)
-            self._safe_clear_plot_items()
+            self._safe_clear_plot_items(strict=strict)
+            if strict:
+                plot_item = pw.plot_item
+                registries = (
+                    plot_item.items,
+                    plot_item.dataItems,
+                    plot_item.curves,
+                    getattr(plot_item.vb, "addedItems", ()),
+                )
+                leftovers = [
+                    item for item in previous_plot_items
+                    if item.scene() is not None
+                    or any(item in registry for registry in registries)
+                ]
+                if leftovers:
+                    raise RuntimeError(
+                        f"严格清空仍有 {len(leftovers)} 个旧曲线项留在场景或注册表"
+                    )
             pw.axis_y.setLabel(text="")
             pw.update_legend_label("channel name")
 
@@ -943,16 +1011,20 @@ class PlotDataManager:
             # 本图已无曲线：游标域回到全局数据域，而不是放开成无界
             self._axis_manager.apply_cursor_x_domain()
         except Exception:
+            if strict:
+                logger.warning("严格清理绘图数据失败", exc_info=True)
+                raise
             logger.debug("清理绘图数据时异常", exc_info=True)
 
-    def clear_plot_item(self, clear_invalid: bool = False):
+    def clear_plot_item(self, clear_invalid: bool = False, *, strict: bool = False):
         """清除绘图项
 
         ``clear_invalid`` 语义见 ``_clear_plot_data``：reload 不传（占位存活），
         模板应用 / 用户显式清空传 True（完整还原，不留孤儿占位）。
+        ``strict`` 仅 Shift 替换开启，语义见 ``_clear_plot_data``。
         """
         self._axis_manager._reset_plot_limits()
-        self._clear_plot_data(clear_invalid=clear_invalid)
+        self._clear_plot_data(clear_invalid=clear_invalid, strict=strict)
 
     # ========================================================================
     # 变量移除（权威实现，设计文档 §3.5）

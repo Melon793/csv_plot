@@ -13,6 +13,7 @@ test_legend_drop.py 已覆盖 legend 来源与 add/replace 基础回归，
 
 import numpy as np
 import pandas as pd
+import pyqtgraph as pg
 import pytest
 
 from PySide6.QtCore import QPoint, QPointF, Qt
@@ -34,8 +35,17 @@ def _demo_data():
 
 
 def _array_snapshot(array):
+    if array is None:
+        return None
     array = np.asarray(array)
     return array.dtype.str, array.shape, array.tobytes()
+
+
+def _pen_snapshot(curve):
+    pen = curve.opts.get("pen")
+    if pen is None:
+        return None
+    return pen.color().name(), pen.widthF(), pen.style()
 
 
 def _curve_snapshot(pw):
@@ -51,11 +61,15 @@ def _curve_snapshot(pw):
             ci.factor,
             ci.offset,
             ci.draw_mode,
+            ci.draw_mode_source,
             ci.symbol_policy,
+            ci.y_format,
             ci.visible,
+            _pen_snapshot(ci.curve),
             _array_snapshot(ci.x_data),
             _array_snapshot(ci.y_data),
             _array_snapshot(ci.y_raw),
+            _array_snapshot(ci.original_index),
         )
         for name, ci in pw.curves.items()
     ]
@@ -160,10 +174,40 @@ def test_shift_drop_multiple_replaces_all(plot_factory, silent_dialogs):
     """Shift + 多变量拖入 = 全量替换"""
     pw = plot_factory()
     assert pw.plot_variable("a")
+    old_item = pw.curves["a"].curve
 
     _drop(pw, ["b", "c"], shift=True)
 
     assert list(pw.curves) == ["b", "c"]
+    assert old_item.scene() is None
+    assert old_item not in pw.plot_item.items
+    assert old_item not in pw.plot_item.dataItems
+    assert old_item not in pw.plot_item.curves
+    assert old_item not in pw.view_box.addedItems
+
+
+def test_shift_drop_clears_preexisting_detached_registry_orphan(
+    plot_factory, silent_dialogs
+):
+    """替换前已离场景但仍注册的旧曲线也必须清掉，不能继续参与新图。"""
+    pw = plot_factory()
+    assert pw.plot_variable("a")
+    old_item = pw.curves["a"].curve
+    pw.plot_item.scene().removeItem(old_item)
+    assert old_item.scene() is None
+    assert old_item in pw.plot_item.items
+    assert old_item in pw.plot_item.dataItems
+    assert old_item in pw.plot_item.curves
+    assert old_item in pw.view_box.addedItems
+
+    _drop(pw, ["b", "c"], shift=True)
+
+    assert list(pw.curves) == ["b", "c"]
+    assert old_item not in pw.plot_item.items
+    assert old_item not in pw.plot_item.dataItems
+    assert old_item not in pw.plot_item.curves
+    assert old_item not in pw.view_box.addedItems
+    assert silent_dialogs["information"] == []
 
 
 def test_shift_drop_to_empty_plot(plot_factory, silent_dialogs):
@@ -273,19 +317,253 @@ def test_shift_drop_partial_success_skips_failures_without_false_success(
 
 
 def test_shift_drop_same_name_is_replacement_not_duplicate_skip(
-    plot_factory, silent_dialogs
+    plot_factory, silent_dialogs, monkeypatch
 ):
     """目标已有同名变量：替换后仍绘制；输入重复项只绘制一次。"""
     pw = plot_factory(_demo_data())
     assert pw.plot_variable("speed")
     assert pw.plot_variable("flag")
     old_ci = pw.curves["speed"]
+    original_plot = pw.plot_item.plot
+    plotted_names = []
+
+    def record_plot(*args, **kwargs):
+        plotted_names.append(kwargs.get("name"))
+        return original_plot(*args, **kwargs)
+
+    monkeypatch.setattr(pw.plot_item, "plot", record_plot)
 
     _drop(pw, ["speed", "speed", "rpm"], shift=True)
 
     assert list(pw.curves) == ["speed", "rpm"]
+    assert plotted_names == ["speed", "rpm"]
     assert pw.curves["speed"] is not old_ci
     assert silent_dialogs["information"] == []
+
+
+def _prepare_failure_snapshot(pw):
+    """故障注入前布置有样式、隐藏曲线和失效占位的旧图。"""
+    assert pw.plot_variable("speed")
+    assert pw.plot_variable("rpm")
+    manager = pw._multi_curve_manager
+    assert manager.apply_curve_line_preset("speed", "dash")
+    assert manager.apply_curve_display_name("speed", "Demo speed")
+    assert manager.apply_curve_transform("rpm", 2.0, -1.0, allow_y_rescue=False)
+    manager.toggle_curve_visibility_by_name("rpm")
+    pw.demote_to_invalid(
+        "ghost_var", "#123456", False,
+        display_name="Demo ghost", factor=3.0, offset=2.0,
+    )
+    pw._legend_selection.clear()
+    pw._legend_selection.add("speed")
+    pw._legend_sel_anchor = "speed"
+    pw._refresh_selection_projections()
+    return (
+        _curve_snapshot(pw),
+        dict(pw.invalid_curves),
+        [tuple(pw.view_box.viewRange()[0]), tuple(pw.view_box.viewRange()[1])],
+        pw.current_color_index,
+        {ci.curve for ci in pw.curves.values()},
+        (set(pw._legend_selection), pw._legend_sel_anchor),
+    )
+
+
+def _assert_failure_snapshot(pw, before, dialogs, *, expect_complete=True):
+    curves, invalid, view_ranges, color_index, scene_items, selection = before
+    assert _curve_snapshot(pw) == curves
+    assert pw.invalid_curves == invalid
+    assert pw.current_color_index == color_index
+    assert (set(pw._legend_selection), pw._legend_sel_anchor) == selection
+    for actual, expected in zip(pw.view_box.viewRange(), view_ranges):
+        assert actual == pytest.approx(expected)
+    assert all(ci.curve.scene() is not None for ci in pw.curves.values())
+    curve_type = type(next(iter(pw.curves.values())).curve)
+    assert {
+        item for item in pw.plot_item.scene().items()
+        if isinstance(item, curve_type)
+    } == scene_items
+    assert {
+        item for item in pw.plot_item.items if isinstance(item, curve_type)
+    } == scene_items
+    assert {
+        item for item in pw.plot_item.dataItems if isinstance(item, curve_type)
+    } == scene_items
+    assert {
+        item for item in pw.plot_item.curves if isinstance(item, curve_type)
+    } == scene_items
+    assert {
+        item for item in pw.view_box.addedItems if isinstance(item, curve_type)
+    } == scene_items
+    assert pw._batch_adding is False
+    assert len(dialogs["information"]) == 1
+    message = dialogs["information"][0][1]
+    assert "替换失败" in message
+    if expect_complete:
+        assert "已恢复替换前的曲线、占位和视野" in message
+    else:
+        assert "部分曲线、占位或视野状态未完成" in message
+        assert "已恢复替换前的曲线、占位和视野" not in message
+    assert "成功" not in message
+
+
+def test_shift_drop_clear_failure_restores_original_subplot(
+    plot_factory, silent_dialogs, monkeypatch
+):
+    """清空阶段抛错不能被吞掉后继续提交，也不能丢掉旧曲线。"""
+    pw = plot_factory(_demo_data())
+    before = _prepare_failure_snapshot(pw)
+
+    def fail_clear():
+        raise RuntimeError("Demo clear failure")
+
+    monkeypatch.setattr(pw._plot_data_manager, "_safe_clear_plot_items", fail_clear)
+
+    _drop(pw, ["rpm", "flag"], shift=True)
+
+    _assert_failure_snapshot(pw, before, silent_dialogs)
+
+
+def test_shift_drop_inner_clear_failure_is_not_swallowed(
+    plot_factory, silent_dialogs, monkeypatch
+):
+    """逐项清理的真实内层异常必须终止提交，不能留下新旧混合曲线。"""
+    pw = plot_factory(_demo_data())
+    before = _prepare_failure_snapshot(pw)
+    manager = pw._plot_data_manager
+    old_speed = pw.curves["speed"].curve
+    original_clear_item = manager._clear_single_item
+
+    def fail_speed_item(item, current_scene, plot_item):
+        if item is old_speed:
+            raise AttributeError("Demo inner clear failure")
+        return original_clear_item(item, current_scene, plot_item)
+
+    monkeypatch.setattr(manager, "_clear_single_item", fail_speed_item)
+
+    _drop(pw, ["rpm", "flag"], shift=True)
+
+    _assert_failure_snapshot(pw, before, silent_dialogs)
+
+
+def test_shift_drop_clear_registry_leftover_blocks_replacement(
+    plot_factory, silent_dialogs, monkeypatch
+):
+    """曲线已离开场景但仍留在 PlotItem/ViewBox 注册表时也必须回滚。"""
+    pw = plot_factory(_demo_data())
+    before = _prepare_failure_snapshot(pw)
+    manager = pw._plot_data_manager
+    old_speed = pw.curves["speed"].curve
+    original_clear_item = manager._clear_single_item
+
+    def scene_only_clear(item, current_scene, plot_item):
+        if item is old_speed:
+            current_scene.removeItem(item)
+            return
+        return original_clear_item(item, current_scene, plot_item)
+
+    monkeypatch.setattr(manager, "_clear_single_item", scene_only_clear)
+
+    _drop(pw, ["rpm", "flag"], shift=True)
+
+    _assert_failure_snapshot(pw, before, silent_dialogs)
+
+
+def test_shift_drop_second_curve_failure_restores_original_subplot(
+    plot_factory, silent_dialogs, monkeypatch
+):
+    """第二条曲线绘制异常时撤掉第一条半成品，并恢复完整旧图。"""
+    pw = plot_factory(_demo_data())
+    before = _prepare_failure_snapshot(pw)
+    original_plot = pw.plot_item.plot
+
+    def fail_second(*args, **kwargs):
+        curve = original_plot(*args, **kwargs)
+        if kwargs.get("name") == "flag":
+            # 模拟 plot 已把 item 挂进场景、返回前才抛错的最坏情况。
+            raise RuntimeError("Demo draw failure")
+        return curve
+
+    monkeypatch.setattr(pw.plot_item, "plot", fail_second)
+
+    _drop(pw, ["rpm", "flag"], shift=True)
+
+    _assert_failure_snapshot(pw, before, silent_dialogs)
+
+
+def test_shift_drop_finalize_failure_restores_original_subplot(
+    plot_factory, silent_dialogs, monkeypatch
+):
+    """批量收尾异常同样走失败闭环，不能留下已提交的新曲线集合。"""
+    pw = plot_factory(_demo_data())
+    before = _prepare_failure_snapshot(pw)
+
+    def fail_finalize(*args, **kwargs):
+        raise RuntimeError("Demo finalize failure")
+
+    monkeypatch.setattr(pw._multi_curve_manager, "_finalize_batch_add", fail_finalize)
+
+    _drop(pw, ["rpm", "flag"], shift=True)
+
+    _assert_failure_snapshot(pw, before, silent_dialogs)
+
+
+def test_shift_drop_refresh_failure_still_restores_view_without_false_success(
+    plot_factory, silent_dialogs, monkeypatch
+):
+    """恢复刷新中断后独立还原视野，但不得宣称所有状态都已恢复。"""
+    pw = plot_factory(_demo_data())
+    before = _prepare_failure_snapshot(pw)
+
+    def fail_finalize(*args, **kwargs):
+        raise RuntimeError("Demo finalize failure")
+
+    def mutate_view_then_fail(*args, **kwargs):
+        pw.view_box.setYRange(0.5, 6.5, pad=0)
+        raise RuntimeError("Demo restore refresh failure")
+
+    monkeypatch.setattr(pw._multi_curve_manager, "_finalize_batch_add", fail_finalize)
+    monkeypatch.setattr(
+        pw._multi_curve_manager, "_update_axes_for_multi_curve", mutate_view_then_fail
+    )
+
+    _drop(pw, ["rpm", "flag"], shift=True)
+
+    _assert_failure_snapshot(pw, before, silent_dialogs, expect_complete=False)
+
+
+@pytest.mark.parametrize("with_invalid", [False, True])
+def test_shift_drop_failure_restores_empty_or_placeholder_only_plot(
+    plot_factory, silent_dialogs, monkeypatch, with_invalid
+):
+    """旧图没有曲线时，失败也不能留下新曲线；纯占位原样恢复。"""
+    pw = plot_factory(_demo_data())
+    if with_invalid:
+        pw.demote_to_invalid(
+            "ghost_var", "#123456", False,
+            display_name="Demo ghost", factor=3.0, offset=2.0,
+        )
+    invalid_before = dict(pw.invalid_curves)
+    view_before = [tuple(item) for item in pw.view_box.viewRange()]
+    original_plot = pw.plot_item.plot
+
+    def fail_after_add(*args, **kwargs):
+        original_plot(*args, **kwargs)
+        raise RuntimeError("Demo draw failure")
+
+    monkeypatch.setattr(pw.plot_item, "plot", fail_after_add)
+
+    _drop(pw, ["rpm"], shift=True)
+
+    assert pw.curves == {}
+    assert pw.invalid_curves == invalid_before
+    for actual, expected in zip(pw.view_box.viewRange(), view_before):
+        assert actual == pytest.approx(expected)
+    assert not any(
+        isinstance(item, pg.PlotDataItem) for item in pw.plot_item.scene().items()
+    )
+    assert not any(isinstance(item, pg.PlotDataItem) for item in pw.plot_item.items)
+    assert pw._batch_adding is False
+    assert "已恢复" in silent_dialogs["information"][0][1]
 
 
 def test_shift_drop_parse_exception_preserves_current_subplot(

@@ -1772,18 +1772,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """重置绘图限制 → 委托到 AxisManager"""
         self._axis_manager._reset_plot_limits()
 
-    def _clear_plot_data(self, clear_invalid: bool = False):
+    def _clear_plot_data(self, clear_invalid: bool = False, *, strict: bool = False):
         """清除绘图数据 → 委托到 PlotDataManager"""
-        self._plot_data_manager._clear_plot_data(clear_invalid=clear_invalid)
+        self._plot_data_manager._clear_plot_data(
+            clear_invalid=clear_invalid, strict=strict
+        )
         self.curves_changed.emit()
 
-    def clear_plot_item(self, clear_invalid: bool = False):
+    def clear_plot_item(self, clear_invalid: bool = False, *, strict: bool = False):
         """清除绘图项 → 委托到 PlotDataManager
 
         ``clear_invalid`` 缺省 False：reload 路径保留占位跨清空存活；
         模板应用 / 用户显式清空传 True（完整还原，不留孤儿占位，§4.3）。
+        ``strict=True`` 仅供 Shift 替换：失败抛给调用方做局部回滚。
         """
-        self._plot_data_manager.clear_plot_item(clear_invalid=clear_invalid)
+        self._plot_data_manager.clear_plot_item(
+            clear_invalid=clear_invalid, strict=strict
+        )
         self.curves_changed.emit()
 
     def demote_to_invalid(
