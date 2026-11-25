@@ -818,16 +818,13 @@ class CurveShelfWidget(QListWidget):
         return self.return_entries(self.selected_keys())
 
     # ------------------------------------------------------------------
-    # 条目删除（中键 / 右键 / 清空）
+    # 条目删除（右键 / 清空）
     # ------------------------------------------------------------------
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
-            item = self.itemAt(event.position().toPoint())
-            if item is not None:
-                key = item.data(SHELF_KEY_ROLE)
-                self.remove_entries([key])
-                event.accept()
-                return
+            # 显式消费，避免 QAbstractItemView 把中键当选中并清掉用户多选。
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
