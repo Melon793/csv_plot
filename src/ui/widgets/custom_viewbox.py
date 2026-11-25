@@ -18,6 +18,7 @@ from src.ui import theme
 # PlotItem 菜单，能力保留（scene.showExportDialog），只是入口改由我们排布。
 ZH_JUMP_TO_DATA = "跳转至变量数值表"
 ZH_AUTO_Y_IN_X = "按 X 范围调节 Y 轴"
+ZH_SCAN_ZOOM = "扫选放大（拖动选择 X 区间）"
 ZH_CURSOR_MENU = "游标选项"
 ZH_SHOW_CURSOR_VALUE = "显示游标数值"
 ZH_HIDE_CURSOR_VALUE = "隐藏游标数值"
@@ -88,6 +89,7 @@ class CustomViewBox(pg.ViewBox):
         # 右键扫选会话：_scan_active 在 Esc 取消后仍要吞掉剩余拖拽事件，
         # 所以不能只靠 _scan_band 判活
         self._scan_active = False
+        self._scan_armed = False
         self._scan_band = None
         self._scan_band_committed = None
         self._scan_filter_view = None
@@ -98,7 +100,7 @@ class CustomViewBox(pg.ViewBox):
     # ================================================================
 
     def mouseDragEvent(self, ev, axis=None):
-        """左/中键与轴区拖拽沿用父类；右键在绘图区内拖拽 = 扫选 X 区间。
+        """左/中键与轴区拖拽沿用父类；右键或 armed 左键在绘图区内扫选 X。
 
         pyqtgraph 0.14 的默认右键拖拽是双轴 ``scaleBy``（未写进文档，且会静默
         关掉两轴 autoRange）。整个默认行为在这里替换为「按下点 → 当前点」的
@@ -108,9 +110,11 @@ class CustomViewBox(pg.ViewBox):
         其余一律扫选 —— 判定线固定为像素、不随视宽放大。预览带的
         「虚线无填充 / 实线填充」与这个判定严格同源，松手前即可预知结果。
         """
+        button = ev.button()
+        armed_left = self._scan_armed and button == Qt.MouseButton.LeftButton
         if (
             axis is not None  # 轴区拖拽（AxisItem 转交，axis=0/1）
-            or ev.button() != Qt.MouseButton.RightButton
+            or (button != Qt.MouseButton.RightButton and not armed_left)
             # 锁 X 时不写 X（生产上锁定时 x 已 setMouseEnabled(False)，父类
             # 只剩 Y 缩放），与 D13「锁定时框选只写 Y」同口径
             or getattr(self.plot_widget, "_x_mouse_locked", False)
@@ -124,12 +128,10 @@ class CustomViewBox(pg.ViewBox):
         if not self._scan_active:
             return  # Esc 已取消：剩余拖拽事件直接吞掉，不再处理
 
-        # 松手事件可能被模态/切窗吃掉：中途发现右键已不在按下集合里就收摊，
+        # 松手事件可能被模态/切窗吃掉：中途发现拖动键已不在按下集合里就收摊，
         # 否则预览带与十字光标会一直留到下一次拖拽
-        if not ev.isFinish() and not (
-            ev.buttons() & Qt.MouseButton.RightButton
-        ):
-            self._teardown_scan()
+        if not ev.isFinish() and not (ev.buttons() & button):
+            self._teardown_scan(keep_armed=armed_left)
             return
 
         try:
@@ -140,6 +142,13 @@ class CustomViewBox(pg.ViewBox):
 
         if ev.isFinish():
             self._end_scan(ev)
+
+    def _arm_scan(self) -> None:
+        if getattr(self.plot_widget, "_x_mouse_locked", False):
+            return
+        self._scan_armed = True
+        self._install_scan_key_filter()
+        self._set_scan_cursor(Qt.CursorShape.CrossCursor)
 
     def _begin_scan(self) -> None:
         self._scan_active = True
@@ -156,7 +165,7 @@ class CustomViewBox(pg.ViewBox):
 
     def _update_scan_band(self, ev) -> None:
         """按「按下点 → 当前点」建/更新预览带（数据坐标，无 padding）。"""
-        down = ev.buttonDownScenePos(Qt.MouseButton.RightButton)
+        down = ev.buttonDownScenePos(ev.button())
         x0 = self.mapSceneToView(down).x()
         x1 = self.mapSceneToView(ev.scenePos()).x()
         committed = abs(ev.scenePos().x() - down.x()) >= self._scan_commit_px()
@@ -202,21 +211,23 @@ class CustomViewBox(pg.ViewBox):
         band.update()
 
     def _end_scan(self, ev) -> None:
-        """松手：净位移够判定线 → 缩 X；否则按点击补弹菜单。无论如何先清理。"""
-        down = ev.buttonDownScenePos(Qt.MouseButton.RightButton)
+        """松手：净位移够判定线 → 缩 X；armed 左键误触保持模式，右键误触弹菜单。"""
+        down = ev.buttonDownScenePos(ev.button())
         pos = ev.scenePos()
         commit_px = self._scan_commit_px()
         x0 = self.mapSceneToView(down).x()
         x1 = self.mapSceneToView(pos).x()
+        committed = abs(pos.x() - down.x()) >= commit_px
+        keep_armed = ev.button() == Qt.MouseButton.LeftButton and not committed
 
         try:
-            if abs(pos.x() - down.x()) >= commit_px:
+            if committed:
                 self._apply_scan_range(min(x0, x1), max(x0, x1))
-            elif self.menuEnabled():
+            elif ev.button() == Qt.MouseButton.RightButton and self.menuEnabled():
                 # 拖动已消费掉 mouseClickEvent → 手动补齐「点一下出菜单」
                 self.raiseContextMenu(ev)
         finally:
-            self._teardown_scan()
+            self._teardown_scan(keep_armed=keep_armed)
 
     def _apply_scan_range(self, xmin: float, xmax: float) -> None:
         """写 X 范围：走 AxisManager 入口（XLink 时写源视图，由原生广播到整组）。"""
@@ -230,7 +241,7 @@ class CustomViewBox(pg.ViewBox):
     def _cancel_scan(self) -> None:
         self._teardown_scan()
 
-    def _teardown_scan(self) -> None:
+    def _teardown_scan(self, keep_armed: bool = False) -> None:
         self._scan_active = False
         self._scan_band_committed = None
         band = self._scan_band
@@ -246,13 +257,16 @@ class CustomViewBox(pg.ViewBox):
                     band.setParentItem(None)
                     scene.removeItem(band)
             band.deleteLater()
+        if keep_armed:
+            return
+        self._scan_armed = False
         self._remove_scan_key_filter()
         self._set_scan_cursor(None)
 
     def eventFilter(self, obj, event):
         """扫选期间监听视图的 Esc：取消并撤掉预览带。"""
         if (
-            self._scan_active
+            (self._scan_active or self._scan_armed)
             and obj is self._scan_filter_view
             and event.type() == QEvent.Type.KeyPress
             and event.key() == Qt.Key.Key_Escape
@@ -310,6 +324,11 @@ class CustomViewBox(pg.ViewBox):
         menu = self._ensure_context_menu()
         self._clear_context_menu(menu)
         self._detach_native_menus()
+
+        scan_act = QAction(ZH_SCAN_ZOOM, menu)
+        scan_act.triggered.connect(self._arm_scan)
+        scan_act.setEnabled(not getattr(self.plot_widget, "_x_mouse_locked", False))
+        menu.addAction(scan_act)
 
         auto_y_act = QAction(ZH_AUTO_Y_IN_X, menu)
         auto_y_act.triggered.connect(self._emit_auto_y)
