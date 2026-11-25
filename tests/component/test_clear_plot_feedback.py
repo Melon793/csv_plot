@@ -94,13 +94,14 @@ def test_middle_double_click_announces_cleared_count(plot_factory, qapp):
 
 
 def test_right_click_menu_clear_announces_cleared_count(plot_factory, qapp):
-    """右键菜单「清除绘图」：整链（QAction → 信号 → EventHandler → 落点）报数目"""
+    """右键菜单「清除当前子图」：整链（QAction → 信号 → EventHandler → 落点）报数目"""
+    assert ZH_CLEAR_PLOT == "清除当前子图"
     pw = plot_factory()
     assert pw.plot_variable("a")
     _stub_menu_context(pw)
 
     menu = pw.view_box.getMenu(_FakeMenuEvent())
-    clear_act = next(a for a in menu.actions() if a.text() == ZH_CLEAR_PLOT)
+    clear_act = next(a for a in menu.actions() if a.text() == "清除当前子图")
     clear_act.trigger()
     qapp.processEvents()
 

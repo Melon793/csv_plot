@@ -600,9 +600,10 @@ def test_clear_all_button_announces_total_curves(loaded_window, qapp, qtbot, mon
 
 
 def test_right_click_clear_announces_current_plot(loaded_window, qapp):
-    """子图右键菜单「清除绘图」：只清当前子图，播报走同一条文案函数。"""
+    """子图右键菜单「清除当前子图」：只清当前子图，播报走同一条文案函数。"""
     from src.ui.widgets.custom_viewbox import ZH_CLEAR_PLOT
 
+    assert ZH_CLEAR_PLOT == "清除当前子图"
     mw = loaded_window
     pw = _plot_variables(mw, ["speed"], qapp)
 
@@ -611,7 +612,7 @@ def test_right_click_clear_announces_current_plot(loaded_window, qapp):
             return QPointF(0.0, 0.0)
 
     menu = pw.view_box.getMenu(_FakeMenuEvent())
-    clear_act = next(a for a in menu.actions() if a.text() == ZH_CLEAR_PLOT)
+    clear_act = next(a for a in menu.actions() if a.text() == "清除当前子图")
     clear_act.trigger()
     qapp.processEvents()
 
