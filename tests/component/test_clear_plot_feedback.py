@@ -80,11 +80,17 @@ def test_middle_double_click_announces_cleared_count(plot_factory, qapp):
     pw = plot_factory()
     assert pw.plot_variable("a")
     assert pw.plot_variable("b")
+    old_items = {ci.curve for ci in pw.curves.values()}
 
     _middle_double_click(pw, qapp)
 
     assert list(pw.curves) == []
-    assert pw.plot_context.cleared_announces == [("已清除绘图", 2)]
+    assert all(item.scene() is None for item in old_items)
+    assert all(item not in pw.plot_item.items for item in old_items)
+    assert all(item not in pw.plot_item.dataItems for item in old_items)
+    assert all(item not in pw.plot_item.curves for item in old_items)
+    assert all(item not in pw.view_box.addedItems for item in old_items)
+    assert pw.plot_context.cleared_announces == [("已清除当前子图", 2)]
 
 
 def test_right_click_menu_clear_announces_cleared_count(plot_factory, qapp):
@@ -99,7 +105,7 @@ def test_right_click_menu_clear_announces_cleared_count(plot_factory, qapp):
     qapp.processEvents()
 
     assert list(pw.curves) == []
-    assert pw.plot_context.cleared_announces == [("已清除绘图", 1)]
+    assert pw.plot_context.cleared_announces == [("已清除当前子图", 1)]
 
 
 def test_empty_plot_clear_stays_silent(plot_factory, qapp):
@@ -123,13 +129,13 @@ def test_empty_plot_clear_stays_silent(plot_factory, qapp):
 
 def test_announce_sentence_and_level():
     host = _BroadcastRecorder()
-    MainWindow._announce_cleared_plots(host, "已清除全部绘图", 7)
+    MainWindow._announce_cleared_plots(host, "已清除全部页", 7)
 
-    assert host.calls == [("已清除全部绘图 · 7 条曲线", "info")]
+    assert host.calls == [("已清除全部页 · 7 条曲线", "info")]
 
 
 def test_announce_skips_zero_curves():
     host = _BroadcastRecorder()
-    MainWindow._announce_cleared_plots(host, "已清除绘图", 0)
+    MainWindow._announce_cleared_plots(host, "已清除当前子图", 0)
 
     assert host.calls == [], "0 条曲线时不该占用消息区"

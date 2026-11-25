@@ -23,7 +23,7 @@ ZH_VAR_EDITOR = "绘图变量编辑器"
 ZH_ADJUST_HEIGHT = "调整高度"
 ZH_ARRANGE_LAYOUT = "重排子图"
 ZH_RESET_ALL_HEIGHT = "全部重置为 100%"
-ZH_CLEAR_PLOT = "清除绘图"
+ZH_CLEAR_PLOT = "清除当前子图"
 
 # 游标模式显示文案：键是跨模块内部标识符（cursor_sync_manager 的模式分发、
 # file_loader_manager 的重载恢复都按它比对），只改显示、绝不可改键值。

@@ -1588,7 +1588,10 @@ class MainWindow(QMainWindow):
         # layout_manager.apply_time_correction，对绘图的作用完全同源，而抽屉还
         # 多频率输入、预设档位与应用前预览。对话框本体
         # （layout_manager.open_time_correction_dialog）按口径留着，只是暂无入口。
-        self.clear_all_plots_btn = QPushButton("清除绘图", self.plot_widget)
+        self.clear_all_plots_btn = QPushButton("清空全部页", self.plot_widget)
+        self.clear_all_plots_btn.setToolTip(
+            "清空全部页的所有子图；执行前显示影响范围并请求确认"
+        )
         top_bar.addWidget(self.clear_all_plots_btn)
 
         self._template_menu_btn = QPushButton("模板菜单", self.plot_widget)
@@ -2355,7 +2358,9 @@ class MainWindow(QMainWindow):
         # 由抽屉在构造时自连（reselect_can_database / show_can_unmatched），
         # 左栏的「CAN 数据库…」按钮只撤入口、不撤实现，dialog 类照旧可达
         # （仅剩 file_loader_manager 内部调用路径）。
-        self.clear_all_plots_btn.clicked.connect(self.cursor_sync_manager.clear_all_plots)
+        self.clear_all_plots_btn.clicked.connect(
+            self.cursor_sync_manager.request_clear_all_plots
+        )
         self.auto_range_btn.clicked.connect(self.cursor_sync_manager.auto_range_all_plots)
         self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
         self.cursor_btn.clicked.connect(self.cursor_sync_manager.toggle_cursor_all)

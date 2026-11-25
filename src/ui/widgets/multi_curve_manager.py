@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import html
 import math
+from copy import deepcopy
 from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
 
@@ -1403,20 +1404,15 @@ class MultiCurveManager:
         except Exception as e:
             logger.error("刷新选中曲线加粗时出错: %s", e)
 
-    def add_variables_to_plot(self, var_names: list[str]):
-        """批量添加变量到当前绘图区（统一版）"""
-        names = [name.strip() for name in (var_names or []) if isinstance(name, str) and name.strip()]
-        if not names:
-            return
+    def _prepare_variables_for_add(self, names, *, check_duplicates: bool):
+        """批量添加/替换共用校验与备数据；此阶段绝不修改场景或 curves。"""
+        pw = self.pw
+        invalid_vars = []
+        duplicate_vars = []
+        variables_data = []
 
-        if len(names) > 1:
-            pw = self.pw
-            invalid_vars = []   # 数据无效/不存在的变量
-            duplicate_vars = [] # 已在绘图中的变量
-            success_vars = []
-            variables_data = []
-
-            for var_name in names:
+        for var_name in names:
+            try:
                 is_valid, _ = pw._validate_plot_data(var_name)
                 if not is_valid:
                     invalid_vars.append(var_name)
@@ -1426,109 +1422,303 @@ class MultiCurveManager:
                 if not success:
                     invalid_vars.append(var_name)
                     continue
+            except Exception:
+                logger.warning("准备变量 %s 失败", var_name, exc_info=True)
+                invalid_vars.append(var_name)
+                continue
 
-                # 统一重复检测：始终检查 curves 字典
-                if var_name in pw.curves:
-                    duplicate_vars.append(var_name)
-                    continue
+            # 替换会先清空旧曲线，因此目标已有同名变量不是重复跳过项。
+            if check_duplicates and var_name in pw.curves:
+                duplicate_vars.append(var_name)
+                continue
 
-                variables_data.append((var_name, x_array, y_array, y_format))
+            variables_data.append((var_name, x_array, y_array, y_format))
 
-            pw._batch_adding = True
-            try:
-                if variables_data:
-                    # 分组数据源的时间轴保 float64（float32 会抹平毫秒级采样，
-                    # 见 plot_data_manager.plot_variable 同处说明）
-                    loader = getattr(
-                        getattr(pw, "plot_context", None), "loader", None
+        return invalid_vars, duplicate_vars, variables_data
+
+    def _add_prepared_variables(
+        self, variables_data, invalid_vars, duplicate_vars, *, replacement: bool = False
+    ):
+        """提交已备好的数据；普通添加与 Shift 替换共用同一绘制路径。"""
+        pw = self.pw
+        success_vars = []
+        pw._batch_adding = True
+        try:
+            if variables_data:
+                # 分组数据源的时间轴保 float64（float32 会抹平毫秒级采样，
+                # 见 plot_data_manager.plot_variable 同处说明）
+                loader = getattr(getattr(pw, "plot_context", None), "loader", None)
+                x_dtype = np.float64 if is_grouped_loader(loader) else np.float32
+                for var_name, x_array, y_array, y_format in variables_data:
+                    original_index = np.ascontiguousarray(x_array, dtype=x_dtype)
+                    x_values = pw.offset + pw.factor * original_index
+                    y_contiguous = np.ascontiguousarray(y_array)
+
+                    # 占位复活：批量拖入的同名变量先查占位取色/可见性偏好
+                    revive_ref = self._data_manager._consume_invalid_ref(var_name)
+                    revive_color = revive_ref.color if revive_ref is not None else None
+                    # 颜色分配（统一方法）
+                    color = self._assign_curve_color(revive_color)
+                    logger.debug(
+                        "[COLOR] 批量添加颜色分配: var=%s, color=%s, revived=%s",
+                        var_name, color, revive_ref is not None,
                     )
-                    x_dtype = np.float64 if is_grouped_loader(loader) else np.float32
-                    for var_name, x_array, y_array, y_format in variables_data:
-                        original_index = np.ascontiguousarray(x_array, dtype=x_dtype)
-                        x_values = pw.offset + pw.factor * original_index
-                        y_contiguous = np.ascontiguousarray(y_array)
 
-                        # 占位复活：批量拖入的同名变量先查占位取色/可见性偏好
-                        revive_ref = self._data_manager._consume_invalid_ref(var_name)
-                        revive_color = revive_ref.color if revive_ref is not None else None
-                        # 颜色分配（统一方法）
-                        color = self._assign_curve_color(revive_color)
-                        logger.debug(
-                            "[COLOR] 批量添加颜色分配: var=%s, color=%s, revived=%s",
-                            var_name, color, revive_ref is not None,
-                        )
+                    initial_visible = (
+                        True if revive_ref is None else revive_ref.visible_preference
+                    )
+                    # 编辑器强化轮 D3/D6：复活带回显示名/换算，投影收口构造点
+                    _dn = revive_ref.display_name if revive_ref is not None else ""
+                    _f = revive_ref.factor if revive_ref is not None else 1.0
+                    _o = revive_ref.offset if revive_ref is not None else 0.0
+                    _sp = (
+                        getattr(revive_ref, "symbol_policy", SYMBOL_POLICY_AUTO)
+                        if revive_ref is not None else SYMBOL_POLICY_AUTO
+                    )
+                    y_plot = project_y(y_contiguous, _f, _o, y_format or '')
+                    pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
+                    # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
+                    initial_mode = self._data_manager.decide_initial_draw_mode(
+                        pw, var_name, y_format or ''
+                    )
+                    # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
+                    # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
+                    # 避免 NaN 坐标进入 Qt 光栅化产生横线伪影。
+                    curve = pw.plot_item.plot(
+                        x_values, y_plot, pen=pen, name=var_name,
+                        stepMode=step_mode_for(initial_mode),
+                    )
 
-                        initial_visible = (
-                            True if revive_ref is None else revive_ref.visible_preference
-                        )
-                        # 编辑器强化轮 D3/D6：复活带回显示名/换算，投影收口构造点
-                        _dn = revive_ref.display_name if revive_ref is not None else ""
-                        _f = revive_ref.factor if revive_ref is not None else 1.0
-                        _o = revive_ref.offset if revive_ref is not None else 0.0
-                        _sp = (
-                            getattr(revive_ref, "symbol_policy", SYMBOL_POLICY_AUTO)
-                            if revive_ref is not None else SYMBOL_POLICY_AUTO
-                        )
-                        y_plot = project_y(y_contiguous, _f, _o, y_format or '')
-                        pen = pg.mkPen(color=color, width=DEFAULT_LINE_WIDTH)
-                        # 枚举通道自动阶梯（O(1) 元数据查表，CSV/Excel 恒 'auto'）
-                        initial_mode = self._data_manager.decide_initial_draw_mode(
-                            pw, var_name, y_format or ''
-                        )
-                        # 默认 connect='auto'：全有限数据走 'all'+skipFiniteCheck
-                        # 快速路径；含 NaN（ragged CSV 尾部补 NaN）自动断线，
-                        # 避免 NaN 坐标进入 Qt 光栅化产生横线伪影。
-                        curve = pw.plot_item.plot(
-                            x_values, y_plot, pen=pen, name=var_name,
-                            stepMode=step_mode_for(initial_mode),
-                        )
+                    pw.curves[var_name] = CurveInfo(
+                        var_name=var_name,
+                        curve=curve,
+                        x_data=x_values,
+                        y_data=y_plot,
+                        y_raw=y_contiguous,
+                        display_name=_dn,
+                        factor=_f,
+                        offset=_o,
+                        original_index=original_index,
+                        color=color,
+                        y_format=y_format or '',
+                        visible=initial_visible,
+                        draw_mode=initial_mode,
+                        symbol_policy=_sp,
+                    )
+                    if not initial_visible and curve is not None:
+                        try:
+                            if curve.scene() is not None:
+                                curve.setVisible(False)
+                        except Exception:
+                            logger.debug("复活曲线可见性恢复失败: %s", var_name, exc_info=True)
 
-                        pw.curves[var_name] = CurveInfo(
-                            var_name=var_name,
-                            curve=curve,
-                            x_data=x_values,
-                            y_data=y_plot,
-                            y_raw=y_contiguous,
-                            display_name=_dn,
-                            factor=_f,
-                            offset=_o,
-                            original_index=original_index,
-                            color=color,
-                            y_format=y_format or '',
-                            visible=initial_visible,
-                            draw_mode=initial_mode,
-                            symbol_policy=_sp,
-                        )
-                        if not initial_visible and curve is not None:
-                            try:
-                                if curve.scene() is not None:
-                                    curve.setVisible(False)
-                            except Exception:
-                                logger.debug("复活曲线可见性恢复失败: %s", var_name, exc_info=True)
+                    success_vars.append(var_name)
 
-                        success_vars.append(var_name)
+            if success_vars:
+                self._finalize_batch_add()
+        finally:
+            # try/finally 保证异常路径也复位 flag（对齐 cursor_sync_manager
+            # 批量重建路径）：否则 flag 残留 True 会使后续单曲线添加/
+            # 显隐切换静默跳过 header/vline/密度等全部刷新
+            pw._batch_adding = False
 
-                if success_vars:
-                    self._finalize_batch_add()
-            finally:
-                # try/finally 保证异常路径也复位 flag（对齐 cursor_sync_manager
-                # 批量重建路径）：否则 flag 残留 True 会使后续单曲线添加/
-                # 显隐切换静默跳过 header/vline/密度等全部刷新
-                pw._batch_adding = False
+        # 批量拖入：枚举自动阶梯汇总播报（单条，不逐条刷屏；
+        # 只统计本次新建曲线，已在图上的重复项不计入）
+        self._announce_auto_step(success_vars, batch=True)
 
-            # 批量拖入：枚举自动阶梯汇总播报（单条，不逐条刷屏；
-            # 只统计本次新建曲线，已在图上的重复项不计入）
-            self._announce_auto_step(success_vars, batch=True)
-
+        if replacement:
             if invalid_vars or duplicate_vars:
                 msg_parts = []
+                if success_vars:
+                    msg_parts.append(
+                        f"已替换当前子图，成功 {len(success_vars)} 个变量，"
+                        f"失败 {len(invalid_vars)} 个"
+                    )
+                else:
+                    msg_parts.append("当前子图未更改")
                 if invalid_vars:
-                    msg_parts.append("以下变量没有有效数据:\n" + "\n".join(invalid_vars))
+                    msg_parts.append(
+                        f"以下 {len(invalid_vars)} 个变量没有有效数据:\n"
+                        + "\n".join(invalid_vars)
+                    )
                 if duplicate_vars:
-                    msg_parts.append("以下变量已在绘图中:\n" + "\n".join(duplicate_vars))
-                QMessageBox.information(pw, "提示", "\n\n".join(msg_parts))
+                    msg_parts.append(
+                        f"以下 {len(duplicate_vars)} 个变量已跳过:\n"
+                        + "\n".join(duplicate_vars)
+                    )
+                QMessageBox.information(pw, "替换结果", "\n\n".join(msg_parts))
+        elif invalid_vars or duplicate_vars:
+            msg_parts = []
+            if invalid_vars:
+                msg_parts.append("以下变量没有有效数据:\n" + "\n".join(invalid_vars))
+            if duplicate_vars:
+                msg_parts.append("以下变量已在绘图中:\n" + "\n".join(duplicate_vars))
+            QMessageBox.information(pw, "提示", "\n\n".join(msg_parts))
+
+    def add_variables_to_plot(self, var_names: list[str]):
+        """批量添加变量到当前绘图区（统一版）"""
+        names = [
+            name.strip()
+            for name in (var_names or [])
+            if isinstance(name, str) and name.strip()
+        ]
+        if not names:
+            return
+
+        if len(names) > 1:
+            invalid_vars, duplicate_vars, variables_data = self._prepare_variables_for_add(
+                names, check_duplicates=True
+            )
+            self._add_prepared_variables(variables_data, invalid_vars, duplicate_vars)
         else:
             self.pw.plot_variable(names[0])
+
+    def _snapshot_plot_replacement(self) -> dict[str, Any]:
+        """保存 Shift 替换前的本地资产；不是通用撤销栈。"""
+        pw = self.pw
+        scene = pw.plot_item.scene() if pw.plot_item is not None else None
+        return {
+            "curves": dict(pw.curves),
+            "invalid": dict(getattr(pw, "invalid_curves", {}) or {}),
+            "view_state": deepcopy(pw.view_box.state),
+            "color_index": pw.current_color_index,
+            "legend_selection": set(
+                getattr(pw, "_legend_selection", set()) or set()
+            ),
+            "legend_sel_anchor": getattr(pw, "_legend_sel_anchor", None),
+            # plot_item.plot 若在写入 curves 前抛错，可能留下孤儿场景项。
+            "scene_plot_items": (
+                {item for item in scene.items() if isinstance(item, pg.PlotDataItem)}
+                if scene is not None else set()
+            ),
+        }
+
+    def _restore_plot_replacement(self, state: dict[str, Any]) -> bool:
+        """恢复替换前曲线/占位/视野；返回核心资产是否完整恢复。"""
+        pw = self.pw
+        old_curves: dict[str, CurveInfo] = state["curves"]
+        try:
+            scene = pw.plot_item.scene() if pw.plot_item is not None else None
+            if scene is not None:
+                for item in list(scene.items()):
+                    if (
+                        isinstance(item, pg.PlotDataItem)
+                        and item not in state["scene_plot_items"]
+                    ):
+                        if item in pw.plot_item.items:
+                            pw.plot_item.removeItem(item)
+                        else:
+                            scene.removeItem(item)
+                            item.setParentItem(None)
+            for ci in list(pw.curves.values()):
+                curve = ci.curve
+                if curve is not None and curve.scene() is not None:
+                    pw.plot_item.removeItem(curve)
+
+            # 保留字典对象本身，避免持有旧引用的订阅者看到替换后的新容器。
+            pw.curves.clear()
+            pw.curves.update(old_curves)
+            pw.invalid_curves.clear()
+            pw.invalid_curves.update(state["invalid"])
+            pw.current_color_index = state["color_index"]
+            # 清空占位会清掉图例选择；先恢复真相源，再由下方刷新重放高亮。
+            selection = getattr(pw, "_legend_selection", None)
+            if selection is not None:
+                selection.clear()
+                selection.update(state["legend_selection"])
+            pw._legend_sel_anchor = state["legend_sel_anchor"]
+
+            for ci in old_curves.values():
+                curve = ci.curve
+                if curve is None:
+                    continue
+                curve.setData(
+                    ci.x_data, ci.y_data, stepMode=step_mode_for(ci.draw_mode)
+                )
+                if curve.scene() is None:
+                    if curve in pw.plot_item.items:
+                        pw.plot_item.removeItem(curve)
+                    curve.setParentItem(pw.plot_item.vb.childGroup)
+                    pw.plot_item.addItem(curve)
+                curve.setVisible(ci.visible)
+        except Exception:
+            logger.exception("Shift 替换失败后恢复旧曲线资产失败")
+            return False
+
+        # 核心资产已恢复；刷新失败只记录，不再把异常抛回 dropEvent。
+        refresh_ok = True
+        try:
+            pw.view_box.setState(state["view_state"])
+            x_width = pw.view_box.viewRange()[0][1] - pw.view_box.viewRange()[0][0]
+            for name, ci in old_curves.items():
+                pw._apply_curve_style(name, resolve_symbol_show(ci, x_width))
+            self._update_header_for_curves()
+            self._update_axes_for_multi_curve(allow_y_expand=False)
+            pw._cursor_manager._update_vline_bounds_from_data()
+            pw._axis_manager._recalc_max_point_density()
+        except Exception:
+            refresh_ok = False
+            logger.exception("Shift 替换失败后恢复旧图刷新未完成")
+
+        # 上面的轴/游标刷新可能改动视野；即使刷新中断也独立兜底还原视野。
+        view_restored = True
+        try:
+            pw.view_box.setState(state["view_state"])
+            if pw.vline.isVisible():
+                pw.update_cursor_label()
+        except Exception:
+            view_restored = False
+            logger.exception("Shift 替换失败后恢复旧图视野未完成")
+        return refresh_ok and view_restored
+
+    def replace_variables_in_plot(self, var_names: list[str]) -> bool:
+        """Shift 拖入：先校验并备好至少一条曲线，再替换当前子图。
+
+        有效项（包括与旧曲线同名项）按拖入顺序绘制；无效项跳过并汇总反馈。
+        空载荷或全部失败时不清空、不重置坐标，也不发出成功播报。清空或提交
+        异常时恢复替换前资产并返回 False，不把半成品当作成功替换。
+        """
+        names = list(dict.fromkeys(
+            name.strip()
+            for name in (var_names or [])
+            if isinstance(name, str) and name.strip()
+        ))
+        if not names:
+            QMessageBox.information(
+                self.pw, "替换结果", "拖入载荷为空，当前子图未更改。"
+            )
+            return False
+
+        invalid_vars, _, variables_data = self._prepare_variables_for_add(
+            names, check_duplicates=False
+        )
+        if not variables_data:
+            self._add_prepared_variables([], invalid_vars, [], replacement=True)
+            return False
+
+        state = self._snapshot_plot_replacement()
+        try:
+            self.pw.clear_plot_item(clear_invalid=True, strict=True)
+            self._add_prepared_variables(
+                variables_data, invalid_vars, [], replacement=True
+            )
+        except Exception:
+            logger.exception("Shift 替换当前子图失败")
+            restored = self._restore_plot_replacement(state)
+            self.pw.curves_changed.emit()
+            QMessageBox.information(
+                self.pw,
+                "替换失败",
+                "替换失败：当前子图未完成替换，"
+                + (
+                    "已恢复替换前的曲线、占位和视野。"
+                    if restored
+                    else "旧曲线已尝试恢复，但部分曲线、占位或视野状态未完成，"
+                         "请重新加载数据。"
+                ),
+            )
+            return False
+        return list(self.pw.curves) == [item[0] for item in variables_data]
 
     def add_variable_to_plot(self, var_name: str, x_values: np.ndarray = None, y_values: np.ndarray = None,
                              y_format: str = None, skip_existence_check: bool = False,

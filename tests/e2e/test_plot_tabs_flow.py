@@ -185,9 +185,14 @@ def test_close_button_reenabled_after_second_page_closed(loaded_window, qtbot):
     assert LAST_PAGE_CLOSE_HINT in mw._tab_tooltip_text(0)
 
 
-def test_single_page_clear_button_still_works(loaded_window, qtbot):
-    """替代路径可用：× 置灰后，单页重来仍能靠顶部「清除绘图」完成。"""
+def test_single_page_clear_button_still_works(loaded_window, qtbot, monkeypatch):
+    """替代路径可用：× 置灰后，单页重来仍能靠顶部「清空全部页」完成。"""
     from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    )
 
     mw = loaded_window
     page = mw.current_page
@@ -198,7 +203,7 @@ def test_single_page_clear_button_still_works(loaded_window, qtbot):
 
     assert mw.pages == [page]
     assert all(not c.plot_widget.curves for c in page.plot_widgets)
-    assert "已清除全部绘图" in mw._message_text
+    assert "已清除全部页" in mw._message_text
 
 
 def test_close_page_with_only_placeholder_still_confirms(

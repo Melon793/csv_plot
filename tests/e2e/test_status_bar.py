@@ -581,11 +581,11 @@ def _plot_variables(mw, var_names, qapp, plot_index=0):
     return pw
 
 
-def test_clear_all_button_announces_total_curves(loaded_window, qapp, qtbot):
-    """顶部「清除绘图」：清的是全部子图，播报给总数（且数目在清之前取）。
-
-    数目取在清之后的话这里会是 0 条 —— 一条只为"报个数字"的用例。
-    """
+def test_clear_all_button_announces_total_curves(loaded_window, qapp, qtbot, monkeypatch):
+    """顶部「清空全部页」：确认后清全部子图，播报给总数（清之前取）。"""
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    )
     mw = loaded_window
     pw = _plot_variables(mw, ["speed", "rpm"], qapp)
     total = sum(len(c.plot_widget.curves) for c in mw.plot_widgets)
@@ -595,7 +595,7 @@ def test_clear_all_button_announces_total_curves(loaded_window, qapp, qtbot):
     qapp.processEvents()
 
     assert list(pw.curves) == []
-    assert mw._message_text == "已清除全部绘图 · 2 条曲线"
+    assert mw._message_text == "已清除全部页 · 2 条曲线"
     assert mw._message_level == "info", "清成功不是问题，不该用 warn 粘在屏上"
 
 
@@ -616,7 +616,7 @@ def test_right_click_clear_announces_current_plot(loaded_window, qapp):
     qapp.processEvents()
 
     assert list(pw.curves) == []
-    assert mw._message_text == "已清除绘图 · 1 条曲线"
+    assert mw._message_text == "已清除当前子图 · 1 条曲线"
 
 
 def test_middle_double_click_announces_current_plot(loaded_window, qapp):
@@ -638,7 +638,7 @@ def test_middle_double_click_announces_current_plot(loaded_window, qapp):
     qapp.processEvents()
 
     assert list(pw.curves) == []
-    assert mw._message_text == "已清除绘图 · 2 条曲线"
+    assert mw._message_text == "已清除当前子图 · 2 条曲线"
 
 
 def test_clear_with_nothing_drawn_stays_silent(loaded_window, qapp):
