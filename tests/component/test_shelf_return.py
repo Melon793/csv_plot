@@ -5,7 +5,7 @@ import weakref
 import pytest
 
 from PySide6.QtGui import QContextMenuEvent
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMessageBox, QWidget
 
 from src.ui.transfer_broadcast import build_return_message
 from src.ui.widgets.curve_shelf import (
@@ -143,6 +143,7 @@ def test_return_single_entry_lands_and_removes(shelf, host):
     assert kwargs["scene"] is True
     assert kwargs["batch"] is False
     assert host.messages == ["已退回 a：暂存区 → 页1·图1"]
+    assert not any("已删除暂存条目" in message for message in host.messages)
 
 
 def test_return_hidden_page_defers_scene_and_batches(shelf, host):
@@ -409,6 +410,46 @@ def test_menu_hides_return_for_no_origin(shelf, host, monkeypatch, qapp):
         "删除条目",
         "清空暂存区",
     ]
+
+
+def test_menu_delete_announces_single_name(shelf, host, monkeypatch, qapp):
+    shelf.add_entry(ShelfEntry(key="k1", var_name="a"))
+    _patch_menu(monkeypatch, choose_prefix="删除")
+
+    _open_menu(shelf, qapp)
+
+    assert shelf.count() == 0
+    assert host.messages == ["已删除暂存条目「a」"]
+
+
+def test_menu_delete_batch_cancel_and_confirm_receipts(
+    shelf, host, monkeypatch, qapp
+):
+    shelf.add_entry(ShelfEntry(key="k1", var_name="a"))
+    shelf.add_entry(ShelfEntry(key="k2", var_name="b"))
+    shelf.item(0).setSelected(True)
+    shelf.item(1).setSelected(True)
+    _patch_menu(monkeypatch, choose_prefix="删除")
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No),
+    )
+
+    _open_menu(shelf, qapp)
+
+    assert shelf.count() == 2
+    assert host.messages == []
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    _open_menu(shelf, qapp)
+
+    assert shelf.count() == 0
+    assert host.messages == ["已删除 2 个暂存条目"]
 
 
 def test_menu_return_executes_and_removes(shelf, host, monkeypatch, qapp):
