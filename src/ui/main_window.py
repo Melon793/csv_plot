@@ -35,7 +35,7 @@ from src.ui.widgets.chrome_button import (  # noqa: E402
     ChromeButton,
     native_push_height,
 )
-from src.ui import theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
+from src.ui import action_receipts, theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
@@ -831,7 +831,9 @@ class MainWindow(QMainWindow):
         if self.plot_tabs.count() <= 1:
             self._broadcast(LAST_PAGE_CLOSE_HINT, "warn")
             return
-        self.close_page(page)
+        title = page.title
+        if self.close_page(page):
+            self._broadcast(action_receipts.page_closed(title))
 
     def _close_other_pages(self, index: int) -> None:
         self._batch_close_pages([p for i, p in enumerate(self.pages) if i != index])
@@ -859,10 +861,14 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        closed = 0
         for page in targets:
-            self.close_page(page, confirm=False)
+            if self.close_page(page, confirm=False):
+                closed += 1
+        if closed:
+            self._broadcast(action_receipts.pages_closed(closed))
 
-    def close_page(self, page: PlotPage | None, *, confirm: bool = True) -> None:
+    def close_page(self, page: PlotPage | None, *, confirm: bool = True) -> bool:
         """关闭页；最后一页保留，只清空内容（§5.4）。
 
         交互入口必须经 ``_on_tab_close_requested``（单页在那里被拦截并
@@ -871,19 +877,23 @@ class MainWindow(QMainWindow):
 
         ``confirm=False`` 供模板套用等程序化路径使用：事务化重建时不能再弹
         「仍有曲线，确定关闭？」。
+
+        Returns:
+            真正移除并销毁页签时返回 True；页不存在、死控件、最后一页或
+            用户取消确认时返回 False。回执由交互入口据此决定是否播报。
         """
         if page is None or page not in self.pages:
-            return
+            return False
         if not widget_alive(page.widget):
             self.pages.remove(page)
             # 第 6 轮 C5：死控件分支同样清 MRU 引用，防滞留已 dispose 的页
             if self._prev_page is page:
                 self._prev_page = None
-            return
+            return False
         if len(self.pages) == 1:
             self.activate_page(page)
             self.cursor_sync_manager.clear_all_plots()
-            return
+            return False
         has_curves = self._page_curve_count(page) > 0
         if confirm and has_curves:
             answer = QMessageBox.question(
@@ -894,7 +904,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
-                return
+                return False
 
         is_current = page is self._current_page
         index = self.plot_tabs.indexOf(page.widget)
@@ -927,6 +937,7 @@ class MainWindow(QMainWindow):
             # 的行与幽灵页筛选项，直到下一次拖动/切页。补一次刷新收口
             # （无统计窗口时 request_mark_stats_refresh 自身 no-op）。
             layout_manager.request_mark_stats_refresh(immediate=True)
+        return True
 
     def _on_tab_rename_requested(self, index: int) -> None:
         page = self.page_at_tab(index)
