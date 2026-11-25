@@ -40,7 +40,7 @@ from src.ui.drag_visuals import (
 )
 from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
 from src.ui.transfer_broadcast import announce_selection, broadcast_transfer
-from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR, SCROLL_APPLY_INTERVAL_MS)
+from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR, SCROLL_APPLY_INTERVAL_MS, CTRL_NOTCH_ZOOM_FACTOR, WHEEL_NOTCH_UNIT)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -107,6 +107,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # 滚轮 zoom_x、Shift 框选 release、右键菜单可见性都读它
         self._x_mouse_locked = False
         self._trackpad_scroll = TrackpadScroll()
+        self._scroll_modifiers = None
         self._scroll_center_x = 0.0
         self._scroll_apply_timer = QTimer(self)
         self._scroll_apply_timer.setSingleShot(True)
@@ -701,10 +702,19 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             or self._x_mouse_locked
         )
 
+    def _reset_trackpad_scroll(self) -> None:
+        self._trackpad_scroll.reset()
+        self._scroll_apply_timer.stop()
+
+    def _sync_scroll_modifiers(self, modifiers) -> None:
+        if self._scroll_modifiers != modifiers:
+            self._flush_trackpad_scroll()
+            self._reset_trackpad_scroll()
+            self._scroll_modifiers = modifiers
+
     def _feed_trackpad_scroll(self, dx: float, dy: float, center_x: float):
         if self._scroll_input_blocked():
-            self._trackpad_scroll.reset()
-            self._scroll_apply_timer.stop()
+            self._reset_trackpad_scroll()
             return None
         self._scroll_center_x = center_x
         step = self._trackpad_scroll.feed(dx, dy, self._scroll_now())
@@ -718,8 +728,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
 
     def _flush_trackpad_scroll(self) -> None:
         if self._scroll_input_blocked():
-            self._trackpad_scroll.reset()
-            self._scroll_apply_timer.stop()
+            self._reset_trackpad_scroll()
             return
         step = self._trackpad_scroll.flush(self._scroll_now())
         if step is not None:
@@ -736,47 +745,70 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         angle = ev.angleDelta()
         dx = angle.x()
         delta = angle.y()
-        # 鼠标悬停在 legend 上时，滚轮驱动 legend 滚动而非 X 轴缩放
+        modifiers = ev.modifiers()
+        self._sync_scroll_modifiers(modifiers)
+        scene_pos = self.mapToScene(ev.position().toPoint())
+
         if (
-            ev.modifiers() == Qt.KeyboardModifier.NoModifier
+            modifiers == Qt.KeyboardModifier.NoModifier
             and (dx != 0 or delta != 0)
             and getattr(self, "_legend_proxy", None) is not None
+            and self._legend_proxy.sceneBoundingRect().contains(scene_pos)
         ):
-            scene_pos = self.mapToScene(ev.position().toPoint())
-            if self._legend_proxy.sceneBoundingRect().contains(scene_pos):
-                if dx != 0:
-                    ev.accept()
-                    return
-                sb = self.legend_label.verticalScrollBar()
-                if sb.maximum() > sb.minimum():
-                    # 内容溢出可滚动：滚轮驱动 legend 滚动（每齿(120)约 3 行）
-                    fm = self.legend_label.fontMetrics()
-                    steps = delta / 120
-                    sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
-                    ev.accept()
-                    return
-                # 内容未溢出：不吞事件，放行到下方 X 轴缩放路径
-        # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
-        if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
-            if dx != 0 or delta != 0:
-                # 获取鼠标位置
-                mouse_pos = ev.position().toPoint()
-                scene_pos = self.mapToScene(mouse_pos)
-                view_pos = vb.mapSceneToView(scene_pos)
-                mouse_x = view_pos.x()
+            if dx != 0:
+                ev.accept()
+                return
+            sb = self.legend_label.verticalScrollBar()
+            if sb.maximum() > sb.minimum():
+                fm = self.legend_label.fontMetrics()
+                steps = delta / 120
+                sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
+                ev.accept()
+                return
 
+        if modifiers == Qt.KeyboardModifier.NoModifier:
+            if dx != 0 or delta != 0:
+                mouse_x = vb.mapSceneToView(scene_pos).x()
                 step = self._feed_trackpad_scroll(dx, delta, mouse_x)
                 if step is not None:
                     self._apply_scroll_step(step)
                 if self._trackpad_scroll.mode == "mouse" and delta != 0:
                     factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
                     self._axis_manager.zoom_x(factor, mouse_x)
-                ev.accept()  # 确保事件被处理
+                ev.accept()
             else:
                 super().wheelEvent(ev)
-        else:
-            # 有按键按下，交给父类默认处理
-            super().wheelEvent(ev)
+            return
+
+        if modifiers == Qt.KeyboardModifier.ControlModifier:
+            if not vb.sceneBoundingRect().contains(scene_pos):
+                super().wheelEvent(ev)
+                return
+            if dx == 0 and delta == 0:
+                super().wheelEvent(ev)
+                return
+            if self._scroll_input_blocked():
+                self._reset_trackpad_scroll()
+                ev.accept()
+                return
+            if delta == 0:
+                ev.accept()
+                return
+
+            mouse_x = vb.mapSceneToView(scene_pos).x()
+            if delta % WHEEL_NOTCH_UNIT == 0:
+                self._flush_trackpad_scroll()
+                self._reset_trackpad_scroll()
+                factor = CTRL_NOTCH_ZOOM_FACTOR ** (-delta / WHEEL_NOTCH_UNIT)
+                self._axis_manager.zoom_x(factor, mouse_x)
+            else:
+                step = self._feed_trackpad_scroll(0, delta, mouse_x)
+                if step is not None:
+                    self._apply_scroll_step(step)
+            ev.accept()
+            return
+
+        super().wheelEvent(ev)
     
     @safe_callback
     def mouse_moved(self, evt):

@@ -19,7 +19,14 @@ import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QGraphicsSceneWheelEvent,
+    QHBoxLayout,
+    QVBoxLayout,
+    QWidget,
+)
+
+import pyqtgraph as pg
 
 from src.core.config import FACTOR_SCROLL_ZOOM
 
@@ -119,40 +126,200 @@ def test_wheel_zoom_out_expands_range(shown_plot, qapp):
     assert width_after == pytest.approx(width_before * (1 + FACTOR_SCROLL_ZOOM), rel=1e-6)
 
 
-def test_wheel_with_modifier_delegates_to_pyqtgraph_default(shown_plot, qapp):
-    """Ctrl/Shift + 滚轮：不走应用自定义的鼠标中心 X-only 缩放，
-    委托给父类 → pyqtgraph ViewBox 默认行为（1.02^n 双轴缩放，
-    受 mouseEnabled 掩码控制）"""
+def test_ctrl_wheel_in_plot_uses_x_only_fine_zoom(shown_plot, qapp):
+    """绘图区内 Ctrl 走 X-only 12%/齿，不再委托 pyqtgraph 双轴缩放。"""
     pw = shown_plot
     assert pw.plot_variable("a")
     vb = pw.view_box
     vb.setXRange(10, 90, padding=0)
     vb.setYRange(-5, 105, padding=0)
     qapp.processEvents()
-    before_x = vb.viewRange()[0]
-    before_y = vb.viewRange()[1]
-
+    before_x = list(vb.viewRange()[0])
+    before_y = list(vb.viewRange()[1])
     pos = QPoint(400, 300)
-    mouse_x = _zoom_center_mapping(pw, pos)
-    factor = max(0.000001, 1 - FACTOR_SCROLL_ZOOM)
+    center = _zoom_center_mapping(pw, pos)
+    factor = 1 / 1.12
+
+    pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ControlModifier))
+
+    assert vb.viewRange()[0] == pytest.approx(
+        [
+            center - (center - before_x[0]) * factor,
+            center + (before_x[1] - center) * factor,
+        ],
+        abs=1e-9,
+    )
+    assert vb.viewRange()[1] == before_y
+
+
+def test_shift_wheel_in_plot_still_delegates_to_pyqtgraph(shown_plot, qapp):
+    """Shift 暂保留父类路径；轴上与绘图区的最终分工由轴区用例单独守住。"""
+    pw = shown_plot
+    assert pw.plot_variable("a")
+    vb = pw.view_box
+    vb.setXRange(10, 90, padding=0)
+    vb.setYRange(-5, 105, padding=0)
+    qapp.processEvents()
+    before_x = list(vb.viewRange()[0])
+    before_y = list(vb.viewRange()[1])
+    pos = QPoint(400, 300)
+    center = _zoom_center_mapping(pw, pos)
+    factor = 1 - FACTOR_SCROLL_ZOOM
     custom_expected = (
-        mouse_x - (mouse_x - before_x[0]) * factor,
-        mouse_x + (before_x[1] - mouse_x) * factor,
+        center - (center - before_x[0]) * factor,
+        center + (before_x[1] - center) * factor,
     )
 
-    for mods in (Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.ShiftModifier):
-        vb.setXRange(*before_x, padding=0)
-        qapp.processEvents()
-        pw.wheelEvent(_wheel_event(pw, pos, 120, modifiers=mods))
-        actual_x = vb.viewRange()[0]
-        # 不属于应用自定义路径：X 范围与鼠标中心 factor 缩放期望不同，
-        # 且 Y 可能被 pyqtgraph 默认缩放（自定义路径恒不动 Y）
-        custom_applied = (
-            actual_x[0] == pytest.approx(custom_expected[0], rel=1e-6)
-            and actual_x[1] == pytest.approx(custom_expected[1], rel=1e-6)
-            and vb.viewRange()[1] == list(before_y)
+    pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ShiftModifier))
+
+    assert vb.viewRange()[0] != pytest.approx(custom_expected, rel=1e-6)
+    assert vb.viewRange()[1] != before_y
+
+
+def test_five_ctrl_notches_preserve_y_autorange(shown_plot, qapp):
+    pw = shown_plot
+    assert pw.plot_variable("a")
+    vb = pw.view_box
+    vb.setXRange(10, 90, padding=0)
+    vb.setYRange(-5, 105, padding=0)
+    vb.enableAutoRange(axis=vb.YAxis, enable=True)
+    qapp.processEvents()
+    width_before = vb.viewRange()[0][1] - vb.viewRange()[0][0]
+    y_before = list(vb.viewRange()[1])
+
+    for _ in range(5):
+        pw.wheelEvent(
+            _wheel_event(pw, QPoint(400, 300), 120, Qt.KeyboardModifier.ControlModifier)
         )
-        assert not custom_applied, f"修饰键 {mods} 下误走了自定义缩放路径"
+
+    width_after = vb.viewRange()[0][1] - vb.viewRange()[0][0]
+    assert width_after == pytest.approx(width_before / 1.12**5, rel=1e-9)
+    assert width_before / width_after <= 2.1
+    assert vb.viewRange()[1] == y_before
+    assert bool(vb.state["autoRange"][1]) is True
+
+
+def test_ctrl_subnotches_use_continuous_zoom(shown_plot, monkeypatch):
+    pw = shown_plot
+    assert pw.plot_variable("a")
+    calls = []
+    original = pw._axis_manager.zoom_x
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda factor, center: calls.append(factor) or original(factor, center),
+    )
+    now = [0.0]
+    monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
+    pos = QPoint(400, 300)
+
+    pw.wheelEvent(_wheel_event(pw, pos, 3, Qt.KeyboardModifier.ControlModifier))
+    now[0] = 5
+    pw.wheelEvent(_wheel_event(pw, pos, 3, Qt.KeyboardModifier.ControlModifier))
+    assert calls == []
+    now[0] = 16
+    pw.wheelEvent(_wheel_event(pw, pos, 3, Qt.KeyboardModifier.ControlModifier))
+
+    assert calls == [pytest.approx(math.exp(-math.log(2) * 9 / 500))]
+
+
+def test_ctrl_horizontal_scroll_is_ignored(shown_plot, monkeypatch):
+    pw = shown_plot
+    calls = []
+    monkeypatch.setattr(pw._axis_manager, "pan_x", calls.append)
+    monkeypatch.setattr(pw._axis_manager, "zoom_x", lambda *_: calls.append("zoom"))
+    ev = _wheel_event(
+        pw, QPoint(400, 300), 0, Qt.KeyboardModifier.ControlModifier, delta_x=80
+    )
+
+    pw.wheelEvent(ev)
+
+    assert ev.isAccepted()
+    assert calls == []
+    assert not pw._scroll_apply_timer.isActive()
+
+
+def test_modifier_change_flushes_pending_scroll_before_reset(shown_plot, monkeypatch):
+    pw = shown_plot
+    calls = []
+    original = pw._axis_manager.zoom_x
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda factor, center: calls.append(factor) or original(factor, center),
+    )
+    now = [0.0]
+    monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
+    pos = QPoint(400, 300)
+
+    pw.wheelEvent(_wheel_event(pw, pos, 1))
+    assert calls == []
+    now[0] = 5
+    pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ControlModifier))
+
+    assert calls == [
+        pytest.approx(math.exp(-math.log(2) / 500)),
+        pytest.approx(1 / 1.12),
+    ]
+    assert not pw._scroll_apply_timer.isActive()
+    assert pw._trackpad_scroll.mode == "unknown"
+    now[0] = 50
+    pw._flush_trackpad_scroll()
+    assert len(calls) == 2
+
+
+def test_ctrl_wheel_on_y_axis_delegates_and_keeps_x_unchanged(
+    shown_plot, qapp, monkeypatch
+):
+    pw = shown_plot
+    assert pw.plot_variable("a")
+    vb = pw.view_box
+    vb.setXRange(10, 90, padding=0)
+    vb.setYRange(-5, 105, padding=0)
+    qapp.processEvents()
+    before_x = list(vb.viewRange()[0])
+    before_y = list(vb.viewRange()[1])
+    delegated = []
+    monkeypatch.setattr(
+        pg.GraphicsLayoutWidget,
+        "wheelEvent",
+        lambda _self, ev: delegated.append(ev) or ev.accept(),
+    )
+    zoom_calls = []
+    monkeypatch.setattr(pw._axis_manager, "zoom_x", lambda *args: zoom_calls.append(args))
+    axis_calls = []
+    original_wheel = vb.wheelEvent
+
+    def record_axis_wheel(event, axis=None):
+        axis_calls.append((axis, event.delta()))
+        return original_wheel(event, axis=axis)
+
+    monkeypatch.setattr(vb, "wheelEvent", record_axis_wheel)
+    rect = vb.sceneBoundingRect()
+    pos = pw.mapFromScene(QPointF(rect.left() - 20, rect.center().y()))
+    assert not rect.contains(pw.mapToScene(pos))
+
+    pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ControlModifier))
+
+    assert len(delegated) == 1
+    assert zoom_calls == []
+
+    axis_event = QGraphicsSceneWheelEvent(QEvent.Type.GraphicsSceneWheel)
+    axis_pos = pw.axis_y.mapRectToScene(pw.axis_y.geometry()).center()
+    axis_event.setPos(axis_pos)
+    axis_event.setScenePos(axis_pos)
+    axis_event.setScreenPos(axis_pos.toPoint())
+    axis_event.setDelta(120)
+    axis_event.setOrientation(Qt.Orientation.Vertical)
+    axis_event.setButtons(Qt.MouseButton.NoButton)
+    axis_event.setModifiers(Qt.KeyboardModifier.ControlModifier)
+    assert pw.axis_y.linkedView() is vb
+    pw.axis_y.wheelEvent(axis_event)
+    qapp.processEvents()
+
+    assert axis_calls == [(1, 120)]
+    assert vb.viewRange()[0] == before_x
+    assert vb.viewRange()[1] != before_y
 
 
 def test_trackpad_subnotches_merge_before_zoom(shown_plot, qapp, monkeypatch):
