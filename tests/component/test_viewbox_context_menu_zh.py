@@ -54,10 +54,11 @@ LEGACY_ENGLISH_TEXTS = [
 
 
 class _FakeMenuEvent:
-    """只提供 getMenu 用到的 scenePos() 的伪事件"""
+    """只提供 getMenu / addParentContextMenus 用到的字段"""
 
-    def __init__(self, x=0.0, y=0.0):
+    def __init__(self, x=0.0, y=0.0, accepted_item=None):
         self._pos = QPointF(x, y)
+        self.acceptedItem = accepted_item
 
     def scenePos(self):
         return self._pos
@@ -164,6 +165,35 @@ def test_pyqtgraph_default_items_removed(view_box):
     plot_item = view_box.plot_widget.plot_item
     assert plot_item.menuEnabled() is False
     assert plot_item.ctrlMenu is not None
+
+
+def test_export_action_keeps_native_chain(view_box):
+    """导出项仍走 Scene.showExportDialog；真实追加链路不会重复塞原生项"""
+    vb = view_box
+    ev = _FakeMenuEvent(accepted_item=vb)
+    menu = vb.getMenu(ev)
+    scene = vb.scene()
+
+    class _FakeDialog:
+        def __init__(self):
+            self.shown = []
+
+        def show(self, item):
+            self.shown.append(item)
+
+    fake = _FakeDialog()
+    scene.exportDialog = fake
+    try:
+        # 复现 ViewBox.mouseClickEvent → addParentContextMenus 的真实顺序
+        scene.addParentContextMenus(vb, menu, ev)
+        texts = [a.text() for a in menu.actions()]
+        assert texts.count(ZH_EXPORT) == 1, "导出项被重复追加"
+        assert "Plot Options" not in texts
+
+        next(a for a in menu.actions() if a.text() == ZH_EXPORT).trigger()
+        assert fake.shown == [vb]
+    finally:
+        scene.exportDialog = None
 
 
 def test_top_level_order_is_fixed(view_box):
