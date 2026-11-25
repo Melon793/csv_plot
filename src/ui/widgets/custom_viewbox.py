@@ -5,10 +5,12 @@ CustomViewBox —— 信号化自定义 ViewBox
 替换为 PyQt 信号，由 DraggableGraphicsLayoutWidget 负责连接。
 """
 
-from PySide6.QtCore import Signal, QObject
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QMenu
 import pyqtgraph as pg
+
+from src.ui import theme
 
 # 右键菜单中文文案：创建与「判重 / 移除旧项」比对必须共用这些常量——
 # getMenu 返回的是 pyqtgraph 缓存的同一个 QMenu，两处文案不一致会导致
@@ -24,6 +26,13 @@ ZH_ADJUST_HEIGHT = "调整高度"
 ZH_ARRANGE_LAYOUT = "重排子图"
 ZH_RESET_ALL_HEIGHT = "全部重置为 100%"
 ZH_CLEAR_PLOT = "清除当前子图"
+
+# 右键拖拽扫选的最小有效宽度：8 px 与视宽 3% 取大。
+# GraphicsScene 的拖拽认判是 moveDistance=5px（按住超 0.5s 后 1px 也算拖动），
+# 5~8px 的抖动会走到「拖动已开始但不该缩放」的中间态 —— 这段按误触处理，
+# 松手时补弹右键菜单，保证「点一下 = 菜单」的手感不变。
+SCAN_MIN_PX = 8
+SCAN_MIN_WIDTH_RATIO = 0.03
 
 # 游标模式显示文案：键是跨模块内部标识符（cursor_sync_manager 的模式分发、
 # file_loader_manager 的重载恢复都按它比对），只改显示、绝不可改键值。
@@ -71,6 +80,195 @@ class CustomViewBox(pg.ViewBox):
         self.signals = CustomViewBoxSignals(parent=self)
         self.context_x: float | None = None
         self.plot_widget = None
+        # 右键扫选会话：_scan_active 在 Esc 取消后仍要吞掉剩余拖拽事件，
+        # 所以不能只靠 _scan_band 判活
+        self._scan_active = False
+        self._scan_band = None
+        self._scan_filter_view = None
+        self._scan_cursor_saved = None
+
+    # ================================================================
+    # 右键拖拽扫选 X 区间
+    # ================================================================
+
+    def mouseDragEvent(self, ev, axis=None):
+        """左/中键与轴区拖拽沿用父类；右键在绘图区内拖拽 = 扫选 X 区间。
+
+        pyqtgraph 0.14 的默认右键拖拽是双轴 ``scaleBy``（未写进文档，且会静默
+        关掉两轴 autoRange）。整个默认行为在这里替换为「按下点 → 当前点」的
+        预览带，松手后只缩 X、Y 一点不碰、autoRange 标记不动。
+        """
+        if (
+            axis is not None  # 轴区拖拽（AxisItem 转交，axis=0/1）
+            or ev.button() != Qt.MouseButton.RightButton
+            # 锁 X 时不写 X（生产上锁定时 x 已 setMouseEnabled(False)，父类
+            # 只剩 Y 缩放），与 D13「锁定时框选只写 Y」同口径
+            or getattr(self.plot_widget, "_x_mouse_locked", False)
+        ):
+            return super().mouseDragEvent(ev, axis=axis)
+
+        ev.accept()  # 必须接受：GraphicsScene 靠它把后续 move/finish 都派给本视图
+        if ev.isStart():
+            self._begin_scan()
+
+        if not self._scan_active:
+            return  # Esc 已取消：剩余拖拽事件直接吞掉，不再处理
+
+        # 松手事件可能被模态/切窗吃掉：中途发现右键已不在按下集合里就收摊，
+        # 否则预览带与十字光标会一直留到下一次拖拽
+        if not ev.isFinish() and not (
+            ev.buttons() & Qt.MouseButton.RightButton
+        ):
+            self._teardown_scan()
+            return
+
+        try:
+            self._update_scan_band(ev)
+        except Exception:
+            self._teardown_scan()
+            raise
+
+        if ev.isFinish():
+            self._end_scan(ev)
+
+    def _begin_scan(self) -> None:
+        self._scan_active = True
+        self._install_scan_key_filter()
+        self._set_scan_cursor(Qt.CursorShape.CrossCursor)
+
+    def _update_scan_band(self, ev) -> None:
+        """按「按下点 → 当前点」建/更新预览带（数据坐标，无 padding）。"""
+        x0 = self.mapSceneToView(
+            ev.buttonDownScenePos(Qt.MouseButton.RightButton)
+        ).x()
+        x1 = self.mapSceneToView(ev.scenePos()).x()
+
+        band = self._scan_band
+        if band is None:
+            plot_item = getattr(self.plot_widget, "plot_item", None)
+            if plot_item is None:
+                return
+            band = pg.LinearRegionItem(
+                values=(x0, x1), movable=False, brush=theme.tint_qcolor()
+            )
+            pen = pg.mkPen(theme.accent_qcolor(), width=1)
+            for line in band.lines:
+                line.setPen(pen)
+                line.setHoverPen(pen)
+                # 预览带只是视觉反馈，任何鼠标键都不得被它抢走：否则拖拽中的
+                # 悬停/点击会落到区域上，松手后右键菜单也可能被它接管
+                line.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            band.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            # ignoreBounds：预览带横跨整高，参与 auto-range 会把 Y 撑飞
+            plot_item.addItem(band, ignoreBounds=True)
+            self._scan_band = band
+        else:
+            band.setRegion((x0, x1))
+
+    def _end_scan(self, ev) -> None:
+        """松手：宽度够就缩 X，不够按误触补弹右键菜单；无论如何先清理会话。"""
+        down = ev.buttonDownScenePos(Qt.MouseButton.RightButton)
+        pos = ev.scenePos()
+        width_px = abs(pos.x() - down.x())
+        # 视图脱离 ViewWidget 时 screenGeometry() 为 None：按 0 宽算，只剩 8px 绝对下限
+        geometry = self.screenGeometry()
+        view_width = geometry.width() if geometry is not None else 0
+        min_px = max(SCAN_MIN_PX, SCAN_MIN_WIDTH_RATIO * view_width)
+        x0 = self.mapSceneToView(down).x()
+        x1 = self.mapSceneToView(pos).x()
+
+        try:
+            if width_px >= min_px:
+                self._apply_scan_range(min(x0, x1), max(x0, x1))
+            elif self.menuEnabled():
+                # 拖动已消费掉 mouseClickEvent → 手动补齐「点一下出菜单」
+                self.raiseContextMenu(ev)
+        finally:
+            self._teardown_scan()
+
+    def _apply_scan_range(self, xmin: float, xmax: float) -> None:
+        """写 X 范围：走 AxisManager 入口（XLink 时写源视图，由原生广播到整组）。"""
+        apply = getattr(self.plot_widget, "set_xrange_with_link_handling", None)
+        if callable(apply):
+            apply(xmin, xmax)
+            return
+        self.enableAutoRange(x=False)
+        self.setXRange(xmin, xmax, padding=0)
+
+    def _cancel_scan(self) -> None:
+        self._teardown_scan()
+
+    def _teardown_scan(self) -> None:
+        self._scan_active = False
+        band = self._scan_band
+        self._scan_band = None
+        if band is not None:
+            plot_item = getattr(self.plot_widget, "plot_item", None)
+            if plot_item is not None:
+                plot_item.removeItem(band)
+            else:
+                # plot_item 已先一步没了：直接从场景摘，别留一张幽灵带
+                scene = band.scene()
+                if scene is not None:
+                    band.setParentItem(None)
+                    scene.removeItem(band)
+            band.deleteLater()
+        self._remove_scan_key_filter()
+        self._set_scan_cursor(None)
+
+    def eventFilter(self, obj, event):
+        """扫选期间监听视图的 Esc：取消并撤掉预览带。"""
+        if (
+            self._scan_active
+            and obj is self._scan_filter_view
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Escape
+        ):
+            self._cancel_scan()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _install_scan_key_filter(self) -> None:
+        view = self.plot_widget
+        if view is None or self._scan_filter_view is not None:
+            return
+        view.installEventFilter(self)
+        self._scan_filter_view = view
+
+    def _remove_scan_key_filter(self) -> None:
+        view = self._scan_filter_view
+        if view is None:
+            return
+        self._scan_filter_view = None
+        try:
+            view.removeEventFilter(self)
+        except RuntimeError:
+            pass  # C++ 侧已销毁
+
+    def _set_scan_cursor(self, shape) -> None:
+        """shape=None 表示还原。用 WA_SetCursor 区分「原本没设光标」的常态，
+        没设过就 unsetCursor（不覆盖应用/主题光标，与视图其它路径同口径）。"""
+        view = self.plot_widget
+        viewport = view.viewport() if view is not None else None
+        if viewport is None:
+            return
+        if shape is None:
+            saved = self._scan_cursor_saved
+            self._scan_cursor_saved = None
+            if saved is None:
+                return
+            had_cursor, prev = saved
+            if had_cursor:
+                viewport.setCursor(prev)
+            else:
+                viewport.unsetCursor()
+            return
+        if self._scan_cursor_saved is None:
+            self._scan_cursor_saved = (
+                viewport.testAttribute(Qt.WidgetAttribute.WA_SetCursor),
+                viewport.cursor(),
+            )
+        viewport.setCursor(shape)
 
     def getMenu(self, ev):
         scene_pos = ev.scenePos()
