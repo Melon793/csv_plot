@@ -14,6 +14,7 @@ import pytest
 
 from PySide6.QtCore import QByteArray, QPointF, Qt
 from PySide6.QtGui import QDropEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMessageBox, QWidget
 
 from src.core.data_types import (
@@ -513,9 +514,74 @@ def test_revalidate_marks_stale_and_recovers(shelf):
     assert widget.item(0).flags() & Qt.ItemFlag.ItemIsDragEnabled
 
 
+@pytest.mark.parametrize("double_click", [False, True], ids=["click", "double-click"])
+def test_middle_button_does_not_remove_or_reselect(shelf, qapp, double_click):
+    widget, host = shelf
+    _drop_into_shelf(widget, build_var_mimedata(["a", "b", "c"]))
+    widget.setCurrentRow(0)
+    widget.clearSelection()
+    widget.item(0).setSelected(True)
+    widget.item(2).setSelected(True)
+    qapp.processEvents()
+    current_row = widget.currentRow()
+    selected = widget.selected_keys()
+    messages = list(host.messages)
+    selection_changes = []
+    widget.itemSelectionChanged.connect(lambda: selection_changes.append(True))
+    pos = widget.visualItemRect(widget.item(1)).center()
+
+    if double_click:
+        QTest.mouseDClick(widget.viewport(), Qt.MouseButton.MiddleButton, pos=pos)
+    else:
+        QTest.mouseClick(widget.viewport(), Qt.MouseButton.MiddleButton, pos=pos)
+    qapp.processEvents()
+
+    assert widget.count() == 3
+    assert widget.currentRow() == current_row
+    assert widget.selected_keys() == selected
+    assert selection_changes == []
+    assert host.messages == messages
+
+
+def test_delete_entries_announces_single_name(shelf):
+    widget, host = shelf
+    _drop_into_shelf(widget, build_var_mimedata(["a"]))
+    entry = widget.entry_for_name("a")
+    host.messages.clear()
+
+    assert widget._delete_entries([entry.key]) == 1
+
+    assert widget.count() == 0
+    assert host.messages == ["已删除暂存条目「a」"]
+
+
+def test_delete_entries_announces_batch_count(shelf):
+    widget, host = shelf
+    _drop_into_shelf(widget, build_var_mimedata(["a", "b", "c"]))
+    keys = [widget.entry_for_name(name).key for name in ("a", "b", "c")]
+    host.messages.clear()
+
+    assert widget._delete_entries(keys) == 3
+
+    assert widget.count() == 0
+    assert host.messages == ["已删除 3 个暂存条目"]
+
+
+def test_clear_single_entry_announces(shelf):
+    widget, host = shelf
+    _drop_into_shelf(widget, build_var_mimedata(["a"]))
+    host.messages.clear()
+
+    assert widget.request_clear() == 1
+
+    assert widget.count() == 0
+    assert host.messages == ["已清空暂存区 · 1 个条目"]
+
+
 def test_clear_confirm_no_keeps_entries(shelf, monkeypatch):
-    widget, _ = shelf
+    widget, host = shelf
     _drop_into_shelf(widget, build_var_mimedata(["b", "c"]))
+    host.messages.clear()
     calls = []
     monkeypatch.setattr(
         QMessageBox,
@@ -525,6 +591,7 @@ def test_clear_confirm_no_keeps_entries(shelf, monkeypatch):
     assert widget.request_clear() == 0
     assert widget.count() == 2
     assert len(calls) == 1  # N>1 一次汇总确认
+    assert host.messages == []
 
     monkeypatch.setattr(
         QMessageBox,
@@ -533,6 +600,7 @@ def test_clear_confirm_no_keeps_entries(shelf, monkeypatch):
     )
     assert widget.request_clear() == 2
     assert widget.count() == 0
+    assert host.messages == ["已清空暂存区 · 2 个条目"]
 
 
 # ---------------------------------------------------------------------------
