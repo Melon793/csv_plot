@@ -748,9 +748,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         modifiers = ev.modifiers()
         self._sync_scroll_modifiers(modifiers)
         scene_pos = self.mapToScene(ev.position().toPoint())
+        in_view_box = vb.sceneBoundingRect().contains(scene_pos)
+        x_zoom_modifiers = modifiers == Qt.KeyboardModifier.NoModifier or (
+            modifiers == Qt.KeyboardModifier.ShiftModifier and in_view_box
+        )
 
         if (
-            modifiers == Qt.KeyboardModifier.NoModifier
+            x_zoom_modifiers
             and (dx != 0 or delta != 0)
             and getattr(self, "_legend_proxy", None) is not None
             and self._legend_proxy.sceneBoundingRect().contains(scene_pos)
@@ -766,7 +770,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 ev.accept()
                 return
 
-        if modifiers == Qt.KeyboardModifier.NoModifier:
+        if x_zoom_modifiers:
             if dx != 0 or delta != 0:
                 mouse_x = vb.mapSceneToView(scene_pos).x()
                 step = self._feed_trackpad_scroll(dx, delta, mouse_x)
@@ -781,7 +785,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
 
         if modifiers == Qt.KeyboardModifier.ControlModifier:
-            if not vb.sceneBoundingRect().contains(scene_pos):
+            if not in_view_box:
                 super().wheelEvent(ev)
                 return
             if dx == 0 and delta == 0:

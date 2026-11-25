@@ -152,28 +152,30 @@ def test_ctrl_wheel_in_plot_uses_x_only_fine_zoom(shown_plot, qapp):
     assert vb.viewRange()[1] == before_y
 
 
-def test_shift_wheel_in_plot_still_delegates_to_pyqtgraph(shown_plot, qapp):
-    """Shift 暂保留父类路径；轴上与绘图区的最终分工由轴区用例单独守住。"""
+def test_shift_wheel_in_plot_matches_unmodified_x_zoom(shown_plot, qapp):
+    """绘图区内 Shift 与无修饰同路径：整齿仍 0.7，且不破坏 Y autoRange。"""
     pw = shown_plot
     assert pw.plot_variable("a")
     vb = pw.view_box
     vb.setXRange(10, 90, padding=0)
     vb.setYRange(-5, 105, padding=0)
+    vb.enableAutoRange(axis=vb.YAxis, enable=True)
     qapp.processEvents()
     before_x = list(vb.viewRange()[0])
     before_y = list(vb.viewRange()[1])
     pos = QPoint(400, 300)
     center = _zoom_center_mapping(pw, pos)
     factor = 1 - FACTOR_SCROLL_ZOOM
-    custom_expected = (
+    expected_x = [
         center - (center - before_x[0]) * factor,
         center + (before_x[1] - center) * factor,
-    )
+    ]
 
     pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ShiftModifier))
 
-    assert vb.viewRange()[0] != pytest.approx(custom_expected, rel=1e-6)
-    assert vb.viewRange()[1] != before_y
+    assert vb.viewRange()[0] == pytest.approx(expected_x, rel=1e-6)
+    assert vb.viewRange()[1] == before_y
+    assert bool(vb.state["autoRange"][1]) is True
 
 
 def test_five_ctrl_notches_preserve_y_autorange(shown_plot, qapp):
@@ -268,8 +270,12 @@ def test_modifier_change_flushes_pending_scroll_before_reset(shown_plot, monkeyp
     assert len(calls) == 2
 
 
-def test_ctrl_wheel_on_y_axis_delegates_and_keeps_x_unchanged(
-    shown_plot, qapp, monkeypatch
+@pytest.mark.parametrize(
+    "modifiers",
+    [Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.ShiftModifier],
+)
+def test_modified_wheel_on_y_axis_delegates_and_keeps_x_unchanged(
+    shown_plot, qapp, monkeypatch, modifiers
 ):
     pw = shown_plot
     assert pw.plot_variable("a")
@@ -299,7 +305,7 @@ def test_ctrl_wheel_on_y_axis_delegates_and_keeps_x_unchanged(
     pos = pw.mapFromScene(QPointF(rect.left() - 20, rect.center().y()))
     assert not rect.contains(pw.mapToScene(pos))
 
-    pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ControlModifier))
+    pw.wheelEvent(_wheel_event(pw, pos, 120, modifiers))
 
     assert len(delegated) == 1
     assert zoom_calls == []
@@ -312,7 +318,7 @@ def test_ctrl_wheel_on_y_axis_delegates_and_keeps_x_unchanged(
     axis_event.setDelta(120)
     axis_event.setOrientation(Qt.Orientation.Vertical)
     axis_event.setButtons(Qt.MouseButton.NoButton)
-    axis_event.setModifiers(Qt.KeyboardModifier.ControlModifier)
+    axis_event.setModifiers(modifiers)
     assert pw.axis_y.linkedView() is vb
     pw.axis_y.wheelEvent(axis_event)
     qapp.processEvents()
