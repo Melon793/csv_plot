@@ -18,6 +18,7 @@ import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtTest import QSignalSpy
+from PySide6.QtWidgets import QApplication
 
 from src.core.data_types import MarkStatEntry
 from src.ui.mark_stats import (
@@ -85,6 +86,16 @@ def stats_window(qapp, app_settings):
     window.deleteLater()
     app_settings.set_mark_stats_columns(list(DEFAULT_COLUMN_KEYS))
     app_settings.set_mark_stats_header_state("")
+
+
+@pytest.fixture()
+def clipboard_sentinel(qapp):
+    """剪贴板先插哨兵，测试后还原，防止同进程用例之间互相污染。"""
+    clipboard = QApplication.clipboard()
+    original = clipboard.text()
+    clipboard.setText("__sentinel__")
+    yield clipboard
+    clipboard.setText(original)
 
 
 class TestStatColumnRegistry:
@@ -824,6 +835,24 @@ class TestExport:
         assert md_text.splitlines()[0].startswith("| 页 | 子图 | 变量名 | 单位 |")
         assert "alpha" in md_text.splitlines()[2]
 
+    def test_export_sanitizes_separators(self, stats_window):
+        """变量名/单位里的制表符与换行不能破坏导出的行列结构。"""
+        stats_window.update_stats(
+            [("p", 0, [_entry(var_name="a\tb\nc\rd", unit="km\r\nh")])]
+        )
+        tsv_text = stats_window._export_text(as_csv=True)
+        lines = tsv_text.split("\n")
+        width = len(stats_window._visible_columns())
+        assert len(lines) == 2  # 表头 + 1 行：换行未被当成新行
+        assert all(line.count("\t") == width - 1 for line in lines)
+        assert "a b c d" in lines[1]
+        assert "km h" in lines[1]  # \r\n 合并成一个空格
+        assert "\r" not in tsv_text
+
+        md_text = stats_window._export_text(as_csv=False)
+        assert "a b c d" in md_text
+        assert "\r" not in md_text
+
     def test_status_bar_counts_and_range(self, stats_window):
         from PySide6.QtWidgets import QWidget
 
@@ -842,3 +871,46 @@ class TestExport:
         finally:
             stats_window.setParent(None)
             holder.deleteLater()
+
+
+class TestCopyToClipboard:
+    """复制按钮文案与回执：目标是从 Excel 粘贴，不再承诺 CSV。"""
+
+    def test_button_offers_table_not_csv(self, stats_window):
+        assert stats_window.copy_csv_btn.text() == "复制表格"
+        assert "CSV" not in stats_window.copy_csv_btn.text()
+        assert "Excel" in stats_window.copy_csv_btn.toolTip()
+
+    def test_copy_feedback_clears_on_next_refresh(
+        self, stats_window, clipboard_sentinel
+    ):
+        stats_window.update_stats([("p", 0, [_entry()])])
+        width = len(stats_window._visible_columns())
+        stats_window.copy_csv_btn.click()
+        notice = stats_window.status_label.text()
+        assert notice.startswith(f"已复制 1 行 × {width} 列")
+        assert "可粘贴到 Excel" in notice
+        assert clipboard_sentinel.text().split("\n")[0].startswith("页\t子图")
+
+        stats_window.update_stats([("p", 0, [_entry()])])
+        assert "已复制" not in stats_window.status_label.text()
+
+    def test_copy_empty_table_keeps_clipboard(
+        self, stats_window, clipboard_sentinel
+    ):
+        stats_window.update_stats([])
+        stats_window.copy_csv_btn.click()
+        assert stats_window.status_label.text().startswith("没有可复制的数据")
+        assert clipboard_sentinel.text() == "__sentinel__"
+
+    def test_column_config_change_clears_notice(
+        self, stats_window, clipboard_sentinel
+    ):
+        stats_window.update_stats([("p", 0, [_entry()])])
+        stats_window.copy_csv_btn.click()
+        assert "已复制" in stats_window.status_label.text()
+
+        stats_window._apply_column_keys(
+            [k for k in stats_window.model.column_keys() if k != "slope"]
+        )
+        assert "已复制" not in stats_window.status_label.text()
