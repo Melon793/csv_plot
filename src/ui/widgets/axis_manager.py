@@ -288,6 +288,18 @@ class AxisManager:
                 center_x + (right - center_x) * factor,
             )
 
+    def pan_x(self, fraction: float) -> None:
+        """按本地视宽比例平移 X 轴，并保持 Y autoRange 与 XLink 一致。"""
+        if getattr(self.pw, "_x_mouse_locked", False):
+            return
+        vb = self.pw.view_box
+        local_left, local_right = vb.viewRange()[0]
+        distance = (local_right - local_left) * fraction
+        target = self._xlink_target(vb)
+        left, right = target.viewRange()[0]
+        with y_autorange_preserved(target):
+            self.set_xrange_with_link_handling(left + distance, right + distance)
+
     def set_xrange_with_link_handling(
         self,
         xmin: float,

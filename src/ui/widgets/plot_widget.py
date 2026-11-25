@@ -728,6 +728,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
     def _apply_scroll_step(self, step) -> None:
         if step.zoom_log != 0:
             self._axis_manager.zoom_x(math.exp(step.zoom_log), self._scroll_center_x)
+        if step.pan_fraction != 0:
+            self._axis_manager.pan_x(step.pan_fraction)
 
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
@@ -756,17 +758,17 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 # 内容未溢出：不吞事件，放行到下方 X 轴缩放路径
         # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
         if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
-            if delta != 0:
+            if dx != 0 or delta != 0:
                 # 获取鼠标位置
                 mouse_pos = ev.position().toPoint()
                 scene_pos = self.mapToScene(mouse_pos)
                 view_pos = vb.mapSceneToView(scene_pos)
                 mouse_x = view_pos.x()
 
-                step = self._feed_trackpad_scroll(0, delta, mouse_x)
+                step = self._feed_trackpad_scroll(dx, delta, mouse_x)
                 if step is not None:
                     self._apply_scroll_step(step)
-                if self._trackpad_scroll.mode == "mouse":
+                if self._trackpad_scroll.mode == "mouse" and delta != 0:
                     factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
                     self._axis_manager.zoom_x(factor, mouse_x)
                 ev.accept()  # 确保事件被处理
