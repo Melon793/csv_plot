@@ -388,6 +388,9 @@ class CustomViewBox(pg.ViewBox):
 
         只关入口：``ctrlMenu`` 与其中的动作原样保留，将来要恢复只需改回。
         Scene 的「Export...」由 ``_export_action`` 接管。
+
+        必须显式传 ``enableViewBoxMenu=None``：``_end_scan`` 靠
+        ``self.menuEnabled()`` 决定短拖是否补弹菜单，ViewBox 菜单本身不能关。
         """
         plot_item = getattr(self.plot_widget, "plot_item", None)
         if plot_item is None:
@@ -410,7 +413,8 @@ class CustomViewBox(pg.ViewBox):
         act = getattr(scene, "_csv_plot_export_action", None)
         if act is None:
             acts = list(getattr(scene, "contextMenu", None) or [])
-            if not acts:
+            # 只认 Scene 自建的那个动作；列表被第三方改写时不误改别人的项
+            if not acts or acts[0].parent() is not scene:
                 return None
             act = acts[0]
             scene.contextMenu = []
@@ -423,8 +427,6 @@ class CustomViewBox(pg.ViewBox):
         current_mode = self._get_current_cursor_mode()
 
         cursor_menu = QMenu(ZH_CURSOR_MENU, parent)
-        # 游标选项菜单始终可用
-        cursor_menu.setEnabled(True)
         cursor_group = QActionGroup(cursor_menu)
         cursor_group.setExclusive(True)
 
@@ -434,8 +436,6 @@ class CustomViewBox(pg.ViewBox):
             mode_act.setCheckable(True)
             # 选中逻辑：光标开启时检查是否匹配当前模式，光标关闭时不选中
             mode_act.setChecked(cursor_enabled and mode == current_mode)
-            # 所有选项始终可用
-            mode_act.setEnabled(True)
             mode_act.triggered.connect(
                 lambda checked, m=mode: self.signals.request_set_cursor_mode.emit(
                     m, self.plot_widget, self.context_x
@@ -448,8 +448,6 @@ class CustomViewBox(pg.ViewBox):
         off_act = QAction(ZH_CURSOR_MODE_LABELS["off"], cursor_menu)
         off_act.setCheckable(True)
         off_act.setChecked(current_mode == "off" or not cursor_enabled)
-        # "off" 选项始终可用
-        off_act.setEnabled(True)
         off_act.triggered.connect(
             lambda checked: self.signals.request_set_cursor_mode.emit(
                 "off", self.plot_widget, self.context_x
