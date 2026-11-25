@@ -562,10 +562,9 @@ class CursorSyncManager(MainWindowBaseManager):
             or not widget_alive(page.widget)
         ):
             return False
-        self.clear_current_page(page)
-        return True
+        return self.clear_current_page(page)
 
-    def clear_current_page(self, page=None) -> None:
+    def clear_current_page(self, page=None) -> bool:
         """无确认清空指定页的全部子图；共享缓存与全局标记区间保持不变。"""
         target = self.mw.current_page if page is None else page
         if (
@@ -573,10 +572,10 @@ class CursorSyncManager(MainWindowBaseManager):
             or target not in self.mw.pages
             or not widget_alive(target.widget)
         ):
-            return
+            return False
         curves, invalid = self._page_plot_counts(target)
         if not curves and not invalid:
-            return
+            return False
         if curves:
             self.mw.set_x_axis_locked(False, reason="绘图已清空")
         for container in list(target.plot_widgets):
@@ -590,6 +589,7 @@ class CursorSyncManager(MainWindowBaseManager):
             self.mw._announce_cleared_plots("已清空当前页", curves)
         else:
             self.mw._broadcast(f"已清空当前页 · {invalid} 个失效占位")
+        return True
 
     def clear_all_plots(self):
         """程序化全局清空，不弹确认框（重选库/关末页/模板与测试路径）。"""

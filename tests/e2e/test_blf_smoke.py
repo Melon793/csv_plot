@@ -421,3 +421,52 @@ def test_reselecting_pushes_the_new_units_into_the_plot_widgets(
     assert pw.units[name] == "xalt", "控件级单位没跟着换 = 图上仍是老单位"
     assert not pw.curves, "§5.6：旧曲线引用的是作废名字，一律清除"
     assert mw.list_widget.rowCount() == len(loader.var_names)
+
+
+def test_reselecting_database_clears_same_name_curves_on_hidden_pages(
+    main_window, qapp, qtbot, dialog_stubs, can_dialogs, tmp_path
+):
+    """真实重选入口必须保留全局清空，隐藏页不得按同名重绑到新库。"""
+    mw = main_window
+    blf, dbc = write_blf_pair(tmp_path, n=30, buses=(0,))
+    _import(mw, qtbot, qapp, dialog_stubs, can_dialogs, blf, dbc)
+    first = mw.current_page
+    second = mw.new_page()
+    qtbot.waitUntil(lambda: len(second.plot_widgets) > 0, timeout=3000)
+    name = max(mw.loader.var_names, key=lambda n: mw.loader.get_series(n).size)
+    first_pw = first.plot_widgets[0].plot_widget
+    second_pw = second.plot_widgets[0].plot_widget
+    assert first_pw.plot_variable(name)
+    assert second_pw.plot_variable(name)
+    hidden_ci = second_pw.curves[name]
+    mw.activate_page(first)
+    qtbot.waitUntil(lambda: mw.current_page is first, timeout=3000)
+
+    alt_frames = copy.deepcopy(list(CAN_FRAMES))
+    for frame in alt_frames:
+        for signal in frame["signals"]:
+            signal["unit"] = "xalt"
+    alt = write_dbc(tmp_path / "alt.dbc", alt_frames)
+    can_dialogs["replace"] = True
+    can_dialogs["paths"] = [str(alt)]
+    mw.resize(1400, 800)
+    qapp.processEvents()
+    qtbot.mouseClick(mw._can_segment, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    qtbot.mouseClick(mw._can_db_drawer.reselect_btn, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+
+    assert not dialog_stubs["critical"], dialog_stubs["critical"]
+    assert mw.loader.db_paths == [str(alt)]
+    assert first_pw.curves == {}
+    assert second_pw.curves == {}, "隐藏页旧曲线必须在重绑前跨页清除"
+    assert hidden_ci.curve.scene() is None, "隐藏页旧曲线 item 不得留在场景中"
+    mw.activate_page(second)
+    qtbot.waitUntil(
+        lambda: mw.current_page is second
+        and mw._pending_activation is None
+        and not second._scene_dirty,
+        timeout=3000,
+    )
+    qapp.processEvents()
+    assert second_pw.curves == {}, "切回隐藏页不得按同名重绑到新库"
