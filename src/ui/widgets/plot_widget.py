@@ -1,9 +1,12 @@
 from __future__ import annotations
 import sys
 import os
+import math
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from src.ui.widgets.scroll_gesture import TrackpadScroll
 from src.utils.platform_setup import setup_platform
 setup_platform()
 
@@ -37,7 +40,7 @@ from src.ui.drag_visuals import (
 )
 from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
 from src.ui.transfer_broadcast import announce_selection, broadcast_transfer
-from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR)
+from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR, SCROLL_APPLY_INTERVAL_MS)
 from src.core.logger import get_logger
 from src.ui.table_dialog import DataTableDialog
 from src.ui.plot_variable_editor import PlotVariableEditorDialog
@@ -103,6 +106,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # X 轴锁定（MainWindow.set_x_axis_locked 广播 / 建图补种）：
         # 滚轮 zoom_x、Shift 框选 release、右键菜单可见性都读它
         self._x_mouse_locked = False
+        self._trackpad_scroll = TrackpadScroll()
+        self._scroll_center_x = 0.0
+        self._scroll_apply_timer = QTimer(self)
+        self._scroll_apply_timer.setSingleShot(True)
+        self._scroll_apply_timer.timeout.connect(self._flush_trackpad_scroll)
         # C++ 侧析构一开始就置位，覆盖所有不经过显式拆卸点的路径（如主窗口
         # 退出时的子对象析构）。必须用 lambda 连：连到绑定方法上时 PySide6 在
         # 包装器失效时会丢掉这条连接，实测不再回调。
@@ -683,17 +691,60 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         except Exception:
             logger.warning("paintEvent 异常", exc_info=True)
 
+    def _scroll_now(self) -> float:
+        return time.monotonic_ns() / 1_000_000.0
+
+    def _scroll_input_blocked(self) -> bool:
+        return (
+            self._is_updating_data
+            or self._is_being_destroyed
+            or self._x_mouse_locked
+        )
+
+    def _feed_trackpad_scroll(self, dx: float, dy: float, center_x: float):
+        if self._scroll_input_blocked():
+            self._trackpad_scroll.reset()
+            self._scroll_apply_timer.stop()
+            return None
+        self._scroll_center_x = center_x
+        step = self._trackpad_scroll.feed(dx, dy, self._scroll_now())
+        if (
+            step is None
+            and self._trackpad_scroll.mode == "trackpad"
+            and not self._scroll_apply_timer.isActive()
+        ):
+            self._scroll_apply_timer.start(SCROLL_APPLY_INTERVAL_MS)
+        return step
+
+    def _flush_trackpad_scroll(self) -> None:
+        if self._scroll_input_blocked():
+            self._trackpad_scroll.reset()
+            self._scroll_apply_timer.stop()
+            return
+        step = self._trackpad_scroll.flush(self._scroll_now())
+        if step is not None:
+            self._apply_scroll_step(step)
+
+    def _apply_scroll_step(self, step) -> None:
+        if step.zoom_log != 0:
+            self._axis_manager.zoom_x(math.exp(step.zoom_log), self._scroll_center_x)
+
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
-        delta = ev.angleDelta().y()
+        angle = ev.angleDelta()
+        dx = angle.x()
+        delta = angle.y()
         # 鼠标悬停在 legend 上时，滚轮驱动 legend 滚动而非 X 轴缩放
         if (
             ev.modifiers() == Qt.KeyboardModifier.NoModifier
-            and delta != 0
+            and (dx != 0 or delta != 0)
             and getattr(self, "_legend_proxy", None) is not None
         ):
             scene_pos = self.mapToScene(ev.position().toPoint())
             if self._legend_proxy.sceneBoundingRect().contains(scene_pos):
+                if dx != 0:
+                    ev.accept()
+                    return
                 sb = self.legend_label.verticalScrollBar()
                 if sb.maximum() > sb.minimum():
                     # 内容溢出可滚动：滚轮驱动 legend 滚动（每齿(120)约 3 行）
@@ -712,8 +763,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 view_pos = vb.mapSceneToView(scene_pos)
                 mouse_x = view_pos.x()
 
-                factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
-                self._axis_manager.zoom_x(factor, mouse_x)
+                step = self._feed_trackpad_scroll(0, delta, mouse_x)
+                if step is not None:
+                    self._apply_scroll_step(step)
+                if self._trackpad_scroll.mode == "mouse":
+                    factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
+                    self._axis_manager.zoom_x(factor, mouse_x)
                 ev.accept()  # 确保事件被处理
             else:
                 super().wheelEvent(ev)

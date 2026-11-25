@@ -12,6 +12,8 @@
 才能测到 XLink 锚点问题，断言口径用「缩放前后同一像素处的数据值漂移（px）」。
 """
 
+import math
+
 import pandas as pd
 import pytest
 
@@ -145,6 +147,140 @@ def test_wheel_with_modifier_delegates_to_pyqtgraph_default(shown_plot, qapp):
             and vb.viewRange()[1] == list(before_y)
         )
         assert not custom_applied, f"修饰键 {mods} 下误走了自定义缩放路径"
+
+
+def test_trackpad_subnotches_merge_before_zoom(shown_plot, qapp, monkeypatch):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(10, 90, padding=0)
+    qapp.processEvents()
+    now = [0.0]
+    monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
+    calls = []
+    original = pw._axis_manager.zoom_x
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda factor, center: calls.append((factor, center)) or original(factor, center),
+    )
+    pos = QPoint(400, 300)
+
+    pw.wheelEvent(_wheel_event(pw, pos, 3))
+    now[0] = 5
+    pw.wheelEvent(_wheel_event(pw, pos, 3))
+    assert calls == []
+
+    now[0] = 16
+    pw.wheelEvent(_wheel_event(pw, pos, 3))
+    assert len(calls) == 1
+    assert calls[0][0] == pytest.approx(math.exp(-math.log(2) * 9 / 500))
+
+
+def test_trackpad_tail_flush_uses_single_shot_timer(shown_plot, qtbot, monkeypatch):
+    pw = shown_plot
+    calls = []
+    original = pw._axis_manager.zoom_x
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda factor, center: calls.append(factor) or original(factor, center),
+    )
+
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 4))
+    assert pw._scroll_apply_timer.isActive()
+    qtbot.waitUntil(lambda: bool(calls), timeout=500)
+
+    assert len(calls) == 1
+    assert calls[0] == pytest.approx(math.exp(-math.log(2) * 4 / 500))
+    assert not pw._scroll_apply_timer.isActive()
+
+
+def test_trackpad_timer_is_not_restarted_by_each_event(shown_plot, monkeypatch):
+    pw = shown_plot
+    now = [0.0]
+    monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
+    starts = []
+    original = pw._scroll_apply_timer.start
+
+    def start(interval):
+        starts.append(interval)
+        return original(interval)
+
+    monkeypatch.setattr(pw._scroll_apply_timer, "start", start)
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 4))
+    now[0] = 5
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 4))
+
+    assert starts == [16]
+    assert pw._scroll_apply_timer.isActive()
+
+
+def test_trackpad_latch_keeps_dense_notch_on_continuous_path(shown_plot, monkeypatch):
+    pw = shown_plot
+    now = [0.0]
+    monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
+    calls = []
+    original = pw._axis_manager.zoom_x
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda factor, center: calls.append(factor) or original(factor, center),
+    )
+
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 4))
+    now[0] = 20
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 240))
+
+    assert len(calls) == 1
+    assert calls[0] == pytest.approx(2.5 ** -0.02)
+    assert calls[0] != pytest.approx(0.7)
+
+
+def test_mouse_notches_keep_original_factor_at_high_rate(shown_plot, monkeypatch):
+    pw = shown_plot
+    calls = []
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda factor, center: calls.append(factor),
+    )
+
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 120))
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 120))
+
+    assert calls == [0.7, 0.7]
+    assert pw._trackpad_scroll.mode == "mouse"
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["_is_updating_data", "_is_being_destroyed", "_x_mouse_locked"],
+)
+def test_trackpad_scroll_resets_when_input_is_blocked(shown_plot, monkeypatch, flag):
+    pw = shown_plot
+    now = [0.0]
+    monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
+    setattr(pw, flag, True)
+    calls = []
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda factor, center: calls.append(factor),
+    )
+
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 4))
+    assert calls == []
+    assert not pw._scroll_apply_timer.isActive()
+    assert pw._trackpad_scroll.flush(16) is None
+
+    setattr(pw, flag, False)
+    now[0] = 20
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 4))
+    now[0] = 36
+    pw._flush_trackpad_scroll()
+
+    assert len(calls) == 1
+    assert calls[0] == pytest.approx(math.exp(-math.log(2) * 4 / 500))
 
 
 def test_wheel_zoom_preserves_y_range(shown_plot, qapp):
