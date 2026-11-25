@@ -154,6 +154,18 @@ def _format_stat_value(value, decimals: int | None = None) -> str:
 # x 相关列：与游标 X 标签共用「按数据步长推导」的小数位
 _X_DECIMAL_KEYS = frozenset({"x1", "x2", "dx", "x_at_y_max", "x_at_y_min"})
 
+_SEPARATOR_TRANSLATION = str.maketrans({"\t": " ", "\r": " ", "\n": " "})
+
+
+def _export_cell_text(value) -> str:
+    """导出单格文本：None→空串；制表符/回车/换行替换为空格，避免破坏行列结构。
+
+    先合并 ``\r\n``，避免一个换行被替换成两个空格。
+    """
+    if value is None:
+        return ""
+    return str(value).replace("\r\n", " ").translate(_SEPARATOR_TRANSLATION)
+
 
 # ---------------------------------------------------------------------------
 # 表格 Model / Proxy（§5.4 / §5.5）
@@ -976,7 +988,7 @@ class MarkStatsWindow(QDialog):
     def _export_text(self, as_csv: bool) -> str:
         cols = self._visible_columns()
         headers = [
-            str(
+            _export_cell_text(
                 self.model.headerData(
                     c, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole
                 )
@@ -993,7 +1005,7 @@ class MarkStatsWindow(QDialog):
             cells = []
             for c in cols:
                 text = self.proxy.data(self.proxy.index(prow, c), Qt.ItemDataRole.DisplayRole)
-                cells.append("" if text is None else str(text))
+                cells.append(_export_cell_text(text))
             if as_csv:
                 lines.append("\t".join(cells))
             else:

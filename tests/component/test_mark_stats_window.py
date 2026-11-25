@@ -824,6 +824,24 @@ class TestExport:
         assert md_text.splitlines()[0].startswith("| 页 | 子图 | 变量名 | 单位 |")
         assert "alpha" in md_text.splitlines()[2]
 
+    def test_export_sanitizes_separators(self, stats_window):
+        """变量名/单位里的制表符与换行不能破坏导出的行列结构。"""
+        stats_window.update_stats(
+            [("p", 0, [_entry(var_name="a\tb\nc\rd", unit="km\r\nh")])]
+        )
+        tsv_text = stats_window._export_text(as_csv=True)
+        lines = tsv_text.split("\n")
+        width = len(stats_window._visible_columns())
+        assert len(lines) == 2  # 表头 + 1 行：换行未被当成新行
+        assert all(line.count("\t") == width - 1 for line in lines)
+        assert "a b c d" in lines[1]
+        assert "km h" in lines[1]  # \r\n 合并成一个空格
+        assert "\r" not in tsv_text
+
+        md_text = stats_window._export_text(as_csv=False)
+        assert "a b c d" in md_text
+        assert "\r" not in md_text
+
     def test_status_bar_counts_and_range(self, stats_window):
         from PySide6.QtWidgets import QWidget
 
