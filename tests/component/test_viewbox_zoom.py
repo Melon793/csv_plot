@@ -2,7 +2,7 @@
 
 模拟 help.md 4️⃣「交互操作」中的用户动作：
 - 滚轮缩放 X 轴（以鼠标位置为中心，factor=FACTOR_SCROLL_ZOOM）
-- Ctrl/Shift 修饰键下滚轮不触发 X 轴缩放
+- 绘图区内 Ctrl/Shift 与无修饰相同，轴上 Ctrl/Shift 保持轴专属缩放
 - XLink：一个子图缩放，联动子图 X 范围同步
 - Shift+左键框选放大（含 10% margin、过小框忽略）
 - 双击中键清除单个图表
@@ -326,6 +326,32 @@ def test_modified_wheel_on_y_axis_delegates_and_keeps_x_unchanged(
     assert axis_calls == [(1, 120)]
     assert vb.viewRange()[0] == before_x
     assert vb.viewRange()[1] != before_y
+
+
+def test_unmodified_horizontal_scroll_on_axis_does_not_pan(shown_plot, monkeypatch):
+    pw = shown_plot
+    vb = pw.view_box
+    before_x = list(vb.viewRange()[0])
+    delegated = []
+    monkeypatch.setattr(
+        pg.GraphicsLayoutWidget,
+        "wheelEvent",
+        lambda _self, ev: delegated.append(ev) or ev.accept(),
+    )
+    pan_calls = []
+    monkeypatch.setattr(
+        pw._axis_manager, "pan_x", lambda fraction: pan_calls.append(fraction)
+    )
+    rect = vb.sceneBoundingRect()
+    pos = pw.mapFromScene(QPointF(rect.left() - 20, rect.center().y()))
+    assert not rect.contains(pw.mapToScene(pos))
+
+    pw.wheelEvent(_wheel_event(pw, pos, 0, delta_x=32))
+
+    assert len(delegated) == 1
+    assert pan_calls == []
+    assert vb.viewRange()[0] == before_x
+    assert pw._trackpad_scroll.flush(16) is None
 
 
 def test_trackpad_subnotches_merge_before_zoom(shown_plot, qapp, monkeypatch):

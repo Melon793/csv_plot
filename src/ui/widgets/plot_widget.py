@@ -771,6 +771,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 return
 
         if x_zoom_modifiers:
+            if not in_view_box and delta == 0 and dx != 0:
+                super().wheelEvent(ev)
+                return
             if dx != 0 or delta != 0:
                 mouse_x = vb.mapSceneToView(scene_pos).x()
                 step = self._feed_trackpad_scroll(dx, delta, mouse_x)
