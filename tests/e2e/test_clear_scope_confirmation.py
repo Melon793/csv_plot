@@ -113,7 +113,7 @@ def test_top_clear_button_names_current_page_scope(loaded_window):
 
     assert button.text() == "清空当前页"
     assert "当前页" in button.toolTip()
-    assert "确认" in button.toolTip()
+    assert "有曲线或失效占位时二次确认" in button.toolTip()
 
 
 def test_current_page_clear_cancel_preserves_every_page_and_has_no_announcement(

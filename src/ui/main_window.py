@@ -1590,7 +1590,7 @@ class MainWindow(QMainWindow):
         # （layout_manager.open_time_correction_dialog）按口径留着，只是暂无入口。
         self.clear_all_plots_btn = QPushButton("清空当前页", self.plot_widget)
         self.clear_all_plots_btn.setToolTip(
-            "清空当前页的所有子图；有曲线时二次确认"
+            "清空当前页的所有子图；有曲线或失效占位时二次确认"
         )
         top_bar.addWidget(self.clear_all_plots_btn)
 
