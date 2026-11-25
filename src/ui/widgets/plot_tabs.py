@@ -671,9 +671,12 @@ class _PageDirectoryPopup(QWidget):
         self._owner = owner
         self.setObjectName("pageDirectoryPopup")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 不画圆角：本浮层是不透明顶层窗口，QSS 圆角只改描边路径，窗口四角仍
+        # 按矩形刷白（同一现象见 theme.py 的 QToolTip 注释）。改透明窗承载圆角
+        # 需真机验证阴影与文字渲染，先在 dev 分支试，main 暂用直角。
         self.setStyleSheet(
             "#pageDirectoryPopup { background: #ffffff;"
-            " border: 1px solid #d5dbe3; border-radius: 6px; }"
+            " border: 1px solid #d5dbe3; }"
             "#pageDirectoryPopup QScrollArea { background: transparent; border: none; }"
         )
         outer = QVBoxLayout(self)
