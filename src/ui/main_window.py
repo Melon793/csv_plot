@@ -2660,7 +2660,7 @@ class MainWindow(QMainWindow):
             self._broadcast(text)
 
     def _announce_cleared_plots(self, label: str, curves: int) -> None:
-        """清除绘图之后的播报，三条入口共用（顶部按钮 / 右键菜单 / 双击中键）。
+        """清除绘图之后的播报，三条入口共用（顶部当前页 / 右键子图 / 双击中键子图）。
 
         只在真有曲线被清掉时出声 —— 清一遍本来就没曲线的子图，屏上什么都没变，
         不该占消息区（这条守卫顺带保证文案里的数目 ≥1）。

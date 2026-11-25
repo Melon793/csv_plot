@@ -592,14 +592,12 @@ class CursorSyncManager(MainWindowBaseManager):
         return True
 
     def clear_all_plots(self):
-        """程序化全局清空，不弹确认框（重选库/关末页/模板与测试路径）。"""
-        if self.mw.reject_when_loading("清除绘图"):
+        """程序化全局清空，不弹确认框（重选库/关末页/测试等路径）。"""
+        if self.mw.reject_when_loading("清空全部页"):
             return
-        # 跨页口径（P1-E）：顶部按钮播报「已清除全部页」、CAN 数据库重选调用点
-        # 注释「一律清除」，都要求清所有页——只清当前页会让隐藏页旧曲线在
-        # 随后的 _apply_loader(is_reload=True) 里按同名静默重绑到新数据。
-        # 与 reset_plots_after_loading 同模式：隐藏页清数据层后置脏，
-        # 场景补建留给激活链。
+        # CAN 重选必须跨页清除旧库曲线，否则隐藏页会在 _apply_loader(is_reload=True)
+        # 里按同名静默重绑到新数据；顶部用户入口另走 clear_current_page。
+        # 隐藏页先清旧场景，再置脏等待激活链补建游标和标记区。
         containers = self._iter_all_containers()
         # 播报里的数目在清之前取（全部子图，含不可见的容器——它们同样被清）
         cleared = sum(len(c.plot_widget.curves) for c in containers)
