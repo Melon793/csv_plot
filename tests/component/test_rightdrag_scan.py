@@ -20,9 +20,10 @@ import pandas as pd
 import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QKeyEvent, QWheelEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QGraphicsSceneMouseEvent
 
+import pyqtgraph as pg
 from pyqtgraph.GraphicsScene.mouseEvents import MouseClickEvent, MouseDragEvent
 
 from src.ui.widgets.custom_viewbox import SCAN_MIN_PX, ZH_SCAN_ZOOM
@@ -751,3 +752,106 @@ def test_scan_menu_disabled_when_x_locked(scan_plot):
     action.trigger()
     assert vb._scan_armed is False
     assert pw.viewport().testAttribute(Qt.WidgetAttribute.WA_SetCursor) is False
+
+
+def test_escape_during_armed_left_drag_swallows_remaining_events(
+    scan_plot, qapp, monkeypatch
+):
+    pw = scan_plot
+    vb = pw.view_box
+    x_before = list(vb.viewRange()[0])
+    _arm_from_menu(vb)
+    down = pw.mapToScene(QPoint(200, 300))
+    mid = pw.mapToScene(QPoint(400, 300))
+    press = _qscene_event(
+        QEvent.Type.GraphicsSceneMousePress,
+        down,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    move = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseMove,
+        mid,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(move, press, None, start=True, finish=False))
+    assert vb._scan_active is True
+
+    qapp.sendEvent(
+        pw,
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+        ),
+    )
+    delegated = []
+    monkeypatch.setattr(
+        pg.ViewBox,
+        "mouseDragEvent",
+        lambda self, ev, axis=None: delegated.append(ev),
+    )
+    end = pw.mapToScene(QPoint(520, 300))
+    move = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseMove,
+        end,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(move, press, move, start=False, finish=False))
+    release = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseRelease,
+        end,
+        down,
+        buttons=Qt.MouseButton.NoButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(release, press, move, start=False, finish=True))
+
+    assert delegated == []
+    assert vb.viewRange()[0] == x_before
+    assert vb._scan_cancelled_button is None
+
+
+def test_armed_left_click_keeps_selection_and_never_starts_lift(scan_plot):
+    pw = scan_plot
+    vb = pw.view_box
+    pw.legend_label._toggle_legend_selection("a")
+    _arm_from_menu(vb)
+    curve = pw.curves["a"]
+    curve_pos = pw.mapFromScene(
+        vb.mapViewToScene(QPointF(float(curve.x_data[50]), float(curve.y_data[50])))
+    )
+
+    for pos, modifiers in (
+        (QPoint(150, 100), Qt.KeyboardModifier.NoModifier),
+        (curve_pos, Qt.KeyboardModifier.ControlModifier),
+    ):
+        pw.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(pos),
+                QPointF(pos),
+                QPointF(0.0, 0.0),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                modifiers,
+            )
+        )
+        assert pw._lift_timer.isActive() is False
+        assert pw._curve_click_press_pos is None
+        pw.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                QPointF(pos),
+                QPointF(pos),
+                QPointF(0.0, 0.0),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                modifiers,
+            )
+        )
+        assert pw._legend_selection == {"a"}
+        assert vb._scan_armed is True

@@ -90,6 +90,8 @@ class CustomViewBox(pg.ViewBox):
         # 所以不能只靠 _scan_band 判活
         self._scan_active = False
         self._scan_armed = False
+        self._scan_drag_button = None
+        self._scan_cancelled_button = None
         self._scan_band = None
         self._scan_band_committed = None
         self._scan_filter_view = None
@@ -111,6 +113,11 @@ class CustomViewBox(pg.ViewBox):
         「虚线无填充 / 实线填充」与这个判定严格同源，松手前即可预知结果。
         """
         button = ev.button()
+        if button == self._scan_cancelled_button:
+            ev.accept()
+            if ev.isFinish() or not (ev.buttons() & button):
+                self._scan_cancelled_button = None
+            return
         armed_left = self._scan_armed and button == Qt.MouseButton.LeftButton
         if (
             axis is not None  # 轴区拖拽（AxisItem 转交，axis=0/1）
@@ -123,7 +130,7 @@ class CustomViewBox(pg.ViewBox):
 
         ev.accept()  # 必须接受：GraphicsScene 靠它把后续 move/finish 都派给本视图
         if ev.isStart():
-            self._begin_scan()
+            self._begin_scan(button)
 
         if not self._scan_active:
             return  # Esc 已取消：剩余拖拽事件直接吞掉，不再处理
@@ -150,8 +157,9 @@ class CustomViewBox(pg.ViewBox):
         self._install_scan_key_filter()
         self._set_scan_cursor(Qt.CursorShape.CrossCursor)
 
-    def _begin_scan(self) -> None:
+    def _begin_scan(self, button) -> None:
         self._scan_active = True
+        self._scan_drag_button = button
         self._install_scan_key_filter()
         self._set_scan_cursor(Qt.CursorShape.CrossCursor)
 
@@ -239,10 +247,13 @@ class CustomViewBox(pg.ViewBox):
         self.setXRange(xmin, xmax, padding=0)
 
     def _cancel_scan(self) -> None:
+        if self._scan_active:
+            self._scan_cancelled_button = self._scan_drag_button
         self._teardown_scan()
 
     def _teardown_scan(self, keep_armed: bool = False) -> None:
         self._scan_active = False
+        self._scan_drag_button = None
         self._scan_band_committed = None
         band = self._scan_band
         self._scan_band = None

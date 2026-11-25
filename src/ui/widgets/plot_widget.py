@@ -2199,9 +2199,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._suppress_curve_click = False
             self._cancel_lift()
         # 曲线选中联动：先按口径记录/清空点击起点，再走既有分支（不改控制流）
-        self._curve_click_press_pos = self._curve_click_press_candidate(event)
-        self._curve_click_ctrl = bool(
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        scan_armed = bool(getattr(self.view_box, "_scan_armed", False))
+        self._curve_click_press_pos = (
+            None if scan_armed else self._curve_click_press_candidate(event)
+        )
+        self._curve_click_ctrl = (
+            False
+            if scan_armed
+            else bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         )
         # 长按抬框：Shift 不参与（框选缩放专属）；Alt/Ctrl/⌘ 允许——macOS
         # ⌥/⌘ 是「先按修饰键再拖动」的习惯路径，排除 Ctrl 会让选择手感断裂。
