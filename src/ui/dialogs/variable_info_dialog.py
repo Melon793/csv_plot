@@ -628,7 +628,11 @@ class VarInfoPage(QWidget):
         self.title_label = QLabel(self.var_name)
         font = self.title_label.font()
         font.setBold(True)
-        font.setPointSize(font.pointSize() + 1)
+        # 应用字体是 pixelSize 态时 pointSize() 为 -1，setPointSize(0) 是空操作
+        if font.pixelSize() > 0:
+            font.setPixelSize(font.pixelSize() + 1)
+        else:
+            font.setPointSize(font.pointSize() + 1)
         self.title_label.setFont(font)
         self.title_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse

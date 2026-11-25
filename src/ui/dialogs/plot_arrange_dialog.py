@@ -409,7 +409,12 @@ class _IconBoard(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         page = self._page()
         seat_font = QFont(self.font())
-        seat_font.setPointSizeF(max(8.0, seat_font.pointSizeF() - 1))
+        # 应用字体在 Windows/macOS 是 pixelSize 态（pointSize() == -1），
+        # 只减 pointSize 会 clamp 成 8pt（≈10.7px），比正文小两号
+        if seat_font.pixelSize() > 0:
+            seat_font.setPixelSize(max(9, seat_font.pixelSize() - 1))
+        else:
+            seat_font.setPointSizeF(max(8.0, seat_font.pointSizeF() - 1))
         painter.setFont(seat_font)
         occupied_seats = {icon.seat for icon in self.icons.values()}
         for _row, _col, index in self._display_seats():
