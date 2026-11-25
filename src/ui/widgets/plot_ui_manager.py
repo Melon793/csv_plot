@@ -1443,7 +1443,12 @@ class PlotUIManager(BasePlotManager):
         fm = QFontMetrics(font)
         pw.axis_y.setWidth(fm.horizontalAdvance("-10000.01"))
 
-        font_family = font.family()
+        # 轴标签走 HTML font-family，拿不到应用字体栈；用启动时解析到的
+        # 中文字体，缺字时才不会又落回平台隐式回退（英文系统上可能是日文
+        # 或繁中字形）
+        from src.core.font_cache import resolved_chinese_family
+
+        font_family = resolved_chinese_family() or font.family()
         pixel_size = font.pixelSize() + 2
         pw.axis_y.setLabel(
             color="black",

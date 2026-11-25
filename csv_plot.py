@@ -15,7 +15,7 @@ def main():
     """
     from src.core.crash_handler import install_crash_logging
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QFont, QIcon
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
     import pyqtgraph as pg
 
@@ -30,11 +30,8 @@ def main():
     app = QApplication(sys.argv)
 
     if sys.platform == "win32":
-        from src.core.font_cache import get_windows_chinese_font_cached
-        font_name = get_windows_chinese_font_cached()
-        font = QFont(font_name) if font_name else QApplication.font()
-        font.setPixelSize(12)
-        app.setFont(font)
+        from src.core.font_cache import build_windows_ui_font
+        app.setFont(build_windows_ui_font())
     elif sys.platform == "darwin":
         font = QApplication.font()
         font.setPixelSize(13)
