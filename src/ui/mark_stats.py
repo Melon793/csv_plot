@@ -596,7 +596,11 @@ class MarkStatsWindow(QDialog):
         status = QHBoxLayout()
         status.setSpacing(4)
         self.status_label = QLabel("", self)  # 字号与上方控件一致，不缩放
-        self.copy_csv_btn = QPushButton("复制 CSV", self)
+        self.copy_csv_btn = QPushButton("复制表格", self)
+        self.copy_csv_btn.setToolTip(
+            "复制当前可见列（制表符分隔），可直接粘贴到 Excel；"
+            "字段内的制表符或换行会替换为空格"
+        )
         self.copy_csv_btn.clicked.connect(self._copy_csv)  # 样式用平台默认（美观优先）
         # 「复制 Markdown」按钮已按需求从界面移除；_copy_markdown 导出
         # 实现保留在下方，供未来重新接入或测试直接调用

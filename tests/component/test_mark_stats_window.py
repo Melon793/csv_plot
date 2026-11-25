@@ -860,3 +860,12 @@ class TestExport:
         finally:
             stats_window.setParent(None)
             holder.deleteLater()
+
+
+class TestCopyToClipboard:
+    """复制按钮文案与回执：目标是从 Excel 粘贴，不再承诺 CSV。"""
+
+    def test_button_offers_table_not_csv(self, stats_window):
+        assert stats_window.copy_csv_btn.text() == "复制表格"
+        assert "CSV" not in stats_window.copy_csv_btn.text()
+        assert "Excel" in stats_window.copy_csv_btn.toolTip()
