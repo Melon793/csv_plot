@@ -1588,9 +1588,9 @@ class MainWindow(QMainWindow):
         # layout_manager.apply_time_correction，对绘图的作用完全同源，而抽屉还
         # 多频率输入、预设档位与应用前预览。对话框本体
         # （layout_manager.open_time_correction_dialog）按口径留着，只是暂无入口。
-        self.clear_all_plots_btn = QPushButton("清空全部页", self.plot_widget)
+        self.clear_all_plots_btn = QPushButton("清空当前页", self.plot_widget)
         self.clear_all_plots_btn.setToolTip(
-            "清空全部页的所有子图；执行前显示影响范围并请求确认"
+            "清空当前页的所有子图；有曲线或失效占位时二次确认"
         )
         top_bar.addWidget(self.clear_all_plots_btn)
 
@@ -2359,7 +2359,7 @@ class MainWindow(QMainWindow):
         # 左栏的「CAN 数据库…」按钮只撤入口、不撤实现，dialog 类照旧可达
         # （仅剩 file_loader_manager 内部调用路径）。
         self.clear_all_plots_btn.clicked.connect(
-            self.cursor_sync_manager.request_clear_all_plots
+            self.cursor_sync_manager.request_clear_current_page
         )
         self.auto_range_btn.clicked.connect(self.cursor_sync_manager.auto_range_all_plots)
         self.auto_y_btn.clicked.connect(self.cursor_sync_manager.auto_y_in_x_range)
@@ -2660,7 +2660,7 @@ class MainWindow(QMainWindow):
             self._broadcast(text)
 
     def _announce_cleared_plots(self, label: str, curves: int) -> None:
-        """清除绘图之后的播报，三条入口共用（顶部按钮 / 右键菜单 / 双击中键）。
+        """清除绘图之后的播报，三条入口共用（顶部当前页 / 右键子图 / 双击中键子图）。
 
         只在真有曲线被清掉时出声 —— 清一遍本来就没曲线的子图，屏上什么都没变，
         不该占消息区（这条守卫顺带保证文案里的数目 ≥1）。

@@ -161,6 +161,7 @@ def test_single_page_middle_click_blocked_and_hinted(loaded_window, qtbot):
     )
 
     assert mw._message_text == LAST_PAGE_CLOSE_HINT
+    assert "清空当前页" in LAST_PAGE_CLOSE_HINT
     assert mw.pages == [page]
     assert mw.plot_tabs.count() == 1
     assert page.master_container().plot_widget.curves   # 未被清空
@@ -186,7 +187,7 @@ def test_close_button_reenabled_after_second_page_closed(loaded_window, qtbot):
 
 
 def test_single_page_clear_button_still_works(loaded_window, qtbot, monkeypatch):
-    """替代路径可用：× 置灰后，单页重来仍能靠顶部「清空全部页」完成。"""
+    """替代路径可用：× 置灰后，单页重来仍能靠顶部「清空当前页」完成。"""
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QMessageBox
 
@@ -203,7 +204,7 @@ def test_single_page_clear_button_still_works(loaded_window, qtbot, monkeypatch)
 
     assert mw.pages == [page]
     assert all(not c.plot_widget.curves for c in page.plot_widgets)
-    assert "已清除全部页" in mw._message_text
+    assert "已清空当前页" in mw._message_text
 
 
 def test_close_page_with_only_placeholder_still_confirms(
