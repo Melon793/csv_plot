@@ -4,7 +4,7 @@
 - 右键单击（无拖动）仍是弹菜单（不经过扫选会话）；
 - 右键拖拽过判定线 → X 缩放到扫出的数据区间，Y 范围与 Y autoRange 都不动；
 - 判定线固定为平台拖动距离（不随视宽放大）：窄扫掠照样缩放；
-- 净位移不足判定线、或路径来回（抖动否决）→ 范围不变，补弹右键菜单；
+- 净位移不足判定线 → 范围不变，补弹右键菜单（判定只看净位移，不看路径）；
 - 预览带只在拖拽期间存在、ignoreBounds、任何退出路径都摘干净，
   且未过判定线时是「虚线无填充」候选态、过线才变成 tint 实线；
 - XLink 子图上扫选 → 整组一致；
@@ -191,29 +191,34 @@ def test_short_drag_keeps_range_and_opens_menu(scan_plot, monkeypatch):
     assert vb._scan_band is None
 
 
-def test_jitter_veto_treats_as_click(scan_plot, monkeypatch):
-    """净位移够线，但路径来回（反转 ≥2 次、路径 ≥2×净位移）→ 按点击弹菜单。
+def test_wobble_but_ends_past_line_still_zooms(scan_plot, monkeypatch):
+    """判定只看净位移：中途来回摆、最终仍过线 → 照常缩放（保留此口径）。
 
-    区分「手抖/犹豫」与「有方向的窄扫掠」：这里出 16px、回 8px、再出 5px，
-    净位移 13px 已过判定线，但整段是在原地来回，不该缩放到任意一段。
+    预览带的实线填充态与这里的提交条件同源，所以「看到实线就一定会缩」——
+    不再有「实线带子却弹菜单」的视觉相悖。
     """
     pw = scan_plot
     vb = pw.view_box
     opened = []
     monkeypatch.setattr(vb, "raiseContextMenu", lambda ev: opened.append(ev))
-    x_before = list(vb.viewRange()[0])
 
     down = pw.mapToScene(QPoint(300, 300))
     p1 = pw.mapToScene(QPoint(316, 300))
     p2 = pw.mapToScene(QPoint(308, 300))
     p3 = pw.mapToScene(QPoint(313, 300))
+    expected = sorted(
+        [
+            vb.mapSceneToView(down).x(),
+            vb.mapSceneToView(p3).x(),
+        ]
+    )
     _start_drag(vb, down, p1)
     _continue_drag(vb, down, p1, p2)
     _continue_drag(vb, down, p2, p3)
     _finish_drag(vb, down, p3, p3)
 
-    assert len(opened) == 1
-    assert vb.viewRange()[0] == x_before
+    assert vb.viewRange()[0] == pytest.approx(expected, rel=1e-9, abs=1e-9)
+    assert opened == []
     assert vb._scan_band is None
 
 

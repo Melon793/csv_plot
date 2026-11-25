@@ -32,14 +32,8 @@ ZH_CLEAR_PLOT = "清除当前子图"
 # 2560px 宽的全屏图要 77px 才算扫选，几十像素的认真扫掠被判成点击。
 SCAN_MIN_PX = 8
 
-# 抖动否决：净位移够线、但路径来回（路径 ≥ 2×净位移且方向反转 ≥2 次）
-# 视为手抖，仍按点击处理。两个条件同时成立才否决 —— 正常扫掠末端
-# 零点几像素的回摆不足以触发。
-SCAN_JITTER_PATH_RATIO = 2.0
-SCAN_JITTER_MIN_REVERSALS = 2
-
 # 候选态（未过判定线）的虚线 alpha：过线前只画两条细虚线、不填充，
-# 松手前就能看出「这次还不算数」
+# 松手前就能看出「这次还不算数」——「虚线/实线」与「弹菜单/缩放」严格一一对应
 SCAN_CANDIDATE_ALPHA = 160
 
 # 游标模式显示文案：键是跨模块内部标识符（cursor_sync_manager 的模式分发、
@@ -95,11 +89,6 @@ class CustomViewBox(pg.ViewBox):
         self._scan_band_committed = None
         self._scan_filter_view = None
         self._scan_cursor_saved = None
-        # 抖动判据：净位移之外还要看路径长度与方向反转
-        self._scan_path_px = 0.0
-        self._scan_reversals = 0
-        self._scan_last_x = None
-        self._scan_direction = 0
 
     # ================================================================
     # 右键拖拽扫选 X 区间
@@ -112,8 +101,9 @@ class CustomViewBox(pg.ViewBox):
         关掉两轴 autoRange）。整个默认行为在这里替换为「按下点 → 当前点」的
         预览带，松手后只缩 X、Y 一点不碰、autoRange 标记不动。
 
-        松手时的点击/扫选判定：净位移不足平台拖动距离、或路径来回（抖动）
-        都按点击补弹菜单；其余一律扫选 —— 判定线固定为像素、不随视宽放大。
+        松手时的点击/扫选判定只看净位移：不足平台拖动距离按点击补弹菜单，
+        其余一律扫选 —— 判定线固定为像素、不随视宽放大。预览带的
+        「虚线无填充 / 实线填充」与这个判定严格同源，松手前即可预知结果。
         """
         if (
             axis is not None  # 轴区拖拽（AxisItem 转交，axis=0/1）
@@ -126,7 +116,7 @@ class CustomViewBox(pg.ViewBox):
 
         ev.accept()  # 必须接受：GraphicsScene 靠它把后续 move/finish 都派给本视图
         if ev.isStart():
-            self._begin_scan(ev)
+            self._begin_scan()
 
         if not self._scan_active:
             return  # Esc 已取消：剩余拖拽事件直接吞掉，不再处理
@@ -148,14 +138,8 @@ class CustomViewBox(pg.ViewBox):
         if ev.isFinish():
             self._end_scan(ev)
 
-    def _begin_scan(self, ev) -> None:
+    def _begin_scan(self) -> None:
         self._scan_active = True
-        self._scan_path_px = 0.0
-        self._scan_reversals = 0
-        # 从按下点起算路径：首个拖拽事件（isStart）已经离按下点 5px 以上，
-        # 不补这一段会漏掉手势最长的那一跳
-        self._scan_last_x = ev.buttonDownScenePos(Qt.MouseButton.RightButton).x()
-        self._scan_direction = 0
         self._install_scan_key_filter()
         self._set_scan_cursor(Qt.CursorShape.CrossCursor)
 
@@ -167,25 +151,8 @@ class CustomViewBox(pg.ViewBox):
         )
         return max(SCAN_MIN_PX, platform_px)
 
-    def _track_scan_path(self, ev) -> None:
-        """累计路径长度与方向反转次数，供松手时的抖动否决使用。"""
-        x = ev.scenePos().x()
-        if self._scan_last_x is None:
-            self._scan_last_x = x
-            return
-        step = x - self._scan_last_x
-        self._scan_last_x = x
-        self._scan_path_px += abs(step)
-        if step == 0:
-            return
-        direction = 1 if step > 0 else -1
-        if self._scan_direction != 0 and direction != self._scan_direction:
-            self._scan_reversals += 1
-        self._scan_direction = direction
-
     def _update_scan_band(self, ev) -> None:
         """按「按下点 → 当前点」建/更新预览带（数据坐标，无 padding）。"""
-        self._track_scan_path(ev)
         down = ev.buttonDownScenePos(Qt.MouseButton.RightButton)
         x0 = self.mapSceneToView(down).x()
         x1 = self.mapSceneToView(ev.scenePos()).x()
@@ -232,22 +199,15 @@ class CustomViewBox(pg.ViewBox):
         band.update()
 
     def _end_scan(self, ev) -> None:
-        """松手：够线且不是来回抖 → 缩 X；否则按点击补弹菜单。无论如何先清理。"""
+        """松手：净位移够判定线 → 缩 X；否则按点击补弹菜单。无论如何先清理。"""
         down = ev.buttonDownScenePos(Qt.MouseButton.RightButton)
         pos = ev.scenePos()
-        net_px = abs(pos.x() - down.x())
         commit_px = self._scan_commit_px()
-        # 抖动否决：净位移够线，但跑过的路远多于净位移且方向翻来覆去
-        jitter = (
-            net_px >= commit_px
-            and self._scan_path_px >= SCAN_JITTER_PATH_RATIO * net_px
-            and self._scan_reversals >= SCAN_JITTER_MIN_REVERSALS
-        )
         x0 = self.mapSceneToView(down).x()
         x1 = self.mapSceneToView(pos).x()
 
         try:
-            if net_px >= commit_px and not jitter:
+            if abs(pos.x() - down.x()) >= commit_px:
                 self._apply_scan_range(min(x0, x1), max(x0, x1))
             elif self.menuEnabled():
                 # 拖动已消费掉 mouseClickEvent → 手动补齐「点一下出菜单」
