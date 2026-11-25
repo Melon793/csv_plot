@@ -2,9 +2,11 @@
 
 覆盖 CustomViewBox.mouseDragEvent 的右键分支：
 - 右键单击（无拖动）仍是弹菜单（不经过扫选会话）；
-- 右键拖拽够宽 → X 缩放到扫出的数据区间，Y 范围与 Y autoRange 都不动；
-- 拖拽过窄 → 范围不变，补弹右键菜单；
-- 预览带只在拖拽期间存在、ignoreBounds、任何退出路径都摘干净；
+- 右键拖拽过判定线 → X 缩放到扫出的数据区间，Y 范围与 Y autoRange 都不动；
+- 判定线固定为平台拖动距离（不随视宽放大）：窄扫掠照样缩放；
+- 净位移不足判定线、或路径来回（抖动否决）→ 范围不变，补弹右键菜单；
+- 预览带只在拖拽期间存在、ignoreBounds、任何退出路径都摘干净，
+  且未过判定线时是「虚线无填充」候选态、过线才变成 tint 实线；
 - XLink 子图上扫选 → 整组一致；
 - 反向拖动（右→左）结果相同；
 - Esc 取消；X 轴锁定时不接管（沿用父类默认行为）。
@@ -68,6 +70,51 @@ def _drag_start_only(vb, start_scene, mid_scene):
     press = _qscene_event(QEvent.Type.GraphicsSceneMousePress, start_scene, start_scene)
     move = _qscene_event(QEvent.Type.GraphicsSceneMouseMove, mid_scene, start_scene)
     _send(vb, MouseDragEvent(move, press, None, start=True, finish=False))
+
+
+def _start_drag(vb, down_scene, pos_scene):
+    _send(
+        vb,
+        MouseDragEvent(
+            _qscene_event(QEvent.Type.GraphicsSceneMouseMove, pos_scene, down_scene),
+            _qscene_event(QEvent.Type.GraphicsSceneMousePress, down_scene, down_scene),
+            None,
+            start=True,
+            finish=False,
+        ),
+    )
+
+
+def _continue_drag(vb, down_scene, from_scene, pos_scene):
+    _send(
+        vb,
+        MouseDragEvent(
+            _qscene_event(QEvent.Type.GraphicsSceneMouseMove, pos_scene, down_scene),
+            _qscene_event(QEvent.Type.GraphicsSceneMousePress, down_scene, down_scene),
+            _qscene_event(QEvent.Type.GraphicsSceneMouseMove, from_scene, down_scene),
+            start=False,
+            finish=False,
+        ),
+    )
+
+
+def _finish_drag(vb, down_scene, from_scene, pos_scene):
+    release = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseRelease,
+        pos_scene,
+        down_scene,
+        buttons=Qt.MouseButton.NoButton,
+    )
+    _send(
+        vb,
+        MouseDragEvent(
+            release,
+            _qscene_event(QEvent.Type.GraphicsSceneMousePress, down_scene, down_scene),
+            _qscene_event(QEvent.Type.GraphicsSceneMouseMove, from_scene, down_scene),
+            start=False,
+            finish=True,
+        ),
+    )
 
 
 def _right_click(vb, scene_pos):
@@ -138,6 +185,32 @@ def test_short_drag_keeps_range_and_opens_menu(scan_plot, monkeypatch):
     # 6px：超过 GraphicsScene 的 moveDistance(5) 已算拖动，但不到最小有效宽度
     end = pw.mapToScene(QPoint(300 + SCAN_MIN_PX - 2, 300))
     _drag(vb, start, end)
+
+    assert len(opened) == 1
+    assert vb.viewRange()[0] == x_before
+    assert vb._scan_band is None
+
+
+def test_jitter_veto_treats_as_click(scan_plot, monkeypatch):
+    """净位移够线，但路径来回（反转 ≥2 次、路径 ≥2×净位移）→ 按点击弹菜单。
+
+    区分「手抖/犹豫」与「有方向的窄扫掠」：这里出 16px、回 8px、再出 5px，
+    净位移 13px 已过判定线，但整段是在原地来回，不该缩放到任意一段。
+    """
+    pw = scan_plot
+    vb = pw.view_box
+    opened = []
+    monkeypatch.setattr(vb, "raiseContextMenu", lambda ev: opened.append(ev))
+    x_before = list(vb.viewRange()[0])
+
+    down = pw.mapToScene(QPoint(300, 300))
+    p1 = pw.mapToScene(QPoint(316, 300))
+    p2 = pw.mapToScene(QPoint(308, 300))
+    p3 = pw.mapToScene(QPoint(313, 300))
+    _start_drag(vb, down, p1)
+    _continue_drag(vb, down, p1, p2)
+    _continue_drag(vb, down, p2, p3)
+    _finish_drag(vb, down, p3, p3)
 
     assert len(opened) == 1
     assert vb.viewRange()[0] == x_before
@@ -217,6 +290,25 @@ def test_drag_sets_x_range_exactly_and_keeps_y(scan_plot, monkeypatch):
 
     assert vb.viewRange()[0] == pytest.approx([x0, x1], rel=1e-9, abs=1e-9)
     assert vb.viewRange()[1] == y_before
+    assert opened == []
+
+
+def test_narrow_sweep_still_zooms(scan_plot, monkeypatch):
+    """判定线不随视宽放大：14px 扫掠在旧「视宽 3%」规则下会被判点击，现在必须缩放。"""
+    pw = scan_plot
+    vb = pw.view_box
+    opened = []
+    monkeypatch.setattr(vb, "raiseContextMenu", lambda ev: opened.append(ev))
+    assert 0.03 * vb.screenGeometry().width() > 14, "前提：旧规则下这段属于误触"
+
+    start_local, end_local = QPoint(300, 300), QPoint(314, 300)
+    start, end = pw.mapToScene(start_local), pw.mapToScene(end_local)
+    expected = sorted([_x_of(vb, pw, start_local), _x_of(vb, pw, end_local)])
+
+    _drag(vb, start, end)
+
+    assert vb.viewRange()[0] == pytest.approx(expected, rel=1e-9, abs=1e-9)
+    assert vb.viewRange()[0][1] - vb.viewRange()[0][0] < 99
     assert opened == []
 
 
@@ -319,6 +411,28 @@ def test_band_removed_after_scan(scan_plot):
     assert band.scene() is None
     assert band not in pw.plot_item.items
     assert band not in vb.addedItems
+
+
+def test_band_two_states_before_and_after_commit_line(scan_plot):
+    """未过判定线：只有 accent 虚线、不填充；过线：tint 填充 + 实线。"""
+    pw = scan_plot
+    vb = pw.view_box
+    down = pw.mapToScene(QPoint(300, 300))
+    small = pw.mapToScene(QPoint(305, 300))  # < 判定线(平台 10px)
+    big = pw.mapToScene(QPoint(360, 300))
+
+    _start_drag(vb, down, small)
+    band = vb._scan_band
+    assert band is not None
+    assert band.brush.style() == Qt.BrushStyle.NoBrush
+    assert all(line.pen.style() == Qt.PenStyle.DashLine for line in band.lines)
+
+    _continue_drag(vb, down, small, big)
+    assert band.brush.style() != Qt.BrushStyle.NoBrush
+    assert all(line.pen.style() == Qt.PenStyle.SolidLine for line in band.lines)
+
+    _finish_drag(vb, down, big, big)
+    assert vb._scan_band is None
 
 
 def test_band_ignores_bounds(scan_plot):
