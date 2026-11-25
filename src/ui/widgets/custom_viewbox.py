@@ -115,9 +115,12 @@ class CustomViewBox(pg.ViewBox):
         button = ev.button()
         if button == self._scan_cancelled_button:
             ev.accept()
-            if ev.isFinish() or not (ev.buttons() & button):
+            if ev.isStart():
                 self._scan_cancelled_button = None
-            return
+            else:
+                if ev.isFinish() or not (ev.buttons() & button):
+                    self._scan_cancelled_button = None
+                return
         armed_left = self._scan_armed and button == Qt.MouseButton.LeftButton
         if (
             axis is not None  # 轴区拖拽（AxisItem 转交，axis=0/1）

@@ -815,6 +815,49 @@ def test_escape_during_armed_left_drag_swallows_remaining_events(
     assert vb._scan_cancelled_button is None
 
 
+def test_new_drag_after_lost_cancel_release_is_not_swallowed(
+    scan_plot, qapp, monkeypatch
+):
+    pw = scan_plot
+    vb = pw.view_box
+    _arm_from_menu(vb)
+    down = pw.mapToScene(QPoint(200, 300))
+    press = _qscene_event(
+        QEvent.Type.GraphicsSceneMousePress,
+        down,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(press, press, None, start=True, finish=False))
+    qapp.sendEvent(
+        pw,
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+        ),
+    )
+    assert vb._scan_cancelled_button == Qt.MouseButton.LeftButton
+
+    delegated = []
+    monkeypatch.setattr(
+        pg.ViewBox,
+        "mouseDragEvent",
+        lambda self, ev, axis=None: delegated.append(ev),
+    )
+    move_pos = pw.mapToScene(QPoint(400, 300))
+    move = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseMove,
+        move_pos,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(move, press, None, start=True, finish=False))
+
+    assert len(delegated) == 1
+    assert vb._scan_cancelled_button is None
+
+
 def test_armed_left_click_keeps_selection_and_never_starts_lift(scan_plot):
     pw = scan_plot
     vb = pw.view_box
