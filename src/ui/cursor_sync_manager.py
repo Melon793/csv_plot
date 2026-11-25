@@ -13,6 +13,7 @@ from src.core.config import (
     safe_qt_op,
     is_grouped_loader,
     compute_global_x_limits,
+    widget_alive,
 )
 from src.core.data_types import (
     DRAW_MODE_SOURCE_USER,
@@ -517,27 +518,78 @@ class CursorSyncManager(MainWindowBaseManager):
                 continue
             widget.reset_pin_state()
 
-    def request_clear_all_plots(self) -> bool:
-        """顶部用户入口：先明确全部页范围并确认，默认否/取消。"""
-        if self.mw.reject_when_loading("清空全部页"):
+    @staticmethod
+    def _page_plot_counts(page) -> tuple[int, int]:
+        curves = invalid = 0
+        for container in page.plot_widgets:
+            widget = container.plot_widget
+            curves += len(getattr(widget, "curves", None) or [])
+            invalid += len(getattr(widget, "invalid_curves", None) or [])
+        return curves, invalid
+
+    def request_clear_current_page(self) -> bool:
+        """顶部用户入口：只清当前页，有内容时确认，默认否/取消。"""
+        if self.mw.reject_when_loading("清空当前页"):
             return False
-        containers = self._iter_all_containers()
-        pages = list(getattr(self.mw, "pages", []) or [])
-        page_ids = {id(getattr(c.plot_widget, "page", None)) for c in containers}
-        page_count = len(pages) or len(page_ids) or 1
-        curve_count = sum(len(c.plot_widget.curves) for c in containers)
-        reply = QMessageBox.question(
-            self.mw,
-            "清空全部页",
-            f"将清空全部 {page_count} 页中的 {curve_count} 条曲线（包括当前页和隐藏页）。\n"
-            "此操作无法撤销，是否继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        page = self.mw.current_page
+        if (
+            page is None
+            or page not in self.mw.pages
+            or not widget_alive(page.widget)
+        ):
             return False
-        self.clear_all_plots()
+        curves, invalid = self._page_plot_counts(page)
+        if curves or invalid:
+            if curves and invalid:
+                detail = f"{curves} 条曲线（另有 {invalid} 个失效占位）"
+            elif curves:
+                detail = f"{curves} 条曲线"
+            else:
+                detail = f"{invalid} 个失效占位"
+            reply = QMessageBox.question(
+                self.mw,
+                "清空当前页",
+                f"将清空「{page.title}」中的 {detail}，此操作无法撤销，是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+        if self.mw.reject_when_loading("清空当前页"):
+            return False
+        if (
+            page not in self.mw.pages
+            or not widget_alive(page.widget)
+        ):
+            return False
+        self.clear_current_page(page)
         return True
+
+    def clear_current_page(self, page=None) -> None:
+        """无确认清空指定页的全部子图；共享缓存与全局标记区间保持不变。"""
+        target = self.mw.current_page if page is None else page
+        if (
+            target is None
+            or target not in self.mw.pages
+            or not widget_alive(target.widget)
+        ):
+            return
+        curves, invalid = self._page_plot_counts(target)
+        if not curves and not invalid:
+            return
+        if curves:
+            self.mw.set_x_axis_locked(False, reason="绘图已清空")
+        for container in list(target.plot_widgets):
+            widget = container.plot_widget
+            widget.clear_plot_item(clear_invalid=True)
+            widget.reset_pin_state()
+            if self._defers_scene_write(widget):
+                self._mark_dirty(widget)
+        self.mw.layout_manager.request_mark_stats_refresh(immediate=True)
+        if curves:
+            self.mw._announce_cleared_plots("已清空当前页", curves)
+        else:
+            self.mw._broadcast(f"已清空当前页 · {invalid} 个失效占位")
 
     def clear_all_plots(self):
         """程序化全局清空，不弹确认框（重选库/关末页/模板与测试路径）。"""

@@ -24,7 +24,7 @@ def _two_pages_with_curve(mw, qtbot):
     return first, second
 
 
-def _answer_global_clear(monkeypatch, answer):
+def _answer_current_page_clear(monkeypatch, answer):
     """记录确认窗参数；不依赖替身实现是否保存 kwargs。"""
     calls = []
 
@@ -108,22 +108,22 @@ def test_shift_hover_shows_current_subplot_scope_before_release(
     pw.dragLeaveEvent(event)
 
 
-def test_top_clear_button_names_global_scope(loaded_window):
+def test_top_clear_button_names_current_page_scope(loaded_window):
     button = loaded_window.clear_all_plots_btn
 
-    assert button.text() == "清空全部页"
-    assert "全部页" in button.toolTip()
+    assert button.text() == "清空当前页"
+    assert "当前页" in button.toolTip()
     assert "确认" in button.toolTip()
 
 
-def test_global_clear_cancel_preserves_every_page_and_has_no_announcement(
+def test_current_page_clear_cancel_preserves_every_page_and_has_no_announcement(
     loaded_window, dialog_stubs, monkeypatch, qtbot
 ):
     mw = loaded_window
     first, second = _two_pages_with_curve(mw, qtbot)
     first_pw, second_pw = _plots(first, second)
     before = (first_pw.curves["speed"], second_pw.curves["rpm"])
-    calls = _answer_global_clear(monkeypatch, QMessageBox.StandardButton.No)
+    calls = _answer_current_page_clear(monkeypatch, QMessageBox.StandardButton.No)
     broadcasts = []
     monkeypatch.setattr(
         mw, "_broadcast", lambda message, level="info": broadcasts.append(message)
@@ -133,22 +133,23 @@ def test_global_clear_cancel_preserves_every_page_and_has_no_announcement(
 
     assert len(calls) == 1
     title, text, buttons, default = calls[0]
-    assert "全部页" in title
-    assert "2 页" in text and "2 条曲线" in text
+    assert "当前页" in title
+    assert "1 条曲线" in text
     assert buttons & QMessageBox.StandardButton.Yes
     assert buttons & QMessageBox.StandardButton.No
     assert default == QMessageBox.StandardButton.No
     assert (first_pw.curves["speed"], second_pw.curves["rpm"]) == before
-    assert not any("已清除" in message for message in broadcasts)
+    assert not any("已清" in message for message in broadcasts)
 
 
-def test_global_clear_confirm_clears_all_pages_and_announces_scope(
+def test_current_page_clear_confirm_clears_only_current_page_and_announces_scope(
     loaded_window, monkeypatch, qtbot
 ):
     mw = loaded_window
     first, second = _two_pages_with_curve(mw, qtbot)
     first_pw, second_pw = _plots(first, second)
-    calls = _answer_global_clear(monkeypatch, QMessageBox.StandardButton.Yes)
+    hidden_ci = second_pw.curves["rpm"]
+    calls = _answer_current_page_clear(monkeypatch, QMessageBox.StandardButton.Yes)
     broadcasts = []
     monkeypatch.setattr(
         mw, "_broadcast", lambda message, level="info": broadcasts.append(message)
@@ -157,8 +158,9 @@ def test_global_clear_confirm_clears_all_pages_and_announces_scope(
     qtbot.mouseClick(mw.clear_all_plots_btn, Qt.MouseButton.LeftButton)
 
     assert len(calls) == 1
-    assert first_pw.curves == {} and second_pw.curves == {}
-    assert broadcasts == ["已清除全部页 · 2 条曲线"]
+    assert first_pw.curves == {}
+    assert second_pw.curves["rpm"] is hidden_ci
+    assert broadcasts == ["已清空当前页 · 1 条曲线"]
 
 
 def test_current_subplot_clear_does_not_clear_other_pages(

@@ -581,21 +581,21 @@ def _plot_variables(mw, var_names, qapp, plot_index=0):
     return pw
 
 
-def test_clear_all_button_announces_total_curves(loaded_window, qapp, qtbot, monkeypatch):
-    """顶部「清空全部页」：确认后清全部子图，播报给总数（清之前取）。"""
+def test_clear_current_page_button_announces_current_page_curves(loaded_window, qapp, qtbot, monkeypatch):
+    """顶部「清空当前页」：确认后清当前页子图，播报给当前页曲线总数。"""
     monkeypatch.setattr(
         QMessageBox, "question", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
     )
     mw = loaded_window
     pw = _plot_variables(mw, ["speed", "rpm"], qapp)
-    total = sum(len(c.plot_widget.curves) for c in mw.plot_widgets)
-    assert total == 2, "前置条件：只往第一个子图画了 2 条曲线"
+    total = sum(len(c.plot_widget.curves) for c in mw.current_page.plot_widgets)
+    assert total == 2, "前置条件：只往当前页第一个子图画了 2 条曲线"
 
     qtbot.mouseClick(mw.clear_all_plots_btn, Qt.MouseButton.LeftButton)
     qapp.processEvents()
 
     assert list(pw.curves) == []
-    assert mw._message_text == "已清除全部页 · 2 条曲线"
+    assert mw._message_text == "已清空当前页 · 2 条曲线"
     assert mw._message_level == "info", "清成功不是问题，不该用 warn 粘在屏上"
 
 
