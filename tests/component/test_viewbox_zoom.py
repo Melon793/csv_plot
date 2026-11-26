@@ -34,6 +34,7 @@ from src.core.config import (
     TRACKPAD_PAN_DIRECTION,
     TRACKPAD_PAN_UNITS_PER_SCREEN,
     TRACKPAD_SCAN_UNITS_PER_SCREEN,
+    TRACKPAD_ZOOM_MAX_RATE,
     TRACKPAD_ZOOM_UNITS_PER_2X,
 )
 
@@ -451,7 +452,7 @@ def test_trackpad_latch_keeps_dense_notch_on_continuous_path(shown_plot, monkeyp
     pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 240))
 
     assert len(calls) == 1
-    assert calls[0] == pytest.approx(2.5 ** -0.02)
+    assert calls[0] == pytest.approx(TRACKPAD_ZOOM_MAX_RATE**-0.02)
     assert calls[0] != pytest.approx(0.7)
 
 

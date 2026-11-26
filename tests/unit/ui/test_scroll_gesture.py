@@ -26,7 +26,8 @@ def _replay(scroll, total, duration_ms, parts, *, start_ms=0, axis="dy"):
 
 
 def test_trackpad_feel_constants_are_pinned():
-    assert TRACKPAD_ZOOM_UNITS_PER_2X == 300.0
+    assert TRACKPAD_ZOOM_UNITS_PER_2X == 200.0
+    assert TRACKPAD_ZOOM_MAX_RATE == 3.5
     assert TRACKPAD_SCAN_UNITS_PER_SCREEN == 1200.0
     assert TRACKPAD_PAN_UNITS_PER_SCREEN == 800.0
     assert TRACKPAD_PAN_DIRECTION == -1.0
