@@ -22,7 +22,6 @@ from src.ui import theme
 # PlotItem 菜单，能力保留（scene.showExportDialog），只是入口改由我们排布。
 ZH_JUMP_TO_DATA = "跳转至变量数值表"
 ZH_AUTO_Y_IN_X = "按 X 范围调节 Y 轴"
-ZH_SCAN_ZOOM = "扫选放大（拖动选择 X 区间）"
 ZH_CURSOR_MENU = "游标选项"
 ZH_SHOW_CURSOR_VALUE = "显示游标数值"
 ZH_HIDE_CURSOR_VALUE = "隐藏游标数值"
@@ -464,11 +463,6 @@ class CustomViewBox(pg.ViewBox):
         menu = self._ensure_context_menu()
         self._clear_context_menu(menu)
         self._detach_native_menus()
-
-        scan_act = QAction(ZH_SCAN_ZOOM, menu)
-        scan_act.triggered.connect(self._arm_scan)
-        scan_act.setEnabled(not getattr(self.plot_widget, "_x_mouse_locked", False))
-        menu.addAction(scan_act)
 
         auto_y_act = QAction(ZH_AUTO_Y_IN_X, menu)
         auto_y_act.triggered.connect(self._emit_auto_y)

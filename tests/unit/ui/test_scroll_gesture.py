@@ -28,8 +28,8 @@ def _replay(scroll, total, duration_ms, parts, *, start_ms=0, axis="dy"):
 def test_trackpad_feel_constants_are_pinned():
     assert TRACKPAD_ZOOM_UNITS_PER_2X == 200.0
     assert TRACKPAD_ZOOM_MAX_RATE == 3.5
-    assert TRACKPAD_SCAN_UNITS_PER_SCREEN == 1200.0
-    assert TRACKPAD_PAN_UNITS_PER_SCREEN == 800.0
+    assert TRACKPAD_SCAN_UNITS_PER_SCREEN == 2000.0
+    assert TRACKPAD_PAN_UNITS_PER_SCREEN == 400.0
     assert TRACKPAD_PAN_DIRECTION == -1.0
 
 
@@ -69,7 +69,7 @@ def test_sub_interval_events_merge_without_losing_travel():
         outputs.append(scroll.feed(1, 0.1, index * 0.5))
 
     assert outputs == [None] * 10
-    step = scroll.flush(5)
+    step = scroll.flush(20)
     assert step is not None
     assert step.pan_fraction == pytest.approx(
         TRACKPAD_PAN_DIRECTION * 10 / TRACKPAD_PAN_UNITS_PER_SCREEN
@@ -77,7 +77,7 @@ def test_sub_interval_events_merge_without_losing_travel():
     assert math.exp(step.zoom_log) == pytest.approx(
         math.exp(-math.log(2) / TRACKPAD_ZOOM_UNITS_PER_2X)
     )
-    assert scroll.flush(6) is None
+    assert scroll.flush(21) is None
 
 
 def test_pause_clamps_dt_and_does_not_burst():

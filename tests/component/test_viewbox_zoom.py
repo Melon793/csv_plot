@@ -521,7 +521,7 @@ def test_trackpad_horizontal_scroll_pans_without_zoom_or_y_change(
     monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
 
     pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 0, delta_x=32))
-    now[0] = 16
+    now[0] = 40
     pw._flush_trackpad_scroll()
 
     distance = (
@@ -553,7 +553,7 @@ def test_trackpad_horizontal_scroll_uses_local_span_and_writes_xlink_source(
     local = QPoint(int(child.width() * 0.4), int(child.height() * 0.5))
 
     child.wheelEvent(_wheel_event(child, local, 0, delta_x=32))
-    now[0] = 16
+    now[0] = 40
     child._flush_trackpad_scroll()
     qapp.processEvents()
 

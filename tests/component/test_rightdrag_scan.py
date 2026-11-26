@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QGraphicsSceneMouseEvent
 import pyqtgraph as pg
 from pyqtgraph.GraphicsScene.mouseEvents import MouseClickEvent, MouseDragEvent
 
-from src.ui.widgets.custom_viewbox import SCAN_MIN_PX, ZH_SCAN_ZOOM
+from src.ui.widgets.custom_viewbox import SCAN_MIN_PX
 
 
 # ---------- 事件构造辅助 ----------
@@ -146,22 +146,8 @@ def _right_click(vb, scene_pos):
     vb.mouseClickEvent(MouseClickEvent(release))
 
 
-def _scan_action(vb):
-    pos = vb.plot_widget.mapToScene(QPoint(400, 300))
-    release = _qscene_event(
-        QEvent.Type.GraphicsSceneMouseRelease,
-        pos,
-        pos,
-        buttons=Qt.MouseButton.NoButton,
-    )
-    menu = vb.getMenu(MouseClickEvent(release))
-    return next(action for action in menu.actions() if action.text() == ZH_SCAN_ZOOM)
-
-
-def _arm_from_menu(vb):
-    action = _scan_action(vb)
-    assert action.isEnabled()
-    action.trigger()
+def _arm_scan_mode(vb):
+    vb._arm_scan()
     assert vb._scan_armed is True
 
 
@@ -602,13 +588,13 @@ def test_xlink_scan_updates_group(plot_factory, qapp):
     assert master.view_box.viewRange()[1] == master_y_before
 
 
-# ---------- 一次性左键扫选入口 ----------
+# ---------- 底层一次性扫选模式（右键菜单入口已移除） ----------
 
 
-def test_scan_menu_arms_crosshair_and_wheel_still_works(scan_plot):
+def test_armed_scan_crosshair_and_wheel_still_works(scan_plot):
     pw = scan_plot
     vb = pw.view_box
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
     assert pw.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
     assert vb._scan_filter_view is pw
 
@@ -635,7 +621,7 @@ def test_armed_left_drag_scans_x_and_disarms(scan_plot, monkeypatch):
     vb = pw.view_box
     opened = []
     monkeypatch.setattr(vb, "raiseContextMenu", lambda ev: opened.append(ev))
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
     start_local, end_local = QPoint(200, 300), QPoint(500, 300)
     expected = sorted([_x_of(vb, pw, start_local), _x_of(vb, pw, end_local)])
     y_before = list(vb.viewRange()[1])
@@ -662,7 +648,7 @@ def test_armed_left_short_drag_or_click_keeps_mode(scan_plot, monkeypatch):
     opened = []
     monkeypatch.setattr(vb, "raiseContextMenu", lambda ev: opened.append(ev))
     x_before = list(vb.viewRange()[0])
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
     start = pw.mapToScene(QPoint(300, 300))
 
     _drag(
@@ -692,7 +678,7 @@ def test_escape_disarms_without_scanning(scan_plot, qapp):
     pw = scan_plot
     vb = pw.view_box
     x_before = list(vb.viewRange()[0])
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
 
     qapp.sendEvent(
         pw,
@@ -730,7 +716,7 @@ def test_unarmed_left_drag_still_pans(scan_plot):
 def test_armed_right_drag_scans_and_disarms(scan_plot):
     pw = scan_plot
     vb = pw.view_box
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
     start_local, end_local = QPoint(200, 300), QPoint(500, 300)
     expected = sorted([_x_of(vb, pw, start_local), _x_of(vb, pw, end_local)])
 
@@ -741,15 +727,13 @@ def test_armed_right_drag_scans_and_disarms(scan_plot):
     assert vb._scan_filter_view is None
 
 
-def test_scan_menu_disabled_when_x_locked(scan_plot):
+def test_arm_scan_is_noop_when_x_locked(scan_plot):
     pw = scan_plot
     vb = pw.view_box
     pw._x_mouse_locked = True
 
-    action = _scan_action(vb)
+    vb._arm_scan()
 
-    assert action.isEnabled() is False
-    action.trigger()
     assert vb._scan_armed is False
     assert pw.viewport().testAttribute(Qt.WidgetAttribute.WA_SetCursor) is False
 
@@ -760,7 +744,7 @@ def test_escape_during_armed_left_drag_swallows_remaining_events(
     pw = scan_plot
     vb = pw.view_box
     x_before = list(vb.viewRange()[0])
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
     down = pw.mapToScene(QPoint(200, 300))
     mid = pw.mapToScene(QPoint(400, 300))
     press = _qscene_event(
@@ -820,7 +804,7 @@ def test_new_drag_after_lost_cancel_release_is_not_swallowed(
 ):
     pw = scan_plot
     vb = pw.view_box
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
     down = pw.mapToScene(QPoint(200, 300))
     press = _qscene_event(
         QEvent.Type.GraphicsSceneMousePress,
@@ -862,7 +846,7 @@ def test_armed_left_click_keeps_selection_and_never_starts_lift(scan_plot):
     pw = scan_plot
     vb = pw.view_box
     pw.legend_label._toggle_legend_selection("a")
-    _arm_from_menu(vb)
+    _arm_scan_mode(vb)
     curve = pw.curves["a"]
     curve_pos = pw.mapFromScene(
         vb.mapViewToScene(QPointF(float(curve.x_data[50]), float(curve.y_data[50])))

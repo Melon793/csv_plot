@@ -1,7 +1,7 @@
 """CustomViewBox 右键菜单结构测试（offscreen）。
 
 菜单完全自建（不再继承 pyqtgraph 的 ViewBoxMenu）：
-- 顶层顺序固定：扫选 / 按 X 调节 Y / 游标 → 数据三项 → 布局两项 → 导出 → 清除；
+- 顶层顺序固定：按 X 调节 Y / 游标 → 数据三项 → 布局两项 → 导出 → 清除；
 - pyqtgraph 的 View All / X/Y axis / Plot Options / Mouse Mode 不再出现；
 - 导出改为复用 Scene 原生动作（scene.showExportDialog 能力保留）；
 - 缓存同一个 QMenu、每次右键清空重排，反复右键不累积对象。
@@ -30,10 +30,11 @@ from src.ui.widgets.custom_viewbox import (
     ZH_HIDE_CURSOR_VALUE,
     ZH_JUMP_TO_DATA,
     ZH_RESET_ALL_HEIGHT,
-    ZH_SCAN_ZOOM,
     ZH_SHOW_CURSOR_VALUE,
     ZH_VAR_EDITOR,
 )
+
+REMOVED_SCAN_TEXT = "扫选放大（拖动选择 X 区间）"
 
 # 改造前的英文字面量：任何一条重新出现在菜单里都说明有比对点漏改
 LEGACY_ENGLISH_TEXTS = [
@@ -104,7 +105,6 @@ def test_menu_uses_chinese_labels(view_box):
 
     for zh in (
         ZH_JUMP_TO_DATA,
-        ZH_SCAN_ZOOM,
         ZH_AUTO_Y_IN_X,
         ZH_CURSOR_MENU,
         ZH_COPY_NAME,
@@ -115,6 +115,7 @@ def test_menu_uses_chinese_labels(view_box):
         assert zh in texts, f"缺少中文菜单项 {zh!r}，实际：{texts}"
 
     # 数值开关已收进子菜单，顶层不得残留任何状态下的文案
+    assert REMOVED_SCAN_TEXT not in texts
     assert ZH_HIDE_CURSOR_VALUE not in texts
     assert ZH_SHOW_CURSOR_VALUE not in texts
 
@@ -199,12 +200,11 @@ def test_export_action_keeps_native_chain(view_box):
 
 
 def test_top_level_order_is_fixed(view_box):
-    """顶层顺序固定：扫选 → 视图 → 数据 → 布局 → 导出 → 清除"""
+    """顶层顺序固定：视图 → 数据 → 布局 → 导出 → 清除"""
     menu = view_box.getMenu(_FakeMenuEvent())
     texts = [a.text() for a in menu.actions()]
 
     assert texts == [
-        ZH_SCAN_ZOOM,
         ZH_AUTO_Y_IN_X,
         ZH_CURSOR_MENU,
         "",
