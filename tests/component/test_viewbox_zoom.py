@@ -7,7 +7,7 @@
 - Shift+左键框选放大（含 10% margin、过小框忽略）
 - 双击中键清除单个图表
 
-事件基于控件自身坐标构造，QWheelEvent/QMouseEvent 手工构造后直接调用对应事件方法；
+事件基于控件自身坐标构造，QWheelEvent/QNativeGestureEvent/QMouseEvent 手工构造后调用对应事件方法；
 多列 / 同列不等宽两类宿主拓扑（``zoom_group``）例外——它们要靠子图的屏幕几何错开
 才能测到 XLink 锚点问题，断言口径用「缩放前后同一像素处的数据值漂移（px）」。
 """
@@ -18,7 +18,13 @@ import pandas as pd
 import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtGui import (
+    QKeyEvent,
+    QMouseEvent,
+    QNativeGestureEvent,
+    QPointingDevice,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QGraphicsSceneWheelEvent,
@@ -47,6 +53,7 @@ def _wheel_event(
     delta_y: int,
     modifiers=Qt.KeyboardModifier.NoModifier,
     delta_x: int = 0,
+    phase: Qt.ScrollPhase = Qt.ScrollPhase.NoScrollPhase,
 ) -> QWheelEvent:
     """构造一个落在 pw 指定局部坐标的滚轮事件（每齿 120）"""
     pos = QPointF(local_pos)
@@ -58,8 +65,27 @@ def _wheel_event(
         QPoint(delta_x, delta_y),        # angleDelta（>0 向前=放大）
         Qt.MouseButton.NoButton,
         modifiers,
-        Qt.ScrollPhase.NoScrollPhase,
+        phase,
         False,
+    )
+
+
+def _native_gesture_event(
+    widget,
+    local_pos: QPoint,
+    value: float,
+    gesture_type: Qt.NativeGestureType = Qt.NativeGestureType.ZoomNativeGesture,
+) -> QNativeGestureEvent:
+    pos = QPointF(local_pos)
+    return QNativeGestureEvent(
+        gesture_type,
+        QPointingDevice.primaryPointingDevice(),
+        2,
+        pos,
+        pos,
+        QPointF(widget.mapToGlobal(local_pos)),
+        value,
+        QPointF(0, 0),
     )
 
 
@@ -250,6 +276,105 @@ def test_ctrl_horizontal_scroll_is_ignored(shown_plot, monkeypatch):
     assert ev.isAccepted()
     assert calls == []
     assert not pw._scroll_apply_timer.isActive()
+
+
+# ---------- macOS 原生捏合 ----------
+
+
+@pytest.mark.parametrize("value", [0.1, -0.1])
+def test_native_pinch_zooms_x_at_gesture_position(shown_plot, value):
+    """ZoomNativeGesture 的增量直接作为 X 轴 factor，不依赖 Ctrl+wheel。"""
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    vb.setYRange(-5, 105, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    before_y = list(vb.viewRange()[1])
+    pos = QPoint(400, 300)
+    center = _zoom_center_mapping(pw, pos)
+    factor = 1.0 + value
+
+    ev = _native_gesture_event(pw, pos, value)
+
+    assert pw.event(ev) is True
+    assert ev.isAccepted()
+    assert vb.viewRange()[0] == pytest.approx(
+        [
+            center - (center - before_x[0]) * factor,
+            center + (before_x[1] - center) * factor,
+        ],
+        abs=1e-9,
+    )
+    assert vb.viewRange()[1] == before_y
+
+
+def test_native_pinch_received_by_viewport_is_consumed(shown_plot, qapp):
+    """真实 macOS 事件常落在 viewport，事件过滤器必须接住并完成缩放。"""
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(10, 90, padding=0)
+    QApplication.processEvents()
+    width_before = vb.viewRange()[0][1] - vb.viewRange()[0][0]
+    pos = QPoint(400, 300)
+    ev = _native_gesture_event(pw.viewport(), pos, 0.05)
+
+    QApplication.sendEvent(pw.viewport(), ev)
+    qapp.processEvents()
+
+    assert ev.isAccepted()
+    assert vb.viewRange()[0][1] - vb.viewRange()[0][0] == pytest.approx(
+        width_before * 1.05, rel=1e-6
+    )
+
+
+def test_native_pinch_over_legend_does_not_zoom_plot(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    proxy = pw._legend_proxy
+    pos = pw.mapFromScene(proxy.sceneBoundingRect().center())
+
+    ev = _native_gesture_event(pw, pos, 0.1)
+
+    assert pw.event(ev) is False
+    assert vb.viewRange()[0] == before_x
+
+
+def test_native_pinch_respects_x_lock(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pw._x_mouse_locked = True
+
+    ev = _native_gesture_event(pw, QPoint(400, 300), 0.1)
+
+    assert pw.event(ev) is True
+    assert vb.viewRange()[0] == before_x
+
+
+def test_native_gesture_begin_discards_pending_wheel_zoom(shown_plot, monkeypatch):
+    pw = shown_plot
+    calls = []
+    monkeypatch.setattr(pw._axis_manager, "zoom_x", lambda *args: calls.append(args))
+    pw.wheelEvent(_wheel_event(pw, QPoint(400, 300), 1))
+    assert pw._scroll_apply_timer.isActive()
+
+    begin = _native_gesture_event(
+        pw,
+        QPoint(400, 300),
+        0.0,
+        Qt.NativeGestureType.BeginNativeGesture,
+    )
+
+    assert pw.event(begin) is True
+    assert not pw._scroll_apply_timer.isActive()
+    pw._flush_trackpad_scroll()
+    assert calls == []
 
 
 def test_modifier_change_flushes_pending_scroll_before_reset(shown_plot, monkeypatch):
@@ -587,8 +712,9 @@ def test_trackpad_horizontal_scroll_is_noop_when_x_locked(shown_plot, monkeypatc
     assert pw._trackpad_scroll.flush(32) is None
 
 
+@pytest.mark.parametrize("dy", [0, 20])
 @pytest.mark.parametrize("dx", [200.0, -200.0])
-def test_shift_horizontal_scroll_brushes_from_cursor_and_commits(shown_plot, dx):
+def test_shift_horizontal_scroll_brushes_from_cursor_and_commits(shown_plot, dx, dy):
     pw = shown_plot
     vb = pw.view_box
     vb.setXRange(0, 100, padding=0)
@@ -604,7 +730,7 @@ def test_shift_horizontal_scroll_brushes_from_cursor_and_commits(shown_plot, dx)
         _wheel_event(
             pw,
             pos,
-            0,
+            dy,
             Qt.KeyboardModifier.ShiftModifier,
             delta_x=int(dx),
         )
@@ -646,6 +772,71 @@ def test_shift_horizontal_scroll_commits_after_idle(shown_plot, qtbot):
     assert vb.viewRange()[0] == pytest.approx(
         [anchor, anchor + 200 / TRACKPAD_SCAN_UNITS_PER_SCREEN * 100]
     )
+
+
+def test_shift_horizontal_scroll_phase_end_commits_after_shift_release(shown_plot):
+    """ScrollEnd 即使已松开 Shift 也应提交，且无需等待静默超时。"""
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pos = QPoint(400, 300)
+    anchor = _zoom_center_mapping(pw, pos)
+    target = anchor + 200 / TRACKPAD_SCAN_UNITS_PER_SCREEN * (before_x[1] - before_x[0])
+
+    update = _wheel_event(
+        pw,
+        pos,
+        20,
+        Qt.KeyboardModifier.ShiftModifier,
+        delta_x=200,
+        phase=Qt.ScrollPhase.ScrollUpdate,
+    )
+    pw.wheelEvent(update)
+    assert update.isAccepted()
+    assert vb.scroll_scan_active is True
+    assert vb.viewRange()[0] == before_x
+
+    end = _wheel_event(
+        pw,
+        pos,
+        0,
+        Qt.KeyboardModifier.NoModifier,
+        phase=Qt.ScrollPhase.ScrollEnd,
+    )
+    pw.wheelEvent(end)
+
+    assert end.isAccepted()
+    assert vb.scroll_scan_active is False
+    assert vb.viewRange()[0] == pytest.approx(sorted([anchor, target]), abs=1e-9)
+
+
+def test_shift_vertical_scroll_keeps_direct_zoom_path(shown_plot):
+    """Shift+竖滑按主轴进入缩放，不应因少量横向漂移启动刷选。"""
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    vb.setYRange(-5, 105, padding=0)
+    QApplication.processEvents()
+    width_before = vb.viewRange()[0][1] - vb.viewRange()[0][0]
+    before_y = list(vb.viewRange()[1])
+
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            200,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=20,
+            phase=Qt.ScrollPhase.ScrollUpdate,
+        )
+    )
+    pw._flush_trackpad_scroll()
+
+    assert vb.scroll_scan_active is False
+    assert vb.viewRange()[0][1] - vb.viewRange()[0][0] < width_before
+    assert vb.viewRange()[1] == before_y
 
 
 def test_shift_horizontal_short_brush_does_not_scan(shown_plot):

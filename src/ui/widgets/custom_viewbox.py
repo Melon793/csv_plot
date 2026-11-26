@@ -99,8 +99,8 @@ class CustomViewBox(pg.ViewBox):
         self._scan_band_committed = None
         self._scan_filter_view = None
         self._scan_cursor_saved = None
-        # Shift + 双指横滑刷选：Windows 无 ScrollPhase，用最后一次横滑后的
-        # 静默超时代替“松手”；预览带与鼠标扫选共用，避免两套视觉语义。
+        # Shift + 双指横滑刷选：优先由 ScrollPhase 的 End 提交；无 ScrollPhase
+        # 的平台用最后一次横滑后的静默超时兜底。预览带与鼠标扫选共用。
         self._scroll_scan_active = False
         self._scroll_scan_anchor_x = None
         self._scroll_scan_target_x = None
@@ -311,7 +311,12 @@ class CustomViewBox(pg.ViewBox):
         self.enableAutoRange(x=False)
         self.setXRange(xmin, xmax, padding=0)
 
-    def feed_scroll_scan(self, dx: float, scene_pos) -> bool:
+    def feed_scroll_scan(
+        self,
+        dx: float,
+        scene_pos,
+        phase: Qt.ScrollPhase = Qt.ScrollPhase.NoScrollPhase,
+    ) -> bool:
         """Shift+横滑：以光标为固定锚点，横滑量决定另一条边。"""
         if (
             getattr(self.plot_widget, "_x_mouse_locked", False)
@@ -322,6 +327,11 @@ class CustomViewBox(pg.ViewBox):
             return False
         if self._scan_active or self._scan_armed:
             return False
+        if phase == Qt.ScrollPhase.ScrollEnd:
+            if not self._scroll_scan_active:
+                return False
+            self._finish_scroll_scan()
+            return True
 
         if not self._scroll_scan_active:
             self._scroll_scan_active = True
@@ -349,8 +359,8 @@ class CustomViewBox(pg.ViewBox):
             target,
             pixel_delta >= self._scan_commit_px(),
         )
-        # 这里故意用 debounce：横滑事件本身就是连续流，最后一次事件后的
-        # 静默才代表手指离开；不能用 16ms 单发定时器提前提交。
+        # 有 ScrollPhase 时通常由 End 立即提交；debounce 仅兜底丢失 End 的
+        # 事件流，连续横滑会不断重启计时器，不会提前提交。
         self._scroll_scan_timer.start(TRACKPAD_MODE_IDLE_MS)
         return True
 
