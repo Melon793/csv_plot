@@ -30,7 +30,8 @@ import pytest
 from shiboken6 import isValid
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QMainWindow, QPushButton, QWidget
 
 from src.core.gc_guard import no_autogc
 from src.data.loader import DataLoadThread
@@ -456,6 +457,100 @@ def test_shutdown_blocks_pending_blf_retry_from_reentering_load(qapp, monkeypatc
     assert thread.timeouts == [50, 50]
     host.deleteLater()
     flush_deferred_deletes()
+
+
+@pytest.mark.parametrize("suffix", [".blf", ".xlsx"])
+def test_modal_return_after_close_never_begins_reload(
+    qapp, tmp_path, monkeypatch, suffix
+):
+    """模态选库/选表期间关窗，返回后不得开始 reload 或创建新线程。"""
+    from src.data.can_bindings import CanBindings
+
+    host = QWidget()
+    host._is_being_destroyed = False
+    host._is_loading_new_data = False
+    host.load_btn = QPushButton(host)
+    host.reload_btn = QPushButton(host)
+    manager = FileLoaderManager(host)
+    path = tmp_path / f"Demo{suffix}"
+    path.write_bytes(b"fixture")
+
+    def close_during_modal(*_args, **_kwargs):
+        host._is_being_destroyed = True
+        return CanBindings.empty() if suffix == ".blf" else "Sheet1"
+
+    if suffix == ".blf":
+        monkeypatch.setattr(manager, "_resolve_can_databases", close_during_modal)
+    else:
+        from src.ui.dialogs import sheet_selector
+
+        monkeypatch.setattr(
+            sheet_selector.SheetSelectorDialog, "pick_sheet", close_during_modal
+        )
+
+    def forbidden_begin():
+        raise AssertionError("模态返回时窗口已进入销毁态，不得开始 reload")
+
+    monkeypatch.setattr(manager, "_begin_data_reload", forbidden_begin)
+    try:
+        manager._load_file(str(path), is_reload=True)
+        assert host.load_btn.isEnabled()
+        assert host.reload_btn.isEnabled()
+        assert manager._blf_pending_loader is None
+    finally:
+        host.deleteLater()
+        flush_deferred_deletes()
+
+
+def test_close_event_ignores_reentry_during_shutdown(qapp):
+    """关窗等待处理事件时再次收到 close event，不得递归执行整套收尾。"""
+    from src.ui.main_window import MainWindow
+
+    class Host(MainWindow):
+        def __init__(self):
+            QMainWindow.__init__(self)
+
+    class Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+    host = Host()
+    host._logger = Logger()
+    host._is_being_destroyed = False
+    host.loader = None
+    host.plot_tabs = type("Tabs", (), {"_dir_popup": None})()
+    calls = []
+    host._close_status_drawers = lambda: calls.append("drawers")
+    host.curve_shelf_if_open = lambda: None
+    host.plot_config_manager = type(
+        "Config", (), {"save_auto_save": lambda _self, _mw: calls.append("save")}
+    )()
+    host._shutdown_var_info_worker = lambda: calls.append("var_info")
+    host.layout_manager = type(
+        "Layout", (), {"_handle_close": lambda _self: calls.append("layout")}
+    )()
+
+    reentered = []
+
+    def shutdown_once():
+        calls.append("shutdown")
+        event = QCloseEvent()
+        MainWindow.closeEvent(host, event)
+        reentered.append(event.isAccepted())
+
+    host._shutdown_data_load_thread = shutdown_once
+    first = QCloseEvent()
+    try:
+        MainWindow.closeEvent(host, first)
+        assert first.isAccepted()
+        assert reentered == [False], "重入关窗事件必须被忽略"
+        assert calls == ["drawers", "var_info", "shutdown", "layout"]
+    finally:
+        host.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_qt_widgets_exit_cleanly_in_subprocess():

@@ -746,7 +746,7 @@ class FileLoaderManager(MainWindowBaseManager):
         不能直接碰 ``self.mw``：它是弱引用 property，断链时自己就会抛
         ``RuntimeError("MainWindow has been garbage collected")``。
         """
-        mw = self._mw_ref()
+        mw = self._live_mw()
         return mw is None or bool(getattr(mw, "_is_being_destroyed", False))
 
     def _safety_force_unlock(self):
@@ -1418,6 +1418,15 @@ class FileLoaderManager(MainWindowBaseManager):
             self.mw.load_btn.setEnabled(True)
             return
 
+        # 选库/选表等模态框会开嵌套事件循环，关窗可能已在这期间完成。
+        # 初始入口守卫不足以覆盖这段返回路程；必须在改场景、起线程前再核一次。
+        if self._window_going_away():
+            self._give_up_blf_restart()
+            if self._live_mw() is not None:
+                self._cancel_pending_reload(is_reload)
+            logger.info("主窗口正在销毁，跳过模态返回后的数据加载")
+            return
+
         self._begin_data_reload()
         self._load_started_at = time.perf_counter()
         self.mw.begin_load_feedback(file_path)
@@ -1741,7 +1750,7 @@ class FileLoaderManager(MainWindowBaseManager):
         try:
             if notice:
                 dialog.set_notice(notice)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if dialog.exec() != QDialog.DialogCode.Accepted or self._window_going_away():
                 logger.info(BLF_TEXT_NO_DB_SELECTED)
                 return None
             paths = dialog.get_selected_paths()
@@ -2342,6 +2351,8 @@ class FileLoaderManager(MainWindowBaseManager):
             unmatched, total_messages=loader.total_messages, parent=self.mw
         )
         dialog.exec()
+        if self._window_going_away():
+            return
         if dialog.reselect_requested:
             self.reselect_can_database()
 

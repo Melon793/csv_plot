@@ -2421,6 +2421,11 @@ class MainWindow(QMainWindow):
             self.file_loader_manager.load_csv_file(positional_args[0])
 
     def closeEvent(self, event):
+        # 关窗等待会放行 posted close event；第二次进入必须忽略，避免递归
+        # 重复保存、关 worker 和等待线程，干扰首次清理现场。
+        if getattr(self, "_is_being_destroyed", False):
+            event.ignore()
+            return
         self._logger.info("CSV Plot 应用程序退出")
         # 必须先置位再收尾：下面的清理会开嵌套事件循环（等线程退出、存盘），
         # 期间排着的 singleShot/防抖回调还会打到正在退出的窗口
