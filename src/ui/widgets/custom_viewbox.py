@@ -5,11 +5,12 @@ CustomViewBox —— 信号化自定义 ViewBox
 替换为 PyQt 信号，由 DraggableGraphicsLayoutWidget 负责连接。
 """
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 import pyqtgraph as pg
 
+from src.core.config import TRACKPAD_MODE_IDLE_MS, TRACKPAD_PAN_UNITS_PER_SCREEN
 from src.ui import theme
 
 # 右键菜单完全自建：保留一个本 ViewBox 的缓存 QMenu，每次右键清空重排。
@@ -96,6 +97,15 @@ class CustomViewBox(pg.ViewBox):
         self._scan_band_committed = None
         self._scan_filter_view = None
         self._scan_cursor_saved = None
+        # Shift + 双指横滑刷选：Windows 无 ScrollPhase，用最后一次横滑后的
+        # 静默超时代替“松手”；预览带与鼠标扫选共用，避免两套视觉语义。
+        self._scroll_scan_active = False
+        self._scroll_scan_anchor_x = None
+        self._scroll_scan_target_x = None
+        self._scroll_scan_dx = 0.0
+        self._scroll_scan_timer = QTimer(self)
+        self._scroll_scan_timer.setSingleShot(True)
+        self._scroll_scan_timer.timeout.connect(self._finish_scroll_scan)
 
     # ================================================================
     # 右键拖拽扫选 X 区间
@@ -112,6 +122,7 @@ class CustomViewBox(pg.ViewBox):
         其余一律扫选 —— 判定线固定为像素、不随视宽放大。预览带的
         「虚线无填充 / 实线填充」与这个判定严格同源，松手前即可预知结果。
         """
+        self.cancel_scroll_scan()
         button = ev.button()
         if button == self._scan_cancelled_button:
             ev.accept()
@@ -156,11 +167,13 @@ class CustomViewBox(pg.ViewBox):
     def _arm_scan(self) -> None:
         if getattr(self.plot_widget, "_x_mouse_locked", False):
             return
+        self.cancel_scroll_scan()
         self._scan_armed = True
         self._install_scan_key_filter()
         self._set_scan_cursor(Qt.CursorShape.CrossCursor)
 
     def _begin_scan(self, button) -> None:
+        self.cancel_scroll_scan()
         self._scan_active = True
         self._scan_drag_button = button
         self._install_scan_key_filter()
@@ -174,13 +187,20 @@ class CustomViewBox(pg.ViewBox):
         )
         return max(SCAN_MIN_PX, platform_px)
 
+    @property
+    def scroll_scan_active(self) -> bool:
+        return self._scroll_scan_active
+
     def _update_scan_band(self, ev) -> None:
         """按「按下点 → 当前点」建/更新预览带（数据坐标，无 padding）。"""
         down = ev.buttonDownScenePos(ev.button())
         x0 = self.mapSceneToView(down).x()
         x1 = self.mapSceneToView(ev.scenePos()).x()
         committed = abs(ev.scenePos().x() - down.x()) >= self._scan_commit_px()
+        self._set_scan_band(x0, x1, committed)
 
+    def _set_scan_band(self, x0: float, x1: float, committed: bool) -> None:
+        """鼠标拖扫与 Shift+横滑刷选共用的预览带。"""
         band = self._scan_band
         if band is None:
             plot_item = getattr(self.plot_widget, "plot_item", None)
@@ -194,12 +214,28 @@ class CustomViewBox(pg.ViewBox):
                 line.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             self._scan_band = band
             self._scan_band_committed = None
-            self._style_scan_band(band, committed)
-            # ignoreBounds：预览带横跨整高，参与 auto-range 会把 Y 撑飞
+            # ignoreBounds：预览带横跨全高，参与 auto-range 会把 Y 撑飞
             plot_item.addItem(band, ignoreBounds=True)
         else:
             band.setRegion((x0, x1))
-            self._style_scan_band(band, committed)
+        self._style_scan_band(band, committed)
+
+    def _remove_scan_band(self) -> None:
+        self._scan_band_committed = None
+        band = self._scan_band
+        self._scan_band = None
+        if band is None:
+            return
+        plot_item = getattr(self.plot_widget, "plot_item", None)
+        if plot_item is not None:
+            plot_item.removeItem(band)
+        else:
+            # plot_item 已先一步没了：直接从场景摘，别留一张幽灵带
+            scene = band.scene()
+            if scene is not None:
+                band.setParentItem(None)
+                scene.removeItem(band)
+        band.deleteLater()
 
     def _style_scan_band(self, band, committed: bool) -> None:
         """两态预览：未过判定线只画 accent 虚线、不填充；过线才有 tint 填充。"""
@@ -244,10 +280,109 @@ class CustomViewBox(pg.ViewBox):
         """写 X 范围：走 AxisManager 入口（XLink 时写源视图，由原生广播到整组）。"""
         apply = getattr(self.plot_widget, "set_xrange_with_link_handling", None)
         if callable(apply):
+            linked = self.linkedView(0)
+            if linked is not None:
+                local_range = self.viewRange()[0]
+                source_range = linked.viewRange()[0]
+                if max(abs(a - b) for a, b in zip(local_range, source_range)) > 1e-9:
+                    # 同列错位 XLink 走像素对齐：子图范围是源范围的局部窗口。
+                    # 要让广播后的子图恰好等于所选区间，需按两侧像素宽反推源范围；
+                    # 低重叠仍走整段复制，不能把列间距折进数据坐标。
+                    local_rect = self.screenGeometry()
+                    source_rect = linked.screenGeometry()
+                    local_width = max(local_rect.width(), 1)
+                    source_width = max(source_rect.width(), 1)
+                    overlap = min(local_rect.right(), source_rect.right()) - max(
+                        local_rect.left(), source_rect.left()
+                    )
+                    if overlap >= min(local_width / 3, source_width / 3):
+                        source_span = (xmax - xmin) * source_width / local_width
+                        source_left = xmin - (
+                            (local_rect.left() - source_rect.left())
+                            / source_width
+                            * source_span
+                        )
+                        xmin = source_left
+                        xmax = source_left + source_span
             apply(xmin, xmax)
             return
         self.enableAutoRange(x=False)
         self.setXRange(xmin, xmax, padding=0)
+
+    def feed_scroll_scan(self, dx: float, scene_pos) -> bool:
+        """Shift+横滑：以光标为固定锚点，横滑量决定另一条边。"""
+        if (
+            getattr(self.plot_widget, "_x_mouse_locked", False)
+            or getattr(self.plot_widget, "_is_updating_data", False)
+            or getattr(self.plot_widget, "_is_being_destroyed", False)
+        ):
+            self.cancel_scroll_scan()
+            return False
+        if self._scan_active or self._scan_armed:
+            return False
+
+        if not self._scroll_scan_active:
+            self._scroll_scan_active = True
+            self._scroll_scan_anchor_x = self.mapSceneToView(scene_pos).x()
+            self._scroll_scan_target_x = self._scroll_scan_anchor_x
+            self._scroll_scan_dx = 0.0
+            self._install_scan_key_filter()
+            self._set_scan_cursor(Qt.CursorShape.CrossCursor)
+
+        self._scroll_scan_dx += dx
+        left, right = self.viewRange()[0]
+        span = max(right - left, 1e-12)
+        target = self._scroll_scan_anchor_x + (
+            self._scroll_scan_dx / TRACKPAD_PAN_UNITS_PER_SCREEN * span
+        )
+        target = max(left, min(right, target))
+        self._scroll_scan_target_x = target
+        pixel_delta = (
+            abs(target - self._scroll_scan_anchor_x)
+            / span
+            * max(self.sceneBoundingRect().width(), 1.0)
+        )
+        self._set_scan_band(
+            self._scroll_scan_anchor_x,
+            target,
+            pixel_delta >= self._scan_commit_px(),
+        )
+        # 这里故意用 debounce：横滑事件本身就是连续流，最后一次事件后的
+        # 静默才代表手指离开；不能用 16ms 单发定时器提前提交。
+        self._scroll_scan_timer.start(TRACKPAD_MODE_IDLE_MS)
+        return True
+
+    def _finish_scroll_scan(self, commit: bool = True) -> None:
+        if not self._scroll_scan_active:
+            return
+        self._scroll_scan_timer.stop()
+        self._scroll_scan_active = False
+        anchor = self._scroll_scan_anchor_x
+        target = self._scroll_scan_target_x
+        committed = bool(self._scan_band_committed)
+        self._scroll_scan_anchor_x = None
+        self._scroll_scan_target_x = None
+        self._scroll_scan_dx = 0.0
+        self._remove_scan_band()
+        self._remove_scan_key_filter()
+        self._set_scan_cursor(None)
+
+        blocked = (
+            getattr(self.plot_widget, "_x_mouse_locked", False)
+            or getattr(self.plot_widget, "_is_updating_data", False)
+            or getattr(self.plot_widget, "_is_being_destroyed", False)
+        )
+        if (
+            commit
+            and committed
+            and not blocked
+            and anchor is not None
+            and target is not None
+        ):
+            self._apply_scan_range(min(anchor, target), max(anchor, target))
+
+    def cancel_scroll_scan(self) -> None:
+        self._finish_scroll_scan(commit=False)
 
     def _cancel_scan(self) -> None:
         if self._scan_active:
@@ -257,20 +392,7 @@ class CustomViewBox(pg.ViewBox):
     def _teardown_scan(self, keep_armed: bool = False) -> None:
         self._scan_active = False
         self._scan_drag_button = None
-        self._scan_band_committed = None
-        band = self._scan_band
-        self._scan_band = None
-        if band is not None:
-            plot_item = getattr(self.plot_widget, "plot_item", None)
-            if plot_item is not None:
-                plot_item.removeItem(band)
-            else:
-                # plot_item 已先一步没了：直接从场景摘，别留一张幽灵带
-                scene = band.scene()
-                if scene is not None:
-                    band.setParentItem(None)
-                    scene.removeItem(band)
-            band.deleteLater()
+        self._remove_scan_band()
         if keep_armed:
             return
         self._scan_armed = False
@@ -280,11 +402,12 @@ class CustomViewBox(pg.ViewBox):
     def eventFilter(self, obj, event):
         """扫选期间监听视图的 Esc：取消并撤掉预览带。"""
         if (
-            (self._scan_active or self._scan_armed)
+            (self._scan_active or self._scan_armed or self._scroll_scan_active)
             and obj is self._scan_filter_view
             and event.type() == QEvent.Type.KeyPress
             and event.key() == Qt.Key.Key_Escape
         ):
+            self.cancel_scroll_scan()
             self._cancel_scan()
             return True
         return super().eventFilter(obj, event)

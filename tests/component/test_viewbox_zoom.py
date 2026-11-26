@@ -18,8 +18,9 @@ import pandas as pd
 import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QGraphicsSceneWheelEvent,
     QHBoxLayout,
     QVBoxLayout,
@@ -28,7 +29,12 @@ from PySide6.QtWidgets import (
 
 import pyqtgraph as pg
 
-from src.core.config import FACTOR_SCROLL_ZOOM
+from src.core.config import (
+    FACTOR_SCROLL_ZOOM,
+    TRACKPAD_PAN_DIRECTION,
+    TRACKPAD_PAN_UNITS_PER_SCREEN,
+    TRACKPAD_ZOOM_UNITS_PER_2X,
+)
 
 
 # ---------- 事件构造辅助 ----------
@@ -176,6 +182,7 @@ def test_shift_wheel_in_plot_matches_unmodified_x_zoom(shown_plot, qapp):
     assert vb.viewRange()[0] == pytest.approx(expected_x, rel=1e-6)
     assert vb.viewRange()[1] == before_y
     assert bool(vb.state["autoRange"][1]) is True
+    assert vb.scroll_scan_active is False
 
 
 def test_five_ctrl_notches_preserve_y_autorange(shown_plot, qapp):
@@ -219,10 +226,12 @@ def test_ctrl_subnotches_use_continuous_zoom(shown_plot, monkeypatch):
     now[0] = 5
     pw.wheelEvent(_wheel_event(pw, pos, 3, Qt.KeyboardModifier.ControlModifier))
     assert calls == []
-    now[0] = 16
+    now[0] = 20
     pw.wheelEvent(_wheel_event(pw, pos, 3, Qt.KeyboardModifier.ControlModifier))
 
-    assert calls == [pytest.approx(math.exp(-math.log(2) * 9 / 500))]
+    assert calls == [
+        pytest.approx(math.exp(-math.log(2) * 9 / TRACKPAD_ZOOM_UNITS_PER_2X))
+    ]
 
 
 def test_ctrl_horizontal_scroll_is_ignored(shown_plot, monkeypatch):
@@ -260,7 +269,7 @@ def test_modifier_change_flushes_pending_scroll_before_reset(shown_plot, monkeyp
     pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ControlModifier))
 
     assert calls == [
-        pytest.approx(math.exp(-math.log(2) / 500)),
+        pytest.approx(math.exp(-math.log(2) / TRACKPAD_ZOOM_UNITS_PER_2X)),
         pytest.approx(1 / 1.12),
     ]
     assert not pw._scroll_apply_timer.isActive()
@@ -375,10 +384,12 @@ def test_trackpad_subnotches_merge_before_zoom(shown_plot, qapp, monkeypatch):
     pw.wheelEvent(_wheel_event(pw, pos, 3))
     assert calls == []
 
-    now[0] = 16
+    now[0] = 20
     pw.wheelEvent(_wheel_event(pw, pos, 3))
     assert len(calls) == 1
-    assert calls[0][0] == pytest.approx(math.exp(-math.log(2) * 9 / 500))
+    assert calls[0][0] == pytest.approx(
+        math.exp(-math.log(2) * 9 / TRACKPAD_ZOOM_UNITS_PER_2X)
+    )
 
 
 def test_trackpad_tail_flush_uses_single_shot_timer(shown_plot, qtbot, monkeypatch):
@@ -396,7 +407,9 @@ def test_trackpad_tail_flush_uses_single_shot_timer(shown_plot, qtbot, monkeypat
     qtbot.waitUntil(lambda: bool(calls), timeout=500)
 
     assert len(calls) == 1
-    assert calls[0] == pytest.approx(math.exp(-math.log(2) * 4 / 500))
+    assert calls[0] == pytest.approx(
+        math.exp(-math.log(2) * 4 / TRACKPAD_ZOOM_UNITS_PER_2X)
+    )
     assert not pw._scroll_apply_timer.isActive()
 
 
@@ -485,7 +498,9 @@ def test_trackpad_scroll_resets_when_input_is_blocked(shown_plot, monkeypatch, f
     pw._flush_trackpad_scroll()
 
     assert len(calls) == 1
-    assert calls[0] == pytest.approx(math.exp(-math.log(2) * 4 / 500))
+    assert calls[0] == pytest.approx(
+        math.exp(-math.log(2) * 4 / TRACKPAD_ZOOM_UNITS_PER_2X)
+    )
 
 
 def test_trackpad_horizontal_scroll_pans_without_zoom_or_y_change(
@@ -507,7 +522,12 @@ def test_trackpad_horizontal_scroll_pans_without_zoom_or_y_change(
     now[0] = 16
     pw._flush_trackpad_scroll()
 
-    distance = (before_x[1] - before_x[0]) * 32 / 800
+    distance = (
+        (before_x[1] - before_x[0])
+        * 32
+        / TRACKPAD_PAN_UNITS_PER_SCREEN
+        * TRACKPAD_PAN_DIRECTION
+    )
     assert vb.viewRange()[0] == pytest.approx(
         [before_x[0] + distance, before_x[1] + distance], abs=1e-9
     )
@@ -535,7 +555,7 @@ def test_trackpad_horizontal_scroll_uses_local_span_and_writes_xlink_source(
     child._flush_trackpad_scroll()
     qapp.processEvents()
 
-    distance = local_width * 32 / 800
+    distance = local_width * 32 / TRACKPAD_PAN_UNITS_PER_SCREEN * TRACKPAD_PAN_DIRECTION
     assert child.view_box.viewRange()[0] == pytest.approx(
         [child_before[0] + distance, child_before[1] + distance], abs=1e-6
     )
@@ -565,6 +585,361 @@ def test_trackpad_horizontal_scroll_is_noop_when_x_locked(shown_plot, monkeypatc
     assert pw._trackpad_scroll.flush(32) is None
 
 
+@pytest.mark.parametrize("dx", [200.0, -200.0])
+def test_shift_horizontal_scroll_brushes_from_cursor_and_commits(shown_plot, dx):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    vb.setYRange(-5, 105, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    before_y = list(vb.viewRange()[1])
+    pos = QPoint(400, 300)
+    anchor = _zoom_center_mapping(pw, pos)
+    target = anchor + dx / TRACKPAD_PAN_UNITS_PER_SCREEN * (before_x[1] - before_x[0])
+
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            pos,
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=int(dx),
+        )
+    )
+
+    assert vb.scroll_scan_active is True
+    assert vb._scan_band is not None
+    assert vb.viewRange()[0] == before_x
+    assert pw.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+
+    vb._finish_scroll_scan()
+
+    assert vb.viewRange()[0] == pytest.approx(sorted([anchor, target]), abs=1e-9)
+    assert vb.viewRange()[1] == before_y
+    assert vb.scroll_scan_active is False
+    assert vb._scan_band is None
+    assert vb._scan_filter_view is None
+    assert pw.viewport().testAttribute(Qt.WidgetAttribute.WA_SetCursor) is False
+
+
+def test_shift_horizontal_scroll_commits_after_idle(shown_plot, qtbot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    anchor = _zoom_center_mapping(pw, QPoint(400, 300))
+
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+    qtbot.waitUntil(lambda: not vb.scroll_scan_active, timeout=1000)
+
+    assert vb.viewRange()[0] == pytest.approx([anchor, anchor + 25.0])
+
+
+def test_shift_horizontal_short_brush_does_not_scan(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=1,
+        )
+    )
+    vb._finish_scroll_scan()
+
+    assert vb.viewRange()[0] == before_x
+    assert vb._scan_band is None
+    assert vb.scroll_scan_active is False
+
+
+def test_escape_cancels_shift_horizontal_brush(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+
+    QApplication.sendEvent(
+        pw,
+        QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Escape,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    QApplication.processEvents()
+
+    assert vb.viewRange()[0] == before_x
+    assert vb.scroll_scan_active is False
+    assert vb._scan_band is None
+    assert vb._scan_filter_view is None
+
+
+def test_modifier_change_cancels_pending_shift_brush(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+
+    pw._sync_scroll_modifiers(Qt.KeyboardModifier.NoModifier)
+
+    assert vb.scroll_scan_active is False
+    assert vb.viewRange()[0] == before_x
+    assert vb._scan_band is None
+
+
+def test_vertical_scroll_cancels_brush_without_double_apply(shown_plot, monkeypatch):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    actions = []
+    monkeypatch.setattr(
+        pw,
+        "set_xrange_with_link_handling",
+        lambda xmin, xmax, *args, **kwargs: actions.append("scan"),
+    )
+    monkeypatch.setattr(
+        pw._axis_manager,
+        "zoom_x",
+        lambda *args, **kwargs: actions.append("zoom"),
+    )
+    pos = QPoint(400, 300)
+    pw.wheelEvent(
+        _wheel_event(pw, pos, 0, Qt.KeyboardModifier.ShiftModifier, delta_x=200)
+    )
+
+    pw.wheelEvent(_wheel_event(pw, pos, 120, Qt.KeyboardModifier.ShiftModifier))
+    pw._flush_trackpad_scroll()
+
+    assert vb.scroll_scan_active is False
+    assert vb._scan_band is None
+    assert actions == ["zoom"]
+
+
+def test_trackpad_reset_cancels_pending_shift_brush(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+
+    pw._reset_trackpad_scroll()
+
+    assert vb.scroll_scan_active is False
+    assert vb.viewRange()[0] == before_x
+    assert vb._scan_band is None
+
+
+def test_destroy_cancels_pending_shift_brush(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+
+    pw.mark_being_destroyed()
+
+    assert vb.scroll_scan_active is False
+    assert vb.viewRange()[0] == before_x
+    assert vb._scan_band is None
+
+
+def test_shift_horizontal_brush_is_noop_when_x_locked(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pw._x_mouse_locked = True
+
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+
+    assert vb.scroll_scan_active is False
+    assert vb.viewRange()[0] == before_x
+    assert vb._scan_band is None
+
+
+def test_shift_horizontal_brush_is_noop_during_data_update(shown_plot):
+    pw = shown_plot
+    vb = pw.view_box
+    vb.setXRange(0, 100, padding=0)
+    QApplication.processEvents()
+    before_x = list(vb.viewRange()[0])
+    pw._is_updating_data = True
+
+    pw.wheelEvent(
+        _wheel_event(
+            pw,
+            QPoint(400, 300),
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+    pw._is_updating_data = False
+    QApplication.processEvents()
+
+    assert vb.scroll_scan_active is False
+    assert vb.viewRange()[0] == before_x
+    assert vb._scan_band is None
+    assert vb._scroll_scan_timer.isActive() is False
+
+
+def test_shift_horizontal_brush_writes_xlink_source(qapp, zoom_group):
+    _host, (master, child) = zoom_group("row", 2, left_margin=80)
+    child_before = list(child.view_box.viewRange()[0])
+    master_before = list(master.view_box.viewRange()[0])
+    local = QPoint(int(child.width() * 0.4), int(child.height() * 0.5))
+    anchor = _zoom_center_mapping(child, local)
+    target = anchor + 200 / TRACKPAD_PAN_UNITS_PER_SCREEN * (
+        child_before[1] - child_before[0]
+    )
+
+    child.wheelEvent(
+        _wheel_event(
+            child,
+            local,
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+    child.view_box._finish_scroll_scan()
+    qapp.processEvents()
+
+    expected = sorted([anchor, target])
+    assert child.view_box.viewRange()[0] == pytest.approx(expected, abs=1e-6)
+    assert master.view_box.viewRange()[0] == pytest.approx(expected, abs=1e-6)
+
+
+def test_shift_horizontal_brush_keeps_selected_range_on_unequal_width_stack(
+    qapp, zoom_group
+):
+    """同列错位 XLink：刷选端点必须先换算到源视图，再写整组范围。"""
+    _host, (master, child) = zoom_group("col", 2, left_margin=80)
+    assert child.view_box.viewRange()[0] != pytest.approx(
+        master.view_box.viewRange()[0], abs=1e-3
+    ), "宿主未造出不等宽的像素对齐态，用例失去意义"
+    child_before = list(child.view_box.viewRange()[0])
+    master_before = list(master.view_box.viewRange()[0])
+    local = QPoint(int(child.width() * 0.4), int(child.height() * 0.5))
+    anchor = _zoom_center_mapping(child, local)
+    target = anchor + 200 / TRACKPAD_PAN_UNITS_PER_SCREEN * (
+        child_before[1] - child_before[0]
+    )
+
+    child.wheelEvent(
+        _wheel_event(
+            child,
+            local,
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+    child.view_box._finish_scroll_scan()
+    qapp.processEvents()
+
+    assert child.view_box.viewRange()[0] == pytest.approx(
+        sorted([anchor, target]), abs=1e-6
+    )
+    assert master.view_box.viewRange()[0] != pytest.approx(master_before, abs=1e-6)
+
+
+def test_shift_horizontal_brush_replicates_range_when_xlink_views_do_not_overlap(
+    qapp, zoom_group
+):
+    """跨列低重叠时即使范围暂时不一致，也必须整段复制而非按列距反推。"""
+    _host, (master, child) = zoom_group("row", 2)
+    child.view_box.blockLink(True)
+    master.view_box.setXRange(20, 30, padding=0)
+    child.view_box.blockLink(False)
+    qapp.processEvents()
+    assert child.view_box.viewRange()[0] != pytest.approx(
+        master.view_box.viewRange()[0], abs=1e-3
+    )
+    local = QPoint(int(child.width() * 0.4), int(child.height() * 0.5))
+    anchor = _zoom_center_mapping(child, local)
+    target = anchor + 200 / TRACKPAD_PAN_UNITS_PER_SCREEN * 99
+
+    child.wheelEvent(
+        _wheel_event(
+            child,
+            local,
+            0,
+            Qt.KeyboardModifier.ShiftModifier,
+            delta_x=200,
+        )
+    )
+    child.view_box._finish_scroll_scan()
+    qapp.processEvents()
+
+    expected = sorted([anchor, target])
+    assert child.view_box.viewRange()[0] == pytest.approx(expected, abs=1e-6)
+    assert master.view_box.viewRange()[0] == pytest.approx(expected, abs=1e-6)
+
+
 def test_trackpad_axes_accumulate_and_apply_in_same_flush(shown_plot, monkeypatch):
     pw = shown_plot
     assert pw.plot_variable("a")
@@ -575,15 +950,17 @@ def test_trackpad_axes_accumulate_and_apply_in_same_flush(shown_plot, monkeypatc
     before_y = list(vb.viewRange()[1])
     pos = QPoint(400, 300)
     center = _zoom_center_mapping(pw, pos)
-    factor = math.exp(-math.log(2) * 8 / 500)
+    factor = math.exp(-math.log(2) * 8 / TRACKPAD_ZOOM_UNITS_PER_2X)
     zoomed_width = (before_x[1] - before_x[0]) * factor
     expected_left = center - (center - before_x[0]) * factor
-    distance = zoomed_width * 16 / 800
+    distance = (
+        zoomed_width * 16 / TRACKPAD_PAN_UNITS_PER_SCREEN * TRACKPAD_PAN_DIRECTION
+    )
     now = [0.0]
     monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
 
     pw.wheelEvent(_wheel_event(pw, pos, 8, delta_x=16))
-    now[0] = 16
+    now[0] = 20
     pw._flush_trackpad_scroll()
 
     assert vb.viewRange()[0] == pytest.approx(
@@ -593,7 +970,11 @@ def test_trackpad_axes_accumulate_and_apply_in_same_flush(shown_plot, monkeypatc
     assert vb.viewRange()[1] == before_y
 
 
-def test_legend_horizontal_scroll_is_swallowed(shown_plot, monkeypatch):
+@pytest.mark.parametrize(
+    "modifiers",
+    [Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier],
+)
+def test_legend_horizontal_scroll_is_swallowed(shown_plot, monkeypatch, modifiers):
     pw = shown_plot
     assert pw.plot_variable("a")
     proxy = pw._legend_proxy
@@ -603,10 +984,11 @@ def test_legend_horizontal_scroll_is_swallowed(shown_plot, monkeypatch):
     monkeypatch.setattr(pw._axis_manager, "zoom_x", lambda *_: calls.append("zoom"))
     pos = pw.mapFromScene(proxy.sceneBoundingRect().center())
 
-    pw.wheelEvent(_wheel_event(pw, pos, 0, delta_x=80))
+    pw.wheelEvent(_wheel_event(pw, pos, 0, modifiers, delta_x=80))
 
     assert calls == []
     assert not pw._scroll_apply_timer.isActive()
+    assert pw.view_box.scroll_scan_active is False
 
 
 def test_wheel_zoom_preserves_y_range(shown_plot, qapp):

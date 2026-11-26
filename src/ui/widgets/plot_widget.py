@@ -162,6 +162,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         一轮事件循环，期间排着的定时器/防抖回调仍会打到这个 plot。
         """
         self._is_being_destroyed = True
+        self._reset_trackpad_scroll()
         self._cancel_lift(restore_cursor=True)
         # 浮卡挂在主窗口上，不会随 plot 一起析构，这里显式回收。
         card = getattr(self, "_lift_card", None)
@@ -703,6 +704,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         )
 
     def _reset_trackpad_scroll(self) -> None:
+        vb = self.plot_item.getViewBox()
+        cancel_scan = getattr(vb, "cancel_scroll_scan", None)
+        if callable(cancel_scan):
+            cancel_scan()
         self._trackpad_scroll.reset()
         self._scroll_apply_timer.stop()
 
@@ -749,16 +754,23 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         self._sync_scroll_modifiers(modifiers)
         scene_pos = self.mapToScene(ev.position().toPoint())
         in_view_box = vb.sceneBoundingRect().contains(scene_pos)
+        over_legend = getattr(
+            self, "_legend_proxy", None
+        ) is not None and self._legend_proxy.sceneBoundingRect().contains(scene_pos)
+        shift_horizontal_scan = (
+            modifiers == Qt.KeyboardModifier.ShiftModifier
+            and in_view_box
+            and not over_legend
+            and dx != 0
+            and delta == 0
+        )
+        if vb.scroll_scan_active and not shift_horizontal_scan:
+            vb.cancel_scroll_scan()
         x_zoom_modifiers = modifiers == Qt.KeyboardModifier.NoModifier or (
             modifiers == Qt.KeyboardModifier.ShiftModifier and in_view_box
         )
 
-        if (
-            x_zoom_modifiers
-            and (dx != 0 or delta != 0)
-            and getattr(self, "_legend_proxy", None) is not None
-            and self._legend_proxy.sceneBoundingRect().contains(scene_pos)
-        ):
+        if x_zoom_modifiers and (dx != 0 or delta != 0) and over_legend:
             if dx != 0:
                 ev.accept()
                 return
@@ -769,6 +781,10 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
                 ev.accept()
                 return
+
+        if shift_horizontal_scan and vb.feed_scroll_scan(dx, scene_pos):
+            ev.accept()
+            return
 
         if x_zoom_modifiers:
             if not in_view_box and delta == 0 and dx != 0:

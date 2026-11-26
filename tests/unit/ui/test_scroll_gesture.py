@@ -4,6 +4,7 @@ import pytest
 
 from src.core.config import (
     SCROLL_APPLY_DT_MAX_MS,
+    TRACKPAD_PAN_DIRECTION,
     TRACKPAD_PAN_UNITS_PER_SCREEN,
     TRACKPAD_ZOOM_MAX_RATE,
     TRACKPAD_ZOOM_UNITS_PER_2X,
@@ -21,6 +22,11 @@ def _replay(scroll, total, duration_ms, parts, *, start_ms=0, axis="dy"):
         if step is not None:
             steps.append(step)
     return steps
+
+
+def test_trackpad_feel_constants_are_pinned():
+    assert TRACKPAD_ZOOM_UNITS_PER_2X == 350.0
+    assert TRACKPAD_PAN_DIRECTION == -1.0
 
 
 def test_zoom_calibration_matches_distance():
@@ -61,7 +67,9 @@ def test_sub_interval_events_merge_without_losing_travel():
     assert outputs == [None] * 10
     step = scroll.flush(5)
     assert step is not None
-    assert step.pan_fraction == pytest.approx(10 / TRACKPAD_PAN_UNITS_PER_SCREEN)
+    assert step.pan_fraction == pytest.approx(
+        TRACKPAD_PAN_DIRECTION * 10 / TRACKPAD_PAN_UNITS_PER_SCREEN
+    )
     assert math.exp(step.zoom_log) == pytest.approx(
         math.exp(-math.log(2) / TRACKPAD_ZOOM_UNITS_PER_2X)
     )
@@ -112,14 +120,18 @@ def test_device_latch_keeps_mouse_notches_and_trackpad_flick_continuous():
 def test_pan_calibration_and_rate_limit():
     scroll = TrackpadScroll()
     steps = _replay(scroll, 1903, 3980, 200, axis="dx")
-    assert sum(step.pan_fraction for step in steps) == pytest.approx(1903 / 800)
+    assert sum(step.pan_fraction for step in steps) == pytest.approx(
+        TRACKPAD_PAN_DIRECTION * 1903 / TRACKPAD_PAN_UNITS_PER_SCREEN
+    )
 
     single = TrackpadScroll()
     single_steps = _replay(single, 275, 980, 50, axis="dx")
-    assert sum(step.pan_fraction for step in single_steps) == pytest.approx(275 / 800)
+    assert sum(step.pan_fraction for step in single_steps) == pytest.approx(
+        TRACKPAD_PAN_DIRECTION * 275 / TRACKPAD_PAN_UNITS_PER_SCREEN
+    )
 
     burst = TrackpadScroll()
     burst.feed(10_000, 0, 0)
     step = burst.flush(16)
     assert step is not None
-    assert step.pan_fraction == pytest.approx(3.0 * 0.016)
+    assert step.pan_fraction == pytest.approx(TRACKPAD_PAN_DIRECTION * 3.0 * 0.016)
