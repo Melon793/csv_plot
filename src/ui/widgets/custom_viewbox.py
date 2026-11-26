@@ -10,7 +10,10 @@ from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 import pyqtgraph as pg
 
-from src.core.config import TRACKPAD_MODE_IDLE_MS, TRACKPAD_PAN_UNITS_PER_SCREEN
+from src.core.config import (
+    TRACKPAD_MODE_IDLE_MS,
+    TRACKPAD_SCAN_UNITS_PER_SCREEN,
+)
 from src.ui import theme
 
 # 右键菜单完全自建：保留一个本 ViewBox 的缓存 QMenu，每次右键清空重排。
@@ -333,7 +336,7 @@ class CustomViewBox(pg.ViewBox):
         left, right = self.viewRange()[0]
         span = max(right - left, 1e-12)
         target = self._scroll_scan_anchor_x + (
-            self._scroll_scan_dx / TRACKPAD_PAN_UNITS_PER_SCREEN * span
+            self._scroll_scan_dx / TRACKPAD_SCAN_UNITS_PER_SCREEN * span
         )
         target = max(left, min(right, target))
         self._scroll_scan_target_x = target

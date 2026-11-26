@@ -33,6 +33,7 @@ from src.core.config import (
     FACTOR_SCROLL_ZOOM,
     TRACKPAD_PAN_DIRECTION,
     TRACKPAD_PAN_UNITS_PER_SCREEN,
+    TRACKPAD_SCAN_UNITS_PER_SCREEN,
     TRACKPAD_ZOOM_UNITS_PER_2X,
 )
 
@@ -226,7 +227,7 @@ def test_ctrl_subnotches_use_continuous_zoom(shown_plot, monkeypatch):
     now[0] = 5
     pw.wheelEvent(_wheel_event(pw, pos, 3, Qt.KeyboardModifier.ControlModifier))
     assert calls == []
-    now[0] = 20
+    now[0] = 40
     pw.wheelEvent(_wheel_event(pw, pos, 3, Qt.KeyboardModifier.ControlModifier))
 
     assert calls == [
@@ -384,7 +385,7 @@ def test_trackpad_subnotches_merge_before_zoom(shown_plot, qapp, monkeypatch):
     pw.wheelEvent(_wheel_event(pw, pos, 3))
     assert calls == []
 
-    now[0] = 20
+    now[0] = 40
     pw.wheelEvent(_wheel_event(pw, pos, 3))
     assert len(calls) == 1
     assert calls[0][0] == pytest.approx(
@@ -596,7 +597,7 @@ def test_shift_horizontal_scroll_brushes_from_cursor_and_commits(shown_plot, dx)
     before_y = list(vb.viewRange()[1])
     pos = QPoint(400, 300)
     anchor = _zoom_center_mapping(pw, pos)
-    target = anchor + dx / TRACKPAD_PAN_UNITS_PER_SCREEN * (before_x[1] - before_x[0])
+    target = anchor + dx / TRACKPAD_SCAN_UNITS_PER_SCREEN * (before_x[1] - before_x[0])
 
     pw.wheelEvent(
         _wheel_event(
@@ -641,7 +642,9 @@ def test_shift_horizontal_scroll_commits_after_idle(shown_plot, qtbot):
     )
     qtbot.waitUntil(lambda: not vb.scroll_scan_active, timeout=1000)
 
-    assert vb.viewRange()[0] == pytest.approx([anchor, anchor + 25.0])
+    assert vb.viewRange()[0] == pytest.approx(
+        [anchor, anchor + 200 / TRACKPAD_SCAN_UNITS_PER_SCREEN * 100]
+    )
 
 
 def test_shift_horizontal_short_brush_does_not_scan(shown_plot):
@@ -852,7 +855,7 @@ def test_shift_horizontal_brush_writes_xlink_source(qapp, zoom_group):
     master_before = list(master.view_box.viewRange()[0])
     local = QPoint(int(child.width() * 0.4), int(child.height() * 0.5))
     anchor = _zoom_center_mapping(child, local)
-    target = anchor + 200 / TRACKPAD_PAN_UNITS_PER_SCREEN * (
+    target = anchor + 200 / TRACKPAD_SCAN_UNITS_PER_SCREEN * (
         child_before[1] - child_before[0]
     )
 
@@ -885,7 +888,7 @@ def test_shift_horizontal_brush_keeps_selected_range_on_unequal_width_stack(
     master_before = list(master.view_box.viewRange()[0])
     local = QPoint(int(child.width() * 0.4), int(child.height() * 0.5))
     anchor = _zoom_center_mapping(child, local)
-    target = anchor + 200 / TRACKPAD_PAN_UNITS_PER_SCREEN * (
+    target = anchor + 200 / TRACKPAD_SCAN_UNITS_PER_SCREEN * (
         child_before[1] - child_before[0]
     )
 
@@ -921,7 +924,7 @@ def test_shift_horizontal_brush_replicates_range_when_xlink_views_do_not_overlap
     )
     local = QPoint(int(child.width() * 0.4), int(child.height() * 0.5))
     anchor = _zoom_center_mapping(child, local)
-    target = anchor + 200 / TRACKPAD_PAN_UNITS_PER_SCREEN * 99
+    target = anchor + 200 / TRACKPAD_SCAN_UNITS_PER_SCREEN * 99
 
     child.wheelEvent(
         _wheel_event(
@@ -960,7 +963,7 @@ def test_trackpad_axes_accumulate_and_apply_in_same_flush(shown_plot, monkeypatc
     monkeypatch.setattr(pw, "_scroll_now", lambda: now[0])
 
     pw.wheelEvent(_wheel_event(pw, pos, 8, delta_x=16))
-    now[0] = 20
+    now[0] = 40
     pw._flush_trackpad_scroll()
 
     assert vb.viewRange()[0] == pytest.approx(
