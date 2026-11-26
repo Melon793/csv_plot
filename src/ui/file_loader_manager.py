@@ -16,7 +16,7 @@ import time
 import warnings
 from collections import OrderedDict
 
-from PySide6.QtCore import Qt, QStandardPaths, QTimer, QSignalBlocker
+from PySide6.QtCore import QObject, Qt, QStandardPaths, QTimer, QSignalBlocker, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -58,6 +58,81 @@ from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.core.logger import get_logger
 
 logger = get_logger("ui.file_loader")
+
+
+def _delete_dialog_next_turn(dialog) -> None:
+    """当前回调栈退出后再销毁对话框；定时器归 dialog 所有，随其一起回收。"""
+    timer = QTimer(dialog)
+    timer.setSingleShot(True)
+    timer.timeout.connect(dialog.deleteLater)
+    timer.start(0)
+
+
+class _LoaderSignalRelay(QObject):
+    """把加载线程信号接到生命周期不超过 MainWindow 的 QObject receiver。
+
+    ``FileLoaderManager`` 不是 QObject，直接连接它的绑定方法无法获得 Qt 的
+    receiver 销毁即断开语义。relay 由 MainWindow 拥有；线程迟到信号最迟在
+    主窗口关闭时随 relay 一起断开。terminal 信号处理后还会提前 deleteLater，
+    避免连续加载在父窗口下累积隐藏 relay。
+    """
+
+    def __init__(self, parent, manager, file_path: str, load_version: int,
+                 is_reload: bool, *, blf: bool):
+        super().__init__(parent)
+        self._manager = manager
+        self._file_path = file_path
+        self._load_version = load_version
+        self._is_reload = is_reload
+        self._blf = blf
+
+    def _release(self) -> None:
+        self.deleteLater()
+
+    @Slot(object)
+    def finished(self, loader) -> None:
+        try:
+            if self._blf:
+                self._manager._on_blf_done(
+                    loader, self._file_path, self._load_version, self._is_reload
+                )
+            else:
+                self._manager._on_load_done(
+                    loader, self._file_path, self._load_version, self._is_reload
+                )
+        finally:
+            self._release()
+
+    @Slot(str)
+    def error(self, msg: str) -> None:
+        try:
+            if self._blf:
+                self._manager._on_blf_error(msg, self._is_reload, self._load_version)
+            else:
+                self._manager._on_load_error(msg)
+        finally:
+            self._release()
+
+    @Slot(int)
+    def progress(self, value: int) -> None:
+        if self._blf:
+            self._manager._on_blf_progress(value, self._load_version)
+
+    @Slot()
+    def canceled(self) -> None:
+        if self._blf:
+            self._manager._on_blf_cancel(self._file_path, self._load_version)
+
+    @Slot(str)
+    def cancelled(self, path: str) -> None:
+        try:
+            if self._blf:
+                self._manager._on_blf_cancelled(
+                    path, self._is_reload, self._load_version
+                )
+        finally:
+            self._release()
+
 
 # 可加载的后缀白名单：分卷文件（data.csv.0）由 _extract_file_extension 的正则单独识别
 SUPPORTED_EXTENSIONS = (
@@ -1394,15 +1469,23 @@ class FileLoaderManager(MainWindowBaseManager):
                 self.mw._progress.show()
 
                 _load_version = self.mw._data_version
-                self.mw._thread.finished.connect(
-                    lambda loader: self._on_load_done(loader, file_path, _load_version, is_reload)
+                relay = _LoaderSignalRelay(
+                    self.mw, self, file_path, _load_version, is_reload, blf=False
                 )
-                self.mw._thread.error.connect(self._on_load_error)
+                self.mw._thread.finished.connect(relay.finished)
+                self.mw._thread.error.connect(relay.error)
                 # 跨线程 GC 死锁防护：worker 内一旦发生全量 GC（显式调用或自动分代
                 # 收集），会把主线程的 QObject 包装器拿到 worker 析构，与主线程
                 # 锁序倒置。起跑前先在本线程排空引用环垃圾，使 worker 侧无对象可错。
                 gc.collect()
-                self.mw._thread.start()
+                try:
+                    self.mw._thread.start()
+                except Exception:
+                    # start 失败不会发 terminal 信号，relay 与进度框必须在这里收口，
+                    # 不能等一个永远不会到的 finished/error。
+                    relay.deleteLater()
+                    self._close_load_progress()
+                    raise
                 started_async = True
         except Exception:
             if not started_async:
@@ -1615,28 +1698,34 @@ class FileLoaderManager(MainWindowBaseManager):
             initial_cfg=base,
             known_channels=list(known_channels or []),
         )
-        if notice:
-            dialog.set_notice(notice)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            logger.info(BLF_TEXT_NO_DB_SELECTED)
-            return None
-        paths = dialog.get_selected_paths()
-        if not paths:
-            logger.info(BLF_TEXT_NO_DB_SELECTED)
-            return None
-        cfg = dialog.get_result_config()
-        # 记忆写入时机：「导入」成功后才写；取消不写（§5.2）。此处先记住列表，
-        # 扫描失败（异常路径）时不会回滚 —— 下次导入仍能在对话框里看到它们。
-        # 复选框现在是「记住此列表，下次自动预选」：不勾 = 这一次的选择不入
-        # 记忆，同时清掉旧记忆，否则旧列表会在下次弹窗里违背用户意图地出现。
-        settings = AppSettings()
-        remembered = dialog.remember_choice()
-        settings.set_blf_last_db_paths(cfg.pool_list if remembered else [])
-        if not remembered:
-            # 「不记住」也要清掉按文件记忆，否则过期配置会在下次弹窗里
-            # 违背用户意图地重新出现。
-            settings.forget_blf_file_binding(file_path)
-        return cfg
+        try:
+            if notice:
+                dialog.set_notice(notice)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                logger.info(BLF_TEXT_NO_DB_SELECTED)
+                return None
+            paths = dialog.get_selected_paths()
+            if not paths:
+                logger.info(BLF_TEXT_NO_DB_SELECTED)
+                return None
+            cfg = dialog.get_result_config()
+            # 记忆写入时机：「导入」成功后才写；取消不写（§5.2）。此处先记住列表，
+            # 扫描失败（异常路径）时不会回滚 —— 下次导入仍能在对话框里看到它们。
+            # 复选框现在是「记住此列表，下次自动预选」：不勾 = 这一次的选择不入
+            # 记忆，同时清掉旧记忆，否则旧列表会在下次弹窗里违背用户意图地出现。
+            settings = AppSettings()
+            remembered = dialog.remember_choice()
+            settings.set_blf_last_db_paths(cfg.pool_list if remembered else [])
+            if not remembered:
+                # 「不记住」也要清掉按文件记忆，否则过期配置会在下次弹窗里
+                # 违背用户意图地重新出现。
+                settings.forget_blf_file_binding(file_path)
+            return cfg
+        finally:
+            # 模态框返回后结果已读完；parent 仍是主窗口，不 deleteLater 会
+            # 每次重选都留一个隐藏子对话框。预扫是协作取消，这里只负责 UI 收口。
+            dialog._shutdown_prescan()
+            dialog.deleteLater()
 
     def save_can_config(self, file_path: str, cfg: CanBindings,
                         *, alongside: bool = False):
@@ -1683,6 +1772,21 @@ class FileLoaderManager(MainWindowBaseManager):
         except Exception:
             logger.debug("写入 BLF 文件配置记忆失败", exc_info=True)
 
+    def _close_load_progress(self) -> None:
+        """普通后台加载进度框的统一收口：隐藏、延迟销毁、清引用。"""
+        dialog = getattr(self.mw, "_progress", None)
+        self.mw._progress = None
+        if dialog is None:
+            return
+        try:
+            dialog.close()
+            # 不能用 DeferredDelete 直接收尾：进度回调仍可能站在 setValue 内部，
+            # 嵌套事件循环会提前兑现删除。改为下一轮零延时定时器，并绑定 dialog
+            # 为 receiver，确保当前调用栈退出后才销毁，且不捕获 Python lambda。
+            _delete_dialog_next_turn(dialog)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
     def _close_blf_progress(self) -> None:
         dialog = getattr(self, "_blf_progress", None)
         self._blf_progress = None
@@ -1698,6 +1802,8 @@ class FileLoaderManager(MainWindowBaseManager):
             pass
         try:
             dialog.close()
+            # 与普通进度框同口径：等当前进度回调栈退出后再销毁。
+            _delete_dialog_next_turn(dialog)
         except RuntimeError:  #已被 Qt 销毁
             pass
 
@@ -1760,21 +1866,23 @@ class FileLoaderManager(MainWindowBaseManager):
         self._blf_load_version = load_version
         self._blf_cancelled_version = None
 
-        thread.progress.connect(
-            lambda value: self._on_blf_progress(value, load_version)
+        relay = _LoaderSignalRelay(
+            self.mw, self, file_path, load_version, is_reload, blf=True
         )
+        thread.progress.connect(relay.progress)
         dialog.canceled.connect(thread.request_cancel)
-        dialog.canceled.connect(lambda: self._on_blf_cancel(file_path, load_version))
-        thread.finished.connect(
-            lambda loader: self._on_blf_done(loader, file_path, load_version, is_reload)
-        )
-        thread.error.connect(
-            lambda msg: self._on_blf_error(msg, is_reload, load_version)
-        )
-        thread.cancelled.connect(
-            lambda path: self._on_blf_cancelled(path, is_reload, load_version)
-        )
-        thread.start()
+        dialog.canceled.connect(relay.canceled)
+        thread.finished.connect(relay.finished)
+        thread.error.connect(relay.error)
+        thread.cancelled.connect(relay.cancelled)
+        try:
+            thread.start()
+        except Exception:
+            # 与普通加载同口径：启动失败没有 terminal 信号，必须主动释放 relay
+            # 并收掉进度框，否则两者会一直挂在主窗口下。
+            relay.deleteLater()
+            self._close_blf_progress()
+            raise
 
     def _keep_alive_old_thread(self, new_thread) -> None:
         """覆盖 ``mw._thread`` 前把还在跑的旧线程收编进保活列表。
@@ -1813,6 +1921,11 @@ class FileLoaderManager(MainWindowBaseManager):
                 dialog.setLabelText(f"正在扫描 BLF 报文… {value}%（已读 {read:,} 帧）")
             else:
                 dialog.setLabelText("正在生成信号列表…")
+            # setLabelText 的布局/事件处理可能让 terminal 回调同步关闭并删除
+            # 进度框；局部 dialog 仍持有包装器，必须再次核验身份与 C++ 存活，
+            # 否则下一步 setValue 会访问已释放的 QProgressDialog（实测 SIGSEGV）。
+            if self._blf_progress is not dialog or not _qt_alive(dialog):
+                return
             dialog.setValue(value)
         except RuntimeError:
             self._blf_progress = None
@@ -2590,7 +2703,7 @@ class FileLoaderManager(MainWindowBaseManager):
                 new_loader.release_memory()
             return
         logger.info("后台加载完成: %s", file_path)
-        self.mw._progress.close()
+        self._close_load_progress()
 
         # P0-3: _swap_loader → _apply_loader → replots_after_loading 链上任一异常
         # 都不得跳过解锁，否则 _is_loading_new_data / _reload_in_progress 永久卡死
@@ -2627,7 +2740,7 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _on_load_error(self, msg):
         logger.error("后台加载失败: %s", msg)
-        self.mw._progress.close()
+        self._close_load_progress()
         self.mw.end_load_feedback(f"加载失败：{msg}", level="error")
         QMessageBox.critical(self.mw, "读取失败", msg)
         self._end_data_reload()

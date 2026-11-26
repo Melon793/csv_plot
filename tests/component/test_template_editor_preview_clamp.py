@@ -10,6 +10,7 @@ import pytest
 
 from src.core.template_manager import TemplateManager
 from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
+from tests.fixtures.waits import flush_deferred_deletes
 
 
 @pytest.fixture()
@@ -17,6 +18,7 @@ def editor(qapp, tmp_path):
     dlg = TemplateEditorDialog(TemplateManager(tmp_path / "templates"))
     yield dlg
     dlg.deleteLater()
+    flush_deferred_deletes()
 
 
 def _cell_count(dlg):
@@ -206,7 +208,6 @@ def test_preview_out_of_range_col_not_wrapped(editor, qapp):
     editor._yaml_edit.setPlainText(yaml.safe_dump(config, allow_unicode=True))
     qapp.processEvents()
     # 初始示例 YAML 的旧帧走 deleteLater，须 flush 后再断言（防陈旧帧假阳）
-    from tests.fixtures.waits import flush_deferred_deletes
     flush_deferred_deletes()
     # 预览网格 1×2：按布局项取格（findChildren 会混入角位 chip 等结构帧）
     layout = editor._preview_layout

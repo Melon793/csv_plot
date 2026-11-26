@@ -20,13 +20,23 @@ A/B 重复计数（同一必崩配方各 5 轮）：默认 GC 5/5 崩，全程 `
 from __future__ import annotations
 
 import gc
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
+from shiboken6 import isValid
+
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QWidget
 
 from src.core.gc_guard import no_autogc
 from src.data.loader import DataLoadThread
+from src.ui.file_loader_manager import _LoaderSignalRelay
 from tests.fixtures.data_factory import make_simple_rows, write_csv
+from tests.fixtures.waits import flush_deferred_deletes
 
 # 2 万个自引用 dict：每个都是只能靠分代收集释放的环，远超 gen0 默认阈值 700。
 # 刻意**不释放**它们 —— 这样窗口退出时 gen0 计数必然处于「待发」状态，是最坏情况。
@@ -274,6 +284,7 @@ def test_blf_prescan_thread_runs_no_collection_on_worker_thread(
     finally:
         dlg._shutdown_prescan()
         dlg.deleteLater()
+        flush_deferred_deletes()
 
     assert seen, "预扫线程没有执行到预扫函数，用例是空过"
     assert seen["gc_enabled"] is False, "预扫窗口内自动 GC 未被关闭"
@@ -288,3 +299,132 @@ def test_blf_prescan_thread_runs_no_collection_on_worker_thread(
         "它会把主线程 QObject 包装器拿到 worker 析构 → activateTimers 段错误"
     )
     assert gc.isenabled() == enabled_before, "窗口退出后必须把自动 GC 恢复原状"
+
+
+# ---------------------------------------------------------------------------
+# Qt 退出与信号 receiver 生命周期
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_waits_until_load_thread_really_stops():
+    """有界 wait 超时后不能继续关窗：运行中的 QThread 被销毁会直接终止进程。"""
+    from src.ui.main_window import MainWindow
+
+    class _Thread:
+        def __init__(self):
+            self.running = True
+            self.cancel_requests = 0
+            self.waits = []
+
+        def isRunning(self):
+            return self.running
+
+        def request_cancel(self):
+            self.cancel_requests += 1
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            if timeout is not None:
+                return False  # 旧实现会在这里继续关窗，埋下 QThread 销毁崩溃
+            self.running = False
+            return True
+
+    class _Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+    thread = _Thread()
+    host = type(
+        "Host", (),
+        {"_thread": thread, "file_loader_manager": None, "_logger": _Logger()},
+    )()
+
+    MainWindow._shutdown_data_load_thread(host)
+
+    assert thread.cancel_requests == 1
+    assert thread.waits == [None], "必须无界等待真正结束，不能把 3 秒超时当安全退出"
+    assert thread.running is False
+
+
+def test_qt_widgets_exit_cleanly_in_subprocess():
+    """pytest passed 不等于解释器退出成功；退出码与 stderr 都必须单独判定。"""
+    code = """
+from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtWidgets import QApplication, QMainWindow
+from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
+
+app = QApplication([])
+host = QMainWindow()
+child = CanDatabaseSelectorDialog(host)
+standalone = CanDatabaseSelectorDialog()
+for widget in (child, standalone, host):
+    widget.close()
+    widget.deleteLater()
+QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+app.processEvents()
+assert not QApplication.topLevelWidgets()
+"""
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Qt 子进程退出码 {result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "shared QObject was deleted directly" not in result.stderr
+
+
+class _LoaderSignalSender(QObject):
+    finished = Signal(object)
+
+
+def test_loader_signal_relay_disconnects_with_main_window(qapp):
+    calls = []
+
+    class Manager:
+        def _on_load_done(self, loader, file_path, load_version, is_reload):
+            calls.append((loader, file_path, load_version, is_reload))
+
+    host = QWidget()
+    manager = Manager()
+    relay = _LoaderSignalRelay(host, manager, "Demo.csv", 7, False, blf=False)
+    sender = _LoaderSignalSender()
+    sender.finished.connect(relay.finished)
+
+    host.close()
+    host.deleteLater()
+    flush_deferred_deletes()
+    assert not isValid(relay), "主窗口销毁后 relay 必须随之销毁并断开信号"
+
+    sender.finished.emit(object())
+    assert calls == [], "receiver 已销毁后，迟到的线程信号不得再调用 manager"
+    sender.deleteLater()
+    flush_deferred_deletes()
+
+
+def test_loader_signal_relay_releases_after_terminal_signal(qapp):
+    calls = []
+
+    class Manager:
+        def _on_load_done(self, loader, file_path, load_version, is_reload):
+            calls.append((loader, file_path, load_version, is_reload))
+
+    host = QWidget()
+    relay = _LoaderSignalRelay(host, Manager(), "Demo.csv", 7, True, blf=False)
+    loader = object()
+    relay.finished(loader)
+    assert calls == [(loader, "Demo.csv", 7, True)]
+    flush_deferred_deletes()
+    assert not isValid(relay), "terminal 信号后 relay 不得在主窗口下累积"
+    host.deleteLater()
+    flush_deferred_deletes()

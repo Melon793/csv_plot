@@ -2471,8 +2471,12 @@ class MainWindow(QMainWindow):
                 if thread.isRunning():
                     if hasattr(thread, "request_cancel"):
                         thread.request_cancel()
-                    if not thread.wait(3000):
-                        self._logger.warning("后台数据加载线程 3s 内未退出")
+                    # 不能在有界 wait 超时后继续关窗：普通 CSV/MDF/Excel 不响应
+                    # request_cancel，BLF 也可能卡在某个分块边界。此时窗口仍是
+                    # 线程强引用的持有者；一旦继续销毁，运行中的 QThread 会触发
+                    # std::terminate。宁可等它真正结束，也不能把超时当安全退出。
+                    self._logger.info("等待后台数据加载线程安全退出")
+                    thread.wait()
             except (RuntimeError, TypeError):
                 self._logger.debug("收尾后台数据加载线程失败", exc_info=True)
         if flm is None:

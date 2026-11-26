@@ -13,6 +13,7 @@ from src.core.plot_config import (
 )
 from src.core.template_manager import TemplateManager
 from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
+from tests.fixtures.waits import flush_deferred_deletes
 
 
 @pytest.fixture()
@@ -97,6 +98,7 @@ def test_yaml_keeps_all_pages_and_view_state(manager):
         assert pages[1]["plots"][0]["curves"] == ["rpm"]
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_preview_combo_defaults_to_active_page_and_switches(manager):
@@ -121,6 +123,7 @@ def test_preview_combo_defaults_to_active_page_and_switches(manager):
         assert editor._page_combo.parent() is not None
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_typing_preserves_selected_page(manager, qapp):
@@ -133,6 +136,7 @@ def test_typing_preserves_selected_page(manager, qapp):
         assert editor._preview_layout.count() == 4
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_save_preserves_all_pages_and_optional_state(manager):
@@ -157,6 +161,7 @@ def test_save_preserves_all_pages_and_optional_state(manager):
         assert saved.config["plots"] == saved.config["pages"][0]["plots"]
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_edit_existing_v2_template_shows_pages(manager):
@@ -176,6 +181,7 @@ def test_edit_existing_v2_template_shows_pages(manager):
         assert renamed.config["active_page"] == 1
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_blank_template_saves_as_single_page_v2(manager):
@@ -192,6 +198,7 @@ def test_blank_template_saves_as_single_page_v2(manager):
         assert len(saved.config["pages"][0]["plots"]) == 4
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_save_rejects_missing_layout_and_invalid_pages(manager, boxes):
@@ -225,6 +232,7 @@ def test_save_rejects_missing_layout_and_invalid_pages(manager, boxes):
         assert "第 1 页配置不是字典" in boxes[-1][1]
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_save_clamps_out_of_range_active_page(manager):
@@ -241,6 +249,7 @@ def test_save_clamps_out_of_range_active_page(manager):
         assert saved.config["active_page"] == 1
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def _placeholder_config() -> PlotSessionConfig:
@@ -284,6 +293,7 @@ def test_yaml_keeps_invalid_curve_placeholders(manager):
         ] == [["ghost"], ["only_placeholder"]]
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
 
 
 def test_edit_and_save_without_edits_preserves_placeholders(manager, boxes):
@@ -294,6 +304,7 @@ def test_edit_and_save_without_edits_preserves_placeholders(manager, boxes):
         _add_and_save(editor, "with-placeholder")
     finally:
         editor.deleteLater()
+        flush_deferred_deletes()
     assert not boxes, f"保存不应弹窗：{boxes}"
     saved = next(
         item

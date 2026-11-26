@@ -29,6 +29,7 @@ from src.core.plot_config import PlotConfig
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.plot_config_manager import PlotConfigManager
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+from tests.fixtures.waits import flush_deferred_deletes
 
 N = 60
 SENTINEL = -1.7e38
@@ -158,6 +159,7 @@ def env(qapp):
     pw._is_being_destroyed = True
     pw.deleteLater()
     host.deleteLater()
+    flush_deferred_deletes()
 
 
 def test_mixed_plot_unplottable_demotes_and_not_counted(env, modal_records):

@@ -15,13 +15,14 @@ from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
 @pytest.fixture()
-def editor_with_host(plot_factory, qapp):
+def editor_with_host(plot_factory, qtbot):
     pw = plot_factory()
     host = pw.window()
     host.loader = types.SimpleNamespace(var_names=["a", "b"], units={})
     host.data_validity = {}
     dlg = PlotVariableEditorDialog(pw)
-    qapp.processEvents()
+    qtbot.addWidget(dlg)
+    qtbot.wait(0)
     return dlg, host, pw
 
 

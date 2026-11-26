@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QWidget
 
 from src.ui import layout_manager
 from src.ui.layout_manager import LayoutManager
+from tests.fixtures.waits import flush_deferred_deletes
 
 
 class _FakePlotWidget:
@@ -99,6 +100,7 @@ def drifted_pair(qapp):
     yield manager, master, child
     for container in (master, child):
         container.plot_widget.view.deleteLater()
+    flush_deferred_deletes()
 
 
 @pytest.fixture
@@ -111,6 +113,7 @@ def equal_pair(qapp):
     yield manager, master, child
     for container in (master, child):
         container.plot_widget.view.deleteLater()
+    flush_deferred_deletes()
 
 
 class TestSyncLoopGuarded:

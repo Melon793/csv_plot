@@ -574,11 +574,16 @@ class _IconBoard(QWidget):
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         anim.setStartValue(start)
         anim.setEndValue(end)
-        anim.finished.connect(lambda t=token, a=anim: self._on_anim_finished(t, a))
+        anim.setProperty("token", token)
+        anim.finished.connect(self._on_anim_finished)
         anim.start()
         self._anims[token] = anim
 
-    def _on_anim_finished(self, token: str, anim: QPropertyAnimation) -> None:
+    def _on_anim_finished(self) -> None:
+        anim = self.sender()
+        if anim is None:
+            return
+        token = anim.property("token")
         if self._anims.get(token) is not anim:
             return
         self._anims.pop(token, None)
@@ -692,7 +697,11 @@ class _TrayPanel(QWidget):
             anim.stop()
             anim.deleteLater()
 
-    def _on_anim_finished(self, token: str, anim: QPropertyAnimation) -> None:
+    def _on_anim_finished(self) -> None:
+        anim = self.sender()
+        if anim is None:
+            return
+        token = anim.property("token")
         if self._anims.get(token) is not anim:
             return
         self._anims.pop(token, None)
@@ -705,7 +714,8 @@ class _TrayPanel(QWidget):
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         anim.setStartValue(start)
         anim.setEndValue(end)
-        anim.finished.connect(lambda t=token, a=anim: self._on_anim_finished(t, a))
+        anim.setProperty("token", token)
+        anim.finished.connect(self._on_anim_finished)
         anim.start()
         self._anims[token] = anim
 

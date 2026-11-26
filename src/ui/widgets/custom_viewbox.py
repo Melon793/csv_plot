@@ -80,6 +80,9 @@ class CustomViewBox(pg.ViewBox):
     signals: CustomViewBoxSignals
 
     def __init__(self, *args, **kwargs):
+        # 本类右键菜单完全自建；禁用 pyqtgraph 原生 ViewBoxMenu 的创建，
+        # 避免每个 plot 都留下一个无 QWidget parent 的顶层菜单树。
+        kwargs["enableMenu"] = False
         super().__init__(*args, **kwargs)
         self.signals = CustomViewBoxSignals(parent=self)
         self.context_x: float | None = None
@@ -92,6 +95,17 @@ class CustomViewBox(pg.ViewBox):
         self._scan_band_committed = None
         self._scan_filter_view = None
         self._scan_cursor_saved = None
+
+    # ================================================================
+    # 右键单击：与 pyqtgraph 原生菜单开关解耦，始终走本类自建菜单
+    # ================================================================
+
+    def mouseClickEvent(self, ev):
+        if ev.button() == Qt.MouseButton.RightButton:
+            ev.accept()
+            self.raiseContextMenu(ev)
+        else:
+            super().mouseClickEvent(ev)
 
     # ================================================================
     # 右键拖拽扫选 X 区间
@@ -212,7 +226,7 @@ class CustomViewBox(pg.ViewBox):
         try:
             if abs(pos.x() - down.x()) >= commit_px:
                 self._apply_scan_range(min(x0, x1), max(x0, x1))
-            elif self.menuEnabled():
+            else:
                 # 拖动已消费掉 mouseClickEvent → 手动补齐「点一下出菜单」
                 self.raiseContextMenu(ev)
         finally:
@@ -389,8 +403,8 @@ class CustomViewBox(pg.ViewBox):
         只关入口：``ctrlMenu`` 与其中的动作原样保留，将来要恢复只需改回。
         Scene 的「Export...」由 ``_export_action`` 接管。
 
-        必须显式传 ``enableViewBoxMenu=None``：``_end_scan`` 靠
-        ``self.menuEnabled()`` 决定短拖是否补弹菜单，ViewBox 菜单本身不能关。
+        必须显式传 ``enableViewBoxMenu=None``：ViewBox 原生菜单已在构造时
+        禁用，``_end_scan`` 的自建菜单补弹不能受这个开关影响。
         """
         plot_item = getattr(self.plot_widget, "plot_item", None)
         if plot_item is None:

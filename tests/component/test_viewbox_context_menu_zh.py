@@ -96,6 +96,13 @@ def _submenu(menu, title):
     ]
 
 
+def test_native_viewbox_menu_is_never_created(view_box):
+    """原生菜单不应成为无宿主顶层窗口；停用的 PlotItem 菜单保留实现并挂父。"""
+    assert view_box.menu is None
+    assert view_box.menuEnabled() is False
+    assert view_box.plot_widget.plot_item.ctrlMenu.parent() is view_box.plot_widget
+
+
 def test_menu_uses_chinese_labels(view_box):
     """自定义项全部中文，且无改造前的英文字面量残留"""
     menu = view_box.getMenu(_FakeMenuEvent())

@@ -32,6 +32,7 @@ from src.ui.mark_stats import (
     StatRow,
     _format_stat_value,
 )
+from tests.fixtures.waits import flush_deferred_deletes
 
 # 表头菜单位置参与插入点判定；未显示时默认列宽已生效，可直接用 QPoint 命中
 _QT_POINT_ZERO = QPoint(0, 0)
@@ -76,7 +77,7 @@ def _entry(**over) -> MarkStatEntry:
 
 
 @pytest.fixture()
-def stats_window(qapp, app_settings):
+def stats_window(app_settings):
     """隔离的统计窗口：每个用例前把列配置/表头状态归零，防跨用例 ini 残留。"""
     app_settings.set_mark_stats_columns(list(DEFAULT_COLUMN_KEYS))
     app_settings.set_mark_stats_header_state("")
@@ -84,6 +85,7 @@ def stats_window(qapp, app_settings):
     yield window
     window.hide()  # 触发 hideEvent 保存，随后归零，不污染后续用例
     window.deleteLater()
+    flush_deferred_deletes()
     app_settings.set_mark_stats_columns(list(DEFAULT_COLUMN_KEYS))
     app_settings.set_mark_stats_header_state("")
 
@@ -282,8 +284,6 @@ class TestColumnConfig:
 
     def test_column_config_survives_window_rebuild(self, qapp, app_settings):
         """模拟重启：新窗口实例从设置读回列配置。"""
-        from tests.fixtures.waits import flush_deferred_deletes
-
         app_settings.set_mark_stats_columns(list(DEFAULT_COLUMN_KEYS))
         app_settings.set_mark_stats_header_state("")
         w1 = MarkStatsWindow()
@@ -753,6 +753,7 @@ class TestSmartColumnInsert:
             ] == expected_visual
         finally:
             rebuilt.deleteLater()
+            flush_deferred_deletes()
 
 
 class TestFilters:
