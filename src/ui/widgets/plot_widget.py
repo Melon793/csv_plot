@@ -788,7 +788,13 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if not math.isfinite(value):
             event.accept()
             return True
-        factor = max(0.000001, 1.0 + value)
+        # macOS 双指张开的 magnification 为正；绘图中的“放大”应缩小 X 跨度，
+        # 因此取倒数，保持手势方向与用户预期一致。
+        scale = 1.0 + value
+        if scale <= 0.0:
+            event.accept()
+            return True
+        factor = max(0.000001, 1.0 / scale)
         self._axis_manager.zoom_x(factor, vb.mapSceneToView(scene_pos).x())
         event.accept()
         return True

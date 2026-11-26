@@ -283,7 +283,7 @@ def test_ctrl_horizontal_scroll_is_ignored(shown_plot, monkeypatch):
 
 @pytest.mark.parametrize("value", [0.1, -0.1])
 def test_native_pinch_zooms_x_at_gesture_position(shown_plot, value):
-    """ZoomNativeGesture 的增量直接作为 X 轴 factor，不依赖 Ctrl+wheel。"""
+    """双指张开（value>0）收缩 X 跨度，反向操作则扩展。"""
     pw = shown_plot
     vb = pw.view_box
     vb.setXRange(0, 100, padding=0)
@@ -293,7 +293,7 @@ def test_native_pinch_zooms_x_at_gesture_position(shown_plot, value):
     before_y = list(vb.viewRange()[1])
     pos = QPoint(400, 300)
     center = _zoom_center_mapping(pw, pos)
-    factor = 1.0 + value
+    factor = 1.0 / (1.0 + value)
 
     ev = _native_gesture_event(pw, pos, value)
 
@@ -324,7 +324,7 @@ def test_native_pinch_received_by_viewport_is_consumed(shown_plot, qapp):
 
     assert ev.isAccepted()
     assert vb.viewRange()[0][1] - vb.viewRange()[0][0] == pytest.approx(
-        width_before * 1.05, rel=1e-6
+        width_before / 1.05, rel=1e-6
     )
 
 
