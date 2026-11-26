@@ -14,6 +14,7 @@ import typing
 
 import pytest
 
+from src.ui.widgets.plot_data_manager import PlotDataManager
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
 
 
@@ -36,6 +37,19 @@ def test_every_method_annotation_resolves(qapp):
             typing.get_type_hints(fn)
         except Exception as e:  # noqa: BLE001
             broken.append(f"{name}: {type(e).__name__}: {e}")
+
+    assert broken == [], "注解无法求值的方法：\n" + "\n".join(broken)
+
+
+def test_plot_data_manager_annotations_resolve(qapp):
+    broken = []
+    for name, fn in inspect.getmembers(
+        PlotDataManager, predicate=inspect.isfunction
+    ):
+        try:
+            typing.get_type_hints(fn)
+        except Exception as exc:  # noqa: BLE001
+            broken.append(f"{name}: {type(exc).__name__}: {exc}")
 
     assert broken == [], "注解无法求值的方法：\n" + "\n".join(broken)
 

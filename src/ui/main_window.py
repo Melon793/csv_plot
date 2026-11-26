@@ -17,10 +17,9 @@ from src.core.config import (  # noqa: E402
     widget_alive,
 )
 from src.core.settings import AppSettings  # noqa: E402
-from src.ui.table_dialog import DropOverlay  # noqa: E402
+from src.ui.drop_overlay import DropOverlay  # noqa: E402
 from src.ui.variable_list import MyTableWidget  # noqa: E402
 from src.core.logger import LogManager, get_logger  # noqa: E402
-from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 from src.ui.widgets.plot_page import PlotPage  # noqa: E402
 from src.ui.widgets.plot_tabs import (  # noqa: E402
@@ -226,17 +225,37 @@ class MainWindow(QMainWindow):
     # 加载期间右区文案的秒表步进，只用于"还在干活吗"，不表示百分比
     LOAD_ELAPSED_TICK_MS = 1000
 
-    def __init__(self):
+    def __init__(self, *, startup_yield=None):
         super().__init__()
-        self._init_basic_config()
-        self._load_window_context()
-        self._init_data_state()
-        self._init_central_widget()
-        self._init_left_panel()
-        self._init_right_panel()
-        self._init_status_bar()
-        self._init_managers()
-        self._handle_cli_args()
+        from src.core.startup_metrics import get_metrics
+
+        metrics = get_metrics()
+
+        def run_phase(name, initializer):
+            initializer()
+            metrics.mark(f"main_phase.{name}")
+            if startup_yield is not None:
+                startup_yield()
+
+        run_phase("basic_config", self._init_basic_config)
+        run_phase("window_context", self._load_window_context)
+        run_phase("data_state", self._init_data_state)
+        run_phase("central_widget", self._init_central_widget)
+        run_phase("left_panel", self._init_left_panel)
+        run_phase("right_panel", self._init_right_panel)
+        run_phase("status_bar", self._init_status_bar)
+        run_phase("managers", self._init_managers)
+        run_phase("cli_args", self._handle_cli_args)
+
+        self._startup_constructing = False
+        if startup_yield is not None:
+            # Cooperative processEvents() may have delivered the zero-delay
+            # callbacks queued by _init_central_widget while managers did not
+            # exist yet.  Their guards leave the work pending; restart it only
+            # after the complete object is safe to use.
+            if getattr(self, "_pending_activation", None) is not None:
+                self._page_activation_timer.start(0)
+            QTimer.singleShot(0, self._ensure_splitter_ready)
 
     # ------------------------------------------------------------------
     # 垫片（设计文档 §4.3 C1-C5）：页级状态委托给 current_page
@@ -519,6 +538,8 @@ class MainWindow(QMainWindow):
         self._page_activation_timer.start(0)
 
     def _run_pending_page_activation(self) -> None:
+        if self._startup_constructing:
+            return
         pending = self._pending_activation
         self._pending_activation = None
         if pending is not None:
@@ -1267,6 +1288,7 @@ class MainWindow(QMainWindow):
 
     def _init_basic_config(self):
         # 构造期兜底（C4）：页创建前对这些字段的读写都落在 _bootstrap_state
+        self._startup_constructing = True
         self._bootstrap_state: dict = {}
         self.pages: list[PlotPage] = []
         self._current_page: PlotPage | None = None
@@ -2476,6 +2498,8 @@ class MainWindow(QMainWindow):
             self._logger.debug("释放暂存 BLF loader 失败", exc_info=True)
 
     def show_log_window(self):
+        from src.ui.dialogs.log_window import LogWindow
+
         log_window = LogWindow.get_instance(self)
         log_window.show()
         log_window.raise_()
@@ -2485,6 +2509,8 @@ class MainWindow(QMainWindow):
         self.layout_manager._on_splitter_moved(pos, index)
 
     def _ensure_splitter_ready(self):
+        if self._startup_constructing or not hasattr(self, "layout_manager"):
+            return
         self.layout_manager._ensure_splitter_ready()
 
     def _apply_fixed_splitter_width(self):

@@ -12,13 +12,13 @@ Font cache layer —— 基于 QSettings 的字体缓存, 避免每次启动枚�
 缓存策略:
   - 写入: 首次检测成功后写入 QSettings
   - 读取: 后续启动直接从 QSettings 读取, 跳过 families() 枚举
-  - 失效: 当缓存字体名不在当前系统中时回退到重新枚举
+  - 失效: 缓存版本升级或删除配置；缺失字体由 Qt 自然回退
   - 版本: CACHE_VERSION 递增可强制全局重新枚举
 """
 
 from __future__ import annotations
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 _FONT_PRIORITY_WIN = [
     "Microsoft YaHei UI",
@@ -80,7 +80,7 @@ _MONO_FONT_PRIORITY = [
     "Courier New",
 ]
 
-_MONO_CACHE_VERSION = 1
+_MONO_CACHE_VERSION = 2
 
 
 def _detect_mono_font() -> str:
@@ -101,7 +101,7 @@ def get_monospace_font_cached() -> str:
     cached_version = settings.get_mono_font_cache_version()
     if cached_version == _MONO_CACHE_VERSION:
         cached_name = settings.get_mono_font_name()
-        if cached_name and cached_name in installed_font_families():
+        if cached_name:
             return cached_name
 
     detected = _detect_mono_font()
@@ -128,7 +128,9 @@ def get_windows_chinese_font_cached() -> str:
     cached_version = settings.get_font_cache_version()
     if cached_version == CACHE_VERSION:
         cached_name = settings.get_font_name()
-        if cached_name and cached_name in installed_font_families():
+        if cached_name:
+            # 不再为校验缓存而枚举整张系统字体表；那会把缓存要省的
+            # 50–100ms 原样花掉。字体变更由缓存版本升级/删除配置触发。
             return cached_name
 
     detected = _detect_font_win()

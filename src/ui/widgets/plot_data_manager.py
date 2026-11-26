@@ -12,10 +12,9 @@ PlotDataManager - 绘图和数据管理（统一版）
 
 from __future__ import annotations
 from collections import OrderedDict
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import numpy as np
-import pandas as pd
 import pyqtgraph as pg
 from PySide6.QtCore import QSignalBlocker
 
@@ -54,14 +53,10 @@ def _lru_cache_put(cache: OrderedDict, key: str, value: tuple) -> None:
             cache.popitem(last=False)
     cache[key] = value
 
-if TYPE_CHECKING:
-    from src.ui.widgets.axis_manager import AxisManager
-
-
 class PlotDataManager:
     """负责绘图和数据管理（统一路径：始终写入 curves 字典）"""
 
-    def __init__(self, axis_manager: AxisManager):
+    def __init__(self, axis_manager: Any):
         if axis_manager is None:
             raise ValueError("PlotDataManager requires a valid AxisManager instance")
         self._axis_manager = axis_manager
@@ -380,6 +375,8 @@ class PlotDataManager:
         """
         pw = self.pw
 
+        import pandas as pd
+
         try:
             y_values, y_format = self.get_value_from_name(var_name=var_name)
 
@@ -462,6 +459,8 @@ class PlotDataManager:
         """Safely compute min/max ignoring NaN/INF values."""
         if values is None:
             return None, None
+
+        import pandas as pd
 
         try:
             if isinstance(values, pd.Series):
@@ -569,7 +568,7 @@ class PlotDataManager:
         if pw.plot_context and hasattr(pw.plot_context, "value_cache"):
             pw.plot_context.value_cache.clear()
 
-    def datetime_to_unix_seconds(self, series: pd.Series) -> pd.Series:
+    def datetime_to_unix_seconds(self, series: Any) -> Any:
         """将datetime Series转换为Unix时间戳（秒，float64精度）"""
         dtype_str = str(series.dtype)
         if "ns" in dtype_str:
@@ -586,6 +585,8 @@ class PlotDataManager:
 
     def get_value_from_name(self, var_name: str) -> tuple | None:
         """根据变量名获取值和格式"""
+        import pandas as pd
+
         pw = self.pw
 
         if not pw.plot_context:

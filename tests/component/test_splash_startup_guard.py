@@ -122,6 +122,77 @@ class TestRunSplashStartup:
         assert window is None
         assert "启动超时" in error
 
+    def test_running_import_thread_exits_without_terminating(
+        self, splash, restore_quit_policy, monkeypatch, tmp_path
+    ):
+        """看门狗超时不能 terminate 持有导入锁的 Python 线程。"""
+
+        class FakeSignal:
+            def connect(self, *_args, **_kwargs):
+                pass
+
+        class FakeThread:
+            instances = []
+
+            def __init__(self, _loader, parent=None):
+                self.finished = FakeSignal()
+                self.started = False
+                self.terminated = False
+                FakeThread.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+            def isRunning(self):
+                return self.started
+
+            def terminate(self):
+                self.terminated = True
+                raise AssertionError("must not terminate a Python import thread")
+
+        monkeypatch.setattr("PySide6.QtCore.QThread", FakeThread)
+        monkeypatch.setattr(
+            SplashScreen, "wait_for_completion", lambda self, timeout_ms=0: False
+        )
+        crash_path = tmp_path / "crash.log"
+        monkeypatch.setattr(
+            "src.core.crash_handler.crash_log_path", lambda: str(crash_path)
+        )
+
+        class FakeLogger:
+            def critical(self, message):
+                messages.append(message)
+
+        messages = []
+        monkeypatch.setattr(
+            "src.core.logger.get_logger", lambda _name: FakeLogger()
+        )
+        saved = []
+        monkeypatch.setattr(csv_plot._metrics, "save", lambda: saved.append(True))
+        exit_codes = []
+
+        def fake_exit(code):
+            exit_codes.append(code)
+            raise SystemExit(code)
+
+        monkeypatch.setattr(csv_plot.os, "_exit", fake_exit)
+
+        with pytest.raises(SystemExit) as exc_info:
+            csv_plot._run_splash_startup(
+                restore_quit_policy,
+                splash,
+                0,
+                lambda: QWidget(),
+                preload=lambda: None,
+            )
+
+        assert exc_info.value.code == 1
+        assert exit_codes == [1]
+        assert saved == [True]
+        assert FakeThread.instances[0].terminated is False
+        assert "后台导入仍在运行" in crash_path.read_text(encoding="utf-8")
+        assert messages == ["启动看门狗超时时后台导入仍在运行，强制退出以避免损坏模块状态"]
+
 
 class TestFailStartup:
     def test_shows_reason_and_exits_nonzero(

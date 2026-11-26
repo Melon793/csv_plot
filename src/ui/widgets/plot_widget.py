@@ -8,7 +8,6 @@ from src.utils.platform_setup import setup_platform
 setup_platform()
 
 import numpy as np
-import pandas as pd
 
 from src.ui.drag_drop import (
     VAR_SEPARATOR,
@@ -39,8 +38,6 @@ from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
 from src.ui.transfer_broadcast import announce_selection, broadcast_transfer
 from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR)
 from src.core.logger import get_logger
-from src.ui.table_dialog import DataTableDialog
-from src.ui.plot_variable_editor import PlotVariableEditorDialog
 
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QRect, QRectF, QItemSelectionModel, Signal, QEvent
@@ -54,6 +51,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 import pyqtgraph as pg
+
+
+def __getattr__(name):
+    """延迟导出变量编辑器，保留既有 monkeypatch 接口而不增加启动导入。"""
+    if name == "PlotVariableEditorDialog":
+        from src.ui.plot_variable_editor import PlotVariableEditorDialog
+
+        return PlotVariableEditorDialog
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass
@@ -227,6 +233,8 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             return
 
         # a. 打开/激活变量数值表，并添加所有变量
+        from src.ui.table_dialog import DataTableDialog
+
         is_mdf_loader = is_grouped_loader(main_window.loader)
         dlg = None
         # 实际入表的变量名：上面两个 continue 会跳过取数失败/列不存在的曲线，
@@ -533,6 +541,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
                 current = current.parentWidget()
 
             target_window = widget_under_cursor.window()
+            from src.ui.table_dialog import DataTableDialog
+            from src.ui.plot_variable_editor import PlotVariableEditorDialog
+
             if isinstance(target_window, (DataTableDialog, PlotVariableEditorDialog)):
                 return True
             if target_window is not main_window:
@@ -925,7 +936,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         """清除值缓存 → 委托到 PlotDataManager"""
         self._plot_data_manager.clear_value_cache()
 
-    def datetime_to_unix_seconds(self, series: pd.Series) -> pd.Series:
+    def datetime_to_unix_seconds(self, series: Any) -> Any:
         """将datetime Series转换为Unix时间戳 → 委托到 PlotDataManager"""
         return self._plot_data_manager.datetime_to_unix_seconds(series)
         
@@ -1917,7 +1928,11 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         非模态 Tool 窗口，每次新建一个实例（多实例为既有设计，
         信号断连见 PlotVariableEditorDialog.closeEvent）。
         """
-        dialog = PlotVariableEditorDialog(self, self.window())
+        dialog_cls = globals().get("PlotVariableEditorDialog")
+        if dialog_cls is None:
+            dialog_cls = __getattr__("PlotVariableEditorDialog")
+
+        dialog = dialog_cls(self, self.window())
         dialog.show_initial()
         return dialog
 

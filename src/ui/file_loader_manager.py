@@ -44,7 +44,6 @@ from src.core.config import (
     widget_alive as _qt_alive,
 )
 from src.core.data_types import AutoDetectError
-from src.data.loader import DataLoadThread, FastDataLoader
 from src.data.can_bindings import (
     CanBindings,
     is_dir_writable,
@@ -52,12 +51,35 @@ from src.data.can_bindings import (
     save_yaml,
     sidecar_config_path,
 )
-from src.data.mdf_lazy_loader import MDFLazyLoader
 from src.utils.paths import normalize_input_path
+
 from src.ui.main_window_base_manager import MainWindowBaseManager
 from src.core.logger import get_logger
 
 logger = get_logger("ui.file_loader")
+
+_LAZY_LOADER_NAMES = {
+    "FastDataLoader": ("src.data.loader", "FastDataLoader"),
+    "DataLoadThread": ("src.data.loader", "DataLoadThread"),
+    "MDFLazyLoader": ("src.data.mdf_lazy_loader", "MDFLazyLoader"),
+}
+
+
+def __getattr__(name):
+    """Keep legacy module symbols patchable without importing them at startup."""
+    target = _LAZY_LOADER_NAMES.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(target[0]), target[1])
+    globals()[name] = value
+    return value
+
+
+def _loader_class(name: str):
+    return globals().get(name) or __getattr__(name)
+
 
 # 可加载的后缀白名单：分卷文件（data.csv.0）由 _extract_file_extension 的正则单独识别
 SUPPORTED_EXTENSIONS = (
@@ -1152,6 +1174,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _load_file(self, file_path: str, is_reload: bool = False,
                    cached_sheet_name: str | None = None):
+        FastDataLoader = _loader_class("FastDataLoader")
+        DataLoadThread = _loader_class("DataLoadThread")
         file_ext = self._extract_file_extension(file_path)
         if file_ext is None:
             # 白名单外此前会一路走到 config_dict 分支，抛 'NoneType' object is not
@@ -1703,6 +1727,8 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _start_blf_load(self, file_path: str, cfg: CanBindings,
                         is_reload: bool = False):
+        DataLoadThread = _loader_class("DataLoadThread")
+
         """§5.4：后台扫描 + 可量化进度 + **必须有取消按钮**。
 
         ``cfg`` 是**整份配置**（池 + 绑定 + 别名）：只传池会让 F 回环与线程
@@ -2514,6 +2540,9 @@ class FileLoaderManager(MainWindowBaseManager):
         is_reload: bool = False,
         db_paths: list[str] | None = None,
     ):
+        FastDataLoader = _loader_class("FastDataLoader")
+        MDFLazyLoader = _loader_class("MDFLazyLoader")
+
         if not is_excel:
             is_valid, error_msg = self._validate_load_parameters(
                 file_path, desc_rows, sep, has_unit

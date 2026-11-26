@@ -24,7 +24,6 @@ from src.core.data_types import (
 from src.core.curve_transform import reproject
 from src.core.logger import get_logger
 from src.ui.main_window_base_manager import MainWindowBaseManager
-from src.ui.table_dialog import DataTableDialog
 
 logger = get_logger(__name__)
 
@@ -820,6 +819,8 @@ class CursorSyncManager(MainWindowBaseManager):
                 # 占位被绕过复活逻辑永久滞留。
                 all_y_names.extend(widget.curves.keys())
                 all_y_names.extend(getattr(widget, "invalid_curves", {}).keys())
+
+            from src.ui.table_dialog import DataTableDialog
 
             if DataTableDialog._instance is not None:
                 all_y_names.extend(DataTableDialog._instance.get_column_names())
