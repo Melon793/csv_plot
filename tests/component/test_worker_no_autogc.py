@@ -29,12 +29,12 @@ from pathlib import Path
 import pytest
 from shiboken6 import isValid
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QWidget
 
 from src.core.gc_guard import no_autogc
 from src.data.loader import DataLoadThread
-from src.ui.file_loader_manager import _LoaderSignalRelay
+from src.ui.file_loader_manager import FileLoaderManager, _LoaderSignalRelay
 from tests.fixtures.data_factory import make_simple_rows, write_csv
 from tests.fixtures.waits import flush_deferred_deletes
 
@@ -371,6 +371,91 @@ def test_shutdown_waits_until_load_thread_really_stops(qapp):
     assert thread.running is False
     assert manager.closed == ["load", "blf"]
     assert manager.released is True
+
+
+def test_load_file_refuses_destroyed_window_and_releases_pending(qapp):
+    """统一加载入口必须拦住关窗态，不能弹框或起线程。"""
+    class _Pending:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    host = QWidget()
+    host._is_being_destroyed = True
+    host.loader = None
+    manager = FileLoaderManager(host)
+    pending = _Pending()
+    manager._blf_pending_loader = pending
+    manager._blf_force_dialog = True
+    manager._blf_preset_cfg = object()
+
+    manager._load_file("Demo.blf")
+
+    assert manager._blf_pending_loader is None
+    assert manager._blf_force_dialog is False
+    assert manager._blf_preset_cfg is None
+    assert pending.closed is True
+    host.deleteLater()
+    flush_deferred_deletes()
+
+
+def test_shutdown_blocks_pending_blf_retry_from_reentering_load(qapp, monkeypatch):
+    """关窗轮询放行重试定时器时，不得重新进入加载入口。"""
+    from src.ui.main_window import MainWindow
+
+    class _Thread:
+        def __init__(self):
+            self.running = True
+            self.timeouts = []
+
+        def isRunning(self):
+            return self.running
+
+        def request_cancel(self):
+            pass
+
+        def wait(self, timeout=None):
+            self.timeouts.append(timeout)
+            if len(self.timeouts) >= 2:
+                self.running = False
+                return True
+            return False
+
+    class _Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    host = QWidget()
+    host._is_being_destroyed = True
+    host._progress = None
+    host.loader = None
+    host._logger = _Logger()
+    thread = _Thread()
+    host._thread = thread
+    manager = FileLoaderManager(host)
+    host.file_loader_manager = manager
+    entered = []
+    monkeypatch.setattr(manager, "load_csv_file", lambda path: entered.append(path))
+
+    retry = QTimer(host)
+    retry.setSingleShot(True)
+    retry.timeout.connect(lambda: manager._restart_blf_import("Demo.blf"))
+    retry.start(0)
+
+    MainWindow._shutdown_data_load_thread(host)
+
+    assert entered == [], "销毁态下 BLF 重试不得重新进入加载入口"
+    assert thread.timeouts == [50, 50]
+    host.deleteLater()
+    flush_deferred_deletes()
 
 
 def test_qt_widgets_exit_cleanly_in_subprocess():

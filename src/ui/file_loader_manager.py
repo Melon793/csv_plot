@@ -1238,6 +1238,12 @@ class FileLoaderManager(MainWindowBaseManager):
 
     def _load_file(self, file_path: str, is_reload: bool = False,
                    cached_sheet_name: str | None = None):
+        # 关窗等待会放行定时器/posted event；所有加载入口最终都经过这里。
+        # 必须在弹框或起线程前拦住销毁态，否则新线程不在 closeEvent 的等待快照内。
+        if self._window_going_away():
+            self._give_up_blf_restart()
+            logger.info("主窗口正在销毁，跳过数据加载")
+            return
         file_ext = self._extract_file_extension(file_path)
         if file_ext is None:
             # 白名单外此前会一路走到 config_dict 分支，抛 'NoneType' object is not
@@ -2128,7 +2134,8 @@ class FileLoaderManager(MainWindowBaseManager):
         ``load_csv_file`` 里再去碰按钮，抛一条无人认领的 RuntimeError。
         """
         mw = self._live_mw()
-        if mw is None:  # MainWindow 的 Python 引用或 C++ 对象已经没了
+        if mw is None or self._window_going_away():
+            # closeEvent 已置位但 C++ 仍存活时，_live_mw() 不足以防重入。
             self._give_up_blf_restart()
             logger.info("BLF 重开导入已中止：主窗口正在销毁")
             return
@@ -2153,7 +2160,8 @@ class FileLoaderManager(MainWindowBaseManager):
         """丢弃 F 路径暂存的「已扫完但 0 信号」loader（它可能占几百 MB）。"""
         pending = self._blf_pending_loader
         self._blf_pending_loader = None
-        if pending is not None and pending is not getattr(self.mw, "loader", None):
+        mw = self._mw_ref()
+        if pending is not None and pending is not getattr(mw, "loader", None):
             self._discard_loader(pending)
 
     def _update_can_db_ui(self) -> None:
