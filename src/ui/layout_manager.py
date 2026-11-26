@@ -24,7 +24,6 @@ from src.utils.paths import normalize_input_path
 from src.core.logger import get_logger
 from src.core.settings import AppSettings
 from src.ui.main_window_base_manager import MainWindowBaseManager
-from src.ui.table_dialog import DataTableDialog
 from src.ui.mark_stats import MarkStatsWindow
 from src.ui.dialogs.help import HelpDialog
 from src.ui.dialogs.layout_grid_selector import LayoutGridSelector
@@ -415,6 +414,8 @@ class LayoutManager(MainWindowBaseManager):
             timer.stop()
             self._save_var_pane_width()
         self._mark_all_plots_being_destroyed()
+        from src.ui.table_dialog import DataTableDialog
+
         if DataTableDialog._instance is not None:
             DataTableDialog._instance.set_skip_close_confirmation(True)
         self._unregister_global_event_filter()

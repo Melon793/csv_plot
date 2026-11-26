@@ -34,6 +34,7 @@ from src.core.config import compute_global_x_limits
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.table_dialog import DataTableDialog
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+from tests.fixtures.waits import flush_deferred_deletes
 
 N = 100
 
@@ -205,6 +206,7 @@ def env(qapp):
     pw._is_being_destroyed = True
     pw.deleteLater()
     host.deleteLater()
+    flush_deferred_deletes()
 
 
 def _x_limits(pw) -> list:

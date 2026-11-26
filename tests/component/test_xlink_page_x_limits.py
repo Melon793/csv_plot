@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QWidget
 from src.ui import layout_manager
 from src.ui.layout_manager import apply_page_x_limits
 from src.ui.widgets.plot_page import PlotPage
+from tests.fixtures.waits import flush_deferred_deletes
 
 ORACLE = (-750.0, 15750.0, -750.0, 15750.0)
 
@@ -25,6 +26,7 @@ def _cleanup_widgets():
     yield
     while _CREATED:
         _CREATED.pop().deleteLater()
+    flush_deferred_deletes()
 
 
 class _FakeAxis:

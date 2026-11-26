@@ -21,6 +21,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+from tests.fixtures.waits import flush_deferred_deletes
 
 N = 100
 
@@ -122,6 +123,7 @@ def host(qapp):
     h = FakeMainWindow()
     yield h
     h.deleteLater()
+    flush_deferred_deletes()
 
 
 @pytest.fixture()

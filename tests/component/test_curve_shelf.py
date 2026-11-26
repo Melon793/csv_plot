@@ -40,7 +40,7 @@ from src.ui.widgets.curve_shelf import (
     CurveShelfWidget,
     ShelfEntry,
 )
-from tests.fixtures.waits import force_delete
+from tests.fixtures.waits import flush_deferred_deletes, force_delete
 
 
 # mime 保活：offscreen 下手工构造的 QDropEvent 不接管 mimeData 所有权
@@ -92,6 +92,7 @@ def shelf(qapp):
     yield widget, host
     widget.deleteLater()
     host.deleteLater()
+    flush_deferred_deletes()
 
 
 def _drop_into_shelf(widget, mime, *, copy=False):
@@ -705,26 +706,31 @@ def test_geometry_setting_type_defence(app_settings):
     assert settings.get_curve_shelf_geometry() is None
 
 
-def test_shelf_dialog_geometry_roundtrip(qapp, app_settings):
+def test_shelf_dialog_geometry_roundtrip(qtbot, app_settings):
     host = ShelfHost()
+    qtbot.addWidget(host)
     host.show()
     dialog = CurveShelfDialog(main_window=host, parent=host)
     dialog.resize(320, 240)
     dialog.move(120, 90)
     dialog._save_geometry()
     dialog.deleteLater()
+    saved_size = dialog.size()
 
     restored = CurveShelfDialog(main_window=host, parent=host)
-    assert restored.size() == dialog.size() or restored.size().width() > 0
+    flush_deferred_deletes()
+    assert restored.size() == saved_size or restored.size().width() > 0
     # 落屏幕守卫放行（offscreen 有虚拟屏幕）时尺寸应与存档一致
     assert restored.width() == 320 and restored.height() == 240
     restored.deleteLater()
     host.deleteLater()
+    flush_deferred_deletes()
 
 
-def test_dialog_count_title_and_clear_button(shelf):
+def test_dialog_count_title_and_clear_button(shelf, qtbot):
     widget, _ = shelf
     host = ShelfHost()
+    qtbot.addWidget(host)
     dialog = CurveShelfDialog(main_window=host, parent=host)
     dialog.shelf.add_entry(ShelfEntry.from_name("a"))
     dialog._on_entries_changed()
@@ -732,3 +738,4 @@ def test_dialog_count_title_and_clear_button(shelf):
     assert dialog.clear_btn.isEnabled() is True
     dialog.deleteLater()
     host.deleteLater()
+    flush_deferred_deletes()

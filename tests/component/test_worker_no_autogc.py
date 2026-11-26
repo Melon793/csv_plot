@@ -20,13 +20,24 @@ A/B 重复计数（同一必崩配方各 5 轮）：默认 GC 5/5 崩，全程 `
 from __future__ import annotations
 
 import gc
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
+from shiboken6 import isValid
+
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QMainWindow, QPushButton, QWidget
 
 from src.core.gc_guard import no_autogc
 from src.data.loader import DataLoadThread
+from src.ui.file_loader_manager import FileLoaderManager, _LoaderSignalRelay
 from tests.fixtures.data_factory import make_simple_rows, write_csv
+from tests.fixtures.waits import flush_deferred_deletes
 
 # 2 万个自引用 dict：每个都是只能靠分代收集释放的环，远超 gen0 默认阈值 700。
 # 刻意**不释放**它们 —— 这样窗口退出时 gen0 计数必然处于「待发」状态，是最坏情况。
@@ -274,6 +285,7 @@ def test_blf_prescan_thread_runs_no_collection_on_worker_thread(
     finally:
         dlg._shutdown_prescan()
         dlg.deleteLater()
+        flush_deferred_deletes()
 
     assert seen, "预扫线程没有执行到预扫函数，用例是空过"
     assert seen["gc_enabled"] is False, "预扫窗口内自动 GC 未被关闭"
@@ -288,3 +300,361 @@ def test_blf_prescan_thread_runs_no_collection_on_worker_thread(
         "它会把主线程 QObject 包装器拿到 worker 析构 → activateTimers 段错误"
     )
     assert gc.isenabled() == enabled_before, "窗口退出后必须把自动 GC 恢复原状"
+
+
+# ---------------------------------------------------------------------------
+# Qt 退出与信号 receiver 生命周期
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_waits_until_load_thread_really_stops(qapp):
+    """有界 wait 超时后不能继续关窗：运行中的 QThread 被销毁会直接终止进程。"""
+    from src.ui.main_window import MainWindow
+
+    class _Thread:
+        def __init__(self):
+            self.running = True
+            self.cancel_requests = 0
+            self.waits = []
+
+        def isRunning(self):
+            return self.running
+
+        def request_cancel(self):
+            self.cancel_requests += 1
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            if len(self.waits) >= 3:
+                self.running = False
+                return True
+            return False  # 超时只表示继续轮询，不能继续关窗
+
+    class _Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    class _Manager:
+        def __init__(self):
+            self.closed = []
+            self.released = False
+
+        def _close_load_progress(self):
+            self.closed.append("load")
+
+        def _close_blf_progress(self):
+            self.closed.append("blf")
+
+        def _release_pending_blf_loader(self):
+            self.released = True
+
+    thread = _Thread()
+    manager = _Manager()
+    host = type(
+        "Host", (),
+        {
+            "_thread": thread,
+            "file_loader_manager": manager,
+            "_logger": _Logger(),
+        },
+    )()
+
+    MainWindow._shutdown_data_load_thread(host)
+
+    assert thread.cancel_requests == 1
+    assert thread.waits == [50, 50, 50], "每次只等 50ms，超时后继续等并处理事件"
+    assert thread.running is False
+    assert manager.closed == ["load", "blf"]
+    assert manager.released is True
+
+
+def test_load_file_refuses_destroyed_window_and_releases_pending(qapp):
+    """统一加载入口必须拦住关窗态，不能弹框或起线程。"""
+    class _Pending:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    host = QWidget()
+    host._is_being_destroyed = True
+    host.loader = None
+    manager = FileLoaderManager(host)
+    pending = _Pending()
+    manager._blf_pending_loader = pending
+    manager._blf_force_dialog = True
+    manager._blf_preset_cfg = object()
+
+    manager._load_file("Demo.blf")
+
+    assert manager._blf_pending_loader is None
+    assert manager._blf_force_dialog is False
+    assert manager._blf_preset_cfg is None
+    assert pending.closed is True
+    host.deleteLater()
+    flush_deferred_deletes()
+
+
+def test_shutdown_blocks_pending_blf_retry_from_reentering_load(qapp, monkeypatch):
+    """关窗轮询放行重试定时器时，不得重新进入加载入口。"""
+    from src.ui.main_window import MainWindow
+
+    class _Thread:
+        def __init__(self):
+            self.running = True
+            self.timeouts = []
+
+        def isRunning(self):
+            return self.running
+
+        def request_cancel(self):
+            pass
+
+        def wait(self, timeout=None):
+            self.timeouts.append(timeout)
+            if len(self.timeouts) >= 2:
+                self.running = False
+                return True
+            return False
+
+    class _Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    host = QWidget()
+    host._is_being_destroyed = True
+    host._progress = None
+    host.loader = None
+    host._logger = _Logger()
+    thread = _Thread()
+    host._thread = thread
+    manager = FileLoaderManager(host)
+    host.file_loader_manager = manager
+    entered = []
+    monkeypatch.setattr(manager, "load_csv_file", lambda path: entered.append(path))
+
+    retry = QTimer(host)
+    retry.setSingleShot(True)
+    retry.timeout.connect(lambda: manager._restart_blf_import("Demo.blf"))
+    retry.start(0)
+
+    MainWindow._shutdown_data_load_thread(host)
+
+    assert entered == [], "销毁态下 BLF 重试不得重新进入加载入口"
+    assert thread.timeouts == [50, 50]
+    host.deleteLater()
+    flush_deferred_deletes()
+
+
+@pytest.mark.parametrize("suffix", [".blf", ".xlsx"])
+def test_modal_return_after_close_never_begins_reload(
+    qapp, tmp_path, monkeypatch, suffix
+):
+    """模态选库/选表期间关窗，返回后不得开始 reload 或创建新线程。"""
+    from src.data.can_bindings import CanBindings
+
+    host = QWidget()
+    host._is_being_destroyed = False
+    host._is_loading_new_data = False
+    host.load_btn = QPushButton(host)
+    host.reload_btn = QPushButton(host)
+    manager = FileLoaderManager(host)
+    path = tmp_path / f"Demo{suffix}"
+    path.write_bytes(b"fixture")
+
+    def close_during_modal(*_args, **_kwargs):
+        host._is_being_destroyed = True
+        return CanBindings.empty() if suffix == ".blf" else "Sheet1"
+
+    if suffix == ".blf":
+        monkeypatch.setattr(manager, "_resolve_can_databases", close_during_modal)
+    else:
+        from src.ui.dialogs import sheet_selector
+
+        monkeypatch.setattr(
+            sheet_selector.SheetSelectorDialog, "pick_sheet", close_during_modal
+        )
+
+    def forbidden_begin():
+        raise AssertionError("模态返回时窗口已进入销毁态，不得开始 reload")
+
+    monkeypatch.setattr(manager, "_begin_data_reload", forbidden_begin)
+    try:
+        manager._load_file(str(path), is_reload=True)
+        assert host.load_btn.isEnabled()
+        assert host.reload_btn.isEnabled()
+        assert manager._blf_pending_loader is None
+    finally:
+        host.deleteLater()
+        flush_deferred_deletes()
+
+
+def test_close_event_ignores_reentry_during_shutdown(qapp):
+    """关窗等待处理事件时再次收到 close event，不得递归执行整套收尾。"""
+    from src.ui.main_window import MainWindow
+
+    class Host(MainWindow):
+        def __init__(self):
+            QMainWindow.__init__(self)
+
+    class Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def debug(self, *_args, **_kwargs):
+            pass
+
+    host = Host()
+    host._logger = Logger()
+    host._is_being_destroyed = False
+    host.loader = None
+    host.plot_tabs = type("Tabs", (), {"_dir_popup": None})()
+    calls = []
+    host._close_status_drawers = lambda: calls.append("drawers")
+    host.curve_shelf_if_open = lambda: None
+    host.plot_config_manager = type(
+        "Config", (), {"save_auto_save": lambda _self, _mw: calls.append("save")}
+    )()
+    host._shutdown_var_info_worker = lambda: calls.append("var_info")
+    host.layout_manager = type(
+        "Layout", (), {"_handle_close": lambda _self: calls.append("layout")}
+    )()
+
+    reentered = []
+
+    def shutdown_once():
+        calls.append("shutdown")
+        event = QCloseEvent()
+        MainWindow.closeEvent(host, event)
+        reentered.append(event.isAccepted())
+
+    host._shutdown_data_load_thread = shutdown_once
+    first = QCloseEvent()
+    try:
+        MainWindow.closeEvent(host, first)
+        assert first.isAccepted()
+        assert reentered == [False], "重入关窗事件必须被忽略"
+        assert calls == ["drawers", "var_info", "shutdown", "layout"]
+    finally:
+        host.deleteLater()
+        flush_deferred_deletes()
+
+
+def test_qt_widgets_exit_cleanly_in_subprocess():
+    """pytest passed 不等于解释器退出成功；退出码与 stderr 都必须单独判定。"""
+    code = """
+from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtWidgets import QApplication, QMainWindow
+from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
+
+app = QApplication([])
+host = QMainWindow()
+child = CanDatabaseSelectorDialog(host)
+standalone = CanDatabaseSelectorDialog()
+for widget in (child, standalone, host):
+    widget.close()
+    widget.deleteLater()
+QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+app.processEvents()
+assert not QApplication.topLevelWidgets()
+"""
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Qt 子进程退出码 {result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "shared QObject was deleted directly" not in result.stderr
+
+
+class _LoaderSignalSender(QObject):
+    finished = Signal(object)
+
+
+def test_loader_signal_relay_disconnects_with_main_window(qapp):
+    calls = []
+
+    class Manager:
+        def _on_load_done(self, loader, file_path, load_version, is_reload):
+            calls.append((loader, file_path, load_version, is_reload))
+
+    host = QWidget()
+    manager = Manager()
+    relay = _LoaderSignalRelay(host, manager, "Demo.csv", 7, False, blf=False)
+    sender = _LoaderSignalSender()
+    sender.finished.connect(relay.finished)
+
+    host.close()
+    host.deleteLater()
+    flush_deferred_deletes()
+    assert not isValid(relay), "主窗口销毁后 relay 必须随之销毁并断开信号"
+
+    sender.finished.emit(object())
+    assert calls == [], "receiver 已销毁后，迟到的线程信号不得再调用 manager"
+    sender.deleteLater()
+    flush_deferred_deletes()
+
+
+def test_loader_signal_relay_releases_after_terminal_signal(qapp):
+    calls = []
+
+    class Manager:
+        def _on_load_done(self, loader, file_path, load_version, is_reload):
+            calls.append((loader, file_path, load_version, is_reload))
+
+    host = QWidget()
+    relay = _LoaderSignalRelay(host, Manager(), "Demo.csv", 7, True, blf=False)
+    loader = object()
+    relay.finished(loader)
+    assert calls == [(loader, "Demo.csv", 7, True)]
+    flush_deferred_deletes()
+    assert not isValid(relay), "terminal 信号后 relay 不得在主窗口下累积"
+    host.deleteLater()
+    flush_deferred_deletes()
+
+
+def test_loader_signal_relay_drops_done_while_window_closing(qapp):
+    calls = []
+    discarded = []
+
+    class Manager:
+        def _on_load_done(self, loader, file_path, load_version, is_reload):
+            calls.append((loader, file_path, load_version, is_reload))
+
+        def _discard_loader(self, loader):
+            discarded.append(loader)
+
+    host = QWidget()
+    host._is_being_destroyed = True
+    relay = _LoaderSignalRelay(host, Manager(), "Demo.csv", 7, False, blf=False)
+    loader = object()
+    relay.finished(loader)
+
+    assert calls == [], "关窗等待期间处理事件，不得把迟到结果应用到将销毁的窗口"
+    assert discarded == [loader], "迟到 loader 必须释放，不能随窗口销毁前留资源"
+    flush_deferred_deletes()
+    assert not isValid(relay)
+    host.close()
+    host.deleteLater()
+    flush_deferred_deletes()

@@ -17,10 +17,9 @@ from src.core.config import (  # noqa: E402
     widget_alive,
 )
 from src.core.settings import AppSettings  # noqa: E402
-from src.ui.table_dialog import DropOverlay  # noqa: E402
+from src.ui.drop_overlay import DropOverlay  # noqa: E402
 from src.ui.variable_list import MyTableWidget  # noqa: E402
 from src.core.logger import LogManager, get_logger  # noqa: E402
-from src.ui.dialogs.log_window import LogWindow  # noqa: E402
 from src.ui.widgets.plot_container import PlotContainerWidget  # noqa: E402
 from src.ui.widgets.plot_page import PlotPage  # noqa: E402
 from src.ui.widgets.plot_tabs import (  # noqa: E402
@@ -37,7 +36,7 @@ from src.ui.widgets.chrome_button import (  # noqa: E402
 )
 from src.ui import action_receipts, theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QPointF, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
     QColor,
     QIcon,
@@ -226,17 +225,37 @@ class MainWindow(QMainWindow):
     # 加载期间右区文案的秒表步进，只用于"还在干活吗"，不表示百分比
     LOAD_ELAPSED_TICK_MS = 1000
 
-    def __init__(self):
+    def __init__(self, *, startup_yield=None):
         super().__init__()
-        self._init_basic_config()
-        self._load_window_context()
-        self._init_data_state()
-        self._init_central_widget()
-        self._init_left_panel()
-        self._init_right_panel()
-        self._init_status_bar()
-        self._init_managers()
-        self._handle_cli_args()
+        from src.core.startup_metrics import get_metrics
+
+        metrics = get_metrics()
+
+        def run_phase(name, initializer):
+            initializer()
+            metrics.mark(f"main_phase.{name}")
+            if startup_yield is not None:
+                startup_yield()
+
+        run_phase("basic_config", self._init_basic_config)
+        run_phase("window_context", self._load_window_context)
+        run_phase("data_state", self._init_data_state)
+        run_phase("central_widget", self._init_central_widget)
+        run_phase("left_panel", self._init_left_panel)
+        run_phase("right_panel", self._init_right_panel)
+        run_phase("status_bar", self._init_status_bar)
+        run_phase("managers", self._init_managers)
+        run_phase("cli_args", self._handle_cli_args)
+
+        self._startup_constructing = False
+        if startup_yield is not None:
+            # Cooperative processEvents() may have delivered the zero-delay
+            # callbacks queued by _init_central_widget while managers did not
+            # exist yet.  Their guards leave the work pending; restart it only
+            # after the complete object is safe to use.
+            if getattr(self, "_pending_activation", None) is not None:
+                self._page_activation_timer.start(0)
+            QTimer.singleShot(0, self._ensure_splitter_ready)
 
     # ------------------------------------------------------------------
     # 垫片（设计文档 §4.3 C1-C5）：页级状态委托给 current_page
@@ -519,6 +538,8 @@ class MainWindow(QMainWindow):
         self._page_activation_timer.start(0)
 
     def _run_pending_page_activation(self) -> None:
+        if self._startup_constructing:
+            return
         pending = self._pending_activation
         self._pending_activation = None
         if pending is not None:
@@ -1278,6 +1299,7 @@ class MainWindow(QMainWindow):
 
     def _init_basic_config(self):
         # 构造期兜底（C4）：页创建前对这些字段的读写都落在 _bootstrap_state
+        self._startup_constructing = True
         self._bootstrap_state: dict = {}
         self.pages: list[PlotPage] = []
         self._current_page: PlotPage | None = None
@@ -2399,6 +2421,11 @@ class MainWindow(QMainWindow):
             self.file_loader_manager.load_csv_file(positional_args[0])
 
     def closeEvent(self, event):
+        # 关窗等待会放行 posted close event；第二次进入必须忽略，避免递归
+        # 重复保存、关 worker 和等待线程，干扰首次清理现场。
+        if getattr(self, "_is_being_destroyed", False):
+            event.ignore()
+            return
         self._logger.info("CSV Plot 应用程序退出")
         # 必须先置位再收尾：下面的清理会开嵌套事件循环（等线程退出、存盘），
         # 期间排着的 singleShot/防抖回调还会打到正在退出的窗口
@@ -2458,12 +2485,19 @@ class MainWindow(QMainWindow):
 
         BLF 还有一条独立的保活链：取消后仍在跑的旧线程挂在 FileLoaderManager
         的 ``_blf_thread_refs`` 里（丢引用同样会走到 SIGABRT），一并 cancel/wait。
-        随后收掉扫描中的进度框（否则它作为独立顶层窗口留在屏幕上）与 F 路径
-        暂存的 loader（可能占着几百 MB）。
+        等待前先收掉两类加载进度框，结束后释放 F 路径暂存的 loader
+        （可能占几百 MB）。
         """
         threads = [getattr(self, "_thread", None)]
         flm = getattr(self, "file_loader_manager", None)
         threads.extend(getattr(flm, "_blf_thread_refs", None) or [])
+        if flm is not None:
+            # 先收进度框：无取消按钮的普通加载框若不收，等待期间会一直冻结在屏幕上。
+            for close_method in ("_close_load_progress", "_close_blf_progress"):
+                try:
+                    getattr(flm, close_method)()
+                except (RuntimeError, TypeError, AttributeError):
+                    self._logger.debug("退出时关闭加载进度框失败", exc_info=True)
         for thread in threads:
             if thread is None:
                 continue
@@ -2471,22 +2505,34 @@ class MainWindow(QMainWindow):
                 if thread.isRunning():
                     if hasattr(thread, "request_cancel"):
                         thread.request_cancel()
-                    if not thread.wait(3000):
-                        self._logger.warning("后台数据加载线程 3s 内未退出")
+                    # 超时后继续等，防止销毁运行中 QThread；轮询放行事件，避免关窗假死。
+                    self._logger.info("等待后台数据加载线程安全退出")
+                    started = time.monotonic()
+                    warned = False
+                    while thread.isRunning():
+                        if thread.wait(50):
+                            break
+                        QApplication.processEvents(
+                            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                        )
+                        elapsed = time.monotonic() - started
+                        if elapsed >= 5.0 and not warned:
+                            self._logger.warning(
+                                "后台加载线程 5s 内未退出；继续等待并保持窗口响应"
+                            )
+                            warned = True
             except (RuntimeError, TypeError):
                 self._logger.debug("收尾后台数据加载线程失败", exc_info=True)
         if flm is None:
             return
-        try:
-            flm._close_blf_progress()
-        except (RuntimeError, TypeError):
-            self._logger.debug("关闭 BLF 扫描进度框失败", exc_info=True)
         try:
             flm._release_pending_blf_loader()
         except (RuntimeError, TypeError):
             self._logger.debug("释放暂存 BLF loader 失败", exc_info=True)
 
     def show_log_window(self):
+        from src.ui.dialogs.log_window import LogWindow
+
         log_window = LogWindow.get_instance(self)
         log_window.show()
         log_window.raise_()
@@ -2496,6 +2542,8 @@ class MainWindow(QMainWindow):
         self.layout_manager._on_splitter_moved(pos, index)
 
     def _ensure_splitter_ready(self):
+        if self._startup_constructing or not hasattr(self, "layout_manager"):
+            return
         self.layout_manager._ensure_splitter_ready()
 
     def _apply_fixed_splitter_width(self):

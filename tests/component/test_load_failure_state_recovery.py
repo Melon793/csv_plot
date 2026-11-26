@@ -21,9 +21,11 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtWidgets import QMessageBox, QPushButton, QWidget
+from shiboken6 import isValid
 
 from src.ui.file_loader_manager import FileLoaderManager
 from tests.fixtures.data_factory import make_simple_rows, write_csv
+from tests.fixtures.waits import flush_deferred_deletes
 
 #: ``set_button_status()`` 会逐个 setEnabled 的分析类按钮
 _STATUS_BUTTONS = (
@@ -139,6 +141,38 @@ def csv_file(tmp_path):
         units=["s", "km/h", "rpm", "-"],
         rows=make_simple_rows(20),
     )
+
+
+def test_background_start_failure_releases_progress_and_relay(
+    host, csv_file, monkeypatch, qtbot, dialogs
+):
+    """普通后台 start 抛错也必须销毁进度框/relay，并恢复加载锁与按钮。"""
+    import src.ui.file_loader_manager as flm
+
+    mw, mgr = host
+    progress = []
+
+    def _boom(self):
+        progress.append(mw._progress)
+        raise RuntimeError("simulated start failure")
+
+    monkeypatch.setattr(flm, "FILE_SIZE_LIMIT_BACKGROUND_LOADING", 0)
+    monkeypatch.setattr(flm.DataLoadThread, "start", _boom)
+
+    mgr.load_csv_file(str(csv_file))
+    qtbot.waitUntil(
+        lambda: not isValid(progress[0]) and not mw._is_loading_new_data,
+        timeout=1000,
+    )
+    flush_deferred_deletes()
+
+    assert len(progress) == 1
+    assert mw._progress is None
+    assert not isValid(progress[0])
+    assert not any(isinstance(child, flm._LoaderSignalRelay) for child in mw.children())
+    assert mw._is_loading_new_data is False
+    assert mw.load_btn.isEnabled() is True
+    assert dialogs["critical"], "失败原因应报告给用户"
 
 
 def _fake_fmt():

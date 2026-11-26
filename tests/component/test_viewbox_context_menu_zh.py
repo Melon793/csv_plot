@@ -15,7 +15,7 @@
 
 import pytest
 
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPoint, QPointF, Qt
 
 from tests.fixtures.waits import flush_deferred_deletes
 from src.ui.widgets.custom_viewbox import (
@@ -94,6 +94,18 @@ def _submenu(menu, title):
         for a in menu.actions()
         if a.menu() is not None and a.menu().title() == title
     ]
+
+
+def test_native_viewbox_menu_is_never_created(view_box):
+    """原生菜单不应成为无宿主顶层窗口，也不应成为 plot 的可见子控件。"""
+    assert view_box.menu is None
+    assert view_box.menuEnabled() is False
+    ctrl_menu = view_box.plot_widget.plot_item.ctrlMenu
+    assert ctrl_menu.parent() is view_box.plot_widget
+    assert ctrl_menu.isWindow()
+    assert ctrl_menu.windowType() == Qt.WindowType.Popup
+    assert not ctrl_menu.isVisible()
+    assert view_box.plot_widget.childAt(QPoint(10, 10)) is not ctrl_menu
 
 
 def test_menu_uses_chinese_labels(view_box):

@@ -24,6 +24,7 @@ from src.core.data_types import SYMBOL_POLICY_OFF, SYMBOL_POLICY_ON
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.table_dialog import DataTableDialog
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+from tests.fixtures.waits import flush_deferred_deletes
 
 N = 60
 
@@ -199,6 +200,7 @@ def env(qapp):
     pw._is_being_destroyed = True
     pw.deleteLater()
     host.deleteLater()
+    flush_deferred_deletes()
 
 
 def _assert_disjoint(pw):

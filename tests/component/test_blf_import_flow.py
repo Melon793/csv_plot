@@ -36,6 +36,7 @@ from src.data.can_bindings import CanBindings, save_yaml, sidecar_config_path
 from src.data.loader import DataLoadThread
 from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
 from tests.fixtures.data_factory import CAN_FRAMES, write_blf_pair, write_dbc
+from tests.fixtures.waits import flush_deferred_deletes
 
 
 def _pump(ms: int = 60) -> None:
@@ -1284,6 +1285,55 @@ def test_start_blf_load_forwards_the_whole_configuration(
     assert threads[0].db_paths == [str(dbc)]
     assert threads[0].bindings == {1: frozenset({str(dbc)})}
     assert threads[0].aliases == {1: "车身CAN"}
+
+
+def test_blf_progress_rechecks_dialog_after_updating_label(
+    blf_flow, monkeypatch
+):
+    """标签更新期间若 terminal 回调删框，不得继续对局部包装器 setValue。"""
+    from PySide6.QtWidgets import QProgressDialog
+
+    host, manager, _threads = blf_flow
+    host._thread = None
+    dialog = QProgressDialog(host)
+    manager._blf_progress = dialog
+    value_calls = []
+
+    def _close_during_label(_text):
+        manager._close_blf_progress()
+        flush_deferred_deletes()
+
+    monkeypatch.setattr(dialog, "setLabelText", _close_during_label)
+    monkeypatch.setattr(dialog, "setValue", value_calls.append)
+
+    manager._on_blf_progress(20)
+
+    assert value_calls == [], "标签更新后进度框已删除，不能再访问 setValue"
+    assert manager._blf_progress is None
+
+
+def test_blf_thread_start_failure_releases_relay_and_progress(
+    blf_flow, monkeypatch
+):
+    """start 抛错不会发 terminal 信号，relay 与进度框必须由启动路径自己收口。"""
+    import src.ui.file_loader_manager as flm
+    from tests.component.blf_flow_doubles import FakeLoadThread
+
+    host, manager, _threads = blf_flow
+
+    def _boom(self):
+        raise RuntimeError("simulated start failure")
+
+    monkeypatch.setattr(FakeLoadThread, "start", _boom)
+
+    with pytest.raises(RuntimeError, match="simulated start failure"):
+        manager._start_blf_load("Demo.blf", CanBindings.empty(), False)
+
+    assert manager._blf_progress is None
+    flush_deferred_deletes()
+    assert not any(
+        isinstance(child, flm._LoaderSignalRelay) for child in host.children()
+    ), "启动失败后 relay 不得留在主窗口下"
 
 
 def test_a_reload_keeps_channel_bindings_and_aliases(

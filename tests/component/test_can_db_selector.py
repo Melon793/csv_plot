@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from shiboken6 import isValid
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
@@ -51,10 +52,85 @@ from tests.fixtures.data_factory import (
     write_blf_pair,
     write_dbc,
 )
+from tests.fixtures.waits import flush_deferred_deletes
 
 # 保活容器：offscreen 下手工构造的 QMimeData 不受 Qt 事件系统接管，局部变量
 # 被 GC 后事件里访问 mimeData 会 SIGSEGV（tests/README.md 陷阱 #2）
 _keep_alive: list = []
+
+
+class _CanDialogFactory:
+    """本文件专用的对话框生命周期跟踪器。
+
+    只登记通过本工厂创建的对象；收尾顺序固定为：停止预扫 → 有界等待线程
+    → close → deleteLater → 排空 DeferredDelete。禁止扫描/关闭其它顶层窗口。
+    """
+
+    def __init__(self):
+        self.created: list[CanDatabaseSelectorDialog] = []
+        self._cleaned = False
+
+    def __call__(self, *args, **kwargs):
+        dialog = CanDatabaseSelectorDialog(*args, **kwargs)
+        self.created.append(dialog)
+        return dialog
+
+    def cleanup(self) -> None:
+        if self._cleaned:
+            return
+        self._cleaned = True
+        alive_threads: list[str] = []
+        try:
+            for dialog in reversed(self.created):
+                if not isValid(dialog):
+                    continue
+                dialog._shutdown_prescan()
+                thread = getattr(dialog, "_prescan_thread", None)
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=5.0)
+                    if thread.is_alive():
+                        alive_threads.append(thread.name)
+                dialog.close()
+                dialog.deleteLater()
+        finally:
+            # pytest 不跑 app.exec()，只 deleteLater 不会真正销毁 C++ 对象。
+            flush_deferred_deletes()
+        if alive_threads:
+            pytest.fail(f"CAN 预扫线程未在 5 秒内退出: {alive_threads}")
+
+
+@pytest.fixture()
+def can_dialog_factory(qapp):
+    factory = _CanDialogFactory()
+    try:
+        yield factory
+    finally:
+        factory.cleanup()
+
+
+def test_can_dialog_factory_tracks_and_cleans_created_objects(can_dialog_factory):
+    dialog = can_dialog_factory()
+    assert can_dialog_factory.created == [dialog]
+    can_dialog_factory.cleanup()
+    assert not isValid(dialog)
+
+
+def test_can_dialog_factory_cleans_an_already_closed_object(can_dialog_factory):
+    dialog = can_dialog_factory()
+    dialog.close()
+    can_dialog_factory.cleanup()
+    assert not isValid(dialog)
+
+
+def test_can_dialog_factory_cleans_after_exception(can_dialog_factory):
+    dialog = can_dialog_factory()
+    try:
+        raise RuntimeError("测试异常路径")
+    except RuntimeError:
+        pass
+    finally:
+        can_dialog_factory.cleanup()
+    assert not isValid(dialog)
 
 
 def _frame(can_id=0x1A0, name="EngineData", sig="Speed", factor=1.0, unit="rpm"):
@@ -110,9 +186,9 @@ def _import_btn(dialog):
 # 规格（§5.2）
 # ---------------------------------------------------------------------------
 
-def test_the_dialog_keeps_the_specified_sizes(qapp, dbc_a):
+def test_the_dialog_keeps_the_specified_sizes(can_dialog_factory, qapp, dbc_a):
     """尺寸/列宽是 §5.2 明文规定的，改了就必须在这里同步改。"""
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a)])
     assert dlg.minimumSize().width() == BLF_DB_DIALOG_MIN_SIZE[0]
     assert dlg.minimumSize().height() == BLF_DB_DIALOG_MIN_SIZE[1]
     assert dlg.size().width() >= BLF_DB_DIALOG_SIZE[0]
@@ -137,10 +213,10 @@ def test_the_dialog_keeps_the_specified_sizes(qapp, dbc_a):
     assert dlg.acceptDrops() is True, "§5.2：把 dbc/arxml 直拖进对话框"
 
 
-def test_the_header_explains_why_a_database_is_needed(qapp, tmp_path):
+def test_the_header_explains_why_a_database_is_needed(can_dialog_factory, qapp, tmp_path):
     blf = tmp_path / "log.blf"
     blf.write_bytes(b"\x00" * 2048)
-    dlg = CanDatabaseSelectorDialog(data_file=str(blf))
+    dlg = can_dialog_factory(data_file=str(blf))
     titles = [w for w in dlg.children() if isinstance(w, QLabel)]
     assert any("BLF 只记录原始报文" in w.text() for w in titles)
     assert "log.blf" in dlg.subtitle.text()
@@ -150,8 +226,8 @@ def test_the_header_explains_why_a_database_is_needed(qapp, tmp_path):
 # 「导入」按钮的可用性（§5.2 空列表 / 全失败）
 # ---------------------------------------------------------------------------
 
-def test_an_empty_list_disables_import_with_a_tell_whole_hint(qapp):
-    dlg = CanDatabaseSelectorDialog()
+def test_an_empty_list_disables_import_with_a_tell_whole_hint(can_dialog_factory, qapp):
+    dlg = can_dialog_factory()
     assert _import_btn(dlg).isEnabled() is False
     assert _import_btn(dlg).toolTip() == "请先添加 DBC / ARXML 文件"
     # 没选中行时三个行操作按钮都该是灰的，点了才知道没反应很挫败
@@ -160,8 +236,8 @@ def test_an_empty_list_disables_import_with_a_tell_whole_hint(qapp):
     assert dlg.down_btn.isEnabled() is False
 
 
-def test_a_usable_dbc_lights_up_import(qapp, dbc_a):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+def test_a_usable_dbc_lights_up_import(can_dialog_factory, qapp, dbc_a):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a)])
     assert len(dlg.rows) == 1
     assert _import_btn(dlg).isEnabled() is True
     assert _import_btn(dlg).toolTip() == ""
@@ -171,11 +247,11 @@ def test_a_usable_dbc_lights_up_import(qapp, dbc_a):
     assert _status_color(dlg, 0) == BLF_DB_COLOR_OK
 
 
-def test_only_unreadable_files_leaves_import_disabled_with_a_different_hint(qapp,
+def test_only_unreadable_files_leaves_import_disabled_with_a_different_hint(can_dialog_factory, qapp,
                                                                            tmp_path):
     junk = tmp_path / "broken.arxml"
     junk.write_text("这不是 XML\n", encoding="utf-8")
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(junk)])
+    dlg = can_dialog_factory(initial_paths=[str(junk)])
     assert _import_btn(dlg).isEnabled() is False
     # 与「还没加文件」区分的另一句：加了但一个都没读出来
     assert _import_btn(dlg).toolTip() == "至少选择一个可解析的数据库文件"
@@ -185,7 +261,7 @@ def test_only_unreadable_files_leaves_import_disabled_with_a_different_hint(qapp
     assert "XMLSyntaxError" in dlg.table.item(0, 6).toolTip()
 
 
-def test_accepting_with_no_usable_file_warns_and_keeps_the_dialog_open(qapp,
+def test_accepting_with_no_usable_file_warns_and_keeps_the_dialog_open(can_dialog_factory, qapp,
                                                                        tmp_path,
                                                                        monkeypatch):
     import src.ui.dialogs.can_db_selector as mod
@@ -198,7 +274,7 @@ def test_accepting_with_no_usable_file_warns_and_keeps_the_dialog_open(qapp,
     )
     junk = tmp_path / "broken.arxml"
     junk.write_text("这不是 XML\n", encoding="utf-8")
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(junk)])
+    dlg = can_dialog_factory(initial_paths=[str(junk)])
     dlg._on_accept()
     assert asked, "全失败时点导入必须有说明，否则用户以为程序卡住"
     assert "无法解析" in asked[0][2]
@@ -209,12 +285,12 @@ def test_accepting_with_no_usable_file_warns_and_keeps_the_dialog_open(qapp,
 # 容错：坏文件不阻断好文件
 # ---------------------------------------------------------------------------
 
-def test_a_broken_file_sits_next_to_a_good_one_without_blocking_it(qapp,
+def test_a_broken_file_sits_next_to_a_good_one_without_blocking_it(can_dialog_factory, qapp,
                                                                    tmp_path,
                                                                    dbc_a):
     junk = tmp_path / "broken.arxml"
     junk.write_text("这不是 XML\n", encoding="utf-8")
-    dlg = CanDatabaseSelectorDialog()
+    dlg = can_dialog_factory()
     assert dlg.add_paths([str(junk), str(dbc_a)]) == 2
     assert _status_color(dlg, 0) == BLF_DB_COLOR_ERROR
     assert _cell(dlg, 1, 6) == "✔ 已加载"
@@ -224,11 +300,11 @@ def test_a_broken_file_sits_next_to_a_good_one_without_blocking_it(qapp,
     assert dlg.all_paths() == [str(junk), str(dbc_a)]
 
 
-def test_a_dbc_that_parses_to_no_frames_warns_instead_of_failing(qapp, tmp_path):
+def test_a_dbc_that_parses_to_no_frames_warns_instead_of_failing(can_dialog_factory, qapp, tmp_path):
     """⚠ 与 ✖ 的分界必须守住：0 报文是「库是空的」，不是「库读坏了」。"""
     empty = tmp_path / "empty.dbc"
     empty.write_text('VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_:\n\n', encoding="utf-8")
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(empty)])
+    dlg = can_dialog_factory(initial_paths=[str(empty)])
     assert _cell(dlg, 0, 6) == "⚠ 无 CAN 报文"
     assert _status_color(dlg, 0) == BLF_DB_COLOR_WARN
     assert _cell(dlg, 0, 3) == "0 / 0"
@@ -241,8 +317,8 @@ def test_a_dbc_that_parses_to_no_frames_warns_instead_of_failing(qapp, tmp_path)
 # 优先级 = 列表顺序（§2「数据库匹配」+ §5.2）
 # ---------------------------------------------------------------------------
 
-def test_reordering_the_list_changes_which_database_wins(qapp, dbc_a, dbc_b):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a), str(dbc_b)])
+def test_reordering_the_list_changes_which_database_wins(can_dialog_factory, qapp, dbc_a, dbc_b):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a), str(dbc_b)])
     assert dlg.get_selected_paths() == [str(dbc_a), str(dbc_b)]
     assert _cell(dlg, 0, 0) == "1" and _cell(dlg, 1, 0) == "2"
 
@@ -266,8 +342,8 @@ def test_reordering_the_list_changes_which_database_wins(qapp, dbc_a, dbc_b):
     assert dlg.get_selected_paths() == [str(dbc_a), str(dbc_b)]
 
 
-def test_the_edge_rows_only_offer_the_outward_move_button(qapp, dbc_a, dbc_b):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a), str(dbc_b)])
+def test_the_edge_rows_only_offer_the_outward_move_button(can_dialog_factory, qapp, dbc_a, dbc_b):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a), str(dbc_b)])
     dlg.table.selectRow(0)
     assert dlg.up_btn.isEnabled() is False, "首行没有上方，按钮该灰而不是点了没反应"
     assert dlg.down_btn.isEnabled() is True
@@ -276,8 +352,8 @@ def test_the_edge_rows_only_offer_the_outward_move_button(qapp, dbc_a, dbc_b):
     assert dlg.down_btn.isEnabled() is False
 
 
-def test_remove_drops_the_selected_row(qapp, dbc_a, dbc_b):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a), str(dbc_b)])
+def test_remove_drops_the_selected_row(can_dialog_factory, qapp, dbc_a, dbc_b):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a), str(dbc_b)])
     dlg.table.selectRow(0)
     dlg.remove_btn.click()
     assert dlg.get_selected_paths() == [str(dbc_b)]
@@ -304,11 +380,11 @@ def _url_event(cls, paths):
                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
 
 
-def test_dragging_in_a_mixed_bundle_keeps_only_the_databases(qapp, dbc_a, tmp_path):
+def test_dragging_in_a_mixed_bundle_keeps_only_the_databases(can_dialog_factory, qapp, dbc_a, tmp_path):
     csv = tmp_path / "data.csv"
     csv.write_text("a,b\n1,2\n", encoding="utf-8")
     arxml = write_arxml(tmp_path / "sys.arxml")
-    dlg = CanDatabaseSelectorDialog()
+    dlg = can_dialog_factory()
 
     enter = _url_event(QDragEnterEvent, [str(csv), str(dbc_a)])
     dlg.dragEnterEvent(enter)
@@ -320,10 +396,10 @@ def test_dragging_in_a_mixed_bundle_keeps_only_the_databases(qapp, dbc_a, tmp_pa
     assert dlg.table.item(1, 2).text() == "ARXML", "类型列要跟后缀一致"
 
 
-def test_dragging_only_rejected_files_does_not_accept_the_drop(qapp, tmp_path):
+def test_dragging_only_rejected_files_does_not_accept_the_drop(can_dialog_factory, qapp, tmp_path):
     csv = tmp_path / "data.csv"
     csv.write_text("a,b\n1,2\n", encoding="utf-8")
-    dlg = CanDatabaseSelectorDialog()
+    dlg = can_dialog_factory()
     enter = _url_event(QDragEnterEvent, [str(csv)])
     dlg.dragEnterEvent(enter)
     assert not enter.isAccepted(), "全是不收的后缀还显示可放置，是纯误导"
@@ -332,8 +408,8 @@ def test_dragging_only_rejected_files_does_not_accept_the_drop(qapp, tmp_path):
     assert len(dlg.rows) == before
 
 
-def test_duplicate_paths_are_not_added_twice(qapp, dbc_a):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+def test_duplicate_paths_are_not_added_twice(can_dialog_factory, qapp, dbc_a):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a)])
     assert dlg.add_paths([str(dbc_a)]) == 0
     assert len(dlg.rows) == 1
 
@@ -342,9 +418,9 @@ def test_duplicate_paths_are_not_added_twice(qapp, dbc_a):
 # C 路径：记忆命中但有文件缺失（§5.1）
 # ---------------------------------------------------------------------------
 
-def test_missing_remembered_files_are_listed_in_the_notice(qapp, dbc_a, tmp_path):
+def test_missing_remembered_files_are_listed_in_the_notice(can_dialog_factory, qapp, dbc_a, tmp_path):
     gone = tmp_path / "old_fota.dbc"
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         initial_paths=[str(gone), str(dbc_a)], missing_paths=[str(gone)]
     )
     assert dlg.notice.isVisibleTo(dlg) is True
@@ -356,10 +432,10 @@ def test_missing_remembered_files_are_listed_in_the_notice(qapp, dbc_a, tmp_path
     assert _import_btn(dlg).isEnabled() is True
 
 
-def test_missing_file_names_are_escaped_in_the_notice(qapp, tmp_path):
+def test_missing_file_names_are_escaped_in_the_notice(can_dialog_factory, qapp, tmp_path):
     """A8：提示条是 RichText，文件名里的 & / < 不能当标记吞掉。"""
     weird = tmp_path / "A&B<2>.dbc"
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(weird)])
+    dlg = can_dialog_factory(initial_paths=[str(weird)])
     try:
         text = dlg.notice.text()
         assert "A&amp;B&lt;2&gt;.dbc" in text
@@ -384,8 +460,13 @@ def flow_host(qapp):
     # 基类持的是弱引用：测试里 mw 没有其它拥有者，不留一手会在用例
     # 跑一半时被 GC 抽走，报「MainWindow has been garbage collected」
     mgr._kept_alive = mw
-    yield mgr
-    mgr._kept_alive = None
+    try:
+        yield mgr
+    finally:
+        mgr._kept_alive = None
+        mw.close()
+        mw.deleteLater()
+        flush_deferred_deletes()
 
 
 @pytest.fixture()
@@ -450,12 +531,26 @@ def test_cancelling_the_dialog_writes_nothing(flow_host, monkeypatch,
     assert AppSettings().get_blf_last_db_paths() == []
 
 
+def test_repeated_cancellations_do_not_leave_hidden_dialogs(
+    flow_host, monkeypatch, dbc_a, fresh_blf_settings
+):
+    _auto_answer(monkeypatch, accept=False)
+    for _ in range(5):
+        assert flow_host._ask_can_databases(
+            "log.blf", initial_cfg=CanBindings.from_paths([str(dbc_a)])
+        ) is None
+    # deleteLater 已安排但尚未排空时仍算 parent 的 child，不能误判为泄漏。
+    assert len(flow_host.mw.findChildren(CanDatabaseSelectorDialog)) == 5
+    flush_deferred_deletes()
+    assert flow_host.mw.findChildren(CanDatabaseSelectorDialog) == []
+
+
 # ---------------------------------------------------------------------------
 # 用户备注：仅备注列可编辑、随改随存、打开回显、跟随行移动
 # ---------------------------------------------------------------------------
 
-def test_the_note_column_is_the_only_editable_one(app_settings, dbc_a):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+def test_the_note_column_is_the_only_editable_one(can_dialog_factory, app_settings, dbc_a):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a)])
     assert dlg.table.item(0, 5).flags() & Qt.ItemFlag.ItemIsEditable
     for col in (0, 1, 2, 3, 4, 6):
         assert not (
@@ -463,8 +558,8 @@ def test_the_note_column_is_the_only_editable_one(app_settings, dbc_a):
         ), f"第 {col} 列不该可编辑（备注列是唯一的输入点）"
 
 
-def test_note_edits_persist_immediately(app_settings, dbc_a):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+def test_note_edits_persist_immediately(can_dialog_factory, app_settings, dbc_a):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a)])
     dlg.table.item(0, 5).setText("  动力总成库  ")
     # 随改随存（不等「导入」：备注是文件的属性，与本次导入是否发生无关），
     # 且落盘前去空白
@@ -473,18 +568,18 @@ def test_note_edits_persist_immediately(app_settings, dbc_a):
     assert _cell(dlg, 0, 5) == "动力总成库", "item 文本要与落盘值一致"
 
 
-def test_a_stored_note_is_echoed_and_can_be_cleared(app_settings, dbc_a):
+def test_a_stored_note_is_echoed_and_can_be_cleared(can_dialog_factory, app_settings, dbc_a):
     app_settings.set_blf_db_note(str(dbc_a), "主库")
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a)])
     assert _cell(dlg, 0, 5) == "主库", "打开对话框要回显已存备注"
     dlg.table.item(0, 5).setText("  ")
     assert app_settings.get_blf_db_note(str(dbc_a)) == ""
     assert _cell(dlg, 0, 5) == "", "清空即删除条目"
 
 
-def test_notes_follow_the_row_when_reordering(app_settings, dbc_a, dbc_b):
+def test_notes_follow_the_row_when_reordering(can_dialog_factory, app_settings, dbc_a, dbc_b):
     app_settings.set_blf_db_note(str(dbc_a), "A 库")
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a), str(dbc_b)])
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a), str(dbc_b)])
     dlg.table.selectRow(0)
     dlg.down_btn.click()
     assert [r.path for r in dlg.rows] == [str(dbc_b), str(dbc_a)]
@@ -508,11 +603,11 @@ def _pump_until(dialog, cond, timeout_ms: int = 5000) -> None:
     pytest.fail("预扫没有在超时时间内完成")
 
 
-def test_prescan_fills_the_hit_column_and_sorts_by_match(qapp, tmp_path):
+def test_prescan_fills_the_hit_column_and_sorts_by_match(can_dialog_factory, qapp, tmp_path):
     """预扫完成后命中列回填、未编辑的列表自动把最匹配的库顶上去。"""
     blf, dbc_full = write_blf_pair(tmp_path, n=24, buses=(0,))
     partial_dbc = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(partial_dbc), str(dbc_full)]
     )
     try:
@@ -531,11 +626,11 @@ def test_prescan_fills_the_hit_column_and_sorts_by_match(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_user_edited_order_is_never_resorted(qapp, tmp_path):
+def test_user_edited_order_is_never_resorted(can_dialog_factory, qapp, tmp_path):
     """用户动过行序就不许自动排序：尊重手工顺序，命中列照常回填。"""
     blf, dbc_full = write_blf_pair(tmp_path, n=24, buses=(0,))
     partial_dbc = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(partial_dbc), str(dbc_full)]
     )
     try:
@@ -556,14 +651,14 @@ def test_user_edited_order_is_never_resorted(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_hit_column_degrades_gracefully_without_a_blf(qapp, dbc_a):
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc_a)])
+def test_hit_column_degrades_gracefully_without_a_blf(can_dialog_factory, qapp, dbc_a):
+    dlg = can_dialog_factory(initial_paths=[str(dbc_a)])
     assert dlg._prescan_state == "off", "data_file 不是 BLF 就不启动预扫"
     assert _cell(dlg, 0, 4) == "—"
 
 
 def test_a_blf_at_the_prescan_cap_skips_it_without_hiding_other_notices(
-        qapp, tmp_path, monkeypatch, dbc_a):
+        can_dialog_factory, qapp, tmp_path, monkeypatch, dbc_a):
     """大文件不预扫（第二次完整 I/O）：命中列退化为「—」，且黄条叠加不覆盖。"""
     blf, _ = write_blf_pair(tmp_path, n=8, buses=(0,))
     monkeypatch.setattr(
@@ -571,7 +666,7 @@ def test_a_blf_at_the_prescan_cap_skips_it_without_hiding_other_notices(
         os.path.getsize(blf),  # 恰好触到上限：>= 即跳过
     )
     missing = tmp_path / "gone.dbc"
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(missing), str(dbc_a)]
     )
     try:
@@ -589,14 +684,14 @@ def test_a_blf_at_the_prescan_cap_skips_it_without_hiding_other_notices(
 
 
 def test_a_blf_below_the_prescan_cap_still_prescans(
-        qapp, tmp_path, monkeypatch, dbc_a):
+        can_dialog_factory, qapp, tmp_path, monkeypatch, dbc_a):
     """阈值只用体积判定：差 1 字节就照常预扫。"""
     blf, dbc_full = write_blf_pair(tmp_path, n=8, buses=(0,))
     monkeypatch.setattr(
         "src.ui.dialogs.can_db_selector.BLF_PRESCAN_MAX_BYTES",
         os.path.getsize(blf) + 1,
     )
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc_a), str(dbc_full)]
     )
     try:
@@ -623,9 +718,9 @@ def _bind_rows(dialog) -> list[tuple[int, str]]:
     ]
 
 
-def test_channel_rows_come_from_prescan_with_binding_summary(qapp, tmp_path):
+def test_channel_rows_come_from_prescan_with_binding_summary(can_dialog_factory, qapp, tmp_path):
     blf, dbc = write_blf_pair(tmp_path, n=24, buses=(0, 1))
-    dlg = CanDatabaseSelectorDialog(data_file=str(blf), initial_paths=[str(dbc)])
+    dlg = can_dialog_factory(data_file=str(blf), initial_paths=[str(dbc)])
     try:
         _pump_until(dlg, lambda: dlg._prescan_state in ("done", "failed"))
         assert dlg._prescan_state == "done"
@@ -641,12 +736,12 @@ def test_channel_rows_come_from_prescan_with_binding_summary(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_binding_a_subset_changes_hits_and_result_config(qapp, tmp_path):
+def test_binding_a_subset_changes_hits_and_result_config(can_dialog_factory, qapp, tmp_path):
     import re
 
     blf, dbc_full = write_blf_pair(tmp_path, n=24, buses=(0, 1))
     partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])  # 只有 0x1A0
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
     )
     try:
@@ -667,11 +762,11 @@ def test_binding_a_subset_changes_hits_and_result_config(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_dragging_a_pool_row_onto_a_channel_binds_it(qapp, tmp_path):
+def test_dragging_a_pool_row_onto_a_channel_binds_it(can_dialog_factory, qapp, tmp_path):
     """drop 回调 = 绑定唯一入口之一，与勾选面板共用 _set_channel_binding。"""
     blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0, 1))
     partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
     )
     try:
@@ -700,10 +795,10 @@ def test_dragging_a_pool_row_onto_a_channel_binds_it(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_selecting_the_whole_pool_means_unbound(qapp, tmp_path):
+def test_selecting_the_whole_pool_means_unbound(can_dialog_factory, qapp, tmp_path):
     blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0,))
     partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
     )
     try:
@@ -717,9 +812,9 @@ def test_selecting_the_whole_pool_means_unbound(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_known_channels_fill_rows_when_prescan_is_unavailable(qapp, tmp_path):
+def test_known_channels_fill_rows_when_prescan_is_unavailable(can_dialog_factory, qapp, tmp_path):
     _blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         initial_paths=[str(dbc)], known_channels=[(0, 20), (1, 5)]
     )
     try:
@@ -731,11 +826,11 @@ def test_known_channels_fill_rows_when_prescan_is_unavailable(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_manual_channel_row_can_be_added_and_removed(qapp, tmp_path, monkeypatch):
+def test_manual_channel_row_can_be_added_and_removed(can_dialog_factory, qapp, tmp_path, monkeypatch):
     import src.ui.dialogs.can_db_selector as cds
 
     _blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
-    dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc)])
+    dlg = can_dialog_factory(initial_paths=[str(dbc)])
     try:
         monkeypatch.setattr(
             cds.QInputDialog, "getInt",
@@ -750,13 +845,13 @@ def test_manual_channel_row_can_be_added_and_removed(qapp, tmp_path, monkeypatch
         dlg.deleteLater()
 
 
-def test_save_and_load_config_roundtrip(qapp, tmp_path, monkeypatch):
+def test_save_and_load_config_roundtrip(can_dialog_factory, qapp, tmp_path, monkeypatch):
     import src.ui.dialogs.can_db_selector as cds
 
     blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0, 1))
     partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
     target = tmp_path / "x.canview.yaml"
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
     )
     try:
@@ -772,7 +867,7 @@ def test_save_and_load_config_roundtrip(qapp, tmp_path, monkeypatch):
         dlg._shutdown_prescan()
         dlg.deleteLater()
 
-    dlg2 = CanDatabaseSelectorDialog(initial_paths=[])
+    dlg2 = can_dialog_factory(initial_paths=[])
     try:
         monkeypatch.setattr(
             cds.QFileDialog, "getOpenFileName",
@@ -792,10 +887,10 @@ def test_save_and_load_config_roundtrip(qapp, tmp_path, monkeypatch):
 # 合并前评审回归（P0/P1/P2）
 # ---------------------------------------------------------------------------
 
-def test_single_channel_group_starts_collapsed_and_multi_expands(qapp, tmp_path):
+def test_single_channel_group_starts_collapsed_and_multi_expands(can_dialog_factory, qapp, tmp_path):
     """D1：多通道默认展开；单通道默认折叠（评审 P1）。"""
     blf1, dbc1 = write_blf_pair(tmp_path / "one", n=8, buses=(0,))
-    dlg1 = CanDatabaseSelectorDialog(
+    dlg1 = can_dialog_factory(
         data_file=str(blf1), initial_paths=[str(dbc1)]
     )
     try:
@@ -807,7 +902,7 @@ def test_single_channel_group_starts_collapsed_and_multi_expands(qapp, tmp_path)
         dlg1.deleteLater()
 
     blf2, dbc2 = write_blf_pair(tmp_path / "two", n=8, buses=(0, 1))
-    dlg2 = CanDatabaseSelectorDialog(
+    dlg2 = can_dialog_factory(
         data_file=str(blf2), initial_paths=[str(dbc2)]
     )
     try:
@@ -818,11 +913,11 @@ def test_single_channel_group_starts_collapsed_and_multi_expands(qapp, tmp_path)
         dlg2.deleteLater()
 
 
-def test_dropping_a_dbc_file_onto_the_pool_table_still_adds_it(qapp, tmp_path):
+def test_dropping_a_dbc_file_onto_the_pool_table_still_adds_it(can_dialog_factory, qapp, tmp_path):
     """评审 P1：库表接受自定义 MIME 后，外部文件拖入必须显式转发，不能靠冒泡。"""
     blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
     extra = write_dbc(tmp_path / "extra.dbc", CAN_FRAMES[:1])
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc)]
     )
     try:
@@ -848,11 +943,11 @@ def test_dropping_a_dbc_file_onto_the_pool_table_still_adds_it(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_removing_a_bound_library_warns_and_falls_back_with_notice(qapp, tmp_path):
+def test_removing_a_bound_library_warns_and_falls_back_with_notice(can_dialog_factory, qapp, tmp_path):
     """评审 P1：绑定被移除后不能静默放宽，必须提示。"""
     blf, dbc_full = write_blf_pair(tmp_path, n=16, buses=(0, 1))
     partial = write_dbc(tmp_path / "partial.dbc", CAN_FRAMES[:1])
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc_full), str(partial)]
     )
     try:
@@ -870,11 +965,11 @@ def test_removing_a_bound_library_warns_and_falls_back_with_notice(qapp, tmp_pat
         dlg.deleteLater()
 
 
-def test_dropping_a_file_onto_the_channel_table_adds_it_to_the_pool(qapp, tmp_path):
+def test_dropping_a_file_onto_the_channel_table_adds_it_to_the_pool(can_dialog_factory, qapp, tmp_path):
     """通道表也显式转发外部文件，不依赖 ignore 冒泡。"""
     blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
     extra = write_dbc(tmp_path / "extra.dbc", CAN_FRAMES[:1])
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc)]
     )
     try:
@@ -892,9 +987,9 @@ def test_dropping_a_file_onto_the_channel_table_adds_it_to_the_pool(qapp, tmp_pa
         dlg.deleteLater()
 
 
-def test_a_manual_expand_survives_channel_table_rebuilds(qapp, tmp_path):
+def test_a_manual_expand_survives_channel_table_rebuilds(can_dialog_factory, qapp, tmp_path):
     blf, dbc = write_blf_pair(tmp_path, n=8, buses=(0,))
-    dlg = CanDatabaseSelectorDialog(
+    dlg = can_dialog_factory(
         data_file=str(blf), initial_paths=[str(dbc)]
     )
     try:
@@ -911,7 +1006,7 @@ def test_a_manual_expand_survives_channel_table_rebuilds(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_load_config_reorders_existing_pool_to_yaml_priority(qapp, tmp_path, monkeypatch):
+def test_load_config_reorders_existing_pool_to_yaml_priority(can_dialog_factory, qapp, tmp_path, monkeypatch):
     """P1-3（第 5 轮）：载入配置必须把已有池重排成 YAML 顺序。
 
     YAML 有序池 = 分享者的 first-match 优先级；add_paths 只追加不重排，
@@ -932,7 +1027,7 @@ def test_load_config_reorders_existing_pool_to_yaml_priority(qapp, tmp_path, mon
         yaml.safe_dump(sharer.to_yaml_dict(), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    dlg = CanDatabaseSelectorDialog(initial_paths=[a, b, c])
+    dlg = can_dialog_factory(initial_paths=[a, b, c])
     try:
         monkeypatch.setattr(
             cds.QFileDialog, "getOpenFileName",
@@ -947,7 +1042,7 @@ def test_load_config_reorders_existing_pool_to_yaml_priority(qapp, tmp_path, mon
         dlg.deleteLater()
 
 
-def test_load_config_appends_new_paths_then_reorders(qapp, tmp_path, monkeypatch):
+def test_load_config_appends_new_paths_then_reorders(can_dialog_factory, qapp, tmp_path, monkeypatch):
     """P1-3 混合场景：YAML 含当前行以外的新库 → 先追加再整体按 YAML 序重排。"""
     import yaml
 
@@ -962,7 +1057,7 @@ def test_load_config_appends_new_paths_then_reorders(qapp, tmp_path, monkeypatch
         yaml.safe_dump(sharer.to_yaml_dict(), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    dlg = CanDatabaseSelectorDialog(initial_paths=[a])
+    dlg = can_dialog_factory(initial_paths=[a])
     try:
         monkeypatch.setattr(
             cds.QFileDialog, "getOpenFileName",
@@ -975,7 +1070,7 @@ def test_load_config_appends_new_paths_then_reorders(qapp, tmp_path, monkeypatch
         dlg.deleteLater()
 
 
-def test_load_config_duplicate_pool_paths_keep_first_index(qapp, tmp_path, monkeypatch):
+def test_load_config_duplicate_pool_paths_keep_first_index(can_dialog_factory, qapp, tmp_path, monkeypatch):
     """复审 NB-2：YAML 池含重复路径时按首次出现索引排序（first-match 语义）。"""
     import yaml
 
@@ -990,7 +1085,7 @@ def test_load_config_duplicate_pool_paths_keep_first_index(qapp, tmp_path, monke
         yaml.safe_dump(sharer.to_yaml_dict(), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    dlg = CanDatabaseSelectorDialog(initial_paths=[a, b])
+    dlg = can_dialog_factory(initial_paths=[a, b])
     try:
         monkeypatch.setattr(
             cds.QFileDialog, "getOpenFileName",

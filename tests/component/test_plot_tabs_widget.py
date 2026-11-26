@@ -18,6 +18,12 @@ from src.ui.widgets.plot_tabs import (
     MAX_PAGES,
     PlotTabsWidget,
 )
+from tests.fixtures.waits import flush_deferred_deletes
+
+
+def _delete_menu(menu) -> None:
+    menu.deleteLater()
+    flush_deferred_deletes()
 
 
 @pytest.fixture()
@@ -562,7 +568,7 @@ def test_context_menu_actions_emit_signals(tabs):
         ("rename", 1), ("duplicate", 1), ("close", 1),
         ("others", 1), ("right", 1),
     ]
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 def test_context_menu_batch_items_disabled_at_edges(tabs):
@@ -571,20 +577,20 @@ def test_context_menu_batch_items_disabled_at_edges(tabs):
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert not by_text["关闭其他"].isEnabled()
     assert not by_text["关闭右侧"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
     _add_pages(tabs, 2)                      # 共 3 页
     menu = tabs._build_tab_menu(0)
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert by_text["关闭其他"].isEnabled()
     assert by_text["关闭右侧"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
     menu = tabs._build_tab_menu(2)           # 末页：右侧无页
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert by_text["关闭其他"].isEnabled()
     assert not by_text["关闭右侧"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 def test_context_menu_close_disabled_with_single_page(tabs):
@@ -594,7 +600,7 @@ def test_context_menu_close_disabled_with_single_page(tabs):
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert not by_text["关闭"].isEnabled()
     assert by_text["关闭"].toolTip() == LAST_PAGE_CLOSE_HINT
-    menu.deleteLater()
+    _delete_menu(menu)
 
     _add_pages(tabs, 1)
     menu = tabs._build_tab_menu(0)
@@ -602,7 +608,7 @@ def test_context_menu_close_disabled_with_single_page(tabs):
     assert by_text["关闭"].isEnabled()
     # QAction 未设 tooltip 时 toolTip() 回退为 action 文本
     assert by_text["关闭"].toolTip() == "关闭"
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 # ----------------------------------------------------------------------
@@ -1089,7 +1095,7 @@ def test_duplicate_menu_item_enabled_below_limit(tabs):
     menu = tabs._build_tab_menu(0)
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert by_text["复制绘图页"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 def test_duplicate_menu_item_disabled_at_page_limit(tabs, monkeypatch):
@@ -1103,4 +1109,4 @@ def test_duplicate_menu_item_disabled_at_page_limit(tabs, monkeypatch):
     action = by_text["复制绘图页"]
     assert not action.isEnabled()
     assert "上限" in action.toolTip()
-    menu.deleteLater()
+    _delete_menu(menu)

@@ -24,6 +24,7 @@ from src.core.config import MIN_INDEX_LENGTH, compute_global_x_limits
 from src.ui.cursor_sync_manager import CursorSyncManager
 from src.ui.layout_manager import LayoutManager
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+from tests.fixtures.waits import flush_deferred_deletes
 
 N = 100
 
@@ -180,6 +181,7 @@ def env(qapp):
     pw._is_being_destroyed = True
     pw.deleteLater()
     host.deleteLater()
+    flush_deferred_deletes()
 
 
 @pytest.mark.parametrize("factor", [0.5, 2.0])

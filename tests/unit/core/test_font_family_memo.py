@@ -1,9 +1,8 @@
-"""P2-14：字体族查询要进程级记忆一次，缓存命中路径不能再枚举系统字体。
+"""字体族查询进程级记忆，缓存命中路径不枚举系统字体。
 
 `QFontDatabase.families()` 在 Windows 上要遍历全部已安装字体（模块头自述
-50-100 ms）。旧写法把它放在**缓存命中**的校验上（`cached_name in families()`），
-等于把缓存本该省下的时间原样花回去；splash 的 `draw_text` 更是在每帧绘制里
-枚举一次。现在三处都改问 `installed_font_families()`，一次运行只枚举一次。
+50-100 ms）。缓存命中直接信任缓存版本和字体名，不再为校验枚举；splash
+绘制路径完全不接触字体表。缓存版本升级或删除配置才会重新检测。
 """
 
 from __future__ import annotations
@@ -72,13 +71,13 @@ class TestMemoizedFamilyLookup:
         assert fc.get_monospace_font_cached() == "Alpha Font"
         assert fc.get_monospace_font_cached() == "Alpha Font"
 
-        assert len(enumerate_once) == 1, f"命中缓存仍枚举了 {len(enumerate_once)} 次"
+        assert len(enumerate_once) == 0, f"命中缓存仍枚举了 {len(enumerate_once)} 次"
 
-    def test_stale_cache_still_falls_back_to_detection(self, enumerate_once, monkeypatch):
-        """记忆不能把「缓存字体已被卸载」的失效路径一起抹掉。"""
+    def test_version_mismatch_still_falls_back_to_detection(self, enumerate_once, monkeypatch):
+        """缓存版本不一致时必须重新检测，不能信任旧字体名。"""
         monkeypatch.setattr(
             "src.core.settings.AppSettings",
-            lambda: _StubSettings("Gone Font", fc._MONO_CACHE_VERSION),
+            lambda: _StubSettings("Gone Font", fc._MONO_CACHE_VERSION - 1),
         )
 
         detected = fc.get_monospace_font_cached()
@@ -98,4 +97,4 @@ class TestSplashPaintPath:
         source = inspect.getsource(splash_screen)
 
         assert "QFontDatabase" not in source
-        assert "installed_font_families()" in source
+        assert "installed_font_families()" not in source
