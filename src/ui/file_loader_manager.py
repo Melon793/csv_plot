@@ -89,9 +89,16 @@ class _LoaderSignalRelay(QObject):
     def _release(self) -> None:
         self.deleteLater()
 
+    def _is_shutting_down(self) -> bool:
+        return bool(getattr(self.parent(), "_is_being_destroyed", False))
+
     @Slot(object)
     def finished(self, loader) -> None:
         try:
+            # 关窗等待会处理事件；此时只能释放结果，不得再往将销毁的窗口应用。
+            if self._is_shutting_down():
+                self._manager._discard_loader(loader)
+                return
             if self._blf:
                 self._manager._on_blf_done(
                     loader, self._file_path, self._load_version, self._is_reload
@@ -106,6 +113,8 @@ class _LoaderSignalRelay(QObject):
     @Slot(str)
     def error(self, msg: str) -> None:
         try:
+            if self._is_shutting_down():
+                return
             if self._blf:
                 self._manager._on_blf_error(msg, self._is_reload, self._load_version)
             else:
@@ -115,17 +124,19 @@ class _LoaderSignalRelay(QObject):
 
     @Slot(int)
     def progress(self, value: int) -> None:
-        if self._blf:
+        if not self._is_shutting_down() and self._blf:
             self._manager._on_blf_progress(value, self._load_version)
 
     @Slot()
     def canceled(self) -> None:
-        if self._blf:
+        if not self._is_shutting_down() and self._blf:
             self._manager._on_blf_cancel(self._file_path, self._load_version)
 
     @Slot(str)
     def cancelled(self, path: str) -> None:
         try:
+            if self._is_shutting_down():
+                return
             if self._blf:
                 self._manager._on_blf_cancelled(
                     path, self._is_reload, self._load_version

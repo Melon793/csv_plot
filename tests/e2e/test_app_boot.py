@@ -4,6 +4,8 @@
 状态正确（未加载数据时分析类按钮禁用）。
 """
 
+import pytest
+
 
 def test_main_window_boots(main_window):
     """MainWindow 构建成功：标题/关键控件就绪"""
@@ -75,3 +77,24 @@ def test_reload_without_data_is_safe(main_window, dialog_stubs):
 
     assert len(dialog_stubs["critical"]) == 1
     assert "没有可重新加载的数据" in dialog_stubs["critical"][0][1]
+
+
+@pytest.mark.full_matrix
+def test_native_plot_options_menus_never_show_as_child_widgets(loaded_window, qapp):
+    """1×3 多图下，停用的原生 Plot Options 菜单既不可见也不抢鼠标命中。"""
+    from PySide6.QtCore import QPoint, Qt
+
+    mw = loaded_window
+    page = mw.current_page
+    mw.layout_manager.set_plots_visible(1, 3)
+    qapp.processEvents()
+
+    assert len(page.plot_widgets) >= 3
+    for container in page.plot_widgets[:3]:
+        pw = container.plot_widget
+        menu = pw.plot_item.ctrlMenu
+        assert menu.parent() is pw
+        assert menu.isWindow()
+        assert menu.windowType() == Qt.WindowType.Popup
+        assert not menu.isVisible()
+        assert pw.childAt(QPoint(10, 10)) is not menu

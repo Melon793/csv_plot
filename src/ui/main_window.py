@@ -37,7 +37,7 @@ from src.ui.widgets.chrome_button import (  # noqa: E402
 )
 from src.ui import action_receipts, theme  # noqa: E402  # 段间竖线色值与抽屉共用同一份色板
 
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QPointF, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
     QColor,
     QIcon,
@@ -2458,12 +2458,19 @@ class MainWindow(QMainWindow):
 
         BLF 还有一条独立的保活链：取消后仍在跑的旧线程挂在 FileLoaderManager
         的 ``_blf_thread_refs`` 里（丢引用同样会走到 SIGABRT），一并 cancel/wait。
-        随后收掉扫描中的进度框（否则它作为独立顶层窗口留在屏幕上）与 F 路径
-        暂存的 loader（可能占着几百 MB）。
+        等待前先收掉两类加载进度框，结束后释放 F 路径暂存的 loader
+        （可能占几百 MB）。
         """
         threads = [getattr(self, "_thread", None)]
         flm = getattr(self, "file_loader_manager", None)
         threads.extend(getattr(flm, "_blf_thread_refs", None) or [])
+        if flm is not None:
+            # 先收进度框：无取消按钮的普通加载框若不收，等待期间会一直冻结在屏幕上。
+            for close_method in ("_close_load_progress", "_close_blf_progress"):
+                try:
+                    getattr(flm, close_method)()
+                except (RuntimeError, TypeError, AttributeError):
+                    self._logger.debug("退出时关闭加载进度框失败", exc_info=True)
         for thread in threads:
             if thread is None:
                 continue
@@ -2471,20 +2478,26 @@ class MainWindow(QMainWindow):
                 if thread.isRunning():
                     if hasattr(thread, "request_cancel"):
                         thread.request_cancel()
-                    # 不能在有界 wait 超时后继续关窗：普通 CSV/MDF/Excel 不响应
-                    # request_cancel，BLF 也可能卡在某个分块边界。此时窗口仍是
-                    # 线程强引用的持有者；一旦继续销毁，运行中的 QThread 会触发
-                    # std::terminate。宁可等它真正结束，也不能把超时当安全退出。
+                    # 超时后继续等，防止销毁运行中 QThread；轮询放行事件，避免关窗假死。
                     self._logger.info("等待后台数据加载线程安全退出")
-                    thread.wait()
+                    started = time.monotonic()
+                    warned = False
+                    while thread.isRunning():
+                        if thread.wait(50):
+                            break
+                        QApplication.processEvents(
+                            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                        )
+                        elapsed = time.monotonic() - started
+                        if elapsed >= 5.0 and not warned:
+                            self._logger.warning(
+                                "后台加载线程 5s 内未退出；继续等待并保持窗口响应"
+                            )
+                            warned = True
             except (RuntimeError, TypeError):
                 self._logger.debug("收尾后台数据加载线程失败", exc_info=True)
         if flm is None:
             return
-        try:
-            flm._close_blf_progress()
-        except (RuntimeError, TypeError):
-            self._logger.debug("关闭 BLF 扫描进度框失败", exc_info=True)
         try:
             flm._release_pending_blf_loader()
         except (RuntimeError, TypeError):

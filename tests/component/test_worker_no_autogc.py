@@ -306,7 +306,7 @@ def test_blf_prescan_thread_runs_no_collection_on_worker_thread(
 # ---------------------------------------------------------------------------
 
 
-def test_shutdown_waits_until_load_thread_really_stops():
+def test_shutdown_waits_until_load_thread_really_stops(qapp):
     """有界 wait 超时后不能继续关窗：运行中的 QThread 被销毁会直接终止进程。"""
     from src.ui.main_window import MainWindow
 
@@ -324,10 +324,10 @@ def test_shutdown_waits_until_load_thread_really_stops():
 
         def wait(self, timeout=None):
             self.waits.append(timeout)
-            if timeout is not None:
-                return False  # 旧实现会在这里继续关窗，埋下 QThread 销毁崩溃
-            self.running = False
-            return True
+            if len(self.waits) >= 3:
+                self.running = False
+                return True
+            return False  # 超时只表示继续轮询，不能继续关窗
 
     class _Logger:
         def info(self, *_args, **_kwargs):
@@ -336,17 +336,41 @@ def test_shutdown_waits_until_load_thread_really_stops():
         def debug(self, *_args, **_kwargs):
             pass
 
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    class _Manager:
+        def __init__(self):
+            self.closed = []
+            self.released = False
+
+        def _close_load_progress(self):
+            self.closed.append("load")
+
+        def _close_blf_progress(self):
+            self.closed.append("blf")
+
+        def _release_pending_blf_loader(self):
+            self.released = True
+
     thread = _Thread()
+    manager = _Manager()
     host = type(
         "Host", (),
-        {"_thread": thread, "file_loader_manager": None, "_logger": _Logger()},
+        {
+            "_thread": thread,
+            "file_loader_manager": manager,
+            "_logger": _Logger(),
+        },
     )()
 
     MainWindow._shutdown_data_load_thread(host)
 
     assert thread.cancel_requests == 1
-    assert thread.waits == [None], "必须无界等待真正结束，不能把 3 秒超时当安全退出"
+    assert thread.waits == [50, 50, 50], "每次只等 50ms，超时后继续等并处理事件"
     assert thread.running is False
+    assert manager.closed == ["load", "blf"]
+    assert manager.released is True
 
 
 def test_qt_widgets_exit_cleanly_in_subprocess():
@@ -426,5 +450,31 @@ def test_loader_signal_relay_releases_after_terminal_signal(qapp):
     assert calls == [(loader, "Demo.csv", 7, True)]
     flush_deferred_deletes()
     assert not isValid(relay), "terminal 信号后 relay 不得在主窗口下累积"
+    host.deleteLater()
+    flush_deferred_deletes()
+
+
+def test_loader_signal_relay_drops_done_while_window_closing(qapp):
+    calls = []
+    discarded = []
+
+    class Manager:
+        def _on_load_done(self, loader, file_path, load_version, is_reload):
+            calls.append((loader, file_path, load_version, is_reload))
+
+        def _discard_loader(self, loader):
+            discarded.append(loader)
+
+    host = QWidget()
+    host._is_being_destroyed = True
+    relay = _LoaderSignalRelay(host, Manager(), "Demo.csv", 7, False, blf=False)
+    loader = object()
+    relay.finished(loader)
+
+    assert calls == [], "关窗等待期间处理事件，不得把迟到结果应用到将销毁的窗口"
+    assert discarded == [loader], "迟到 loader 必须释放，不能随窗口销毁前留资源"
+    flush_deferred_deletes()
+    assert not isValid(relay)
+    host.close()
     host.deleteLater()
     flush_deferred_deletes()

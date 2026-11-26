@@ -1374,9 +1374,9 @@ class PlotUIManager(BasePlotManager):
             row=1, col=0, colspan=2,
             viewBox=CustomViewBox(defaultPadding=DEFAULT_PADDING_VAL_Y),
         )
-        # pyqtgraph 的 PlotItem.ctrlMenu 默认无 QWidget parent；入口虽已停用，
-        # 实现仍保留给未来恢复，因此只补所有权，随 plot 宿主一起销毁。
-        pw.plot_item.ctrlMenu.setParent(pw)
+        # 只补所有权；保留 Popup flags，裸 setParent 会降级成子控件并抢命中。
+        ctrl_menu = pw.plot_item.ctrlMenu
+        ctrl_menu.setParent(pw, ctrl_menu.windowFlags())
         pw.view_box = pw.plot_item.vb
         pw.view_box.plot_widget = pw
         pw._connect_viewbox_signals()
