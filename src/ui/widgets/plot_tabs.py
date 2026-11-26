@@ -671,9 +671,12 @@ class _PageDirectoryPopup(QWidget):
         self._owner = owner
         self.setObjectName("pageDirectoryPopup")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # 不画圆角：本浮层是不透明顶层窗口，QSS 圆角只改描边路径，窗口四角仍
+        # 按矩形刷白（同一现象见 theme.py 的 QToolTip 注释）。改透明窗承载圆角
+        # 需真机验证阴影与文字渲染，先在 dev 分支试，main 暂用直角。
         self.setStyleSheet(
             "#pageDirectoryPopup { background: #ffffff;"
-            " border: 1px solid #d5dbe3; border-radius: 6px; }"
+            " border: 1px solid #d5dbe3; }"
             "#pageDirectoryPopup QScrollArea { background: transparent; border: none; }"
         )
         outer = QVBoxLayout(self)
@@ -921,6 +924,8 @@ class PlotTabsWidget(QTabWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._mid_press_index: int | None = None
+        self._mid_press_pos: QPoint | None = None
         # 页签全名 tooltip 的数据源（MainWindow 注入，hover 时实时求值，
         # 改名/换布局/增删曲线后无需任何同步点，不会过期）
         self._tab_info_provider = None
@@ -1367,12 +1372,16 @@ class PlotTabsWidget(QTabWidget):
         self._sync_close_buttons()
         self._sync_new_page_button()
         self._place_new_page_button()
+        self._mid_press_index = None
+        self._mid_press_pos = None
 
     def tabRemoved(self, index: int) -> None:  # noqa: N802 - Qt 命名
         super().tabRemoved(index)
         self._sync_close_buttons()
         self._sync_new_page_button()
         self._place_new_page_button()
+        self._mid_press_index = None
+        self._mid_press_pos = None
 
     # ------------------------------------------------------------------
     # 中键关闭 / 「＋」跟随标签重排
@@ -1420,14 +1429,41 @@ class PlotTabsWidget(QTabWidget):
                         rich = "<qt>" + html.escape(text).replace("\n", "<br>") + "</qt>"
                         QToolTip.showText(event.globalPos(), rich, self.tabBar())
                     return True
+            if event_type == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.MiddleButton:
+                    pos = event.position().toPoint()
+                    self._mid_press_index = self.tabBar().tabAt(pos)
+                    self._mid_press_pos = pos
+                else:
+                    self._mid_press_index = None
+                    self._mid_press_pos = None
+            if (
+                event_type == QEvent.Type.MouseButtonDblClick
+                and event.button() == Qt.MouseButton.MiddleButton
+            ):
+                self._mid_press_index = None
+                self._mid_press_pos = None
+                event.accept()
+                return True
             if (
                 event_type == QEvent.Type.MouseButtonRelease
                 and event.button() == Qt.MouseButton.MiddleButton
             ):
-                index = self.tabBar().tabAt(event.position().toPoint())
-                if index >= 0:
-                    self.close_page_requested.emit(index)
-                    return True
+                pos = event.position().toPoint()
+                pressed_index = self._mid_press_index
+                press_pos = self._mid_press_pos
+                self._mid_press_index = None
+                self._mid_press_pos = None
+                if (
+                    pressed_index is not None
+                    and pressed_index >= 0
+                    and press_pos is not None
+                    and self.tabBar().tabAt(pos) == pressed_index
+                    and (pos - press_pos).manhattanLength()
+                    < QApplication.startDragDistance()
+                ):
+                    self.close_page_requested.emit(pressed_index)
+                return True
             if event_type in (
                 QEvent.Type.Resize,
                 QEvent.Type.LayoutRequest,

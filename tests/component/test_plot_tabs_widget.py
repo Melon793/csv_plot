@@ -11,13 +11,19 @@ import pytest
 
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QLabel, QToolButton
+from PySide6.QtWidgets import QApplication, QLabel, QToolButton
 
 from src.ui.widgets.plot_tabs import (
     LAST_PAGE_CLOSE_HINT,
     MAX_PAGES,
     PlotTabsWidget,
 )
+from tests.fixtures.waits import flush_deferred_deletes
+
+
+def _delete_menu(menu) -> None:
+    menu.deleteLater()
+    flush_deferred_deletes()
 
 
 @pytest.fixture()
@@ -152,6 +158,97 @@ def test_middle_click_closes_tab(tabs, qtbot):
         tabs.tabBar(), Qt.MouseButton.MiddleButton, pos=center
     )
     assert received == [1]
+
+
+def test_middle_press_on_tab_release_on_other_tab_closes_nothing(tabs, qtbot):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=bar.tabRect(0).center())
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=bar.tabRect(2).center())
+
+    assert received == []
+
+
+def test_middle_click_with_long_same_tab_drag_closes_nothing(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+    press_pos = bar.tabRect(0).topLeft() + QPoint(4, bar.tabRect(0).height() // 2)
+    release_pos = press_pos + QPoint(QApplication.startDragDistance() + 5, 0)
+    assert bar.tabAt(release_pos) == 0
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=press_pos)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=release_pos)
+
+    assert received == []
+
+
+def test_middle_click_with_small_jitter_still_closes(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+    press_pos = bar.tabRect(0).topLeft() + QPoint(4, bar.tabRect(0).height() // 2)
+    release_pos = press_pos + QPoint(QApplication.startDragDistance() - 3, 0)
+    assert bar.tabAt(release_pos) == 0
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=press_pos)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=release_pos)
+
+    assert received == [0]
+
+
+def test_middle_release_without_press_closes_nothing(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+
+    QTest.mouseRelease(
+        tabs.tabBar(),
+        Qt.MouseButton.MiddleButton,
+        pos=tabs.tabBar().tabRect(0).center(),
+    )
+
+    assert received == []
+
+
+def test_middle_double_click_closes_once_without_rename(tabs, qapp):
+    _add_pages(tabs, 3)
+    closed, renamed = [], []
+
+    def close_synchronously(index):
+        closed.append(index)
+        tabs.removeTab(index)
+
+    tabs.close_page_requested.connect(close_synchronously)
+    tabs.rename_page_requested.connect(renamed.append)
+    bar = tabs.tabBar()
+    pos = bar.tabRect(0).center()
+
+    QTest.mouseClick(bar, Qt.MouseButton.MiddleButton, pos=pos)
+    QTest.mouseDClick(bar, Qt.MouseButton.MiddleButton, pos=pos)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=pos)
+
+    assert closed == [0]
+    assert renamed == []
+
+
+def test_tab_layout_change_invalidates_middle_press(tabs):
+    _add_pages(tabs, 3)
+    received = []
+    tabs.close_page_requested.connect(received.append)
+    bar = tabs.tabBar()
+    pos = bar.tabRect(0).center()
+
+    QTest.mousePress(bar, Qt.MouseButton.MiddleButton, pos=pos)
+    tabs.removeTab(0)
+    QTest.mouseRelease(bar, Qt.MouseButton.MiddleButton, pos=pos)
+
+    assert received == []
 
 
 def test_double_click_requests_rename(tabs, qtbot):
@@ -471,7 +568,7 @@ def test_context_menu_actions_emit_signals(tabs):
         ("rename", 1), ("duplicate", 1), ("close", 1),
         ("others", 1), ("right", 1),
     ]
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 def test_context_menu_batch_items_disabled_at_edges(tabs):
@@ -480,20 +577,20 @@ def test_context_menu_batch_items_disabled_at_edges(tabs):
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert not by_text["关闭其他"].isEnabled()
     assert not by_text["关闭右侧"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
     _add_pages(tabs, 2)                      # 共 3 页
     menu = tabs._build_tab_menu(0)
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert by_text["关闭其他"].isEnabled()
     assert by_text["关闭右侧"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
     menu = tabs._build_tab_menu(2)           # 末页：右侧无页
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert by_text["关闭其他"].isEnabled()
     assert not by_text["关闭右侧"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 def test_context_menu_close_disabled_with_single_page(tabs):
@@ -503,7 +600,7 @@ def test_context_menu_close_disabled_with_single_page(tabs):
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert not by_text["关闭"].isEnabled()
     assert by_text["关闭"].toolTip() == LAST_PAGE_CLOSE_HINT
-    menu.deleteLater()
+    _delete_menu(menu)
 
     _add_pages(tabs, 1)
     menu = tabs._build_tab_menu(0)
@@ -511,7 +608,7 @@ def test_context_menu_close_disabled_with_single_page(tabs):
     assert by_text["关闭"].isEnabled()
     # QAction 未设 tooltip 时 toolTip() 回退为 action 文本
     assert by_text["关闭"].toolTip() == "关闭"
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 # ----------------------------------------------------------------------
@@ -998,7 +1095,7 @@ def test_duplicate_menu_item_enabled_below_limit(tabs):
     menu = tabs._build_tab_menu(0)
     by_text = {a.text(): a for a in menu.actions() if a.text()}
     assert by_text["复制绘图页"].isEnabled()
-    menu.deleteLater()
+    _delete_menu(menu)
 
 
 def test_duplicate_menu_item_disabled_at_page_limit(tabs, monkeypatch):
@@ -1012,4 +1109,4 @@ def test_duplicate_menu_item_disabled_at_page_limit(tabs, monkeypatch):
     action = by_text["复制绘图页"]
     assert not action.isEnabled()
     assert "上限" in action.toolTip()
-    menu.deleteLater()
+    _delete_menu(menu)

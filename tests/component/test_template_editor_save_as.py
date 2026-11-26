@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QMessageBox
 from src.core.plot_config import PlotConfig, PlotSessionConfig
 from src.core.template_manager import TemplateManager
 from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
+from tests.fixtures.waits import flush_deferred_deletes
 
 
 def _config(curves):
@@ -35,15 +36,22 @@ def boxes(monkeypatch):
     return shown
 
 
-def _editor(manager, template_id):
-    """顶层构造即可：临时 QWidget() 当 parent 会让子对话框立刻一起被回收"""
-    return TemplateEditorDialog(manager, edit_template_id=template_id)
+def _editor(request, manager, template_id):
+    """顶层构造即可；finalizer 显式派发 DeferredDelete，不依赖 qtbot。"""
+    dlg = TemplateEditorDialog(manager, edit_template_id=template_id)
+
+    def _dispose():
+        dlg.deleteLater()
+        flush_deferred_deletes()
+
+    request.addfinalizer(_dispose)
+    return dlg
 
 
-def test_cancelled_save_as_keeps_edit_target(manager, boxes, monkeypatch):
+def test_cancelled_save_as_keeps_edit_target(manager, boxes, monkeypatch, request):
     first = manager.save_template(_config(["a"]), "tpl1", "d1")
     manager.save_template(_config(["b"]), "tpl2", "d2")
-    dlg = _editor(manager, first.metadata.id)
+    dlg = _editor(request, manager, first.metadata.id)
     monkeypatch.setattr(
         TemplateEditorDialog,
         "_ask_conflict_resolution",
@@ -58,12 +66,12 @@ def test_cancelled_save_as_keeps_edit_target(manager, boxes, monkeypatch):
 
 
 def test_save_after_cancelled_save_as_still_targets_original(
-    manager, boxes, monkeypatch
+    manager, boxes, monkeypatch, request
 ):
     """上一条的回滚必须真接在「保存」上：改名保存的是原模板，不是又新建一个"""
     first = manager.save_template(_config(["a"]), "tpl1", "d1")
     manager.save_template(_config(["b"]), "tpl2", "d2")
-    dlg = _editor(manager, first.metadata.id)
+    dlg = _editor(request, manager, first.metadata.id)
     monkeypatch.setattr(
         TemplateEditorDialog,
         "_ask_conflict_resolution",
@@ -80,9 +88,9 @@ def test_save_after_cancelled_save_as_still_targets_original(
     assert manager.get_template(first.metadata.id).metadata.name == "tpl3"
 
 
-def test_save_as_success_creates_new_template_and_leaves_original(manager, boxes):
+def test_save_as_success_creates_new_template_and_leaves_original(manager, boxes, request):
     first = manager.save_template(_config(["a"]), "tpl1", "d1")
-    dlg = _editor(manager, first.metadata.id)
+    dlg = _editor(request, manager, first.metadata.id)
 
     dlg._name_edit.setText("copy")
     dlg._saveas_btn.click()
@@ -96,10 +104,10 @@ def test_save_as_success_creates_new_template_and_leaves_original(manager, boxes
     assert dlg._edit_template_id == copy_id
 
 
-def test_save_success_is_quiet_and_hands_the_wording_over(manager, boxes):
+def test_save_success_is_quiet_and_hands_the_wording_over(manager, boxes, request):
     """成功框已撤：点保存不该再有「成功」弹窗，动词交给状态栏那一句去拼。"""
     emitted = []
-    dlg = _editor(manager, None)
+    dlg = _editor(request, manager, None)
     dlg.template_saved.connect(emitted.append)
 
     dlg._name_edit.setText("quiet")
@@ -111,10 +119,10 @@ def test_save_success_is_quiet_and_hands_the_wording_over(manager, boxes):
     assert manager.exists("quiet")
 
 
-def test_edit_save_reports_update_not_save(manager, boxes):
+def test_edit_save_reports_update_not_save(manager, boxes, request):
     """编辑已有模板时动词必须是「模板已更新」，否则状态栏会误报新建了一个。"""
     first = manager.save_template(_config(["a"]), "tpl1", "d1")
-    dlg = _editor(manager, first.metadata.id)
+    dlg = _editor(request, manager, first.metadata.id)
 
     dlg._save_btn.click()
 

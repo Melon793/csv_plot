@@ -43,6 +43,7 @@ from src.core.data_types import (
     SYMBOL_POLICY_AUTO,
 )
 from src.core.logger import get_logger
+from src.ui import action_receipts
 from src.ui.drag_drop import (
     LEGEND_MIME_FORMAT,
     SHELF_MIME_FORMAT,
@@ -818,16 +819,24 @@ class CurveShelfWidget(QListWidget):
         return self.return_entries(self.selected_keys())
 
     # ------------------------------------------------------------------
-    # 条目删除（中键 / 右键 / 清空）
+    # 条目删除（右键 / 清空）
     # ------------------------------------------------------------------
+    def _delete_entries(self, keys: list[str]) -> int:
+        """右键删除的唯一实现：删条目 + 状态栏回执。"""
+        single_name = ""
+        if len(keys) == 1:
+            entry = self.entry_for_key(keys[0])
+            single_name = entry.var_name if entry is not None else ""
+        removed = self.remove_entries(keys)
+        if removed:
+            self._announce(action_receipts.shelf_entries_removed(removed, single_name))
+        return removed
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
-            item = self.itemAt(event.position().toPoint())
-            if item is not None:
-                key = item.data(SHELF_KEY_ROLE)
-                self.remove_entries([key])
-                event.accept()
-                return
+            # 显式消费，避免 QAbstractItemView 把中键当选中并清掉用户多选。
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
@@ -885,7 +894,7 @@ class CurveShelfWidget(QListWidget):
                 )
                 if reply != QMessageBox.StandardButton.Yes:
                     return
-            self.remove_entries(delete_keys)
+            self._delete_entries(delete_keys)
         elif chosen is clear_act:
             self.request_clear()
 
@@ -904,7 +913,10 @@ class CurveShelfWidget(QListWidget):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return 0
-        return self.clear_entries()
+        removed = self.clear_entries()
+        if removed:
+            self._announce(action_receipts.shelf_cleared(removed))
+        return removed
 
 
 class CurveShelfDialog(QDialog):

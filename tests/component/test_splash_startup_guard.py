@@ -36,8 +36,17 @@ def splash(qapp, qtbot):
 @pytest.fixture()
 def restore_quit_policy(qapp):
     original = qapp.quitOnLastWindowClosed()
+    had_main_window_ref = hasattr(qapp, "_main_window_ref")
+    original_main_window_ref = getattr(qapp, "_main_window_ref", None)
     yield qapp
+    # splash_delay=0 的收尾会排一个 singleShot(0)；先把它跑到，再恢复引用，
+    # 否则迟到的 _show_main_window 会在 fixture 收尾后重新写入已销毁窗口。
+    qapp.processEvents()
     qapp.setQuitOnLastWindowClosed(original)
+    if had_main_window_ref:
+        qapp._main_window_ref = original_main_window_ref
+    elif hasattr(qapp, "_main_window_ref"):
+        del qapp._main_window_ref
 
 
 class TestWaitForCompletionWatchdog:

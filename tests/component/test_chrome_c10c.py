@@ -31,6 +31,7 @@ from src.ui.widgets.curve_style_panel import (
     _line_preset_icon,
     _symbol_policy_icon,
 )
+from tests.fixtures.waits import flush_deferred_deletes
 
 ACCENT = QColor(theme.ACCENT)
 
@@ -261,12 +262,19 @@ def test_manual_check_palette_and_font(qapp):
 # ---------------------------------------------------------------------------
 
 
-def test_can_db_binding_button_is_native_toolbutton(qapp, tmp_path):
+def _dispose_can_dialog(dlg) -> None:
+    dlg._shutdown_prescan()
+    dlg.deleteLater()
+    flush_deferred_deletes()
+
+
+def test_can_db_binding_button_is_native_toolbutton(request, tmp_path):
     from src.ui.dialogs.can_db_selector import CanDatabaseSelectorDialog
     from tests.fixtures.data_factory import write_dbc
 
     dbc = write_dbc(tmp_path / "a.dbc")
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc)])
+    request.addfinalizer(lambda: _dispose_can_dialog(dlg))
     btn = dlg._binding_button(0)
     assert isinstance(btn, QToolButton)
     assert not btn.styleSheet()
@@ -275,10 +283,9 @@ def test_can_db_binding_button_is_native_toolbutton(qapp, tmp_path):
     assert btn.menu() is not None
     assert "▾" not in btn.text()  # 箭头交给原生 popup 指示器
     assert btn.text() == "全部库（默认）"
-    dlg.deleteLater()
 
 
-def test_can_db_text_area_click_opens_menu(qapp, tmp_path):
+def test_can_db_text_area_click_opens_menu(qtbot, request, tmp_path):
     """D-j 行为锁（评审 r1 P2-1）：文字区点击（clicked 语义）开菜单。
 
     Qt 6.12 公有 showMenu 是阻塞嵌套事件循环（qtoolbutton.cpp:670）；
@@ -291,9 +298,10 @@ def test_can_db_text_area_click_opens_menu(qapp, tmp_path):
 
     dbc = write_dbc(tmp_path / "a.dbc")
     dlg = CanDatabaseSelectorDialog(initial_paths=[str(dbc)])
+    request.addfinalizer(lambda: _dispose_can_dialog(dlg))
     btn = dlg._binding_button(0)
     btn.show()
-    qapp.processEvents()
+    qtbot.wait(0)
     menu = btn.menu()
     opened = []
     menu.aboutToShow.connect(lambda: opened.append(True))
@@ -305,4 +313,3 @@ def test_can_db_text_area_click_opens_menu(qapp, tmp_path):
     assert opened == [True]
     assert not menu.isVisible()
     btn.close()
-    dlg.deleteLater()

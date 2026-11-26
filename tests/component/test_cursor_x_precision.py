@@ -15,6 +15,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from src.ui.widgets.plot_widget import DraggableGraphicsLayoutWidget
+from tests.fixtures.waits import flush_deferred_deletes
 
 # 时间轴基准：1370 s 附近是 BLF 长录制的典型量级（float32 ULP≈0.12 ms）
 T0 = 1370.0
@@ -134,6 +135,7 @@ def host(qapp):
     h = FakeMainWindow()
     yield h
     h.deleteLater()
+    flush_deferred_deletes()
 
 
 @pytest.fixture()

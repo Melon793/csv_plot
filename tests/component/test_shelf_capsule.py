@@ -28,6 +28,7 @@ from src.ui.drag_drop import (
 from src.ui.widgets.curve_shelf import CurveShelfWidget, ShelfEntry
 from src.ui.widgets.chrome_button import native_push_height
 from src.ui.widgets.plot_tabs import MAX_PAGES, PlotTabsWidget
+from tests.fixtures.waits import flush_deferred_deletes
 
 # 手工构造的 QDropEvent 不接管 mimeData 所有权，必须外部保活
 _keep_alive: list = []
@@ -104,6 +105,7 @@ def capsule_shelf(qtbot):
     shelf.deleteLater()
     host.close()
     host.deleteLater()
+    flush_deferred_deletes()
 
 
 # ---------------------------------------------------------------------------

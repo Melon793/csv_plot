@@ -268,18 +268,19 @@ def test_exec_var_menu_routes_placeholder_to_invalid_menu(plot_factory, monkeypa
 
 # ---------- 编辑器 ----------
 
-def _editor(pw, qapp):
+def _editor(pw, qtbot):
     dlg = PlotVariableEditorDialog(pw)
-    qapp.processEvents()
+    qtbot.addWidget(dlg)
+    qtbot.wait(0)
     return dlg
 
 
-def test_editor_renders_placeholder_row(plot_factory, qapp):
+def test_editor_renders_placeholder_row(plot_factory, qtbot):
     """编辑器表格渲染占位行：灰名 +（缺失），行标记 UserRole+1"""
     pw = plot_factory()
     assert pw.plot_variable("a")
     pw.demote_to_invalid("ghost", "red", True)
-    dlg = _editor(pw, qapp)
+    dlg = _editor(pw, qtbot)
 
     names = [
         dlg.var_table.item(r, 1).data(Qt.ItemDataRole.UserRole)
@@ -292,11 +293,11 @@ def test_editor_renders_placeholder_row(plot_factory, qapp):
     dlg.close()
 
 
-def test_editor_checkbox_toggles_visible_preference(plot_factory, qapp):
+def test_editor_checkbox_toggles_visible_preference(plot_factory, qtbot):
     """占位行复选框切换 visible_preference（复活时生效）"""
     pw = plot_factory()
     pw.invalid_curves["ghost"] = InvalidCurveRef(var_name="ghost", color="red", visible_preference=True)
-    dlg = _editor(pw, qapp)
+    dlg = _editor(pw, qtbot)
 
     checkbox = dlg.var_table.cellWidget(0, 0)
     checkbox.setChecked(False)
@@ -305,12 +306,12 @@ def test_editor_checkbox_toggles_visible_preference(plot_factory, qapp):
     dlg.close()
 
 
-def test_editor_incremental_refresh_keeps_placeholder_row(plot_factory, qapp):
+def test_editor_incremental_refresh_keeps_placeholder_row(plot_factory, qapp, qtbot):
     """增量刷新不误删占位行（§6.3）：占位存在时回退全量重建"""
     pw = plot_factory()
     assert pw.plot_variable("a")
     pw.demote_to_invalid("ghost", "red", True)
-    dlg = _editor(pw, qapp)
+    dlg = _editor(pw, qtbot)
     assert dlg.var_table.rowCount() == 2
 
     # 触发一次 curves_changed（模拟外部增删）：占位行必须仍在
@@ -326,12 +327,12 @@ def test_editor_incremental_refresh_keeps_placeholder_row(plot_factory, qapp):
     dlg.close()
 
 
-def test_editor_clear_all_clears_placeholders(plot_factory, qapp, silent_dialogs):
+def test_editor_clear_all_clears_placeholders(plot_factory, qapp, qtbot, silent_dialogs):
     """编辑器「清空所有」连带清占位并 emit（§6.3）"""
     pw = plot_factory()
     assert pw.plot_variable("a")
     pw.demote_to_invalid("ghost", "red", True)
-    dlg = _editor(pw, qapp)
+    dlg = _editor(pw, qtbot)
     emitted = []
     pw.curves_changed.connect(lambda: emitted.append(1))
 
@@ -344,12 +345,12 @@ def test_editor_clear_all_clears_placeholders(plot_factory, qapp, silent_dialogs
     dlg.close()
 
 
-def test_editor_delete_selected_removes_placeholder(plot_factory, qapp):
+def test_editor_delete_selected_removes_placeholder(plot_factory, qtbot):
     """编辑器「删除选中」可删占位行（remove_variables_from_plot 两侧都查）"""
     pw = plot_factory()
     assert pw.plot_variable("a")
     pw.demote_to_invalid("ghost", "red", True)
-    dlg = _editor(pw, qapp)
+    dlg = _editor(pw, qtbot)
 
     dlg.var_table.selectRow(1)  # ghost 占位行
     dlg._remove_selected_variable_impl()

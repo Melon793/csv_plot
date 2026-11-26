@@ -1374,6 +1374,9 @@ class PlotUIManager(BasePlotManager):
             row=1, col=0, colspan=2,
             viewBox=CustomViewBox(defaultPadding=DEFAULT_PADDING_VAL_Y),
         )
+        # 只补所有权；保留 Popup flags，裸 setParent 会降级成子控件并抢命中。
+        ctrl_menu = pw.plot_item.ctrlMenu
+        ctrl_menu.setParent(pw, ctrl_menu.windowFlags())
         pw.view_box = pw.plot_item.vb
         pw.view_box.plot_widget = pw
         pw._connect_viewbox_signals()

@@ -19,7 +19,7 @@ ASC = ["AI05_1", "AI05_2", "AI05_3", "AI05_4", "AI05_10"]
 
 
 @pytest.fixture()
-def sort_env(plot_factory, qapp):
+def sort_env(plot_factory, qtbot):
     df = pd.DataFrame(
         {name: [float(i), float(i + 1)] for i, name in enumerate(NAMES)}
     )
@@ -30,7 +30,8 @@ def sort_env(plot_factory, qapp):
     for name in NAMES:
         assert pw.add_variable_to_plot(name)
     dlg = PlotVariableEditorDialog(pw)
-    qapp.processEvents()
+    qtbot.addWidget(dlg)
+    qtbot.wait(0)
     return dlg, pw
 
 

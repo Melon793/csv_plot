@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QInputDialog, QMessageBox, QToolButton
 
 from src.ui.widgets.plot_tabs import LAST_PAGE_CLOSE_HINT, MAX_PAGES
@@ -132,6 +135,100 @@ def test_close_current_page_switches_to_neighbor(loaded_window, qtbot):
     assert mw.plot_tabs.count() == 1
     assert mw.current_page is first_page
     assert mw.plot_tabs.currentWidget() is first_page.widget
+
+
+@pytest.mark.parametrize("entry", ["button", "middle", "menu", "directory"])
+def test_single_page_close_receipt_from_each_ui_entry(loaded_window, qtbot, entry):
+    mw = loaded_window
+    page = mw.new_page()
+    _wait_new_page_matrix(qtbot, page)
+    index = mw.plot_tabs.indexOf(page.widget)
+
+    if entry == "button":
+        qtbot.mouseClick(
+            mw.plot_tabs.close_button(index), Qt.MouseButton.LeftButton
+        )
+    elif entry == "middle":
+        qtbot.mouseClick(
+            mw.plot_tabs.tabBar(),
+            Qt.MouseButton.MiddleButton,
+            pos=mw.plot_tabs.tabBar().tabRect(index).center(),
+        )
+    elif entry == "menu":
+        menu = mw.plot_tabs._build_tab_menu(index)
+        action = next(action for action in menu.actions() if action.text() == "关闭")
+        action.trigger()
+        menu.deleteLater()
+    else:
+        qtbot.mouseClick(mw.plot_tabs._dir_btn, Qt.MouseButton.LeftButton)
+        popup = mw.plot_tabs._dir_popup
+        qtbot.waitUntil(popup.isVisible, timeout=2000)
+        rows = [
+            popup._rows_layout.itemAt(i).widget()
+            for i in range(popup._rows_layout.count())
+        ]
+        qtbot.mouseClick(rows[index]._close, Qt.MouseButton.LeftButton)
+
+    expected = f"已关闭「{page.title}」"
+    assert page not in mw.pages
+    assert mw._message_text == expected
+    assert mw._message_label.text()
+    assert mw._message_label.isVisible()
+    assert mw._log_separator.isVisible()
+
+
+def test_close_page_confirmation_cancel_keeps_previous_receipt(
+    loaded_window, qtbot, dialog_stubs
+):
+    mw = loaded_window
+    page = mw.new_page()
+    _wait_new_page_matrix(qtbot, page)
+    page.plot_widgets[0].plot_widget.plot_variable("speed")
+    mw._broadcast("关闭前已有消息")
+
+    qtbot.mouseClick(
+        mw.plot_tabs.close_button(mw.plot_tabs.indexOf(page.widget)),
+        Qt.MouseButton.LeftButton,
+    )
+
+    assert len(dialog_stubs["question"]) == 1
+    assert page in mw.pages
+    assert mw._message_text == "关闭前已有消息"
+
+
+def test_close_page_confirmation_yes_emits_receipt(loaded_window, qtbot, monkeypatch):
+    mw = loaded_window
+    page = mw.new_page()
+    _wait_new_page_matrix(qtbot, page)
+    page.plot_widgets[0].plot_widget.plot_variable("speed")
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+
+    qtbot.mouseClick(
+        mw.plot_tabs.close_button(mw.plot_tabs.indexOf(page.widget)),
+        Qt.MouseButton.LeftButton,
+    )
+
+    assert page not in mw.pages
+    assert mw._message_text == f"已关闭「{page.title}」"
+
+
+def test_programmatic_close_page_returns_result_without_receipt(loaded_window, qtbot):
+    mw = loaded_window
+    page = mw.current_page
+    assert mw.close_page(None) is False
+    assert mw.close_page(page) is False
+
+    second = mw.new_page()
+    _wait_new_page_matrix(qtbot, second)
+    second.plot_widgets[0].plot_widget.plot_variable("speed")
+    assert mw.close_page(second) is False
+    mw._broadcast("程序化关闭基准")
+    assert mw.close_page(second, confirm=False) is True
+    assert mw._message_text == "程序化关闭基准"
 
 
 def test_closing_last_page_clears_instead_of_removing(loaded_window):
@@ -371,11 +468,23 @@ def test_close_other_pages_batch_confirm_yes(loaded_window, qtbot, monkeypatch):
         return QMessageBox.StandardButton.Yes
 
     monkeypatch.setattr(QMessageBox, "question", staticmethod(yes))
+    broadcasts = []
+    original_broadcast = mw._broadcast
+
+    def record_broadcast(message, level="info"):
+        broadcasts.append(message)
+        original_broadcast(message, level)
+
+    monkeypatch.setattr(mw, "_broadcast", record_broadcast)
     mw._close_other_pages(0)
     assert len(calls) == 1
     assert "将关闭 2 个绘图页" in calls[0]
     assert mw.pages == [first]
     assert mw.plot_tabs.count() == 1
+    assert [m for m in broadcasts if m.startswith("已关闭")] == [
+        "已关闭 2 个绘图页"
+    ]
+    assert mw._message_text == "已关闭 2 个绘图页"
 
 
 def test_close_right_pages_cancel_keeps_pages(loaded_window, qtbot, dialog_stubs):
@@ -384,10 +493,12 @@ def test_close_right_pages_cancel_keeps_pages(loaded_window, qtbot, dialog_stubs
     _wait_new_page_matrix(qtbot, second)
     third = mw.new_page()
     _wait_new_page_matrix(qtbot, third)
+    mw._broadcast("批量关闭前已有消息")
 
     mw._close_right_pages(0)                 # 替身默认 No → 全保留
     assert len(mw.pages) == 3
     assert any("将关闭 2 个绘图页" in text for _, text in dialog_stubs["question"])
+    assert mw._message_text == "批量关闭前已有消息"
 
 
 def test_batch_close_reports_curve_pages(loaded_window, qtbot, dialog_stubs):
