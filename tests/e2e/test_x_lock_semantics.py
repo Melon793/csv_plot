@@ -186,6 +186,43 @@ def test_d3_lock_syncs_all_pages_and_switch_keeps_window(loaded_window, qtbot, q
     assert second_pw.view_box.viewRange()[0] == pytest.approx((5, 15), abs=1e-6)
 
 
+def test_d3_lock_defers_hidden_page_style_refresh(loaded_window, qtbot, qapp, monkeypatch):
+    """锁定仍立即同步全部页范围，但隐藏页样式延后到激活时补刷。"""
+    from src.ui.widgets.plot_page import PlotPage
+
+    mw = loaded_window
+    first = mw.current_page
+    assert first.plot_widgets[0].plot_widget.plot_variable("speed")
+    second = _add_page(mw, qtbot, "rpm")
+    _wait_activation(mw, qtbot)
+    assert mw.current_page is second
+    assert first.apply_x_range(10, 20)
+    assert second.apply_x_range(30, 40)
+    qapp.processEvents()
+
+    calls = []
+    original = PlotPage.refresh_curve_styles
+
+    def spy(page):
+        calls.append(page)
+        return original(page)
+
+    monkeypatch.setattr(PlotPage, "refresh_curve_styles", spy)
+    mw.set_x_axis_locked(True)
+
+    # 范围立即同步到隐藏页；样式只刷新当前活动页。
+    assert second in calls
+    assert first not in calls
+    for page in (first, second):
+        assert page.master_viewbox().viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
+
+    calls.clear()
+    mw.activate_page(first)
+    _wait_activation(mw, qtbot)
+    qapp.processEvents()
+    assert first in calls, "隐藏页激活时必须由既有链路补刷样式"
+
+
 def test_d3_locked_empty_new_page_uses_global_window(loaded_window, qtbot, qapp):
     """锁定下新建页没有自己的窗口：激活即继承全局锁定窗口，首绘不跳全域。
 

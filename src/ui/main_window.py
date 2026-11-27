@@ -1071,7 +1071,10 @@ class MainWindow(QMainWindow):
             return
         for page in tuple(self.pages):
             page.apply_x_range(*self._locked_x_range)
-            page.refresh_curve_styles()
+            # 隐藏页不在锁定瞬间做可推迟的样式刷新；切页激活时
+            # _post_activation -> sync_xlink 会补刷，避免 16 页同步尖峰。
+            if page is self._current_page:
+                page.refresh_curve_styles()
 
     def set_x_axis_locked(self, locked: bool, reason: str = "") -> None:
         """锁定状态的唯一写入口：抽屉锁 chip / 自动解锁都走这里（main 收口版
