@@ -438,6 +438,10 @@ class FileLoaderManager(MainWindowBaseManager):
             widget = getattr(container, "plot_widget", None)
             if not widget:
                 continue
+            # 触摸板刷选属于旧数据会话；reload 开始立即取消，不能等 250ms 静默定时器。
+            reset_scroll = getattr(widget, "_reset_trackpad_scroll", None)
+            if callable(reset_scroll):
+                reset_scroll()
             # v5.x: 断开 vline/vline2 信号，防止中间态触发回调导致 SIGSEGV
             # 重复 reload 时信号可能已断开，使用 catch_warnings 抑制 libpyside 的 RuntimeWarning
             if hasattr(widget, "vline"):

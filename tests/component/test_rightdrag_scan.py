@@ -20,9 +20,10 @@ import pandas as pd
 import pytest
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QGraphicsSceneMouseEvent
 
+import pyqtgraph as pg
 from pyqtgraph.GraphicsScene.mouseEvents import MouseClickEvent, MouseDragEvent
 
 from src.ui.widgets.custom_viewbox import SCAN_MIN_PX
@@ -31,16 +32,20 @@ from src.ui.widgets.custom_viewbox import SCAN_MIN_PX
 # ---------- 事件构造辅助 ----------
 
 
-def _qscene_event(kind, scene_pos, down_pos, buttons=Qt.MouseButton.RightButton):
+def _qscene_event(
+    kind,
+    scene_pos,
+    down_pos,
+    buttons=Qt.MouseButton.RightButton,
+    button=Qt.MouseButton.RightButton,
+):
     ev = QGraphicsSceneMouseEvent(kind)
     ev.setScenePos(QPointF(scene_pos))
     ev.setScreenPos(QPoint(int(scene_pos.x()), int(scene_pos.y())))
-    ev.setButton(Qt.MouseButton.RightButton)
+    ev.setButton(button)
     ev.setButtons(buttons)
-    ev.setButtonDownScenePos(Qt.MouseButton.RightButton, QPointF(down_pos))
-    ev.setButtonDownScreenPos(
-        Qt.MouseButton.RightButton, QPoint(int(down_pos.x()), int(down_pos.y()))
-    )
+    ev.setButtonDownScenePos(button, QPointF(down_pos))
+    ev.setButtonDownScreenPos(button, QPoint(int(down_pos.x()), int(down_pos.y())))
     return ev
 
 
@@ -50,10 +55,22 @@ def _send(vb, drag, axis=None):
     vb.mouseDragEvent(drag, axis=axis)
 
 
-def _drag(vb, start_scene, end_scene, axis=None):
-    """模拟一次完整右键拖拽：start → end → 松手。"""
-    press = _qscene_event(QEvent.Type.GraphicsSceneMousePress, start_scene, start_scene)
-    move = _qscene_event(QEvent.Type.GraphicsSceneMouseMove, end_scene, start_scene)
+def _drag(vb, start_scene, end_scene, axis=None, button=Qt.MouseButton.RightButton):
+    """模拟一次完整拖拽：start → end → 松手。"""
+    press = _qscene_event(
+        QEvent.Type.GraphicsSceneMousePress,
+        start_scene,
+        start_scene,
+        buttons=button,
+        button=button,
+    )
+    move = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseMove,
+        end_scene,
+        start_scene,
+        buttons=button,
+        button=button,
+    )
     _send(vb, MouseDragEvent(move, press, None, start=True, finish=False), axis=axis)
     _send(vb, MouseDragEvent(move, press, move, start=False, finish=False), axis=axis)
     release = _qscene_event(
@@ -61,6 +78,7 @@ def _drag(vb, start_scene, end_scene, axis=None):
         end_scene,
         start_scene,
         buttons=Qt.MouseButton.NoButton,
+        button=button,
     )
     _send(vb, MouseDragEvent(release, press, move, start=False, finish=True), axis=axis)
 
@@ -126,6 +144,11 @@ def _right_click(vb, scene_pos):
         buttons=Qt.MouseButton.NoButton,
     )
     vb.mouseClickEvent(MouseClickEvent(release))
+
+
+def _arm_scan_mode(vb):
+    vb._arm_scan()
+    assert vb._scan_armed is True
 
 
 def _x_of(vb, pw, local: QPoint) -> float:
@@ -494,7 +517,10 @@ def test_escape_cancels_scan(scan_plot, qapp, monkeypatch):
     assert band is not None
 
     qapp.sendEvent(
-        pw, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        pw,
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+        ),
     )
 
     assert vb._scan_band is None
@@ -556,11 +582,303 @@ def test_xlink_scan_updates_group(plot_factory, qapp):
     _drag(vb, start, end)
     qapp.processEvents()
 
-    assert master.view_box.viewRange()[0] == pytest.approx(
-        expected, rel=1e-9, abs=1e-9
-    )
-    assert child.view_box.viewRange()[0] == pytest.approx(
-        expected, rel=1e-9, abs=1e-9
-    )
+    assert master.view_box.viewRange()[0] == pytest.approx(expected, rel=1e-9, abs=1e-9)
+    assert child.view_box.viewRange()[0] == pytest.approx(expected, rel=1e-9, abs=1e-9)
     assert child.view_box.viewRange()[1] == child_y_before
     assert master.view_box.viewRange()[1] == master_y_before
+
+
+# ---------- 底层一次性扫选模式（右键菜单入口已移除） ----------
+
+
+def test_armed_scan_crosshair_and_wheel_still_works(scan_plot):
+    pw = scan_plot
+    vb = pw.view_box
+    _arm_scan_mode(vb)
+    assert pw.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    assert vb._scan_filter_view is pw
+
+    before_x = list(vb.viewRange()[0])
+    event = QWheelEvent(
+        QPointF(400, 300),
+        QPointF(pw.mapToGlobal(QPoint(400, 300))),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    pw.wheelEvent(event)
+
+    assert vb.viewRange()[0] != before_x
+    assert vb._scan_armed is True
+    vb._cancel_scan()
+
+
+def test_armed_left_drag_scans_x_and_disarms(scan_plot, monkeypatch):
+    pw = scan_plot
+    vb = pw.view_box
+    opened = []
+    monkeypatch.setattr(vb, "raiseContextMenu", lambda ev: opened.append(ev))
+    _arm_scan_mode(vb)
+    start_local, end_local = QPoint(200, 300), QPoint(500, 300)
+    expected = sorted([_x_of(vb, pw, start_local), _x_of(vb, pw, end_local)])
+    y_before = list(vb.viewRange()[1])
+
+    _drag(
+        vb,
+        pw.mapToScene(start_local),
+        pw.mapToScene(end_local),
+        button=Qt.MouseButton.LeftButton,
+    )
+
+    assert vb.viewRange()[0] == pytest.approx(expected, rel=1e-9, abs=1e-9)
+    assert vb.viewRange()[1] == y_before
+    assert vb._scan_band is None
+    assert vb._scan_armed is False
+    assert vb._scan_filter_view is None
+    assert pw.viewport().testAttribute(Qt.WidgetAttribute.WA_SetCursor) is False
+    assert opened == []
+
+
+def test_armed_left_short_drag_or_click_keeps_mode(scan_plot, monkeypatch):
+    pw = scan_plot
+    vb = pw.view_box
+    opened = []
+    monkeypatch.setattr(vb, "raiseContextMenu", lambda ev: opened.append(ev))
+    x_before = list(vb.viewRange()[0])
+    _arm_scan_mode(vb)
+    start = pw.mapToScene(QPoint(300, 300))
+
+    _drag(
+        vb,
+        start,
+        pw.mapToScene(QPoint(300 + SCAN_MIN_PX - 2, 300)),
+        button=Qt.MouseButton.LeftButton,
+    )
+    release = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseRelease,
+        start,
+        start,
+        buttons=Qt.MouseButton.NoButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    vb.mouseClickEvent(MouseClickEvent(release))
+
+    assert vb.viewRange()[0] == x_before
+    assert vb._scan_armed is True
+    assert vb._scan_band is None
+    assert pw.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    assert opened == []
+    vb._cancel_scan()
+
+
+def test_escape_disarms_without_scanning(scan_plot, qapp):
+    pw = scan_plot
+    vb = pw.view_box
+    x_before = list(vb.viewRange()[0])
+    _arm_scan_mode(vb)
+
+    qapp.sendEvent(
+        pw,
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+        ),
+    )
+
+    assert vb.viewRange()[0] == x_before
+    assert vb._scan_armed is False
+    assert vb._scan_active is False
+    assert vb._scan_filter_view is None
+    assert pw.viewport().testAttribute(Qt.WidgetAttribute.WA_SetCursor) is False
+
+
+def test_unarmed_left_drag_still_pans(scan_plot):
+    pw = scan_plot
+    vb = pw.view_box
+    x_before = list(vb.viewRange()[0])
+
+    _drag(
+        vb,
+        pw.mapToScene(QPoint(300, 300)),
+        pw.mapToScene(QPoint(500, 300)),
+        button=Qt.MouseButton.LeftButton,
+    )
+
+    assert vb.viewRange()[0][0] < x_before[0]
+    assert vb.viewRange()[0][1] - vb.viewRange()[0][0] == pytest.approx(
+        x_before[1] - x_before[0]
+    )
+    assert vb._scan_active is False
+
+
+def test_armed_right_drag_scans_and_disarms(scan_plot):
+    pw = scan_plot
+    vb = pw.view_box
+    _arm_scan_mode(vb)
+    start_local, end_local = QPoint(200, 300), QPoint(500, 300)
+    expected = sorted([_x_of(vb, pw, start_local), _x_of(vb, pw, end_local)])
+
+    _drag(vb, pw.mapToScene(start_local), pw.mapToScene(end_local))
+
+    assert vb.viewRange()[0] == pytest.approx(expected, rel=1e-9, abs=1e-9)
+    assert vb._scan_armed is False
+    assert vb._scan_filter_view is None
+
+
+def test_arm_scan_is_noop_when_x_locked(scan_plot):
+    pw = scan_plot
+    vb = pw.view_box
+    pw._x_mouse_locked = True
+
+    vb._arm_scan()
+
+    assert vb._scan_armed is False
+    assert pw.viewport().testAttribute(Qt.WidgetAttribute.WA_SetCursor) is False
+
+
+def test_escape_during_armed_left_drag_swallows_remaining_events(
+    scan_plot, qapp, monkeypatch
+):
+    pw = scan_plot
+    vb = pw.view_box
+    x_before = list(vb.viewRange()[0])
+    _arm_scan_mode(vb)
+    down = pw.mapToScene(QPoint(200, 300))
+    mid = pw.mapToScene(QPoint(400, 300))
+    press = _qscene_event(
+        QEvent.Type.GraphicsSceneMousePress,
+        down,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    move = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseMove,
+        mid,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(move, press, None, start=True, finish=False))
+    assert vb._scan_active is True
+
+    qapp.sendEvent(
+        pw,
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+        ),
+    )
+    delegated = []
+    monkeypatch.setattr(
+        pg.ViewBox,
+        "mouseDragEvent",
+        lambda self, ev, axis=None: delegated.append(ev),
+    )
+    end = pw.mapToScene(QPoint(520, 300))
+    move = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseMove,
+        end,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(move, press, move, start=False, finish=False))
+    release = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseRelease,
+        end,
+        down,
+        buttons=Qt.MouseButton.NoButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(release, press, move, start=False, finish=True))
+
+    assert delegated == []
+    assert vb.viewRange()[0] == x_before
+    assert vb._scan_cancelled_button is None
+
+
+def test_new_drag_after_lost_cancel_release_is_not_swallowed(
+    scan_plot, qapp, monkeypatch
+):
+    pw = scan_plot
+    vb = pw.view_box
+    _arm_scan_mode(vb)
+    down = pw.mapToScene(QPoint(200, 300))
+    press = _qscene_event(
+        QEvent.Type.GraphicsSceneMousePress,
+        down,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(press, press, None, start=True, finish=False))
+    qapp.sendEvent(
+        pw,
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+        ),
+    )
+    assert vb._scan_cancelled_button == Qt.MouseButton.LeftButton
+
+    delegated = []
+    monkeypatch.setattr(
+        pg.ViewBox,
+        "mouseDragEvent",
+        lambda self, ev, axis=None: delegated.append(ev),
+    )
+    move_pos = pw.mapToScene(QPoint(400, 300))
+    move = _qscene_event(
+        QEvent.Type.GraphicsSceneMouseMove,
+        move_pos,
+        down,
+        buttons=Qt.MouseButton.LeftButton,
+        button=Qt.MouseButton.LeftButton,
+    )
+    _send(vb, MouseDragEvent(move, press, None, start=True, finish=False))
+
+    assert len(delegated) == 1
+    assert vb._scan_cancelled_button is None
+
+
+def test_armed_left_click_keeps_selection_and_never_starts_lift(scan_plot):
+    pw = scan_plot
+    vb = pw.view_box
+    pw.legend_label._toggle_legend_selection("a")
+    _arm_scan_mode(vb)
+    curve = pw.curves["a"]
+    curve_pos = pw.mapFromScene(
+        vb.mapViewToScene(QPointF(float(curve.x_data[50]), float(curve.y_data[50])))
+    )
+
+    for pos, modifiers in (
+        (QPoint(150, 100), Qt.KeyboardModifier.NoModifier),
+        (curve_pos, Qt.KeyboardModifier.ControlModifier),
+    ):
+        pw.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(pos),
+                QPointF(pos),
+                QPointF(0.0, 0.0),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                modifiers,
+            )
+        )
+        assert pw._lift_timer.isActive() is False
+        assert pw._curve_click_press_pos is None
+        pw.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                QPointF(pos),
+                QPointF(pos),
+                QPointF(0.0, 0.0),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                modifiers,
+            )
+        )
+        assert pw._legend_selection == {"a"}
+        assert vb._scan_armed is True

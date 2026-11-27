@@ -34,6 +34,8 @@ from src.ui.widgets.custom_viewbox import (
     ZH_VAR_EDITOR,
 )
 
+REMOVED_SCAN_TEXT = "扫选放大（拖动选择 X 区间）"
+
 # 改造前的英文字面量：任何一条重新出现在菜单里都说明有比对点漏改
 LEGACY_ENGLISH_TEXTS = [
     "Jump to Data",
@@ -125,6 +127,7 @@ def test_menu_uses_chinese_labels(view_box):
         assert zh in texts, f"缺少中文菜单项 {zh!r}，实际：{texts}"
 
     # 数值开关已收进子菜单，顶层不得残留任何状态下的文案
+    assert REMOVED_SCAN_TEXT not in texts
     assert ZH_HIDE_CURSOR_VALUE not in texts
     assert ZH_SHOW_CURSOR_VALUE not in texts
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 import sys
 import os
+import math
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from src.ui.widgets.scroll_gesture import TrackpadScroll
 from src.utils.platform_setup import setup_platform
 setup_platform()
 
@@ -36,7 +39,7 @@ from src.ui.drag_visuals import (
 )
 from src.core.data_types import DRAW_MODE_AUTO, SYMBOL_POLICY_AUTO
 from src.ui.transfer_broadcast import announce_selection, broadcast_transfer
-from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR)
+from src.core.config import (safe_callback, safe_qt_op, CURVE_LIFT_LONG_PRESS_MS, DEFAULT_PADDING_VAL_X, XRANGE_THRESHOLD_FOR_SYMBOLS, FACTOR_SCROLL_ZOOM, DEFAULT_LINE_WIDTH, THICK_LINE_WIDTH, THIN_LINE_WIDTH, UI_DEBOUNCE_DELAY_MS, PLOT_ROW_MAX_DEFAULT, is_grouped_loader, PLOT_ROW_CURRENT_DEFAULT, DEFAULT_SHOW_X_AXIS_LABEL, INVALID_CURVE_COLOR, SCROLL_APPLY_INTERVAL_MS, CTRL_NOTCH_ZOOM_FACTOR, WHEEL_NOTCH_UNIT)
 from src.core.logger import get_logger
 
 
@@ -95,6 +98,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         if time_channels_info is None:
             time_channels_info = {}
         super().__init__()
+        # 原生捏合事件会先落到 QGraphicsView 的 viewport；在 viewport 与控件
+        # event() 两侧共用同一处理入口，避免 macOS 事件在子控件处被吞掉。
+        self.viewport().installEventFilter(self)
         self.factor = 1.0
         self.offset = 0.0
         self.mark_region = None
@@ -109,6 +115,12 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         # X 轴锁定（MainWindow.set_x_axis_locked 广播 / 建图补种）：
         # 滚轮 zoom_x、Shift 框选 release、右键菜单可见性都读它
         self._x_mouse_locked = False
+        self._trackpad_scroll = TrackpadScroll()
+        self._scroll_modifiers = None
+        self._scroll_center_x = 0.0
+        self._scroll_apply_timer = QTimer(self)
+        self._scroll_apply_timer.setSingleShot(True)
+        self._scroll_apply_timer.timeout.connect(self._flush_trackpad_scroll)
         # C++ 侧析构一开始就置位，覆盖所有不经过显式拆卸点的路径（如主窗口
         # 退出时的子对象析构）。必须用 lambda 连：连到绑定方法上时 PySide6 在
         # 包装器失效时会丢掉这条连接，实测不再回调。
@@ -159,6 +171,7 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         一轮事件循环，期间排着的定时器/防抖回调仍会打到这个 plot。
         """
         self._is_being_destroyed = True
+        self._reset_trackpad_scroll()
         self._cancel_lift(restore_cursor=True)
         # 浮卡挂在主窗口上，不会随 plot 一起析构，这里显式回收。
         card = getattr(self, "_lift_card", None)
@@ -694,43 +707,221 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
         except Exception:
             logger.warning("paintEvent 异常", exc_info=True)
 
+    def _scroll_now(self) -> float:
+        return time.monotonic_ns() / 1_000_000.0
+
+    def _scroll_input_blocked(self) -> bool:
+        return (
+            self._is_updating_data
+            or self._is_being_destroyed
+            or self._x_mouse_locked
+        )
+
+    def _reset_trackpad_scroll(self) -> None:
+        vb = self.plot_item.getViewBox()
+        cancel_scan = getattr(vb, "cancel_scroll_scan", None)
+        if callable(cancel_scan):
+            cancel_scan()
+        self._trackpad_scroll.reset()
+        self._scroll_apply_timer.stop()
+
+    def _sync_scroll_modifiers(self, modifiers) -> None:
+        if self._scroll_modifiers != modifiers:
+            self._flush_trackpad_scroll()
+            self._reset_trackpad_scroll()
+            self._scroll_modifiers = modifiers
+
+    def _feed_trackpad_scroll(self, dx: float, dy: float, center_x: float):
+        if self._scroll_input_blocked():
+            self._reset_trackpad_scroll()
+            return None
+        self._scroll_center_x = center_x
+        step = self._trackpad_scroll.feed(dx, dy, self._scroll_now())
+        if (
+            step is None
+            and self._trackpad_scroll.mode == "trackpad"
+            and not self._scroll_apply_timer.isActive()
+        ):
+            self._scroll_apply_timer.start(SCROLL_APPLY_INTERVAL_MS)
+        return step
+
+    def _flush_trackpad_scroll(self) -> None:
+        if self._scroll_input_blocked():
+            self._reset_trackpad_scroll()
+            return
+        step = self._trackpad_scroll.flush(self._scroll_now())
+        if step is not None:
+            self._apply_scroll_step(step)
+
+    def _apply_scroll_step(self, step) -> None:
+        if step.zoom_log != 0:
+            self._axis_manager.zoom_x(math.exp(step.zoom_log), self._scroll_center_x)
+        if step.pan_fraction != 0:
+            self._axis_manager.pan_x(step.pan_fraction)
+
+    def _handle_native_gesture(self, event) -> bool:
+        """把 macOS 原生捏合增量接入统一的 X 轴缩放路径。"""
+        gesture_type = event.gestureType()
+        if gesture_type not in (
+            Qt.NativeGestureType.BeginNativeGesture,
+            Qt.NativeGestureType.ZoomNativeGesture,
+            Qt.NativeGestureType.EndNativeGesture,
+        ):
+            return False
+
+        plot_item = getattr(self, "plot_item", None)
+        if plot_item is None:
+            return False
+        if gesture_type in (
+            Qt.NativeGestureType.BeginNativeGesture,
+            Qt.NativeGestureType.EndNativeGesture,
+        ):
+            # 捏合与滚轮滑动可能交替出现，Begin/End 都要清掉未应用增量，
+            # 避免同一次触摸手势被两条路径重复缩放。
+            self._reset_trackpad_scroll()
+            event.accept()
+            return True
+        if self._scroll_input_blocked():
+            event.accept()
+            return True
+
+        # 事件可能由 viewport 接收，local position 的坐标系随接收者变化；
+        # 统一从全局坐标回算，确保锚点始终落在实际手势位置。
+        local_pos = self.mapFromGlobal(event.globalPosition().toPoint())
+        scene_pos = self.mapToScene(local_pos)
+        vb = plot_item.getViewBox()
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return False
+        if self._is_pos_over_legend(local_pos):
+            return False
+
+        value = float(event.value())
+        if not math.isfinite(value):
+            event.accept()
+            return True
+        # macOS 双指张开的 magnification 为正；绘图中的“放大”应缩小 X 跨度，
+        # 因此取倒数，保持手势方向与用户预期一致。
+        scale = 1.0 + value
+        if scale <= 0.0:
+            event.accept()
+            return True
+        factor = max(0.000001, 1.0 / scale)
+        self._axis_manager.zoom_x(factor, vb.mapSceneToView(scene_pos).x())
+        event.accept()
+        return True
+
+    def event(self, event):
+        if event.type() == QEvent.Type.NativeGesture:
+            if self._handle_native_gesture(event):
+                return True
+        return super().event(event)
+
     def wheelEvent(self, ev):
         vb = self.plot_item.getViewBox()
-        delta = ev.angleDelta().y()
-        # 鼠标悬停在 legend 上时，滚轮驱动 legend 滚动而非 X 轴缩放
-        if (
-            ev.modifiers() == Qt.KeyboardModifier.NoModifier
-            and delta != 0
-            and getattr(self, "_legend_proxy", None) is not None
-        ):
-            scene_pos = self.mapToScene(ev.position().toPoint())
-            if self._legend_proxy.sceneBoundingRect().contains(scene_pos):
-                sb = self.legend_label.verticalScrollBar()
-                if sb.maximum() > sb.minimum():
-                    # 内容溢出可滚动：滚轮驱动 legend 滚动（每齿(120)约 3 行）
-                    fm = self.legend_label.fontMetrics()
-                    steps = delta / 120
-                    sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
-                    ev.accept()
-                    return
-                # 内容未溢出：不吞事件，放行到下方 X 轴缩放路径
-        # 只在没有按下任何修饰键（Ctrl/Shift/Alt…）时才执行缩放
-        if ev.modifiers() == Qt.KeyboardModifier.NoModifier:
-            if delta != 0:
-                # 获取鼠标位置
-                mouse_pos = ev.position().toPoint()
-                scene_pos = self.mapToScene(mouse_pos)
-                view_pos = vb.mapSceneToView(scene_pos)
-                mouse_x = view_pos.x()
+        angle = ev.angleDelta()
+        dx = angle.x()
+        delta = angle.y()
+        modifiers = ev.modifiers()
+        phase = ev.phase()
+        scene_pos = self.mapToScene(ev.position().toPoint())
 
-                factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
-                self._axis_manager.zoom_x(factor, mouse_x)
-                ev.accept()  # 确保事件被处理
+        # macOS/Windows 精密触控板会提供 ScrollPhase。横滑刷选一旦开始，
+        # 就由 ScrollEnd 提交；先于修饰键同步处理，兼容“先松 Shift 再抬手”。
+        if vb.scroll_scan_active and phase in (
+            Qt.ScrollPhase.ScrollBegin,
+            Qt.ScrollPhase.ScrollUpdate,
+            Qt.ScrollPhase.ScrollEnd,
+        ):
+            if phase == Qt.ScrollPhase.ScrollEnd:
+                vb.feed_scroll_scan(0, scene_pos, phase)
+            elif dx != 0:
+                vb.feed_scroll_scan(dx, scene_pos, phase)
+            ev.accept()
+            return
+
+        self._sync_scroll_modifiers(modifiers)
+        in_view_box = vb.sceneBoundingRect().contains(scene_pos)
+        over_legend = getattr(
+            self, "_legend_proxy", None
+        ) is not None and self._legend_proxy.sceneBoundingRect().contains(scene_pos)
+        horizontal_dominant = dx != 0 and abs(dx) >= abs(delta)
+        shift_horizontal_scan = (
+            modifiers == Qt.KeyboardModifier.ShiftModifier
+            and in_view_box
+            and not over_legend
+            and (
+                horizontal_dominant
+                or (vb.scroll_scan_active and dx != 0)
+            )
+        )
+        if vb.scroll_scan_active and not shift_horizontal_scan:
+            vb.cancel_scroll_scan()
+        x_zoom_modifiers = modifiers == Qt.KeyboardModifier.NoModifier or (
+            modifiers == Qt.KeyboardModifier.ShiftModifier and in_view_box
+        )
+
+        if x_zoom_modifiers and (dx != 0 or delta != 0) and over_legend:
+            if dx != 0:
+                ev.accept()
+                return
+            sb = self.legend_label.verticalScrollBar()
+            if sb.maximum() > sb.minimum():
+                fm = self.legend_label.fontMetrics()
+                steps = delta / 120
+                sb.setValue(int(sb.value() - steps * 3 * fm.lineSpacing()))
+                ev.accept()
+                return
+
+        if shift_horizontal_scan and vb.feed_scroll_scan(dx, scene_pos, phase):
+            ev.accept()
+            return
+
+        if x_zoom_modifiers:
+            if not in_view_box and delta == 0 and dx != 0:
+                super().wheelEvent(ev)
+                return
+            if dx != 0 or delta != 0:
+                mouse_x = vb.mapSceneToView(scene_pos).x()
+                step = self._feed_trackpad_scroll(dx, delta, mouse_x)
+                if step is not None:
+                    self._apply_scroll_step(step)
+                if self._trackpad_scroll.mode == "mouse" and delta != 0:
+                    factor = max(0.000001,1-FACTOR_SCROLL_ZOOM)if delta > 0 else (1+FACTOR_SCROLL_ZOOM)
+                    self._axis_manager.zoom_x(factor, mouse_x)
+                ev.accept()
             else:
                 super().wheelEvent(ev)
-        else:
-            # 有按键按下，交给父类默认处理
-            super().wheelEvent(ev)
+            return
+
+        if modifiers == Qt.KeyboardModifier.ControlModifier:
+            if not in_view_box:
+                super().wheelEvent(ev)
+                return
+            if dx == 0 and delta == 0:
+                super().wheelEvent(ev)
+                return
+            if self._scroll_input_blocked():
+                self._reset_trackpad_scroll()
+                ev.accept()
+                return
+            if delta == 0:
+                ev.accept()
+                return
+
+            mouse_x = vb.mapSceneToView(scene_pos).x()
+            if delta % WHEEL_NOTCH_UNIT == 0:
+                self._flush_trackpad_scroll()
+                self._reset_trackpad_scroll()
+                factor = CTRL_NOTCH_ZOOM_FACTOR ** (-delta / WHEEL_NOTCH_UNIT)
+                self._axis_manager.zoom_x(factor, mouse_x)
+            else:
+                step = self._feed_trackpad_scroll(0, delta, mouse_x)
+                if step is not None:
+                    self._apply_scroll_step(step)
+            ev.accept()
+            return
+
+        super().wheelEvent(ev)
     
     @safe_callback
     def mouse_moved(self, evt):
@@ -759,7 +950,9 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._plot_ui_manager.update_legend_height()
 
     def eventFilter(self, obj, event):
-        """legend_label 宽度变化 → 重算 legend 高度（补齐布局协商时序缺口）"""
+        """viewport 原生捏合，以及 legend/轴尺寸变化后的布局补偿。"""
+        if obj is self.viewport() and event.type() == QEvent.Type.NativeGesture:
+            return self._handle_native_gesture(event)
         if (
             obj is getattr(self, "legend_label", None)
             and event.type() == QEvent.Type.Resize
@@ -2121,9 +2314,14 @@ class DraggableGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
             self._suppress_curve_click = False
             self._cancel_lift()
         # 曲线选中联动：先按口径记录/清空点击起点，再走既有分支（不改控制流）
-        self._curve_click_press_pos = self._curve_click_press_candidate(event)
-        self._curve_click_ctrl = bool(
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        scan_armed = bool(getattr(self.view_box, "_scan_armed", False))
+        self._curve_click_press_pos = (
+            None if scan_armed else self._curve_click_press_candidate(event)
+        )
+        self._curve_click_ctrl = (
+            False
+            if scan_armed
+            else bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         )
         # 长按抬框：Shift 不参与（框选缩放专属）；Alt/Ctrl/⌘ 允许——macOS
         # ⌥/⌘ 是「先按修饰键再拖动」的习惯路径，排除 Ctrl 会让选择手感断裂。
