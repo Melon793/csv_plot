@@ -307,6 +307,8 @@ class AxisManager:
         padding: float = 0,
     ) -> None:
         """设置 X 范围；本视图被 XLink 接管时写入源视图，由其广播到整组。"""
+        if getattr(self.pw, "_x_mouse_locked", False):
+            return
         vb = self.pw.view_box
         target = self._xlink_target(vb)
 

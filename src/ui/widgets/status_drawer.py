@@ -736,7 +736,7 @@ class XAxisDrawer(StatusDrawer):
         self.lock_chip.setText("解锁X轴可见范围" if locked else "锁定X轴可见范围")
         self.lock_chip.setIcon(_lock_icon(locked, DEFAULT_CURVE_COLOR if locked else "#4b5563"))
         self.lock_hint.setText(
-            "已冻结 · 切页不跟随 · 改基准自动解锁" if locked
+            "已冻结 · 所有页面同步 · 改基准自动解锁" if locked
             else "锁定后滚轮停用、拖动只调 Y"
         )
         self.apply_btn.setToolTip(

@@ -2,8 +2,8 @@
 
 - L2 抽屉 chip 唯一手动入口同规格播报（main 收口撤菜单/快捷键）；
 - D2：自动缩放按钮置灰 + 快捷键槽守卫 + auto_range_page 入口守卫；
-- D3：锁定切页各页保留冻结窗口，saved_x_range 跳过分支同样被消费，
-  解锁后跟随恢复；空页无窗口可冻结，激活时照常继承来源页范围；
+- D3：锁定当前页窗口并立即同步全部页，锁定切页保持同一窗口，
+  解锁后跟随恢复；空页激活与首绘均保持锁定窗口；
 - D4：reload / 时间修正 / 模板应用 / reset_plot 四入口自动解锁+播报。
 
 交互流（滚轮/拖动/框选）在 test_x_lock_flow.py（C3）。
@@ -138,9 +138,9 @@ def test_d2_auto_range_guarded_on_all_entries(loaded_window, qapp):
     assert list(pw.view_box.viewRange()[0]) != before, "解锁后自动缩放应恢复"
 
 
-# ---------- D3：锁定切页不跟随 ----------
+# ---------- D3：锁定当前窗口并跨页同步 ----------
 
-def test_d3_locked_page_switch_keeps_frozen_ranges(loaded_window, qtbot, qapp):
+def test_d3_lock_syncs_all_pages_and_switch_keeps_window(loaded_window, qtbot, qapp):
     mw = loaded_window
     first = mw.current_page
     assert first.plot_widgets[0].plot_widget.plot_variable("speed")
@@ -153,28 +153,30 @@ def test_d3_locked_page_switch_keeps_frozen_ranges(loaded_window, qtbot, qapp):
     qapp.processEvents()
 
     mw.set_x_axis_locked(True)
-    # 切回第一页：跟随写范围必须被跳过，第二页保留 (30, 40)
+    assert mw._locked_x_range == pytest.approx((30, 40), abs=1e-6)
+    assert first_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
+    assert second_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
+
+    # 切回第一页：不得恢复它锁定前的 (10, 20)。
     mw.activate_page(first)
     _wait_activation(mw, qtbot)
     qapp.processEvents()
+    assert first.saved_x_range is None, "锁定态必须消费切页跟随范围"
+    assert first_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
     assert second_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
-    # 消费侧是被激活页（first）：跳过分支同样置 None（m1），否则解锁后
-    # 同页重激活写回陈旧范围。second.saved_x_range 是 grab 侧的副产物，不在此断言
-    assert first.saved_x_range is None, "跳过分支必须消费 saved_x_range（m1）"
-    assert first_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
-    # 广播含非当前页：两页掩码都在
     for pw in (first_pw, second_pw):
         assert [bool(v) for v in pw.view_box.state["mouseEnabled"]] == [False, True]
 
-    # 再切回第二页：仍不跟随，第一页冻结窗口保持
+    # 再切回第二页：两页仍保持同一锁定窗口。
     mw.activate_page(second)
     _wait_activation(mw, qtbot)
     qapp.processEvents()
-    assert first_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+    assert first_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
     assert second_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
 
-    # 解锁后跟随恢复：改第一页窗口再切页，第二页应沿用
+    # 解锁后跟随恢复：改第一页窗口再切页，第二页应沿用。
     mw.set_x_axis_locked(False)
+    assert mw._locked_x_range is None
     mw.activate_page(first)
     _wait_activation(mw, qtbot)
     assert first.apply_x_range(5, 15)
@@ -184,8 +186,8 @@ def test_d3_locked_page_switch_keeps_frozen_ranges(loaded_window, qtbot, qapp):
     assert second_pw.view_box.viewRange()[0] == pytest.approx((5, 15), abs=1e-6)
 
 
-def test_d3_locked_empty_new_page_inherits_frozen_window(loaded_window, qtbot, qapp):
-    """锁定下新建页没有自己的窗口：激活即继承来源页，首绘不跳全域。
+def test_d3_locked_empty_new_page_uses_global_window(loaded_window, qtbot, qapp):
+    """锁定下新建页没有自己的窗口：激活即继承全局锁定窗口，首绘不跳全域。
 
     覆盖两个可观测阶段：激活时不得停在空 ViewBox 的 0~3 占位范围；
     第一条曲线落下时不得被 autoRange 拉到全局数据域。
@@ -225,15 +227,72 @@ def test_d3_locked_empty_new_page_inherits_frozen_window(loaded_window, qtbot, q
     assert first_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
     assert mw._x_axis_locked is True
 
-    # 有内容后转冻结：改来源页窗口再切回，新页不得再跟随
-    assert first.apply_x_range(5, 15)
+    # 有内容后反复切页，仍保持同一全局锁定窗口。
     mw.activate_page(first)
     _wait_activation(mw, qtbot)
     mw.activate_page(second)
     _wait_activation(mw, qtbot)
     qapp.processEvents()
-    assert first_pw.view_box.viewRange()[0] == pytest.approx((5, 15), abs=1e-6)
+    assert first_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
     assert second_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+
+
+def test_d3_lock_before_new_page_matrix_uses_existing_window(loaded_window, qtbot, qapp):
+    mw = loaded_window
+    first = mw.current_page
+    first_pw = _plot(mw)
+    assert first.apply_x_range(10, 20)
+
+    second = mw.new_page()
+    assert second is not None and not second.plot_widgets
+    mw.set_x_axis_locked(True)
+    assert mw._locked_x_range == pytest.approx((10, 20), abs=1e-6)
+
+    _wait_activation(mw, qtbot)
+    qapp.processEvents()
+    second_pw = second.plot_widgets[0].plot_widget
+    assert first_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+    assert second_pw.view_box.viewRange()[0] == pytest.approx((10, 20), abs=1e-6)
+
+
+def test_d3_lock_fallback_skips_empty_matrix_page(loaded_window, qtbot, qapp):
+    mw = loaded_window
+    empty = mw.current_page
+    assert not empty.has_plot_content()
+    plotted = _add_page(mw, qtbot, "rpm")
+    plotted_pw = plotted.plot_widgets[0].plot_widget
+    assert plotted.apply_x_range(30, 40)
+
+    pending = mw.new_page()
+    assert pending is not None and not pending.plot_widgets
+    mw.set_x_axis_locked(True)
+    assert mw._locked_x_range == pytest.approx((30, 40), abs=1e-6)
+
+    _wait_activation(mw, qtbot)
+    qapp.processEvents()
+    pending_pw = pending.plot_widgets[0].plot_widget
+    assert plotted_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
+    assert pending_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
+
+
+def test_d3_lock_on_built_empty_page_uses_plotted_window(loaded_window, qtbot, qapp):
+    mw = loaded_window
+    plotted = _add_page(mw, qtbot, "rpm")
+    plotted_pw = plotted.plot_widgets[0].plot_widget
+    assert plotted.apply_x_range(30, 40)
+
+    empty = mw.new_page()
+    assert empty is not None
+    qtbot.waitUntil(lambda: len(empty.plot_widgets) > 0, timeout=3000)
+    _wait_activation(mw, qtbot)
+    empty_pw = empty.plot_widgets[0].plot_widget
+    assert not empty.has_plot_content()
+    assert empty.apply_x_range(1, 2)
+
+    mw.set_x_axis_locked(True)
+    assert mw._locked_x_range == pytest.approx((30, 40), abs=1e-6)
+    assert plotted_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
+    assert empty_pw.view_box.viewRange()[0] == pytest.approx((30, 40), abs=1e-6)
 
 
 # ---------- D4：四入口自动解锁 ----------

@@ -104,6 +104,16 @@ def test_locked_zoom_x_direct_noop(locked_plot, qapp):
     assert list(pw.view_box.viewRange()[0]) == before
 
 
+def test_locked_set_xrange_with_link_handling_noop(locked_plot, qapp):
+    pw = locked_plot
+    before = list(pw.view_box.viewRange()[0])
+
+    pw.set_xrange_with_link_handling(10, 20, padding=0)
+    qapp.processEvents()
+
+    assert list(pw.view_box.viewRange()[0]) == before
+
+
 def test_lock_mask_disables_x_keeps_y(locked_plot):
     vb = locked_plot.view_box
     assert [bool(v) for v in vb.state["mouseEnabled"]] == [False, True]
@@ -198,19 +208,43 @@ def test_getmenu_has_no_unlock_entry_in_any_lock_state(menu_vb):
 
 # ---------- 广播：真实 set_x_axis_locked + 最小宿主替身 ----------
 
+class _BroadcastPage:
+    def __init__(self, plot_widgets, x_range):
+        self.plot_widgets = plot_widgets
+        self.x_range = x_range
+
+    def peek_master_x_range(self):
+        return self.x_range
+
+    def has_plot_content(self):
+        return True
+
+    def apply_x_range(self, x_min, x_max):
+        self.x_range = (x_min, x_max)
+        return True
+
+    def refresh_curve_styles(self):
+        pass
+
+
 class _BroadcastHost:
     """承载真实 MainWindow.set_x_axis_locked / iter_all_plot_widgets 的最小宿主。
 
     只替身播报落点与缺席的 UI 件（getattr 防御分支），遍历/掩码/标志/文案
-    全部走真实实现；pages 含两页，验证广播覆盖非当前页。
+    全部走真实实现；pages 含两页，验证广播与范围同步覆盖非当前页。
     """
 
     def __init__(self, pages):
         self.pages = pages
+        self._current_page = pages[-1]
         self._x_axis_locked = False
+        self._locked_x_range = None
         self.announcements = []
         self.iter_all_plot_widgets = types.MethodType(
             MainWindow.iter_all_plot_widgets, self
+        )
+        self._sync_locked_x_range = types.MethodType(
+            MainWindow._sync_locked_x_range, self
         )
 
     #: 文案函数走真实实现（staticmethod 不依赖实例状态）
@@ -225,11 +259,11 @@ def broadcast_host(plot_factory):
     df = pd.DataFrame({"a": [float(i) for i in range(10)]})
     pages = []
     pws = []
-    for _ in range(2):  # 两页：当前页 + 非当前页都要被广播
+    for index in range(2):  # 当前页 + 非当前页都要被广播并同步范围
         pw = plot_factory(df)
         container = PlotContainerWidget(pw)
         container.plot_widget = pw
-        pages.append(types.SimpleNamespace(plot_widgets=[container]))
+        pages.append(_BroadcastPage([container], (10.0, 20.0) if index == 0 else (30.0, 40.0)))
         pws.append(pw)
     host = _BroadcastHost(pages)
     host.pws = pws
@@ -241,6 +275,8 @@ def test_broadcast_locks_all_pages_and_unlock_restores(broadcast_host):
     MainWindow.set_x_axis_locked(host, True)
 
     assert host._x_axis_locked is True
+    assert host._locked_x_range == (30.0, 40.0)
+    assert [page.x_range for page in host.pages] == [(30.0, 40.0), (30.0, 40.0)]
     for pw in host.pws:
         assert pw._x_mouse_locked is True
         assert [bool(v) for v in pw.view_box.state["mouseEnabled"]] == [False, True]
@@ -251,6 +287,7 @@ def test_broadcast_locks_all_pages_and_unlock_restores(broadcast_host):
     assert len(host.announcements) == 1
 
     MainWindow.set_x_axis_locked(host, False)
+    assert host._locked_x_range is None
     for pw in host.pws:
         assert pw._x_mouse_locked is False
         assert [bool(v) for v in pw.view_box.state["mouseEnabled"]] == [True, True]

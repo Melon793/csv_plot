@@ -563,13 +563,11 @@ class MainWindow(QMainWindow):
                 # 新页在加载后创建，没走过 replots_after_loading；
                 # 激活时补一次全局 X limits（否则可无限缩放）
                 page.apply_global_x_limits()
+            locked_range = self._locked_x_range if self._x_axis_locked else None
             if page.saved_x_range and self._x_range_follow_enabled:
-                # D3：锁定冻结「有内容」的页（各页保留各自冻结窗口）；空页
-                # 没有自己的窗口可保留，照常继承 —— 否则新建页停在空
-                # ViewBox 的占位范围，首绘即被 autoRange 拉到全局数据域。
-                # 跳过分支同样消费 saved_x_range，否则解锁后同页重激活会
-                # 写回陈旧范围（评审 m1）。跟随只在切页那一刻生效一次。
-                if not self._x_axis_locked or not page.has_plot_content():
+                # 锁定态以全局锁定窗口为准；未锁定时才沿用切页前范围。
+                # 跳过分支同样消费 saved_x_range，避免解锁后重激活写回陈旧范围。
+                if locked_range is None:
                     page.apply_x_range(*page.saved_x_range)
                 page.saved_x_range = None
             # 模板恢复的对齐标志：跟随范围落地后，把视图对齐到恢复后的数据域
@@ -583,7 +581,10 @@ class MainWindow(QMainWindow):
             copy_range = getattr(page, "_copy_x_range", None)
             if copy_range is not None:
                 page._copy_x_range = None
-                page.apply_x_range(*copy_range)
+                if locked_range is None:
+                    page.apply_x_range(*copy_range)
+            if locked_range is not None:
+                page.apply_x_range(*locked_range)
             # 非脏页也要按全局游标状态对齐一次：视图跟随后旧 vline 可能落在
             # viewRange 外（指纹未变时内部直接跳过，见 PlotPage.sync_cursor_scene）
             page.sync_cursor_scene()
@@ -1064,15 +1065,23 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # X 轴锁定（D1–D4）：唯一权威 + 单函数广播
     # ------------------------------------------------------------------
+    def _sync_locked_x_range(self) -> None:
+        """把全局锁定窗口同步到全部页，含尚未激活的隐藏页。"""
+        if self._locked_x_range is None:
+            return
+        for page in tuple(self.pages):
+            page.apply_x_range(*self._locked_x_range)
+            page.refresh_curve_styles()
+
     def set_x_axis_locked(self, locked: bool, reason: str = "") -> None:
         """锁定状态的唯一写入口：抽屉锁 chip / 自动解锁都走这里（main 收口版
         撤了右键菜单项与 Ctrl+Shift+X；dev/x-lock-range-nav 另有尺锁钮入口）。
 
         广播面（§1）：全部页子图（含非当前页/隐藏页）的鼠标掩码与 plot 级
         标志、导航尺 set_locked、自动缩放按钮、状态栏 x 轴段、状态栏播报。
-        新建子图的锁定继承由 plot_page._new_plot_container 补种；锁定态的
-        跨页跟随只跳过「有内容」的页（D3），空页激活时照常继承来源页窗口，
-        否则新页会停在空 ViewBox 的占位范围。
+        锁定时捕获当前页 master 的 X 范围并立即同步全部页；锁定态切页也以
+        该全局窗口为准。新建子图的锁定继承由 plot_page._new_plot_container
+        补种。
 
         ``reason`` 仅自动解锁（D4：数据域/时间基准改变，冻结数值失效）时
         非空，供播报文案区分；同状态重复调用是 no-op —— reset_plot 类入口
@@ -1082,6 +1091,25 @@ class MainWindow(QMainWindow):
         if locked == getattr(self, "_x_axis_locked", False):
             return
         self._x_axis_locked = locked
+        if locked:
+            current = self._current_page
+            locked_range = (
+                current.peek_master_x_range()
+                if current is not None and current.has_plot_content()
+                else None
+            )
+            if locked_range is None:
+                for page in self.pages:
+                    if not page.has_plot_content():
+                        continue
+                    locked_range = page.peek_master_x_range()
+                    if locked_range is not None:
+                        break
+            self._locked_x_range = locked_range
+        else:
+            self._locked_x_range = None
+        if locked and self._locked_x_range is not None:
+            self._sync_locked_x_range()
         for container in self.iter_all_plot_widgets():
             pw = getattr(container, "plot_widget", None)
             if pw is None:
@@ -1310,6 +1338,7 @@ class MainWindow(QMainWindow):
         #: X 轴锁定的唯一权威（D5：不持久化，重启默认解锁）。所有入口只调
         #: set_x_axis_locked()；plot 级标志 pw._x_mouse_locked 由它广播/建图补种
         self._x_axis_locked = False
+        self._locked_x_range: tuple[float, float] | None = None
         #: 延迟激活（parented 单次定时器；打包环境不用三参 singleShot）
         self._pending_activation: tuple[PlotPage, int] | None = None
         self._page_activation_timer = QTimer(self)
