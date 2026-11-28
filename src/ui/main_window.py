@@ -1042,7 +1042,7 @@ class MainWindow(QMainWindow):
         auto_range_btn = getattr(self, "auto_range_btn", None)
         if auto_range_btn is not None:
             auto_range_btn.setToolTip(
-                "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
+                "X 轴已锁定，自动缩放不可用（按 Ctrl+Shift+X 解锁）"
                 if self._x_axis_locked
                 else "自动缩放XY轴 (Ctrl+Shift+Y)"
             )
@@ -1077,8 +1077,7 @@ class MainWindow(QMainWindow):
                 page.refresh_curve_styles()
 
     def set_x_axis_locked(self, locked: bool, reason: str = "") -> None:
-        """锁定状态的唯一写入口：抽屉锁 chip / 自动解锁都走这里（main 收口版
-        撤了右键菜单项与 Ctrl+Shift+X；dev/x-lock-range-nav 另有尺锁钮入口）。
+        """锁定状态的唯一写入口：抽屉锁 chip / Ctrl+Shift+X / 自动解锁。
 
         广播面（§1）：全部页子图（含非当前页/隐藏页）的鼠标掩码与 plot 级
         标志、导航尺 set_locked、自动缩放按钮、状态栏 x 轴段、状态栏播报。
@@ -1799,6 +1798,8 @@ class MainWindow(QMainWindow):
         self._auto_range_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Y"), self.plot_widget)
         self._auto_range_shortcut.activated.connect(self._on_auto_range_shortcut)
 
+        self._x_lock_shortcut = QShortcut(QKeySequence("Ctrl+Shift+X"), self)
+        self._x_lock_shortcut.activated.connect(self._on_x_lock_shortcut)
 
         self._mark_region_shortcut = QShortcut(QKeySequence("Ctrl+T"), self.plot_widget)
         self._mark_region_shortcut.activated.connect(self._on_mark_region_shortcut)
@@ -2927,10 +2928,16 @@ class MainWindow(QMainWindow):
         if not self.can_execute("auto_range"):
             if self._action_block_reason("auto_range") == "x_locked":
                 self._show_status_message(
-                    "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
+                    "X 轴已锁定，自动缩放不可用（按 Ctrl+Shift+X 解锁）"
                 )
             return
         self.cursor_sync_manager.auto_range_all_plots()
+
+    def _on_x_lock_shortcut(self):
+        """Ctrl+Shift+X：有数据且非加载态时切换 X 轴可见范围锁定。"""
+        if not self.can_execute("auto_y"):
+            return
+        self.set_x_axis_locked(not self._x_axis_locked)
 
     def _on_mark_region_shortcut(self):
         """Ctrl+T 快捷键：切换标记区域"""

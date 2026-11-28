@@ -416,7 +416,7 @@ def test_x_lock_blocks_only_x_changing_actions(
     )
     assert range_calls == []
     assert tuple(pw.view_box.viewRange()[0]) == before_x
-    assert mw._message_label.text() == "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
+    assert mw._message_label.text() == "X 轴已锁定，自动缩放不可用（按 Ctrl+Shift+X 解锁）"
 
     _press_shortcut(mw, qtbot, qapp, Qt.Key_Y, Qt.KeyboardModifier.ControlModifier)
     assert len(y_calls) == 1

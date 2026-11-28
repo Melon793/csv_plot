@@ -1,7 +1,7 @@
 """X 轴锁定 component 测试：D14 AxisDialog X 档禁用（main 收口版）。
 
-菜单/快捷键入口已按拍板撤销（L2 唯一手动入口=抽屉 chip，见
-test_x_lock_drawer.py）；本文件只保留 D14 对话框语义。
+菜单入口已按拍板撤销；手动入口为抽屉 chip / Ctrl+Shift+X（见
+test_x_lock_drawer.py 与 test_x_lock_semantics.py）；本文件只保留 D14 对话框语义。
 """
 
 import pandas as pd

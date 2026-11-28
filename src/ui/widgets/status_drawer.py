@@ -22,7 +22,15 @@ import subprocess
 import sys
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -546,7 +554,7 @@ def _lock_icon(locked: bool, color: str) -> QIcon:
 class XAxisDrawer(StatusDrawer):
     """中段抽屉：X 轴可见范围锁定状态行 + x 轴时间基准（采样频率 / 系数 / 偏移）。
 
-    顶部状态行是锁的唯一手动入口（L2 chip，立即生效）；表单是"预览→确认"
+    顶部状态行提供锁的手动入口（L2 chip / Ctrl+Shift+X，立即生效）；表单是"预览→确认"
     模型，两者用 hairline 分离。锁定态表单不禁用：应用时间修正按 D4 自动
     解锁+播报（应用钮 tooltip 在锁态直说该后果）。
 
@@ -678,9 +686,13 @@ class XAxisDrawer(StatusDrawer):
         # 默认高，setFixedHeight(28) 会顶出档变灰斜面方壳（真机报障）；
         # Fixed/Fixed 策略防水平可拉伸被撑到半行宽（_chip docstring 先例）
         self.lock_chip = self._chip(
-            "锁定X轴可见范围", "锁定/解锁 X 轴可见范围（立即生效）"
+            "锁定X轴可见范围",
+            "锁定/解锁 X 轴可见范围（Ctrl+Shift+X，立即生效）",
         )
         self.lock_chip.clicked.connect(self._on_lock_chip)
+        # Popup 是独立窗口，主窗口的 WindowShortcut 不会穿透键盘抓取。
+        self._lock_shortcut = QShortcut(QKeySequence("Ctrl+Shift+X"), self)
+        self._lock_shortcut.activated.connect(self._on_lock_shortcut)
         self.lock_hint = QLabel()
         self.lock_hint.setStyleSheet(theme.muted_text())
         self.lock_hint.setSizePolicy(
@@ -724,11 +736,18 @@ class XAxisDrawer(StatusDrawer):
     _APPLY_TIP = "按上面的输入重算所有子图的横轴（焦点不在输入框里时，按 Enter 同效）"
 
     def _on_lock_chip(self) -> None:
-        """L2 唯一手动入口：与自动解锁同一广播函数（同规格播报）。"""
+        """抽屉 chip：与快捷键、自动解锁共用唯一写入口和同规格播报。"""
         mw = self._mw()
         setter = getattr(mw, "set_x_axis_locked", None)
         if setter is not None:
             setter(not getattr(mw, "_x_axis_locked", False))
+
+    def _on_lock_shortcut(self) -> None:
+        """Popup 快捷键复用主窗口的数据/加载态守卫。"""
+        mw = self._mw()
+        handler = getattr(mw, "_on_x_lock_shortcut", None)
+        if handler is not None:
+            handler()
 
     def sync_lock_ui(self, locked: bool) -> None:
         """锁态 → chip 换形/hint/应用钮 tooltip。不用 checked 视觉

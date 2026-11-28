@@ -1,6 +1,6 @@
 """e2e：X 轴锁定 C2 边界语义（真实 MainWindow）。
 
-- L2 抽屉 chip 唯一手动入口同规格播报（main 收口撤菜单/快捷键）；
+- L2 抽屉 chip 与 Ctrl+Shift+X 两个手动入口同规格播报；
 - D2：自动缩放按钮置灰 + 快捷键槽守卫 + auto_range_page 入口守卫；
 - D3：锁定当前页窗口并立即同步全部页，锁定切页保持同一窗口，
   解锁后跟随恢复；空页激活与首绘均保持锁定窗口；
@@ -12,7 +12,8 @@
 import pytest
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QDropEvent
+from PySide6.QtGui import QDropEvent, QKeySequence
+from PySide6.QtTest import QTest
 
 from src.ui.drag_drop import build_var_mimedata
 from src.ui.main_window import MainWindow
@@ -48,8 +49,108 @@ def _wait_activation(mw, qtbot):
 
 # ---------- L1 两入口同规格 ----------
 
+def test_x_lock_shortcut_toggles_both_ways(loaded_window, qapp):
+    """主窗口与抽屉 Popup 内的 Ctrl+Shift+X 共用锁态、UI 联动和播报。"""
+    mw = loaded_window
+    pw = _plot(mw)
+    qapp.processEvents()
+    assert mw._x_lock_shortcut.key() == QKeySequence("Ctrl+Shift+X")
+
+    modifiers = (
+        Qt.KeyboardModifier.ControlModifier
+        | Qt.KeyboardModifier.ShiftModifier
+    )
+    mw.activateWindow()
+    qapp.processEvents()
+    QTest.keyClick(mw, Qt.Key.Key_X, modifiers)
+    qapp.processEvents()
+
+    assert mw._x_axis_locked is True
+    assert pw._x_mouse_locked is True
+    assert mw._axis_segment.text().endswith("· 已锁定")
+    assert not mw.auto_range_btn.isEnabled()
+    assert mw._message_label.text() == MainWindow._x_lock_announce_text(True)
+
+    mw._axis_segment.clicked.emit()
+    qapp.processEvents()
+    drawer = mw._axis_drawer
+    assert drawer is not None and drawer.isVisible()
+    assert drawer.lock_chip.text() == "解锁X轴可见范围"
+    assert drawer._lock_shortcut.key() == QKeySequence("Ctrl+Shift+X")
+
+    QTest.keyClick(drawer, Qt.Key.Key_X, modifiers)
+    qapp.processEvents()
+
+    assert mw._x_axis_locked is False
+    assert pw._x_mouse_locked is False
+    assert drawer.lock_chip.text() == "锁定X轴可见范围"
+    assert "已锁定" not in mw._axis_segment.text()
+    assert mw.auto_range_btn.isEnabled()
+    assert mw._message_label.text() == MainWindow._x_lock_announce_text(False)
+
+
+def test_x_lock_shortcut_requires_data(main_window, qapp):
+    """无数据不留下空锁。"""
+    mw = main_window
+    assert mw.loader is None
+    modifiers = (
+        Qt.KeyboardModifier.ControlModifier
+        | Qt.KeyboardModifier.ShiftModifier
+    )
+    mw.activateWindow()
+    qapp.processEvents()
+    QTest.keyClick(mw, Qt.Key.Key_X, modifiers)
+    qapp.processEvents()
+    assert mw._x_axis_locked is False
+
+
+def test_x_lock_shortcut_ignored_without_analysis_data(loaded_window, qapp):
+    """零行数据只放行资产动作；主窗口与 Popup 快捷键都不得留下空锁。"""
+    mw = loaded_window
+    mw.file_loader_manager.set_button_status(False, asset_actions=True)
+    assert not mw.can_execute("auto_y")
+    modifiers = (
+        Qt.KeyboardModifier.ControlModifier
+        | Qt.KeyboardModifier.ShiftModifier
+    )
+
+    mw.activateWindow()
+    qapp.processEvents()
+    QTest.keyClick(mw, Qt.Key.Key_X, modifiers)
+    qapp.processEvents()
+    assert mw._x_axis_locked is False
+
+    mw._axis_segment.clicked.emit()
+    qapp.processEvents()
+    drawer = mw._axis_drawer
+    assert drawer is not None and drawer.isVisible()
+    QTest.keyClick(drawer, Qt.Key.Key_X, modifiers)
+    qapp.processEvents()
+    assert mw._x_axis_locked is False
+
+
+def test_x_lock_shortcut_ignored_while_loading(loaded_window, qapp):
+    """加载中不切换旧数据上的现有锁态。"""
+    mw = loaded_window
+    _plot(mw)
+    mw.set_x_axis_locked(True)
+    modifiers = (
+        Qt.KeyboardModifier.ControlModifier
+        | Qt.KeyboardModifier.ShiftModifier
+    )
+    mw.begin_load_feedback("Demo.csv")
+    try:
+        mw.activateWindow()
+        qapp.processEvents()
+        QTest.keyClick(mw, Qt.Key.Key_X, modifiers)
+        qapp.processEvents()
+        assert mw._x_axis_locked is True
+    finally:
+        mw.end_load_feedback()
+
+
 def test_drawer_chip_entry_same_spec(loaded_window, qapp):
-    """L2 抽屉 chip 是唯一手动入口：锁定/解锁同规格广播+段+按钮联动。"""
+    """L2 抽屉 chip：锁定/解锁同规格广播+段+按钮联动。"""
     mw = loaded_window
     pw = _plot(mw)
     qapp.processEvents()
@@ -118,7 +219,7 @@ def test_d2_auto_range_guarded_on_all_entries(loaded_window, qapp):
     mw._on_auto_range_shortcut()
     qapp.processEvents()
     assert list(pw.view_box.viewRange()[0]) == before
-    assert mw._message_label.text() == "X 轴已锁定，自动缩放不可用（在 x 轴抽屉解锁）"
+    assert mw._message_label.text() == "X 轴已锁定，自动缩放不可用（按 Ctrl+Shift+X 解锁）"
 
     # auto_range_page 直调入口（防其它调用旁路）
     mw.cursor_sync_manager.auto_range_page()
